@@ -607,6 +607,7 @@ pub fn write_mesh_text_response(
 mod tests {
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -618,6 +619,8 @@ mod tests {
         BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
         KeyPair, KeyUsagePurpose,
     };
+
+    static NEXT_TEMP_CERT_ROOT: AtomicU64 = AtomicU64::new(0);
 
     use super::{
         MeshHttpClient, MeshHttpClientRequest, MeshHttpTimeouts, connect_mesh_tcp,
@@ -1005,7 +1008,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "ramflux_transport_{name}_{}_{}",
             std::process::id(),
-            Instant::now().elapsed().as_nanos()
+            NEXT_TEMP_CERT_ROOT.fetch_add(1, Ordering::Relaxed)
         ));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;

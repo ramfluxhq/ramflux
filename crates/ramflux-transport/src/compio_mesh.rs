@@ -328,9 +328,10 @@ fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, TransportError> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
     use std::thread;
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
@@ -342,6 +343,8 @@ mod tests {
     use crate::{MeshQuicServer, MeshTlsConfig, mesh_quic_post_json_with_peer_ca_pems};
 
     use super::{CompioMeshQuicServer, compio_mesh_quic_post_json_with_peer_ca_pems};
+
+    static NEXT_TEMP_CERT_ROOT: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn compio_server_accepts_tokio_quinn_client_mesh_frame()
@@ -670,7 +673,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "ramflux_transport_{name}_{}_{}",
             std::process::id(),
-            Instant::now().elapsed().as_nanos()
+            NEXT_TEMP_CERT_ROOT.fetch_add(1, Ordering::Relaxed)
         ));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
