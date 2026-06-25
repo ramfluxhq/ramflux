@@ -36,15 +36,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
-            use_cross: false
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            archive_ext: tar.gz
-            use_cross: true
           - os: macos-latest
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-            use_cross: false
 
     steps:
       - name: Checkout
@@ -55,24 +49,13 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.use_cross
-        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3
-        with:
-          tool: cross
-
       - name: Add target
-        if: ${{ !matrix.use_cross }}
         run: rustup target add ${{ matrix.target }}
 
       - name: Build
         run: |
           set -euo pipefail
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --locked --release --target "${{ matrix.target }}" --workspace
-          else
-            cargo build --locked --release --target "${{ matrix.target }}" --workspace
-          fi
+          cargo build --locked --release --target "${{ matrix.target }}" --workspace
 
       - name: Package
         shell: bash
@@ -101,9 +84,11 @@ jobs:
         run: |
           set -euo pipefail
           for artifact in dist/*.tar.gz; do
+            test -n "$artifact"
             cosign sign-blob --yes \
               --output-signature "${artifact}.sig" \
               --output-certificate "${artifact}.pem" \
+              --bundle "${artifact}.cosign.bundle" \
               "$artifact"
           done
 
@@ -121,6 +106,7 @@ jobs:
             dist/*.sha256
             dist/*.sig
             dist/*.pem
+            dist/*.cosign.bundle
 
   sbom-and-sign:
     name: SBOM, signatures, provenance
@@ -155,6 +141,7 @@ jobs:
           cosign sign-blob --yes \
             --output-signature dist/ramflux-sbom.cdx.json.sig \
             --output-certificate dist/ramflux-sbom.cdx.json.pem \
+            --bundle dist/ramflux-sbom.cdx.json.cosign.bundle \
             dist/ramflux-sbom.cdx.json
 
       - name: Attest SBOM provenance
@@ -171,3 +158,4 @@ jobs:
             dist/ramflux-sbom.cdx.json.sha256
             dist/ramflux-sbom.cdx.json.sig
             dist/ramflux-sbom.cdx.json.pem
+            dist/ramflux-sbom.cdx.json.cosign.bundle

@@ -16,10 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Placeholder for the first public release.
-- Release binaries for Linux x64, Linux arm64, and macOS arm64:
-  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-  and `aarch64-apple-darwin`.
+- Release binaries for Linux x64 and macOS arm64:
+  `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`.
 
 ### Notes
 
-- Intel Mac and Windows release binaries are deferred until a later release.
+- Linux arm64, Intel Mac, and Windows release binaries are deferred until a
+  later release.
