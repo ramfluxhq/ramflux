@@ -38,6 +38,15 @@ Run tests:
 cargo test --workspace
 ```
 
+Prebuilt `v0.1.0` release binaries are published for Linux x64, Linux arm64,
+and macOS arm64:
+
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `aarch64-apple-darwin`
+
+Intel Mac and Windows binaries are not part of the `v0.1.0` release target set.
+
 Start a local self-hosted node with Docker Compose:
 
 ```sh
