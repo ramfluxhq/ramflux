@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 pub(crate) fn run_smoke_from_env() -> anyhow::Result<()> {
     let core = std::env::var("RAMFLUX_GLOMMIO_CORE")
         .ok()

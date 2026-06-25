@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 pub mod account;
 pub mod bot;
 pub mod conversation;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 mod handlers;
 mod lifecycle;
 mod router_engine;
@@ -254,7 +256,7 @@ fn serve_router_mesh_from_env(
     router: &Arc<router_runtime::RouterHandle>,
 ) -> anyhow::Result<()> {
     // Frozen diagnostic runtime: default production and itest shipping path is
-    // tokio; new runtime work follows the compio federation plan in im-bus/.
+    // tokio; new runtime work follows the compio federation migration plan.
     if std::env::var("RAMFLUX_ROUTER_RUNTIME").as_deref() == Ok("glommio") {
         tracing::info!("router mesh runtime selected: glommio mTLS");
         return glommio_mesh::serve_router_mesh_glommio_mtls(config, router);

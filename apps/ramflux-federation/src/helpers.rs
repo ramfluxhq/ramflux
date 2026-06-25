@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use crate::{FederationDiscoverySurface, RouterMeshClient};
 
 pub(crate) fn router_mesh_client(

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use ed25519_dalek::{Signer, SigningKey};
 use ramflux_crypto::{
     CanonicalSignatureBatchItem, CanonicalSignatureSingleKeyBatchItem,

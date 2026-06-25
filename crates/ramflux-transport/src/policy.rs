@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use ramflux_core::{BackpressureBudget, CancellationToken, CoreError, RetryPolicy};
 use std::future::Future;
 use std::sync::Arc;

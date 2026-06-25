@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 //! Rust core SDK facade and stable C-ABI boundary substrate.
 
 mod bus;

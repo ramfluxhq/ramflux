@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use crate::{RouterMeshClient, router_get_json, router_post_json};
 #[cfg(feature = "itest-http")]
 use crate::{gateway_state, is_timeout_error, pre_auth_gate};
