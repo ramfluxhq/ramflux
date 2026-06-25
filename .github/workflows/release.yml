@@ -25,6 +25,10 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +57,9 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --rev 668b7ca614152067f5f23b9e7303f0c2b871b8a7
+        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3
+        with:
+          tool: cross
 
       - name: Add target
         if: ${{ !matrix.use_cross }}
@@ -121,6 +127,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: build
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
