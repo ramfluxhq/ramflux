@@ -150,7 +150,7 @@ impl CompioMeshQuicAcceptedRequest {
         response: &T,
     ) -> Result<(), TransportError> {
         compio_write_json_message(&mut self.send, response).await?;
-        compio_finish_send_stream(&mut self.send).await?;
+        compio_finish_send_stream(&mut self.send)?;
         compio_drain_recv_to_fin(&mut self.recv).await
     }
 }
@@ -207,7 +207,7 @@ async fn compio_mesh_quic_request(
         connection.open_bi().map_err(|error| TransportError::Quic(error.to_string()))?;
     tracing::trace!(%peer_addr, "compio mesh client opened bidirectional stream");
     compio_write_json_message(&mut send, request).await?;
-    compio_finish_send_stream(&mut send).await?;
+    compio_finish_send_stream(&mut send)?;
     tracing::trace!(%peer_addr, "compio mesh client reading response");
     let response: GatewayQuicResponse = compio_read_json_frame(&mut recv).await?;
     compio_drain_recv_to_fin(&mut recv).await?;
@@ -298,9 +298,7 @@ async fn compio_drain_recv_to_fin(
     Ok(())
 }
 
-async fn compio_finish_send_stream(
-    send: &mut compio_quic::SendStream,
-) -> Result<(), TransportError> {
+fn compio_finish_send_stream(send: &mut compio_quic::SendStream) -> Result<(), TransportError> {
     tracing::trace!("compio mesh finishing send stream");
     send.finish().map_err(|error| TransportError::Quic(error.to_string()))?;
     tracing::trace!("compio mesh send stream finished");

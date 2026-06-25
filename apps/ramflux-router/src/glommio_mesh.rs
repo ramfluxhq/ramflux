@@ -16,6 +16,13 @@ use crate::handlers::{MeshResponse, handle_mesh_request_value};
 const TLS_IO_BUFFER_SIZE: usize = 16 * 1024;
 const HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
 
+struct MeshLoopConfig {
+    local_service_id: String,
+    allowed_service_ids: std::collections::BTreeSet<String>,
+    ready: Option<mpsc::SyncSender<anyhow::Result<String>>>,
+    allow_self_peer: bool,
+}
+
 fn glommio_error(context: &'static str, error: impl std::fmt::Debug) -> anyhow::Error {
     anyhow::anyhow!("{context}: {error:?}")
 }
@@ -37,22 +44,17 @@ pub(crate) fn serve_router_mesh_glommio_mtls_with_ready(
     let tls = crate::serve::mesh_tls_config(config);
     let server_config = Arc::new(ramflux_transport::mesh_server_config(&tls)?);
     let router = Arc::clone(router);
-    let local_service_id = config.service_id.clone();
-    let allowed_service_ids = config.mesh.allowed_service_ids.clone();
+    let loop_config = MeshLoopConfig {
+        local_service_id: config.service_id.clone(),
+        allowed_service_ids: config.mesh.allowed_service_ids.clone(),
+        ready,
+        allow_self_peer,
+    };
     thread::spawn(move || {
         let spawn_result = LocalExecutorBuilder::new(Placement::Fixed(0))
             .name("ramflux-router-glommio-mesh")
             .spawn(move || async move {
-                if let Err(error) = serve_mesh_loop(
-                    &addr,
-                    server_config,
-                    router,
-                    local_service_id,
-                    allowed_service_ids,
-                    ready,
-                    allow_self_peer,
-                )
-                .await
+                if let Err(error) = serve_mesh_loop(&addr, server_config, router, loop_config).await
                 {
                     tracing::error!(%error, "router glommio mesh listener stopped");
                 }
@@ -75,16 +77,13 @@ async fn serve_mesh_loop(
     addr: &str,
     server_config: Arc<rustls::ServerConfig>,
     router: Arc<crate::router_runtime::RouterHandle>,
-    local_service_id: String,
-    allowed_service_ids: std::collections::BTreeSet<String>,
-    ready: Option<mpsc::SyncSender<anyhow::Result<String>>>,
-    allow_self_peer: bool,
+    loop_config: MeshLoopConfig,
 ) -> anyhow::Result<()> {
     let listener =
         match TcpListener::bind(addr).map_err(|error| glommio_error("bind failed", error)) {
             Ok(listener) => listener,
             Err(error) => {
-                if let Some(ready) = ready {
+                if let Some(ready) = loop_config.ready.as_ref() {
                     let _ = ready.send(Err(anyhow::anyhow!("{error}")));
                 }
                 return Err(error);
@@ -94,13 +93,13 @@ async fn serve_mesh_loop(
         match listener.local_addr().map_err(|error| glommio_error("local_addr failed", error)) {
             Ok(local_addr) => local_addr,
             Err(error) => {
-                if let Some(ready) = ready {
+                if let Some(ready) = loop_config.ready.as_ref() {
                     let _ = ready.send(Err(anyhow::anyhow!("{error}")));
                 }
                 return Err(error);
             }
         };
-    if let Some(ready) = ready {
+    if let Some(ready) = loop_config.ready.as_ref() {
         let _ = ready.send(Ok(local_addr.to_string()));
     }
     tracing::info!(addr = %local_addr, "router glommio mesh mTLS surface listening");
@@ -118,17 +117,18 @@ async fn serve_mesh_loop(
         }
         let server_config = Arc::clone(&server_config);
         let router = Arc::clone(&router);
-        let local_service_id = local_service_id.clone();
-        let allowed_service_ids = allowed_service_ids.clone();
+        let local_service_id = loop_config.local_service_id.clone();
+        let allowed_service_ids = loop_config.allowed_service_ids.clone();
+        let allow_self_peer = loop_config.allow_self_peer;
         glommio::spawn_local(async move {
-            if let Err(error) = handle_mesh_connection(
+            if let Err(error) = Box::pin(handle_mesh_connection(
                 stream,
                 server_config,
                 &router,
                 &local_service_id,
                 &allowed_service_ids,
                 allow_self_peer,
-            )
+            ))
             .await
             {
                 tracing::warn!(%error, "router glommio mesh connection ended");
@@ -162,7 +162,7 @@ async fn handle_mesh_connection(
     );
     let mut requests_on_connection = 0usize;
     loop {
-        let Some(request) = tls.read_http_request().await? else {
+        let Some(request) = Box::pin(tls.read_http_request()).await? else {
             tracing::debug!(
                 requests_on_connection,
                 "router glommio mesh connection ended by client EOF"
@@ -261,10 +261,8 @@ impl GlommioTlsStream {
             if self.connection.wants_write() {
                 self.flush_tls().await?;
             }
-            if self.connection.wants_read() {
-                if !self.read_tls_from_socket().await? {
-                    anyhow::bail!("mesh TLS EOF during handshake");
-                }
+            if self.connection.wants_read() && !self.read_tls_from_socket().await? {
+                anyhow::bail!("mesh TLS EOF during handshake");
             }
         }
         self.flush_tls().await?;
@@ -288,7 +286,7 @@ impl GlommioTlsStream {
             if let Some(request) = parse_http_request(&mut self.plaintext)? {
                 return Ok(Some(request));
             }
-            if !self.fill_plaintext().await? {
+            if !Box::pin(self.fill_plaintext()).await? {
                 if self.plaintext.is_empty() {
                     return Ok(None);
                 }
@@ -361,14 +359,14 @@ impl GlommioTlsStream {
             return Ok(false);
         }
         let mut cursor = std::io::Cursor::new(&input[..read]);
-        while (cursor.position() as usize) < read {
+        while usize::try_from(cursor.position()).unwrap_or(usize::MAX) < read {
             let before = cursor.position();
             let consumed = self.connection.read_tls(&mut cursor)?;
             self.connection.process_new_packets()?;
             if consumed == 0 && cursor.position() == before {
                 anyhow::bail!(
                     "mesh TLS read_tls made no progress with {} bytes pending",
-                    read - cursor.position() as usize
+                    read.saturating_sub(usize::try_from(cursor.position()).unwrap_or(read))
                 );
             }
         }
@@ -508,11 +506,13 @@ mod tests {
     #[test]
     fn parse_http_request_keeps_pipelined_request_bytes() -> anyhow::Result<()> {
         let mut bytes = b"GET /healthz HTTP/1.1\r\nHost: router\r\n\r\nGET /healthz HTTP/1.1\r\nHost: router\r\n\r\n".to_vec();
-        let first = parse_http_request(&mut bytes)?.expect("first request");
+        let first = parse_http_request(&mut bytes)?
+            .ok_or_else(|| anyhow::anyhow!("missing first request"))?;
         assert_eq!(first.method, "GET");
         assert_eq!(first.path, "/healthz");
         assert!(!bytes.is_empty());
-        let second = parse_http_request(&mut bytes)?.expect("second request");
+        let second = parse_http_request(&mut bytes)?
+            .ok_or_else(|| anyhow::anyhow!("missing second request"))?;
         assert_eq!(second.path, "/healthz");
         assert!(bytes.is_empty());
         Ok(())
@@ -523,7 +523,8 @@ mod tests {
         let mut bytes = b"POST /healthz HTTP/1.1\r\nContent-Length: 4\r\n\r\nab".to_vec();
         assert!(parse_http_request(&mut bytes)?.is_none());
         bytes.extend_from_slice(b"cd");
-        let request = parse_http_request(&mut bytes)?.expect("complete request");
+        let request = parse_http_request(&mut bytes)?
+            .ok_or_else(|| anyhow::anyhow!("missing complete request"))?;
         assert_eq!(request.body, b"abcd");
         assert!(bytes.is_empty());
         Ok(())
@@ -539,7 +540,8 @@ mod tests {
         bytes.extend_from_slice(&body[..split]);
         assert!(parse_http_request(&mut bytes)?.is_none());
         bytes.extend_from_slice(&body[split..]);
-        let request = parse_http_request(&mut bytes)?.expect("complete large request");
+        let request = parse_http_request(&mut bytes)?
+            .ok_or_else(|| anyhow::anyhow!("missing complete large request"))?;
         assert_eq!(request.path, "/mvp0/envelope");
         assert_eq!(request.body, body);
         assert!(bytes.is_empty());
