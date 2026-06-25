@@ -16,17 +16,17 @@ c-abi = []
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-core = { path = "../ramflux-core" }
+ramflux-core = { version = "0.1.0", path = "../ramflux-core" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-protocol = { path = "../ramflux-protocol" }
+ramflux-protocol = { version = "0.1.0", path = "../ramflux-protocol" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-crypto = { path = "../ramflux-crypto" }
+ramflux-crypto = { version = "0.1.0", path = "../ramflux-crypto" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-storage = { path = "../ramflux-storage" }
+ramflux-storage = { version = "0.1.0", path = "../ramflux-storage" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-transport = { path = "../ramflux-transport" }
+ramflux-transport = { version = "0.1.0", path = "../ramflux-transport" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-sync = { path = "../ramflux-sync" }
+ramflux-sync = { version = "0.1.0", path = "../ramflux-sync" }
 aes-gcm = "0.10"
 blake3 = "1.5"
 rmcp = "0.14"
@@ -57,3 +57,6 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[package.metadata.cargo-machete]
+ignored = ["cbindgen", "ramflux-core", "rmcp"]

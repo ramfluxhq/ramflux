@@ -1,0 +1,5 @@
+/certs/*
+!/certs/.gitkeep
+!/certs/ca.pem
+/prod-bin/
+/.env

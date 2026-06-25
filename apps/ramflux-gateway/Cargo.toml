@@ -20,7 +20,7 @@ arc-swap = { workspace = true }
 quinn = { workspace = true }
 ramflux-core = { workspace = true }
 ramflux-crypto = { workspace = true }
-ramflux-node-core = { path = "../../crates/ramflux-node-core" }
+ramflux-node-core = { version = "0.1.0", path = "../../crates/ramflux-node-core" }
 ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
 redb = { workspace = true }
@@ -38,3 +38,6 @@ glommio = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["arc-swap", "glommio", "ramflux-core", "redb"]

@@ -1,0 +1,37 @@
+node_id = "localhost"
+service_id = "ramflux-notify"
+redb_path = "/var/lib/ramflux/notify/notify.redb"
+
+[mesh]
+listen_addr = "0.0.0.0:7443"
+ca_cert = "/etc/ramflux/mesh/ca.pem"
+service_cert = "/etc/ramflux/mesh/notify.pem"
+service_key = "/etc/ramflux/mesh/notify-key.pem"
+allowed_service_ids = [
+  "ramflux-gateway",
+  "ramflux-router",
+  "ramflux-notify",
+  "ramflux-federation",
+  "ramflux-relay",
+  "ramflux-signaling",
+  "ramflux-retention",
+]
+
+[mesh.endpoints]
+gateway = "ramflux-gateway:7443"
+router = "ramflux-router:7443"
+notify = "ramflux-notify:7443"
+federation = "ramflux-federation:7443"
+relay = "ramflux-relay:7443"
+signaling = "ramflux-signaling:7443"
+retention = "ramflux-retention:7443"
+
+[gateway]
+public_listen_addr = "0.0.0.0:443"
+
+[signaling]
+turn_udp_addr = "0.0.0.0:3478"
+turn_tcp_addr = "0.0.0.0:3478"
+
+[relay]
+service_key_ref = "literal:ramflux-relay-development-service-key"
