@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 //! Core primitives shared by the Ramflux workspace.
 
 #![allow(clippy::module_name_repetitions)]

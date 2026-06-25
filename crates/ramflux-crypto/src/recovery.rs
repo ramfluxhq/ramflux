@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use crate::{CryptoError, random_32};
 use std::collections::BTreeSet;
 use std::fmt;

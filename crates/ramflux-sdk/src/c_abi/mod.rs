@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 #![allow(unsafe_code)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]

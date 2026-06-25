@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 pub(crate) fn handle_mvp7_lifecycle_event(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 #![cfg_attr(not(feature = "itest-http"), allow(dead_code))]
 
 use std::collections::{BTreeSet, HashMap};

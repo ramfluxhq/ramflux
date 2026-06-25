@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, verify_batch};
 use ramflux_protocol::{decode_base64url, encode_base64url, signed_bytes};
 use serde::Serialize;

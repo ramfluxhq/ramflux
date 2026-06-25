@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,7 +33,7 @@ const ROUTER_TARGET_SHARD_COUNT: usize = 64;
 
 // Frozen runtime path: retained only for regression comparison and historical
 // experiments. Owner direction moved hot-path runtime work to compio federation
-// forwarding; see im-bus/ramflux_compio_federation_migration_plan_2026-06-19.md.
+// forwarding.
 #[cfg(all(target_os = "linux", feature = "glommio-runtime"))]
 pub(crate) struct GlommioRouterRuntime {
     state: Arc<ramflux_node_core::RouterCore>,

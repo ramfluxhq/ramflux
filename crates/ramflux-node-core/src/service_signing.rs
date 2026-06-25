@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use crate::{NodeCoreError, NodeServiceConfig};
 
 pub const NODE_SERVICE_SIGNING_SEED_ENV: &str = "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL";

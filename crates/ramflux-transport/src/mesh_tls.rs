@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use rustls::{ServerConfig, ServerConnection};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;

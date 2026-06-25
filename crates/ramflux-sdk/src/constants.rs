@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 use std::time::Duration;
 pub const CRATE_NAME: &str = "ramflux-sdk";
 pub const GATEWAY_SESSION_PROTOCOL_VERSION: &str = "ramflux.gateway_session.v1";

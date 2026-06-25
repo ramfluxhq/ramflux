@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 pub const CRATE_NAME: &str = "ramflux-storage";
 pub const ACCOUNT_DB_FILE: &str = "ramflux_local.sqlite";
 pub const ACCOUNT_INDEX_FILE: &str = "account_index.sqlite";

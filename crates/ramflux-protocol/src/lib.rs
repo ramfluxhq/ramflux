@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
 //! Ramflux C1 protocol types, canonical JSON, and fixture helpers.
 
 mod canonical_json;
