@@ -12,11 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-protocol = { path = "../../crates/ramflux-protocol" }
+ramflux-protocol = { version = "0.1.0", path = "../../crates/ramflux-protocol" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-sdk = { path = "../../crates/ramflux-sdk" }
+ramflux-sdk = { version = "0.1.0", path = "../../crates/ramflux-sdk" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-sync = { path = "../../crates/ramflux-sync" }
+ramflux-sync = { version = "0.1.0", path = "../../crates/ramflux-sync" }
 clap = { version = "4.5", features = ["derive"] }
 keyring = "3"
 serde = { version = "1.0", features = ["derive"] }

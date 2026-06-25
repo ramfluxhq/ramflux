@@ -22,18 +22,18 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.96.0"
-license = "MPL-2.0"
+license = "BSD-3-Clause"
 repository = "https://github.com/ramfluxhq/ramflux"
 
 [workspace.dependencies]
-ramflux-core = { path = "crates/ramflux-core" }
-ramflux-protocol = { path = "crates/ramflux-protocol" }
-ramflux-crypto = { path = "crates/ramflux-crypto" }
-ramflux-storage = { path = "crates/ramflux-storage" }
-ramflux-transport = { path = "crates/ramflux-transport" }
-ramflux-sync = { path = "crates/ramflux-sync" }
-ramflux-sdk = { path = "crates/ramflux-sdk" }
-ramflux-node-core = { path = "crates/ramflux-node-core" }
+ramflux-core = { version = "0.1.0", path = "crates/ramflux-core" }
+ramflux-protocol = { version = "0.1.0", path = "crates/ramflux-protocol" }
+ramflux-crypto = { version = "0.1.0", path = "crates/ramflux-crypto" }
+ramflux-storage = { version = "0.1.0", path = "crates/ramflux-storage" }
+ramflux-transport = { version = "0.1.0", path = "crates/ramflux-transport" }
+ramflux-sync = { version = "0.1.0", path = "crates/ramflux-sync" }
+ramflux-sdk = { version = "0.1.0", path = "crates/ramflux-sdk" }
+ramflux-node-core = { version = "0.1.0", path = "crates/ramflux-node-core" }
 anyhow = "1.0"
 aes-gcm = "0.10"
 arc-swap = "1.8.2"

@@ -8,11 +8,11 @@ repository = "https://github.com/ramflux/ramflux-storage"
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-core = { path = "../ramflux-core" }
+ramflux-core = { version = "0.1.0", path = "../ramflux-core" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-crypto = { path = "../ramflux-crypto" }
+ramflux-crypto = { version = "0.1.0", path = "../ramflux-crypto" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-protocol = { path = "../ramflux-protocol" }
+ramflux-protocol = { version = "0.1.0", path = "../ramflux-protocol" }
 blake3 = "1.8.5"
 chacha20poly1305 = "0.10.1"
 rusqlite = { version = "0.37", default-features = false }

@@ -32,9 +32,9 @@ compio-tls = { version = "=0.10.0", default-features = false, features = ["ring"
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-core = { path = "../ramflux-core" }
+ramflux-core = { version = "0.1.0", path = "../ramflux-core" }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-protocol = { path = "../ramflux-protocol" }
+ramflux-protocol = { version = "0.1.0", path = "../ramflux-protocol" }
 anyhow = "1.0"
 bytes = "1.10"
 h2 = "0.4"
@@ -74,3 +74,6 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[package.metadata.cargo-machete]
+ignored = ["anyhow", "compio-io", "compio-tls", "hyper", "rustls-pki-types", "tokio-util"]

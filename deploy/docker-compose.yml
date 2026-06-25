@@ -1,0 +1,187 @@
+services:
+  ramflux-gateway:
+    image: ghcr.io/ramfluxhq/ramflux-gateway:${RAMFLUX_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BIN: ramflux-gateway
+    command: ["--config", "/etc/ramflux/config/gateway.toml"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
+    volumes:
+      - gateway-redb:/var/lib/ramflux/gateway
+      - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
+      - ./certs/gateway:/etc/ramflux/mesh:ro
+    ports:
+      - "${RAMFLUX_GATEWAY_TCP_PORT:-443}:443/tcp"
+      - "${RAMFLUX_GATEWAY_QUIC_PORT:-443}:443/udp"
+    depends_on: [ramflux-router, ramflux-retention]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-gateway", "--health-check"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
+
+  ramflux-router:
+    image: ghcr.io/ramfluxhq/ramflux-router:${RAMFLUX_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BIN: ramflux-router
+    command: ["--config", "/etc/ramflux/config/router.toml"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes:
+      - router-redb:/var/lib/ramflux/router
+      - ./config/router.toml:/etc/ramflux/config/router.toml:ro
+      - ./certs/router:/etc/ramflux/mesh:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-router", "--health-check"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
+
+  ramflux-notify:
+    image: ghcr.io/ramfluxhq/ramflux-notify:${RAMFLUX_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BIN: ramflux-notify
+    command: ["--config", "/etc/ramflux/config/notify.toml"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
+    volumes:
+      - notify-redb:/var/lib/ramflux/notify
+      - ./config/notify.toml:/etc/ramflux/config/notify.toml:ro
+      - ./certs/notify:/etc/ramflux/mesh:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-notify", "--health-check"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
+
+  ramflux-federation:
+    image: ghcr.io/ramfluxhq/ramflux-federation:${RAMFLUX_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BIN: ramflux-federation
+    command: ["--config", "/etc/ramflux/config/federation.toml"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      RAMFLUX_FEDERATION_ADMIN_ADDR: "0.0.0.0:18082"
+      RAMFLUX_FEDERATION_ADMIN_TOKEN: "${RAMFLUX_FEDERATION_ADMIN_TOKEN:-ramflux-local-admin-token}"
+      RAMFLUX_FEDERATION_NODE_ID: "${RAMFLUX_FEDERATION_NODE_ID:-localhost}"
+      RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RAMFLUX_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
+      RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL: "${RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL:-}"
+      RAMFLUX_FEDERATION_FORCE_TCP_MESH: "${RAMFLUX_FEDERATION_FORCE_TCP_MESH:-0}"
+      RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "${RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK:-0}"
+    volumes:
+      - federation-redb:/var/lib/ramflux/federation
+      - ./config/federation.toml:/etc/ramflux/config/federation.toml:ro
+      - ./certs/federation:/etc/ramflux/mesh:ro
+    ports:
+      - "${RAMFLUX_FEDERATION_ADMIN_PORT:-18082}:18082"
+      - "${RAMFLUX_FEDERATION_MESH_PORT:-7443}:7443/tcp"
+      - "${RAMFLUX_FEDERATION_MESH_PORT:-7443}:7443/udp"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-federation", "--health-check"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
+
+  ramflux-relay:
+    image: ghcr.io/ramfluxhq/ramflux-relay:${RAMFLUX_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BIN: ramflux-relay
+    command: ["--config", "/etc/ramflux/config/relay.toml"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes:
+      - relay-redb:/var/lib/ramflux/relay
+      - ./config/relay.toml:/etc/ramflux/config/relay.toml:ro
+      - ./certs/relay:/etc/ramflux/mesh:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-relay", "--health-check"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
+
+  ramflux-signaling:
+    image: ghcr.io/ramfluxhq/ramflux-signaling:${RAMFLUX_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BIN: ramflux-signaling
+    command: ["--config", "/etc/ramflux/config/signaling.toml"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes:
+      - signaling-redb:/var/lib/ramflux/signaling
+      - ./config/signaling.toml:/etc/ramflux/config/signaling.toml:ro
+      - ./certs/signaling:/etc/ramflux/mesh:ro
+    ports:
+      - "${RAMFLUX_SIGNALING_TURN_UDP_PORT:-3478}:3478/udp"
+      - "${RAMFLUX_SIGNALING_TURN_TCP_PORT:-3478}:3478/tcp"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-signaling", "--health-check"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
+
+  ramflux-retention:
+    image: ghcr.io/ramfluxhq/ramflux-retention:${RAMFLUX_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BIN: ramflux-retention
+    command: ["--config", "/etc/ramflux/config/retention.toml"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes:
+      - retention-redb:/var/lib/ramflux/retention
+      - ./config/retention.toml:/etc/ramflux/config/retention.toml:ro
+      - ./certs/retention:/etc/ramflux/mesh:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-retention", "--health-check"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
+
+volumes:
+  gateway-redb: {}
+  router-redb: {}
+  notify-redb: {}
+  federation-redb: {}
+  relay-redb: {}
+  signaling-redb: {}
+  retention-redb: {}
