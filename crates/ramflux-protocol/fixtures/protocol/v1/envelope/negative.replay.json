@@ -1,0 +1,19 @@
+{
+  "created_at": 1760000000,
+  "delivery_class": "opaque_event",
+  "domain": "ramflux.envelope.v1",
+  "encrypted_payload": "ZW5jcnlwdGVkLWVudmVsb3BlLXBheWxvYWQ",
+  "envelope_id": "env_01",
+  "payload_hash": "cGF5bG9hZC1oYXNo",
+  "priority": "normal",
+  "routing_set_id": "route_epoch_08",
+  "schema": "ramflux.envelope.v1",
+  "signature": "66qX2bu2c9PtMTbIU3fPJc9_pfSNMynhTMbX0qLWTcR7gLvxDDJ5VMLtCGKpl5IQEnwuYlTFFbsxaEZKomWmAQ",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "source_device_id": "dev_a",
+  "source_principal_id": "opaque_id_a",
+  "target_delivery_id": "deliv_b",
+  "ttl": 604800,
+  "version": 1
+}

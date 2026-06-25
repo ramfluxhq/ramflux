@@ -1,0 +1,1 @@
+{"body_hash":"Ym9keS1oYXNo","created_at":1760000000,"device_proof_hash":"ZGV2aWNlLXByb29mLWhhc2g","domain":"ramflux.signed_request.v1","expires_at":1760000060,"method":"POST","nonce":"cmVxdWVzdC1ub25jZQ","path":"/client/v1/envelope","request_id":"req_01","schema":"ramflux.signed_request.v1","source_device_id":"dev_a","version":1}

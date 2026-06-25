@@ -1,0 +1,40 @@
+{
+  "a2ui_profiles": [
+    "ramflux.a2ui.v1"
+  ],
+  "actor_type": "bot",
+  "bot_identity_commitment": "bot_idc_01",
+  "capabilities": [
+    "message:send",
+    "a2ui:render",
+    "call:tool:ci.deploy"
+  ],
+  "created_at": 1760000000,
+  "display_name": "Deploy Bot",
+  "domain": "ramflux.bot_manifest.v1",
+  "home_node": "bots.example.com",
+  "hosting_model": "federated",
+  "manifest_version": "1.0.0",
+  "owner_identity_commitment": "id_owner",
+  "permissions": [
+    "conversation:read:mentioned_context",
+    "call:tool:ci.deploy"
+  ],
+  "safety_disclosure": {
+    "can_read_dm_plaintext": true,
+    "can_read_group_messages_when_member": true,
+    "disclosure_hash": "ZGlzY2xvc3VyZS1oYXNo",
+    "disclosure_text": "This hosted bot operator can read messages sent to the bot and group messages made visible to it.",
+    "disclosure_version": 1,
+    "hosting_model": "federated",
+    "key_custody_class": "federated_operator_key",
+    "operator_display_name": "Example Bot Operator",
+    "operator_identity_commitment": "id_operator"
+  },
+  "schema": "ramflux.bot_manifest.v1",
+  "signature": "IDOtlC2wsSD_mAevt5k5F-iIMfBBIi_sfbklEhg-TkfJXfn8DNNSzIvevYNJMHTuKy6bU4Qf3PQ4sk88_35dDA",
+  "signature_alg": "ed25519",
+  "signature_by_bot_identity": "Ym90LXNpZ25hdHVyZQ",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

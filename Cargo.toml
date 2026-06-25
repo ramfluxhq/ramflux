@@ -1,0 +1,120 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ramflux-core",
+    "crates/ramflux-protocol",
+    "crates/ramflux-crypto",
+    "crates/ramflux-storage",
+    "crates/ramflux-transport",
+    "crates/ramflux-sync",
+    "crates/ramflux-sdk",
+    "crates/ramflux-node-core",
+    "apps/rf",
+    "apps/ramflux-gateway",
+    "apps/ramflux-router",
+    "apps/ramflux-notify",
+    "apps/ramflux-federation",
+    "apps/ramflux-relay",
+    "apps/ramflux-signaling",
+    "apps/ramflux-retention",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96.0"
+license = "MPL-2.0"
+repository = "https://github.com/ramfluxhq/ramflux"
+
+[workspace.dependencies]
+ramflux-core = { path = "crates/ramflux-core" }
+ramflux-protocol = { path = "crates/ramflux-protocol" }
+ramflux-crypto = { path = "crates/ramflux-crypto" }
+ramflux-storage = { path = "crates/ramflux-storage" }
+ramflux-transport = { path = "crates/ramflux-transport" }
+ramflux-sync = { path = "crates/ramflux-sync" }
+ramflux-sdk = { path = "crates/ramflux-sdk" }
+ramflux-node-core = { path = "crates/ramflux-node-core" }
+anyhow = "1.0"
+aes-gcm = "0.10"
+arc-swap = "1.8.2"
+argon2 = "0.5.3"
+base64 = "0.22"
+blake3 = "1.8.5"
+bytes = "1.10"
+cbindgen = "0.29.3"
+chacha20poly1305 = "0.10.1"
+clap = { version = "4.5", features = ["derive"] }
+constant_time_eq = "0.4"
+crc32fast = "1.4"
+ed25519-dalek = "2.2.0"
+futures-lite = "2.6"
+getrandom = "0.3"
+glommio = "0.9.0"
+h2 = "0.4"
+hex = "0.4"
+hkdf = "0.12.4"
+hmac = "0.12"
+http = "1.3"
+hyper = "1.10.1"
+jsonwebtoken = { version = "10.2", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+keyring = "3"
+p256 = { version = "0.13", features = ["ecdh"] }
+parking_lot = "0.12"
+postcard = { version = "1.1", features = ["alloc"] }
+prost = "0.14"
+quinn = "0.11.9"
+rand = "0.10"
+rcgen = "0.14"
+redb = "4.1.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rmcp = "0.14"
+rusqlite = { version = "0.37", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2.2"
+rustls-pki-types = "1.14"
+secrecy = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_json_canonicalizer = "0.3.2"
+sha2 = "0.10"
+stun = "0.17.1"
+subtle = "2.6"
+thiserror = "2.0"
+tokio = "1.42"
+tokio-rustls = "0.26"
+tokio-util = "0.7"
+toml = "1.1.2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
+turn = "0.17.1"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+webpki-roots = "1.0"
+x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
+x509-parser = "0.17"
+zeroize = "1.8"
+
+[workspace.lints.rust]
+warnings = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+correctness = "deny"
+suspicious = "deny"
+complexity = "deny"
+perf = "deny"
+style = "deny"
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

@@ -1,0 +1,76 @@
+//! Rust core SDK facade and stable C-ABI boundary substrate.
+
+mod bus;
+#[cfg(feature = "c-abi")]
+pub mod c_abi;
+mod client;
+mod constants;
+mod dm;
+mod error;
+mod federation;
+mod gateway;
+mod group;
+mod object;
+mod prekey;
+mod prelude;
+mod records;
+mod time;
+
+pub use bus::{
+    LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest, LocalBusA2uiActionRequest,
+    LocalBusA2uiRenderRequest, LocalBusAccountBackupExportRequest,
+    LocalBusAccountBackupImportRequest, LocalBusAccountCreateRequest,
+    LocalBusAccountCreateResponse, LocalBusAccountPassphraseRotateRequest,
+    LocalBusAccountUnlockRequest, LocalBusBotInstallRequest, LocalBusBotRevokeRequest,
+    LocalBusBotTrustAddRequest, LocalBusCallAnswerRequest, LocalBusCallHangupRequest,
+    LocalBusCallInviteRequest, LocalBusClient, LocalBusClientMode, LocalBusConfig,
+    LocalBusContactAddRequest, LocalBusContactFederatedRequest, LocalBusContactLinkRequest,
+    LocalBusContactRemoveRequest, LocalBusContactSafetyRequest,
+    LocalBusConversationDisappearingExpireRequest, LocalBusConversationDisappearingSetRequest,
+    LocalBusConversationMuteRequest, LocalBusConversationRequest, LocalBusDeviceActivateRequest,
+    LocalBusDeviceActivateResponse, LocalBusDeviceListResponse, LocalBusDeviceRecord,
+    LocalBusErrorBody, LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind,
+    LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
+    LocalBusGrantStandingApprovalRevokeRequest, LocalBusGroupCreateRequest,
+    LocalBusGroupMemberAddRequest, LocalBusGroupMemberRemoveRequest, LocalBusGroupMemberRoute,
+    LocalBusGroupReceiveRequest, LocalBusGroupRequest, LocalBusGroupSendRequest,
+    LocalBusGroupSenderKeyExportRequest, LocalBusGroupSenderKeyImportRequest,
+    LocalBusMcpApprovalDecisionRequest, LocalBusMcpApprovalGrantRequest,
+    LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest, LocalBusMessageAckRequest,
+    LocalBusMessageDeleteRequest, LocalBusMessageReceiptDeliveredRequest,
+    LocalBusMessageReceiptReadRequest, LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest,
+    LocalBusObjectDeleteRequest, LocalBusObjectGetRequest, LocalBusObjectImportRequest,
+    LocalBusObjectPutRequest, LocalBusObjectShareRequest, LocalBusSubscriptionOpenRequest,
+    LocalMcpGrantSigningBody, LocalMcpStandingApprovalSigningBody, serve_local_bus,
+    serve_local_bus_until,
+};
+pub use client::RamfluxClient;
+pub use client::contact::SdkContactSafetyNumber;
+pub use client::recovery::{
+    SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember, recovery_member_public_key_base64url,
+};
+pub use constants::*;
+pub use dm::SdkDmX3dhHeader;
+pub use error::SdkError;
+pub use federation::{
+    SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,
+    SdkFederatedSubmitResponse,
+};
+pub use gateway::{
+    GatewayAuthFrame, GatewayClientFrame, GatewayCursor, GatewayDirectMessage, GatewayInboxEntry,
+    GatewayOpenFrame, GatewayPlaintextDelivery, GatewayQuicEndpointConfig, GatewayResumeFrame,
+    GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine, GatewaySessionEstablishedFrame,
+    GatewaySessionState, GatewaySessionTransportKind, GatewaySubmitFrame,
+    GatewayTcpTlsEndpointConfig,
+};
+pub use group::SdkGroupSenderKeyDistribution;
+pub use object::{SdkObjectKeySlot, SdkObjectSharePackage};
+pub use prekey::{
+    SdkMvp1IdentityRegistrationResponse, SdkMvp1PrekeyResponse, SdkMvp1PublishPrekeyRequest,
+    SdkMvp1RegisterIdentityRequest, identity_root_public_key_commitment,
+    identity_root_public_key_commitment_for_seed,
+};
+pub use records::{
+    LocalBotRecord, LocalBotTrustPinRecord, LocalCallRecord, LocalMcpApprovalRecord,
+    LocalMcpAuditRecord, LocalMcpGrantRecord, LocalMcpStandingApprovalRecord,
+};

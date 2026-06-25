@@ -1,0 +1,1 @@
+{"capability":"send_message","domain":"ramflux.mcp_grant.v1","expires_at":1760003600,"grant_id":"grant_01","principal_id":"id_a","risk_level":"medium","schema":"ramflux.mcp_grant.v1","source_app_device_id":"dev_app","target_ai_device_id":"dev_cli","version":1}

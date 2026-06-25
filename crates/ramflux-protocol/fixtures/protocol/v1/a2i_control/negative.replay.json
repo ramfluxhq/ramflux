@@ -1,0 +1,17 @@
+{
+  "action": "request_approval",
+  "control_domain": "mcp_tool",
+  "correlation_id": "corr_01",
+  "domain": "ramflux.a2i_control.v1",
+  "event_type": "a2i.control",
+  "schema": "ramflux.a2i_control.v1",
+  "signature": "uDGOMKbg7ro-TweVtojyk1Gkw5klCOZQyR8DNjsJtjlwgP91_f50AsZjbT5m4IOSHvWhGXKmJgpGwcBHjl4xAw",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "source_device_id": "dev_app",
+  "subject": {
+    "tool": "send_message"
+  },
+  "target_device_id": "dev_cli",
+  "version": 1
+}

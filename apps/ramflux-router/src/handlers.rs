@@ -1,0 +1,701 @@
+use std::io::Write;
+use std::time::Instant;
+
+use crate::lifecycle::{
+    handle_mvp7_abuse_report, handle_mvp7_abuse_report_get, handle_mvp7_federated_tombstone,
+    handle_mvp7_lifecycle_cancel, handle_mvp7_lifecycle_event, handle_mvp7_lifecycle_finalize,
+    handle_mvp7_lifecycle_get, handle_mvp7_metadata_get,
+};
+
+#[cfg(feature = "itest-http")]
+use std::net::TcpStream;
+
+#[cfg(feature = "itest-http")]
+pub(crate) fn handle_itest_request(
+    stream: &mut TcpStream,
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<()> {
+    let Some(request) = ramflux_node_core::read_itest_http_request(stream)? else {
+        return Ok(());
+    };
+    log_router_itest_request(&request);
+    if handle_healthz_request(stream, &request)? {
+        return Ok(());
+    }
+    if handle_perf_metrics_request(stream, &request)? {
+        return Ok(());
+    }
+    if handle_itest_mvp0_request(stream, &request, router)? {
+        return Ok(());
+    }
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/mvp1/identity/register") => {
+            let response =
+                handle_mvp1_identity_register(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp6/registration/policy") => {
+            let response =
+                handle_mvp6_registration_policy(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp6/friend/request") => {
+            let response =
+                handle_mvp6_friend_request(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp10/own-devices/fanout") => {
+            let response = handle_mvp10_own_devices_fanout(&request.body, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp7/lifecycle/event") => {
+            let response =
+                handle_mvp7_lifecycle_event(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp7/lifecycle/cancel") => {
+            let response =
+                handle_mvp7_lifecycle_cancel(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp7/lifecycle/finalize") => {
+            let response =
+                handle_mvp7_lifecycle_finalize(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp7/lifecycle/") => {
+            let response = handle_mvp7_lifecycle_get(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp7/metadata/") => {
+            let response = handle_mvp7_metadata_get(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp7/federation/tombstone/apply") => {
+            let response =
+                handle_mvp7_federated_tombstone(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp7/abuse/report") => {
+            let response = handle_mvp7_abuse_report(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp7/abuse/report/") => {
+            let response = handle_mvp7_abuse_report_get(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp1/device/revoke") => {
+            let response =
+                handle_mvp1_device_revoke(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp1/prekey/publish") => {
+            let response =
+                handle_mvp1_prekey_publish(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp1/prekey/") => {
+            let response = handle_mvp1_prekey_fetch(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
+            let response = handle_mvp1_device_manifest_fetch(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
+            let response = handle_mvp1_device_auth_key_fetch(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp1/inbox/") => {
+            let response = handle_mvp1_inbox_fetch(path, router.state())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        _ => {
+            ramflux_node_core::write_itest_text_response(stream, "404 Not Found", "not found")?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_itest_mvp0_request(
+    stream: &mut TcpStream,
+    request: &ramflux_node_core::ItestHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<bool> {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/mvp0/envelope") => {
+            let response = handle_mvp0_envelope(&request.body, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp0/ack") => {
+            let response = handle_mvp0_ack(&request.body, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp0/ack-bound") => {
+            let response = handle_mvp0_ack_bound(&request.body, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp0/nack") => {
+            let response = handle_mvp0_nack(&request.body, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/mvp0/nack-bound") => {
+            let response = handle_mvp0_nack_bound(&request.body, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp0/cursor/") => {
+            let response = handle_mvp0_cursor(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_healthz_request(
+    stream: &mut TcpStream,
+    request: &ramflux_node_core::ItestHttpRequest,
+) -> anyhow::Result<bool> {
+    if (request.method.as_str(), request.path.as_str()) != ("GET", "/healthz") {
+        return Ok(false);
+    }
+    ramflux_node_core::write_itest_json_response(
+        stream,
+        "200 OK",
+        &serde_json::json!({
+            "service": "ramflux-router",
+            "status": "ok"
+        }),
+    )?;
+    Ok(true)
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_perf_metrics_request(
+    stream: &mut TcpStream,
+    request: &ramflux_node_core::ItestHttpRequest,
+) -> anyhow::Result<bool> {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/perf/metrics") => {
+            let snapshot = serde_json::json!({
+                "service": "ramflux-router",
+                "node": ramflux_node_core::node_perf_snapshot(),
+                "transport": ramflux_transport::mesh_perf_snapshot()
+            });
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &snapshot)?;
+            Ok(true)
+        }
+        ("POST", "/perf/metrics/reset") => {
+            ramflux_node_core::node_perf_reset();
+            ramflux_transport::mesh_perf_reset();
+            ramflux_node_core::write_itest_json_response(
+                stream,
+                "200 OK",
+                &serde_json::json!({"reset": true}),
+            )?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+#[cfg(feature = "itest-http")]
+fn log_router_itest_request(request: &ramflux_node_core::ItestHttpRequest) {
+    tracing::info!(
+        method = %request.method,
+        path = %request.path,
+        "router HTTP itest request received"
+    );
+}
+
+pub(crate) fn handle_mesh_request(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    router: &crate::router_runtime::RouterHandle,
+    peer_service_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(request) = ramflux_transport::read_mesh_http_request(stream)? else {
+        return Ok(false);
+    };
+    tracing::info!(
+        method = %request.method,
+        path = %request.path,
+        "router mesh request received"
+    );
+    let response = handle_mesh_request_value(request, router, peer_service_id)?;
+    write_mesh_value_response(stream, &response)?;
+    Ok(response.keep_alive)
+}
+
+pub(crate) struct MeshResponse {
+    pub(crate) status: &'static str,
+    pub(crate) content_type: &'static str,
+    pub(crate) body: Vec<u8>,
+    pub(crate) keep_alive: bool,
+}
+
+impl MeshResponse {
+    fn json(status: &'static str, body: Vec<u8>) -> Self {
+        Self { status, content_type: "application/json", body, keep_alive: true }
+    }
+
+    fn text(status: &'static str, body: &str) -> Self {
+        Self {
+            status,
+            content_type: "text/plain; charset=utf-8",
+            body: body.as_bytes().to_vec(),
+            keep_alive: true,
+        }
+    }
+}
+
+pub(crate) fn handle_mesh_request_value(
+    request: ramflux_transport::MeshHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+    peer_service_id: &str,
+) -> anyhow::Result<MeshResponse> {
+    let ramflux_transport::MeshHttpRequest { method, path, body } = request;
+    if let Some(response) = handle_mesh_retention_value(&method, &path, &body, peer_service_id)? {
+        return Ok(response);
+    }
+    if let Some(response) = handle_mesh_fast_path_value(&method, &path, &body, router)? {
+        return Ok(response);
+    }
+    if let Some(response) = handle_mesh_mvp0_value(&method, &path, &body, router)? {
+        return Ok(response);
+    }
+    handle_mesh_general_value(&method, &path, &body, router)
+}
+
+fn handle_mesh_retention_value(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    peer_service_id: &str,
+) -> anyhow::Result<Option<MeshResponse>> {
+    if peer_service_id == "ramflux-retention" && path != "/internal/retention/gc_sweep" {
+        return Ok(MeshResponse::text(
+            "403 Forbidden",
+            "retention peer is only authorized for gc_sweep",
+        )
+        .into());
+    }
+    if method == "POST" && path == "/internal/retention/gc_sweep" {
+        if peer_service_id != "ramflux-retention" {
+            return Ok(MeshResponse::text(
+                "403 Forbidden",
+                "gc_sweep requires ramflux-retention peer",
+            )
+            .into());
+        }
+        let sweep: ramflux_node_core::RetentionGcSweepRequest = serde_json::from_slice(body)?;
+        return Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&sweep.response(0))?)));
+    }
+    Ok(None)
+}
+
+fn handle_mesh_fast_path_value(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<Option<MeshResponse>> {
+    match (method, path) {
+        ("POST", "/s1/session/upsert") => {
+            let response = handle_s1_session_upsert(body, router.state(), router.store())?;
+            tracing::info!(
+                target_delivery_id = %response.target_delivery_id,
+                session_id = %response.session_id,
+                "router mesh session upsert returned"
+            );
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        ("GET", "/healthz") => Ok(MeshResponse::json(
+            "200 OK",
+            serde_json::to_vec(&serde_json::json!({
+                "service": "ramflux-router",
+                "status": "ok"
+            }))?,
+        )
+        .into()),
+        ("POST", "/mvp0/envelope") => {
+            let response = handle_mvp0_envelope(body, router)?;
+            tracing::info!(
+                target_delivery_id = %response.target_delivery_id,
+                outcome = %response.outcome,
+                inbox_seq = ?response.inbox_seq,
+                "router mesh mvp0 envelope returned"
+            );
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        #[cfg(feature = "itest-http")]
+        ("POST", "/mvp0/ack") => {
+            let response = handle_mvp0_ack(body, router)?;
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        ("POST", "/mvp0/ack-bound") => {
+            let response = handle_mvp0_ack_bound(body, router)?;
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn handle_mesh_mvp0_value(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<Option<MeshResponse>> {
+    match (method, path) {
+        #[cfg(feature = "itest-http")]
+        ("POST", "/mvp0/nack") => {
+            let response = handle_mvp0_nack(body, router)?;
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        ("POST", "/mvp0/nack-bound") => {
+            let response = handle_mvp0_nack_bound(body, router)?;
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        ("GET", path) if path.starts_with("/mvp0/cursor/") => {
+            let response = handle_mvp0_cursor(path, router.state());
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn handle_mesh_general_value(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<MeshResponse> {
+    match (method, path) {
+        ("POST", "/mvp1/identity/register") => {
+            let response = handle_mvp1_identity_register(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp6/registration/policy") => {
+            let response = handle_mvp6_registration_policy(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp6/friend/request") => {
+            let response = handle_mvp6_friend_request(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp10/own-devices/fanout") => {
+            let response = handle_mvp10_own_devices_fanout(body, router)?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp7/lifecycle/event") => {
+            let response = handle_mvp7_lifecycle_event(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp7/lifecycle/cancel") => {
+            let response = handle_mvp7_lifecycle_cancel(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp7/lifecycle/finalize") => {
+            let response = handle_mvp7_lifecycle_finalize(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp7/lifecycle/") => {
+            let response = handle_mvp7_lifecycle_get(path, router.state());
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp7/metadata/") => {
+            let response = handle_mvp7_metadata_get(path, router.state());
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp7/federation/tombstone/apply") => {
+            let response = handle_mvp7_federated_tombstone(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp7/abuse/report") => {
+            let response = handle_mvp7_abuse_report(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp7/abuse/report/") => {
+            let response = handle_mvp7_abuse_report_get(path, router.state());
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp1/device/revoke") => {
+            let response = handle_mvp1_device_revoke(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/mvp1/prekey/publish") => {
+            let response = handle_mvp1_prekey_publish(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp1/prekey/") => {
+            let response = handle_mvp1_prekey_fetch(path, router.state());
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
+            let response = handle_mvp1_device_manifest_fetch(path, router.state());
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
+            let response = handle_mvp1_device_auth_key_fetch(path, router.state());
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp1/inbox/") => {
+            let response = handle_mvp1_inbox_fetch(path, router.state())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        _ => Ok(MeshResponse::text("404 Not Found", "not found")),
+    }
+}
+
+fn write_mesh_value_response(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    response: &MeshResponse,
+) -> anyhow::Result<()> {
+    let connection = if response.keep_alive { "keep-alive" } else { "close" };
+    write!(
+        stream,
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
+        response.status,
+        response.content_type,
+        response.body.len(),
+        connection
+    )?;
+    stream.write_all(&response.body)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn handle_mvp0_envelope(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse> {
+    let total_started = Instant::now();
+    let decode_started = Instant::now();
+    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
+    router.submit_envelope(envelope, total_started)
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_mvp0_ack(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    let ack: ramflux_protocol::Ack = serde_json::from_slice(body)?;
+    router.apply_ack(&ack)
+}
+
+fn handle_mvp0_ack_bound(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    let request: ramflux_node_core::ItestMvp0BoundAckRequest = serde_json::from_slice(body)?;
+    router.apply_bound_ack(&request)
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_mvp0_nack(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    let nack: ramflux_protocol::Nack = serde_json::from_slice(body)?;
+    router.apply_nack(&nack)
+}
+
+fn handle_mvp0_nack_bound(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    let request: ramflux_node_core::ItestMvp0BoundNackRequest = serde_json::from_slice(body)?;
+    router.apply_bound_nack(&request)
+}
+
+fn handle_mvp0_cursor(
+    path: &str,
+    state: &ramflux_node_core::RouterCore,
+) -> Option<ramflux_node_core::ItestMvp0CursorResponse> {
+    let target_delivery_id = path.trim_start_matches("/mvp0/cursor/");
+    state
+        .cursor_state(target_delivery_id)
+        .as_ref()
+        .map(ramflux_node_core::ItestMvp0CursorResponse::from)
+}
+
+fn handle_s1_session_upsert(
+    body: &[u8],
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<ramflux_node_core::SessionDescriptor> {
+    let descriptor: ramflux_node_core::SessionDescriptor = serde_json::from_slice(body)?;
+    state.upsert_session(descriptor.clone())?;
+    state.mark_live(&descriptor.target_delivery_id)?;
+    let session = state
+        .session(&descriptor.target_delivery_id)
+        .ok_or_else(|| anyhow::anyhow!("session missing after upsert"))?;
+    store.record_session_entry(&session)?;
+    Ok(descriptor)
+}
+
+fn handle_mvp1_identity_register(
+    body: &[u8],
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<ramflux_node_core::ItestMvp1IdentityRegistrationResponse> {
+    let request: ramflux_node_core::ItestMvp1RegisterIdentityRequest =
+        serde_json::from_slice(body)?;
+    tracing::info!(
+        principal_id = %request.proof.principal_id,
+        device_id = %request.proof.device_id,
+        target_delivery_id = %request.target_delivery_id,
+        "router decoded mvp1 identity registration"
+    );
+    let response = state.mvp1_register_identity(&request)?;
+    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    let session = state
+        .session(&response.target_delivery_id)
+        .ok_or_else(|| anyhow::anyhow!("session missing after identity registration"))?;
+    store.record_session_entry(&session)?;
+    tracing::info!(
+        principal_id = %response.principal_id,
+        device_id = %response.device_id,
+        target_delivery_id = %response.target_delivery_id,
+        session_bound = response.session_bound,
+        "router mvp1 identity registration outcome"
+    );
+    Ok(response)
+}
+
+fn handle_mvp1_device_auth_key_fetch(
+    path: &str,
+    state: &ramflux_node_core::RouterCore,
+) -> Option<ramflux_node_core::ItestMvp1DeviceAuthKeyResponse> {
+    let device_id = path.trim_start_matches("/mvp1/device-auth-key/");
+    state.mvp1_device_auth_key(device_id)
+}
+
+fn handle_mvp6_registration_policy(
+    body: &[u8],
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<ramflux_node_core::ItestRegistrationPolicy> {
+    let request: ramflux_node_core::ItestRegistrationPolicy = serde_json::from_slice(body)?;
+    state.mvp6_set_registration_policy(request);
+    let response = state.mvp6_registration_policy();
+    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    Ok(response)
+}
+
+fn handle_mvp6_friend_request(
+    body: &[u8],
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<ramflux_node_core::ItestMvp6FriendRequestBudgetResponse> {
+    let request: ramflux_node_core::ItestMvp6FriendRequestBudgetRequest =
+        serde_json::from_slice(body)?;
+    let response = state.mvp6_record_friend_request(&request)?;
+    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    Ok(response)
+}
+
+fn handle_mvp10_own_devices_fanout(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
+    let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
+        serde_json::from_slice(body)?;
+    router.own_device_fanout(&request)
+}
+
+fn handle_mvp1_device_revoke(
+    body: &[u8],
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<ramflux_node_core::ItestMvp1RevokeDeviceResponse> {
+    let request: ramflux_node_core::ItestMvp1RevokeDeviceRequest = serde_json::from_slice(body)?;
+    let response = state.mvp1_revoke_device(&request.device_id);
+    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    Ok(response)
+}
+
+fn handle_mvp1_prekey_publish(
+    body: &[u8],
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+) -> anyhow::Result<ramflux_node_core::ItestMvp1PrekeyResponse> {
+    let request: ramflux_node_core::ItestMvp1PublishPrekeyRequest = serde_json::from_slice(body)?;
+    tracing::info!(
+        device_id = %request.device_id,
+        "router decoded mvp1 prekey publish"
+    );
+    let response = state.mvp1_publish_prekey(request)?;
+    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    tracing::info!(
+        device_id = %response.device_id,
+        has_bundle = response.bundle.is_some(),
+        target_delivery_id = ?response.target_delivery_id,
+        "router mvp1 prekey publish outcome"
+    );
+    Ok(response)
+}
+
+fn handle_mvp1_prekey_fetch(
+    path: &str,
+    state: &ramflux_node_core::RouterCore,
+) -> ramflux_node_core::ItestMvp1PrekeyResponse {
+    let device_id = path.trim_start_matches("/mvp1/prekey/");
+    let response = state.mvp1_prekey(device_id);
+    tracing::info!(
+        device_id = %response.device_id,
+        has_bundle = response.bundle.is_some(),
+        target_delivery_id = ?response.target_delivery_id,
+        "router mvp1 prekey fetch outcome"
+    );
+    response
+}
+
+fn handle_mvp1_device_manifest_fetch(
+    path: &str,
+    state: &ramflux_node_core::RouterCore,
+) -> Option<ramflux_node_core::ItestMvp1DeviceManifestResponse> {
+    let principal_commitment = path.trim_start_matches("/mvp1/device-manifest/");
+    let response = state.mvp1_device_manifest(principal_commitment);
+    tracing::info!(
+        principal_commitment,
+        found = response.is_some(),
+        device_count = response.as_ref().map_or(0, |manifest| manifest.devices.len()),
+        "router mvp1 device manifest fetch outcome"
+    );
+    response
+}
+
+fn handle_mvp1_inbox_fetch(
+    path: &str,
+    state: &ramflux_node_core::RouterCore,
+) -> anyhow::Result<ramflux_node_core::ItestMvp1InboxResponse> {
+    let request = path.trim_start_matches("/mvp1/inbox/");
+    let (target_delivery_id, query) = request.split_once('?').unwrap_or((request, ""));
+    let mut after_inbox_seq = 0;
+    let mut limit = 100;
+    for part in query.split('&').filter(|part| !part.is_empty()) {
+        if let Some(value) = part.strip_prefix("after=") {
+            after_inbox_seq = value.parse()?;
+        } else if let Some(value) = part.strip_prefix("limit=") {
+            limit = value.parse()?;
+        }
+    }
+    let response = state.mvp1_inbox(target_delivery_id, after_inbox_seq, limit);
+    tracing::info!(
+        target_delivery_id = %response.target_delivery_id,
+        after_inbox_seq,
+        limit,
+        entries = response.entries.len(),
+        "router mvp1 inbox fetch outcome"
+    );
+    Ok(response)
+}

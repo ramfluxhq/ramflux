@@ -1,0 +1,19 @@
+{
+  "audience": "node",
+  "capability_scope": [
+    "delivery.send"
+  ],
+  "device_epoch": 1,
+  "device_id": "dev_a",
+  "domain": "ramflux.branch_proof.v1",
+  "expires_at": 1760000060,
+  "issued_at": 1760000000,
+  "lineage_head": "lin_01",
+  "principal_id": "id_a",
+  "proof_id": "bp_01",
+  "schema": "ramflux.branch_proof.v1",
+  "signature": "uJYqaNHeJGuamOLGG0_9LmfjccEx8lRZ5yO9vkQLGymzW5R18xlyh-SRtA4BalXnSXgR1w1JQO7-w5cMwnYEBw",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

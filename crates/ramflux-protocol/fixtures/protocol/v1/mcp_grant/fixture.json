@@ -1,0 +1,15 @@
+{
+  "capability": "send_message",
+  "domain": "ramflux.mcp_grant.v1",
+  "expires_at": 1760003600,
+  "grant_id": "grant_01",
+  "principal_id": "id_a",
+  "risk_level": "medium",
+  "schema": "ramflux.mcp_grant.v1",
+  "signature": "-orIix1D2BnZ4ki3nOVh-lEkx_t6MOcdfWlVZV-oOha7OPRayph2GO9JV2ZlyL5ubJGeaFa4no_x_cWqfmvyDA",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "source_app_device_id": "dev_app",
+  "target_ai_device_id": "dev_cli",
+  "version": 1
+}

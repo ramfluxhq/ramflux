@@ -1,0 +1,126 @@
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::wildcard_imports)]
+use crate::prelude::*;
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct SdkGroupSenderKeyDistribution {
+    pub schema: String,
+    pub version: u32,
+    pub group_id: String,
+    pub sender_id: String,
+    pub group_key_epoch: u64,
+    pub sender_key_seed: [u8; 32],
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkGroupSenderKeyDistributionEnvelope {
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) distribution_base64: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkGroupSenderKeyState {
+    pub(crate) group_id: String,
+    pub(crate) sender_id: String,
+    pub(crate) group_key_epoch: u64,
+    pub(crate) session_snapshot: ramflux_crypto::DmSessionSnapshot,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkGroupEncryptedEnvelope {
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) group_id: String,
+    pub(crate) sender_id: String,
+    pub(crate) group_key_epoch: u64,
+    pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
+}
+
+pub(crate) enum GroupGatewayDeliveryResult {
+    Message(Vec<u8>),
+    SenderKeyDistribution(SdkGroupSenderKeyDistribution),
+}
+
+pub(crate) struct SdkGroupPendingPlaintext {
+    pub(crate) group_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) message_id: String,
+    pub(crate) plaintext: Vec<u8>,
+}
+
+pub(crate) fn group_sender_key_checkpoint_name(
+    group_id: &str,
+    sender_id: &str,
+    epoch: u64,
+    direction: &str,
+) -> String {
+    format!("group_sender_key:{group_id}:{sender_id}:{epoch}:{direction}")
+}
+
+pub(crate) fn group_sender_session_id(group_id: &str, sender_id: &str, epoch: u64) -> String {
+    format!("group:{group_id}:sender:{sender_id}:epoch:{epoch}")
+}
+
+pub(crate) fn group_sender_device_hash(group_id: &str, sender_id: &str, role: &str) -> [u8; 32] {
+    ramflux_crypto::blake3_256(
+        ramflux_protocol::domain::GROUP_SENDER_KEY_DISTRIBUTION,
+        format!("{group_id}|{sender_id}|{role}").as_bytes(),
+    )
+}
+
+pub(crate) fn group_sender_transcript_hash(
+    group_id: &str,
+    sender_id: &str,
+    epoch: u64,
+) -> [u8; 32] {
+    ramflux_crypto::blake3_256(
+        ramflux_protocol::domain::DM_RATCHET_ROOT,
+        group_sender_session_id(group_id, sender_id, epoch).as_bytes(),
+    )
+}
+
+pub(crate) fn group_sender_key_distribution_conversation_id(
+    group_id: &str,
+    sender_id: &str,
+    recipient_device_id: &str,
+) -> String {
+    format!("group.sender_key.distribution:{group_id}:{sender_id}:{recipient_device_id}")
+}
+
+pub(crate) fn group_member_route_event_id(group_id: &str, member_id: &str) -> String {
+    format!("group.member.route:{group_id}:{member_id}")
+}
+
+pub(crate) fn group_entry_is_sender_key_message(
+    entry: &GatewayInboxEntry,
+) -> Result<bool, SdkError> {
+    let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
+        .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
+    Ok(serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&encrypted_body)
+        .is_ok_and(|envelope| envelope.schema == "ramflux.sdk.group_sender_key.message.v1"))
+}
+
+pub(crate) fn group_plaintext_json(
+    conversation_id: &str,
+    group_id: &str,
+    message_id: &str,
+    plaintext: &[u8],
+) -> serde_json::Value {
+    serde_json::json!({
+        "conversation_id": conversation_id,
+        "group_id": group_id,
+        "message_id": message_id,
+        "plaintext_body_base64": ramflux_protocol::encode_base64url(plaintext),
+        "body_utf8": String::from_utf8_lossy(plaintext),
+    })
+}
+
+pub(crate) fn is_missing_group_sender_key_error(error: &SdkError) -> bool {
+    let message = error.to_string();
+    message.contains("missing group sender key")
+}
+
+pub(crate) fn group_associated_data(group_id: &str, sender_id: &str, epoch: u64) -> Vec<u8> {
+    format!("ramflux.group.sender_key.v1|{group_id}|{sender_id}|{epoch}").into_bytes()
+}

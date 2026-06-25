@@ -1,0 +1,17 @@
+{
+  "branch_proof_hash": "YnJhbmNoLXByb29mLWhhc2g",
+  "capability_scope": [
+    "delivery.send"
+  ],
+  "device_epoch": 1,
+  "device_id": "dev_a",
+  "domain": "ramflux.device_proof.v1",
+  "expires_at": 1760000060,
+  "nonce": "ZGV2aWNlLXByb29mLW5vbmNl",
+  "principal_id": "id_a",
+  "schema": "ramflux.device_proof.v1",
+  "signature": "-T8mPVZb58wpbCcU8MiGIwk5u17i6wU_06mLWEPSsXU5kJCcLNoQ0Dq9E8Sk3DeOIAyVPWLXphWu9tAIOsvSAQ",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

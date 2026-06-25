@@ -1,0 +1,18 @@
+{
+  "acked_event_ids": [
+    "evt_msg_01"
+  ],
+  "cursor_id": "cur_01",
+  "device_id": "dev_b",
+  "domain": "ramflux.cursor.v1",
+  "inbox_seq": 42,
+  "lamport_time": 7,
+  "last_envelope_id": "env_01",
+  "pending_event_ids": [],
+  "principal_id": "id_b",
+  "schema": "ramflux.cursor.v1",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

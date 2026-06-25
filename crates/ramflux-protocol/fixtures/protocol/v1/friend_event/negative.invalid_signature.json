@@ -1,0 +1,22 @@
+{
+  "actor_device_id": "dev_a",
+  "actor_principal_id": "id_a",
+  "body": {
+    "causal_event_id": "evt_friend_prev",
+    "effective_at": 1760000000,
+    "link_id": "fl_01",
+    "reason": "blocked",
+    "revoked_capability_id": "cap_01"
+  },
+  "created_at": 1760000000,
+  "device_counter": 3,
+  "domain": "ramflux.friend_event.v1",
+  "event_id": "evt_friend_01",
+  "event_type": "friend.capability_revoked",
+  "lamport_time": 9,
+  "schema": "ramflux.friend_event.v1",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}
