@@ -127,10 +127,18 @@ jobs:
       - name: Generate SBOM
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cargo cyclonedx --workspace --all --format json --output-cdx --override-filename ramflux-sbom
-          mv ramflux-sbom.cdx.json dist/ramflux-sbom.cdx.json
-          shasum -a 256 dist/ramflux-sbom.cdx.json > dist/ramflux-sbom.cdx.json.sha256
+          rm -rf dist/sbom
+          mkdir -p dist/sbom
+          find apps crates -name "ramflux-sbom.json" -delete
+          cargo cyclonedx --all --format json --override-filename ramflux-sbom
+          while IFS= read -r sbom; do
+            dest="dist/sbom/${sbom}"
+            mkdir -p "$(dirname "$dest")"
+            mv "$sbom" "$dest"
+          done < <(find apps crates -name "ramflux-sbom.json" | sort)
+          test "$(find dist/sbom -name "ramflux-sbom.json" | wc -l)" -gt 0
+          tar -C dist -czf dist/ramflux-sbom.cdx.tar.gz sbom
+          shasum -a 256 dist/ramflux-sbom.cdx.tar.gz > dist/ramflux-sbom.cdx.tar.gz.sha256
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
@@ -139,23 +147,23 @@ jobs:
         run: |
           set -euo pipefail
           cosign sign-blob --yes \
-            --output-signature dist/ramflux-sbom.cdx.json.sig \
-            --output-certificate dist/ramflux-sbom.cdx.json.pem \
-            --bundle dist/ramflux-sbom.cdx.json.cosign.bundle \
-            dist/ramflux-sbom.cdx.json
+            --output-signature dist/ramflux-sbom.cdx.tar.gz.sig \
+            --output-certificate dist/ramflux-sbom.cdx.tar.gz.pem \
+            --bundle dist/ramflux-sbom.cdx.tar.gz.cosign.bundle \
+            dist/ramflux-sbom.cdx.tar.gz
 
       - name: Attest SBOM provenance
         uses: actions/attest-build-provenance@f14352a605c57b0a66e0d49bba5825967f1dbedf
         with:
-          subject-path: "dist/ramflux-sbom.cdx.json"
+          subject-path: "dist/ramflux-sbom.cdx.tar.gz"
 
       - name: Upload SBOM
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
-            dist/ramflux-sbom.cdx.json
-            dist/ramflux-sbom.cdx.json.sha256
-            dist/ramflux-sbom.cdx.json.sig
-            dist/ramflux-sbom.cdx.json.pem
-            dist/ramflux-sbom.cdx.json.cosign.bundle
+            dist/ramflux-sbom.cdx.tar.gz
+            dist/ramflux-sbom.cdx.tar.gz.sha256
+            dist/ramflux-sbom.cdx.tar.gz.sig
+            dist/ramflux-sbom.cdx.tar.gz.pem
+            dist/ramflux-sbom.cdx.tar.gz.cosign.bundle
