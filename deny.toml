@@ -35,6 +35,11 @@ confidence-threshold = 0.8
 multiple-versions = "allow"
 wildcards = "deny"
 highlight = "all"
+deny = [
+    { name = "native-tls" },
+    { name = "openssl" },
+    { name = "openssl-sys" },
+]
 
 [sources]
 unknown-registry = "deny"
