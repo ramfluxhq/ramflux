@@ -3058,6 +3058,7 @@ dependencies = [
  "quinn",
  "ramflux-core",
  "ramflux-protocol",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-pemfile",
