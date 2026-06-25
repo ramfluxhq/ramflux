@@ -1,0 +1,13 @@
+{
+  "delivery_class": "self_device_control_notification",
+  "domain": "ramflux.notification_wake.v1",
+  "priority": "high",
+  "push_alias": "push_alias_01",
+  "schema": "ramflux.notification_wake.v1",
+  "signature": "ggFvz9Tmks58lai0EPL4oQEKYI1vGg6KeftvJBkBf1bPTBOFLXKSM5xlur5PiWrf9XTClXhW7dpcL_pBTHwmAQ",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "ttl": 60,
+  "version": 1,
+  "wake_id": "wake_01"
+}

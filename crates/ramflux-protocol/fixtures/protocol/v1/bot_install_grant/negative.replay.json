@@ -1,0 +1,20 @@
+{
+  "bot_identity_commitment": "bot_idc_01",
+  "bot_manifest_hash": "Ym90LW1hbmlmZXN0LWhhc2g",
+  "domain": "ramflux.bot_install_grant.v1",
+  "expires_at": 1760003600,
+  "grant_id": "big_01",
+  "group_id": "grp_01",
+  "installer_device_id": "dev_a",
+  "installer_identity": "id_a",
+  "schema": "ramflux.bot_install_grant.v1",
+  "scope": [
+    "conversation:read:mentioned_context",
+    "call:tool:ci.deploy"
+  ],
+  "signature": "o0s0XALxx55xyaXj-MSEDkS4l6Wo3jOI47cU7WjClAioy4hMqS9MkEzCLIg8R2iNDMTjBdZdSz9CNS2hh00RDA",
+  "signature_alg": "ed25519",
+  "signature_by_installer_device": "aW5zdGFsbGVyLXNpZ25hdHVyZQ",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

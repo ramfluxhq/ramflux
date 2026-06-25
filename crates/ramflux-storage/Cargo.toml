@@ -1,0 +1,45 @@
+[package]
+name = "ramflux-storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+license = "Apache-2.0"
+repository = "https://github.com/ramflux/ramflux-storage"
+
+[dependencies]
+# path dep for local dev; switch to git tag dep when GitHub repos exist
+ramflux-core = { path = "../ramflux-core" }
+# path dep for local dev; switch to git tag dep when GitHub repos exist
+ramflux-crypto = { path = "../ramflux-crypto" }
+# path dep for local dev; switch to git tag dep when GitHub repos exist
+ramflux-protocol = { path = "../ramflux-protocol" }
+blake3 = "1.8.5"
+chacha20poly1305 = "0.10.1"
+rusqlite = { version = "0.37", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+
+[features]
+default = ["sqlcipher"]
+sqlcipher = ["rusqlite/bundled-sqlcipher"]
+insecure-test-sqlite = ["rusqlite/bundled"]
+
+[lints.rust]
+warnings = "deny"
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "deny"
+correctness = "deny"
+suspicious = "deny"
+complexity = "deny"
+perf = "deny"
+style = "deny"
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"

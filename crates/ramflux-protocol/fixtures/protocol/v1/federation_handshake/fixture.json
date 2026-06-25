@@ -1,0 +1,23 @@
+{
+  "created_at": 1760000000,
+  "domain": "ramflux.federation_handshake.v1",
+  "handshake_id": "fh_01",
+  "nonce": "ZmVkZXJhdGlvbi1ub25jZQ",
+  "protocol_versions": [
+    "v1"
+  ],
+  "schema": "ramflux.federation_handshake.v1",
+  "signature": "fv1DpopkvQIlRvpcOtPg9Ux2F5nOGWGhLOuPrY5Z_u5Z6vw2bVUTmPxajq5otNKryx7Nlr_xPwy-Gavw3WjrAQ",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "source_capabilities": [
+    "opaque_delivery"
+  ],
+  "source_node_id": "node_a",
+  "target_node_id": "node_b",
+  "transport_backends": [
+    "quic_quinn"
+  ],
+  "trust_state_hash": "dHJ1c3Qtc3RhdGUtaGFzaA",
+  "version": 1
+}

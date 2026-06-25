@@ -1,0 +1,14 @@
+{
+  "domain": "ramflux.object_chunk_request.v1",
+  "manifest_hash": "bWFuaWZlc3QtaGFzaA",
+  "max_chunks": 32,
+  "missing_chunk_bitmap": "Yml0bWFw",
+  "object_id": "obj_01",
+  "request_id": "ocr_01",
+  "resume_token": "resume_01",
+  "schema": "ramflux.object_chunk_request.v1",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

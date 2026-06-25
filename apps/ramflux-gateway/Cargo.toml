@@ -1,0 +1,40 @@
+[package]
+name = "ramflux-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.ramflux]
+commercial-license = true
+
+[features]
+default = []
+compio-gateway = ["dep:compio", "ramflux-transport/compio-gateway"]
+itest-http = ["ramflux-node-core/itest-http"]
+
+[dependencies]
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+quinn = { workspace = true }
+ramflux-core = { workspace = true }
+ramflux-crypto = { workspace = true }
+ramflux-node-core = { path = "../../crates/ramflux-node-core" }
+ramflux-protocol = { workspace = true }
+ramflux-transport = { workspace = true }
+redb = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+compio = { version = "=0.19.1", optional = true }
+glommio = { workspace = true }
+
+[lints]
+workspace = true

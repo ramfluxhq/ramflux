@@ -1,0 +1,27 @@
+{
+  "completed_at": 1760086460,
+  "deleted_metadata_hash": "ZGVsZXRlZC1tZXRhZGF0YS1oYXNo",
+  "deletion_scope": [
+    "cursor_ack_state",
+    "opaque_device_inbox",
+    "push_alias"
+  ],
+  "domain": "ramflux.identity_deletion_proof.v1",
+  "finalized_at": 1760086400,
+  "identity_commitment": "id_a",
+  "identity_deleted_event_id": "evt_delete_01",
+  "identity_lifecycle_tombstone_hash": "dG9tYnN0b25lLWhhc2g",
+  "legal_hold_ids": [],
+  "lifecycle_epoch": 4,
+  "node_epoch": 2,
+  "node_id": "node_a.example",
+  "nonce": "ZGVsZXRpb24tbm9uY2U",
+  "proof_id": "del_01",
+  "retained_summary_hash": "cmV0YWluZWQtc3VtbWFyeS1oYXNo",
+  "retention_policy_id": "retention_default_v1",
+  "schema": "ramflux.identity_deletion_proof.v1",
+  "signature": "--yWy7IPqZ2JA_U9v-0BXIXGAWqdZN4Q1GEoHU9TTguAO1zvDH4f1rRBoGOmDKupqZrIj8uC65jxjgceKUlXDw",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

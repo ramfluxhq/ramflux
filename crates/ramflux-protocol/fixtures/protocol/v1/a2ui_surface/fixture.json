@@ -1,0 +1,20 @@
+{
+  "a2ui_profile": "ramflux.a2ui.v1",
+  "a2ui_profile_version": 1,
+  "catalog_id": "ramflux.basic.v1",
+  "catalog_version": "1.0.0",
+  "correlation_id": "corr_01",
+  "domain": "ramflux.a2ui_surface.v1",
+  "encrypted_surface_payload": "YTJ1aS1wYXlsb2Fk",
+  "event_type": "ramflux.a2ui.surface",
+  "schema": "ramflux.a2ui_surface.v1",
+  "signature": "VCvKTfgnmQd1eHgc_VYtHOnvORIXZyhMfKUD1I91X1XA3_0IDEOheHMVgYEWiOA7kKiaO-L2_WAbTRcD2i4PCg",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "source_device_id": "dev_cli",
+  "surface_hash": "c3VyZmFjZS1oYXNo",
+  "surface_id": "surf_01",
+  "target_device_id": "dev_app",
+  "upstream_a2ui_version": "0.9.1",
+  "version": 1
+}

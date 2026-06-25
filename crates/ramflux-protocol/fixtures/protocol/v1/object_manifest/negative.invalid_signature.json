@@ -1,0 +1,17 @@
+{
+  "chunk_count": 2,
+  "chunk_manifest_hash": "Y2h1bmstbWFuaWZlc3QtaGFzaA",
+  "domain": "ramflux.object_manifest.v1",
+  "encrypted_metadata": "bWV0YWRhdGE",
+  "encrypted_owner_ref": "b3duZXItcmVm",
+  "encrypted_relation_ref": "cmVsYXRpb24tcmVm",
+  "object_created_group_key_epoch": 8,
+  "object_id": "obj_01",
+  "object_key_slots": [],
+  "schema": "ramflux.object_manifest.v1",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "total_cipher_size": 2048,
+  "version": 1
+}

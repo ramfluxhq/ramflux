@@ -1,0 +1,13 @@
+{
+  "ack_id": "ack_01",
+  "cursor_after": "cur_01",
+  "domain": "ramflux.ack.v1",
+  "envelope_id": "env_01",
+  "received_at": 1760000001,
+  "receiver_device_id": "dev_b",
+  "schema": "ramflux.ack.v1",
+  "signature": "1b54j_fOrvvEs3qI6Ey7AmxBzUasZS3pOMRPoLH7hiGIaC946VvmwSg6RDyVPQ6Na_ENPk_IONyKZIZanALSAw",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

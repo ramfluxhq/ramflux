@@ -1,0 +1,13 @@
+{
+  "domain": "ramflux.nack.v1",
+  "envelope_id": "env_01",
+  "nack_id": "nack_01",
+  "reason": "home_node_migrated",
+  "received_at": 1760000001,
+  "receiver_device_id": "dev_b",
+  "schema": "ramflux.nack.v1",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

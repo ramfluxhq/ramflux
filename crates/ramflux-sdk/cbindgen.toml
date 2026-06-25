@@ -1,0 +1,18 @@
+language = "C"
+include_guard = "RAMFLUX_SDK_H"
+pragma_once = true
+style = "tag"
+usize_is_size_t = true
+documentation = true
+documentation_style = "c"
+cpp_compat = true
+
+[parse]
+parse_deps = false
+include = ["ramflux-sdk"]
+
+[export]
+exclude = ["CAbiClientInner", "CAbiEventQueue"]
+
+[enum]
+rename_variants = "QualifiedScreamingSnakeCase"

@@ -1,0 +1,23 @@
+{
+  "actor_device_epoch": 7,
+  "actor_device_id": "dev_a",
+  "branch_proof_hash": "YnJhbmNoLXByb29mLWhhc2g",
+  "domain": "ramflux.home_node_migration_proof.v1",
+  "effective_at": 1760000000,
+  "expires_at": 1762592000,
+  "identity_commitment": "id_a",
+  "issued_at": 1759999900,
+  "lineage_head": "lin_01",
+  "new_home_node": "node_c.example",
+  "new_home_node_key_hash": "bmV3LW5vZGUta2V5LWhhc2g",
+  "nonce": "bWlncmF0aW9uLW5vbmNl",
+  "old_home_node": "node_a.example",
+  "previous_home_node_binding_hash": "b2xkLWJpbmRpbmctaGFzaA",
+  "proof_id": "mig_01",
+  "route_record_hash": "cm91dGUtcmVjb3JkLWhhc2g",
+  "schema": "ramflux.home_node_migration_proof.v1",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature_alg": "ed25519",
+  "signing_key_id": "fixture-ed25519-01",
+  "version": 1
+}

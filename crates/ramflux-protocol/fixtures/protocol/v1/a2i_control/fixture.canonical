@@ -1,0 +1,1 @@
+{"action":"request_approval","control_domain":"mcp_tool","correlation_id":"corr_01","domain":"ramflux.a2i_control.v1","event_type":"a2i.control","schema":"ramflux.a2i_control.v1","source_device_id":"dev_app","subject":{"tool":"send_message"},"target_device_id":"dev_cli","version":1}
