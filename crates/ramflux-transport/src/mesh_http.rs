@@ -984,9 +984,7 @@ mod tests {
     /// process-wide CA so server (`router`) and client (`gateway`) interoperate.
     ///
     /// Layout-independent: requires no on-disk deploy certs, only `openssl`.
-    fn test_mesh_tls_config(
-        service: &str,
-    ) -> Result<MeshTlsConfig, Box<dyn std::error::Error>> {
+    fn test_mesh_tls_config(service: &str) -> Result<MeshTlsConfig, Box<dyn std::error::Error>> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
