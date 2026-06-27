@@ -96,6 +96,12 @@ async fn handle_mcp_approval(
             )?)
         }
         McpApprovalAction::Approve(selector) => {
+            crate::handlers::grant::rf_guard_local_approval(
+                bus,
+                &selector.account,
+                &selector.approval,
+            )
+            .await?;
             let request = LocalBusMcpApprovalDecisionRequest { approval_id: selector.approval };
             print_json(
                 &bus.request(Some(selector.account), "grant", "grant.approve", &request).await?,

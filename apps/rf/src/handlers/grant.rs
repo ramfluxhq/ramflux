@@ -23,6 +23,7 @@ pub(crate) async fn handle_grant(socket: PathBuf, command: GrantCommand) -> Resu
                 .await?,
         ),
         GrantAction::Approve(selector) => {
+            rf_guard_local_approval(&mut bus, &selector.account, &selector.approval).await?;
             let request = LocalBusMcpApprovalDecisionRequest { approval_id: selector.approval };
             print_json(
                 &bus.request(Some(selector.account), "grant", "grant.approve", &request).await?,
@@ -55,6 +56,37 @@ pub(crate) async fn handle_grant(socket: PathBuf, command: GrantCommand) -> Resu
             print_json(&bus.request(Some(revoke.account), "grant", "grant.revoke", &body).await?)
         }
     }
+}
+
+/// Refuses to finalize an approval that requires App-side signing.
+///
+/// Mirrors the TUI gate (cli-pro `app.rs` `decide_selected_approval`): a `remote_app`
+/// approval must be signed on the App, so a LOCAL `rf` approve must not fail open.
+/// The approval is fetched first to read its `confirmation_mode`; a missing field is
+/// treated as `remote_app` to stay fail-closed (matching the TUI parser default).
+///
+/// # Errors
+/// Returns an error when the approval cannot be fetched, is not found, or when its
+/// `confirmation_mode` is `remote_app`.
+pub(crate) async fn rf_guard_local_approval(
+    bus: &mut LocalBusClient,
+    account: &str,
+    approval_id: &str,
+) -> Result<(), RfError> {
+    let value = bus
+        .request(Some(account.to_owned()), "mcp", "mcp.approval.list", &serde_json::json!({}))
+        .await?;
+    let approval = rf_select_record(&value, "approvals", "approval_id", approval_id, "approval")?;
+    let confirmation_mode = approval
+        .get("confirmation_mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("remote_app");
+    if confirmation_mode == "remote_app" {
+        return Err(RfError::Message(format!(
+            "approval {approval_id} requires app-side signing (remote_app)"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn rf_select_record(
