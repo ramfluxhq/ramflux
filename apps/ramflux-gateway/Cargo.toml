@@ -16,14 +16,11 @@ itest-http = ["ramflux-node-core/itest-http"]
 
 [dependencies]
 anyhow = { workspace = true }
-arc-swap = { workspace = true }
 quinn = { workspace = true }
-ramflux-core = { workspace = true }
 ramflux-crypto = { workspace = true }
 ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
-redb = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
