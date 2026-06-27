@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("transport is not open")]

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -11,13 +12,8 @@ pub(crate) async fn dispatch_contact_bus_request(
     let account_id = request_account_id(request)?;
     match request.method.as_str() {
         "contact.add" => {
-            let account = local_bus_account(state, account_id)?;
             let body: LocalBusContactAddRequest = serde_json::from_value(request.body.clone())?;
-            let link = account.client.establish_friend_link(
-                &body.link_id,
-                &body.requester_id,
-                &body.target_id,
-            )?;
+            let link = dispatch_contact_add(state, account_id, &body).await?;
             Ok(local_bus_ok(serde_json::to_value(link)?))
         }
         "contact.accept" => {
@@ -25,31 +21,31 @@ pub(crate) async fn dispatch_contact_bus_request(
                 serde_json::from_value::<LocalBusContactFederatedRequest>(request.body.clone())
             {
                 let account = local_bus_account_mut(state, account_id)?;
-                let link = account.client.establish_friend_link(
-                    &body.link_id,
-                    &body.requester_id,
-                    &body.target_id,
-                )?;
                 let engine = account.take_live_engine().await?;
+                let link = account
+                    .client
+                    .establish_friend_link_via_gateway(
+                        &engine.config,
+                        &body.link_id,
+                        &body.requester_id,
+                        &body.target_id,
+                    )
+                    .await;
                 let response = account.client.send_plaintext_federated_contact_event(
                     &engine,
                     "friend.accepted",
                     &body,
                 );
                 account.put_engine(engine);
+                let link = link?;
                 let response = response?;
                 Ok(local_bus_ok(serde_json::json!({
                     "link": link,
                     "delivery": response,
                 })))
             } else {
-                let account = local_bus_account(state, account_id)?;
                 let body: LocalBusContactAddRequest = serde_json::from_value(request.body.clone())?;
-                let link = account.client.establish_friend_link(
-                    &body.link_id,
-                    &body.requester_id,
-                    &body.target_id,
-                )?;
+                let link = dispatch_contact_add(state, account_id, &body).await?;
                 Ok(local_bus_ok(serde_json::to_value(link)?))
             }
         }
@@ -103,6 +99,26 @@ pub(crate) async fn dispatch_contact_bus_request(
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
+}
+
+async fn dispatch_contact_add(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+    body: &LocalBusContactAddRequest,
+) -> Result<FriendLinkRecord, SdkError> {
+    let account = local_bus_account_mut(state, account_id)?;
+    let engine = account.take_live_engine().await?;
+    let link = account
+        .client
+        .establish_friend_link_via_gateway(
+            &engine.config,
+            &body.link_id,
+            &body.requester_id,
+            &body.target_id,
+        )
+        .await;
+    account.put_engine(engine);
+    link
 }
 
 fn contact_safety_request(

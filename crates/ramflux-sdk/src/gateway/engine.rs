@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use super::GatewaySessionTransportKind;
@@ -40,6 +41,8 @@ pub struct GatewayPlaintextDelivery {
     pub message_id: String,
     pub sender_id: String,
     pub plaintext_body_base64: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SdkDmAttachmentImportResult>,
 }
 
 pub(crate) async fn gateway_session_timeout<T, F>(

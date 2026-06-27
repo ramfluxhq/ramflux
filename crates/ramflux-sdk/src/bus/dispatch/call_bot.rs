@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -361,7 +362,11 @@ mod tests {
             config: LocalBusConfig::new(root.join("rfd.sock"), root.clone()),
             accounts: BTreeMap::from([(
                 ACCOUNT_ID.to_owned(),
-                LocalBusAccountState::disconnected(client, gateway_config()),
+                LocalBusAccountState::disconnected(
+                    client,
+                    gateway_config(),
+                    "principal_commitment_bot".to_owned(),
+                ),
             )]),
             active_account_id: Some(ACCOUNT_ID.to_owned()),
             attended_accounts: BTreeSet::new(),
@@ -514,7 +519,11 @@ mod tests {
         restored_client.create_device_branch(PRINCIPAL_ID, DEVICE_ID, 1, [0x62; 32]);
         restored_client.open_account_index(&root).expect("open restored index");
         restored_client.unlock_account(ACCOUNT_ID, b"bot-account-secret").expect("unlock restored");
-        let mut restored = LocalBusAccountState::disconnected(restored_client, gateway_config());
+        let mut restored = LocalBusAccountState::disconnected(
+            restored_client,
+            gateway_config(),
+            "principal_commitment_bot".to_owned(),
+        );
         hydrate_local_bot_records(&mut restored).expect("hydrate bots");
         assert!(restored.bots.contains_key("bot_idc_b2"));
         let _ = std::fs::remove_dir_all(root);

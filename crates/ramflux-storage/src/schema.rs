@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::wildcard_imports)]
 use crate::*;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -207,6 +208,61 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             );
             CREATE INDEX IF NOT EXISTS idx_group_sender_key_counter_seen_sender
                 ON group_sender_key_counter_seen(group_id, group_key_epoch, sender_id, counter);
+            CREATE TABLE IF NOT EXISTS group_member_device_key (
+                group_id TEXT NOT NULL,
+                member_id TEXT NOT NULL,
+                device_signing_public_key TEXT NOT NULL,
+                verified_at INTEGER NOT NULL,
+                PRIMARY KEY(group_id, member_id)
+            );
+            CREATE TABLE IF NOT EXISTS group_control_event_seen (
+                group_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                actor_device_id TEXT NOT NULL,
+                target_member_id TEXT NOT NULL,
+                previous_epoch INTEGER NOT NULL,
+                new_group_epoch INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL,
+                PRIMARY KEY(group_id, event_id)
+            );
+            CREATE TABLE IF NOT EXISTS group_message_tombstone_projection (
+                group_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                tombstone_id TEXT NOT NULL,
+                actor_device_id TEXT NOT NULL,
+                delete_scope TEXT NOT NULL,
+                deleted_epoch INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                deleted_at INTEGER NOT NULL,
+                PRIMARY KEY(group_id, message_id)
+            );
+            CREATE TABLE IF NOT EXISTS group_ban_projection (
+                group_id TEXT NOT NULL,
+                member_id TEXT NOT NULL,
+                ban_id TEXT NOT NULL,
+                actor_device_id TEXT NOT NULL,
+                banned_epoch INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(group_id, member_id)
+            );
+            CREATE TABLE IF NOT EXISTS group_invite_projection (
+                group_id TEXT NOT NULL,
+                invite_id TEXT NOT NULL,
+                invitee_identity TEXT NOT NULL,
+                invitee_signing_public_key TEXT NOT NULL,
+                invited_role TEXT NOT NULL,
+                inviter_device_id TEXT NOT NULL,
+                invite_epoch INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(group_id, invite_id)
+            );
             CREATE TABLE IF NOT EXISTS conversation_disappearing_policy (
                 conversation_id TEXT PRIMARY KEY,
                 timer_seconds INTEGER NOT NULL,
@@ -595,6 +651,22 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             );
         ",
     },
+    AccountMigration {
+        schema_version: 3,
+        app_version: "mvp-s4x",
+        checksum: "2026-06-26-device-directory-v1",
+        notes: "trusted local device directory for manifest fanout resolution",
+        sql: r"
+            CREATE TABLE IF NOT EXISTS device_directory (
+                device_id TEXT PRIMARY KEY,
+                principal_commitment TEXT NOT NULL,
+                source TEXT NOT NULL,
+                verified_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_directory_principal
+                ON device_directory(principal_commitment);
+        ",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {
@@ -732,6 +804,7 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
         "updated_at",
         "updated_at INTEGER NOT NULL DEFAULT 1760000000",
     )?;
+    ensure_group_control_tables(connection)?;
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS bot_trust_pin (
             bot_identity_commitment TEXT PRIMARY KEY,
@@ -758,6 +831,83 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_mcp_legacy_columns(connection)?;
     ensure_column(connection, "audit_log", "audit_body", "audit_body BLOB")?;
     ensure_object_index_legacy_columns(connection)?;
+    ensure_object_transfer_state_columns(connection)?;
+    ensure_device_directory_table(connection)?;
+    Ok(())
+}
+
+fn ensure_device_directory_table(connection: &Connection) -> Result<(), StorageError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS device_directory (
+            device_id TEXT PRIMARY KEY,
+            principal_commitment TEXT NOT NULL,
+            source TEXT NOT NULL,
+            verified_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_device_directory_principal
+            ON device_directory(principal_commitment);",
+    )?;
+    Ok(())
+}
+
+fn ensure_group_control_tables(connection: &Connection) -> Result<(), StorageError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS group_member_device_key (
+            group_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            device_signing_public_key TEXT NOT NULL,
+            verified_at INTEGER NOT NULL,
+            PRIMARY KEY(group_id, member_id)
+        );
+        CREATE TABLE IF NOT EXISTS group_control_event_seen (
+            group_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            event_kind TEXT NOT NULL,
+            actor_device_id TEXT NOT NULL,
+            target_member_id TEXT NOT NULL,
+            previous_epoch INTEGER NOT NULL,
+            new_group_epoch INTEGER NOT NULL,
+            applied_at INTEGER NOT NULL,
+            PRIMARY KEY(group_id, event_id)
+        );
+        CREATE TABLE IF NOT EXISTS group_message_tombstone_projection (
+            group_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            tombstone_id TEXT NOT NULL,
+            actor_device_id TEXT NOT NULL,
+            delete_scope TEXT NOT NULL,
+            deleted_epoch INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            deleted_at INTEGER NOT NULL,
+            PRIMARY KEY(group_id, message_id)
+        );
+        CREATE TABLE IF NOT EXISTS group_ban_projection (
+            group_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            ban_id TEXT NOT NULL,
+            actor_device_id TEXT NOT NULL,
+            banned_epoch INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(group_id, member_id)
+        );
+        CREATE TABLE IF NOT EXISTS group_invite_projection (
+            group_id TEXT NOT NULL,
+            invite_id TEXT NOT NULL,
+            invitee_identity TEXT NOT NULL,
+            invitee_signing_public_key TEXT NOT NULL,
+            invited_role TEXT NOT NULL,
+            inviter_device_id TEXT NOT NULL,
+            invite_epoch INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(group_id, invite_id)
+        );",
+    )?;
     Ok(())
 }
 
@@ -793,6 +943,48 @@ fn ensure_object_index_legacy_columns(connection: &Connection) -> Result<(), Sto
     )?;
     ensure_column(connection, "object_index", "object_content_key", "object_content_key BLOB")?;
     ensure_column(connection, "object_index", "object_body", "object_body BLOB")?;
+    Ok(())
+}
+
+fn ensure_object_transfer_state_columns(connection: &Connection) -> Result<(), StorageError> {
+    ensure_column(
+        connection,
+        "object_transfer_state",
+        "direction",
+        "direction TEXT NOT NULL DEFAULT 'upload'",
+    )?;
+    ensure_column(connection, "object_transfer_state", "relay_endpoint", "relay_endpoint TEXT")?;
+    ensure_column(
+        connection,
+        "object_transfer_state",
+        "chunk_size",
+        "chunk_size INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "object_transfer_state",
+        "total_bytes",
+        "total_bytes INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "object_transfer_state",
+        "done_bytes",
+        "done_bytes INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "object_transfer_state",
+        "total_chunks",
+        "total_chunks INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "object_transfer_state",
+        "next_chunk_index",
+        "next_chunk_index INTEGER",
+    )?;
+    ensure_column(connection, "object_transfer_state", "expires_at", "expires_at INTEGER")?;
     Ok(())
 }
 

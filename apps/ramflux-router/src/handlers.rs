@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use std::io::Write;
 use std::time::Instant;
 
@@ -620,7 +621,7 @@ fn handle_mvp1_device_revoke(
     store: &ramflux_node_core::RouterRedbStore,
 ) -> anyhow::Result<ramflux_node_core::ItestMvp1RevokeDeviceResponse> {
     let request: ramflux_node_core::ItestMvp1RevokeDeviceRequest = serde_json::from_slice(body)?;
-    let response = state.mvp1_revoke_device(&request.device_id);
+    let response = state.mvp1_revoke_device(&request)?;
     store.record_identity_registry(&state.mvp1_identities_snapshot())?;
     Ok(response)
 }

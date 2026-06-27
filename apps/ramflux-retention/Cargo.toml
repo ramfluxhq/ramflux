@@ -17,7 +17,7 @@ itest-http = ["ramflux-node-core/itest-http"]
 anyhow = { workspace = true }
 ramflux-core = { workspace = true }
 ramflux-crypto = { workspace = true }
-ramflux-node-core = { version = "0.1.0", path = "../../crates/ramflux-node-core" }
+ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-storage = { workspace = true }
 ramflux-transport = { workspace = true }
@@ -29,6 +29,3 @@ tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
-
-[package.metadata.cargo-machete]
-ignored = ["anyhow", "ramflux-core", "ramflux-storage", "redb", "tokio"]

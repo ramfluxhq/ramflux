@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(unused_imports)]
 
 use crate::{
@@ -173,9 +174,14 @@ impl RouterCore {
         lock_unpoisoned(&self.control).mvp1_identities.record_friend_request(request)
     }
 
-    pub fn mvp1_revoke_device(&self, device_id: &str) -> ItestMvp1RevokeDeviceResponse {
-        let revoked = lock_unpoisoned(&self.control).mvp1_identities.revoke_device(device_id);
-        ItestMvp1RevokeDeviceResponse { device_id: device_id.to_owned(), revoked }
+    /// # Errors
+    /// Returns an error when the revocation is not authorized by the principal root key.
+    pub fn mvp1_revoke_device(
+        &self,
+        request: &crate::ItestMvp1RevokeDeviceRequest,
+    ) -> Result<ItestMvp1RevokeDeviceResponse, NodeCoreError> {
+        let revoked = lock_unpoisoned(&self.control).mvp1_identities.revoke_device(request)?;
+        Ok(ItestMvp1RevokeDeviceResponse { device_id: request.device_id.clone(), revoked })
     }
 
     /// # Errors

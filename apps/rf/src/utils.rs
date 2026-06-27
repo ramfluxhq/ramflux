@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use crate::RfError;
 use ramflux_sdk::LocalBusClientMode;
 use ramflux_sync::{McpCapability, RiskLevel};

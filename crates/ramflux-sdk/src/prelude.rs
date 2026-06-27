@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(unused_imports)]
 pub(crate) use crate::*;
 pub(crate) use ramflux_crypto::{
@@ -9,21 +10,26 @@ pub(crate) use ramflux_crypto::{
 pub(crate) use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, BotTrustPinRecord, ContactPresenceRecord,
     ContactPresenceUpdate, ContactVerificationRecord, ContactVerificationUpdate,
-    ConversationListState, ConversationProjection, DeliveryReceiptRecord, DirectMessageRecord,
-    DisappearingPolicyRecord, EventStore, FileVaultSecretSource, FriendLinkRecord,
-    GroupPendingUndecryptedRecord, GroupSenderKeyCounterRecord, GroupState, HistoryBundle,
-    IdentityLifecycleRecord, IdentityLifecycleTiming, McpAuditWrite, McpGrantWrite,
-    McpStandingApprovalWrite, McpToolWrite, MessageMetadata, MessageTombstoneRecord, ObjectWrite,
-    ProjectionStore, StorageError, StoredBotInstallRecord, TypingStateRecord, VaultSecretSource,
-    WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
+    ConversationListState, ConversationProjection, DeliveryReceiptRecord, DeviceDirectoryRecord,
+    DirectMessageRecord, DirectMessageWrite, DisappearingPolicyRecord, EventStore,
+    FileVaultSecretSource, FriendLinkRecord, GroupInviteAcceptWrite, GroupInviteWrite,
+    GroupMemberBanWrite, GroupMemberKickWrite, GroupMessageDeleteWrite,
+    GroupPendingUndecryptedRecord, GroupRoleChangeWrite, GroupSenderKeyCounterRecord, GroupState,
+    HistoryBundle, IdentityLifecycleRecord, IdentityLifecycleTiming, McpAuditWrite, McpGrantWrite,
+    McpStandingApprovalWrite, McpToolWrite, MessageMetadata, MessageReceiptState,
+    MessageTombstoneRecord, ObjectTransferRecord, ObjectTransferWrite, ObjectWrite,
+    ProjectionStore, ReceiptEventWrite, StorageError, StoredBotInstallRecord, TypingStateRecord,
+    VaultSecretSource, WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub(crate) use ramflux_sync::{
-    A2iControlEvent, A2uiAction, A2uiSurface, EncryptedObject, FederationMesh, FederationMessage,
-    HomeNodeMigration, McpCapability, McpGrantState, McpRegistry, McpToolManifest, ObjectStore,
-    OpaqueCallSignal, RenderedSurface, RiskLevel, SignalingRelay, SyncError,
+    A2iControlEvent, A2uiAction, A2uiSurface, ChunkManifest, ChunkPayload, EncryptedObject,
+    FederationMesh, FederationMessage, HomeNodeMigration, McpCapability, McpGrantState,
+    McpRegistry, McpToolManifest, ObjectStore, ObjectSyncSession, OpaqueCallSignal,
+    RenderedSurface, ResumeToken, RiskLevel, SignalingRelay, SyncError,
     bot_install_grant_signing_body, bot_manifest_hash, bot_manifest_signing_body,
-    grant_matches_manifest, mcp_capability_wire_name, parse_mcp_capability,
-    risk_requires_explicit_approval, verify_bot_install_grant, verify_bot_manifest,
+    chunk_manifest_for_object, decrypt_chunk_payload, grant_matches_manifest,
+    mcp_capability_wire_name, parse_mcp_capability, risk_requires_explicit_approval,
+    verify_bot_install_grant, verify_bot_manifest,
 };
 pub(crate) use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub(crate) use std::future::Future;
@@ -56,15 +62,33 @@ pub(crate) use crate::bus::protocol::{LocalBusPersistedAccount, default_device_c
 pub(crate) use crate::bus::state::{
     LocalBusAccountState, LocalBusConnectionState, LocalBusDaemonState, LocalBusSubscriber,
 };
+pub(crate) use crate::client::contact::{
+    assert_manifest_active_device, assert_target_manifest_active_device,
+};
 pub(crate) use crate::dm::*;
 pub(crate) use crate::gateway::{
     gateway_auth_frame, gateway_fresh_open_frame, gateway_heartbeat_now, gateway_session_state,
     gateway_session_timeout, gateway_stream_nonce, sdk_device_signed_fields, sdk_signed_fields,
 };
 pub(crate) use crate::group::*;
-pub(crate) use crate::object::{object_chunks, object_key_slot_associated_data};
+pub(crate) use crate::object::{
+    OBJECT_TRANSFER_DOWNLOAD, OBJECT_TRANSFER_UPLOAD, RelayTransferOptions, SdkObjectChunkFrame,
+    SdkObjectPermissionEnvelope, SdkObjectRelayAck, SdkObjectRelayAckResponse,
+    SdkObjectRelayCapability, SdkObjectRelayGetRequest, SdkObjectRelayGetResponse,
+    SdkObjectRelayPutResponse, SdkObjectTransferStatus, SdkRelayChunkStatus, SdkRelayToken,
+    object_chunks, object_key_slot_associated_data, object_permission_for_chunk,
+    object_relay_chunk_cipher_hash, object_transfer_id, object_transfer_status,
+    parse_relay_transfer_options, relay_post_json, relay_token_for_chunk,
+};
+pub(crate) use crate::own_device_sync::{
+    SdkOwnDeviceDmSessionSnapshot, SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,
+    SdkOwnDeviceHistoryBundle, SdkOwnDeviceSyncEnvelope, SdkOwnDeviceSyncExportResponse,
+    SdkOwnDeviceSyncImportResponse, group_message_epoch, own_device_sync_signing_body,
+    own_device_sync_slot_conversation_id,
+};
 pub(crate) use crate::prekey::{
-    SdkMvp1DeviceManifestResponse, identity_root_public_key_commitment, sdk_fetch_prekey_bundle,
+    SdkMvp1DeviceManifestResponse, SdkMvp1RevokeDeviceRequest, SdkMvp1RevokeDeviceResponse,
+    SdkMvp1RevokeDeviceSigningBody, identity_root_public_key_commitment, sdk_fetch_prekey_bundle,
     sdk_gateway_get_json, sdk_gateway_post_json, sdk_http_get_json, sdk_http_host_port,
     sdk_http_json_request, sdk_http_post_json, sdk_publish_prekey_bundle,
 };

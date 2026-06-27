@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -261,8 +262,14 @@ async fn restore_local_bus_account_impl(
         ),
     };
     let mut account = match engine {
-        Some(engine) => LocalBusAccountState::new(client, engine),
-        None => LocalBusAccountState::disconnected(client, gateway),
+        Some(engine) => {
+            LocalBusAccountState::new(client, engine, manifest.principal_commitment.clone())
+        }
+        None => LocalBusAccountState::disconnected(
+            client,
+            gateway,
+            manifest.principal_commitment.clone(),
+        ),
     };
     hydrate_local_bot_records(&mut account)?;
     hydrate_local_mcp_state(&mut account)?;
@@ -462,10 +469,10 @@ pub(crate) async fn dispatch_local_bus_request(
             dispatch_account_bus_request(request, state).await
         }
         method if method.starts_with("message.") => {
-            dispatch_message_bus_request(request, state, connection).await
+            Box::pin(dispatch_message_bus_request(request, state, connection)).await
         }
         method if method.starts_with("conversation.") => {
-            dispatch_message_bus_request(request, state, connection).await
+            Box::pin(dispatch_message_bus_request(request, state, connection)).await
         }
         method if method.starts_with("contact.") => {
             dispatch_contact_bus_request(request, state).await
@@ -473,7 +480,9 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("device.") => {
             dispatch_device_bus_request(request, state).await
         }
-        method if method.starts_with("group.") => dispatch_group_bus_request(request, state).await,
+        method if method.starts_with("group.") => {
+            Box::pin(dispatch_group_bus_request(request, state)).await
+        }
         method if method.starts_with("object.") => {
             dispatch_object_bus_request(request, state).await
         }
@@ -528,7 +537,11 @@ mod tests {
             config: LocalBusConfig::new(root.join("bus.sock"), root),
             accounts: BTreeMap::from([(
                 "acct".to_owned(),
-                LocalBusAccountState::disconnected(client, gateway),
+                LocalBusAccountState::disconnected(
+                    client,
+                    gateway,
+                    "principal_fanout_test".to_owned(),
+                ),
             )]),
             active_account_id: Some("acct".to_owned()),
             attended_accounts: BTreeSet::new(),

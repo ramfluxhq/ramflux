@@ -16,7 +16,7 @@ itest-http = ["ramflux-node-core/itest-http"]
 [dependencies]
 anyhow = { workspace = true }
 ramflux-core = { workspace = true }
-ramflux-node-core = { version = "0.1.0", path = "../../crates/ramflux-node-core" }
+ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
 redb = { workspace = true }
@@ -28,6 +28,3 @@ turn = { workspace = true }
 
 [lints]
 workspace = true
-
-[package.metadata.cargo-machete]
-ignored = ["ramflux-core", "ramflux-protocol", "ramflux-transport", "redb", "tokio"]

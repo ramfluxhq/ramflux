@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use crate::EncryptionMode;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,12 +39,28 @@ pub enum StorageError {
     InvalidGroupRole(String),
     #[error("group permission denied")]
     GroupPermissionDenied,
+    #[error("group control event replayed: {0}")]
+    GroupControlReplay(String),
+    #[error("group control event epoch mismatch: expected {expected}, got {actual}")]
+    GroupControlEpochMismatch { expected: u64, actual: u64 },
+    #[error("group control signing key missing for {0}")]
+    GroupControlSigningKeyMissing(String),
+    #[error("group invite missing: {0}")]
+    GroupInviteMissing(String),
+    #[error("group invite invalid state for {invite_id}: expected {expected}, got {actual}")]
+    GroupInviteInvalidState { invite_id: String, expected: String, actual: String },
+    #[error("group invite expired: {0}")]
+    GroupInviteExpired(String),
+    #[error("group invite acceptor mismatch for {0}")]
+    GroupInviteAcceptorMismatch(String),
     #[error("group sender key is not distributed")]
     SenderKeyNotDistributed,
     #[error("group member cannot decrypt epoch")]
     GroupEpochAccessDenied,
     #[error("message not found: {0}")]
     MessageNotFound(String),
+    #[error("message id conflict: {0}")]
+    MessageIdConflict(String),
     #[error("identity lifecycle blocks operation: {0}")]
     IdentityLifecycleBlocked(String),
 }

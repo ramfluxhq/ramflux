@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -22,6 +23,7 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
     pub(crate) gateway_config: GatewaySessionConfig,
+    pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
     pub(crate) pending_deliveries: Vec<GatewayInboxEntry>,
     pub(crate) acked_envelope_ids: BTreeSet<String>,
@@ -36,13 +38,18 @@ pub(crate) struct LocalBusAccountState {
 }
 
 impl LocalBusAccountState {
-    pub(crate) fn new(client: RamfluxClient, engine: GatewaySessionEngine) -> Self {
+    pub(crate) fn new(
+        client: RamfluxClient,
+        engine: GatewaySessionEngine,
+        principal_commitment: String,
+    ) -> Self {
         let gateway_config = engine.config.clone();
         let target_delivery_id = engine.target_delivery_id().to_owned();
         Self {
             client,
             engine: Some(engine),
             gateway_config,
+            principal_commitment,
             target_delivery_id,
             pending_deliveries: Vec::new(),
             acked_envelope_ids: BTreeSet::new(),
@@ -60,12 +67,14 @@ impl LocalBusAccountState {
     pub(crate) fn disconnected(
         client: RamfluxClient,
         gateway_config: GatewaySessionConfig,
+        principal_commitment: String,
     ) -> Self {
         let target_delivery_id = gateway_config.target_delivery_id.clone();
         Self {
             client,
             engine: None,
             gateway_config,
+            principal_commitment,
             target_delivery_id,
             pending_deliveries: Vec::new(),
             acked_envelope_ids: BTreeSet::new(),

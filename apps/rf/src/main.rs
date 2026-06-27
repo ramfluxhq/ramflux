@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 mod cli;
 mod handlers;
 mod keychain;
@@ -39,6 +40,7 @@ async fn run() -> Result<(), RfError> {
         Command::Daemon(command) => handlers::daemon::handle_daemon(cli.socket, command).await,
         Command::Account(command) => handlers::account::handle_account(cli.socket, command).await,
         Command::Contact(command) => handlers::contact::handle_contact(cli.socket, command).await,
+        Command::Device(command) => handlers::device::handle_device(cli.socket, command).await,
         Command::Dm(command) => handlers::dm::handle_dm(cli.socket, command).await,
         Command::Group(command) => handlers::group::handle_group(cli.socket, command).await,
         Command::Object(command) => handlers::object::handle_object(cli.socket, command).await,

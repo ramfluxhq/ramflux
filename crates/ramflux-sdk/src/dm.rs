@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -10,6 +11,117 @@ pub(crate) struct SdkDmEncryptedEnvelope {
     pub(crate) version: u32,
     pub(crate) x3dh: Option<SdkDmX3dhHeader>,
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkDmAttachmentEnvelope {
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) body_base64: String,
+    pub(crate) attachments: Vec<SdkDmAttachmentRef>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkDmAttachmentRef {
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) object_id: String,
+    pub(crate) manifest_hash: String,
+    pub(crate) plaintext_hash: String,
+    pub(crate) cipher_size: u64,
+    pub(crate) chunk_size: usize,
+    pub(crate) total_chunks: u32,
+    pub(crate) relay_endpoint: String,
+    pub(crate) key_slot: SdkObjectKeySlot,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct SdkDmAttachmentImportResult {
+    pub object_id: String,
+    pub manifest_hash: String,
+    pub plaintext_base64: String,
+    pub plaintext_hash: String,
+    pub imported: bool,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkReceiptEventEnvelope {
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) receipt_id: String,
+    pub(crate) event_seq: u64,
+    pub(crate) nonce: String,
+    pub(crate) reader_device_id: String,
+    pub(crate) event: SdkReceiptEventBody,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum SdkReceiptEventBody {
+    #[serde(rename = "ReceiptDelivered")]
+    Delivered {
+        conversation_id: String,
+        message_id: String,
+        delivered_at: i64,
+        receiver_device_id: String,
+        scope: String,
+        ttl_seconds: u32,
+    },
+    #[serde(rename = "ReceiptReadPrivate")]
+    ReadPrivate {
+        conversation_id: String,
+        message_id: String,
+        reader_identity: String,
+        read_at: i64,
+        own_device_scope: String,
+    },
+    #[serde(rename = "ReceiptReadPublic")]
+    ReadPublic {
+        conversation_id: String,
+        message_id: String,
+        reader_identity: String,
+        read_at: i64,
+        visibility_scope: String,
+        ttl_seconds: u32,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receipt_event_body_uses_explicit_private_read_variant() -> Result<(), serde_json::Error> {
+        let envelope = SdkReceiptEventEnvelope {
+            schema: "ramflux.sdk.receipt_event.v1".to_owned(),
+            version: 1,
+            receipt_id: "receipt_read_test".to_owned(),
+            event_seq: 7,
+            nonce: "nonce".to_owned(),
+            reader_device_id: "reader_device".to_owned(),
+            event: SdkReceiptEventBody::ReadPrivate {
+                conversation_id: "conv".to_owned(),
+                message_id: "msg".to_owned(),
+                reader_identity: "reader_device".to_owned(),
+                read_at: 1_900_000_000,
+                own_device_scope: "e2ee_private".to_owned(),
+            },
+        };
+        let encoded = serde_json::to_vec(&envelope)?;
+        let decoded: SdkReceiptEventEnvelope = serde_json::from_slice(&encoded)?;
+        assert!(matches!(
+            decoded.event,
+            SdkReceiptEventBody::ReadPrivate {
+                conversation_id,
+                message_id,
+                reader_identity,
+                ..
+            } if conversation_id == "conv"
+                && message_id == "msg"
+                && reader_identity == "reader_device"
+        ));
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -45,6 +157,14 @@ pub(crate) fn gateway_receive_cursor_checkpoint_name(target_delivery_id: &str) -
 
 pub(crate) fn dm_session_checkpoint_name(conversation_id: &str, direction: &str) -> String {
     format!("dm_session:{conversation_id}:{direction}")
+}
+
+pub(crate) fn dm_attachment_slot_conversation_id(
+    conversation_id: &str,
+    object_id: &str,
+    recipient_device_id: &str,
+) -> String {
+    format!("dm.attachment.slot:{conversation_id}:{object_id}:{recipient_device_id}")
 }
 
 pub(crate) fn dm_device_id_hash(device_id: &str) -> [u8; 32] {

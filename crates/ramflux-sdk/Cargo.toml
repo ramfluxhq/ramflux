@@ -3,7 +3,7 @@ name = "ramflux-sdk"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-license = "Apache-2.0"
+license.workspace = true
 repository = "https://github.com/ramflux/ramflux-sdk"
 build = "build.rs"
 
@@ -16,22 +16,24 @@ c-abi = []
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-core = { version = "0.1.0", path = "../ramflux-core" }
+ramflux-core = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-protocol = { version = "0.1.0", path = "../ramflux-protocol" }
+ramflux-protocol = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-crypto = { version = "0.1.0", path = "../ramflux-crypto" }
+ramflux-crypto = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-storage = { version = "0.1.0", path = "../ramflux-storage" }
+ramflux-storage = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-transport = { version = "0.1.0", path = "../ramflux-transport" }
+ramflux-transport = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-sync = { version = "0.1.0", path = "../ramflux-sync" }
+ramflux-sync = { workspace = true }
 aes-gcm = "0.10"
 blake3 = "1.5"
+hmac = "0.12"
 rmcp = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1.42", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"
@@ -57,6 +59,3 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
-
-[package.metadata.cargo-machete]
-ignored = ["cbindgen", "ramflux-core", "rmcp"]

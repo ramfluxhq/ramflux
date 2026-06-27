@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -189,6 +190,25 @@ pub enum GroupEventBody {
         invitee_id: String,
         invited_by: String,
     },
+    MemberInvitedV2 {
+        group_id: String,
+        group_epoch: u64,
+        invite_id: String,
+        invitee_identity: String,
+        invitee_signing_public_key: String,
+        invited_role: String,
+        inviter_device_id: String,
+        expires_at: i64,
+        reason: String,
+    },
+    MemberAccepted {
+        group_id: String,
+        previous_epoch: u64,
+        new_group_epoch: u64,
+        invite_id: String,
+        invitee_identity: String,
+        accepted_role: String,
+    },
     MemberJoined {
         group_id: String,
         previous_epoch: u64,
@@ -215,6 +235,22 @@ pub enum GroupEventBody {
         new_group_epoch: u64,
         target_identity: String,
         new_role: String,
+    },
+    MemberBanned {
+        group_id: String,
+        previous_epoch: u64,
+        new_group_epoch: u64,
+        banned_identity: String,
+        reason: String,
+        ban_id: String,
+    },
+    MessageDeleted {
+        group_id: String,
+        group_epoch: u64,
+        target_message_id: String,
+        delete_scope: String,
+        tombstone_id: String,
+        reason: String,
     },
     PolicyUpdated {
         group_id: String,

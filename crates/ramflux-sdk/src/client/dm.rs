@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -91,6 +92,65 @@ impl RamfluxClient {
     }
 
     /// # Errors
+    /// Returns an error when attachment encryption/upload, DM encryption, or gateway submit fails.
+    pub async fn send_plaintext_direct_message_with_attachments_via_gateway(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        message: GatewayDirectMessage,
+        plaintext: &[u8],
+        attachments: &[LocalBusMessageAttachmentInput],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        let mut refs = Vec::with_capacity(attachments.len());
+        for attachment in attachments {
+            let attachment_plaintext = ramflux_protocol::decode_base64url(
+                &attachment.plaintext_base64,
+            )
+            .map_err(|error| SdkError::LocalBus(format!("invalid attachment body: {error}")))?;
+            refs.push(
+                self.dm_attachment_ref_for_recipient(
+                    engine,
+                    &message,
+                    attachment,
+                    &attachment_plaintext,
+                )
+                .await?,
+            );
+        }
+        let envelope = SdkDmAttachmentEnvelope {
+            schema: "ramflux.sdk.dm_attachment_envelope.v1".to_owned(),
+            version: 1,
+            body_base64: ramflux_protocol::encode_base64url(plaintext),
+            attachments: refs,
+        };
+        let envelope_plaintext = serde_json::to_vec(&envelope)?;
+        self.send_plaintext_direct_message_via_gateway(engine, message, &envelope_plaintext).await
+    }
+
+    /// # Errors
+    /// Returns an error when receipt serialization, encryption, local projection, or gateway
+    /// delivery fails.
+    pub(crate) async fn send_receipt_event_via_gateway(
+        &self,
+        engine: &mut GatewaySessionEngine,
+        mut message: GatewayDirectMessage,
+        envelope: SdkReceiptEventEnvelope,
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        let conversation_id = message.conversation_id.clone();
+        let (mut session, x3dh) = self.load_or_create_send_dm_session(engine, &message).await?;
+        let plaintext = serde_json::to_vec(&envelope)?;
+        let ciphertext = session.encrypt(&plaintext, dm_associated_data(&conversation_id))?;
+        message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+            schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
+            version: 1,
+            x3dh,
+            ciphertext,
+        })?;
+        let entry = self.submit_direct_message_via_gateway(engine, message).await?;
+        self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "send", &session)?;
+        Ok(entry)
+    }
+
+    /// # Errors
     /// Returns an error when the target device prekey cannot be fetched, the A2I control event
     pub async fn receive_gateway_deliveries(
         &self,
@@ -109,10 +169,12 @@ impl RamfluxClient {
     /// Returns an error when resume fails, the opaque delivery cannot be appended locally, or SDK
     /// DM decryption fails.
     pub async fn receive_gateway_plaintext_deliveries(
-        &self,
+        &mut self,
         engine: &mut GatewaySessionEngine,
         limit: usize,
         conversation_id: &str,
+        auto_fetch_attachments: bool,
+        relay_service_key_base64: Option<String>,
     ) -> Result<Vec<GatewayPlaintextDelivery>, SdkError> {
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;
         let mut entries = engine.resume_after(after_inbox_seq, limit).await?;
@@ -141,6 +203,13 @@ impl RamfluxClient {
                 &session,
             )?;
             self.apply_contact_event_plaintext(&body)?;
+            if self
+                .apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id)?
+                .is_some()
+            {
+                self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                continue;
+            }
             if let Some(reason) =
                 self.friend_rejection_reason(&entry.envelope.source_principal_id)?
             {
@@ -154,13 +223,24 @@ impl RamfluxClient {
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
             }
-            self.append_plaintext_projection_once(conversation_id, &entry, &body)?;
+            let (projection_body, attachment_refs) = decode_dm_attachment_body(&body)?;
+            let mut attachments = Vec::new();
+            if auto_fetch_attachments {
+                for attachment in &attachment_refs {
+                    attachments.push(self.import_dm_attachment_from_relay(
+                        attachment,
+                        relay_service_key_base64.clone(),
+                    )?);
+                }
+            }
+            self.append_plaintext_projection_once(conversation_id, &entry, &projection_body)?;
             self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
             plaintext.push(GatewayPlaintextDelivery {
                 conversation_id: conversation_id.to_owned(),
                 message_id: entry.envelope.envelope_id.clone(),
                 sender_id: entry.envelope.source_principal_id.clone(),
-                plaintext_body_base64: ramflux_protocol::encode_base64url(&body),
+                plaintext_body_base64: ramflux_protocol::encode_base64url(&projection_body),
+                attachments,
                 entry,
             });
         }
@@ -188,6 +268,7 @@ impl RamfluxClient {
             message_id: message.message_id,
             sender_id: message.sender_id,
             plaintext_body_base64: ramflux_protocol::encode_base64url(&message.encrypted_body),
+            attachments: Vec::new(),
         }))
     }
 
@@ -228,4 +309,101 @@ impl RamfluxClient {
             plaintext,
         )
     }
+
+    fn apply_receipt_event_plaintext(
+        &self,
+        body: &[u8],
+        authenticated_source_device_id: &str,
+    ) -> Result<Option<SdkReceiptEventEnvelope>, SdkError> {
+        let Ok(envelope) = serde_json::from_slice::<SdkReceiptEventEnvelope>(body) else {
+            return Ok(None);
+        };
+        if envelope.schema != "ramflux.sdk.receipt_event.v1" {
+            return Ok(None);
+        }
+        if envelope.reader_device_id != authenticated_source_device_id {
+            return Err(SdkError::LocalBus(format!(
+                "receipt reader_device_id mismatch: claimed {}, authenticated {}",
+                envelope.reader_device_id, authenticated_source_device_id
+            )));
+        }
+        let inserted = match &envelope.event {
+            SdkReceiptEventBody::Delivered {
+                conversation_id,
+                message_id,
+                delivered_at,
+                receiver_device_id,
+                ttl_seconds,
+                ..
+            } => {
+                if receiver_device_id != authenticated_source_device_id {
+                    return Err(SdkError::LocalBus(format!(
+                        "receipt receiver_device_id mismatch: claimed {receiver_device_id}, authenticated {authenticated_source_device_id}"
+                    )));
+                }
+                let inserted = self.account_db()?.record_receipt_event_once(ReceiptEventWrite {
+                    receipt_id: &envelope.receipt_id,
+                    conversation_id,
+                    message_id,
+                    receipt_type: "delivered",
+                    actor_device_id: receiver_device_id,
+                    created_at: *delivered_at,
+                })?;
+                if inserted {
+                    self.mark_delivered(
+                        conversation_id,
+                        receiver_device_id,
+                        message_id,
+                        *delivered_at,
+                        i64::from(*ttl_seconds),
+                    )?;
+                }
+                inserted
+            }
+            SdkReceiptEventBody::ReadPrivate {
+                conversation_id,
+                message_id,
+                reader_identity,
+                read_at,
+                ..
+            } => {
+                if reader_identity != authenticated_source_device_id {
+                    return Err(SdkError::LocalBus(format!(
+                        "receipt reader identity mismatch: claimed {reader_identity}, authenticated {authenticated_source_device_id}"
+                    )));
+                }
+                let inserted = self.account_db()?.record_receipt_event_once(ReceiptEventWrite {
+                    receipt_id: &envelope.receipt_id,
+                    conversation_id,
+                    message_id,
+                    receipt_type: "read",
+                    actor_device_id: reader_identity,
+                    created_at: *read_at,
+                })?;
+                if inserted {
+                    self.mark_read(conversation_id, reader_identity, message_id)?;
+                }
+                inserted
+            }
+            SdkReceiptEventBody::ReadPublic { .. } => {
+                return Err(SdkError::LocalBus(
+                    "public read receipts are not accepted on the E2EE receipt path".to_owned(),
+                ));
+            }
+        };
+        let _ = inserted;
+        Ok(Some(envelope))
+    }
+}
+
+fn decode_dm_attachment_body(body: &[u8]) -> Result<(Vec<u8>, Vec<SdkDmAttachmentRef>), SdkError> {
+    let Ok(envelope) = serde_json::from_slice::<SdkDmAttachmentEnvelope>(body) else {
+        return Ok((body.to_vec(), Vec::new()));
+    };
+    if envelope.schema != "ramflux.sdk.dm_attachment_envelope.v1" {
+        return Ok((body.to_vec(), Vec::new()));
+    }
+    let body = ramflux_protocol::decode_base64url(&envelope.body_base64)
+        .map_err(|error| SdkError::LocalBus(format!("invalid DM attachment body: {error}")))?;
+    Ok((body, envelope.attachments))
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::wildcard_imports)]
 use crate::*;
 
@@ -24,4 +25,41 @@ pub(crate) fn can_remove_group_member(actor_role: &str, target_role: &str) -> bo
 
 pub(crate) fn can_mute_group_member(actor_role: &str, target_role: &str) -> bool {
     can_remove_group_member(actor_role, target_role)
+}
+
+pub(crate) fn can_invite_group_member(actor_role: &str, invited_role: &str) -> bool {
+    matches!(
+        (actor_role, invited_role),
+        ("owner", "admin" | "member" | "bot") | ("admin", "member" | "bot")
+    )
+}
+
+pub(crate) fn can_delete_group_message(
+    actor_role: &str,
+    message_author_role: &str,
+    is_own_message: bool,
+) -> bool {
+    if is_own_message {
+        return matches!(actor_role, "owner" | "admin" | "member" | "bot");
+    }
+    match (actor_role, message_author_role) {
+        ("owner", "owner") => false,
+        ("owner", _) | ("admin", "member" | "bot") => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn can_change_group_member_role(
+    actor_role: &str,
+    target_role: &str,
+    new_role: &str,
+) -> bool {
+    if target_role == new_role {
+        return matches!(actor_role, "owner" | "admin");
+    }
+    matches!(
+        (actor_role, target_role, new_role),
+        ("owner", "admin" | "member" | "bot", "admin" | "member" | "bot")
+            | ("admin", "member" | "bot", "member" | "bot")
+    )
 }

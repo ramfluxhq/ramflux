@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -12,6 +13,8 @@ pub struct SdkGroupSenderKeyDistribution {
     pub sender_id: String,
     pub group_key_epoch: u64,
     pub sender_key_seed: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_device_signing_public_key: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -37,6 +40,13 @@ pub(crate) struct SdkGroupEncryptedEnvelope {
     pub(crate) sender_id: String,
     pub(crate) group_key_epoch: u64,
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SdkGroupControlEnvelope {
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) event: ramflux_protocol::GroupEvent,
 }
 
 pub(crate) enum GroupGatewayDeliveryResult {
@@ -92,6 +102,60 @@ pub(crate) fn group_sender_key_distribution_conversation_id(
 
 pub(crate) fn group_member_route_event_id(group_id: &str, member_id: &str) -> String {
     format!("group.member.route:{group_id}:{member_id}")
+}
+
+pub(crate) fn group_role_changed_event_id(
+    group_id: &str,
+    actor_device_id: &str,
+    target_member_id: &str,
+    new_group_epoch: u64,
+) -> String {
+    format!("group.role_changed:{group_id}:{actor_device_id}:{target_member_id}:{new_group_epoch}")
+}
+
+pub(crate) fn group_member_kicked_event_id(
+    group_id: &str,
+    actor_device_id: &str,
+    target_member_id: &str,
+    new_group_epoch: u64,
+) -> String {
+    format!("group.member_kicked:{group_id}:{actor_device_id}:{target_member_id}:{new_group_epoch}")
+}
+
+pub(crate) fn group_member_banned_event_id(
+    group_id: &str,
+    actor_device_id: &str,
+    target_member_id: &str,
+    new_group_epoch: u64,
+) -> String {
+    format!("group.member_banned:{group_id}:{actor_device_id}:{target_member_id}:{new_group_epoch}")
+}
+
+pub(crate) fn group_message_deleted_event_id(
+    group_id: &str,
+    actor_device_id: &str,
+    target_message_id: &str,
+    group_epoch: u64,
+) -> String {
+    format!("group.message_deleted:{group_id}:{actor_device_id}:{target_message_id}:{group_epoch}")
+}
+
+pub(crate) fn group_member_invited_event_id(
+    group_id: &str,
+    actor_device_id: &str,
+    invitee_identity: &str,
+    group_epoch: u64,
+) -> String {
+    format!("group.member_invited:{group_id}:{actor_device_id}:{invitee_identity}:{group_epoch}")
+}
+
+pub(crate) fn group_member_accepted_event_id(
+    group_id: &str,
+    invitee_identity: &str,
+    invite_id: &str,
+    new_group_epoch: u64,
+) -> String {
+    format!("group.member_accepted:{group_id}:{invitee_identity}:{invite_id}:{new_group_epoch}")
 }
 
 pub(crate) fn group_entry_is_sender_key_message(

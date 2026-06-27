@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 mod handlers;
 mod lifecycle;
 mod router_engine;
@@ -82,7 +83,7 @@ fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {
     };
     #[cfg(all(target_os = "linux", feature = "glommio-runtime"))]
     {
-        run_mesh_health_smoke_with_config(&config)
+        return run_mesh_health_smoke_with_config(config);
     }
     #[cfg(not(all(target_os = "linux", feature = "glommio-runtime")))]
     {
@@ -92,10 +93,10 @@ fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "glommio-runtime"))]
 fn run_mesh_health_smoke_with_config(
-    config: &ramflux_node_core::NodeServiceConfig,
+    config: ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<()> {
     let mut server_config = config.clone();
-    "127.0.0.1:0".clone_into(&mut server_config.mesh.listen_addr);
+    server_config.mesh.listen_addr = "127.0.0.1:0".to_owned();
     server_config.mesh.allowed_service_ids.insert(server_config.service_id.clone());
     let smoke_redb = std::env::temp_dir()
         .join(format!("ramflux-router-mesh-health-smoke-{}.redb", std::process::id()));
@@ -116,7 +117,7 @@ fn run_mesh_health_smoke_with_config(
     let endpoint = ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|error| {
         anyhow::anyhow!("glommio mesh health smoke server did not become ready: {error}")
     })??;
-    run_mesh_health_smoke_client_clean_close(config, &endpoint)
+    run_mesh_health_smoke_client_clean_close(&config, &endpoint)
 }
 
 #[cfg(not(all(target_os = "linux", feature = "glommio-runtime")))]
@@ -256,7 +257,7 @@ fn serve_router_mesh_from_env(
     router: &Arc<router_runtime::RouterHandle>,
 ) -> anyhow::Result<()> {
     // Frozen diagnostic runtime: default production and itest shipping path is
-    // tokio; new runtime work follows the compio federation migration plan.
+    // tokio; new runtime work targets compio federation forwarding.
     if std::env::var("RAMFLUX_ROUTER_RUNTIME").as_deref() == Ok("glommio") {
         tracing::info!("router mesh runtime selected: glommio mTLS");
         return glommio_mesh::serve_router_mesh_glommio_mtls(config, router);

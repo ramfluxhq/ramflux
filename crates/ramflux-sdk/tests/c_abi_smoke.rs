@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,13 +33,7 @@ fn c_abi_smoke_runs_real_sdk_storage_and_event_queue() -> Result<(), Box<dyn std
     std::fs::write(&c_source, C_SMOKE_SOURCE)?;
 
     let include_dir = manifest_dir.join("target/include");
-    let lib_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            manifest_dir.parent().and_then(std::path::Path::parent).map(|root| root.join("target"))
-        })
-        .ok_or("failed to locate workspace target dir")?
-        .join("debug");
+    let lib_dir = manifest_dir.join("target/debug");
     let mut compile = Command::new("cc");
     compile
         .arg(&c_source)

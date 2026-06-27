@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use crate::{ProtocolError, domain, encode_base64url};
 
 const MAGIC: &[u8; 4] = b"RFH1";

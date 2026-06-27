@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -13,6 +14,20 @@ pub(crate) async fn dispatch_device_bus_request(
         "device.activate" => {
             let body: LocalBusDeviceActivateRequest = serde_json::from_value(request.body.clone())?;
             dispatch_device_activate(request, state, body).await
+        }
+        "device.revoke" => {
+            let body: LocalBusDeviceRevokeRequest = serde_json::from_value(request.body.clone())?;
+            dispatch_device_revoke(request, state, body).await
+        }
+        "device.sync.export" => {
+            let body: LocalBusDeviceSyncExportRequest =
+                serde_json::from_value(request.body.clone())?;
+            Box::pin(dispatch_device_sync_export(request, state, body)).await
+        }
+        "device.sync.import" => {
+            let body: LocalBusDeviceSyncImportRequest =
+                serde_json::from_value(request.body.clone())?;
+            dispatch_device_sync_import(request, state, body).await
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
@@ -70,6 +85,8 @@ async fn dispatch_device_activate(
             body.device_seed,
         )
         .await?;
+    assert_manifest_active_device(&gateway, &manifest.principal_commitment, &body.device_id)
+        .await?;
 
     // C2 intentionally keeps gateway mesh re-join/session-resume tokens out of device activation.
     // Fresh-session-per-connect already resumes delivery through durable gateway cursors; re-join
@@ -90,6 +107,106 @@ async fn dispatch_device_activate(
             devices,
         },
     )
+}
+
+async fn dispatch_device_revoke(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    body: LocalBusDeviceRevokeRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let data_root = state.config.data_root.clone();
+    let manifest_path = local_bus_account_manifest_path(&data_root, &account_id);
+    let mut manifest = read_local_bus_account_manifest(&manifest_path)?;
+    let account = local_bus_account_mut(state, &account_id)?;
+    let root = ramflux_crypto::create_identity_root(&manifest.principal_id, manifest.root_seed);
+    let root_public_key =
+        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
+    let derived_commitment = identity_root_public_key_commitment(&root_public_key)?;
+    if derived_commitment != manifest.principal_commitment {
+        return Err(SdkError::LocalBus("account manifest root commitment mismatch".to_owned()));
+    }
+    let revoked_at = now_unix_timestamp();
+    let signing_body = SdkMvp1RevokeDeviceSigningBody {
+        device_id: &body.device_id,
+        principal_commitment: &manifest.principal_commitment,
+        revoked_at,
+    };
+    let signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::canonical_json_bytes(&signing_body)?,
+        manifest.root_seed,
+    );
+    let revoke = SdkMvp1RevokeDeviceRequest {
+        device_id: body.device_id.clone(),
+        principal_commitment: manifest.principal_commitment.clone(),
+        root_public_key,
+        revoked_at,
+        signature,
+    };
+    let gateway = GatewaySessionConfig::auto(manifest.gateway.clone());
+    let response: SdkMvp1RevokeDeviceResponse =
+        sdk_gateway_post_json(&gateway, "/mvp1/device/revoke", &revoke).await?;
+    if response.revoked {
+        manifest.devices.retain(|device| device.device_id != body.device_id);
+        write_local_bus_account_manifest(&data_root, &manifest)?;
+    }
+    account.client.append_event(
+        &format!("device.branch_revoked:{}", body.device_id),
+        "identity.device_branch.revoked",
+        &serde_json::to_vec(&serde_json::json!({
+            "device_id": body.device_id,
+            "revoked_at": revoked_at,
+        }))?,
+    )?;
+    Ok(local_bus_ok(serde_json::to_value(response)?))
+}
+
+async fn dispatch_device_sync_export(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    body: LocalBusDeviceSyncExportRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let manifest_path = local_bus_account_manifest_path(&state.config.data_root, &account_id);
+    let manifest = read_local_bus_account_manifest(&manifest_path)?;
+    let account = local_bus_account_mut(state, &account_id)?;
+    let mut engine = account.take_live_engine().await?;
+    let response = account
+        .client
+        .export_own_device_sync(
+            &mut engine,
+            &manifest.principal_commitment,
+            &body.target_device_id,
+            &body.relay_endpoint,
+            body.relay_service_key_base64,
+            body.chunk_size.unwrap_or(64 * 1024),
+        )
+        .await;
+    account.put_engine(engine);
+    Ok(local_bus_ok(serde_json::to_value(response?)?))
+}
+
+async fn dispatch_device_sync_import(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    body: LocalBusDeviceSyncImportRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let manifest_path = local_bus_account_manifest_path(&state.config.data_root, &account_id);
+    let manifest = read_local_bus_account_manifest(&manifest_path)?;
+    let account = local_bus_account_mut(state, &account_id)?;
+    let envelope: SdkOwnDeviceSyncEnvelope = serde_json::from_value(body.envelope)?;
+    let gateway = account.gateway_config.clone();
+    let response = account
+        .client
+        .import_own_device_sync(
+            &gateway,
+            &manifest.principal_commitment,
+            &envelope,
+            body.relay_service_key_base64,
+        )
+        .await?;
+    Ok(local_bus_ok(serde_json::to_value(response)?))
 }
 
 fn append_device_branch_authorized_event(

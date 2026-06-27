@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -141,6 +142,15 @@ impl RamfluxClient {
         conversation_id: &str,
     ) -> Result<Vec<DirectMessageRecord>, SdkError> {
         Ok(self.account_db()?.direct_messages(conversation_id)?)
+    }
+
+    /// # Errors
+    /// Returns an error when storage lookup fails.
+    pub fn direct_message_by_id(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<DirectMessageRecord>, SdkError> {
+        Ok(self.account_db()?.direct_message_by_id(message_id)?)
     }
 
     /// # Errors

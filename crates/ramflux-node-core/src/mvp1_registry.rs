@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(unused_imports)]
 
 use crate::{
@@ -109,12 +110,23 @@ pub struct ItestMvp6FriendRequestBudgetResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ItestMvp1RevokeDeviceRequest {
     pub device_id: String,
+    pub principal_commitment: String,
+    pub root_public_key: String,
+    pub revoked_at: i64,
+    pub signature: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ItestMvp1RevokeDeviceResponse {
     pub device_id: String,
     pub revoked: bool,
+}
+
+#[derive(Serialize)]
+struct DeviceRevokeSigningBody<'a> {
+    device_id: &'a str,
+    principal_commitment: &'a str,
+    revoked_at: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -239,15 +251,35 @@ impl ItestMvp1IdentityRegistry {
                 request.proof.device_id
             )));
         }
+        let root_public_key =
+            ramflux_crypto::verifying_key_from_base64url(&request.root_public_key)
+                .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
+        if !request.principal_commitment.is_empty() {
+            let derived_commitment = ramflux_crypto::blake3_256_base64url(
+                "ramflux.identity.root_public_key.commitment.v1",
+                &root_public_key.to_bytes(),
+            );
+            if derived_commitment != request.principal_commitment {
+                return Err(NodeCoreError::ItestHttp(
+                    "principal commitment root mismatch".to_owned(),
+                ));
+            }
+            if self
+                .root_public_keys_by_commitment
+                .get(&request.principal_commitment)
+                .is_some_and(|existing| existing != &request.root_public_key)
+            {
+                return Err(NodeCoreError::ItestHttp(
+                    "principal commitment already bound to different root".to_owned(),
+                ));
+            }
+        }
         if !self.seen_proofs.insert(request.proof.proof_id.clone()) {
             return Err(NodeCoreError::ItestHttp(format!(
                 "branch proof replay: {}",
                 request.proof.proof_id
             )));
         }
-        let root_public_key =
-            ramflux_crypto::verifying_key_from_base64url(&request.root_public_key)
-                .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
         ramflux_crypto::verify_branch_proof(
             &root_public_key,
             &request.proof,
@@ -394,8 +426,49 @@ impl ItestMvp1IdentityRegistry {
             .push(request.now);
     }
 
-    pub fn revoke_device(&mut self, device_id: &str) -> bool {
-        self.revoked_devices.insert(device_id.to_owned())
+    /// # Errors
+    /// Returns an error when the revocation is not signed by the registered principal root.
+    pub fn revoke_device(
+        &mut self,
+        request: &ItestMvp1RevokeDeviceRequest,
+    ) -> Result<bool, NodeCoreError> {
+        let expected_root = self
+            .root_public_keys_by_commitment
+            .get(&request.principal_commitment)
+            .ok_or_else(|| {
+                NodeCoreError::ItestHttp(format!(
+                    "unknown principal commitment: {}",
+                    request.principal_commitment
+                ))
+            })?;
+        if expected_root != &request.root_public_key {
+            return Err(NodeCoreError::ItestHttp(
+                "device revoke root public key mismatch".to_owned(),
+            ));
+        }
+        let device = self.devices.get(&request.device_id).ok_or_else(|| {
+            NodeCoreError::ItestHttp(format!("unknown device: {}", request.device_id))
+        })?;
+        if device.principal_commitment != request.principal_commitment {
+            return Err(NodeCoreError::ItestHttp(
+                "device revoke principal commitment mismatch".to_owned(),
+            ));
+        }
+        let revoke_body = ramflux_protocol::canonical_json_bytes(&DeviceRevokeSigningBody {
+            device_id: &request.device_id,
+            principal_commitment: &request.principal_commitment,
+            revoked_at: request.revoked_at,
+        })
+        .map_err(|source| {
+            NodeCoreError::ItestHttp(format!("device revoke body invalid: {source}"))
+        })?;
+        ramflux_crypto::verify_canonical_signature(
+            &revoke_body,
+            &request.signature,
+            &request.root_public_key,
+        )
+        .map_err(|source| NodeCoreError::ItestHttp(format!("device revoke invalid: {source}")))?;
+        Ok(self.revoked_devices.insert(request.device_id.clone()))
     }
 
     /// # Errors
@@ -421,6 +494,9 @@ impl ItestMvp1IdentityRegistry {
 
     #[must_use]
     pub fn prekey_bundle(&self, device_id: &str) -> Option<&ramflux_crypto::PrekeyBundle> {
+        if self.revoked_devices.contains(device_id) {
+            return None;
+        }
         self.prekey_bundles.get(device_id)
     }
 
@@ -480,6 +556,9 @@ impl ItestMvp1IdentityRegistry {
 
     #[must_use]
     pub fn target_delivery_id_for_device(&self, device_id: &str) -> Option<&str> {
+        if self.revoked_devices.contains(device_id) {
+            return None;
+        }
         self.devices.get(device_id).map(|device| device.target_delivery_id.as_str())
     }
 

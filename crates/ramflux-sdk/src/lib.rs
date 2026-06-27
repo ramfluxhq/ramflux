@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 //! Rust core SDK facade and stable C-ABI boundary substrate.
 
 mod bus;
@@ -13,6 +14,7 @@ mod federation;
 mod gateway;
 mod group;
 mod object;
+mod own_device_sync;
 mod prekey;
 mod prelude;
 mod records;
@@ -31,20 +33,24 @@ pub use bus::{
     LocalBusConversationDisappearingExpireRequest, LocalBusConversationDisappearingSetRequest,
     LocalBusConversationMuteRequest, LocalBusConversationRequest, LocalBusDeviceActivateRequest,
     LocalBusDeviceActivateResponse, LocalBusDeviceListResponse, LocalBusDeviceRecord,
+    LocalBusDeviceRevokeRequest, LocalBusDeviceSyncExportRequest, LocalBusDeviceSyncImportRequest,
     LocalBusErrorBody, LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind,
     LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
     LocalBusGrantStandingApprovalRevokeRequest, LocalBusGroupCreateRequest,
-    LocalBusGroupMemberAddRequest, LocalBusGroupMemberRemoveRequest, LocalBusGroupMemberRoute,
-    LocalBusGroupReceiveRequest, LocalBusGroupRequest, LocalBusGroupSendRequest,
-    LocalBusGroupSenderKeyExportRequest, LocalBusGroupSenderKeyImportRequest,
-    LocalBusMcpApprovalDecisionRequest, LocalBusMcpApprovalGrantRequest,
-    LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest, LocalBusMessageAckRequest,
-    LocalBusMessageDeleteRequest, LocalBusMessageReceiptDeliveredRequest,
-    LocalBusMessageReceiptReadRequest, LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest,
-    LocalBusObjectDeleteRequest, LocalBusObjectGetRequest, LocalBusObjectImportRequest,
-    LocalBusObjectPutRequest, LocalBusObjectShareRequest, LocalBusSubscriptionOpenRequest,
-    LocalMcpGrantSigningBody, LocalMcpStandingApprovalSigningBody, serve_local_bus,
-    serve_local_bus_until,
+    LocalBusGroupInviteAcceptRequest, LocalBusGroupInviteCreateRequest,
+    LocalBusGroupMemberAddRequest, LocalBusGroupMemberBanRequest, LocalBusGroupMemberKickRequest,
+    LocalBusGroupMemberRemoveRequest, LocalBusGroupMemberRoute, LocalBusGroupMessageDeleteRequest,
+    LocalBusGroupReceiveRequest, LocalBusGroupRequest, LocalBusGroupRoleSetRequest,
+    LocalBusGroupSendRequest, LocalBusGroupSenderKeyExportRequest,
+    LocalBusGroupSenderKeyImportRequest, LocalBusMcpApprovalDecisionRequest,
+    LocalBusMcpApprovalGrantRequest, LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest,
+    LocalBusMessageAckRequest, LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
+    LocalBusMessageReceiptDeliveredRequest, LocalBusMessageReceiptReadRequest,
+    LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest, LocalBusObjectDeleteRequest,
+    LocalBusObjectGetRequest, LocalBusObjectImportRequest, LocalBusObjectPutRequest,
+    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusObjectTransferStatusRequest, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
+    LocalMcpStandingApprovalSigningBody, serve_local_bus, serve_local_bus_until,
 };
 pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;
@@ -52,7 +58,7 @@ pub use client::recovery::{
     SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember, recovery_member_public_key_base64url,
 };
 pub use constants::*;
-pub use dm::SdkDmX3dhHeader;
+pub use dm::{SdkDmAttachmentImportResult, SdkDmX3dhHeader};
 pub use error::SdkError;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,

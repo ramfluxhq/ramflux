@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![cfg(test)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
@@ -60,6 +61,7 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "schema_migration",
     "account_key_check",
     "device_identity",
+    "device_directory",
     "lineage_checkpoint",
     "home_node_binding",
     "session_capability_cache",
@@ -73,6 +75,11 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "friend_projection",
     "group_projection",
     "group_member_projection",
+    "group_member_device_key",
+    "group_control_event_seen",
+    "group_message_tombstone_projection",
+    "group_ban_projection",
+    "group_invite_projection",
     "receipt_projection",
     "conversation_tombstone",
     "device_inbox_cursor",
@@ -190,7 +197,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 38);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 44);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -298,6 +305,29 @@ fn mcp_grant_audit_and_tools_roundtrip() -> Result<(), StorageError> {
 }
 
 #[test]
+fn device_directory_upserts_verified_device_mapping() -> Result<(), StorageError> {
+    let (root, db) = test_db("device-directory")?;
+    let first =
+        db.upsert_device_directory_entry("device_a", "principal_a", "contact.add", 1_000)?;
+    assert_eq!(first.device_id, "device_a");
+    assert_eq!(first.principal_commitment, "principal_a");
+    assert_eq!(first.source, "contact.add");
+    assert_eq!(first.verified_at, 1_000);
+
+    let second =
+        db.upsert_device_directory_entry("device_a", "principal_b", "device_directory", 2_000)?;
+    assert_eq!(second.principal_commitment, "principal_b");
+    assert_eq!(second.source, "device_directory");
+    assert_eq!(second.verified_at, 2_000);
+    assert_eq!(
+        db.device_directory_entry("device_a")?.map(|entry| entry.principal_commitment),
+        Some("principal_b".to_owned())
+    );
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
 fn object_store_objects_keys_and_tombstones_roundtrip() -> Result<(), StorageError> {
     let (_root, db) = test_db("object-store-persistence")?;
     let object = TestEncryptedObject {
@@ -347,6 +377,54 @@ fn account_db_clock_controls_default_storage_timestamps() -> Result<(), StorageE
     assert_eq!(message_created_at(&db, "conv_clock", "msg_clock_2")?, 1_900_000_200);
     assert_eq!(message_created_at(&db, "conv_clock", "msg_clock_3")?, 1_900_000_201);
     let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
+fn dm_receipts_are_idempotent_monotonic_and_read_wins() -> Result<(), StorageError> {
+    let (_root, mut db) = test_db("dm-receipts-monotonic")?;
+    db.set_clock(AccountClock::sequence(1_900_000_300));
+    db.send_direct_message("conv_receipts", "msg_1", "alice", b"one")?;
+    db.send_direct_message("conv_receipts", "msg_2", "alice", b"two")?;
+    assert!(db.record_receipt_event_once(ReceiptEventWrite {
+        receipt_id: "receipt_read_1",
+        conversation_id: "conv_receipts",
+        message_id: "msg_2",
+        receipt_type: "read",
+        actor_device_id: "bob_device",
+        created_at: 1_900_000_310,
+    })?);
+    assert!(!db.record_receipt_event_once(ReceiptEventWrite {
+        receipt_id: "receipt_read_1",
+        conversation_id: "conv_receipts",
+        message_id: "msg_2",
+        receipt_type: "read",
+        actor_device_id: "bob_device",
+        created_at: 1_900_000_311,
+    })?);
+    db.mark_read("conv_receipts", "bob_device", "msg_2")?;
+    assert!(matches!(
+        db.mark_read("conv_receipts", "bob_device", "msg_1"),
+        Err(StorageError::AuthorizationRejected)
+    ));
+
+    db.mark_delivered("conv_receipts", "bob_device", "msg_1", 1_900_000_320, 300)?;
+    let messages = db.direct_messages("conv_receipts")?;
+    let msg_1_receipt = messages[0]
+        .receipts
+        .iter()
+        .find(|receipt| receipt.device_id == "bob_device")
+        .ok_or(StorageError::AuthorizationRejected)?;
+    let msg_2_receipt = messages[1]
+        .receipts
+        .iter()
+        .find(|receipt| receipt.device_id == "bob_device")
+        .ok_or(StorageError::AuthorizationRejected)?;
+    assert_eq!(msg_1_receipt.state, "read");
+    assert_eq!(msg_2_receipt.state, "read");
+    assert_eq!(msg_1_receipt.delivered_at, Some(1_900_000_320));
+    assert!(msg_1_receipt.read_at.is_some());
+    assert!(msg_2_receipt.read_at.is_some());
     Ok(())
 }
 
@@ -583,7 +661,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2]);
+    assert_eq!(before, vec![1, 2, 3]);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

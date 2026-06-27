@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::prekey::SdkMvp1DeviceManifestDevice;
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -25,6 +27,21 @@ impl RamfluxClient {
         target_id: &str,
     ) -> Result<FriendLinkRecord, SdkError> {
         Ok(self.account_db()?.establish_friend_link(link_id, requester_id, target_id)?)
+    }
+
+    /// # Errors
+    /// Returns an error when the friend link or verified peer device manifests cannot be stored.
+    pub(crate) async fn establish_friend_link_via_gateway(
+        &self,
+        gateway: &GatewaySessionConfig,
+        link_id: &str,
+        requester_id: &str,
+        target_id: &str,
+    ) -> Result<FriendLinkRecord, SdkError> {
+        let link = self.establish_friend_link(link_id, requester_id, target_id)?;
+        self.cache_verified_device_manifest(gateway, requester_id, "contact.add").await?;
+        self.cache_verified_device_manifest(gateway, target_id, "contact.add").await?;
+        Ok(link)
     }
 
     /// # Errors
@@ -109,6 +126,81 @@ impl RamfluxClient {
                 &material.contact_material.lineage_head,
             ),
             verification_state: status,
+        })
+    }
+
+    /// # Errors
+    /// Returns an error when the manifest cannot be fetched, verified, or cached.
+    pub(crate) async fn cache_verified_device_manifest(
+        &self,
+        gateway: &GatewaySessionConfig,
+        principal_commitment: &str,
+        source: &str,
+    ) -> Result<SdkMvp1DeviceManifestResponse, SdkError> {
+        let manifest = fetch_verified_device_manifest(gateway, principal_commitment).await?;
+        let verified_at = now_unix_timestamp();
+        for device in &manifest.devices {
+            self.account_db()?.upsert_device_directory_entry(
+                &device.device_id,
+                &manifest.principal_commitment,
+                source,
+                verified_at,
+            )?;
+        }
+        Ok(manifest)
+    }
+
+    /// # Errors
+    /// Returns an error when no trusted local source can resolve the commitment, or when the
+    /// resolved commitment fails device-manifest membership verification.
+    pub(crate) async fn resolve_target_principal_commitment(
+        &self,
+        gateway: &GatewaySessionConfig,
+        explicit_principal_commitment: Option<&str>,
+        device_id: &str,
+    ) -> Result<String, SdkError> {
+        if let Some(principal_commitment) =
+            explicit_principal_commitment.filter(|commitment| !commitment.is_empty())
+        {
+            self.assert_manifest_active_device_cached(
+                gateway,
+                principal_commitment,
+                device_id,
+                "explicit",
+            )
+            .await?;
+            return Ok(principal_commitment.to_owned());
+        }
+        let Some(entry) = self.account_db()?.device_directory_entry(device_id)? else {
+            return Err(SdkError::LocalBus(format!(
+                "cannot resolve principal commitment for target device {device_id} from local trusted device directory"
+            )));
+        };
+        self.assert_manifest_active_device_cached(
+            gateway,
+            &entry.principal_commitment,
+            device_id,
+            "device_directory",
+        )
+        .await?;
+        Ok(entry.principal_commitment)
+    }
+
+    /// # Errors
+    /// Returns an error when the verified manifest does not contain the active target device.
+    pub(crate) async fn assert_manifest_active_device_cached(
+        &self,
+        gateway: &GatewaySessionConfig,
+        principal_commitment: &str,
+        device_id: &str,
+        source: &str,
+    ) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+        let manifest =
+            self.cache_verified_device_manifest(gateway, principal_commitment, source).await?;
+        manifest.devices.into_iter().find(|device| device.device_id == device_id).ok_or_else(|| {
+            SdkError::LocalBus(format!(
+                "recipient device {device_id} is not in verified manifest for {principal_commitment}"
+            ))
         })
     }
 
@@ -314,10 +406,20 @@ impl RamfluxClient {
         } else {
             link.requester_id
         };
-        let self_manifest =
-            fetch_verified_device_manifest(gateway, &self_identity_commitment).await?;
-        let contact_manifest =
-            fetch_verified_device_manifest(gateway, contact_identity_commitment).await?;
+        let self_manifest = self
+            .cache_verified_device_manifest(
+                gateway,
+                &self_identity_commitment,
+                "contact.safety_number",
+            )
+            .await?;
+        let contact_manifest = self
+            .cache_verified_device_manifest(
+                gateway,
+                contact_identity_commitment,
+                "contact.safety_number",
+            )
+            .await?;
         Ok(SdkContactSafetyMaterialPair {
             self_material: contact_safety_material_from_manifest(&self_manifest)?,
             contact_material: contact_safety_material_from_manifest(&contact_manifest)?,
@@ -391,7 +493,7 @@ fn contact_safety_material_for(identity_commitment: &str) -> ramflux_crypto::Con
     }
 }
 
-async fn fetch_verified_device_manifest(
+pub(crate) async fn fetch_verified_device_manifest(
     gateway: &GatewaySessionConfig,
     identity_commitment: &str,
 ) -> Result<SdkMvp1DeviceManifestResponse, SdkError> {
@@ -403,6 +505,40 @@ async fn fetch_verified_device_manifest(
     })?;
     verify_device_manifest(&manifest, identity_commitment)?;
     Ok(manifest)
+}
+
+/// # Errors
+/// Returns an error when the device manifest is missing, fails verification, or does not contain
+/// the expected active device.
+pub(crate) async fn assert_manifest_active_device(
+    gateway: &GatewaySessionConfig,
+    principal_commitment: &str,
+    device_id: &str,
+) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+    let manifest = fetch_verified_device_manifest(gateway, principal_commitment).await?;
+    manifest.devices.into_iter().find(|device| device.device_id == device_id).ok_or_else(|| {
+        SdkError::LocalBus(format!(
+            "recipient device {device_id} is not in verified manifest for {principal_commitment}"
+        ))
+    })
+}
+
+/// # Errors
+/// Returns an error when a targeted device fanout does not carry the principal commitment needed
+/// to verify manifest membership, or when the verified manifest check fails.
+pub(crate) async fn assert_target_manifest_active_device(
+    gateway: &GatewaySessionConfig,
+    principal_commitment: Option<&str>,
+    device_id: &str,
+) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+    let principal_commitment =
+        principal_commitment.filter(|commitment| !commitment.is_empty()).ok_or_else(|| {
+            SdkError::LocalBus(
+                "cannot verify manifest membership for target device without principal commitment"
+                    .to_owned(),
+            )
+        })?;
+    assert_manifest_active_device(gateway, principal_commitment, device_id).await
 }
 
 fn verify_device_manifest(
@@ -615,6 +751,38 @@ mod tests {
         manifest.devices[0].branch_proof.signature = "tampered".to_owned();
 
         assert!(verify_device_manifest(&manifest, &expected).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn targeted_fanout_requires_principal_commitment() -> Result<(), SdkError> {
+        let gateway = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+            bind_addr: "127.0.0.1:0"
+                .parse()
+                .map_err(|error| SdkError::LocalBus(format!("invalid bind addr: {error}")))?,
+            gateway_addr: "127.0.0.1:1"
+                .parse()
+                .map_err(|error| SdkError::LocalBus(format!("invalid gateway addr: {error}")))?,
+            server_name: "ramflux-gateway".to_owned(),
+            ca_cert: PathBuf::from("ca.pem"),
+            principal_id: "principal_alice".to_owned(),
+            device_id: "alice_device".to_owned(),
+            target_delivery_id: "target_alice_device".to_owned(),
+            prekey_http_url: None,
+        });
+
+        for commitment in [None, Some("")] {
+            let Err(error) =
+                assert_target_manifest_active_device(&gateway, commitment, "alice_device").await
+            else {
+                return Err(SdkError::LocalBus(
+                    "targeted fanout accepted a missing principal commitment".to_owned(),
+                ));
+            };
+            assert!(error.to_string().contains(
+                "cannot verify manifest membership for target device without principal commitment"
+            ));
+        }
         Ok(())
     }
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use crate::{RouterMeshClient, router_get_json, router_post_json};
 
 pub(crate) fn dispatch_quic_json_request(
@@ -43,6 +44,13 @@ pub(crate) fn dispatch_quic_json_request(
                 serde_json::from_value(request.body)?;
             let response: ramflux_node_core::ItestMvp1PrekeyResponse =
                 router_post_json(router, "/mvp1/prekey/publish", &prekey)?;
+            serde_json::to_value(response)?
+        }
+        ("POST", "/mvp1/device/revoke") => {
+            let revoke: ramflux_node_core::ItestMvp1RevokeDeviceRequest =
+                serde_json::from_value(request.body)?;
+            let response: ramflux_node_core::ItestMvp1RevokeDeviceResponse =
+                router_post_json(router, "/mvp1/device/revoke", &revoke)?;
             serde_json::to_value(response)?
         }
         ("GET", path) if path.starts_with("/mvp0/cursor/") => {

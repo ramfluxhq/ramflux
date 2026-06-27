@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use ed25519_dalek::SigningKey;
 use ramflux_protocol::{
     A2uiCommand, CreateSurfaceCommand, CursorState, DeleteSurfaceCommand, DeleteSurfaceReason,

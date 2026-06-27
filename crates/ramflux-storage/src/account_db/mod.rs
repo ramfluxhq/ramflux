@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::encryption::{
@@ -17,6 +18,7 @@ pub mod bot;
 pub mod conversation_list;
 pub mod conversation_projection;
 pub mod conversation_state;
+pub mod device_directory;
 pub mod friend;
 pub mod group_pending;
 pub mod groups;

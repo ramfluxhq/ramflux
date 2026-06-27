@@ -3,16 +3,16 @@ name = "ramflux-storage"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-license = "Apache-2.0"
+license.workspace = true
 repository = "https://github.com/ramflux/ramflux-storage"
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-core = { version = "0.1.0", path = "../ramflux-core" }
+ramflux-core = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-crypto = { version = "0.1.0", path = "../ramflux-crypto" }
+ramflux-crypto = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
-ramflux-protocol = { version = "0.1.0", path = "../ramflux-protocol" }
+ramflux-protocol = { workspace = true }
 blake3 = "1.8.5"
 chacha20poly1305 = "0.10.1"
 rusqlite = { version = "0.37", default-features = false }

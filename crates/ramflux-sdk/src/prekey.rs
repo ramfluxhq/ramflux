@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -44,6 +45,28 @@ pub struct SdkMvp1PrekeyResponse {
     pub(crate) bundle: Option<ramflux_crypto::PrekeyBundle>,
     #[serde(default)]
     pub(crate) target_delivery_id: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct SdkMvp1RevokeDeviceRequest {
+    pub(crate) device_id: String,
+    pub(crate) principal_commitment: String,
+    pub(crate) root_public_key: String,
+    pub(crate) revoked_at: i64,
+    pub(crate) signature: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct SdkMvp1RevokeDeviceSigningBody<'a> {
+    pub(crate) device_id: &'a str,
+    pub(crate) principal_commitment: &'a str,
+    pub(crate) revoked_at: i64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct SdkMvp1RevokeDeviceResponse {
+    pub(crate) device_id: String,
+    pub(crate) revoked: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
