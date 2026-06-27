@@ -22,7 +22,8 @@ fn c_abi_smoke_runs_real_sdk_storage_and_event_queue() -> Result<(), Box<dyn std
 
     let build_status = Command::new(env!("CARGO"))
         .current_dir(&manifest_dir)
-        .args(["build", "--features", "c-abi", "--lib"])
+        .args(["build", "--features", "c-abi", "--lib", "--target-dir"])
+        .arg(manifest_dir.join("target"))
         .status()?;
     if !build_status.success() {
         return Err("cargo build --features c-abi --lib failed".into());
