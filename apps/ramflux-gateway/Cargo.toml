@@ -34,7 +34,6 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 compio = { version = "=0.19.1", optional = true }
-glommio = { workspace = true }
 
 [lints]
 workspace = true
