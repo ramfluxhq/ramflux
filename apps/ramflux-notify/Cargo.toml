@@ -26,11 +26,8 @@ hkdf = { workspace = true }
 http = { workspace = true }
 jsonwebtoken = { workspace = true }
 p256 = { workspace = true }
-ramflux-core = { workspace = true }
 ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
-ramflux-transport = { workspace = true }
-redb = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rustls-pki-types = { workspace = true }
