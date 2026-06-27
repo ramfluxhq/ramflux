@@ -15,7 +15,7 @@ argon2 = "0.5.3"
 base64 = "0.22"
 blake3 = "1.8.5"
 chacha20poly1305 = "0.10.1"
-constant_time_eq = "0.4"
+constant_time_eq = "0.5"
 ed25519-dalek = { version = "2.2.0", features = ["batch", "zeroize"] }
 getrandom = "0.3"
 hex = "0.4"
