@@ -72,7 +72,7 @@ rand = "0.10"
 rcgen = "0.14"
 redb = "4.1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-rmcp = "0.14"
+rmcp = "1.8"
 rusqlite = { version = "0.37", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2"
