@@ -400,7 +400,7 @@ pub(super) fn federation_server_record(node_id: &str, endpoint: &str) -> Federat
 }
 
 pub(super) fn test_federation_ca_pem() -> String {
-    include_str!("../../../../../ramflux-deploy/certs/ca.pem").to_owned()
+    include_str!("../../../../deploy/certs/ca.pem").to_owned()
 }
 
 pub(super) fn call_session(call_id: &str) -> OpaqueCallSession {
