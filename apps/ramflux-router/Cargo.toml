@@ -11,7 +11,6 @@ commercial-license = true
 
 [features]
 default = []
-glommio-runtime = ["dep:futures-lite", "dep:glommio", "dep:rustls", "dep:rustls-pemfile"]
 itest-http = ["ramflux-node-core/itest-http"]
 
 [dependencies]
@@ -27,12 +26,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-futures-lite = { workspace = true, optional = true }
-glommio = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 ramflux-crypto = { workspace = true }
