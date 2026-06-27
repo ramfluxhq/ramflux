@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -10,6 +11,8 @@ pub struct DirectMessageRecord {
     pub encrypted_body: Vec<u8>,
     pub metadata: MessageMetadata,
     pub deleted: bool,
+    pub created_at: i64,
+    pub receipts: Vec<MessageReceiptState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +42,24 @@ pub struct ReplyToMetadata {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ForwardedFromMetadata {
     pub source_message_id_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MessageReceiptState {
+    pub device_id: String,
+    pub state: String,
+    pub delivered_at: Option<i64>,
+    pub read_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceiptEventWrite<'a> {
+    pub receipt_id: &'a str,
+    pub conversation_id: &'a str,
+    pub message_id: &'a str,
+    pub receipt_type: &'a str,
+    pub actor_device_id: &'a str,
+    pub created_at: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

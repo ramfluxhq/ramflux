@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityLifecycleRecord {
     pub identity_commitment: String,

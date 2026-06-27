@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -189,7 +190,11 @@ mod tests {
             config: LocalBusConfig::new("bus.sock", "data"),
             accounts: BTreeMap::from([(
                 "acct".to_owned(),
-                LocalBusAccountState::disconnected(client, gateway),
+                LocalBusAccountState::disconnected(
+                    client,
+                    gateway,
+                    "principal_a2ui_test".to_owned(),
+                ),
             )]),
             active_account_id: Some("acct".to_owned()),
             attended_accounts: BTreeSet::new(),

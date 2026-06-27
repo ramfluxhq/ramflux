@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use super::*;
 
 #[test]
@@ -126,7 +127,7 @@ fn identity_deletion_proof_commits_deleted_rows_and_rejects_bad_tombstone()
     let bad_fixture: ramflux_protocol::IdentityDeletionProof = serde_json::from_str(include_str!(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/identity_deletion_proof.bad_tombstone.reject.json"
+            "/../../../ramflux-protocol/fixtures/protocol/v1/identity_deletion_proof/identity_deletion_proof.bad_tombstone.reject.json"
         )
     ))?;
     assert!(

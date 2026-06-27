@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,8 +33,7 @@ impl TokioRouterRuntime {
 const ROUTER_TARGET_SHARD_COUNT: usize = 64;
 
 // Frozen runtime path: retained only for regression comparison and historical
-// experiments. Owner direction moved hot-path runtime work to compio federation
-// forwarding.
+// experiments. Hot-path runtime work now targets compio federation forwarding.
 #[cfg(all(target_os = "linux", feature = "glommio-runtime"))]
 pub(crate) struct GlommioRouterRuntime {
     state: Arc<ramflux_node_core::RouterCore>,
@@ -120,7 +120,7 @@ impl GlommioRouterRuntime {
             let handle = glommio::LocalExecutorBuilder::new(glommio::Placement::Fixed(worker_id))
                 .name(&format!("ramflux-router-glommio-{worker_id}"))
                 .spawn(move || async move {
-                    worker.run(&receiver);
+                    worker.run(receiver);
                 })
                 .map_err(|error| {
                     anyhow::anyhow!("glommio router worker {worker_id} failed to spawn: {error:?}")
@@ -235,12 +235,12 @@ struct GlommioWorker {
 
 #[cfg(all(target_os = "linux", feature = "glommio-runtime"))]
 impl GlommioWorker {
-    fn run(self, receiver: &mpsc::Receiver<GlommioCommand>) {
+    fn run(self, receiver: mpsc::Receiver<GlommioCommand>) {
         while let Ok(command) = receiver.recv() {
             match command {
                 GlommioCommand::Shutdown => break,
                 GlommioCommand::Submit { envelope, total_started, reply } => {
-                    self.handle_submit(envelope, total_started, &reply);
+                    self.handle_submit(envelope, total_started, reply);
                 }
                 GlommioCommand::TargetSubmit {
                     accepted,
@@ -266,7 +266,7 @@ impl GlommioWorker {
                     self.handle_fanout(request, reply);
                 }
                 GlommioCommand::TargetFanoutDelivery { delivery, aggregate } => {
-                    self.finish_fanout_delivery(delivery, &aggregate);
+                    self.finish_fanout_delivery(delivery, aggregate);
                 }
             }
         }
@@ -276,7 +276,7 @@ impl GlommioWorker {
         &self,
         envelope: ramflux_protocol::Envelope,
         total_started: Instant,
-        reply: &mpsc::SyncSender<anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse>>,
+        reply: mpsc::SyncSender<anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse>>,
     ) {
         tracing::info!(
             envelope_id = %envelope.envelope_id,
@@ -352,7 +352,7 @@ impl GlommioWorker {
         owner: usize,
         accepted: ramflux_node_core::ReplayAcceptedEnvelope,
         total_started: Instant,
-        reply: &mpsc::SyncSender<anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse>>,
+        reply: mpsc::SyncSender<anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse>>,
     ) {
         if owner == self.worker_id {
             let target_dispatch_started = Instant::now();
@@ -485,7 +485,7 @@ impl GlommioWorker {
         });
         for delivery in plan.deliveries {
             let owner = target_owner_for_target(&delivery.target_delivery_id, self.workers.len());
-            self.dispatch_fanout_delivery(owner, delivery, &aggregate);
+            self.dispatch_fanout_delivery(owner, delivery, Arc::clone(&aggregate));
         }
     }
 
@@ -493,7 +493,7 @@ impl GlommioWorker {
         &self,
         owner: usize,
         delivery: ramflux_node_core::ReplayAcceptedFanoutDelivery,
-        aggregate: &Arc<FanoutAggregate>,
+        aggregate: Arc<FanoutAggregate>,
     ) {
         if owner == self.worker_id {
             self.finish_fanout_delivery(delivery, aggregate);
@@ -519,14 +519,14 @@ impl GlommioWorker {
     fn finish_fanout_delivery(
         &self,
         delivery: ramflux_node_core::ReplayAcceptedFanoutDelivery,
-        aggregate: &Arc<FanoutAggregate>,
+        aggregate: Arc<FanoutAggregate>,
     ) {
         let (fanout_delivery, entry) = self.state.submit_replay_accepted_fanout_delivery(delivery);
-        if let Some(entry) = entry
-            && let Err(error) = self.core_store.record_inbox_entry(&entry)
-        {
-            aggregate.finish_with_error(anyhow::anyhow!("{error}"));
-            return;
+        if let Some(entry) = entry {
+            if let Err(error) = self.core_store.record_inbox_entry(&entry) {
+                aggregate.finish_with_error(anyhow::anyhow!("{error}"));
+                return;
+            }
         }
         lock_unpoisoned(&aggregate.delivered).push(fanout_delivery);
         aggregate.finish_one();
@@ -539,7 +539,7 @@ impl FanoutAggregate {
         if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
         }
-        let result = Ok(self.build_response());
+        let result = self.build_response();
         if let Some(reply) = lock_unpoisoned(&self.reply).take() {
             let _ = reply.send(result);
         }
@@ -551,14 +551,16 @@ impl FanoutAggregate {
         }
     }
 
-    fn build_response(&self) -> ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse {
+    fn build_response(
+        &self,
+    ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
         let mut delivered = lock_unpoisoned(&self.delivered).clone();
         delivered.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-        ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse {
+        Ok(ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse {
             principal_id: self.principal_id.clone(),
             source_device_id: self.source_device_id.clone(),
             delivered,
-        }
+        })
     }
 }
 
@@ -568,7 +570,7 @@ fn glommio_worker_count() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+        .unwrap_or_else(|| std::thread::available_parallelism().map(usize::from).unwrap_or(1))
 }
 
 #[cfg(all(target_os = "linux", feature = "glommio-runtime"))]
@@ -586,9 +588,7 @@ fn hash_to_bucket(value: &str, bucket_count: usize) -> usize {
     debug_assert!(bucket_count > 0);
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
-    let bucket_count_u64 = u64::try_from(bucket_count).unwrap_or(u64::MAX);
-    let bucket = hasher.finish() % bucket_count_u64;
-    usize::try_from(bucket).unwrap_or(0)
+    (hasher.finish() as usize) % bucket_count
 }
 
 #[cfg(all(target_os = "linux", feature = "glommio-runtime"))]
@@ -959,9 +959,8 @@ mod tests {
             target_delivery_id: "target_glommio_a".to_owned(),
             ack: ack("env_glommio_cross_target_ack"),
         };
-        let Err(error) = handle.apply_bound_ack(&bad_ack) else {
-            anyhow::bail!("cross-target bound ack must be rejected");
-        };
+        let error =
+            handle.apply_bound_ack(&bad_ack).expect_err("cross-target bound ack must be rejected");
         assert!(matches!(
             error.downcast_ref::<ramflux_node_core::NodeCoreError>(),
             Some(ramflux_node_core::NodeCoreError::EnvelopeTargetMismatch { .. })

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

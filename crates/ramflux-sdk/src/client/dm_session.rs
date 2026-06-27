@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -178,12 +179,23 @@ impl RamfluxClient {
         direction: &str,
         session: &ramflux_crypto::DmSession,
     ) -> Result<(), SdkError> {
+        self.persist_dm_session_snapshot(
+            conversation_id,
+            envelope_id,
+            direction,
+            &session.snapshot(),
+        )
+    }
+
+    pub(crate) fn persist_dm_session_snapshot(
+        &self,
+        conversation_id: &str,
+        envelope_id: &str,
+        direction: &str,
+        snapshot: &ramflux_crypto::DmSessionSnapshot,
+    ) -> Result<(), SdkError> {
         let event_id = format!("dm.session:{conversation_id}:{direction}:{envelope_id}");
-        self.append_event(
-            &event_id,
-            "dm.ratchet_session",
-            &serde_json::to_vec(&session.snapshot())?,
-        )?;
+        self.append_event(&event_id, "dm.ratchet_session", &serde_json::to_vec(snapshot)?)?;
         self.set_projection_checkpoint(
             &dm_session_checkpoint_name(conversation_id, direction),
             &event_id,

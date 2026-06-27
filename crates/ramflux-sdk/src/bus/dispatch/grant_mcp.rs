@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -1357,7 +1358,8 @@ mod tests {
         client.set_active_account(ACCOUNT_ID).expect("set active account");
         client.unlock_account(ACCOUNT_ID, b"mcp-test-secret").expect("unlock account");
         let gateway = gateway_config();
-        let account = LocalBusAccountState::disconnected(client, gateway);
+        let account =
+            LocalBusAccountState::disconnected(client, gateway, "principal_mcp_test".to_owned());
         (
             LocalBusDaemonState {
                 config: LocalBusConfig::new(root.join("bus.sock"), root.clone()),
@@ -1577,8 +1579,11 @@ mod tests {
         );
 
         let restored_client = unlocked_client(&root);
-        let mut restored_account =
-            LocalBusAccountState::disconnected(restored_client, gateway_config());
+        let mut restored_account = LocalBusAccountState::disconnected(
+            restored_client,
+            gateway_config(),
+            "principal_mcp_test".to_owned(),
+        );
         hydrate_local_mcp_state(&mut restored_account).expect("hydrate mcp state");
         assert_eq!(restored_account.mcp_registry.registry_hash(), registry_hash);
         assert_eq!(restored_account.mcp_registry.tool_manifest_set_hash(), tool_manifest_set_hash);
@@ -1656,8 +1661,11 @@ mod tests {
         );
 
         let restored_client = unlocked_client(&root);
-        let mut restored_account =
-            LocalBusAccountState::disconnected(restored_client, gateway_config());
+        let mut restored_account = LocalBusAccountState::disconnected(
+            restored_client,
+            gateway_config(),
+            "principal_mcp_test".to_owned(),
+        );
         hydrate_local_mcp_state(&mut restored_account).expect("hydrate mcp state");
         assert_eq!(restored_account.mcp_standing_approvals.len(), 1);
         let mut restored_state = LocalBusDaemonState {

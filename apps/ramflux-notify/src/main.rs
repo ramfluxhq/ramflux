@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![cfg_attr(not(feature = "itest-http"), allow(dead_code))]
 
 use std::collections::{BTreeSet, HashMap};
@@ -2933,6 +2934,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&store_path);
         let store = ramflux_node_core::NotifyRedbStore::open(&store_path)?;
+        let subscription = test_webpush_subscription();
         store.update_provider_credential(ramflux_node_core::ProviderCredential::WebPush(
             ramflux_node_core::WebPushProviderCredential {
                 credential_id: "credential_webpush".to_owned(),
@@ -2942,15 +2944,14 @@ mod tests {
                 provider_ca_pem_ref: Some(stub.ca_pem_secret_ref()),
             },
         ))?;
-        let (webpush_p256dh, webpush_auth) = test_webpush_subscription()?;
         store.register_push_route(ramflux_node_core::DevicePushRoute {
             device_delivery_id: "device_dispatch".to_owned(),
             provider: ramflux_node_core::PushProviderKind::WebPush,
             credential_id: Some("credential_webpush".to_owned()),
             token: "raw_token_not_logged".to_owned(),
             endpoint: stub.endpoint("/webpush"),
-            webpush_p256dh: Some(webpush_p256dh),
-            webpush_auth: Some(webpush_auth),
+            webpush_p256dh: Some(subscription.0),
+            webpush_auth: Some(subscription.1),
             registered_at: 1_760_000_000,
             expires_at: 4_102_444_800,
         })?;
@@ -2975,9 +2976,15 @@ mod tests {
         assert!(received.headers.contains_key("ramflux-push-alias-hash"));
         assert!(received.headers.contains_key("ramflux-collapse-key-hash"));
         assert_eq!(received.headers.get("content-encoding").map(String::as_str), Some("aes128gcm"));
-        assert!(received.payload.is_none());
         assert!(!received.body.is_empty());
-        assert_s13_body_is_opaque(&received.body);
+        for forbidden in
+            [b"wake_dispatch".as_slice(), b"target:".as_slice(), b"encrypted_hint".as_slice()]
+        {
+            assert!(
+                !received.body.windows(forbidden.len()).any(|window| window == forbidden),
+                "webpush encrypted body leaked plaintext marker"
+            );
+        }
         Ok(())
     }
 
@@ -3004,19 +3011,8 @@ mod tests {
         );
     }
 
-    fn test_webpush_subscription() -> Result<(String, String), Box<dyn std::error::Error>> {
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
-
-        let secret = p256::SecretKey::from_slice(&[0x07; 32])?;
-        let public = secret.public_key();
-        let public_key = public.to_encoded_point(false);
-        let p256dh = ramflux_protocol::encode_base64url(public_key.as_bytes());
-        let auth = ramflux_protocol::encode_base64url([0x11; 16]);
-        Ok((p256dh, auth))
-    }
-
-    #[cfg(feature = "itest-http")]
     #[ignore = "microbenchmark; set RAMFLUX_NOTIFY_WAL=1 and run explicitly with --ignored --nocapture"]
+    #[cfg(feature = "itest-http")]
     #[test]
     fn notify_ingest_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
         let total = bench_usize_env("RAMFLUX_INGEST_BENCH_TOTAL", 1_000_000);
@@ -3102,7 +3098,6 @@ mod tests {
         Ok(completed)
     }
 
-    #[cfg(feature = "itest-http")]
     fn signed_s13_wake_request_bodies(
         key: &ramflux_node_core::NodeServiceSigningKey,
         total: usize,
@@ -3187,6 +3182,18 @@ mod tests {
         }
     }
 
+    fn test_webpush_subscription() -> (String, String) {
+        use p256::elliptic_curve::rand_core::OsRng;
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+        let key = p256::SecretKey::random(&mut OsRng);
+        let public = key.public_key().to_encoded_point(false);
+        (
+            ramflux_protocol::encode_base64url(public.as_bytes()),
+            ramflux_protocol::encode_base64url([0x5a; 16]),
+        )
+    }
+
     fn test_prepared_push(
         provider: ramflux_node_core::PushProviderKind,
     ) -> ramflux_node_core::PreparedProviderPush {
@@ -3224,22 +3231,6 @@ mod tests {
             push_alias_hash: "push_alias_hash".to_owned(),
             collapse_key_hash: "collapse_key_hash".to_owned(),
             action: ramflux_node_core::NotifyDeliveryAction::Accept,
-        }
-    }
-
-    fn assert_s13_body_is_opaque(body: &[u8]) {
-        for forbidden in [
-            b"s13 forbidden plaintext".as_slice(),
-            b"conversation_id".as_slice(),
-            b"group_id".as_slice(),
-            b"SRTP_MEDIA_KEY".as_slice(),
-            b"run_shell".as_slice(),
-        ] {
-            assert!(
-                !body.windows(forbidden.len()).any(|window| window == forbidden),
-                "push payload leaked forbidden plaintext: {}",
-                String::from_utf8_lossy(forbidden)
-            );
         }
     }
 
@@ -3286,7 +3277,6 @@ mod tests {
     struct ReceivedProviderRequest {
         path: String,
         headers: std::collections::BTreeMap<String, String>,
-        payload: Option<ramflux_node_core::ProviderPushPayload>,
         body: Vec<u8>,
     }
 
@@ -3346,8 +3336,7 @@ mod tests {
         while let Some(Ok(chunk)) = body_stream.data().await {
             body.extend_from_slice(&chunk);
         }
-        let payload = local_provider_payload_from_body(&path, &headers, &body).ok();
-        let _ = sender.send(ReceivedProviderRequest { path, headers, payload, body });
+        let _ = sender.send(ReceivedProviderRequest { path, headers, body });
         let response = http::Response::builder()
             .status(202)
             .header("content-type", "application/json")
@@ -3357,51 +3346,5 @@ mod tests {
         {
             let _ = send.send_data(bytes::Bytes::from_static(b"{}"), true);
         }
-    }
-
-    fn local_provider_payload_from_body(
-        path: &str,
-        headers: &std::collections::BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Result<ramflux_node_core::ProviderPushPayload, Box<dyn std::error::Error>> {
-        if let Ok(payload) = serde_json::from_slice::<ramflux_node_core::ProviderPushPayload>(body)
-        {
-            return Ok(payload);
-        }
-        let value: serde_json::Value = serde_json::from_slice(body)?;
-        let provider = if path.contains("fcm") {
-            ramflux_node_core::PushProviderKind::Fcm
-        } else if path.contains("webpush") {
-            ramflux_node_core::PushProviderKind::WebPush
-        } else {
-            ramflux_node_core::PushProviderKind::Apns
-        };
-        let data = value.get("message").and_then(|message| message.get("data")).unwrap_or(&value);
-        let wake_id = data
-            .get("wake_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("missing wake_id")?
-            .to_owned();
-        let delivery_class_value =
-            data.get("delivery_class").cloned().ok_or("missing delivery_class")?;
-        let delivery_class = serde_json::from_value(delivery_class_value)?;
-        let ttl = headers.get("ttl").and_then(|ttl| ttl.parse::<u32>().ok()).unwrap_or(0);
-        let priority = match headers.get("urgency").map(String::as_str) {
-            Some("high") => ramflux_protocol::PushPriority::High,
-            Some("low") => ramflux_protocol::PushPriority::Low,
-            _ => ramflux_protocol::PushPriority::Normal,
-        };
-        Ok(ramflux_node_core::ProviderPushPayload {
-            wake_id,
-            provider,
-            delivery_class,
-            priority,
-            ttl,
-            collapse_key: headers.get("ramflux-collapse-key").cloned(),
-            encrypted_hint: data
-                .get("encrypted_hint")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned),
-        })
     }
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(unused_imports)]
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ mod admin;
 mod call_bot;
 mod contact;
 mod daemon;
+mod device;
 mod dm;
 mod grant;
 mod group;
@@ -25,6 +27,7 @@ pub(crate) use admin::*;
 pub(crate) use call_bot::*;
 pub(crate) use contact::*;
 pub(crate) use daemon::*;
+pub(crate) use device::*;
 pub(crate) use dm::*;
 pub(crate) use grant::*;
 pub(crate) use group::*;
@@ -46,6 +49,7 @@ pub(crate) enum Command {
     Daemon(DaemonCommand),
     Account(AccountCommand),
     Contact(ContactCommand),
+    Device(DeviceCommand),
     Dm(DmCommand),
     Group(GroupCommand),
     Object(ObjectCommand),

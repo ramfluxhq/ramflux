@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use super::*;
 
 pub(super) fn assert_incomplete_request_times_out(
@@ -399,7 +400,7 @@ pub(super) fn federation_server_record(node_id: &str, endpoint: &str) -> Federat
 }
 
 pub(super) fn test_federation_ca_pem() -> String {
-    include_str!("../../../../deploy/certs/ca.pem").to_owned()
+    include_str!("../../../../../ramflux-deploy/certs/ca.pem").to_owned()
 }
 
 pub(super) fn call_session(call_id: &str) -> OpaqueCallSession {

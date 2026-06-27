@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 pub mod a2i;
 pub mod account;
 pub mod contact;
@@ -13,6 +14,7 @@ pub mod group_session;
 pub mod identity;
 pub mod mcp_a2ui;
 pub mod object;
+pub mod own_device_sync;
 pub mod recovery;
 pub mod storage;
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use compio_buf::bytes::Bytes;
@@ -150,7 +151,7 @@ impl CompioMeshQuicAcceptedRequest {
         response: &T,
     ) -> Result<(), TransportError> {
         compio_write_json_message(&mut self.send, response).await?;
-        compio_finish_send_stream(&mut self.send)?;
+        compio_finish_send_stream(&mut self.send).await?;
         compio_drain_recv_to_fin(&mut self.recv).await
     }
 }
@@ -207,7 +208,7 @@ async fn compio_mesh_quic_request(
         connection.open_bi().map_err(|error| TransportError::Quic(error.to_string()))?;
     tracing::trace!(%peer_addr, "compio mesh client opened bidirectional stream");
     compio_write_json_message(&mut send, request).await?;
-    compio_finish_send_stream(&mut send)?;
+    compio_finish_send_stream(&mut send).await?;
     tracing::trace!(%peer_addr, "compio mesh client reading response");
     let response: GatewayQuicResponse = compio_read_json_frame(&mut recv).await?;
     compio_drain_recv_to_fin(&mut recv).await?;
@@ -298,7 +299,9 @@ async fn compio_drain_recv_to_fin(
     Ok(())
 }
 
-fn compio_finish_send_stream(send: &mut compio_quic::SendStream) -> Result<(), TransportError> {
+async fn compio_finish_send_stream(
+    send: &mut compio_quic::SendStream,
+) -> Result<(), TransportError> {
     tracing::trace!("compio mesh finishing send stream");
     send.finish().map_err(|error| TransportError::Quic(error.to_string()))?;
     tracing::trace!("compio mesh send stream finished");
@@ -328,23 +331,17 @@ fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, TransportError> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::process::Command;
     use std::sync::{Arc, mpsc};
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-    use rcgen::{
-        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-        KeyPair, KeyUsagePurpose, SanType,
-    };
     use serde_json::json;
     use tracing_subscriber::EnvFilter;
 
     use crate::{MeshQuicServer, MeshTlsConfig, mesh_quic_post_json_with_peer_ca_pems};
 
     use super::{CompioMeshQuicServer, compio_mesh_quic_post_json_with_peer_ca_pems};
-
-    static NEXT_TEMP_CERT_ROOT: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn compio_server_accepts_tokio_quinn_client_mesh_frame()
@@ -673,7 +670,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "ramflux_transport_{name}_{}_{}",
             std::process::id(),
-            NEXT_TEMP_CERT_ROOT.fetch_add(1, Ordering::Relaxed)
+            Instant::now().elapsed().as_nanos()
         ));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
@@ -688,39 +685,91 @@ mod tests {
     ) -> Result<TestPeerCerts, Box<dyn std::error::Error>> {
         let dir = root.join(node_id);
         std::fs::create_dir_all(&dir)?;
+        let ca_key = dir.join("ca-key.pem");
         let ca_cert = dir.join("ca.pem");
         let service_key = dir.join("federation-key.pem");
+        let service_csr = dir.join("federation.csr");
         let service_cert = dir.join("federation.pem");
-        let mut ca_params = CertificateParams::new(Vec::new())?;
-        ca_params.distinguished_name.push(DnType::CommonName, "Ramflux Test Federation CA");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-        ca_params.key_usages.push(KeyUsagePurpose::KeyCertSign);
-        ca_params.key_usages.push(KeyUsagePurpose::CrlSign);
-        let ca_key_pair = KeyPair::generate()?;
-        let ca = ca_params.self_signed(&ca_key_pair)?;
-        let issuer = Issuer::new(ca_params, ca_key_pair);
-
-        let mut service_params =
-            CertificateParams::new(vec!["ramflux-federation".into(), "localhost".into()])?;
-        service_params
-            .subject_alt_names
-            .push(SanType::URI(format!("spiffe://{node_id}/ramflux-federation").try_into()?));
-        service_params.distinguished_name.push(DnType::CommonName, "ramflux-federation");
-        service_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-        service_params.extended_key_usages.push(ExtendedKeyUsagePurpose::ServerAuth);
-        service_params.extended_key_usages.push(ExtendedKeyUsagePurpose::ClientAuth);
-        service_params.use_authority_key_identifier_extension = true;
-        let service_key_pair = KeyPair::generate()?;
-        let service = service_params.signed_by(&service_key_pair, &issuer)?;
-
-        std::fs::write(&ca_cert, ca.pem())?;
-        std::fs::write(&service_key, service_key_pair.serialize_pem())?;
-        std::fs::write(&service_cert, service.pem())?;
+        let ext = dir.join("federation.ext");
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out"], &ca_key)?;
+        run_openssl(
+            &[
+                "req",
+                "-x509",
+                "-new",
+                "-key",
+                path_str(&ca_key)?,
+                "-out",
+                path_str(&ca_cert)?,
+                "-days",
+                "30",
+                "-subj",
+                "/CN=Ramflux Test Federation CA",
+            ],
+            Path::new(""),
+        )?;
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out"], &service_key)?;
+        run_openssl(
+            &[
+                "req",
+                "-new",
+                "-key",
+                path_str(&service_key)?,
+                "-out",
+                path_str(&service_csr)?,
+                "-subj",
+                "/CN=ramflux-federation",
+            ],
+            Path::new(""),
+        )?;
+        std::fs::write(
+            &ext,
+            format!(
+                "subjectAltName = DNS:ramflux-federation, DNS:localhost, URI:spiffe://{node_id}/ramflux-federation\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
+            ),
+        )?;
+        run_openssl(
+            &[
+                "x509",
+                "-req",
+                "-in",
+                path_str(&service_csr)?,
+                "-CA",
+                path_str(&ca_cert)?,
+                "-CAkey",
+                path_str(&ca_key)?,
+                "-CAcreateserial",
+                "-out",
+                path_str(&service_cert)?,
+                "-days",
+                "30",
+                "-extfile",
+                path_str(&ext)?,
+            ],
+            Path::new(""),
+        )?;
         Ok(TestPeerCerts {
             tls: MeshTlsConfig { ca_cert: ca_cert.clone(), service_cert, service_key },
             ca_pem: std::fs::read_to_string(ca_cert)?,
         })
+    }
+
+    fn run_openssl(args: &[&str], output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("openssl");
+        command.args(args);
+        if !output_path.as_os_str().is_empty() {
+            command.arg(path_str(output_path)?);
+        }
+        let output = command.output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!("openssl failed: {}", String::from_utf8_lossy(&output.stderr)).into())
+        }
+    }
+
+    fn path_str(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
+        path.to_str().ok_or_else(|| format!("non-utf8 path {}", path.display()).into())
     }
 
     fn init_test_tracing() {

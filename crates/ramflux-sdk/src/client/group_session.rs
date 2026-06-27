@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -90,6 +91,13 @@ impl RamfluxClient {
             return Err(SdkError::from(StorageError::GroupPermissionDenied));
         }
         let state = self.ensure_own_group_sender_key(group_id, sender_id, group.group_epoch)?;
+        let sender_device_signing_public_key = self
+            .device_branch
+            .as_ref()
+            .filter(|branch| branch.device_id == sender_id)
+            .map(|branch| {
+                ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
+            });
         let distribution = SdkGroupSenderKeyDistribution {
             schema: "ramflux.sdk.group_sender_key.distribution.v1".to_owned(),
             version: 1,
@@ -97,6 +105,7 @@ impl RamfluxClient {
             sender_id: sender_id.to_owned(),
             group_key_epoch: group.group_epoch,
             sender_key_seed: state.session_snapshot.root_key_bytes(),
+            sender_device_signing_public_key,
         };
         Ok(serde_json::to_vec(&distribution)?)
     }
@@ -125,6 +134,14 @@ impl RamfluxClient {
                 distribution.schema
             )));
         }
+        self.assert_group_sender_key_epoch_allowed(&distribution)?;
+        if let Some(public_key) = distribution.sender_device_signing_public_key.as_ref() {
+            self.account_db()?.persist_group_member_device_key(
+                &distribution.group_id,
+                &distribution.sender_id,
+                public_key,
+            )?;
+        }
         let state = SdkGroupSenderKeyState {
             group_id: distribution.group_id.clone(),
             sender_id: distribution.sender_id.clone(),
@@ -148,6 +165,25 @@ impl RamfluxClient {
             Vec::new()
         };
         Ok((distribution, pending))
+    }
+
+    fn assert_group_sender_key_epoch_allowed(
+        &self,
+        distribution: &SdkGroupSenderKeyDistribution,
+    ) -> Result<(), SdkError> {
+        let local_device_id =
+            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.as_str();
+        let joined_epoch = self
+            .account_db()?
+            .group_member_joined_epoch(&distribution.group_id, local_device_id)?
+            .ok_or_else(|| SdkError::from(StorageError::GroupPermissionDenied))?;
+        if distribution.group_key_epoch < joined_epoch {
+            return Err(SdkError::LocalBus(format!(
+                "group sender key epoch {} is below local joined epoch {} for {}/{}",
+                distribution.group_key_epoch, joined_epoch, distribution.group_id, local_device_id
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn retry_pending_group_messages(
@@ -288,5 +324,52 @@ impl RamfluxClient {
             &format!("recv:{}", envelope.ciphertext.counter),
         )?;
         Ok(plaintext)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(test_name: &str) -> PathBuf {
+        let nanos =
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
+        std::env::temp_dir()
+            .join(format!("ramflux-sdk-group-session-{test_name}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn group_sender_key_import_rejects_epoch_below_local_joined_epoch() -> Result<(), SdkError> {
+        let root = temp_root("epoch-floor");
+        let mut client = RamfluxClient::new();
+        client.create_identity_root("principal_floor", [0x91; 32]);
+        client.create_device_branch("principal_floor", "local_device", 1, [0x92; 32]);
+        client.open_account_index(&root)?;
+        client.create_account("acct", "principal_floor")?;
+        client.set_active_account("acct")?;
+        client.unlock_account("acct", b"secret")?;
+        client.create_group("group_floor", "owner_device")?;
+        client.add_group_member("group_floor", "local_device", "member")?;
+        let joined_epoch = client
+            .account_db()?
+            .group_member_joined_epoch("group_floor", "local_device")?
+            .unwrap_or(0);
+        assert!(joined_epoch > 1);
+        let distribution = SdkGroupSenderKeyDistribution {
+            schema: "ramflux.sdk.group_sender_key.distribution.v1".to_owned(),
+            version: 1,
+            group_id: "group_floor".to_owned(),
+            sender_id: "owner_device".to_owned(),
+            group_key_epoch: joined_epoch.saturating_sub(1),
+            sender_key_seed: [0x93; 32],
+            sender_device_signing_public_key: None,
+        };
+        let encoded = serde_json::to_vec(&distribution)?;
+        let Err(error) = client.import_group_sender_key_distribution(&encoded) else {
+            return Err(SdkError::LocalBus("low epoch sender key imported".to_owned()));
+        };
+        assert!(error.to_string().contains("below local joined epoch"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

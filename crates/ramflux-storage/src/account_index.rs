@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::wildcard_imports)]
 use crate::*;
 use rusqlite::{Connection, OptionalExtension, params};

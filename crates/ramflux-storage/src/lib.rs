@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 //! Client-local storage primitives for MVP-1 multi-account tests.
 
 mod account_db;

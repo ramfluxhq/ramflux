@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 //! Transport backends for `grpc_h2`, `quic_quinn`, and `https_json`.
 
 mod backend;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -69,6 +70,9 @@ impl RamfluxClient {
         let plaintext =
             session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
         self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "recv", &session)?;
+        if self.apply_group_control_plaintext(&plaintext)?.is_some() {
+            return Ok(GroupGatewayDeliveryResult::Message(Vec::new()));
+        }
         let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(&plaintext)?;
         if wrapper.schema != "ramflux.sdk.group_sender_key.distribution_envelope.v1" {
             return Err(SdkError::LocalBus(format!(
@@ -107,6 +111,10 @@ impl RamfluxClient {
         }
         match self.decrypt_group_envelope(envelope, message_id) {
             Ok(plaintext) => {
+                if self.apply_group_control_plaintext(&plaintext)?.is_some() {
+                    self.account_db()?.remove_group_pending_undecrypted(message_id)?;
+                    return Ok(Vec::new());
+                }
                 self.send_direct_message(
                     conversation_id,
                     message_id,
@@ -133,6 +141,22 @@ impl RamfluxClient {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn apply_group_control_plaintext(
+        &self,
+        plaintext: &[u8],
+    ) -> Result<Option<GroupState>, SdkError> {
+        let Ok(envelope) = serde_json::from_slice::<SdkGroupControlEnvelope>(plaintext) else {
+            return Ok(None);
+        };
+        if envelope.schema != "ramflux.sdk.group_control.v1" {
+            return Err(SdkError::LocalBus(format!(
+                "unsupported group control schema: {}",
+                envelope.schema
+            )));
+        }
+        Ok(Some(self.apply_group_control_event(&envelope.event)?))
     }
 
     pub(crate) fn group_sender_key_counter_seen(

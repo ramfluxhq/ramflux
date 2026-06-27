@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(unused_imports)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
@@ -17,7 +18,7 @@ pub(crate) struct DmCommand {
 pub(crate) enum DmAction {
     Send(DmSend),
     List(ConversationSelector),
-    Read(ConversationSelector),
+    Read(DmRead),
     Ack(DmAck),
     Delete(DmDelete),
     Receipt(DmReceiptCommand),
@@ -31,6 +32,16 @@ pub(crate) struct ConversationSelector {
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) conversation: String,
+}
+
+#[derive(Args)]
+pub(crate) struct DmRead {
+    #[arg(long)]
+    pub(crate) account: String,
+    #[arg(long)]
+    pub(crate) conversation: String,
+    #[arg(long)]
+    pub(crate) relay_service_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -50,9 +61,19 @@ pub(crate) struct DmSend {
     #[arg(long)]
     pub(crate) recipient_device: Option<String>,
     #[arg(long)]
+    pub(crate) recipient_principal_commitment: Option<String>,
+    #[arg(long)]
     pub(crate) target: String,
     #[arg(long)]
     pub(crate) body: String,
+    #[arg(long)]
+    pub(crate) attach: Vec<PathBuf>,
+    #[arg(long)]
+    pub(crate) relay_url: Option<String>,
+    #[arg(long)]
+    pub(crate) relay_service_key: Option<String>,
+    #[arg(long, default_value_t = 1024)]
+    pub(crate) attachment_chunk_size: usize,
     #[arg(long)]
     pub(crate) federation_url: Option<String>,
     #[arg(long)]
@@ -122,6 +143,10 @@ pub(crate) struct DmReceiptDelivered {
     #[arg(long)]
     pub(crate) receiver_device: String,
     #[arg(long)]
+    pub(crate) recipient_device: Option<String>,
+    #[arg(long)]
+    pub(crate) target: Option<String>,
+    #[arg(long)]
     pub(crate) delivered_at: Option<i64>,
     #[arg(long, default_value_t = 300)]
     pub(crate) ttl_secs: i64,
@@ -137,6 +162,12 @@ pub(crate) struct DmReceiptRead {
     pub(crate) message: String,
     #[arg(long)]
     pub(crate) reader: String,
+    #[arg(long)]
+    pub(crate) recipient_device: Option<String>,
+    #[arg(long)]
+    pub(crate) target: Option<String>,
+    #[arg(long)]
+    pub(crate) read_at: Option<i64>,
 }
 
 #[derive(Args)]

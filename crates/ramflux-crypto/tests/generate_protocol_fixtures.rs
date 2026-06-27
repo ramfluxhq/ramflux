@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use ramflux_crypto::{
     FIXTURE_SIGNING_KEY_ID, FrankingCommitmentInput, event_id, franking_commitment,
     sign_canonical_bytes,

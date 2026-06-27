@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
@@ -13,6 +14,7 @@ impl AccountDb {
         reader_id: &str,
         message_id: &str,
     ) -> Result<(), StorageError> {
+        self.ensure_read_through_can_advance(conversation_id, reader_id, message_id)?;
         self.connection.execute(
             "INSERT INTO conversation_read_state
                 (conversation_id, reader_id, read_through_message_id, read_at)
@@ -35,6 +37,15 @@ impl AccountDb {
         delivered_at: i64,
         ttl_seconds: i64,
     ) -> Result<DeliveryReceiptRecord, StorageError> {
+        if let Some(existing) = self.delivery_receipt(conversation_id, receiver_device_id)?
+            && !self.message_is_at_or_after(
+                conversation_id,
+                message_id,
+                &existing.delivered_through_message_id,
+            )?
+        {
+            return Ok(existing);
+        }
         let ttl_seconds = bounded_ttl_seconds(
             ttl_seconds,
             DEFAULT_DELIVERY_RECEIPT_TTL_SECONDS,
@@ -57,6 +68,69 @@ impl AccountDb {
             delivered_at,
             ttl_seconds,
         })
+    }
+
+    /// # Errors
+    /// Returns an error when storage cannot record or inspect the receipt id.
+    pub fn record_receipt_event_once(
+        &self,
+        event: ReceiptEventWrite<'_>,
+    ) -> Result<bool, StorageError> {
+        let changed = self.connection.execute(
+            "INSERT OR IGNORE INTO receipt_projection
+                (receipt_id, conversation_id, message_id, receipt_type, actor_device_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.receipt_id,
+                event.conversation_id,
+                event.message_id,
+                event.receipt_type,
+                event.actor_device_id,
+                event.created_at
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    fn ensure_read_through_can_advance(
+        &self,
+        conversation_id: &str,
+        reader_id: &str,
+        new_message_id: &str,
+    ) -> Result<(), StorageError> {
+        self.message_created_at(conversation_id, new_message_id)?;
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT read_through_message_id
+                   FROM conversation_read_state
+                  WHERE conversation_id = ?1 AND reader_id = ?2",
+                params![conversation_id, reader_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing_message_id) = existing
+            && !self.message_is_at_or_after(
+                conversation_id,
+                new_message_id,
+                &existing_message_id,
+            )?
+        {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(())
+    }
+
+    fn message_is_at_or_after(
+        &self,
+        conversation_id: &str,
+        candidate_message_id: &str,
+        floor_message_id: &str,
+    ) -> Result<bool, StorageError> {
+        let candidate_created_at =
+            self.message_created_at(conversation_id, candidate_message_id)?;
+        let floor_created_at = self.message_created_at(conversation_id, floor_message_id)?;
+        Ok((candidate_created_at, candidate_message_id) >= (floor_created_at, floor_message_id))
     }
 
     /// # Errors

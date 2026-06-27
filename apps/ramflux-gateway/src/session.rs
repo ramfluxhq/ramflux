@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -446,6 +447,13 @@ pub(crate) async fn handle_gateway_submit(
         write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;
         return Ok(());
     }
+    capture_itest_gateway_json(
+        "submit",
+        &serde_json::json!({
+            "path": "/gateway/session/submit",
+            "envelope": &submit.envelope,
+        }),
+    );
     let response: ramflux_node_core::ItestMvp0SubmitResponse =
         router_post_json(&context.router, "/mvp0/envelope", &submit.envelope)?;
     if response.outcome.starts_with("rejected_") {
@@ -466,6 +474,13 @@ pub(crate) async fn handle_gateway_submit(
         ));
     };
     let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry };
+    capture_itest_gateway_json(
+        "deliver",
+        &serde_json::json!({
+            "path": "/gateway/session/deliver",
+            "frame": &frame,
+        }),
+    );
     write_gateway_handle(send, &frame).await?;
     if response.outcome == "offline_queued" {
         let notify = context.notify.clone();
@@ -588,6 +603,15 @@ pub(crate) async fn handle_gateway_resume(
         resume.after_inbox_seq,
         resume.limit,
     )?;
+    capture_itest_gateway_json(
+        "resume",
+        &serde_json::json!({
+            "path": "/gateway/session/resume",
+            "target_delivery_id": resume.target_delivery_id,
+            "after_inbox_seq": resume.after_inbox_seq,
+            "entries": &inbox.entries,
+        }),
+    );
     write_gateway_handle(
         send,
         &ramflux_node_core::GatewayServerFrame::Resume { entries: inbox.entries },
@@ -648,6 +672,28 @@ async fn delay_itest_gateway_frame() {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
 }
+
+#[cfg(feature = "itest-http")]
+fn capture_itest_gateway_json(kind: &str, value: &serde_json::Value) {
+    let Ok(path) = std::env::var("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON") else {
+        return;
+    };
+    let record = serde_json::json!({
+        "kind": kind,
+        "record": value,
+    });
+    let Ok(line) = serde_json::to_vec(&record) else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write as _;
+        let _ = file.write_all(&line);
+        let _ = file.write_all(b"\n");
+    }
+}
+
+#[cfg(not(feature = "itest-http"))]
+fn capture_itest_gateway_json(_kind: &str, _value: &serde_json::Value) {}
 
 pub(crate) fn pre_auth_gate_for_gateway_open(
     open: &ramflux_node_core::GatewayOpenFrame,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -106,6 +107,28 @@ pub struct LocalBusDeviceActivateRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusDeviceRevokeRequest {
+    pub device_id: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusDeviceSyncExportRequest {
+    pub target_device_id: String,
+    pub relay_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_service_key_base64: Option<String>,
+    #[serde(default)]
+    pub chunk_size: Option<usize>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusDeviceSyncImportRequest {
+    pub envelope: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_service_key_base64: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusDeviceActivateResponse {
     pub local_account_id: String,
     pub principal_id: String,
@@ -195,13 +218,27 @@ pub struct LocalBusMessageSubmitRequest {
     pub source_principal_id: String,
     pub sender_id: String,
     pub recipient_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_principal_commitment: Option<String>,
     pub target_delivery_id: String,
     pub encrypted_body_base64: String,
     pub plaintext_body_base64: Option<String>,
     pub created_at: i64,
     pub ttl: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<LocalBusMessageAttachmentInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub federation: Option<LocalBusFederationRoute>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusMessageAttachmentInput {
+    pub object_id: String,
+    pub plaintext_base64: String,
+    pub chunk_size: usize,
+    pub relay_endpoint: String,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -220,6 +257,10 @@ pub struct LocalBusFederationRoute {
 pub struct LocalBusMessageReceiveRequest {
     pub limit: usize,
     pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub auto_fetch_attachments: bool,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -249,6 +290,10 @@ pub struct LocalBusMessageReceiptDeliveredRequest {
     pub message_id: String,
     pub receiver_device_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i64>,
@@ -259,6 +304,12 @@ pub struct LocalBusMessageReceiptReadRequest {
     pub conversation_id: String,
     pub message_id: String,
     pub reader_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -303,6 +354,10 @@ pub struct LocalBusContactFederatedRequest {
 pub struct LocalBusGroupCreateRequest {
     pub group_id: String,
     pub creator_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_signing_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_target_delivery_id: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -316,6 +371,10 @@ pub struct LocalBusGroupMemberAddRequest {
     pub member_id: String,
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_signing_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_principal_commitment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_delivery_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub federation: Option<LocalBusFederationRoute>,
@@ -326,6 +385,82 @@ pub struct LocalBusGroupMemberRemoveRequest {
     pub group_id: String,
     pub actor_id: String,
     pub member_id: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusGroupRoleSetRequest {
+    pub group_id: String,
+    pub actor_id: String,
+    pub member_id: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusGroupMemberKickRequest {
+    pub group_id: String,
+    pub actor_id: String,
+    pub member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusGroupMemberBanRequest {
+    pub group_id: String,
+    pub actor_id: String,
+    pub member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusGroupInviteCreateRequest {
+    pub group_id: String,
+    pub actor_id: String,
+    pub invitee_id: String,
+    pub invitee_signing_public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitee_principal_commitment: Option<String>,
+    pub target_delivery_id: String,
+    #[serde(default = "default_group_invite_role")]
+    pub role: String,
+    pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federation: Option<LocalBusFederationRoute>,
+}
+
+fn default_group_invite_role() -> String {
+    "member".to_owned()
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusGroupInviteAcceptRequest {
+    pub group_id: String,
+    pub actor_id: String,
+    pub invite_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_principal_commitment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federation: Option<LocalBusFederationRoute>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusGroupMessageDeleteRequest {
+    pub group_id: String,
+    pub actor_id: String,
+    pub message_id: String,
+    #[serde(default = "default_group_message_delete_scope")]
+    pub delete_scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+fn default_group_message_delete_scope() -> String {
+    "group_tombstone".to_owned()
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -347,6 +482,10 @@ pub struct LocalBusGroupSendRequest {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusGroupMemberRoute {
     pub member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_principal_commitment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_signing_public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_delivery_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -417,11 +556,25 @@ pub struct LocalBusObjectPutRequest {
     pub object_id: String,
     pub plaintext_base64: String,
     pub chunk_size: usize,
+    #[serde(default)]
+    pub relay_endpoint: Option<String>,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
+    #[serde(default)]
+    pub relay_interrupt_after_chunks: Option<u32>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusObjectGetRequest {
     pub object_id: String,
+    #[serde(default)]
+    pub relay_endpoint: Option<String>,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
+    #[serde(default)]
+    pub relay_ack: bool,
+    #[serde(default)]
+    pub relay_interrupt_after_chunks: Option<u32>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -430,6 +583,8 @@ pub struct LocalBusObjectShareRequest {
     pub conversation_id: String,
     pub sender_id: Option<String>,
     pub recipient_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_principal_commitment: Option<String>,
     pub target_delivery_id: Option<String>,
 }
 
@@ -441,6 +596,25 @@ pub struct LocalBusObjectDeleteRequest {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusObjectImportRequest {
     pub package: SdkObjectSharePackage,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectTransferStatusRequest {
+    pub object_id: String,
+    #[serde(default)]
+    pub direction: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectTransferResumeRequest {
+    pub object_id: String,
+    pub direction: String,
+    #[serde(default)]
+    pub relay_endpoint: Option<String>,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
+    #[serde(default)]
+    pub relay_interrupt_after_chunks: Option<u32>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

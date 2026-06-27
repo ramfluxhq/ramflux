@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(unused_imports)]
 
 pub(crate) mod a2i;
@@ -10,6 +11,7 @@ pub(crate) mod bot;
 pub(crate) mod call;
 pub(crate) mod contact;
 pub(crate) mod daemon;
+pub(crate) mod device;
 pub(crate) mod dm;
 pub(crate) mod grant;
 pub(crate) mod group;
@@ -30,15 +32,19 @@ pub(crate) use ramflux_sdk::{
     LocalBusClient, LocalBusConfig, LocalBusContactAddRequest, LocalBusContactFederatedRequest,
     LocalBusContactLinkRequest, LocalBusContactRemoveRequest, LocalBusContactSafetyRequest,
     LocalBusConversationDisappearingExpireRequest, LocalBusConversationDisappearingSetRequest,
-    LocalBusConversationMuteRequest, LocalBusConversationRequest, LocalBusFederationRoute,
-    LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGroupCreateRequest,
-    LocalBusGroupMemberAddRequest, LocalBusGroupMemberRemoveRequest, LocalBusGroupReceiveRequest,
-    LocalBusGroupRequest, LocalBusGroupSendRequest, LocalBusMcpApprovalDecisionRequest,
-    LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest, LocalBusMessageAckRequest,
+    LocalBusConversationMuteRequest, LocalBusConversationRequest, LocalBusDeviceRevokeRequest,
+    LocalBusFederationRoute, LocalBusGrantRequest, LocalBusGrantRevokeRequest,
+    LocalBusGroupCreateRequest, LocalBusGroupInviteAcceptRequest, LocalBusGroupInviteCreateRequest,
+    LocalBusGroupMemberAddRequest, LocalBusGroupMemberBanRequest, LocalBusGroupMemberKickRequest,
+    LocalBusGroupMemberRemoveRequest, LocalBusGroupMessageDeleteRequest,
+    LocalBusGroupReceiveRequest, LocalBusGroupRequest, LocalBusGroupRoleSetRequest,
+    LocalBusGroupSendRequest, LocalBusMcpApprovalDecisionRequest, LocalBusMcpServerAddRequest,
+    LocalBusMcpToolCallRequest, LocalBusMessageAckRequest, LocalBusMessageAttachmentInput,
     LocalBusMessageDeleteRequest, LocalBusMessageReceiptDeliveredRequest,
     LocalBusMessageReceiptReadRequest, LocalBusMessageSubmitRequest, LocalBusObjectDeleteRequest,
     LocalBusObjectGetRequest, LocalBusObjectImportRequest, LocalBusObjectPutRequest,
-    LocalBusObjectShareRequest,
+    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusObjectTransferStatusRequest,
 };
 pub(crate) use std::net::SocketAddr;
 pub(crate) use std::path::PathBuf;

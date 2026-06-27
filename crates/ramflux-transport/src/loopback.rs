@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use ramflux_protocol::{Ack, Cursor, Envelope, Nack, ObjectChunkRequest, canonical_json_bytes};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

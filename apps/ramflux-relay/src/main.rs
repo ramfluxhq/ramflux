@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "itest-http")]
+use std::io::Write as _;
 #[cfg(feature = "itest-http")]
 use std::net::{TcpListener, TcpStream};
 
@@ -272,8 +275,45 @@ fn handle_itest_request(
         &context,
         RelayRequestPeer::Itest,
     )?;
+    capture_itest_relay_json(&request.method, &request.path, &request.body, &response)?;
     write_relay_itest_response(stream, &response)?;
     Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn capture_itest_relay_json(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    response: &RelayResponseValue,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let Ok(capture_path) = std::env::var("RAMFLUX_RELAY_ITEST_CAPTURE_JSON") else {
+        return Ok(());
+    };
+    if !path.starts_with("/relay/v1/object/") {
+        return Ok(());
+    }
+    let response_value = match response {
+        RelayResponseValue::Json { status, value } => {
+            serde_json::json!({ "status": status, "body": value })
+        }
+        RelayResponseValue::Text { status, body } => {
+            serde_json::json!({ "status": status, "body": body })
+        }
+    };
+    let record = serde_json::json!({
+        "method": method,
+        "path": path,
+        "request_body_base64url": ramflux_protocol::encode_base64url(body),
+        "response": response_value,
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(capture_path)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    writeln!(file, "{record}")
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))
 }
 
 fn handle_mesh_request(

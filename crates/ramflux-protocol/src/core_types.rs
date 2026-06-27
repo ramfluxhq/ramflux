@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 use ramflux_core::{
     ClientEventEnvelope as CoreClientEventEnvelope, DeviceId as CoreDeviceId,
     EventId as CoreEventId, UnixMillis,

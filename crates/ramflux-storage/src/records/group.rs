@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::wildcard_imports)]
 use crate::*;
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,92 @@ pub struct GroupSenderKeyCounterRecord {
     pub counter: u64,
     pub message_id: String,
     pub seen_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupRoleChangeWrite {
+    pub group_id: String,
+    pub event_id: String,
+    pub actor_device_id: String,
+    pub target_member_id: String,
+    pub previous_epoch: u64,
+    pub new_group_epoch: u64,
+    pub new_role: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupMemberKickWrite {
+    pub group_id: String,
+    pub event_id: String,
+    pub actor_device_id: String,
+    pub target_member_id: String,
+    pub previous_epoch: u64,
+    pub new_group_epoch: u64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupMemberBanWrite {
+    pub group_id: String,
+    pub event_id: String,
+    pub actor_device_id: String,
+    pub target_member_id: String,
+    pub previous_epoch: u64,
+    pub new_group_epoch: u64,
+    pub reason: String,
+    pub ban_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupMessageDeleteWrite {
+    pub group_id: String,
+    pub event_id: String,
+    pub actor_device_id: String,
+    pub target_message_id: String,
+    pub group_epoch: u64,
+    pub delete_scope: String,
+    pub tombstone_id: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupInviteRecord {
+    pub group_id: String,
+    pub invite_id: String,
+    pub invitee_identity: String,
+    pub invitee_signing_public_key: String,
+    pub invited_role: String,
+    pub inviter_device_id: String,
+    pub invite_epoch: u64,
+    pub expires_at: i64,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupInviteWrite {
+    pub group_id: String,
+    pub event_id: String,
+    pub actor_device_id: String,
+    pub invite_id: String,
+    pub invitee_identity: String,
+    pub invitee_signing_public_key: String,
+    pub invited_role: String,
+    pub group_epoch: u64,
+    pub expires_at: i64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupInviteAcceptWrite {
+    pub group_id: String,
+    pub event_id: String,
+    pub actor_device_id: String,
+    pub invite_id: String,
+    pub invitee_identity: String,
+    pub accepted_role: String,
+    pub previous_epoch: u64,
+    pub new_group_epoch: u64,
+    pub now: i64,
 }
 
 impl GroupKeyEpochState {

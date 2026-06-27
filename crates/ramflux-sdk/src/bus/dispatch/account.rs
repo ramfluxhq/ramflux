@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
@@ -146,13 +147,16 @@ pub(crate) async fn local_bus_account_create(
             body.device_seed,
         )
         .await?;
+    client
+        .cache_verified_device_manifest(&gateway, &body.principal_commitment, "account.create")
+        .await?;
     let engine = client.connect_gateway_session(gateway).await?;
     let manifest = LocalBusPersistedAccount::from_create_request(&body);
     write_local_bus_account_manifest(&data_root, &manifest)?;
     let response = LocalBusAccountCreateResponse {
         local_account_id: body.local_account_id.clone(),
         principal_id: body.principal_id,
-        principal_commitment: body.principal_commitment,
+        principal_commitment: body.principal_commitment.clone(),
         device_id: body.device_id.clone(),
         target_delivery_id: body.target_delivery_id,
         client_mode: body.client_mode,
@@ -161,7 +165,10 @@ pub(crate) async fn local_bus_account_create(
     };
     let local_account_id = body.local_account_id;
     state.active_account_id = Some(local_account_id.clone());
-    state.accounts.insert(local_account_id, LocalBusAccountState::new(client, engine));
+    state.accounts.insert(
+        local_account_id,
+        LocalBusAccountState::new(client, engine, body.principal_commitment),
+    );
     Ok(response)
 }
 

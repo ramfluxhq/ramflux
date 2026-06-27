@@ -3,7 +3,7 @@ name = "ramflux-core"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-license = "Apache-2.0"
+license.workspace = true
 repository = "https://github.com/ramflux/ramflux-core"
 
 [dependencies]
@@ -31,6 +31,3 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
-
-[package.metadata.cargo-machete]
-ignored = ["arc-swap", "parking_lot", "tracing", "uuid"]

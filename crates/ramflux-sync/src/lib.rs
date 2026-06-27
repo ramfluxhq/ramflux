@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 //! MVP-3 sync, MCP, A2UI, franking, and WebRTC local state machines.
 
 mod a2ui;

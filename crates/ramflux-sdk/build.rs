@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 fn main() {
     println!("cargo:rerun-if-changed=src/c_abi");
     println!("cargo:rerun-if-changed=cbindgen.toml");

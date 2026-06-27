@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
+use rusqlite::OptionalExtension;
 
 impl AccountDb {
     pub fn send_direct_message(
@@ -48,9 +50,25 @@ impl AccountDb {
         message: DirectMessageWrite<'_>,
     ) -> Result<(), StorageError> {
         self.ensure_identity_can_send(message.sender_id)?;
+        self.insert_direct_message_projection(message)
+    }
+
+    /// # Errors
+    /// Returns an error when validation, serialization, storage, or state checks fail.
+    pub fn import_direct_message_projection(
+        &self,
+        message: DirectMessageWrite<'_>,
+    ) -> Result<(), StorageError> {
+        self.insert_direct_message_projection(message)
+    }
+
+    fn insert_direct_message_projection(
+        &self,
+        message: DirectMessageWrite<'_>,
+    ) -> Result<(), StorageError> {
         let metadata_json = serde_json::to_vec(message.metadata)?;
-        self.connection.execute(
-            "INSERT INTO direct_message_projection
+        let inserted = self.connection.execute(
+            "INSERT OR IGNORE INTO direct_message_projection
                 (conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
             params![
@@ -62,6 +80,17 @@ impl AccountDb {
                 message.created_at
             ],
         )?;
+        if inserted == 0 {
+            let Some(existing) = self.direct_message_by_id(message.message_id)? else {
+                return Err(StorageError::MessageIdConflict(message.message_id.to_owned()));
+            };
+            if existing.conversation_id != message.conversation_id
+                || existing.sender_id != message.sender_id
+                || existing.encrypted_body != message.encrypted_body
+            {
+                return Err(StorageError::MessageIdConflict(message.message_id.to_owned()));
+            }
+        }
         Ok(())
     }
 
@@ -101,7 +130,7 @@ impl AccountDb {
         conversation_id: &str,
     ) -> Result<Vec<DirectMessageRecord>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted
+            "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, created_at
                FROM direct_message_projection
               WHERE conversation_id = ?1
               ORDER BY created_at ASC, message_id ASC",
@@ -121,13 +150,165 @@ impl AccountDb {
                     )
                 })?,
                 deleted: row.get::<_, i64>(5)? != 0,
+                created_at: row.get(6)?,
+                receipts: Vec::new(),
             })
         })?;
         let mut messages = Vec::new();
         for row in rows {
-            messages.push(row?);
+            let mut message = row?;
+            message.receipts =
+                self.message_receipts(&message.conversation_id, &message.message_id)?;
+            messages.push(message);
         }
         Ok(messages)
+    }
+
+    /// # Errors
+    /// Returns an error when storage lookup fails.
+    pub fn all_direct_messages(&self) -> Result<Vec<DirectMessageRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, created_at
+               FROM direct_message_projection
+              ORDER BY created_at ASC, message_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let metadata_json: Vec<u8> = row.get(4)?;
+            Ok(DirectMessageRecord {
+                conversation_id: row.get(0)?,
+                message_id: row.get(1)?,
+                sender_id: row.get(2)?,
+                encrypted_body: row.get(3)?,
+                metadata: serde_json::from_slice(&metadata_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Blob,
+                        Box::new(err),
+                    )
+                })?,
+                deleted: row.get::<_, i64>(5)? != 0,
+                created_at: row.get(6)?,
+                receipts: Vec::new(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
+    }
+
+    /// # Errors
+    /// Returns an error when storage lookup fails.
+    pub fn direct_message_by_id(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<DirectMessageRecord>, StorageError> {
+        let mut message = self
+            .connection
+            .query_row(
+                "SELECT conversation_id, message_id, sender_id, encrypted_body, metadata_json, deleted, created_at
+                   FROM direct_message_projection
+                  WHERE message_id = ?1",
+                params![message_id],
+                |row| {
+                    let metadata_json: Vec<u8> = row.get(4)?;
+                    Ok(DirectMessageRecord {
+                        conversation_id: row.get(0)?,
+                        message_id: row.get(1)?,
+                        sender_id: row.get(2)?,
+                        encrypted_body: row.get(3)?,
+                        metadata: serde_json::from_slice(&metadata_json).map_err(|err| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Blob,
+                                Box::new(err),
+                            )
+                        })?,
+                        deleted: row.get::<_, i64>(5)? != 0,
+                        created_at: row.get(6)?,
+                        receipts: Vec::new(),
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(message) = message.as_mut() {
+            message.receipts =
+                self.message_receipts(&message.conversation_id, &message.message_id)?;
+        }
+        Ok(message)
+    }
+
+    fn message_receipts(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Vec<MessageReceiptState>, StorageError> {
+        let message_created_at = self.message_created_at(conversation_id, message_id)?;
+        let mut receipts = BTreeMap::<String, MessageReceiptState>::new();
+        let mut delivered = self.connection.prepare(
+            "SELECT receiver_device_id, delivered_at
+               FROM conversation_delivery_state AS delivery
+               JOIN direct_message_projection AS marker
+                 ON marker.conversation_id = delivery.conversation_id
+                AND marker.message_id = delivery.delivered_through_message_id
+              WHERE delivery.conversation_id = ?1
+                AND marker.created_at >= ?2",
+        )?;
+        let delivered_rows = delivered
+            .query_map(params![conversation_id, message_created_at], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+        for row in delivered_rows {
+            let (device_id, delivered_at) = row?;
+            receipts.insert(
+                device_id.clone(),
+                MessageReceiptState {
+                    device_id,
+                    state: "delivered".to_owned(),
+                    delivered_at: Some(delivered_at),
+                    read_at: None,
+                },
+            );
+        }
+        let mut read = self.connection.prepare(
+            "SELECT reader_id, read_at
+               FROM conversation_read_state AS read_state
+               JOIN direct_message_projection AS marker
+                 ON marker.conversation_id = read_state.conversation_id
+                AND marker.message_id = read_state.read_through_message_id
+              WHERE read_state.conversation_id = ?1
+                AND marker.created_at >= ?2",
+        )?;
+        let read_rows = read.query_map(params![conversation_id, message_created_at], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in read_rows {
+            let (device_id, read_at) = row?;
+            receipts
+                .entry(device_id.clone())
+                .and_modify(|receipt| {
+                    "read".clone_into(&mut receipt.state);
+                    receipt.read_at = Some(read_at);
+                })
+                .or_insert(MessageReceiptState {
+                    device_id,
+                    state: "read".to_owned(),
+                    delivered_at: None,
+                    read_at: Some(read_at),
+                });
+        }
+        Ok(receipts.into_values().collect())
+    }
+
+    pub(crate) fn message_created_at(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<i64, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT created_at
+               FROM direct_message_projection
+              WHERE conversation_id = ?1 AND message_id = ?2",
+            params![conversation_id, message_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// # Errors

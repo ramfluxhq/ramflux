@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+
 #![allow(unused_imports)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
@@ -9,6 +10,7 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
     match command.action {
         DmAction::Send(send) => {
             let federation = rf_federation_route(&send)?;
+            let attachments = rf_dm_attachments(&send)?;
             let request = LocalBusMessageSubmitRequest {
                 conversation_id: send.conversation,
                 message_id: send.message,
@@ -16,6 +18,7 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 source_principal_id: send.source_principal,
                 sender_id: send.sender,
                 recipient_device_id: send.recipient_device,
+                recipient_principal_commitment: send.recipient_principal_commitment,
                 target_delivery_id: send.target,
                 encrypted_body_base64: String::new(),
                 plaintext_body_base64: Some(ramflux_protocol::encode_base64url(
@@ -25,37 +28,15 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 ttl: send
                     .ttl
                     .min(u32::try_from(ramflux_protocol::REPLAY_WINDOW_SECONDS).unwrap_or(300)),
+                attachments,
                 federation,
             };
             print_json(
                 &bus.request(Some(send.account), "message", "message.submit", &request).await?,
             )
         }
-        DmAction::List(selector) | DmAction::Read(selector) => {
-            let request = LocalBusConversationRequest { conversation_id: selector.conversation };
-            let received = bus
-                .request(
-                    Some(selector.account.clone()),
-                    "message",
-                    "message.receive",
-                    &serde_json::json!({
-                        "limit": 100,
-                        "conversation_id": request.conversation_id,
-                    }),
-                )
-                .await?;
-            let mut value =
-                bus.request(Some(selector.account), "message", "message.read", &request).await?;
-            value["gateway_entries"] = received
-                .get("entries")
-                .cloned()
-                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-            value["decrypted_messages"] = received
-                .get("decrypted_messages")
-                .cloned()
-                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-            print_json(&with_message_plaintext(value))
-        }
+        DmAction::List(selector) => handle_dm_list(&mut bus, selector).await,
+        DmAction::Read(read) => handle_dm_read(&mut bus, read).await,
         DmAction::Ack(ack) => {
             let envelope_id = rf_dm_ack_envelope_id(&ack)?;
             let request = LocalBusMessageAckRequest {
@@ -82,6 +63,83 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
     }
 }
 
+async fn handle_dm_list(
+    bus: &mut LocalBusClient,
+    selector: ConversationSelector,
+) -> Result<(), RfError> {
+    let request = LocalBusConversationRequest { conversation_id: selector.conversation };
+    let received = bus
+        .request(
+            Some(selector.account.clone()),
+            "message",
+            "message.receive",
+            &serde_json::json!({
+                "limit": 100,
+                "conversation_id": request.conversation_id,
+                "auto_fetch_attachments": false,
+            }),
+        )
+        .await?;
+    let mut value =
+        bus.request(Some(selector.account), "message", "message.read", &request).await?;
+    value["gateway_entries"] =
+        received.get("entries").cloned().unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    value["decrypted_messages"] = received
+        .get("decrypted_messages")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    print_json(&with_message_plaintext(value))
+}
+
+async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), RfError> {
+    let request = LocalBusConversationRequest { conversation_id: read.conversation };
+    let received = bus
+        .request(
+            Some(read.account.clone()),
+            "message",
+            "message.receive",
+            &serde_json::json!({
+                "limit": 100,
+                "conversation_id": request.conversation_id,
+                "auto_fetch_attachments": true,
+                "relay_service_key_base64": read.relay_service_key,
+            }),
+        )
+        .await?;
+    let mut value = bus.request(Some(read.account), "message", "message.read", &request).await?;
+    value["gateway_entries"] =
+        received.get("entries").cloned().unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    value["decrypted_messages"] = received
+        .get("decrypted_messages")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    print_json(&with_message_plaintext(value))
+}
+
+fn rf_dm_attachments(send: &DmSend) -> Result<Vec<LocalBusMessageAttachmentInput>, RfError> {
+    if send.attach.is_empty() {
+        return Ok(Vec::new());
+    }
+    let relay_endpoint = send
+        .relay_url
+        .clone()
+        .ok_or_else(|| RfError::Message("dm send --attach requires --relay-url".to_owned()))?;
+    send.attach
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let bytes = std::fs::read(path)?;
+            Ok(LocalBusMessageAttachmentInput {
+                object_id: format!("attachment:{}:{index}", send.message),
+                plaintext_base64: ramflux_protocol::encode_base64url(&bytes),
+                chunk_size: send.attachment_chunk_size,
+                relay_endpoint: relay_endpoint.clone(),
+                relay_service_key_base64: send.relay_service_key.clone(),
+            })
+        })
+        .collect()
+}
+
 async fn handle_dm_receipt(
     bus: &mut LocalBusClient,
     command: DmReceiptCommand,
@@ -92,6 +150,8 @@ async fn handle_dm_receipt(
                 conversation_id: delivered.conversation,
                 message_id: delivered.message,
                 receiver_device_id: delivered.receiver_device,
+                recipient_device_id: delivered.recipient_device,
+                target_delivery_id: delivered.target,
                 delivered_at: delivered.delivered_at,
                 ttl_seconds: Some(delivered.ttl_secs),
             };
@@ -110,6 +170,9 @@ async fn handle_dm_receipt(
                 conversation_id: read.conversation,
                 message_id: read.message,
                 reader_id: read.reader,
+                recipient_device_id: read.recipient_device,
+                target_delivery_id: read.target,
+                read_at: read.read_at,
             };
             print_json(
                 &bus.request(Some(read.account), "message", "message.receipt.read", &request)
