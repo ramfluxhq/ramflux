@@ -13,6 +13,17 @@ permissions:
   contents: read
 
 jobs:
+  provenance:
+    name: Provenance gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+
+      - name: SPDX headers and crate licenses
+        run: ./scripts/check-license-headers.sh
+
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
