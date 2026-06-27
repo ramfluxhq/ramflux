@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn mesh_server_close_notify_and_client_read_complete_body()
     -> Result<(), Box<dyn std::error::Error>> {
-        let server_tls = test_mesh_tls_config("router");
+        let server_tls = test_mesh_tls_config("router")?;
         let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
         let endpoint = server.local_addr()?.to_string();
         let server_thread = thread::spawn(move || -> Result<(), String> {
@@ -695,7 +695,7 @@ mod tests {
         let body: serde_json::Value = mesh_http_get_json(
             &endpoint,
             "/healthz",
-            &test_mesh_tls_config("gateway"),
+            &test_mesh_tls_config("gateway")?,
             "ramflux-router",
         )?;
         assert_eq!(body["status"], "ok");
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn pooled_mesh_client_reuses_same_peer_connection() -> Result<(), Box<dyn std::error::Error>> {
-        let server_tls = test_mesh_tls_config("router");
+        let server_tls = test_mesh_tls_config("router")?;
         let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
         let endpoint = server.local_addr()?.to_string();
         let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -731,7 +731,7 @@ mod tests {
             crate::close_mesh_server_stream(&mut accepted).map_err(|error| error.to_string())
         });
         let client = MeshHttpClient::new();
-        let client_tls = test_mesh_tls_config("gateway");
+        let client_tls = test_mesh_tls_config("gateway")?;
         let first: serde_json::Value =
             client.get_json(&endpoint, "/healthz", &client_tls, "ramflux-router")?;
         let second: serde_json::Value =
@@ -744,8 +744,9 @@ mod tests {
     }
 
     #[test]
-    fn mesh_pool_key_separates_server_name_and_peer_roots() {
-        let tls = test_mesh_tls_config("gateway");
+    fn mesh_pool_key_separates_server_name_and_peer_roots() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let tls = test_mesh_tls_config("gateway")?;
         let local_router = mesh_http_pool_key("ramflux-router:7443", "ramflux-router", &tls, None);
         let local_federation =
             mesh_http_pool_key("ramflux-router:7443", "ramflux-federation", &tls, None);
@@ -758,6 +759,7 @@ mod tests {
         let pinned_b = mesh_http_pool_key("peer:7443", "ramflux-federation", &tls, Some(&peer_b));
         assert_ne!(pinned_a, pinned_b);
         assert_ne!(local_router, pinned_a);
+        Ok(())
     }
 
     #[test]
@@ -768,7 +770,7 @@ mod tests {
 
     #[test]
     fn pooled_mesh_client_rebuilds_stale_connection() -> Result<(), Box<dyn std::error::Error>> {
-        let server_tls = test_mesh_tls_config("router");
+        let server_tls = test_mesh_tls_config("router")?;
         let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
         let endpoint = server.local_addr()?.to_string();
         let server_thread = thread::spawn(move || -> Result<(), String> {
@@ -793,7 +795,7 @@ mod tests {
             Ok(())
         });
         let client = MeshHttpClient::new();
-        let client_tls = test_mesh_tls_config("gateway");
+        let client_tls = test_mesh_tls_config("gateway")?;
         let first: serde_json::Value =
             client.get_json(&endpoint, "/healthz", &client_tls, "ramflux-router")?;
         let second: serde_json::Value =
@@ -919,7 +921,7 @@ mod tests {
             }
         });
         let started = Instant::now();
-        let tls = test_mesh_tls_config("gateway");
+        let tls = test_mesh_tls_config("gateway")?;
         let endpoint = addr.to_string();
         let rejected = mesh_http_json_request_with_timeouts(MeshHttpClientRequest {
             method: "GET",
@@ -939,14 +941,113 @@ mod tests {
         Ok(())
     }
 
-    fn test_mesh_tls_config(service: &str) -> MeshTlsConfig {
-        let deploy_certs =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ramflux-deploy/certs").join(service);
-        MeshTlsConfig {
-            ca_cert: deploy_certs.join("ca.pem"),
-            service_cert: deploy_certs.join(format!("{service}.pem")),
-            service_key: deploy_certs.join(format!("{service}-key.pem")),
+    /// Process-wide shared test CA directory, generated once on first use.
+    ///
+    /// Both the mesh server (`router`) and client (`gateway`) certificates are
+    /// signed by this single CA so mutual TLS trust holds across separate
+    /// `test_mesh_tls_config` calls without reading any on-disk deploy certs.
+    fn shared_test_ca_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        static CA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+        let mut guard = CA_DIR.lock().map_err(|error| error.to_string())?;
+        if let Some(dir) = guard.as_ref() {
+            return Ok(dir.clone());
         }
+        let dir = std::env::temp_dir()
+            .join(format!("ramflux_transport_mesh_shared_ca_{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let ca_key = dir.join("ca-key.pem");
+        let ca_cert = dir.join("ca.pem");
+        if !ca_cert.exists() {
+            run_openssl(&["genpkey", "-algorithm", "ED25519", "-out"], &ca_key)?;
+            run_openssl(
+                &[
+                    "req",
+                    "-x509",
+                    "-new",
+                    "-key",
+                    path_str(&ca_key)?,
+                    "-out",
+                    path_str(&ca_cert)?,
+                    "-days",
+                    "30",
+                    "-subj",
+                    "/CN=Ramflux Test Mesh CA",
+                ],
+                Path::new(""),
+            )?;
+        }
+        *guard = Some(dir.clone());
+        Ok(dir)
+    }
+
+    /// Generate a mesh TLS config for `service` at runtime, signed by the shared
+    /// process-wide CA so server (`router`) and client (`gateway`) interoperate.
+    ///
+    /// Layout-independent: requires no on-disk deploy certs, only `openssl`.
+    fn test_mesh_tls_config(
+        service: &str,
+    ) -> Result<MeshTlsConfig, Box<dyn std::error::Error>> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let ca_dir = shared_test_ca_dir()?;
+        let ca_cert = ca_dir.join("ca.pem");
+        let ca_key = ca_dir.join("ca-key.pem");
+
+        // Unique per-call subdir so concurrently running tests never race on the
+        // same on-disk files; the shared CA above is what ties them together.
+        let dir = ca_dir.join(format!("{service}_{seq}"));
+        std::fs::create_dir_all(&dir)?;
+        let service_key = dir.join(format!("{service}-key.pem"));
+        let service_csr = dir.join(format!("{service}.csr"));
+        let service_cert = dir.join(format!("{service}.pem"));
+        let ext = dir.join(format!("{service}.ext"));
+
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out"], &service_key)?;
+        let subject = format!("/CN=ramflux-{service}");
+        run_openssl(
+            &[
+                "req",
+                "-new",
+                "-key",
+                path_str(&service_key)?,
+                "-out",
+                path_str(&service_csr)?,
+                "-subj",
+                &subject,
+            ],
+            Path::new(""),
+        )?;
+        std::fs::write(
+            &ext,
+            format!(
+                "subjectAltName = DNS:ramflux-{service}, DNS:localhost\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
+            ),
+        )?;
+        // Unique serial per cert avoids racing on a shared `-CAcreateserial` file.
+        let serial = format!("0x{seq:032x}");
+        run_openssl(
+            &[
+                "x509",
+                "-req",
+                "-in",
+                path_str(&service_csr)?,
+                "-CA",
+                path_str(&ca_cert)?,
+                "-CAkey",
+                path_str(&ca_key)?,
+                "-set_serial",
+                &serial,
+                "-out",
+                path_str(&service_cert)?,
+                "-days",
+                "30",
+                "-extfile",
+                path_str(&ext)?,
+            ],
+            Path::new(""),
+        )?;
+        Ok(MeshTlsConfig { ca_cert, service_cert, service_key })
     }
 
     struct TestPeerCerts {
