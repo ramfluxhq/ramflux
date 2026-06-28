@@ -1,0 +1,22 @@
+# Runtime-only image for realnet integration tests (Option B:
+# external host compile + thin runtime image).
+#
+# The 7 node binaries are compiled OUTSIDE Docker on the host's persistent,
+# incremental cargo cache, then staged into deploy/itest-bin/ by
+# scripts/run-realnet.sh. This image just copies the prebuilt binary in.
+# Rationale: an in-Docker `COPY . . && cargo build --bin X` recompiles the
+# FULL dependency graph from scratch inside 7 separate image builds every run
+# (~50min, zero cache -- any source change busts the COPY layer). With Option B
+# the dep graph compiles ONCE on the host and only changed crates recompile;
+# the image build is a near-instant binary copy.
+#
+# GLIBC: the base MUST match the build host's glibc. The reference host is
+# Debian 13 (trixie, glibc 2.41), so the runtime base is debian:trixie-slim.
+# A bookworm-slim base (glibc 2.36) would fail at runtime with "GLIBC_2.xx not
+# found". Adjust the base image if your build host uses a different glibc.
+FROM debian:trixie-slim
+ARG BIN
+ENV RAMFLUX_BIN="${BIN}"
+COPY itest-bin/${BIN} /usr/local/bin/${BIN}
+RUN chmod +x "/usr/local/bin/${BIN}"
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/${RAMFLUX_BIN} \"$@\"", "--"]

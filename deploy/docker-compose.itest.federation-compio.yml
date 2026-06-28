@@ -1,0 +1,11 @@
+services:
+  ramflux-federation:
+    environment:
+      RAMFLUX_FEDERATION_MESH_RUNTIME: "compio"
+      RUST_LOG: "${RAMFLUX_FEDERATION_RUST_LOG:-warn}"
+    security_opt:
+      - seccomp=./seccomp/ramflux-io-uring.json
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1

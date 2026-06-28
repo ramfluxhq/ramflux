@@ -1,0 +1,11 @@
+services:
+  ramflux-notify:
+    environment:
+      RAMFLUX_NOTIFY_RUNTIME: "compio"
+      RUST_LOG: "${RAMFLUX_NOTIFY_RUST_LOG:-warn}"
+    security_opt:
+      - seccomp=./seccomp/ramflux-io-uring.json
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1

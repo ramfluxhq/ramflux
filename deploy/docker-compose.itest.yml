@@ -1,0 +1,220 @@
+services:
+  ramflux-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-gateway
+    command: ["--config", "/etc/ramflux/config/gateway.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_ITEST_PERF: "${RAMFLUX_ITEST_PERF:-0}"
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
+      RAMFLUX_ITEST_GATEWAY_HTTP_ADDR: "0.0.0.0:18081"
+      RAMFLUX_ITEST_GATEWAY_QUIC_ADDR: "0.0.0.0:18443"
+      RAMFLUX_ITEST_GATEWAY_TCP_ADDR: "0.0.0.0:18443"
+      RAMFLUX_ITEST_GATEWAY_FRAME_DELAY_MS: "${RAMFLUX_ITEST_GATEWAY_FRAME_DELAY_MS:-0}"
+      RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON: "${RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON:-/tmp/ramflux-gateway-itest-capture.jsonl}"
+    volumes:
+      - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/gateway:/etc/ramflux/mesh:ro
+      - gateway-redb:/var/lib/ramflux/gateway
+    depends_on: [ramflux-router, ramflux-retention]
+    ports:
+      - "${RAMFLUX_ITEST_GATEWAY_HTTP_PORT:-18081}:18081"
+      - "${RAMFLUX_ITEST_GATEWAY_QUIC_PORT:-18443}:18443/udp"
+      - "${RAMFLUX_ITEST_GATEWAY_TCP_PORT:-18443}:18443/tcp"
+    networks:
+      default: {}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-gateway", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+  ramflux-router:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-router
+    command: ["--config", "/etc/ramflux/config/router.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_ITEST_PERF: "${RAMFLUX_ITEST_PERF:-0}"
+      RAMFLUX_ITEST_ROUTER_HTTP_ADDR: "0.0.0.0:18080"
+    volumes:
+      - ./config/router.toml:/etc/ramflux/config/router.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/router:/etc/ramflux/mesh:ro
+      - router-redb:/var/lib/ramflux/router
+    ports:
+      - "${RAMFLUX_ITEST_ROUTER_HTTP_PORT:-18080}:18080"
+      - "${RAMFLUX_ITEST_ROUTER_MESH_PORT:-17443}:7443"
+    networks:
+      default: {}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-router", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+  ramflux-notify:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-notify
+    command: ["--config", "/etc/ramflux/config/notify.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
+      RAMFLUX_ITEST_NOTIFY_HTTP_ADDR: "0.0.0.0:18083"
+    volumes:
+      - ./config/notify.toml:/etc/ramflux/config/notify.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/notify:/etc/ramflux/mesh:ro
+      - notify-redb:/var/lib/ramflux/notify
+    ports:
+      - "${RAMFLUX_ITEST_NOTIFY_HTTP_PORT:-18083}:18083"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default: {}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-notify", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+  ramflux-federation:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-federation
+    command: ["--config", "/etc/ramflux/config/federation.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_ITEST_PERF: "${RAMFLUX_ITEST_PERF:-0}"
+      RAMFLUX_ITEST_FEDERATION_HTTP_ADDR: "0.0.0.0:18082"
+      RAMFLUX_FEDERATION_NODE_ID: "${RAMFLUX_FEDERATION_NODE_ID:-localhost}"
+      RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RAMFLUX_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
+      RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL: "${RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
+      RAMFLUX_FEDERATION_FORCE_TCP_MESH: "${RAMFLUX_FEDERATION_FORCE_TCP_MESH:-0}"
+      RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "${RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK:-0}"
+      RAMFLUX_FEDERATION_DISABLE_QUIC_LISTENER: "${RAMFLUX_FEDERATION_DISABLE_QUIC_LISTENER:-0}"
+    volumes:
+      - ./config/federation.toml:/etc/ramflux/config/federation.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/federation:/etc/ramflux/mesh:ro
+      - federation-redb:/var/lib/ramflux/federation
+    ports:
+      - "${RAMFLUX_ITEST_FEDERATION_HTTP_PORT:-18082}:18082"
+      - "${RAMFLUX_ITEST_FEDERATION_MESH_PORT:-18482}:7443/tcp"
+      - "${RAMFLUX_ITEST_FEDERATION_MESH_PORT:-18482}:7443/udp"
+    networks:
+      default: {}
+      ramflux-itest-mesh:
+        aliases:
+          - "${RAMFLUX_ITEST_FEDERATION_DNS_ALIAS:-ramflux-federation}"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-federation", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+  ramflux-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-relay
+    command: ["--config", "/etc/ramflux/config/relay.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_ITEST_RELAY_HTTP_ADDR: "0.0.0.0:18084"
+      RAMFLUX_ITEST_RELAY_MEDIA_UDP_ADDR: "0.0.0.0:19000"
+      RAMFLUX_RELAY_ITEST_CAPTURE_JSON: "${RAMFLUX_RELAY_ITEST_CAPTURE_JSON:-/tmp/ramflux-relay-itest-capture.jsonl}"
+    volumes:
+      - ./config/relay.toml:/etc/ramflux/config/relay.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/relay:/etc/ramflux/mesh:ro
+      - relay-redb:/var/lib/ramflux/relay
+    ports:
+      - "${RAMFLUX_ITEST_RELAY_HTTP_PORT:-18084}:18084"
+      - "${RAMFLUX_ITEST_RELAY_MEDIA_UDP_PORT:-19000}:19000/udp"
+    networks:
+      default: {}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-relay", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+  ramflux-signaling:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-signaling
+    command: ["--config", "/etc/ramflux/config/signaling.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_ITEST_SIGNALING_TURN_UDP_ADDR: "0.0.0.0:3478"
+    volumes:
+      - ./config/signaling.toml:/etc/ramflux/config/signaling.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/signaling:/etc/ramflux/mesh:ro
+      - signaling-redb:/var/lib/ramflux/signaling
+    ports:
+      - "${RAMFLUX_ITEST_SIGNALING_TURN_UDP_PORT:-3478}:3478/udp"
+      - "${RAMFLUX_ITEST_SIGNALING_TURN_TCP_PORT:-3478}:3478/tcp"
+    networks:
+      default: {}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-signaling", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+  ramflux-retention:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-retention
+    command: ["--config", "/etc/ramflux/config/retention.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_ITEST_RETENTION_HTTP_ADDR: "0.0.0.0:18087"
+    volumes:
+      - ./config/retention.toml:/etc/ramflux/config/retention.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/retention:/etc/ramflux/mesh:ro
+      - retention-redb:/var/lib/ramflux/retention
+    ports:
+      - "${RAMFLUX_ITEST_RETENTION_HTTP_PORT:-18087}:18087"
+    networks:
+      default: {}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-retention", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+volumes:
+  gateway-redb: {}
+  router-redb: {}
+  notify-redb: {}
+  federation-redb: {}
+  relay-redb: {}
+  signaling-redb: {}
+  retention-redb: {}
+
+networks:
+  default: {}
+  ramflux-itest-mesh:
+    name: "${RAMFLUX_ITEST_SHARED_NETWORK:-ramflux-itest-mesh}"
+    external: true
