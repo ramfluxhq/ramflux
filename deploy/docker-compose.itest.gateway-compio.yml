@@ -1,0 +1,11 @@
+services:
+  ramflux-gateway:
+    environment:
+      RAMFLUX_GATEWAY_QUIC_RUNTIME: "compio"
+      RUST_LOG: "${RAMFLUX_GATEWAY_RUST_LOG:-warn}"
+    security_opt:
+      - seccomp=./seccomp/ramflux-io-uring.json
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1

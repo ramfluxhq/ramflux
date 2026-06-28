@@ -2,4 +2,6 @@
 !/certs/.gitkeep
 !/certs/ca.pem
 /prod-bin/
+/itest-bin/
+/.itest-node-certs/
 /.env

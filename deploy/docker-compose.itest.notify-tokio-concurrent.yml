@@ -1,0 +1,4 @@
+services:
+  ramflux-notify:
+    environment:
+      RAMFLUX_NOTIFY_RUNTIME: "tokio-concurrent"
