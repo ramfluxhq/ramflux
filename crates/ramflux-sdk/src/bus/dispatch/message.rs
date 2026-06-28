@@ -58,6 +58,12 @@ pub(crate) async fn dispatch_message_bus_request(
                 "rejected": rejected,
             })))
         }
+        "conversation.list" => {
+            let account_id = request_account_id(request)?;
+            let account = local_bus_account(state, account_id)?;
+            let conversations = account.client.conversation_list()?;
+            Ok(local_bus_ok(serde_json::json!({ "conversations": conversations })))
+        }
         "conversation.disappearing.set" => {
             let account_id = request_account_id(request)?;
             let account = local_bus_account(state, account_id)?;

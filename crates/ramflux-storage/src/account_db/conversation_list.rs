@@ -127,6 +127,55 @@ impl AccountDb {
         self.read_conversation_list_state(conversation_id)
     }
 
+    /// Lists every conversation known to this account, newest activity first.
+    ///
+    /// The set is the union of conversations that have at least one message
+    /// (`direct_message_projection`) and conversations that carry list state
+    /// (`conversation_list_state`, e.g. archived/pinned with no messages yet).
+    ///
+    /// # Errors
+    /// Returns an error when the underlying query fails.
+    pub fn conversation_summaries(&self) -> Result<Vec<ConversationSummaryRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT ids.conversation_id AS conversation_id,
+                    (SELECT COUNT(*)
+                       FROM direct_message_projection m
+                      WHERE m.conversation_id = ids.conversation_id AND m.deleted = 0)
+                        AS message_count,
+                    (SELECT m.message_id
+                       FROM direct_message_projection m
+                      WHERE m.conversation_id = ids.conversation_id AND m.deleted = 0
+                      ORDER BY m.created_at DESC, m.message_id DESC
+                      LIMIT 1) AS last_message_id,
+                    (SELECT m.created_at
+                       FROM direct_message_projection m
+                      WHERE m.conversation_id = ids.conversation_id AND m.deleted = 0
+                      ORDER BY m.created_at DESC, m.message_id DESC
+                      LIMIT 1) AS last_activity_at,
+                    ls.archived AS archived,
+                    ls.pin_order AS pin_order
+               FROM (
+                    SELECT conversation_id FROM direct_message_projection
+                    UNION
+                    SELECT conversation_id FROM conversation_list_state
+               ) AS ids
+               LEFT JOIN conversation_list_state ls
+                      ON ls.conversation_id = ids.conversation_id
+              ORDER BY last_activity_at DESC, conversation_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ConversationSummaryRecord {
+                conversation_id: row.get(0)?,
+                message_count: row.get::<_, u64>(1)?,
+                last_message_id: row.get(2)?,
+                last_activity_at: row.get(3)?,
+                is_archived: row.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0,
+                pin_order: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
+    }
+
     pub(crate) fn ensure_conversation_list_state(
         &self,
         conversation_id: &str,

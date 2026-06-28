@@ -17,6 +17,23 @@ pub struct ConversationProjection {
     pub cleared_at: Option<i64>,
 }
 
+/// Read-only summary of a single conversation for the account-wide list view.
+///
+/// Only carries metadata the schema actually persists: the conversation id,
+/// derived message activity from `direct_message_projection`, and list flags
+/// from `conversation_list_state`. There is no peer/display-name column in the
+/// schema and no reader-scoped unread count without a reader id, so neither is
+/// included here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationSummaryRecord {
+    pub conversation_id: String,
+    pub message_count: u64,
+    pub last_message_id: Option<String>,
+    pub last_activity_at: Option<i64>,
+    pub is_archived: bool,
+    pub pin_order: Option<i64>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ConversationListState {
     pub conversation_id: String,

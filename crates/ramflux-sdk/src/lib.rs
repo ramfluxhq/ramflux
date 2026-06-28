@@ -54,6 +54,7 @@ pub use bus::{
 };
 pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;
+pub use client::conversation::ConversationSummary;
 pub use client::recovery::{
     SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember, recovery_member_public_key_base64url,
 };

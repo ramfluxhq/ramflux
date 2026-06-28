@@ -714,3 +714,40 @@ fn group_sender_key_counter_seen_rejects_replay() -> Result<(), StorageError> {
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
+
+#[test]
+fn conversation_summaries_lists_real_conversations_with_activity() -> Result<(), StorageError> {
+    let (root, mut db) = test_db("conversation-summaries")?;
+    db.set_clock(AccountClock::sequence(1_900_000_000));
+    db.send_direct_message("conv_alpha", "msg_alpha_1", "alice", b"one")?;
+    db.send_direct_message("conv_alpha", "msg_alpha_2", "alice", b"two")?;
+    db.send_direct_message("conv_beta", "msg_beta_1", "bob", b"hi")?;
+    // Conversation list state without any message still shows up.
+    db.set_conversation_archived("conv_gamma", true)?;
+
+    let summaries = db.conversation_summaries()?;
+    let ids: Vec<&str> = summaries.iter().map(|summary| summary.conversation_id.as_str()).collect();
+    assert!(ids.contains(&"conv_alpha"));
+    assert!(ids.contains(&"conv_beta"));
+    assert!(ids.contains(&"conv_gamma"));
+
+    assert!(summaries.iter().any(|summary| summary.conversation_id == "conv_alpha"
+        && summary.message_count == 2
+        && summary.last_message_id.as_deref() == Some("msg_alpha_2")
+        && summary.last_activity_at.is_some()
+        && !summary.is_archived));
+
+    assert!(summaries.iter().any(|summary| summary.conversation_id == "conv_gamma"
+        && summary.message_count == 0
+        && summary.last_message_id.is_none()
+        && summary.last_activity_at.is_none()
+        && summary.is_archived));
+
+    // Newest activity sorts first; the message-less conversation sinks to the end.
+    assert_eq!(
+        summaries.last().map(|summary| summary.conversation_id.as_str()),
+        Some("conv_gamma")
+    );
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}

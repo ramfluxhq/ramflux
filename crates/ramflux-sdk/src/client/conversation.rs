@@ -5,7 +5,49 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+/// Read-only, account-wide summary of a conversation for list views.
+///
+/// Fields mirror exactly what the storage schema persists: the conversation
+/// id, derived message activity, and the archived/pinned list flags. The
+/// schema has no peer/display-name column and no reader-scoped unread count
+/// without a reader id, so neither is exposed here.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ConversationSummary {
+    pub conversation_id: String,
+    pub message_count: u64,
+    pub last_message_id: Option<String>,
+    pub last_activity_at: Option<i64>,
+    pub is_archived: bool,
+    pub pin_order: Option<i64>,
+}
+
+impl From<ConversationSummaryRecord> for ConversationSummary {
+    fn from(record: ConversationSummaryRecord) -> Self {
+        Self {
+            conversation_id: record.conversation_id,
+            message_count: record.message_count,
+            last_message_id: record.last_message_id,
+            last_activity_at: record.last_activity_at,
+            is_archived: record.is_archived,
+            pin_order: record.pin_order,
+        }
+    }
+}
+
 impl RamfluxClient {
+    /// Lists every conversation for the unlocked account, newest activity first.
+    ///
+    /// # Errors
+    /// Returns an error when no account DB is unlocked or the query fails.
+    pub fn conversation_list(&self) -> Result<Vec<ConversationSummary>, SdkError> {
+        Ok(self
+            .account_db()?
+            .conversation_summaries()?
+            .into_iter()
+            .map(ConversationSummary::from)
+            .collect())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn set_disappearing_policy(
@@ -304,5 +346,75 @@ impl RamfluxClient {
         reader_id: &str,
     ) -> Result<ConversationProjection, SdkError> {
         Ok(self.account_db()?.conversation_projection(conversation_id, reader_id)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(test_name: &str) -> PathBuf {
+        let nanos =
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+        std::env::temp_dir().join(format!("ramflux-sdk-conversation-list-{test_name}-{nanos}"))
+    }
+
+    fn client_with_account(test_name: &str) -> Result<(RamfluxClient, PathBuf), SdkError> {
+        let root = temp_root(test_name);
+        let mut client = RamfluxClient::new();
+        client.create_identity_root("principal_conv", [0x71; 32]);
+        client.create_device_branch("principal_conv", "device_conv", 1, [0x72; 32]);
+        client.open_account_index(&root)?;
+        client.create_account("acct", "principal_conv")?;
+        client.unlock_account("acct", b"conversation-list-test")?;
+        Ok((client, root))
+    }
+
+    #[test]
+    fn conversation_list_returns_inserted_conversations() -> Result<(), SdkError> {
+        let (client, root) = client_with_account("returns-inserted")?;
+        let metadata = MessageMetadata::default();
+        client.account_db()?.import_direct_message_projection(DirectMessageWrite {
+            conversation_id: "conv_one",
+            message_id: "msg_one_a",
+            sender_id: "alice",
+            encrypted_body: b"first",
+            metadata: &metadata,
+            created_at: 1_900_000_000,
+        })?;
+        client.account_db()?.import_direct_message_projection(DirectMessageWrite {
+            conversation_id: "conv_one",
+            message_id: "msg_one_b",
+            sender_id: "alice",
+            encrypted_body: b"second",
+            metadata: &metadata,
+            created_at: 1_900_000_100,
+        })?;
+        client.account_db()?.import_direct_message_projection(DirectMessageWrite {
+            conversation_id: "conv_two",
+            message_id: "msg_two_a",
+            sender_id: "bob",
+            encrypted_body: b"hi",
+            metadata: &metadata,
+            created_at: 1_900_000_050,
+        })?;
+
+        let summaries = client.conversation_list()?;
+        assert!(summaries.iter().any(|summary| summary.conversation_id == "conv_one"
+            && summary.message_count == 2
+            && summary.last_message_id.as_deref() == Some("msg_one_b")
+            && summary.last_activity_at == Some(1_900_000_100)));
+        assert!(
+            summaries
+                .iter()
+                .any(|summary| summary.conversation_id == "conv_two" && summary.message_count == 1)
+        );
+        // Newest activity sorts first.
+        assert_eq!(
+            summaries.first().map(|summary| summary.conversation_id.as_str()),
+            Some("conv_one")
+        );
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
     }
 }
