@@ -13,7 +13,7 @@ pub(crate) async fn dispatch_contact_bus_request(
     match request.method.as_str() {
         "contact.add" => {
             let body: LocalBusContactAddRequest = serde_json::from_value(request.body.clone())?;
-            let link = dispatch_contact_add(state, account_id, &body).await?;
+            let link = dispatch_contact_add(state, account_id, &body)?;
             Ok(local_bus_ok(serde_json::to_value(link)?))
         }
         "contact.accept" => {
@@ -22,15 +22,11 @@ pub(crate) async fn dispatch_contact_bus_request(
             {
                 let account = local_bus_account_mut(state, account_id)?;
                 let engine = account.take_live_engine().await?;
-                let link = account
-                    .client
-                    .establish_friend_link_via_gateway(
-                        &engine.config,
-                        &body.link_id,
-                        &body.requester_id,
-                        &body.target_id,
-                    )
-                    .await;
+                let link = account.client.establish_friend_link(
+                    &body.link_id,
+                    &body.requester_id,
+                    &body.target_id,
+                );
                 let response = account.client.send_plaintext_federated_contact_event(
                     &engine,
                     "friend.accepted",
@@ -45,7 +41,7 @@ pub(crate) async fn dispatch_contact_bus_request(
                 })))
             } else {
                 let body: LocalBusContactAddRequest = serde_json::from_value(request.body.clone())?;
-                let link = dispatch_contact_add(state, account_id, &body).await?;
+                let link = dispatch_contact_add(state, account_id, &body)?;
                 Ok(local_bus_ok(serde_json::to_value(link)?))
             }
         }
@@ -107,24 +103,18 @@ pub(crate) async fn dispatch_contact_bus_request(
     }
 }
 
-async fn dispatch_contact_add(
+// Establishing a friend link is a local projection of a signed friend-event
+// chain (see ramflux_friend_link_design §3/§4): it does NOT verify the peer's
+// device manifest. Device/key verification happens later and out-of-band via
+// the safety-number flow, and the manifest gate is enforced fail-closed on the
+// DM/group/object send paths (resolve_target_principal_commitment), not here.
+fn dispatch_contact_add(
     state: &mut LocalBusDaemonState,
     account_id: &str,
     body: &LocalBusContactAddRequest,
 ) -> Result<FriendLinkRecord, SdkError> {
     let account = local_bus_account_mut(state, account_id)?;
-    let engine = account.take_live_engine().await?;
-    let link = account
-        .client
-        .establish_friend_link_via_gateway(
-            &engine.config,
-            &body.link_id,
-            &body.requester_id,
-            &body.target_id,
-        )
-        .await;
-    account.put_engine(engine);
-    link
+    account.client.establish_friend_link(&body.link_id, &body.requester_id, &body.target_id)
 }
 
 fn contact_safety_request(

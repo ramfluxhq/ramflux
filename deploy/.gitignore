@@ -1,6 +1,8 @@
 /certs/*
 !/certs/.gitkeep
-!/certs/ca.pem
+# ca.pem and all service certs are issued at realnet startup by bootstrap-ca.sh
+# + issue-certs.sh; never track them (avoids working-tree dirt and pull
+# conflicts when a run rewrites them). Only .gitkeep stays.
 /prod-bin/
 /itest-bin/
 /.itest-node-certs/

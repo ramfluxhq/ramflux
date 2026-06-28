@@ -30,21 +30,6 @@ impl RamfluxClient {
     }
 
     /// # Errors
-    /// Returns an error when the friend link or verified peer device manifests cannot be stored.
-    pub(crate) async fn establish_friend_link_via_gateway(
-        &self,
-        gateway: &GatewaySessionConfig,
-        link_id: &str,
-        requester_id: &str,
-        target_id: &str,
-    ) -> Result<FriendLinkRecord, SdkError> {
-        let link = self.establish_friend_link(link_id, requester_id, target_id)?;
-        self.cache_verified_device_manifest(gateway, requester_id, "contact.add").await?;
-        self.cache_verified_device_manifest(gateway, target_id, "contact.add").await?;
-        Ok(link)
-    }
-
-    /// # Errors
     /// Returns an error when no account DB is unlocked or friend links cannot be read.
     pub fn friend_links(&self) -> Result<Vec<FriendLinkRecord>, SdkError> {
         Ok(self.account_db()?.friend_links()?)

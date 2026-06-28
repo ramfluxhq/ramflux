@@ -228,16 +228,28 @@ async fn sdk_tcp_tls_gateway_request(
     config: &GatewaySessionConfig,
     request: &ramflux_transport::GatewayQuicRequest,
 ) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
-    let (_client, mut stream) = ramflux_transport::TcpTlsGatewayClient::connect(
-        config.bind_addr,
-        config.tcp_gateway_addr.unwrap_or(config.gateway_addr),
-        &config.server_name,
-        &config.ca_cert,
-        config.timeout,
-    )
-    .await?;
-    ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
-    Ok(ramflux_transport::read_gateway_session_json(&mut stream).await?)
+    // Bound the whole connect+write+read sequence: an unresponsive gateway (or a
+    // half-open TCP connection) must never hang the caller indefinitely. The cap
+    // is 3x the per-step timeout to cover connect, write, and read in sequence.
+    let overall_timeout = config.timeout.saturating_mul(3);
+    tokio::time::timeout(overall_timeout, async {
+        let (_client, mut stream) = ramflux_transport::TcpTlsGatewayClient::connect(
+            config.bind_addr,
+            config.tcp_gateway_addr.unwrap_or(config.gateway_addr),
+            &config.server_name,
+            &config.ca_cert,
+            config.timeout,
+        )
+        .await?;
+        ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
+        Ok(ramflux_transport::read_gateway_session_json(&mut stream).await?)
+    })
+    .await
+    .map_err(|_| {
+        SdkError::GatewaySessionRejected(format!(
+            "gateway TCP-TLS request timed out after {overall_timeout:?}"
+        ))
+    })?
 }
 
 pub(crate) fn sdk_http_post_json<T, R>(base_url: &str, path: &str, value: &T) -> Result<R, SdkError>
