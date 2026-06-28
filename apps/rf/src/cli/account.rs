@@ -62,11 +62,11 @@ pub(crate) struct AccountCreate {
     pub(crate) device: String,
     #[arg(long)]
     pub(crate) target: String,
-    #[arg(long, default_value = "rf-local-secret")]
+    #[arg(long)]
     pub(crate) secret: String,
     #[arg(long)]
     pub(crate) use_keychain: bool,
-    #[arg(long, default_value = "attended_cli")]
+    #[arg(long, default_value = "headless_ai")]
     pub(crate) client_mode: String,
     #[arg(long, default_value = "127.0.0.1:7443")]
     pub(crate) gateway_addr: String,
@@ -76,10 +76,10 @@ pub(crate) struct AccountCreate {
     pub(crate) prekey_http_url: Option<String>,
     #[arg(long)]
     pub(crate) ca_cert: PathBuf,
-    #[arg(long, default_value = "11")]
-    pub(crate) root_seed_byte_hex: String,
-    #[arg(long, default_value = "22")]
-    pub(crate) device_seed_byte_hex: String,
+    #[arg(long)]
+    pub(crate) root_seed_byte_hex: Option<String>,
+    #[arg(long)]
+    pub(crate) device_seed_byte_hex: Option<String>,
 }
 
 #[derive(Args)]

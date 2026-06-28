@@ -14,6 +14,21 @@ pub(crate) fn repeated_seed(hex_byte: &str) -> Result<[u8; 32], RfError> {
     Ok([value; 32])
 }
 
+/// Resolve an identity/device seed for account or device commands.
+///
+/// When an explicit hex byte is provided (the deterministic test path), it is
+/// expanded into a reproducible 32-byte seed via [`repeated_seed`]. When absent
+/// (the production path), a fresh cryptographically secure 32-byte seed is drawn
+/// from the operating-system CSPRNG so a real account never ships a predictable,
+/// fully derivable identity key.
+pub(crate) fn resolve_seed(hex_byte: Option<&str>) -> Result<[u8; 32], RfError> {
+    match hex_byte {
+        Some(value) => repeated_seed(value),
+        None => ramflux_crypto::random_32()
+            .map_err(|error| RfError::Message(format!("failed to generate random seed: {error}"))),
+    }
+}
+
 pub(crate) fn parse_client_mode(mode: &str) -> Result<LocalBusClientMode, RfError> {
     match mode {
         "attended_cli" => Ok(LocalBusClientMode::AttendedCli),

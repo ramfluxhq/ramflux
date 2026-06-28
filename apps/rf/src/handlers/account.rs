@@ -178,7 +178,7 @@ async fn handle_account_passphrase(
 pub(crate) fn local_bus_account_create_request(
     create: AccountCreate,
 ) -> Result<LocalBusAccountCreateRequest, RfError> {
-    let root_seed = repeated_seed(&create.root_seed_byte_hex)?;
+    let root_seed = resolve_seed(create.root_seed_byte_hex.as_deref())?;
     let principal_commitment =
         ramflux_sdk::identity_root_public_key_commitment_for_seed(&create.principal, root_seed);
     if let Some(expected) = create.expected_commitment.as_ref()
@@ -196,7 +196,7 @@ pub(crate) fn local_bus_account_create_request(
         target_delivery_id: create.target.clone(),
         account_secret: create.secret,
         root_seed,
-        device_seed: repeated_seed(&create.device_seed_byte_hex)?,
+        device_seed: resolve_seed(create.device_seed_byte_hex.as_deref())?,
         client_mode: parse_client_mode(&create.client_mode)?,
         gateway: GatewayQuicEndpointConfig {
             bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
