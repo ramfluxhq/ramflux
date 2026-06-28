@@ -50,6 +50,12 @@ pub(crate) async fn handle_contact(
                 &bus.request(Some(remove.account), "contact", "contact.remove", &request).await?,
             )
         }
+        ContactAction::Reject(reject) => {
+            let request = LocalBusContactLinkRequest { link_id: reject.link };
+            print_json(
+                &bus.request(Some(reject.account), "contact", "contact.reject", &request).await?,
+            )
+        }
         ContactAction::Block(block) => {
             let request = LocalBusContactLinkRequest { link_id: block.link };
             print_json(

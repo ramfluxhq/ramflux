@@ -91,6 +91,12 @@ pub(crate) async fn dispatch_contact_bus_request(
             let link = account.client.unblock_friend_link(&body.link_id)?;
             Ok(local_bus_ok(serde_json::to_value(link)?))
         }
+        "contact.reject" => {
+            let account = local_bus_account(state, account_id)?;
+            let body: LocalBusContactLinkRequest = serde_json::from_value(request.body.clone())?;
+            let link = account.client.reject_friend_link(&body.link_id)?;
+            Ok(local_bus_ok(serde_json::to_value(link)?))
+        }
         "contact.rejected" => {
             let account = local_bus_account(state, account_id)?;
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
