@@ -28,8 +28,8 @@ pub(crate) struct DeviceActivate {
     pub(crate) device: String,
     #[arg(long)]
     pub(crate) target: String,
-    #[arg(long, default_value = "22")]
-    pub(crate) device_seed_byte_hex: String,
+    #[arg(long)]
+    pub(crate) device_seed_byte_hex: Option<String>,
     #[arg(long)]
     pub(crate) device_epoch: Option<u64>,
 }

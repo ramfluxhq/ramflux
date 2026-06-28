@@ -12,7 +12,7 @@ pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Re
             let request = ramflux_sdk::LocalBusDeviceActivateRequest {
                 device_id: activate.device,
                 target_delivery_id: activate.target,
-                device_seed: repeated_seed(&activate.device_seed_byte_hex)?,
+                device_seed: resolve_seed(activate.device_seed_byte_hex.as_deref())?,
                 device_epoch: activate.device_epoch,
             };
             print_json(

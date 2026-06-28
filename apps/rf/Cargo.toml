@@ -14,6 +14,8 @@ path = "src/main.rs"
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
+ramflux-crypto = { workspace = true }
+# path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-sdk = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-sync = { workspace = true }
