@@ -751,3 +751,42 @@ fn conversation_summaries_lists_real_conversations_with_activity() -> Result<(),
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
+
+#[test]
+fn reject_friend_link_transitions_pending_to_rejected() -> Result<(), StorageError> {
+    let (root, db) = test_db("reject-pending-friend-link")?;
+
+    let pending = db.record_pending_friend_link("link_req", "requester", "target", 1_000)?;
+    assert_eq!(pending.state, "pending");
+
+    let rejected = db.reject_friend_link("link_req", 2_000)?;
+    assert_eq!(rejected.state, "rejected");
+    assert_eq!(rejected.requester_id, "requester");
+    assert_eq!(rejected.target_id, "target");
+    assert!(!rejected.blocked);
+
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
+fn reject_friend_link_refuses_non_pending_links() -> Result<(), StorageError> {
+    let (root, db) = test_db("reject-non-pending-friend-link")?;
+
+    // An established (accepted) contact must be removed/blocked, never rejected.
+    db.establish_friend_link("link_acc", "requester", "target")?;
+    assert!(matches!(
+        db.reject_friend_link("link_acc", 2_000),
+        Err(StorageError::AuthorizationRejected)
+    ));
+    assert_eq!(db.friend_link("link_acc")?.state, "accepted");
+
+    // Rejecting an unknown link is likewise refused.
+    assert!(matches!(
+        db.reject_friend_link("link_missing", 2_000),
+        Err(StorageError::AuthorizationRejected)
+    ));
+
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}

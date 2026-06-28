@@ -259,6 +259,39 @@ impl RamfluxClient {
         Ok(link)
     }
 
+    /// Records an inbound friend request as a pending friend link awaiting the
+    /// recipient's accept/reject decision.
+    ///
+    /// # Errors
+    /// Returns an error when no account DB is unlocked or the pending friend link
+    /// cannot be stored.
+    pub fn record_pending_friend_link(
+        &self,
+        link_id: &str,
+        requester_id: &str,
+        target_id: &str,
+    ) -> Result<FriendLinkRecord, SdkError> {
+        Ok(self.account_db()?.record_pending_friend_link(
+            link_id,
+            requester_id,
+            target_id,
+            now_unix_timestamp(),
+        )?)
+    }
+
+    /// Declines a pending inbound friend request, transitioning it to the
+    /// `rejected` state. This is distinct from remove/block of an already
+    /// established contact.
+    ///
+    /// # Errors
+    /// Returns an error when no account DB is unlocked, the link is not a pending
+    /// inbound request, or the friend link cannot be updated.
+    pub fn reject_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
+        let link = self.account_db()?.reject_friend_link(link_id, now_unix_timestamp())?;
+        self.append_contact_control_event("friend.rejected", &link)?;
+        Ok(link)
+    }
+
     /// # Errors
     /// Returns an error when no account DB is unlocked or rejected inbox cannot be read.
     pub fn rejected_inbox(
@@ -312,6 +345,21 @@ impl RamfluxClient {
             return Ok(());
         };
         match event_type {
+            "friend.requested" => {
+                let link_id =
+                    value.get("link_id").and_then(serde_json::Value::as_str).ok_or_else(|| {
+                        SdkError::LocalBus("friend.requested missing link_id".to_owned())
+                    })?;
+                let requester_id =
+                    value.get("requester").and_then(serde_json::Value::as_str).ok_or_else(
+                        || SdkError::LocalBus("friend.requested missing requester".to_owned()),
+                    )?;
+                let target_id =
+                    value.get("target").and_then(serde_json::Value::as_str).ok_or_else(|| {
+                        SdkError::LocalBus("friend.requested missing target".to_owned())
+                    })?;
+                let _link = self.record_pending_friend_link(link_id, requester_id, target_id)?;
+            }
             "friend.accepted" => {
                 let link_id =
                     value.get("link_id").and_then(serde_json::Value::as_str).ok_or_else(|| {
@@ -813,6 +861,81 @@ mod tests {
             ramflux_crypto::safety_fingerprint(&alice_self, &bob_material),
             ramflux_crypto::safety_fingerprint(&bob_material, &alice_contact)
         );
+        Ok(())
+    }
+
+    fn unlocked_client(test_name: &str) -> Result<(RamfluxClient, PathBuf), SdkError> {
+        let nanos = now_unix_timestamp();
+        let root = std::env::temp_dir()
+            .join(format!("ramflux-sdk-contact-{test_name}-{}-{nanos}", std::process::id()));
+        let mut client = RamfluxClient::new();
+        client.create_identity_root("principal_contact", [0x61; 32]);
+        client.create_device_branch("principal_contact", "device_contact", 1, [0x62; 32]);
+        client.open_account_index(&root)?;
+        client.create_account("acct", "principal_contact")?;
+        client.unlock_account("acct", b"contact-reject-test")?;
+        Ok((client, root))
+    }
+
+    #[test]
+    fn reject_friend_link_transitions_pending_to_rejected() -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("reject-pending")?;
+
+        let pending =
+            client.record_pending_friend_link("link_pending", "requester", "principal_contact")?;
+        assert_eq!(pending.state, "pending");
+
+        let rejected = client.reject_friend_link("link_pending")?;
+        assert_eq!(rejected.state, "rejected");
+        assert_eq!(rejected.requester_id, "requester");
+
+        // A second reject is refused: the link is no longer a pending request.
+        assert!(client.reject_friend_link("link_pending").is_err());
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn reject_friend_link_refuses_established_contact() -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("reject-established")?;
+
+        client.establish_friend_link("link_acc", "requester", "principal_contact")?;
+        assert!(client.reject_friend_link("link_acc").is_err());
+        let link = client
+            .friend_links()?
+            .into_iter()
+            .find(|link| link.link_id == "link_acc")
+            .ok_or_else(|| SdkError::LocalBus("established link present".to_owned()))?;
+        assert_eq!(link.state, "accepted");
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_friend_requested_event_records_pending_link() -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("apply-requested")?;
+
+        let event = serde_json::to_vec(&serde_json::json!({
+            "type": "friend.requested",
+            "link_id": "link_inbound",
+            "requester": "requester",
+            "target": "principal_contact",
+        }))?;
+        client.apply_contact_event_plaintext(&event)?;
+
+        let link = client
+            .friend_links()?
+            .into_iter()
+            .find(|link| link.link_id == "link_inbound")
+            .ok_or_else(|| SdkError::LocalBus("pending inbound link recorded".to_owned()))?;
+        assert_eq!(link.state, "pending");
+
+        let rejected = client.reject_friend_link("link_inbound")?;
+        assert_eq!(rejected.state, "rejected");
+
+        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

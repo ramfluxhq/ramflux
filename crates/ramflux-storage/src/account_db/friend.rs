@@ -48,6 +48,54 @@ impl AccountDb {
         self.friend_link(link_id)
     }
 
+    /// Records an inbound friend request as a `pending` friend link awaiting the
+    /// recipient's accept/reject decision. Idempotent via `INSERT OR IGNORE`: it
+    /// never downgrades an already-established (e.g. `accepted`) link back to
+    /// `pending`.
+    ///
+    /// # Errors
+    /// Returns an error when validation, serialization, storage, or state checks fail.
+    pub fn record_pending_friend_link(
+        &self,
+        link_id: &str,
+        requester_id: &str,
+        target_id: &str,
+        requested_at: i64,
+    ) -> Result<FriendLinkRecord, StorageError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO friend_link_projection
+                (link_id, requester_id, target_id, state, remove_scope, blocked, capability_revoked_at, updated_at)
+             VALUES (?1, ?2, ?3, 'pending', NULL, 0, NULL, ?4)",
+            params![link_id, requester_id, target_id, requested_at],
+        )?;
+        self.friend_link(link_id)
+    }
+
+    /// Declines a pending inbound friend request, transitioning it from
+    /// `pending` to `rejected`. This is distinct from remove/block, which act on
+    /// an already-established (`accepted`) contact: rejecting a link that is not
+    /// a pending inbound request is refused with `AuthorizationRejected`.
+    ///
+    /// # Errors
+    /// Returns an error when validation, serialization, storage, or state checks fail.
+    pub fn reject_friend_link(
+        &self,
+        link_id: &str,
+        rejected_at: i64,
+    ) -> Result<FriendLinkRecord, StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE friend_link_projection
+                SET state = 'rejected',
+                    updated_at = ?2
+              WHERE link_id = ?1 AND state = 'pending'",
+            params![link_id, rejected_at],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.friend_link(link_id)
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn block_friend_link(

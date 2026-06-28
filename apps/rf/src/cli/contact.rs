@@ -19,6 +19,7 @@ pub(crate) enum ContactAction {
     Request(ContactFederatedLink),
     Accept(ContactAccept),
     Remove(ContactRemove),
+    Reject(ContactLinkSelector),
     Block(ContactLinkSelector),
     Unblock(ContactLinkSelector),
     List(AccountSelector),
