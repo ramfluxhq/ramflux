@@ -2464,6 +2464,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "keyring",
+ "ramflux-crypto",
  "ramflux-protocol",
  "ramflux-sdk",
  "ramflux-sync",
