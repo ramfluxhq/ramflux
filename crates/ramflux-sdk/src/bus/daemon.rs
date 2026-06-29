@@ -229,7 +229,9 @@ async fn restore_local_bus_account_impl(
     client.set_active_account(&manifest.local_account_id)?;
     let account_secret = passphrase_override.unwrap_or(&manifest.account_secret);
     client.unlock_account(&manifest.local_account_id, account_secret.as_bytes())?;
-    let gateway = GatewaySessionConfig::auto(manifest.gateway.clone());
+    let gateway = GatewaySessionConfig::auto(manifest.gateway.clone()).with_device_branch(
+        client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
+    );
     let engine = if connect_gateway {
         match client.connect_gateway_session(gateway.clone()).await {
             Ok(engine) => Some(engine),

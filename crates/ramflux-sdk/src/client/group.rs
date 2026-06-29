@@ -990,6 +990,45 @@ mod tests {
     }
 
     #[test]
+    fn owner_can_generate_onboard_events_for_multiple_direct_adds() -> Result<(), SdkError> {
+        let alice_seed = [0x75; 32];
+        let alice_key = device_public_key("alice", "alice_device", alice_seed);
+        let alice = group_client("alice_multi_join", "alice", "alice_device", alice_seed)?;
+        seed_group_named(&alice, "group_multi_join", &alice_key)?;
+
+        let bob_event = alice.create_signed_group_member_join_event(
+            "group_multi_join",
+            "alice_device",
+            "bob_device",
+            "member",
+            "alice_commitment",
+        )?;
+        assert_eq!(bob_event.event_type, "group.member_joined");
+
+        alice.add_group_member("group_multi_join", "carol_device", "member")?;
+        let carol_event = alice.create_signed_group_member_join_event(
+            "group_multi_join",
+            "alice_device",
+            "carol_device",
+            "member",
+            "alice_commitment",
+        )?;
+        assert_eq!(carol_event.event_type, "group.member_joined");
+
+        assert!(matches!(
+            alice.create_signed_group_member_join_event(
+                "group_multi_join",
+                "bob_device",
+                "dave_device",
+                "member",
+                "bob_commitment"
+            ),
+            Err(SdkError::Storage(StorageError::GroupPermissionDenied))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn signed_group_role_change_rejects_forgery_epoch_mismatch_and_replay() -> Result<(), SdkError>
     {
         let alice_seed = [0x42; 32];
