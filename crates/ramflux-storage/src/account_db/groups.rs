@@ -68,6 +68,92 @@ impl AccountDb {
     }
 
     /// # Errors
+    /// Returns an error when the signed direct-add onboarding event is unauthorized, replayed, or
+    /// cannot be applied to the local projection.
+    pub fn apply_group_member_join(
+        &self,
+        join: &GroupMemberJoinWrite,
+    ) -> Result<GroupState, StorageError> {
+        validate_group_role(&join.joined_role)?;
+        validate_group_role(&join.actor_role)?;
+        self.ensure_group_control_not_seen(&join.group_id, &join.event_id)?;
+        if !is_group_admin_role(&join.actor_role) {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        if join.new_group_epoch != join.previous_epoch.saturating_add(1) {
+            return Err(StorageError::GroupControlEpochMismatch {
+                expected: join.previous_epoch.saturating_add(1),
+                actual: join.new_group_epoch,
+            });
+        }
+        if self.group_member_banned(&join.group_id, &join.joined_identity)? {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        let applied_at = self.now_unix();
+        self.insert_group_control_seen(
+            &join.group_id,
+            &join.event_id,
+            "member_joined",
+            &join.actor_device_id,
+            &join.joined_identity,
+            join.previous_epoch,
+            join.new_group_epoch,
+            applied_at,
+        )?;
+        self.connection.execute(
+            "INSERT INTO group_projection
+                (group_id, group_epoch, max_members, new_member_history, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(group_id)
+             DO UPDATE SET
+                group_epoch = MAX(group_epoch, excluded.group_epoch),
+                max_members = excluded.max_members,
+                new_member_history = excluded.new_member_history,
+                updated_at = excluded.updated_at",
+            params![
+                join.group_id,
+                i64::try_from(join.new_group_epoch)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?,
+                join.max_members,
+                join.new_member_history,
+                applied_at
+            ],
+        )?;
+        self.persist_group_member_device_key(
+            &join.group_id,
+            &join.actor_device_id,
+            &join.actor_device_signing_public_key,
+        )?;
+        self.connection.execute(
+            "INSERT OR REPLACE INTO group_member_projection
+                (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at)
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5)",
+            params![
+                join.group_id,
+                join.actor_device_id,
+                join.actor_role,
+                i64::try_from(join.previous_epoch)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?,
+                applied_at
+            ],
+        )?;
+        self.connection.execute(
+            "INSERT OR REPLACE INTO group_member_projection
+                (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at)
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5)",
+            params![
+                join.group_id,
+                join.joined_identity,
+                join.joined_role,
+                i64::try_from(join.new_group_epoch)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?,
+                applied_at
+            ],
+        )?;
+        self.group_state(&join.group_id)
+    }
+
+    /// # Errors
     /// Returns an error when validation or storage updates fail.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_group_local_membership_snapshot(

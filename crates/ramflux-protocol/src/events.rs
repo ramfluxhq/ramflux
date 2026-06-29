@@ -214,6 +214,12 @@ pub enum GroupEventBody {
         previous_epoch: u64,
         new_group_epoch: u64,
         joined_identity: String,
+        joined_role: String,
+        actor_role: String,
+        actor_principal_commitment: String,
+        actor_device_signing_public_key: String,
+        max_members: u32,
+        new_member_history: String,
     },
     MemberRemoved {
         group_id: String,

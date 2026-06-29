@@ -47,7 +47,7 @@ pub(crate) async fn dispatch_group_bus_request(
         }
         "group.member.add" => {
             let account = local_bus_account_mut(state, account_id)?;
-            dispatch_group_member_add_request(request, account).await
+            Box::pin(dispatch_group_member_add_request(request, account)).await
         }
         "group.member.remove" => {
             let account = local_bus_account_mut(state, account_id)?;
@@ -159,8 +159,25 @@ async fn dispatch_group_member_add_request(
         federation: body.federation.clone(),
     };
     account.client.persist_group_member_route(&body.group_id, &route)?;
+    let onboard_event = if route.target_delivery_id.is_some() || route.federation.is_some() {
+        Some(account.client.create_signed_group_member_join_event(
+            &body.group_id,
+            &account.gateway_config.device_id,
+            &body.member_id,
+            &body.role,
+            &account.principal_commitment,
+        )?)
+    } else {
+        None
+    };
     let distribution = if route.target_delivery_id.is_some() || route.federation.is_some() {
-        dispatch_group_sender_key_distribution(account, &body.group_id, route).await?
+        dispatch_group_sender_key_distribution(
+            account,
+            &body.group_id,
+            route,
+            onboard_event.as_ref(),
+        )
+        .await?
     } else {
         None
     };
@@ -170,7 +187,7 @@ async fn dispatch_group_member_add_request(
             continue;
         }
         if let Some(redistribution) =
-            dispatch_group_sender_key_distribution(account, &body.group_id, route).await?
+            dispatch_group_sender_key_distribution(account, &body.group_id, route, None).await?
         {
             redistributions.push(redistribution);
         }
@@ -390,7 +407,7 @@ async fn dispatch_group_invite_accept_request(
             continue;
         }
         if let Some(distribution) =
-            dispatch_group_sender_key_distribution(account, &body.group_id, route).await?
+            dispatch_group_sender_key_distribution(account, &body.group_id, route, None).await?
         {
             sender_key_distribution.push(distribution);
         }
@@ -423,7 +440,8 @@ async fn dispatch_group_control_response(
         }
         if redistribute_actor_key
             && let Some(distribution) =
-                dispatch_group_sender_key_distribution(account, group_id, route.clone()).await?
+                dispatch_group_sender_key_distribution(account, group_id, route.clone(), None)
+                    .await?
         {
             sender_key_distribution.push(distribution);
         }
@@ -535,7 +553,7 @@ async fn dispatch_group_member_remove_request(
             continue;
         }
         if let Some(distribution) =
-            dispatch_group_sender_key_distribution(account, &body.group_id, route).await?
+            dispatch_group_sender_key_distribution(account, &body.group_id, route, None).await?
         {
             distributions.push(distribution);
         }
@@ -617,7 +635,7 @@ pub(crate) async fn dispatch_group_send_request(
                 continue;
             }
             if let Some(distribution) =
-                dispatch_group_sender_key_distribution(account, &body.group_id, route).await?
+                dispatch_group_sender_key_distribution(account, &body.group_id, route, None).await?
             {
                 sender_key_distribution.push(distribution);
             }
@@ -669,6 +687,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
     account: &mut LocalBusAccountState,
     group_id: &str,
     route: LocalBusGroupMemberRoute,
+    membership_event: Option<&ramflux_protocol::GroupEvent>,
 ) -> Result<Option<serde_json::Value>, SdkError> {
     let mut engine = account.take_live_engine().await?;
     let result = async {
@@ -725,6 +744,10 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
         let payload = SdkGroupSenderKeyDistributionEnvelope {
             schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".to_owned(),
             version: 1,
+            membership_event_base64: membership_event
+                .map(serde_json::to_vec)
+                .transpose()?
+                .map(|bytes| ramflux_protocol::encode_base64url(&bytes)),
             distribution_base64: ramflux_protocol::encode_base64url(&distribution),
         };
         let message = GatewayDirectMessage {
@@ -785,13 +808,18 @@ pub(crate) async fn dispatch_group_receive_request(
                 continue;
             }
             let message_id = entry.envelope.envelope_id.clone();
-            match account.client.append_group_gateway_delivery_for_recipient(
-                &body.conversation_id,
-                &body.group_id,
-                &message_id,
-                &entry,
-                engine.config.device_id.as_str(),
-            )? {
+            match account
+                .client
+                .append_group_gateway_delivery_for_recipient_with_gateway(
+                    &engine.config,
+                    &body.conversation_id,
+                    &body.group_id,
+                    &message_id,
+                    &entry,
+                    engine.config.device_id.as_str(),
+                )
+                .await?
+            {
                 GroupGatewayDeliveryResult::SenderKeyDistribution(distribution) => {
                     account.client.persist_gateway_receive_cursor(
                         engine.target_delivery_id(),
@@ -822,14 +850,17 @@ pub(crate) async fn dispatch_group_receive_request(
         }
         for entry in message_entries {
             let message_id = entry.envelope.envelope_id.clone();
-            if let GroupGatewayDeliveryResult::Message(plaintext) =
-                account.client.append_group_gateway_delivery_for_recipient(
+            if let GroupGatewayDeliveryResult::Message(plaintext) = account
+                .client
+                .append_group_gateway_delivery_for_recipient_with_gateway(
+                    &engine.config,
                     &body.conversation_id,
                     &body.group_id,
                     &message_id,
                     &entry,
                     engine.config.device_id.as_str(),
-                )?
+                )
+                .await?
             {
                 account
                     .client
