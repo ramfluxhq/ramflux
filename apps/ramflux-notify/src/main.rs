@@ -23,6 +23,8 @@ const NOTIFY_WAL_RAW_ENQUEUE_ENV: &str = "RAMFLUX_NOTIFY_WAL_RAW_ENQUEUE";
 const NOTIFY_BATCH_VERIFY_ENV: &str = "RAMFLUX_NOTIFY_BATCH_VERIFY";
 const NOTIFY_VERIFY_BATCH_MAX_ENV: &str = "RAMFLUX_NOTIFY_VERIFY_BATCH_MAX";
 const NOTIFY_VERIFY_WINDOW_US_ENV: &str = "RAMFLUX_NOTIFY_VERIFY_WINDOW_US";
+const PROVIDER_PUSH_RETRY_DELAYS: [Duration; 3] =
+    [Duration::from_millis(100), Duration::from_millis(200), Duration::from_millis(400)];
 
 fn main() {
     if let Err(error) = run_service("ramflux-notify") {
@@ -54,15 +56,15 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         if std::env::args().any(|arg| arg == "--once") {
             return Ok(());
         }
+        let async_accept = notify_async_accept_enabled();
+        if async_accept {
+            start_notify_async_delivery_workers(&store)?;
+        }
         #[cfg(feature = "itest-http")]
         if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
             let store_gate = Arc::new(Mutex::new(()));
             let runtime = Arc::new(NotifyRuntime::from_env(&store, &store_gate)?);
             let wake_auth = NotifyWakeAuth::from_config(&config)?;
-            let async_accept = notify_async_accept_enabled();
-            if async_accept {
-                start_notify_async_delivery_workers(&store)?;
-            }
             let wake_verify_batcher = NotifyWakeVerifyBatcher::from_env(&wake_auth, &store)?;
             let ingress = Arc::new(NotifyIngressState {
                 store,
@@ -2077,7 +2079,7 @@ fn send_provider_push(
         .enable_all()
         .build()
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
-    runtime.block_on(async { send_provider_push_h2(prepared).await })
+    runtime.block_on(async { send_provider_push_h2_with_retry(prepared).await })
 }
 
 fn send_provider_push_with_runtime(
@@ -2085,7 +2087,68 @@ fn send_provider_push_with_runtime(
     h2_pool: &ProviderH2ConnectionPool,
     prepared: &ramflux_node_core::PreparedProviderPush,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    runtime.block_on(async { send_provider_push_h2_pooled(prepared, h2_pool).await })
+    runtime.block_on(async { send_provider_push_h2_pooled_with_retry(prepared, h2_pool).await })
+}
+
+async fn send_provider_push_h2_with_retry(
+    prepared: &ramflux_node_core::PreparedProviderPush,
+) -> Result<bool, ramflux_node_core::NodeCoreError> {
+    send_provider_push_with_retry(prepared, || send_provider_push_h2(prepared)).await
+}
+
+async fn send_provider_push_h2_pooled_with_retry(
+    prepared: &ramflux_node_core::PreparedProviderPush,
+    h2_pool: &ProviderH2ConnectionPool,
+) -> Result<bool, ramflux_node_core::NodeCoreError> {
+    send_provider_push_with_retry(prepared, || send_provider_push_h2_pooled(prepared, h2_pool))
+        .await
+}
+
+async fn send_provider_push_with_retry<'a, F, Fut>(
+    prepared: &'a ramflux_node_core::PreparedProviderPush,
+    mut send: F,
+) -> Result<bool, ramflux_node_core::NodeCoreError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<bool, ramflux_node_core::NodeCoreError>> + 'a,
+{
+    let mut last_error = None;
+    for (attempt, delay) in PROVIDER_PUSH_RETRY_DELAYS.iter().enumerate() {
+        match send().await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {
+                last_error = None;
+            }
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+        if attempt + 1 < PROVIDER_PUSH_RETRY_DELAYS.len() {
+            tracing::debug!(
+                device_delivery_id = prepared.route.device_delivery_id,
+                provider = ?prepared.route.provider,
+                push_alias_hash = prepared.push_alias_hash,
+                collapse_key_hash = prepared.collapse_key_hash,
+                attempt = attempt + 1,
+                retry_after_ms = delay.as_millis(),
+                "push provider send attempt failed; retrying"
+            );
+            tokio::time::sleep(*delay).await;
+        }
+    }
+    if let Some(error) = last_error {
+        Err(error)
+    } else {
+        tracing::warn!(
+            device_delivery_id = prepared.route.device_delivery_id,
+            provider = ?prepared.route.provider,
+            push_alias_hash = prepared.push_alias_hash,
+            collapse_key_hash = prepared.collapse_key_hash,
+            attempts = PROVIDER_PUSH_RETRY_DELAYS.len(),
+            "push provider rejected all retry attempts"
+        );
+        Ok(false)
+    }
 }
 
 async fn send_provider_push_h2(
