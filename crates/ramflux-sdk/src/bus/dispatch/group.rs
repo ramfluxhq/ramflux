@@ -160,9 +160,16 @@ async fn dispatch_group_member_add_request(
     };
     account.client.persist_group_member_route(&body.group_id, &route)?;
     let onboard_event = if route.target_delivery_id.is_some() || route.federation.is_some() {
+        let actor_device_id = account
+            .client
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .device_id
+            .clone();
         Some(account.client.create_signed_group_member_join_event(
             &body.group_id,
-            &account.gateway_config.device_id,
+            &actor_device_id,
             &body.member_id,
             &body.role,
             &account.principal_commitment,
