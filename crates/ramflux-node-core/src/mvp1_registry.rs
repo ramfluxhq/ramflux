@@ -139,6 +139,7 @@ pub struct ItestMvp1PublishPrekeyRequest {
 pub struct ItestMvp1PrekeyResponse {
     pub device_id: String,
     pub bundle: Option<ramflux_crypto::PrekeyBundle>,
+    pub principal_commitment: String,
     pub target_delivery_id: Option<String>,
 }
 
@@ -498,6 +499,14 @@ impl ItestMvp1IdentityRegistry {
             return None;
         }
         self.prekey_bundles.get(device_id)
+    }
+
+    #[must_use]
+    pub fn principal_commitment_for_device(&self, device_id: &str) -> Option<&str> {
+        if self.revoked_devices.contains(device_id) {
+            return None;
+        }
+        self.devices.get(device_id).map(|device| device.principal_commitment.as_str())
     }
 
     #[must_use]

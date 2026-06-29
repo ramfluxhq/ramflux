@@ -3,7 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
-use crate::prekey::SdkMvp1DeviceManifestDevice;
+use crate::prekey::{SdkMvp1DeviceManifestDevice, SdkMvp1PrekeyResponse};
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -157,9 +157,7 @@ impl RamfluxClient {
             return Ok(principal_commitment.to_owned());
         }
         let Some(entry) = self.account_db()?.device_directory_entry(device_id)? else {
-            return Err(SdkError::LocalBus(format!(
-                "cannot resolve principal commitment for target device {device_id} from local trusted device directory"
-            )));
+            return self.resolve_target_principal_commitment_from_prekey(gateway, device_id).await;
         };
         self.assert_manifest_active_device_cached(
             gateway,
@@ -169,6 +167,30 @@ impl RamfluxClient {
         )
         .await?;
         Ok(entry.principal_commitment)
+    }
+
+    async fn resolve_target_principal_commitment_from_prekey(
+        &self,
+        gateway: &GatewaySessionConfig,
+        device_id: &str,
+    ) -> Result<String, SdkError> {
+        let prekey: SdkMvp1PrekeyResponse =
+            sdk_gateway_get_json(gateway, &format!("/mvp1/prekey/{device_id}")).await?;
+        if prekey.principal_commitment.is_empty() {
+            return Err(SdkError::LocalBus(format!(
+                "cannot resolve principal commitment for target device {device_id} from local trusted device directory or prekey registry"
+            )));
+        }
+        let manifest = self
+            .cache_verified_device_manifest(gateway, &prekey.principal_commitment, "prekey_resolve")
+            .await?;
+        if !manifest.devices.iter().any(|device| device.device_id == device_id) {
+            return Err(SdkError::LocalBus(format!(
+                "recipient device {device_id} is not in verified manifest for {}",
+                prekey.principal_commitment
+            )));
+        }
+        Ok(prekey.principal_commitment)
     }
 
     /// Resolve and verify the recipient principal commitment for a federated (cross-node) send.

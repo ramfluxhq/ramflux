@@ -196,6 +196,11 @@ impl RouterCore {
         Ok(ItestMvp1PrekeyResponse {
             device_id: device_id.clone(),
             bundle: control.mvp1_identities.prekey_bundle(&device_id).cloned(),
+            principal_commitment: control
+                .mvp1_identities
+                .principal_commitment_for_device(&device_id)
+                .unwrap_or_default()
+                .to_owned(),
             target_delivery_id: control
                 .mvp1_identities
                 .target_delivery_id_for_device(&device_id)
@@ -209,6 +214,11 @@ impl RouterCore {
         ItestMvp1PrekeyResponse {
             device_id: device_id.to_owned(),
             bundle: control.mvp1_identities.prekey_bundle(device_id).cloned(),
+            principal_commitment: control
+                .mvp1_identities
+                .principal_commitment_for_device(device_id)
+                .unwrap_or_default()
+                .to_owned(),
             target_delivery_id: control
                 .mvp1_identities
                 .target_delivery_id_for_device(device_id)
