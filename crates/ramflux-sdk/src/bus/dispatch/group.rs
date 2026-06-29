@@ -159,24 +159,9 @@ async fn dispatch_group_member_add_request(
         federation: body.federation.clone(),
     };
     account.client.persist_group_member_route(&body.group_id, &route)?;
-    let onboard_event = if route.target_delivery_id.is_some() || route.federation.is_some() {
-        let actor_device_id = account
-            .client
-            .device_branch
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .device_id
-            .clone();
-        Some(account.client.create_signed_group_member_join_event(
-            &body.group_id,
-            &actor_device_id,
-            &body.member_id,
-            &body.role,
-            &account.principal_commitment,
-        )?)
-    } else {
-        None
-    };
+    let onboard_event = create_group_member_onboard_event_for_authorized_local_actor(
+        account, &group, &body, &route,
+    )?;
     let distribution = if route.target_delivery_id.is_some() || route.federation.is_some() {
         dispatch_group_sender_key_distribution(
             account,
@@ -203,6 +188,37 @@ async fn dispatch_group_member_add_request(
     value["sender_key_distribution"] = serde_json::to_value(distribution)?;
     value["sender_key_redistribution"] = serde_json::Value::Array(redistributions);
     Ok(local_bus_ok(value))
+}
+
+fn create_group_member_onboard_event_for_authorized_local_actor(
+    account: &LocalBusAccountState,
+    group: &GroupState,
+    body: &LocalBusGroupMemberAddRequest,
+    route: &LocalBusGroupMemberRoute,
+) -> Result<Option<ramflux_protocol::GroupEvent>, SdkError> {
+    if route.target_delivery_id.is_none() && route.federation.is_none() {
+        return Ok(None);
+    }
+    let actor_device_id = account
+        .client
+        .device_branch
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .device_id
+        .clone();
+    let Some(actor_role) = group.roles.get(&actor_device_id) else {
+        return Ok(None);
+    };
+    if actor_role != "owner" && actor_role != "admin" {
+        return Ok(None);
+    }
+    Ok(Some(account.client.create_signed_group_member_join_event(
+        &body.group_id,
+        &actor_device_id,
+        &body.member_id,
+        &body.role,
+        &account.principal_commitment,
+    )?))
 }
 
 async fn resolve_group_member_principal_commitment(
@@ -907,4 +923,145 @@ pub(crate) async fn dispatch_group_receive_request(
         "pending_undecrypted_count": account.client.account_db()?.group_pending_undecrypted_count(&body.group_id)?,
         "messages": account.client.direct_messages(&body.conversation_id)?,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(test_name: &str) -> PathBuf {
+        let nanos =
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+        std::env::temp_dir().join(format!("ramflux-sdk-dispatch-group-{test_name}-{nanos}"))
+    }
+
+    fn gateway_config(principal: &str, device: &str, target: &str) -> GatewaySessionConfig {
+        GatewaySessionConfig::auto(GatewayQuicEndpointConfig {
+            bind_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            gateway_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            server_name: "localhost".to_owned(),
+            ca_cert: PathBuf::from("ca.pem"),
+            principal_id: principal.to_owned(),
+            device_id: device.to_owned(),
+            target_delivery_id: target.to_owned(),
+            prekey_http_url: None,
+        })
+    }
+
+    fn account_state(
+        test_name: &str,
+        account_id: &str,
+        principal: &str,
+        device: &str,
+        seed: [u8; 32],
+    ) -> Result<LocalBusAccountState, SdkError> {
+        let mut client = RamfluxClient::new();
+        client.create_identity_root(principal, [0x31; 32]);
+        let branch = client.create_device_branch(principal, device, 1, seed);
+        client.open_account_index(temp_root(test_name))?;
+        client.create_account(account_id, principal)?;
+        client.unlock_account(account_id, b"dispatch-group-test")?;
+        Ok(LocalBusAccountState::disconnected(
+            client,
+            gateway_config(principal, device, &format!("target_{device}"))
+                .with_device_branch(branch),
+            principal.to_owned(),
+        ))
+    }
+
+    fn member_add_body(group_id: &str, member_id: &str) -> LocalBusGroupMemberAddRequest {
+        LocalBusGroupMemberAddRequest {
+            group_id: group_id.to_owned(),
+            member_id: member_id.to_owned(),
+            role: "member".to_owned(),
+            member_signing_public_key: Some(format!("{member_id}_key")),
+            member_principal_commitment: Some(format!("{member_id}_commitment")),
+            target_delivery_id: Some(format!("target_{member_id}")),
+            federation: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_onboard_event_skips_signed_role_local_seed_for_non_admin_signer()
+    -> Result<(), SdkError> {
+        let bob = account_state(
+            "bob_s44_seed",
+            "bob_s44_account",
+            "principal_bob",
+            "bob_device_s44",
+            [0x44; 32],
+        )?;
+        bob.client.create_group("group_s44", "alice_device_s44")?;
+        let body = member_add_body("group_s44", "bob_device_s44");
+        let group = bob.client.add_group_member(&body.group_id, &body.member_id, &body.role)?;
+        let route = LocalBusGroupMemberRoute {
+            member_id: body.member_id.clone(),
+            member_principal_commitment: body.member_principal_commitment.clone(),
+            device_signing_public_key: body.member_signing_public_key.clone(),
+            target_delivery_id: body.target_delivery_id.clone(),
+            federation: body.federation.clone(),
+        };
+
+        assert_eq!(group.roles.get("alice_device_s44").map(String::as_str), Some("owner"));
+        assert_eq!(group.roles.get("bob_device_s44").map(String::as_str), Some("member"));
+        let event = create_group_member_onboard_event_for_authorized_local_actor(
+            &bob, &group, &body, &route,
+        )?;
+        assert!(event.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_onboard_event_owner_can_sign_multiple_direct_adds() -> Result<(), SdkError> {
+        let alice = account_state(
+            "alice_s44_seed",
+            "alice_s44_account",
+            "principal_alice",
+            "alice_device_s44",
+            [0x42; 32],
+        )?;
+        alice.client.create_group("group_s44", "alice_device_s44")?;
+
+        let bob_body = member_add_body("group_s44", "bob_device_s44");
+        let bob_group = alice.client.add_group_member(
+            &bob_body.group_id,
+            &bob_body.member_id,
+            &bob_body.role,
+        )?;
+        let bob_route = LocalBusGroupMemberRoute {
+            member_id: bob_body.member_id.clone(),
+            member_principal_commitment: bob_body.member_principal_commitment.clone(),
+            device_signing_public_key: bob_body.member_signing_public_key.clone(),
+            target_delivery_id: bob_body.target_delivery_id.clone(),
+            federation: bob_body.federation.clone(),
+        };
+        let bob_event = create_group_member_onboard_event_for_authorized_local_actor(
+            &alice, &bob_group, &bob_body, &bob_route,
+        )?;
+        assert!(bob_event.is_some());
+
+        let carol_body = member_add_body("group_s44", "carol_device_s44");
+        let carol_group = alice.client.add_group_member(
+            &carol_body.group_id,
+            &carol_body.member_id,
+            &carol_body.role,
+        )?;
+        let carol_route = LocalBusGroupMemberRoute {
+            member_id: carol_body.member_id.clone(),
+            member_principal_commitment: carol_body.member_principal_commitment.clone(),
+            device_signing_public_key: carol_body.member_signing_public_key.clone(),
+            target_delivery_id: carol_body.target_delivery_id.clone(),
+            federation: carol_body.federation.clone(),
+        };
+        let carol_event = create_group_member_onboard_event_for_authorized_local_actor(
+            &alice,
+            &carol_group,
+            &carol_body,
+            &carol_route,
+        )?;
+        assert!(carol_event.is_some());
+        Ok(())
+    }
 }
