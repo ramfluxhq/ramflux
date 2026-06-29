@@ -21,6 +21,8 @@ pub struct SdkGroupSenderKeyDistribution {
 pub(crate) struct SdkGroupSenderKeyDistributionEnvelope {
     pub(crate) schema: String,
     pub(crate) version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) membership_event_base64: Option<String>,
     pub(crate) distribution_base64: String,
 }
 
@@ -156,6 +158,15 @@ pub(crate) fn group_member_accepted_event_id(
     new_group_epoch: u64,
 ) -> String {
     format!("group.member_accepted:{group_id}:{invitee_identity}:{invite_id}:{new_group_epoch}")
+}
+
+pub(crate) fn group_member_joined_event_id(
+    group_id: &str,
+    actor_device_id: &str,
+    joined_identity: &str,
+    new_group_epoch: u64,
+) -> String {
+    format!("group.member_joined:{group_id}:{actor_device_id}:{joined_identity}:{new_group_epoch}")
 }
 
 pub(crate) fn group_entry_is_sender_key_message(

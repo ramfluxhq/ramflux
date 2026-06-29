@@ -145,6 +145,22 @@ pub struct GroupInviteAcceptWrite {
     pub now: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupMemberJoinWrite {
+    pub group_id: String,
+    pub event_id: String,
+    pub actor_device_id: String,
+    pub joined_identity: String,
+    pub joined_role: String,
+    pub actor_role: String,
+    pub actor_principal_commitment: String,
+    pub actor_device_signing_public_key: String,
+    pub previous_epoch: u64,
+    pub new_group_epoch: u64,
+    pub max_members: u32,
+    pub new_member_history: String,
+}
+
 impl GroupKeyEpochState {
     #[must_use]
     pub fn new(group_id: &str, members: impl IntoIterator<Item = String>) -> Self {
