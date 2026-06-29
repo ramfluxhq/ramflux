@@ -43,6 +43,7 @@ pub struct SdkMvp1IdentityRegistrationResponse {
 pub struct SdkMvp1PrekeyResponse {
     pub(crate) device_id: String,
     pub(crate) bundle: Option<ramflux_crypto::PrekeyBundle>,
+    pub(crate) principal_commitment: String,
     #[serde(default)]
     pub(crate) target_delivery_id: Option<String>,
 }
