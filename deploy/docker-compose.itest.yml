@@ -137,6 +137,7 @@ services:
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_RELAY_HTTP_ADDR: "0.0.0.0:18084"
       RAMFLUX_ITEST_RELAY_MEDIA_UDP_ADDR: "0.0.0.0:19000"
+      RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS: "1"
       RAMFLUX_RELAY_ITEST_CAPTURE_JSON: "${RAMFLUX_RELAY_ITEST_CAPTURE_JSON:-/tmp/ramflux-relay-itest-capture.jsonl}"
     volumes:
       - ./config/relay.toml:/etc/ramflux/config/relay.toml:ro
