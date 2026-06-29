@@ -125,14 +125,12 @@ async fn dispatch_message_submit_request(
             let message = body.into_gateway_message_with_body(Vec::new());
             let engine = account.take_live_engine().await?;
             if let Some(device_id) = message.recipient_device_id.as_deref() {
-                account
-                    .client
-                    .resolve_target_principal_commitment(
-                        &engine.config,
-                        recipient_principal_commitment.as_deref(),
-                        device_id,
-                    )
-                    .await?;
+                federated_manifest_gate(
+                    &account.client,
+                    &federation,
+                    recipient_principal_commitment.as_deref(),
+                    device_id,
+                )?;
             }
             let response = account.client.send_plaintext_federated_direct_message(
                 &engine,
@@ -185,6 +183,33 @@ async fn dispatch_message_submit_request(
         result?
     };
     Ok(local_bus_ok(serde_json::to_value(entry)?))
+}
+
+/// Cross-node manifest gate for federated direct messages (C2 §5).
+///
+/// The recipient lives on a remote home node, so the sender's local gateway/device directory cannot
+/// serve the manifest. Resolve and verify it directly from the recipient home node's federation HTTP
+/// surface — the same base the federated send already uses for the recipient prekey fetch. The
+/// manifest is self-authenticating against the expected commitment, so a lying remote node can only
+/// fail closed. The gate runs before send, fail-closed.
+fn federated_manifest_gate(
+    client: &RamfluxClient,
+    federation: &LocalBusFederationRoute,
+    recipient_principal_commitment: Option<&str>,
+    device_id: &str,
+) -> Result<(), SdkError> {
+    let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
+        SdkError::LocalBus(
+            "federated direct messages require a recipient home-node url (--recipient-prekey-url) to verify the remote device manifest"
+                .to_owned(),
+        )
+    })?;
+    client.resolve_federated_target_principal_commitment(
+        manifest_url,
+        recipient_principal_commitment,
+        device_id,
+    )?;
+    Ok(())
 }
 
 fn dispatch_message_delete(
