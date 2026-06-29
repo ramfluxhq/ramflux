@@ -676,6 +676,16 @@ async fn handle_media_relay_packet(
         return Ok(());
     };
     let target: std::net::SocketAddr = target.parse()?;
+    let allow_private_targets =
+        std::env::var("RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1");
+    if !allow_private_targets && !ramflux_node_core::relay_socket_target_allowed(target, &[]) {
+        tracing::warn!(
+            %target,
+            allocation_id = %packet.header.token.allocation_id,
+            "dropping media relay packet to disallowed target address"
+        );
+        return Ok(());
+    }
     socket.send_to(&packet.payload, target).await?;
     Ok(())
 }
