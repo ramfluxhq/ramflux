@@ -171,6 +171,53 @@ impl RamfluxClient {
         Ok(entry.principal_commitment)
     }
 
+    /// Resolve and verify the recipient principal commitment for a federated (cross-node) send.
+    ///
+    /// The recipient lives on a remote home node, so the sender's local gateway/device directory
+    /// cannot serve the manifest. Instead the manifest is fetched directly from the recipient home
+    /// node's federation HTTP surface (`manifest_url`, the same base the federated send already uses
+    /// for the recipient prekey). Verification is identical to the local path: the manifest's root
+    /// public key must commit to the expected `principal_commitment` and every device branch proof
+    /// must be signed by that root, so a lying remote node can only fail closed, never forge a
+    /// manifest for a commitment it does not control. The verified entries are cached into the local
+    /// trusted device directory.
+    ///
+    /// # Errors
+    /// Returns an error (fail-closed) when no explicit recipient principal commitment is supplied,
+    /// when the manifest cannot be fetched or verified, or when the target device is absent from the
+    /// verified manifest.
+    pub(crate) fn resolve_federated_target_principal_commitment(
+        &self,
+        manifest_url: &str,
+        explicit_principal_commitment: Option<&str>,
+        device_id: &str,
+    ) -> Result<String, SdkError> {
+        let principal_commitment = explicit_principal_commitment
+            .filter(|commitment| !commitment.is_empty())
+            .ok_or_else(|| {
+                SdkError::LocalBus(
+                    "federated direct messages require an explicit recipient principal commitment to verify the remote device manifest"
+                        .to_owned(),
+                )
+            })?;
+        let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
+        let verified_at = now_unix_timestamp();
+        for device in &manifest.devices {
+            self.account_db()?.upsert_device_directory_entry(
+                &device.device_id,
+                &manifest.principal_commitment,
+                "federation",
+                verified_at,
+            )?;
+        }
+        if !manifest.devices.iter().any(|device| device.device_id == device_id) {
+            return Err(SdkError::LocalBus(format!(
+                "recipient device {device_id} is not in verified manifest for {principal_commitment}"
+            )));
+        }
+        Ok(principal_commitment.to_owned())
+    }
+
     /// # Errors
     /// Returns an error when the verified manifest does not contain the active target device.
     pub(crate) async fn assert_manifest_active_device_cached(
@@ -533,6 +580,24 @@ pub(crate) async fn fetch_verified_device_manifest(
     let manifest: Option<SdkMvp1DeviceManifestResponse> =
         sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{identity_commitment}"))
             .await?;
+    let manifest = manifest.ok_or_else(|| {
+        SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
+    })?;
+    verify_device_manifest(&manifest, identity_commitment)?;
+    Ok(manifest)
+}
+
+/// Fetch and verify a device manifest from an absolute federation HTTP base URL (the recipient's
+/// home node), rather than the sender's gateway session. Used for cross-node federated sends where
+/// the recipient is not served by the local gateway. Verification is identical to the gateway path
+/// (`verify_device_manifest`), so the manifest remains self-authenticating against the expected
+/// commitment regardless of which node served it.
+pub(crate) fn fetch_verified_device_manifest_from_url(
+    manifest_url: &str,
+    identity_commitment: &str,
+) -> Result<SdkMvp1DeviceManifestResponse, SdkError> {
+    let manifest: Option<SdkMvp1DeviceManifestResponse> =
+        sdk_http_get_json(manifest_url, &format!("/mvp1/device-manifest/{identity_commitment}"))?;
     let manifest = manifest.ok_or_else(|| {
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
     })?;
