@@ -182,14 +182,24 @@ impl RamfluxClient {
                 "group membership event joined identity {joined_identity} does not match local device {recipient_device_id}"
             )));
         }
-        let actor_device = self
-            .assert_manifest_active_device_cached(
+        let actor_device = if let Some(manifest_url) =
+            wrapper.actor_manifest_url.as_deref().filter(|url| !url.is_empty())
+        {
+            self.assert_manifest_active_device_from_url(
+                manifest_url,
+                actor_principal_commitment,
+                &event.actor_device_id,
+                "group.member_joined.bootstrap.federation",
+            )?
+        } else {
+            self.assert_manifest_active_device_cached(
                 gateway,
                 actor_principal_commitment,
                 &event.actor_device_id,
                 "group.member_joined.bootstrap",
             )
-            .await?;
+            .await?
+        };
         if actor_device.branch_public_key != *actor_device_signing_public_key {
             return Err(SdkError::LocalBus(
                 "group membership event actor key does not match verified manifest".to_owned(),

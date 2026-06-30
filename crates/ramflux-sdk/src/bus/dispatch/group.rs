@@ -797,6 +797,11 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                 .map(serde_json::to_vec)
                 .transpose()?
                 .map(|bytes| ramflux_protocol::encode_base64url(&bytes)),
+            actor_manifest_url: if membership_event.is_some() {
+                route.federation.as_ref().map(|federation| federation.federation_url.clone())
+            } else {
+                None
+            },
             distribution_base64: ramflux_protocol::encode_base64url(&distribution),
         };
         let message = GatewayDirectMessage {
@@ -1082,13 +1087,16 @@ mod tests {
             "alice_device",
             [0x42; 32],
         )?;
-        let error = resolve_federated_group_member_principal_commitment(
+        let Err(error) = resolve_federated_group_member_principal_commitment(
             &account.client,
             &federation_route(None),
             Some("bob_commitment"),
             "bob_device",
-        )
-        .expect_err("missing recipient_prekey_url must fail before local gateway resolve");
+        ) else {
+            return Err(SdkError::LocalBus(
+                "missing recipient_prekey_url should fail before local gateway resolve".to_owned(),
+            ));
+        };
         assert!(error.to_string().contains("recipient-prekey-url"));
         Ok(())
     }
