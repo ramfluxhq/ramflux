@@ -23,6 +23,8 @@ pub(crate) struct SdkGroupSenderKeyDistributionEnvelope {
     pub(crate) version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) membership_event_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) actor_manifest_url: Option<String>,
     pub(crate) distribution_base64: String,
 }
 

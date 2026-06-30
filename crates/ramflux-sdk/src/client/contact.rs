@@ -259,6 +259,32 @@ impl RamfluxClient {
     }
 
     /// # Errors
+    /// Returns an error when the remote verified manifest does not contain the active target device.
+    pub(crate) fn assert_manifest_active_device_from_url(
+        &self,
+        manifest_url: &str,
+        principal_commitment: &str,
+        device_id: &str,
+        source: &str,
+    ) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+        let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
+        let verified_at = now_unix_timestamp();
+        for device in &manifest.devices {
+            self.account_db()?.upsert_device_directory_entry(
+                &device.device_id,
+                &manifest.principal_commitment,
+                source,
+                verified_at,
+            )?;
+        }
+        manifest.devices.into_iter().find(|device| device.device_id == device_id).ok_or_else(|| {
+            SdkError::LocalBus(format!(
+                "recipient device {device_id} is not in verified manifest for {principal_commitment}"
+            ))
+        })
+    }
+
+    /// # Errors
     /// Returns an error when the contact cannot be verified or persisted.
     pub fn mark_contact_safety_verified(
         &self,
