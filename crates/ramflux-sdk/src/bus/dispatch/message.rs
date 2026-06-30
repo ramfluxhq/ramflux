@@ -5,6 +5,11 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+struct ResolvedMessageRecipient {
+    principal_id: Option<String>,
+    principal_commitment: String,
+}
+
 pub(crate) async fn dispatch_message_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -98,16 +103,14 @@ async fn dispatch_message_submit_request(
                 ));
             }
             let mut engine = account.take_live_engine().await?;
-            if let Some(device_id) = body.recipient_device_id.as_deref() {
-                account
-                    .client
-                    .resolve_target_principal_commitment(
-                        &engine.config,
-                        body.recipient_principal_commitment.as_deref(),
-                        device_id,
-                    )
-                    .await?;
-            }
+            let recipient = resolve_local_message_recipient_principal_commitment(
+                account,
+                &engine.config,
+                body.recipient_principal_commitment.as_deref(),
+                body.recipient_device_id.as_deref(),
+            )
+            .await?;
+            require_message_submit_friend_link_accepted(account, &recipient)?;
             let message = body.clone().into_gateway_message_with_body(Vec::new());
             let result = account
                 .client
@@ -124,14 +127,13 @@ async fn dispatch_message_submit_request(
             let recipient_principal_commitment = body.recipient_principal_commitment.clone();
             let message = body.into_gateway_message_with_body(Vec::new());
             let engine = account.take_live_engine().await?;
-            if let Some(device_id) = message.recipient_device_id.as_deref() {
-                federated_manifest_gate(
-                    &account.client,
-                    &federation,
-                    recipient_principal_commitment.as_deref(),
-                    device_id,
-                )?;
-            }
+            let recipient = resolve_federated_message_recipient_principal_commitment(
+                &account.client,
+                &federation,
+                recipient_principal_commitment.as_deref(),
+                message.recipient_device_id.as_deref(),
+            )?;
+            require_message_submit_friend_link_accepted(account, &recipient)?;
             let response = account.client.send_plaintext_federated_direct_message(
                 &engine,
                 message,
@@ -143,16 +145,14 @@ async fn dispatch_message_submit_request(
             return Ok(local_bus_ok(serde_json::to_value(response)?));
         } else {
             let mut engine = account.take_live_engine().await?;
-            if let Some(device_id) = body.recipient_device_id.as_deref() {
-                account
-                    .client
-                    .resolve_target_principal_commitment(
-                        &engine.config,
-                        body.recipient_principal_commitment.as_deref(),
-                        device_id,
-                    )
-                    .await?;
-            }
+            let recipient = resolve_local_message_recipient_principal_commitment(
+                account,
+                &engine.config,
+                body.recipient_principal_commitment.as_deref(),
+                body.recipient_device_id.as_deref(),
+            )
+            .await?;
+            require_message_submit_friend_link_accepted(account, &recipient)?;
             let result = account
                 .client
                 .send_plaintext_direct_message_via_gateway(
@@ -168,21 +168,96 @@ async fn dispatch_message_submit_request(
         let recipient_principal_commitment = body.recipient_principal_commitment.clone();
         let message = body.into_gateway_message()?;
         let mut engine = account.take_live_engine().await?;
-        if let Some(device_id) = message.recipient_device_id.as_deref() {
-            account
-                .client
-                .resolve_target_principal_commitment(
-                    &engine.config,
-                    recipient_principal_commitment.as_deref(),
-                    device_id,
-                )
-                .await?;
-        }
+        let recipient = resolve_local_message_recipient_principal_commitment(
+            account,
+            &engine.config,
+            recipient_principal_commitment.as_deref(),
+            message.recipient_device_id.as_deref(),
+        )
+        .await?;
+        require_message_submit_friend_link_accepted(account, &recipient)?;
         let result = account.client.send_direct_message_via_gateway(&mut engine, message).await;
         account.put_engine(engine);
         result?
     };
     Ok(local_bus_ok(serde_json::to_value(entry)?))
+}
+
+async fn resolve_local_message_recipient_principal_commitment(
+    account: &LocalBusAccountState,
+    gateway: &GatewaySessionConfig,
+    explicit_principal_commitment: Option<&str>,
+    recipient_device_id: Option<&str>,
+) -> Result<ResolvedMessageRecipient, SdkError> {
+    if let Some(device_id) = recipient_device_id {
+        let principal_commitment = account
+            .client
+            .resolve_target_principal_commitment(gateway, explicit_principal_commitment, device_id)
+            .await?;
+        let device = account
+            .client
+            .assert_manifest_active_device_cached(
+                gateway,
+                &principal_commitment,
+                device_id,
+                "message_submit_friend_gate",
+            )
+            .await?;
+        return Ok(ResolvedMessageRecipient {
+            principal_id: Some(device.principal_id),
+            principal_commitment,
+        });
+    }
+    explicit_principal_commitment
+        .filter(|commitment| !commitment.is_empty())
+        .map(|commitment| ResolvedMessageRecipient {
+            principal_id: None,
+            principal_commitment: commitment.to_owned(),
+        })
+        .ok_or_else(|| {
+            SdkError::LocalBus(
+                "message.submit requires recipient_device_id or recipient_principal_commitment to verify friend_link".to_owned(),
+            )
+        })
+}
+
+fn resolve_federated_message_recipient_principal_commitment(
+    client: &RamfluxClient,
+    federation: &LocalBusFederationRoute,
+    recipient_principal_commitment: Option<&str>,
+    recipient_device_id: Option<&str>,
+) -> Result<ResolvedMessageRecipient, SdkError> {
+    if let Some(device_id) = recipient_device_id {
+        return federated_manifest_gate(
+            client,
+            federation,
+            recipient_principal_commitment,
+            device_id,
+        );
+    }
+    recipient_principal_commitment
+        .filter(|commitment| !commitment.is_empty())
+        .map(|commitment| ResolvedMessageRecipient {
+            principal_id: None,
+            principal_commitment: commitment.to_owned(),
+        })
+        .ok_or_else(|| {
+            SdkError::LocalBus(
+                "federated direct messages require recipient_device_id or recipient_principal_commitment to verify friend_link".to_owned(),
+            )
+        })
+}
+
+fn require_message_submit_friend_link_accepted(
+    account: &LocalBusAccountState,
+    recipient: &ResolvedMessageRecipient,
+) -> Result<(), SdkError> {
+    account.client.require_accepted_friend_link_for_dm_send(
+        &account.gateway_config.principal_id,
+        &account.principal_commitment,
+        recipient.principal_id.as_deref(),
+        &recipient.principal_commitment,
+    )
 }
 
 /// Cross-node manifest gate for federated direct messages (C2 §5).
@@ -197,19 +272,25 @@ fn federated_manifest_gate(
     federation: &LocalBusFederationRoute,
     recipient_principal_commitment: Option<&str>,
     device_id: &str,
-) -> Result<(), SdkError> {
+) -> Result<ResolvedMessageRecipient, SdkError> {
     let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
         SdkError::LocalBus(
             "federated direct messages require a recipient home-node url (--recipient-prekey-url) to verify the remote device manifest"
                 .to_owned(),
         )
     })?;
-    client.resolve_federated_target_principal_commitment(
+    let principal_commitment = client.resolve_federated_target_principal_commitment(
         manifest_url,
         recipient_principal_commitment,
         device_id,
     )?;
-    Ok(())
+    let device = client.assert_manifest_active_device_from_url(
+        manifest_url,
+        &principal_commitment,
+        device_id,
+        "message_submit_friend_gate",
+    )?;
+    Ok(ResolvedMessageRecipient { principal_id: Some(device.principal_id), principal_commitment })
 }
 
 fn dispatch_message_delete(

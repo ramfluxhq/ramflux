@@ -131,7 +131,7 @@ pub(crate) async fn dispatch_object_bus_request(
                 SdkError::LocalBus("object.share requires target_delivery_id".to_owned())
             })?;
             let mut engine = account.take_live_engine().await?;
-            account
+            let recipient_principal_commitment = account
                 .client
                 .resolve_target_principal_commitment(
                     &engine.config,
@@ -139,6 +139,21 @@ pub(crate) async fn dispatch_object_bus_request(
                     &recipient_device_id,
                 )
                 .await?;
+            let recipient_device = account
+                .client
+                .assert_manifest_active_device_cached(
+                    &engine.config,
+                    &recipient_principal_commitment,
+                    &recipient_device_id,
+                    "object_share_friend_gate",
+                )
+                .await?;
+            account.client.require_accepted_friend_link_for_dm_send(
+                &account.gateway_config.principal_id,
+                &account.principal_commitment,
+                Some(&recipient_device.principal_id),
+                &recipient_principal_commitment,
+            )?;
             let package =
                 account.client.share_object_key_with_dm_recipient(&mut engine, body).await;
             account.put_engine(engine);
