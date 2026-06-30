@@ -776,6 +776,10 @@ pub struct LocalMcpGrantSigningBody {
     pub registry_hash: String,
     pub tool_manifest_set_hash: String,
     pub full_delegation: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub single_use: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_hash: Option<String>,
     pub expires_at: i64,
 }
 
@@ -796,6 +800,11 @@ pub struct LocalMcpStandingApprovalSigningBody {
 
 const fn default_mcp_manifest_version() -> u32 {
     1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 impl LocalBusConfig {
     #[must_use]
