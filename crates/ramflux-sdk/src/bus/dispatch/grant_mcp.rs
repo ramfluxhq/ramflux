@@ -224,7 +224,7 @@ fn dispatch_grant_request(
         &serde_json::json!({
             "requested_grant": true,
         }),
-    );
+    )?;
     let event_body = mcp_approval_request_event_body(&approval);
     mcp_emit_lifecycle_event(
         request,
@@ -407,7 +407,7 @@ pub(crate) fn dispatch_mcp_tool_call(
             "high risk tool requires explicit approval".to_owned(),
         ));
     }
-    if let Some(grant) = mcp_valid_grant(account, &manifest) {
+    if let Some(grant) = mcp_valid_grant(account, &manifest, &body.arguments) {
         let grant = grant.clone();
         let mut ctx = McpInvokeContext {
             request,
@@ -449,7 +449,7 @@ pub(crate) fn dispatch_mcp_tool_call(
         };
         return dispatch_mcp_tool_call_with_standing(&mut ctx, &standing);
     }
-    let approval = mcp_create_approval(account, &manifest, attended, None, false, &body.arguments);
+    let approval = mcp_create_approval(account, &manifest, attended, None, false, &body.arguments)?;
     let event_body = mcp_approval_request_event_body(&approval);
     mcp_emit_lifecycle_event(
         request,
@@ -481,11 +481,19 @@ fn dispatch_mcp_tool_call_with_grant(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     mcp_trace_tool("BUS-MCP-VALID-GRANT", ctx.request, ctx.body, Some(&grant.grant_id));
     mcp_trace_tool("BUS-MCP-INVOKE-IN", ctx.request, ctx.body, None);
-    let result = ctx
-        .account
-        .mcp_registry
-        .invoke_tool(&ctx.body.server_id, &ctx.body.tool_name, &grant.state)
-        .map_err(mcp_sync_error)?;
+    if mcp_grant_requires_single_use(grant) {
+        mcp_consume_single_use_grant(ctx.account, &grant.grant_id)?;
+    }
+    let result = if risk_requires_explicit_approval(&ctx.manifest.effective_risk()) {
+        if grant_matches_manifest(&grant.state, ctx.manifest) {
+            Ok(format!("{}:{}", ctx.manifest.server_id, ctx.manifest.tool_name))
+        } else {
+            Err(SyncError::CapabilityDenied)
+        }
+    } else {
+        ctx.account.mcp_registry.invoke_tool(&ctx.body.server_id, &ctx.body.tool_name, &grant.state)
+    }
+    .map_err(mcp_sync_error)?;
     mcp_trace_tool("BUS-MCP-INVOKE-OUT", ctx.request, ctx.body, None);
     let output = mcp_echo_tool_output(&ctx.body.arguments);
     mcp_trace_tool("BUS-MCP-COMPLETED-EVENT-IN", ctx.request, ctx.body, None);
@@ -892,10 +900,12 @@ fn mcp_invalidated_grant_exists(
 ) -> bool {
     let now = now_unix_timestamp();
     account.mcp_grants.values().any(|grant| {
-        (grant.state.revoked
-            || mcp_grant_expired(grant, now)
-            || grant.state.registry_hash != account.mcp_registry.registry_hash()
-            || grant.state.tool_manifest_set_hash != account.mcp_registry.tool_manifest_set_hash())
+        (!mcp_grant_requires_single_use(grant)
+            && (grant.state.revoked
+                || mcp_grant_expired(grant, now)
+                || grant.state.registry_hash != account.mcp_registry.registry_hash()
+                || grant.state.tool_manifest_set_hash
+                    != account.mcp_registry.tool_manifest_set_hash()))
             && grant_matches_manifest(&grant.state, manifest)
     })
 }
@@ -920,6 +930,7 @@ fn mcp_full_delegation_blocked_by_risk(
 fn mcp_valid_grant<'a>(
     account: &'a LocalBusAccountState,
     manifest: &McpToolManifest,
+    arguments: &serde_json::Value,
 ) -> Option<&'a LocalMcpGrantRecord> {
     let now = now_unix_timestamp();
     account.mcp_grants.values().find(|grant| {
@@ -931,8 +942,41 @@ fn mcp_valid_grant<'a>(
                 && !risk_requires_explicit_approval(&manifest.effective_risk()))
                 || grant.state.allowed_capabilities.contains(&manifest.capability))
             && grant_matches_manifest(&grant.state, manifest)
+            && mcp_grant_single_use_matches(grant, manifest, arguments)
             && mcp_verify_grant_signature(grant).is_ok()
     })
+}
+
+fn mcp_grant_single_use_matches(
+    grant: &LocalMcpGrantRecord,
+    manifest: &McpToolManifest,
+    arguments: &serde_json::Value,
+) -> bool {
+    if !risk_requires_explicit_approval(&manifest.effective_risk()) {
+        return true;
+    }
+    grant.confirmation_mode == "remote_app"
+        && grant.signing_body.single_use
+        && grant
+            .signing_body
+            .arguments_hash
+            .as_deref()
+            .is_some_and(|hash| mcp_arguments_hash(arguments).is_ok_and(|current| current == hash))
+}
+
+fn mcp_grant_requires_single_use(grant: &LocalMcpGrantRecord) -> bool {
+    grant.signing_body.single_use
+}
+
+fn mcp_consume_single_use_grant(
+    account: &mut LocalBusAccountState,
+    grant_id: &str,
+) -> Result<(), SdkError> {
+    if let Some(record) = account.mcp_grants.get_mut(grant_id) {
+        record.state.revoked = true;
+    }
+    account.client.account_db()?.set_mcp_grant_revoked(grant_id)?;
+    Ok(())
 }
 
 fn mcp_find_standing_auto_approval(
@@ -1056,7 +1100,7 @@ fn mcp_create_approval(
     requested_grant_id: Option<&str>,
     full_delegation: bool,
     arguments: &serde_json::Value,
-) -> LocalMcpApprovalRecord {
+) -> Result<LocalMcpApprovalRecord, SdkError> {
     let confirmation_mode =
         if attended && !risk_requires_explicit_approval(&manifest.effective_risk()) {
             "attended_local"
@@ -1070,6 +1114,8 @@ fn mcp_create_approval(
         account.mcp_pending_approvals.len().saturating_add(1)
     );
     let expires_at = now_unix_timestamp().saturating_add(MCP_GRANT_TTL_SECONDS);
+    let single_use = risk_requires_explicit_approval(&manifest.effective_risk());
+    let arguments_hash = mcp_arguments_hash(arguments)?;
     let approval = LocalMcpApprovalRecord {
         approval_id: approval_id.clone(),
         server_id: manifest.server_id.clone(),
@@ -1087,12 +1133,14 @@ fn mcp_create_approval(
             "tool_scope": manifest.tool_scope.clone(),
             "requested_grant_id": requested_grant_id,
             "full_delegation": full_delegation,
+            "single_use": single_use,
+            "arguments_hash": arguments_hash,
             "expires_at": expires_at,
             "arguments": arguments,
         }),
     };
     account.mcp_pending_approvals.insert(approval_id, approval.clone());
-    approval
+    Ok(approval)
 }
 
 fn mcp_local_grant_from_approval(
@@ -1105,7 +1153,7 @@ fn mcp_local_grant_from_approval(
     }
     let device =
         account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone();
-    let body = mcp_grant_signing_body(account, &approval);
+    let body = mcp_grant_signing_body(account, &approval)?;
     let signature = ramflux_crypto::sign_with_device_branch(&device, &body)?;
     let public_key =
         ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes());
@@ -1117,7 +1165,7 @@ fn mcp_remote_grant_from_approval(
     approval: LocalMcpApprovalRecord,
     signed: LocalBusMcpApprovalGrantRequest,
 ) -> Result<LocalMcpGrantRecord, SdkError> {
-    let body = mcp_grant_signing_body(account, &approval);
+    let body = mcp_grant_signing_body(account, &approval)?;
     ramflux_crypto::verify_device_branch_signature(
         &signed.signer_public_key,
         &body,
@@ -1137,7 +1185,7 @@ fn mcp_remote_grant_from_approval(
 fn mcp_grant_signing_body(
     account: &LocalBusAccountState,
     approval: &LocalMcpApprovalRecord,
-) -> LocalMcpGrantSigningBody {
+) -> Result<LocalMcpGrantSigningBody, SdkError> {
     let requested_grant_id = approval
         .details
         .get("requested_grant_id")
@@ -1148,7 +1196,23 @@ fn mcp_grant_signing_body(
         .get("full_delegation")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    LocalMcpGrantSigningBody {
+    let single_use =
+        approval.details.get("single_use").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let arguments_hash = if single_use {
+        Some(
+            approval
+                .details
+                .get("arguments_hash")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    SdkError::LocalBus("single-use mcp grant missing arguments_hash".to_owned())
+                })?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    Ok(LocalMcpGrantSigningBody {
         approval_id: approval.approval_id.clone(),
         grant_id: requested_grant_id,
         server_id: approval.server_id.clone(),
@@ -1158,8 +1222,10 @@ fn mcp_grant_signing_body(
         registry_hash: account.mcp_registry.registry_hash().to_owned(),
         tool_manifest_set_hash: account.mcp_registry.tool_manifest_set_hash().to_owned(),
         full_delegation,
+        single_use,
+        arguments_hash,
         expires_at: approval.expires_at,
-    }
+    })
 }
 
 fn mcp_store_grant(
@@ -1291,6 +1357,11 @@ fn mcp_echo_tool_output(arguments: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "echo": arguments,
     })
+}
+
+fn mcp_arguments_hash(arguments: &serde_json::Value) -> Result<String, SdkError> {
+    let body = ramflux_protocol::canonical_json_bytes(arguments)?;
+    Ok(ramflux_protocol::hash_base64url(ramflux_protocol::domain::MCP_GRANT, &body))
 }
 
 fn mcp_sync_error(error: SyncError) -> SdkError {
@@ -1788,6 +1859,135 @@ mod tests {
     }
 
     #[test]
+    fn high_and_critical_mcp_grants_are_single_use_remote_app_confirmations() {
+        let mut state = test_state();
+        install_tool(
+            &mut state,
+            "srv",
+            "shell",
+            McpCapability::RunShell,
+            Some("shell"),
+            RiskLevel::High,
+        );
+        install_tool(
+            &mut state,
+            "srv",
+            "node_admin",
+            McpCapability::ManageNode,
+            Some("node"),
+            RiskLevel::Critical,
+        );
+
+        let high_approval = dispatch_mcp_bus_request(
+            &request(
+                "mcp.tool.started",
+                serde_json::json!({
+                    "server_id": "srv",
+                    "tool_name": "shell",
+                    "arguments": {"cmd": "echo hello"},
+                    "operation_origin": "ai_mcp",
+                }),
+            ),
+            &mut state,
+            &mut test_connection(1),
+        )
+        .expect("create high approval")
+        .response_body["approval"]
+            .clone();
+        assert_eq!(high_approval["confirmation_mode"], "remote_app");
+        assert_eq!(high_approval["details"]["single_use"], true);
+        let high_grant = sign_test_remote_grant(&state, &high_approval);
+        dispatch_mcp_bus_request(
+            &request("mcp.approval.granted", serde_json::to_value(high_grant).expect("grant json")),
+            &mut state,
+            &mut test_connection(2),
+        )
+        .expect("approve high grant");
+
+        let first = dispatch_mcp_bus_request(
+            &request(
+                "mcp.tool.started",
+                serde_json::json!({
+                    "server_id": "srv",
+                    "tool_name": "shell",
+                    "arguments": {"cmd": "echo hello"},
+                    "operation_origin": "ai_mcp",
+                }),
+            ),
+            &mut state,
+            &mut test_connection(3),
+        )
+        .expect("single-use high grant should allow one matching invoke");
+        assert_eq!(first.response_body["status"], "ok");
+        let grant_id = high_approval["details"]["requested_grant_id"].as_str().map_or_else(
+            || format!("grant_{}", high_approval["approval_id"].as_str().expect("approval id")),
+            str::to_owned,
+        );
+        assert!(
+            account(&state).mcp_grants.get(&grant_id).is_some_and(|grant| grant.state.revoked),
+            "single-use high grant must be consumed after first invoke"
+        );
+
+        let second = dispatch_mcp_bus_request(
+            &request(
+                "mcp.tool.started",
+                serde_json::json!({
+                    "server_id": "srv",
+                    "tool_name": "shell",
+                    "arguments": {"cmd": "echo hello"},
+                    "operation_origin": "ai_mcp",
+                }),
+            ),
+            &mut state,
+            &mut test_connection(4),
+        )
+        .expect("consumed high grant should require a fresh approval");
+        assert_eq!(second.response_body["status"], "approval_required");
+        assert_eq!(second.response_body["approval"]["confirmation_mode"], "remote_app");
+
+        let critical = dispatch_mcp_bus_request(
+            &request(
+                "mcp.tool.started",
+                serde_json::json!({
+                    "server_id": "srv",
+                    "tool_name": "node_admin",
+                    "arguments": {"op": "rotate-node-key"},
+                    "operation_origin": "ai_mcp",
+                }),
+            ),
+            &mut state,
+            &mut test_connection(5),
+        )
+        .expect("create critical approval");
+        assert_eq!(critical.response_body["approval"]["risk_level"], "critical");
+        assert_eq!(critical.response_body["approval"]["details"]["single_use"], true);
+    }
+
+    fn sign_test_remote_grant(
+        state: &LocalBusDaemonState,
+        approval: &serde_json::Value,
+    ) -> LocalBusMcpApprovalGrantRequest {
+        let approval: LocalMcpApprovalRecord =
+            serde_json::from_value(approval.clone()).expect("approval record");
+        let body = mcp_grant_signing_body(account(state), &approval).expect("signing body");
+        let branch = ramflux_crypto::create_device_branch(
+            PRINCIPAL_ID,
+            "app_device_mcp_test",
+            1,
+            [0xA6; 32],
+        );
+        let signature = ramflux_crypto::sign_with_device_branch(&branch, &body).expect("signature");
+        LocalBusMcpApprovalGrantRequest {
+            approval_id: approval.approval_id,
+            signed_by_device_id: branch.device_id.clone(),
+            signer_public_key: ramflux_protocol::encode_base64url(
+                branch.signing_key.verifying_key().to_bytes(),
+            ),
+            signature,
+        }
+    }
+
+    #[test]
     fn mcp_grant_signature_uses_stored_approval_expiry() {
         let mut state = test_state();
         install_tool(
@@ -2002,6 +2202,8 @@ mod tests {
                     registry_hash,
                     tool_manifest_set_hash,
                     full_delegation: true,
+                    single_use: false,
+                    arguments_hash: None,
                     expires_at: FUTURE_EXPIRES_AT,
                 },
                 confirmation_mode: "remote_app".to_owned(),
