@@ -91,12 +91,11 @@ pub(crate) fn handle_admin_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &record)?;
         }
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response: serde_json::Value = router
-                .client
-                .get_json(&router.endpoint, path, &router.tls, &router.server_name)
-                .map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
-                })?;
+            let response = proxy_router_get_json(router, path)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
+            let response = proxy_router_get_json(router, path)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp1/prekey/fetch") => {
@@ -159,6 +158,16 @@ pub(crate) fn handle_admin_request(
         }
     }
     Ok(())
+}
+
+fn proxy_router_get_json(
+    router: &RouterMeshClient,
+    path: &str,
+) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
+    router
+        .client
+        .get_json(&router.endpoint, path, &router.tls, &router.server_name)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))
 }
 
 fn handle_admin_mesh_observability_request(

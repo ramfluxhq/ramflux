@@ -231,6 +231,14 @@ async fn resolve_group_member_principal_commitment(
     {
         return Ok(None);
     }
+    if let Some(federation) = body.federation.as_ref() {
+        return Ok(Some(resolve_federated_group_member_principal_commitment(
+            &account.client,
+            federation,
+            body.member_principal_commitment.as_deref(),
+            &body.member_id,
+        )?));
+    }
     let engine = account.take_live_engine().await?;
     let commitment = account
         .client
@@ -242,6 +250,25 @@ async fn resolve_group_member_principal_commitment(
         .await;
     account.put_engine(engine);
     Ok(Some(commitment?))
+}
+
+fn resolve_federated_group_member_principal_commitment(
+    client: &RamfluxClient,
+    federation: &LocalBusFederationRoute,
+    member_principal_commitment: Option<&str>,
+    member_id: &str,
+) -> Result<String, SdkError> {
+    let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
+        SdkError::LocalBus(
+            "federated group member routes require --recipient-prekey-url to verify the remote device manifest"
+                .to_owned(),
+        )
+    })?;
+    client.resolve_federated_target_principal_commitment(
+        manifest_url,
+        member_principal_commitment,
+        member_id,
+    )
 }
 
 async fn dispatch_group_role_set_request(
@@ -719,14 +746,13 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
         if sender_id == recipient_device_id {
             return Ok(None);
         }
-        let _member_principal_commitment = account
-            .client
-            .resolve_target_principal_commitment(
-                &engine.config,
-                route.member_principal_commitment.as_deref(),
-                recipient_device_id,
-            )
-            .await?;
+        let _member_principal_commitment = resolve_group_route_principal_commitment(
+            &account.client,
+            &engine.config,
+            &route,
+            recipient_device_id,
+        )
+        .await?;
         let distribution =
             account.client.export_group_sender_key_distribution(group_id, &sender_id)?;
         let decoded_distribution: SdkGroupSenderKeyDistribution =
@@ -806,6 +832,29 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
     .await;
     account.put_engine(engine);
     result
+}
+
+async fn resolve_group_route_principal_commitment(
+    client: &RamfluxClient,
+    gateway: &GatewaySessionConfig,
+    route: &LocalBusGroupMemberRoute,
+    recipient_device_id: &str,
+) -> Result<String, SdkError> {
+    if let Some(federation) = route.federation.as_ref() {
+        return resolve_federated_group_member_principal_commitment(
+            client,
+            federation,
+            route.member_principal_commitment.as_deref(),
+            recipient_device_id,
+        );
+    }
+    client
+        .resolve_target_principal_commitment(
+            gateway,
+            route.member_principal_commitment.as_deref(),
+            recipient_device_id,
+        )
+        .await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -983,6 +1032,17 @@ mod tests {
         }
     }
 
+    fn federation_route(recipient_prekey_url: Option<String>) -> LocalBusFederationRoute {
+        LocalBusFederationRoute {
+            federation_url: "http://node-a.test".to_owned(),
+            source_node_id: "node-a".to_owned(),
+            target_node_id: "node-b".to_owned(),
+            required_capability: "opaque_delivery".to_owned(),
+            admin_token: None,
+            recipient_prekey_url,
+        }
+    }
+
     #[test]
     fn dispatch_onboard_event_skips_signed_role_local_seed_for_non_admin_signer()
     -> Result<(), SdkError> {
@@ -1010,6 +1070,26 @@ mod tests {
             &bob, &group, &body, &route,
         )?;
         assert!(event.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn federated_group_member_resolve_requires_remote_manifest_base() -> Result<(), SdkError> {
+        let account = account_state(
+            "alice_federated_missing_manifest_base",
+            "alice_account",
+            "principal_alice",
+            "alice_device",
+            [0x42; 32],
+        )?;
+        let error = resolve_federated_group_member_principal_commitment(
+            &account.client,
+            &federation_route(None),
+            Some("bob_commitment"),
+            "bob_device",
+        )
+        .expect_err("missing recipient_prekey_url must fail before local gateway resolve");
+        assert!(error.to_string().contains("recipient-prekey-url"));
         Ok(())
     }
 
