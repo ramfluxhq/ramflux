@@ -398,6 +398,39 @@ impl RamfluxClient {
         Ok(None)
     }
 
+    pub(crate) fn require_accepted_friend_link_for_dm_send(
+        &self,
+        self_principal_id: &str,
+        self_principal_commitment: &str,
+        recipient_principal_id: Option<&str>,
+        recipient_principal_commitment: &str,
+    ) -> Result<(), SdkError> {
+        if recipient_principal_id.is_some_and(|principal_id| principal_id == self_principal_id)
+            || self_principal_commitment == recipient_principal_commitment
+        {
+            return Ok(());
+        }
+        if let Some(principal_id) = recipient_principal_id
+            && self.friend_link_peer_is_accepted(principal_id)?
+        {
+            return Ok(());
+        }
+        if self.friend_link_peer_is_accepted(recipient_principal_commitment)? {
+            return Ok(());
+        }
+        Err(SdkError::LocalBus(format!(
+            "friend_link not accepted for recipient principal {}",
+            recipient_principal_id.unwrap_or(recipient_principal_commitment)
+        )))
+    }
+
+    fn friend_link_peer_is_accepted(&self, peer_id: &str) -> Result<bool, SdkError> {
+        let Some(link) = self.account_db()?.friend_link_for_peer(peer_id)? else {
+            return Ok(false);
+        };
+        Ok(link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none())
+    }
+
     pub(crate) fn append_contact_control_event(
         &self,
         event_type: &str,
@@ -1006,6 +1039,49 @@ mod tests {
             .find(|link| link.link_id == "link_acc")
             .ok_or_else(|| SdkError::LocalBus("established link present".to_owned()))?;
         assert_eq!(link.state, "accepted");
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn dm_send_friend_gate_rejects_non_friend_and_allows_self() -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("dm-send-friend-gate")?;
+
+        let rejected = client.require_accepted_friend_link_for_dm_send(
+            "principal_contact",
+            "principal_contact",
+            None,
+            "principal_bob",
+        );
+        assert!(
+            matches!(rejected, Err(SdkError::LocalBus(message)) if message.contains("friend_link not accepted"))
+        );
+
+        client.establish_friend_link("link_bob", "principal_contact", "principal_bob")?;
+        client.require_accepted_friend_link_for_dm_send(
+            "principal_contact",
+            "principal_contact",
+            None,
+            "principal_bob",
+        )?;
+        client.require_accepted_friend_link_for_dm_send(
+            "principal_contact",
+            "principal_contact",
+            None,
+            "principal_contact",
+        )?;
+
+        let _removed = client.remove_friend_link("link_bob", "both")?;
+        let rejected = client.require_accepted_friend_link_for_dm_send(
+            "principal_contact",
+            "principal_contact",
+            None,
+            "principal_bob",
+        );
+        assert!(
+            matches!(rejected, Err(SdkError::LocalBus(message)) if message.contains("friend_link not accepted"))
+        );
 
         let _ = std::fs::remove_dir_all(root);
         Ok(())
