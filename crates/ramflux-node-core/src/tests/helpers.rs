@@ -399,8 +399,25 @@ pub(super) fn federation_server_record(node_id: &str, endpoint: &str) -> Federat
     }
 }
 
+// A self-contained, committed test CA certificate. The federation admission
+// logic treats `*_ca_cert_pem` as opaque pinning data (non-empty check + string
+// equality only — never parsed as X.509), so a static public cert is sufficient
+// and keeps the test suite compilable in clean checkouts. The previous
+// `include_str!` of `deploy/certs/ca.pem` broke CI because that cert is issued at
+// realnet startup and intentionally git-ignored, so it is absent in CI checkouts.
+const TEST_FEDERATION_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBVTCCAQegAwIBAgIUUKW1inJxPZdXqkdecz2mcSAm9/swBQYDK2VwMCAxHjAc\n\
+BgNVBAMMFVJhbWZsdXggTG9jYWwgTWVzaCBDQTAeFw0yNjA2MjkwNDQ1MDlaFw0z\n\
+NjA2MjYwNDQ1MDlaMCAxHjAcBgNVBAMMFVJhbWZsdXggTG9jYWwgTWVzaCBDQTAq\n\
+MAUGAytlcAMhAA3XGSY9j10c/7rAbTdXbkmEEC7xrUsb9QovaLCuc3IRo1MwUTAd\n\
+BgNVHQ4EFgQU2j3DVamGrSfTx33tGcz+KeNscg4wHwYDVR0jBBgwFoAU2j3DVamG\n\
+rSfTx33tGcz+KeNscg4wDwYDVR0TAQH/BAUwAwEB/zAFBgMrZXADQQAWvMVmy8e3\n\
+scSsEjZJSqdZaUTvIdRvMF4sHne9xvtnN8v+aqxgPsyTmNH0ySSmTwT28sNyF15U\n\
+81vAV6JvZYsI\n\
+-----END CERTIFICATE-----\n";
+
 pub(super) fn test_federation_ca_pem() -> String {
-    include_str!("../../../../deploy/certs/ca.pem").to_owned()
+    TEST_FEDERATION_CA_PEM.to_owned()
 }
 
 pub(super) fn call_session(call_id: &str) -> OpaqueCallSession {
