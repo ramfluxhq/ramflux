@@ -61,3 +61,23 @@ pub struct ObjectTransferWrite<'a> {
     pub updated_at: i64,
     pub expires_at: Option<i64>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ObjectShareGrantRecord {
+    pub object_id: String,
+    pub recipient_principal_id: String,
+    pub recipient_principal_commitment: Option<String>,
+    pub recipient_device_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub shared_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+pub struct ObjectShareGrantWrite<'a> {
+    pub object_id: &'a str,
+    pub recipient_principal_id: &'a str,
+    pub recipient_principal_commitment: Option<&'a str>,
+    pub recipient_device_id: Option<&'a str>,
+    pub conversation_id: Option<&'a str>,
+    pub shared_at: i64,
+}

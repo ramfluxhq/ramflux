@@ -667,6 +667,26 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 ON device_directory(principal_commitment);
         ",
     },
+    AccountMigration {
+        schema_version: 4,
+        app_version: "p3-3",
+        checksum: "2026-07-01-object-share-grant-v1",
+        notes: "object share grant projection for friend capability revocation cascade",
+        sql: r"
+            CREATE TABLE IF NOT EXISTS object_share_grant_projection (
+                object_id TEXT NOT NULL,
+                recipient_principal_id TEXT NOT NULL,
+                recipient_principal_commitment TEXT,
+                recipient_device_id TEXT,
+                conversation_id TEXT,
+                shared_at INTEGER NOT NULL,
+                revoked_at INTEGER,
+                PRIMARY KEY (object_id, recipient_principal_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_object_share_grant_recipient
+                ON object_share_grant_projection(recipient_principal_id, revoked_at);
+        ",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {
@@ -833,6 +853,25 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_object_index_legacy_columns(connection)?;
     ensure_object_transfer_state_columns(connection)?;
     ensure_device_directory_table(connection)?;
+    ensure_object_share_grant_table(connection)?;
+    Ok(())
+}
+
+fn ensure_object_share_grant_table(connection: &Connection) -> Result<(), StorageError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS object_share_grant_projection (
+            object_id TEXT NOT NULL,
+            recipient_principal_id TEXT NOT NULL,
+            recipient_principal_commitment TEXT,
+            recipient_device_id TEXT,
+            conversation_id TEXT,
+            shared_at INTEGER NOT NULL,
+            revoked_at INTEGER,
+            PRIMARY KEY (object_id, recipient_principal_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_object_share_grant_recipient
+            ON object_share_grant_projection(recipient_principal_id, revoked_at);",
+    )?;
     Ok(())
 }
 

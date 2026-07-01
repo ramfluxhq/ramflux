@@ -93,6 +93,7 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "object_chunk",
     "object_transfer_state",
     "object_tombstone",
+    "object_share_grant_projection",
     "self_device_control_log",
     "a2ui_surface_cache",
     "mcp_server_registry",
@@ -197,7 +198,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 44);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 45);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -361,6 +362,74 @@ fn object_store_objects_keys_and_tombstones_roundtrip() -> Result<(), StorageErr
     let (objects, keys) = db.load_objects::<TestEncryptedObject>()?;
     assert!(objects[0].tombstoned);
     assert_eq!(keys.get("object_persist_1"), Some(&content_key));
+    Ok(())
+}
+
+#[test]
+fn object_share_grants_record_query_and_revoke_idempotently() -> Result<(), StorageError> {
+    let (root, db) = test_db("object-share-grant")?;
+    let write = ObjectShareGrantWrite {
+        object_id: "object_grant_1",
+        recipient_principal_id: "principal_bob",
+        recipient_principal_commitment: Some("commitment_bob"),
+        recipient_device_id: Some("device_bob"),
+        conversation_id: Some("conv_ab"),
+        shared_at: 1_000,
+    };
+
+    let grant = db.record_object_share_grant(&write)?;
+    assert_eq!(grant.object_id, "object_grant_1");
+    assert_eq!(grant.recipient_principal_id, "principal_bob");
+    assert_eq!(grant.recipient_principal_commitment.as_deref(), Some("commitment_bob"));
+    assert_eq!(grant.recipient_device_id.as_deref(), Some("device_bob"));
+    assert_eq!(grant.conversation_id.as_deref(), Some("conv_ab"));
+    assert_eq!(grant.shared_at, 1_000);
+    assert_eq!(grant.revoked_at, None);
+
+    let active = db.object_share_grants_for_recipients(&["principal_bob"])?;
+    assert_eq!(active, vec![grant.clone()]);
+
+    let revoked = db
+        .revoke_object_share_grant("object_grant_1", "principal_bob", 2_000)?
+        .ok_or_else(|| StorageError::MessageNotFound("object_grant_1".to_owned()))?;
+    assert_eq!(revoked.revoked_at, Some(2_000));
+    assert!(db.object_share_grants_for_recipients(&["principal_bob"])?.is_empty());
+
+    let revoked_again = db
+        .revoke_object_share_grant("object_grant_1", "principal_bob", 3_000)?
+        .ok_or_else(|| StorageError::MessageNotFound("object_grant_1".to_owned()))?;
+    assert_eq!(revoked_again.revoked_at, Some(2_000));
+
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
+fn object_share_grant_reshare_clears_revocation() -> Result<(), StorageError> {
+    let (root, db) = test_db("object-share-grant-reshare")?;
+    let write = ObjectShareGrantWrite {
+        object_id: "object_grant_1",
+        recipient_principal_id: "principal_bob",
+        recipient_principal_commitment: Some("commitment_bob"),
+        recipient_device_id: Some("device_bob"),
+        conversation_id: Some("conv_ab"),
+        shared_at: 1_000,
+    };
+
+    db.record_object_share_grant(&write)?;
+    let revoked = db
+        .revoke_object_share_grant("object_grant_1", "principal_bob", 2_000)?
+        .ok_or_else(|| StorageError::MessageNotFound("object_grant_1".to_owned()))?;
+    assert_eq!(revoked.revoked_at, Some(2_000));
+    assert!(db.object_share_grants_for_recipients(&["principal_bob"])?.is_empty());
+
+    let reshared =
+        db.record_object_share_grant(&ObjectShareGrantWrite { shared_at: 4_000, ..write })?;
+    assert_eq!(reshared.shared_at, 4_000);
+    assert_eq!(reshared.revoked_at, None);
+    assert_eq!(db.object_share_grants_for_recipients(&["principal_bob"])?, vec![reshared]);
+
+    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -661,7 +730,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2, 3]);
+    assert_eq!(before, vec![1, 2, 3, 4]);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

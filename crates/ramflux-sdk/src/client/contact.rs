@@ -318,16 +318,20 @@ impl RamfluxClient {
         link_id: &str,
         scope: &str,
     ) -> Result<FriendLinkRecord, SdkError> {
-        let link = self.account_db()?.remove_friend_link(link_id, scope, now_unix_timestamp())?;
+        let removed_at = now_unix_timestamp();
+        let link = self.account_db()?.remove_friend_link(link_id, scope, removed_at)?;
         self.append_contact_control_event("friend.removed", &link)?;
+        self.cascade_object_share_revocations(&link, "friend_removed", removed_at)?;
         Ok(link)
     }
 
     /// # Errors
     /// Returns an error when no account DB is unlocked or the friend link cannot be updated.
     pub fn block_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
-        let link = self.account_db()?.block_friend_link(link_id, now_unix_timestamp())?;
+        let blocked_at = now_unix_timestamp();
+        let link = self.account_db()?.block_friend_link(link_id, blocked_at)?;
         self.append_contact_control_event("friend.blocked", &link)?;
+        self.cascade_object_share_revocations(&link, "blocked", blocked_at)?;
         Ok(link)
     }
 
@@ -450,7 +454,57 @@ impl RamfluxClient {
         self.set_projection_checkpoint("friend.control", &event_id)
     }
 
-    pub(crate) fn apply_contact_event_plaintext(&self, plaintext: &[u8]) -> Result<(), SdkError> {
+    fn cascade_object_share_revocations(
+        &self,
+        link: &FriendLinkRecord,
+        reason: &str,
+        effective_at: i64,
+    ) -> Result<(), SdkError> {
+        let recipients = [link.requester_id.as_str(), link.target_id.as_str()];
+        let grants = self.account_db()?.object_share_grants_for_recipients(&recipients)?;
+        for grant in grants {
+            self.account_db()?.revoke_object_share_grant(
+                &grant.object_id,
+                &grant.recipient_principal_id,
+                effective_at,
+            )?;
+            self.append_object_revoke_access_event(
+                &grant.object_id,
+                &grant.recipient_principal_id,
+                &link.link_id,
+                reason,
+                effective_at,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn append_object_revoke_access_event(
+        &self,
+        object_id: &str,
+        recipient_principal_id: &str,
+        link_id: &str,
+        reason: &str,
+        effective_at: i64,
+    ) -> Result<(), SdkError> {
+        let event_id =
+            format!("object.revoke_access:{link_id}:{recipient_principal_id}:{object_id}:{reason}");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "type": "object.revoke_access",
+            "object_id": object_id,
+            "recipient_principal_id": recipient_principal_id,
+            "link_id": link_id,
+            "reason": reason,
+            "effective_at": effective_at,
+        }))?;
+        self.append_event(&event_id, "object.revoke_access", &body)?;
+        self.set_projection_checkpoint("object.revoke_access", &event_id)
+    }
+
+    pub(crate) fn apply_contact_event_plaintext(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<(), SdkError> {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(plaintext) else {
             return Ok(());
         };
@@ -513,6 +567,17 @@ impl RamfluxClient {
                         SdkError::LocalBus("friend.unblocked missing link_id".to_owned())
                     })?;
                 let _link = self.unblock_friend_link(link_id)?;
+            }
+            "object.revoke_access" => {
+                let object_id =
+                    value.get("object_id").and_then(serde_json::Value::as_str).ok_or_else(
+                        || SdkError::LocalBus("object.revoke_access missing object_id".to_owned()),
+                    )?;
+                if let Err(error) = self.tombstone_object(object_id)
+                    && !matches!(error, SdkError::Sync(SyncError::ObjectNotFound))
+                {
+                    return Err(error);
+                }
             }
             _ => {}
         }
@@ -1088,8 +1153,92 @@ mod tests {
     }
 
     #[test]
+    fn remove_friend_link_cascades_object_share_revocations() -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("remove-object-share-cascade")?;
+        client.establish_friend_link("link_bob", "principal_contact", "principal_bob")?;
+        client.account_db()?.record_object_share_grant(&ObjectShareGrantWrite {
+            object_id: "object_shared",
+            recipient_principal_id: "principal_bob",
+            recipient_principal_commitment: Some("commitment_bob"),
+            recipient_device_id: Some("device_bob"),
+            conversation_id: Some("conv_bob"),
+            shared_at: 1_000,
+        })?;
+        client.account_db()?.record_object_share_grant(&ObjectShareGrantWrite {
+            object_id: "object_other",
+            recipient_principal_id: "principal_carol",
+            recipient_principal_commitment: Some("commitment_carol"),
+            recipient_device_id: Some("device_carol"),
+            conversation_id: Some("conv_carol"),
+            shared_at: 1_100,
+        })?;
+
+        let _removed = client.remove_friend_link("link_bob", "me")?;
+        let revoked = client
+            .account_db()?
+            .object_share_grant("object_shared", "principal_bob")?
+            .ok_or_else(|| SdkError::LocalBus("missing revoked grant".to_owned()))?;
+        assert!(revoked.revoked_at.is_some());
+        assert!(
+            client.account_db()?.object_share_grants_for_recipients(&["principal_bob"])?.is_empty()
+        );
+        assert_eq!(
+            client.account_db()?.object_share_grants_for_recipients(&["principal_carol"])?.len(),
+            1
+        );
+
+        let event_id = "object.revoke_access:link_bob:principal_bob:object_shared:friend_removed";
+        let event = client
+            .event_body(event_id)?
+            .ok_or_else(|| SdkError::LocalBus("missing revoke event".to_owned()))?;
+        let body: serde_json::Value = serde_json::from_slice(&event)?;
+        assert_eq!(body["type"], "object.revoke_access");
+        assert_eq!(body["object_id"], "object_shared");
+        assert_eq!(body["recipient_principal_id"], "principal_bob");
+        assert_eq!(body["link_id"], "link_bob");
+        assert_eq!(body["reason"], "friend_removed");
+        assert!(body["effective_at"].as_i64().is_some());
+        assert_eq!(
+            client.projection_checkpoint("object.revoke_access")?,
+            Some(event_id.to_owned())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn block_friend_link_cascades_object_share_revocations() -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("block-object-share-cascade")?;
+        client.establish_friend_link("link_bob", "principal_contact", "principal_bob")?;
+        client.account_db()?.record_object_share_grant(&ObjectShareGrantWrite {
+            object_id: "object_shared",
+            recipient_principal_id: "principal_bob",
+            recipient_principal_commitment: Some("commitment_bob"),
+            recipient_device_id: Some("device_bob"),
+            conversation_id: Some("conv_bob"),
+            shared_at: 1_000,
+        })?;
+
+        let _blocked = client.block_friend_link("link_bob")?;
+        let revoked = client
+            .account_db()?
+            .object_share_grant("object_shared", "principal_bob")?
+            .ok_or_else(|| SdkError::LocalBus("missing revoked grant".to_owned()))?;
+        assert!(revoked.revoked_at.is_some());
+        let event = client
+            .event_body("object.revoke_access:link_bob:principal_bob:object_shared:blocked")?
+            .ok_or_else(|| SdkError::LocalBus("missing blocked revoke event".to_owned()))?;
+        let body: serde_json::Value = serde_json::from_slice(&event)?;
+        assert_eq!(body["reason"], "blocked");
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
     fn apply_friend_requested_event_records_pending_link() -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("apply-requested")?;
+        let (mut client, root) = unlocked_client("apply-requested")?;
 
         let event = serde_json::to_vec(&serde_json::json!({
             "type": "friend.requested",
@@ -1108,6 +1257,35 @@ mod tests {
 
         let rejected = client.reject_friend_link("link_inbound")?;
         assert_eq!(rejected.state, "rejected");
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_object_revoke_access_tombstones_local_object_best_effort() -> Result<(), SdkError> {
+        let (mut client, root) = unlocked_client("apply-object-revoke-access")?;
+        client.put_encrypted_object("object_shared", b"shared body")?;
+        let event = serde_json::to_vec(&serde_json::json!({
+            "type": "object.revoke_access",
+            "object_id": "object_shared",
+            "recipient_principal_id": "principal_contact",
+            "link_id": "link_bob",
+            "reason": "friend_removed",
+            "effective_at": 1_000,
+        }))?;
+
+        client.apply_contact_event_plaintext(&event)?;
+        assert!(matches!(
+            client.decrypt_object("object_shared"),
+            Err(SdkError::Sync(SyncError::ObjectTombstoned))
+        ));
+
+        let missing = serde_json::to_vec(&serde_json::json!({
+            "type": "object.revoke_access",
+            "object_id": "missing_object",
+        }))?;
+        client.apply_contact_event_plaintext(&missing)?;
 
         let _ = std::fs::remove_dir_all(root);
         Ok(())

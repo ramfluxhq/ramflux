@@ -124,6 +124,7 @@ pub(crate) async fn dispatch_object_bus_request(
         }))),
         "object.share" => {
             let body: LocalBusObjectShareRequest = serde_json::from_value(request.body.clone())?;
+            let conversation_id = body.conversation_id.clone();
             let recipient_device_id = body.recipient_device_id.clone().ok_or_else(|| {
                 SdkError::LocalBus("object.share requires recipient_device_id".to_owned())
             })?;
@@ -158,6 +159,14 @@ pub(crate) async fn dispatch_object_bus_request(
                 account.client.share_object_key_with_dm_recipient(&mut engine, body).await;
             account.put_engine(engine);
             let package = package?;
+            account.client.account_db()?.record_object_share_grant(&ObjectShareGrantWrite {
+                object_id: &package.object.object_id,
+                recipient_principal_id: &recipient_device.principal_id,
+                recipient_principal_commitment: Some(&recipient_principal_commitment),
+                recipient_device_id: Some(&recipient_device_id),
+                conversation_id: Some(&conversation_id),
+                shared_at: now_unix_timestamp(),
+            })?;
             Ok(local_bus_ok(serde_json::json!({
                 "object_id": package.object.object_id,
                 "conversation_id": package.key_slot.conversation_id,
