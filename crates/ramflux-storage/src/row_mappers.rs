@@ -50,3 +50,17 @@ pub(crate) fn rejected_inbox_from_row(
         rejected_at: row.get(4)?,
     })
 }
+
+pub(crate) fn object_share_grant_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ObjectShareGrantRecord> {
+    Ok(ObjectShareGrantRecord {
+        object_id: row.get(0)?,
+        recipient_principal_id: row.get(1)?,
+        recipient_principal_commitment: row.get(2)?,
+        recipient_device_id: row.get(3)?,
+        conversation_id: row.get(4)?,
+        shared_at: row.get(5)?,
+        revoked_at: row.get(6)?,
+    })
+}

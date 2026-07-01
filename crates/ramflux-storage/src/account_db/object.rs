@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
+use crate::row_mappers::object_share_grant_from_row;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -65,6 +66,89 @@ impl AccountDb {
             params![object_id, serde_json::to_vec(&body)?],
         )?;
         Ok(())
+    }
+
+    pub fn record_object_share_grant(
+        &self,
+        write: &ObjectShareGrantWrite<'_>,
+    ) -> Result<ObjectShareGrantRecord, StorageError> {
+        self.connection.execute(
+            "INSERT INTO object_share_grant_projection (
+                object_id, recipient_principal_id, recipient_principal_commitment,
+                recipient_device_id, conversation_id, shared_at, revoked_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+             ON CONFLICT(object_id, recipient_principal_id) DO UPDATE SET
+                recipient_principal_commitment = excluded.recipient_principal_commitment,
+                recipient_device_id = excluded.recipient_device_id,
+                conversation_id = excluded.conversation_id,
+                shared_at = excluded.shared_at,
+                revoked_at = NULL",
+            params![
+                write.object_id,
+                write.recipient_principal_id,
+                write.recipient_principal_commitment,
+                write.recipient_device_id,
+                write.conversation_id,
+                write.shared_at,
+            ],
+        )?;
+        self.object_share_grant(write.object_id, write.recipient_principal_id)?
+            .ok_or_else(|| StorageError::MessageNotFound(write.object_id.to_owned()))
+    }
+
+    pub fn object_share_grants_for_recipients(
+        &self,
+        recipient_principal_ids: &[&str],
+    ) -> Result<Vec<ObjectShareGrantRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT object_id, recipient_principal_id, recipient_principal_commitment,
+                    recipient_device_id, conversation_id, shared_at, revoked_at
+               FROM object_share_grant_projection
+              WHERE recipient_principal_id = ?1 AND revoked_at IS NULL
+              ORDER BY shared_at ASC, object_id ASC",
+        )?;
+        let mut grants = Vec::new();
+        for recipient_principal_id in recipient_principal_ids {
+            let rows = statement
+                .query_map(params![recipient_principal_id], object_share_grant_from_row)?;
+            for row in rows {
+                grants.push(row?);
+            }
+        }
+        Ok(grants)
+    }
+
+    pub fn object_share_grant(
+        &self,
+        object_id: &str,
+        recipient_principal_id: &str,
+    ) -> Result<Option<ObjectShareGrantRecord>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT object_id, recipient_principal_id, recipient_principal_commitment,
+                        recipient_device_id, conversation_id, shared_at, revoked_at
+                   FROM object_share_grant_projection
+                  WHERE object_id = ?1 AND recipient_principal_id = ?2",
+                params![object_id, recipient_principal_id],
+                object_share_grant_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn revoke_object_share_grant(
+        &self,
+        object_id: &str,
+        recipient_principal_id: &str,
+        revoked_at: i64,
+    ) -> Result<Option<ObjectShareGrantRecord>, StorageError> {
+        self.connection.execute(
+            "UPDATE object_share_grant_projection
+                SET revoked_at = COALESCE(revoked_at, ?3)
+              WHERE object_id = ?1 AND recipient_principal_id = ?2",
+            params![object_id, recipient_principal_id, revoked_at],
+        )?;
+        self.object_share_grant(object_id, recipient_principal_id)
     }
 
     pub fn load_objects<T>(&self) -> Result<StoredObjects<T>, StorageError>

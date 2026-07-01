@@ -18,9 +18,10 @@ pub(crate) use ramflux_storage::{
     GroupRoleChangeWrite, GroupSenderKeyCounterRecord, GroupState, HistoryBundle,
     IdentityLifecycleRecord, IdentityLifecycleTiming, McpAuditWrite, McpGrantWrite,
     McpStandingApprovalWrite, McpToolWrite, MessageMetadata, MessageReceiptState,
-    MessageTombstoneRecord, ObjectTransferRecord, ObjectTransferWrite, ObjectWrite,
-    ProjectionStore, ReceiptEventWrite, StorageError, StoredBotInstallRecord, TypingStateRecord,
-    VaultSecretSource, WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
+    MessageTombstoneRecord, ObjectShareGrantRecord, ObjectShareGrantWrite, ObjectTransferRecord,
+    ObjectTransferWrite, ObjectWrite, ProjectionStore, ReceiptEventWrite, StorageError,
+    StoredBotInstallRecord, TypingStateRecord, VaultSecretSource, WrappedAccountDbKey,
+    unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub(crate) use ramflux_sync::{
     A2iControlEvent, A2uiAction, A2uiSurface, ChunkManifest, ChunkPayload, EncryptedObject,
