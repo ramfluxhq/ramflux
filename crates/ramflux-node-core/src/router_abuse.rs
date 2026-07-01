@@ -7,6 +7,7 @@ use crate::{
     AbuseReportRecord, AbuseReportRequest, AbuseReportResponse, FrankingReportStatus,
     ItestMvp7MetadataSummary, NodeCoreError, RetentionMetadataRecord, RouterCore,
     selected_evidence_hash, verify_selected_franking_evidence,
+    verify_selected_franking_evidence_with_node_public_key,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -25,7 +26,14 @@ impl RouterCore {
         request: &AbuseReportRequest,
     ) -> Result<AbuseReportResponse, NodeCoreError> {
         let evidence_hash = selected_evidence_hash(&request.selected_evidence)?;
-        let verification = verify_selected_franking_evidence(&request.selected_evidence);
+        let node_franking_public_key = self.node_franking_public_key();
+        let verification = match node_franking_public_key.as_deref() {
+            Some(public_key) => verify_selected_franking_evidence_with_node_public_key(
+                &request.selected_evidence,
+                public_key,
+            ),
+            None => verify_selected_franking_evidence(&request.selected_evidence),
+        };
         let (status, reason, verified_commitment) = match verification {
             Ok(commitment) => (
                 FrankingReportStatus::Verified,
@@ -95,5 +103,119 @@ impl RouterCore {
                 .and_then(|record| record.deletion_proof.as_ref())
                 .map(|proof| proof.proof_hash.clone()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FrankingEvidenceKind, NodeFrankingTagInput, NodeServiceSigningKey};
+
+    #[test]
+    fn abuse_report_fails_closed_without_node_franking_public_key() -> Result<(), NodeCoreError> {
+        let router = RouterCore::new();
+        let (request, _signer) = signed_abuse_report("report_no_key");
+
+        let response = router.mvp7_submit_abuse_report(&request)?;
+
+        assert_eq!(response.report.status, FrankingReportStatus::Rejected);
+        assert_eq!(response.report.reason, "node franking public key unavailable");
+        assert!(response.report.verified_commitment.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn abuse_report_verifies_with_configured_node_franking_public_key() -> Result<(), NodeCoreError>
+    {
+        let router = RouterCore::new();
+        let (request, signer) = signed_abuse_report("report_real_key");
+        router.set_node_franking_public_key(Some(signer.public_key_base64url().to_owned()));
+
+        let response = router.mvp7_submit_abuse_report(&request)?;
+
+        assert_eq!(response.report.status, FrankingReportStatus::Verified);
+        assert_eq!(response.report.reason, "franking evidence verified");
+        assert_eq!(
+            response.report.verified_commitment.as_deref(),
+            Some(request.selected_evidence.commitment.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn abuse_report_rejects_wrong_node_franking_public_key() -> Result<(), NodeCoreError> {
+        let router = RouterCore::new();
+        let (request, _signer) = signed_abuse_report("report_wrong_key");
+        let wrong_signer = NodeServiceSigningKey::from_seed([0x72; 32]);
+        router.set_node_franking_public_key(Some(wrong_signer.public_key_base64url().to_owned()));
+
+        let response = router.mvp7_submit_abuse_report(&request)?;
+
+        assert_eq!(response.report.status, FrankingReportStatus::Rejected);
+        assert!(response.report.reason.contains("node franking tag mismatch"));
+        assert!(response.report.verified_commitment.is_none());
+        Ok(())
+    }
+
+    fn signed_abuse_report(report_id: &str) -> (AbuseReportRequest, NodeServiceSigningKey) {
+        let signer = NodeServiceSigningKey::from_seed([0x71; 32]);
+        let opening_key = [0x41; 32];
+        let commitment_key = [0x42; 32];
+        let sender_device_id_hash = [0x43; 32];
+        let plaintext = "selected abuse excerpt";
+        let canonical_header_bytes = b"abuse-header";
+        let associated_data = b"abuse-ad";
+        let ciphertext = b"abuse-ciphertext";
+        let message_event_id = "msg_abuse_report_real";
+        let commitment =
+            ramflux_crypto::franking_commitment(&ramflux_crypto::FrankingCommitmentInput {
+                plaintext: plaintext.as_bytes(),
+                sender_device_id_hash: &sender_device_id_hash,
+                message_event_id,
+                canonical_header_bytes,
+                associated_data,
+                ciphertext,
+                opening_key: &opening_key,
+                commitment_key: &commitment_key,
+            });
+        let franking_timestamp = 1_760_000_700;
+        let franking_tag = signer.sign_franking_node_tag(NodeFrankingTagInput {
+            node_id: "node-abuse-real",
+            envelope_id: "env-abuse-real",
+            message_event_id,
+            sender_device_id_hash: &sender_device_id_hash,
+            commitment: &commitment.commitment,
+            ciphertext_hash: &commitment.ciphertext_hash,
+            accepted_at_unix_ms: franking_timestamp,
+        });
+        let request = AbuseReportRequest {
+            report_id: report_id.to_owned(),
+            reporter_identity: "reporter_abuse_real".to_owned(),
+            reported_identity: "reported_abuse_real".to_owned(),
+            reported_node: "node-abuse-real".to_owned(),
+            selected_evidence: crate::SelectedFrankingEvidence {
+                evidence_kind: FrankingEvidenceKind::ReceiverAttestedDm,
+                node_id: "node-abuse-real".to_owned(),
+                envelope_id: "env-abuse-real".to_owned(),
+                plaintext_excerpt: plaintext.to_owned(),
+                opening_key: ramflux_protocol::encode_base64url(opening_key),
+                commitment_key: ramflux_protocol::encode_base64url(commitment_key),
+                sender_device_id_hash: ramflux_protocol::encode_base64url(sender_device_id_hash),
+                msg_event_id: message_event_id.to_owned(),
+                canonical_header_bytes: ramflux_protocol::encode_base64url(canonical_header_bytes),
+                associated_data: ramflux_protocol::encode_base64url(associated_data),
+                ciphertext: ramflux_protocol::encode_base64url(ciphertext),
+                header_hash: commitment.header_hash,
+                associated_data_hash: commitment.associated_data_hash,
+                ciphertext_hash: commitment.ciphertext_hash,
+                franking_commitment: commitment.franking_commitment,
+                commitment: commitment.commitment,
+                franking_tag,
+                franking_timestamp,
+                group_header_signature: None,
+            },
+            submitted_at: franking_timestamp,
+        };
+        (request, signer)
     }
 }

@@ -768,6 +768,7 @@ impl RouterRedbStore {
             deleted_delivery_targets,
             abuse_reports,
             replay_guard_state,
+            node_franking_public_key: None,
         })))
     }
 

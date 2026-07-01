@@ -75,6 +75,7 @@ pub(crate) struct RouterControlState {
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
+    pub(crate) node_franking_public_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -88,6 +89,7 @@ pub(crate) struct RouterCoreSnapshot {
     pub(crate) deleted_delivery_targets: BTreeSet<String>,
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
     pub(crate) replay_guard_state: NodeReplayGuardState,
+    pub(crate) node_franking_public_key: Option<String>,
 }
 
 impl RouterCore {
@@ -124,6 +126,15 @@ impl RouterCore {
     #[must_use]
     pub fn pending_entries_for_target(&self, target_delivery_id: &str) -> Vec<InboxEntry> {
         self.target_shard(target_delivery_id).inbox.pull_after(target_delivery_id, 0, usize::MAX)
+    }
+
+    pub fn set_node_franking_public_key(&self, public_key_base64url: Option<String>) {
+        crate::lock_unpoisoned(&self.control).node_franking_public_key = public_key_base64url;
+    }
+
+    #[must_use]
+    pub fn node_franking_public_key(&self) -> Option<String> {
+        crate::lock_unpoisoned(&self.control).node_franking_public_key.clone()
     }
 
     /// # Errors
@@ -557,6 +568,7 @@ impl RouterCore {
             snapshot.lifecycle_by_principal = control.lifecycle_by_principal.clone();
             snapshot.lifecycle_tombstones = control.lifecycle_tombstones.clone();
             snapshot.abuse_reports = control.abuse_reports.clone();
+            snapshot.node_franking_public_key.clone_from(&control.node_franking_public_key);
         }
         for shard in &self.target_shards {
             let shard = lock_unpoisoned(shard);
@@ -587,6 +599,7 @@ impl RouterCore {
                 lifecycle_by_principal: snapshot.lifecycle_by_principal,
                 lifecycle_tombstones: snapshot.lifecycle_tombstones,
                 abuse_reports: snapshot.abuse_reports,
+                node_franking_public_key: snapshot.node_franking_public_key,
             }),
             replay_guard_shards,
         };
@@ -625,6 +638,9 @@ impl RouterCore {
             control.lifecycle_by_principal.extend(snapshot.lifecycle_by_principal);
             control.lifecycle_tombstones.extend(snapshot.lifecycle_tombstones);
             control.abuse_reports.extend(snapshot.abuse_reports);
+            if control.node_franking_public_key.is_none() {
+                control.node_franking_public_key = snapshot.node_franking_public_key;
+            }
         }
         {
             for (key, expires_at) in snapshot.replay_guard_state.accepted_entries() {

@@ -20,8 +20,8 @@ mod zeroize_tests;
 pub use double_ratchet::{DmCiphertext, DmSession, DmSessionSnapshot};
 pub use error::CryptoError;
 pub use franking::{
-    FrankingCommitment, FrankingCommitmentInput, franking_commitment, franking_node_tag,
-    franking_node_tag_preimage, sign_franking_node_tag, verify_franking_node_tag,
+    FrankingCommitment, FrankingCommitmentInput, franking_commitment, franking_node_tag_preimage,
+    sign_franking_node_tag, sign_franking_node_tag_with_seed, verify_franking_node_tag,
 };
 pub use group_sender::{
     GroupCiphertext, GroupMemberCommitment, GroupSenderKeyDistribution, GroupSenderKeyState,
