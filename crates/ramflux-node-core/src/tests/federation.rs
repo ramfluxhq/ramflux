@@ -99,6 +99,29 @@ fn federation_redb_store_spools_retries_and_expires_outbound_forward()
 }
 
 #[test]
+fn federation_redb_store_dedups_inbound_forward_replay_persistently()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("federation_redb_store_dedups_inbound_forward_replay_persistently")?;
+    let store = FederationRedbStore::open(&path)?;
+    let forward_a = federation_forward_request("env_inbound_a", "target_inbound_a");
+    let forward_b = federation_forward_request("env_inbound_b", "target_inbound_a");
+    let forward_a_other_target = federation_forward_request("env_inbound_a", "target_inbound_b");
+    let now = 1_760_000_010;
+
+    assert!(store.accept_inbound_forward_once(&forward_a, now)?);
+    assert!(!store.accept_inbound_forward_once(&forward_a, now + 1)?);
+    assert!(store.accept_inbound_forward_once(&forward_b, now + 2)?);
+    assert!(store.accept_inbound_forward_once(&forward_a_other_target, now + 3)?);
+
+    drop(store);
+    let reopened = FederationRedbStore::open(&path)?;
+    assert!(!reopened.accept_inbound_forward_once(&forward_a, now + 4)?);
+    assert!(!reopened.accept_inbound_forward_once(&forward_b, now + 5)?);
+    assert!(!reopened.accept_inbound_forward_once(&forward_a_other_target, now + 6)?);
+    Ok(())
+}
+
+#[test]
 fn federation_discovery_verifies_well_known_and_rejects_pin_hijack()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut state = FederationTrustState::new();

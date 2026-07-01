@@ -67,7 +67,14 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             Arc::clone(&state),
             Arc::clone(&router),
         );
-        serve_federation_mesh_mtls(&config, &state, &router, &mesh_observability, &discovery)?;
+        serve_federation_mesh_mtls(
+            &config,
+            &state,
+            &store,
+            &router,
+            &mesh_observability,
+            &discovery,
+        )?;
         if let Ok(admin_addr) = std::env::var("RAMFLUX_FEDERATION_ADMIN_ADDR") {
             serve_admin_http(
                 &admin_addr,

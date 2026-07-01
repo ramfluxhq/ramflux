@@ -67,6 +67,8 @@ pub(crate) const FEDERATION_STATE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("federation_state_v1");
 pub(crate) const FEDERATION_OUTBOUND_SPOOL_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("federation_outbound_spool_v1");
+pub(crate) const FEDERATION_INBOUND_FORWARD_SEEN_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("federation_inbound_forward_seen_v1");
 pub(crate) const FEDERATION_ROUTE_STATE_KEY: &str = "route_state";
 pub(crate) const FEDERATION_BAD_NODE_ADVISORY_KEY: &str = "bad_node_advisory";
 pub(crate) const FEDERATION_LIFECYCLE_TOMBSTONE_KEY: &str = "lifecycle_tombstone";
