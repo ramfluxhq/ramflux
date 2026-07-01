@@ -397,6 +397,7 @@ fn send_signed_forward_to_peer_over_tcp(
 pub(crate) fn handle_s8_receive_envelope(
     request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
     state: &crate::SharedFederationTrustState,
+    store: &ramflux_node_core::FederationRedbStore,
     router: &RouterMeshClient,
     discovery: &FederationDiscoverySurface,
     observability: Option<&FederationMeshObservability>,
@@ -407,45 +408,18 @@ pub(crate) fn handle_s8_receive_envelope(
     if let Some(observability) = observability {
         observability.record_receive_target_check(step_started.elapsed());
     }
-    {
-        let now = now_unix_seconds()?;
-        let step_started = std::time::Instant::now();
-        let state = state.snapshot()?;
-        if let Some(observability) = observability {
-            observability.record_receive_trust_snapshot(step_started.elapsed());
-        }
-        let step_started = std::time::Instant::now();
-        state.ensure_federated_envelope_allowed(request, &request.source_node_id, now)?;
-        if let Some(observability) = observability {
-            observability.record_receive_policy_check(step_started.elapsed());
-        }
-        let step_started = std::time::Instant::now();
-        let pinned_public_key =
-            state.pinned_node_public_key(&request.source_node_id).ok_or_else(|| {
-                ramflux_node_core::NodeCoreError::ItestHttp(format!(
-                    "missing federation pin for {}",
-                    request.source_node_id
-                ))
-            })?;
-        if let Some(observability) = observability {
-            observability.record_receive_pin_lookup(step_started.elapsed());
-        }
-        let step_started = std::time::Instant::now();
-        let verify_timings = ramflux_node_core::verify_federated_envelope_forward_with_timings(
-            request,
-            &pinned_public_key,
-        )?;
-        if let Some(observability) = observability {
-            observability.record_receive_signature_verify(step_started.elapsed());
-            observability.record_receive_signature_segments(verify_timings);
-        }
+    let now = now_unix_seconds()?;
+    verify_inbound_federated_forward(request, state, now, observability)?;
+    let accepted_once = store.accept_inbound_forward_once(request, now)?;
+    if !accepted_once {
         tracing::info!(
             source_node_id = %request.source_node_id,
             target_node_id = %request.target_node_id,
             envelope_id = %request.envelope.envelope_id,
             target_delivery_id = %request.envelope.target_delivery_id,
-            "verified federated envelope against pinned source node key"
+            "deduplicated replayed federated envelope before local router delivery"
         );
+        return Ok(duplicate_forward_response(request));
     }
     tracing::info!(
         source_node_id = request.source_node_id,
@@ -488,6 +462,68 @@ pub(crate) fn handle_s8_receive_envelope(
         observability.record_receive_total(total_started.elapsed());
     }
     Ok(response)
+}
+
+fn verify_inbound_federated_forward(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    state: &crate::SharedFederationTrustState,
+    now: u64,
+    observability: Option<&FederationMeshObservability>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let step_started = std::time::Instant::now();
+    let state = state.snapshot()?;
+    if let Some(observability) = observability {
+        observability.record_receive_trust_snapshot(step_started.elapsed());
+    }
+    let step_started = std::time::Instant::now();
+    state.ensure_federated_envelope_allowed(request, &request.source_node_id, now)?;
+    if let Some(observability) = observability {
+        observability.record_receive_policy_check(step_started.elapsed());
+    }
+    let step_started = std::time::Instant::now();
+    let pinned_public_key =
+        state.pinned_node_public_key(&request.source_node_id).ok_or_else(|| {
+            ramflux_node_core::NodeCoreError::ItestHttp(format!(
+                "missing federation pin for {}",
+                request.source_node_id
+            ))
+        })?;
+    if let Some(observability) = observability {
+        observability.record_receive_pin_lookup(step_started.elapsed());
+    }
+    let step_started = std::time::Instant::now();
+    let verify_timings = ramflux_node_core::verify_federated_envelope_forward_with_timings(
+        request,
+        &pinned_public_key,
+    )?;
+    if let Some(observability) = observability {
+        observability.record_receive_signature_verify(step_started.elapsed());
+        observability.record_receive_signature_segments(verify_timings);
+    }
+    tracing::info!(
+        source_node_id = %request.source_node_id,
+        target_node_id = %request.target_node_id,
+        envelope_id = %request.envelope.envelope_id,
+        target_delivery_id = %request.envelope.target_delivery_id,
+        "verified federated envelope against pinned source node key"
+    );
+    Ok(())
+}
+
+fn duplicate_forward_response(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+) -> ramflux_node_core::FederatedEnvelopeForwardResponse {
+    ramflux_node_core::FederatedEnvelopeForwardResponse {
+        accepted: false,
+        source_node_id: request.source_node_id.clone(),
+        target_node_id: request.target_node_id.clone(),
+        delivery: ramflux_node_core::ItestMvp0SubmitResponse {
+            outcome: "duplicate_federated_forward".to_owned(),
+            target_delivery_id: request.envelope.target_delivery_id.clone(),
+            inbox_seq: None,
+            cursor: None,
+        },
+    }
 }
 
 pub(crate) fn ensure_receive_target_node(

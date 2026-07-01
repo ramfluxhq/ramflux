@@ -11,9 +11,19 @@ use crate::{
 
 const FEDERATION_MESH_RUNTIME_ENV: &str = "RAMFLUX_FEDERATION_MESH_RUNTIME";
 
+#[derive(Clone)]
+pub(crate) struct MeshServerContext {
+    state: Arc<crate::SharedFederationTrustState>,
+    store: Arc<ramflux_node_core::FederationRedbStore>,
+    router: Arc<RouterMeshClient>,
+    observability: SharedMeshObservability,
+    discovery: FederationDiscoverySurface,
+}
+
 pub(crate) fn serve_federation_mesh_mtls(
     config: &ramflux_node_core::NodeServiceConfig,
     state: &Arc<crate::SharedFederationTrustState>,
+    store: &Arc<ramflux_node_core::FederationRedbStore>,
     router: &Arc<RouterMeshClient>,
     observability: &SharedMeshObservability,
     discovery: &FederationDiscoverySurface,
@@ -21,20 +31,17 @@ pub(crate) fn serve_federation_mesh_mtls(
     let mesh_server =
         ramflux_transport::MeshTlsServer::bind(&config.mesh.listen_addr, &mesh_tls_config(config))
             .map_err(|error| mesh_transport_error(&error))?;
-    let mesh_state = Arc::clone(state);
-    let mesh_router = Arc::clone(router);
-    let mesh_observability = Arc::clone(observability);
-    let mesh_discovery = discovery.clone();
+    let context = MeshServerContext {
+        state: Arc::clone(state),
+        store: Arc::clone(store),
+        router: Arc::clone(router),
+        observability: Arc::clone(observability),
+        discovery: discovery.clone(),
+    };
+    let mesh_context = context.clone();
     let tls = mesh_tls_config(config);
     thread::spawn(move || {
-        if let Err(error) = serve_mesh_mtls(
-            &mesh_server,
-            &mesh_state,
-            &mesh_router,
-            &tls,
-            &mesh_observability,
-            &mesh_discovery,
-        ) {
+        if let Err(error) = serve_mesh_mtls(&mesh_server, &mesh_context, &tls) {
             tracing::error!(%error, "federation mesh mTLS listener stopped");
         }
     });
@@ -44,10 +51,7 @@ pub(crate) fn serve_federation_mesh_mtls(
         tracing::warn!("federation mesh QUIC listener disabled by itest affordance");
         return Ok(());
     }
-    let quic_state = Arc::clone(state);
-    let quic_router = Arc::clone(router);
-    let quic_observability = Arc::clone(observability);
-    let quic_discovery = discovery.clone();
+    let quic_context = context;
     let quic_tls = mesh_tls_config(config);
     let quic_addr = config.mesh.listen_addr.clone();
     match std::env::var(FEDERATION_MESH_RUNTIME_ENV).as_deref() {
@@ -55,15 +59,9 @@ pub(crate) fn serve_federation_mesh_mtls(
             #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
             {
                 thread::spawn(move || {
-                    if let Err(error) = serve_mesh_compio_quic(
-                        &quic_addr,
-                        &quic_state,
-                        &quic_router,
-                        &quic_tls,
-                        &quic_observability,
-                        &quic_discovery,
-                    ) {
-                        quic_observability.mark_quic_listener_error(&error.to_string());
+                    if let Err(error) = serve_mesh_compio_quic(&quic_addr, &quic_context, &quic_tls)
+                    {
+                        quic_context.observability.mark_quic_listener_error(&error.to_string());
                         tracing::error!(%error, "federation mesh compio QUIC listener stopped");
                     }
                 });
@@ -78,15 +76,8 @@ pub(crate) fn serve_federation_mesh_mtls(
         }
         Ok("tokio" | "quinn") | Err(_) => {
             thread::spawn(move || {
-                if let Err(error) = serve_mesh_quic(
-                    &quic_addr,
-                    &quic_state,
-                    &quic_router,
-                    &quic_tls,
-                    &quic_observability,
-                    &quic_discovery,
-                ) {
-                    quic_observability.mark_quic_listener_error(&error.to_string());
+                if let Err(error) = serve_mesh_quic(&quic_addr, &quic_context, &quic_tls) {
+                    quic_context.observability.mark_quic_listener_error(&error.to_string());
                     tracing::error!(%error, "federation mesh QUIC listener stopped");
                 }
             });
@@ -102,13 +93,10 @@ pub(crate) fn serve_federation_mesh_mtls(
 
 pub(crate) fn serve_mesh_quic(
     listen_addr: &str,
-    state: &Arc<crate::SharedFederationTrustState>,
-    router: &Arc<RouterMeshClient>,
+    context: &MeshServerContext,
     tls: &ramflux_transport::MeshTlsConfig,
-    observability: &SharedMeshObservability,
-    discovery: &FederationDiscoverySurface,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let roots_state = Arc::clone(state);
+    let roots_state = Arc::clone(&context.state);
     let root_pems_provider = std::sync::Arc::new(move || {
         let state = roots_state
             .snapshot()
@@ -127,26 +115,20 @@ pub(crate) fn serve_mesh_quic(
         )
         .map_err(|error| mesh_transport_error(&error))?;
         let local_addr = server.local_addr().map_err(|error| mesh_transport_error(&error))?;
-        observability.mark_quic_listener_ready(local_addr.to_string());
+        context.observability.mark_quic_listener_ready(local_addr.to_string());
         tracing::info!(addr = %local_addr, "federation mesh QUIC surface listening");
         loop {
             let connection = match server.accept_connection().await {
                 Ok(connection) => connection,
                 Err(error) => {
-                    observability.mark_quic_listener_error(&error.to_string());
+                    context.observability.mark_quic_listener_error(&error.to_string());
                     tracing::error!(%error, "federation mesh QUIC connection rejected");
                     continue;
                 }
             };
-            let state = Arc::clone(state);
-            let router = Arc::clone(router);
-            let observability = Arc::clone(observability);
-            let discovery = discovery.clone();
+            let context = context.clone();
             tokio::spawn(async move {
-                if let Err(error) =
-                    handle_mesh_quic_connection(connection, state, router, observability, discovery)
-                        .await
-                {
+                if let Err(error) = handle_mesh_quic_connection(connection, context).await {
                     tracing::warn!(%error, "federation mesh QUIC connection failed");
                 }
             });
@@ -157,13 +139,10 @@ pub(crate) fn serve_mesh_quic(
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 pub(crate) fn serve_mesh_compio_quic(
     listen_addr: &str,
-    state: &Arc<crate::SharedFederationTrustState>,
-    router: &Arc<RouterMeshClient>,
+    context: &MeshServerContext,
     tls: &ramflux_transport::MeshTlsConfig,
-    observability: &SharedMeshObservability,
-    discovery: &FederationDiscoverySurface,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let roots_state = Arc::clone(state);
+    let roots_state = Arc::clone(&context.state);
     let root_pems_provider = std::sync::Arc::new(move || {
         let state = roots_state
             .snapshot()
@@ -181,31 +160,20 @@ pub(crate) fn serve_mesh_compio_quic(
         .await
         .map_err(|error| mesh_transport_error(&error))?;
         let local_addr = server.local_addr().map_err(|error| mesh_transport_error(&error))?;
-        observability.mark_quic_listener_ready(local_addr.to_string());
+        context.observability.mark_quic_listener_ready(local_addr.to_string());
         tracing::info!(addr = %local_addr, "federation mesh compio QUIC surface listening");
         loop {
             let connection = match server.accept_connection().await {
                 Ok(connection) => connection,
                 Err(error) => {
-                    observability.mark_quic_listener_error(&error.to_string());
+                    context.observability.mark_quic_listener_error(&error.to_string());
                     tracing::error!(%error, "federation mesh compio QUIC connection rejected");
                     continue;
                 }
             };
-            let state = Arc::clone(state);
-            let router = Arc::clone(router);
-            let observability = Arc::clone(observability);
-            let discovery = discovery.clone();
+            let context = context.clone();
             compio::runtime::spawn(async move {
-                if let Err(error) = handle_mesh_compio_quic_connection(
-                    connection,
-                    &state,
-                    &router,
-                    &observability,
-                    &discovery,
-                )
-                .await
-                {
+                if let Err(error) = handle_mesh_compio_quic_connection(connection, &context).await {
                     tracing::warn!(%error, "federation mesh compio QUIC connection failed");
                 }
             })
@@ -216,16 +184,14 @@ pub(crate) fn serve_mesh_compio_quic(
 
 pub(crate) fn serve_mesh_mtls(
     server: &ramflux_transport::MeshTlsServer,
-    state: &Arc<crate::SharedFederationTrustState>,
-    router: &Arc<RouterMeshClient>,
+    context: &MeshServerContext,
     tls: &ramflux_transport::MeshTlsConfig,
-    observability: &SharedMeshObservability,
-    discovery: &FederationDiscoverySurface,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     tracing::info!("federation mesh mTLS surface listening");
     loop {
         let accepted = match server.accept_authenticated_with_pem_roots_provider(tls, || {
-            let state = state
+            let state = context
+                .state
                 .snapshot()
                 .map_err(|error| ramflux_transport::TransportError::Http(error.to_string()))?;
             Ok(state.pinned_peer_ca_cert_pems())
@@ -242,20 +208,10 @@ pub(crate) fn serve_mesh_mtls(
             .as_deref()
             .and_then(|spiffe_uri| ramflux_node_core::parse_mesh_spiffe_uri(spiffe_uri).ok())
             .map(|peer| peer.service_id);
-        let state = Arc::clone(state);
-        let router = Arc::clone(router);
-        let observability = Arc::clone(observability);
-        let discovery = discovery.clone();
+        let context = context.clone();
         thread::spawn(move || {
             loop {
-                match handle_mesh_request(
-                    &mut stream,
-                    &state,
-                    &router,
-                    peer_service_id.as_deref(),
-                    &observability,
-                    &discovery,
-                ) {
+                match handle_mesh_request(&mut stream, &context, peer_service_id.as_deref()) {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(error) => {
@@ -283,11 +239,8 @@ pub(crate) fn serve_mesh_mtls(
 
 pub(crate) fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
-    state: &Arc<crate::SharedFederationTrustState>,
-    router: &RouterMeshClient,
+    context: &MeshServerContext,
     peer_service_id: Option<&str>,
-    observability: &SharedMeshObservability,
-    discovery: &FederationDiscoverySurface,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
     let Some(request) = ramflux_transport::read_mesh_http_request(stream)
         .map_err(|error| mesh_transport_error(&error))?
@@ -318,13 +271,8 @@ pub(crate) fn handle_mesh_request(
             .map_err(|error| mesh_transport_error(&error))?;
         }
         ("POST", "/s8/federation/envelope") => {
-            observability.record_inbound_s8_envelope(MeshInboundTransport::Tcp);
-            handle_s8_inbound_envelope_request(
-                stream,
-                peer_service_id,
-                &request.body,
-                &MeshEnvelopeContext { state, router, discovery, observability },
-            )?;
+            context.observability.record_inbound_s8_envelope(MeshInboundTransport::Tcp);
+            handle_s8_inbound_envelope_request(stream, peer_service_id, &request.body, context)?;
         }
         ("POST", "/internal/retention/gc_sweep") => {
             if peer_service_id != Some("ramflux-retention") {
@@ -351,15 +299,9 @@ pub(crate) fn handle_mesh_request(
     Ok(true)
 }
 
-struct MeshEnvelopeContext<'a> {
-    state: &'a crate::SharedFederationTrustState,
-    router: &'a RouterMeshClient,
-    discovery: &'a FederationDiscoverySurface,
-    observability: &'a SharedMeshObservability,
-}
-
 struct MeshQuicRequestContext<'a> {
     state: &'a crate::SharedFederationTrustState,
+    store: &'a ramflux_node_core::FederationRedbStore,
     router: &'a RouterMeshClient,
     discovery: &'a FederationDiscoverySurface,
     observability: &'a SharedMeshObservability,
@@ -370,7 +312,7 @@ fn handle_s8_inbound_envelope_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     peer_service_id: Option<&str>,
     body_bytes: &[u8],
-    context: &MeshEnvelopeContext<'_>,
+    context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     if peer_service_id == Some("ramflux-retention") {
         ramflux_transport::write_mesh_text_response(
@@ -416,10 +358,11 @@ fn handle_s8_inbound_envelope_request(
     );
     match handle_s8_receive_envelope(
         &request,
-        context.state,
-        context.router,
-        context.discovery,
-        Some(context.observability),
+        context.state.as_ref(),
+        context.store.as_ref(),
+        context.router.as_ref(),
+        &context.discovery,
+        Some(context.observability.as_ref()),
     ) {
         Ok(response) => {
             tracing::debug!(
@@ -450,10 +393,7 @@ fn handle_s8_inbound_envelope_request(
 
 async fn handle_mesh_quic_connection(
     connection: ramflux_transport::MeshQuicConnection,
-    state: Arc<crate::SharedFederationTrustState>,
-    router: Arc<RouterMeshClient>,
-    observability: SharedMeshObservability,
-    discovery: FederationDiscoverySurface,
+    context: MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let remote_address = connection.remote_address();
     tracing::debug!(%remote_address, "federation mesh QUIC connection stream loop started");
@@ -469,15 +409,9 @@ async fn handle_mesh_quic_connection(
                 return Ok(());
             }
         };
-        let state = Arc::clone(&state);
-        let router = Arc::clone(&router);
-        let observability = Arc::clone(&observability);
-        let discovery = discovery.clone();
+        let context = context.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                handle_mesh_quic_request(accepted, &state, &router, &observability, &discovery)
-                    .await
-            {
+            if let Err(error) = handle_mesh_quic_request(accepted, &context).await {
                 tracing::warn!(%remote_address, %error, "federation mesh QUIC request failed");
             }
         });
@@ -486,19 +420,17 @@ async fn handle_mesh_quic_connection(
 
 async fn handle_mesh_quic_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
-    state: &crate::SharedFederationTrustState,
-    router: &RouterMeshClient,
-    observability: &SharedMeshObservability,
-    discovery: &FederationDiscoverySurface,
+    context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let response = handle_federation_mesh_quic_request(
         &accepted.request,
         None,
         &MeshQuicRequestContext {
-            state,
-            router,
-            discovery,
-            observability,
+            state: context.state.as_ref(),
+            store: context.store.as_ref(),
+            router: context.router.as_ref(),
+            discovery: &context.discovery,
+            observability: &context.observability,
             inbound_transport: MeshInboundTransport::Quic,
         },
     )?;
@@ -519,10 +451,7 @@ async fn handle_mesh_quic_request(
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 async fn handle_mesh_compio_quic_connection(
     connection: ramflux_transport::CompioMeshQuicConnection,
-    state: &crate::SharedFederationTrustState,
-    router: &RouterMeshClient,
-    observability: &SharedMeshObservability,
-    discovery: &FederationDiscoverySurface,
+    context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let remote_address = connection.remote_address();
     let peer_service_id = connection
@@ -546,15 +475,7 @@ async fn handle_mesh_compio_quic_connection(
                 return Ok(());
             }
         };
-        handle_mesh_compio_quic_request(
-            accepted,
-            peer_service_id.as_deref(),
-            state,
-            router,
-            observability,
-            discovery,
-        )
-        .await?;
+        handle_mesh_compio_quic_request(accepted, peer_service_id.as_deref(), context).await?;
     }
 }
 
@@ -562,19 +483,17 @@ async fn handle_mesh_compio_quic_connection(
 async fn handle_mesh_compio_quic_request(
     accepted: ramflux_transport::CompioMeshQuicAcceptedRequest,
     peer_service_id: Option<&str>,
-    state: &crate::SharedFederationTrustState,
-    router: &RouterMeshClient,
-    observability: &SharedMeshObservability,
-    discovery: &FederationDiscoverySurface,
+    context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let response = handle_federation_mesh_quic_request(
         &accepted.request,
         peer_service_id,
         &MeshQuicRequestContext {
-            state,
-            router,
-            discovery,
-            observability,
+            state: context.state.as_ref(),
+            store: context.store.as_ref(),
+            router: context.router.as_ref(),
+            discovery: &context.discovery,
+            observability: &context.observability,
             inbound_transport: MeshInboundTransport::Quic,
         },
     )?;
@@ -620,6 +539,7 @@ fn handle_federation_mesh_quic_request(
             match handle_s8_receive_envelope(
                 &forwarded,
                 context.state,
+                context.store,
                 context.router,
                 context.discovery,
                 Some(context.observability),

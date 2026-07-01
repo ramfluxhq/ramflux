@@ -5,11 +5,11 @@
 
 use crate::{
     FEDERATION_BAD_NODE_ADVISORY_KEY, FEDERATION_DISCOVERY_PIN_KEY,
-    FEDERATION_HANDSHAKE_REPLAY_KEY, FEDERATION_INVITATION_STATE_KEY,
-    FEDERATION_LIFECYCLE_TOMBSTONE_KEY, FEDERATION_NEGOTIATED_CAPABILITIES_KEY,
-    FEDERATION_NODE_SIGNING_SEED_KEY, FEDERATION_OUTBOUND_SPOOL_TABLE, FEDERATION_ROUTE_STATE_KEY,
-    FEDERATION_STATE_TABLE, FederationTrustState, NodeCoreError, load_snapshot,
-    open_redb_with_table, save_snapshot,
+    FEDERATION_HANDSHAKE_REPLAY_KEY, FEDERATION_INBOUND_FORWARD_SEEN_TABLE,
+    FEDERATION_INVITATION_STATE_KEY, FEDERATION_LIFECYCLE_TOMBSTONE_KEY,
+    FEDERATION_NEGOTIATED_CAPABILITIES_KEY, FEDERATION_NODE_SIGNING_SEED_KEY,
+    FEDERATION_OUTBOUND_SPOOL_TABLE, FEDERATION_ROUTE_STATE_KEY, FEDERATION_STATE_TABLE,
+    FederationTrustState, NodeCoreError, load_snapshot, open_redb_with_table, save_snapshot,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,18 @@ pub struct FederationOutboundSpoolEntry {
     pub expires_at: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FederationInboundForwardSeenRecord {
+    pub seen_key: String,
+    pub source_node_id: String,
+    pub target_node_id: String,
+    pub source_device_id: String,
+    pub envelope_id: String,
+    pub target_delivery_id: String,
+    pub seen_at: u64,
+    pub expires_at: u64,
+}
+
 impl FederationRedbStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
@@ -44,6 +56,11 @@ impl FederationRedbStore {
         {
             let _table = write_txn
                 .open_table(FEDERATION_OUTBOUND_SPOOL_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        }
+        {
+            let _table = write_txn
+                .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
@@ -344,6 +361,103 @@ impl FederationRedbStore {
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         Ok(expired_keys.len())
     }
+
+    /// # Errors
+    /// Returns an error when the inbound replay projection cannot be read or written.
+    pub fn accept_inbound_forward_once(
+        &self,
+        request: &crate::FederatedEnvelopeForwardRequest,
+        now: u64,
+    ) -> Result<bool, NodeCoreError> {
+        let expires_at = inbound_forward_expires_at(request)?;
+        if expires_at <= now {
+            return Err(NodeCoreError::TtlExpired {
+                envelope_id: request.envelope.envelope_id.clone(),
+            });
+        }
+        let seen_key = federated_forward_replay_key(request);
+        let expired_keys = self.expired_inbound_forward_keys(now)?;
+        let write_txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let accepted = {
+            let mut table = write_txn
+                .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            for key in &expired_keys {
+                table
+                    .remove(key.as_str())
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            }
+            if table
+                .get(seen_key.as_str())
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?
+                .is_some()
+            {
+                false
+            } else {
+                let record = FederationInboundForwardSeenRecord {
+                    seen_key: seen_key.clone(),
+                    source_node_id: request.source_node_id.clone(),
+                    target_node_id: request.target_node_id.clone(),
+                    source_device_id: request.envelope.source_device_id.clone(),
+                    envelope_id: request.envelope.envelope_id.clone(),
+                    target_delivery_id: request.envelope.target_delivery_id.clone(),
+                    seen_at: now,
+                    expires_at,
+                };
+                let bytes = serialize_inbound_forward_seen_record(&record)?;
+                table
+                    .insert(seen_key.as_str(), bytes.as_slice())
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                true
+            }
+        };
+        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        Ok(accepted)
+    }
+
+    fn expired_inbound_forward_keys(&self, now: u64) -> Result<Vec<String>, NodeCoreError> {
+        let read_txn =
+            self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let table = read_txn
+            .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
+            .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let mut expired = Vec::new();
+        for entry in table.iter().map_err(|source| NodeCoreError::Redb(source.to_string()))? {
+            let (key, value) = entry.map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let record = deserialize_inbound_forward_seen_record(value.value())?;
+            if record.expires_at <= now {
+                expired.push(key.value().to_owned());
+            }
+        }
+        Ok(expired)
+    }
+}
+
+#[must_use]
+pub fn federated_forward_replay_key(request: &crate::FederatedEnvelopeForwardRequest) -> String {
+    let parts = [
+        "v1".to_owned(),
+        inbound_key_part(&request.source_node_id),
+        inbound_key_part(&request.target_node_id),
+        inbound_key_part(&request.envelope.source_device_id),
+        inbound_key_part(&request.envelope.envelope_id),
+        inbound_key_part(&request.envelope.target_delivery_id),
+    ];
+    parts.join("|")
+}
+
+fn inbound_key_part(value: &str) -> String {
+    format!("{:08}:{}", value.len(), value)
+}
+
+fn inbound_forward_expires_at(
+    request: &crate::FederatedEnvelopeForwardRequest,
+) -> Result<u64, NodeCoreError> {
+    let created_at = u64::try_from(request.envelope.created_at).map_err(|_| {
+        NodeCoreError::TtlExpired { envelope_id: request.envelope.envelope_id.clone() }
+    })?;
+    Ok(created_at.saturating_add(u64::from(request.envelope.ttl)))
 }
 
 fn next_spool_seq_in_table(
@@ -376,6 +490,20 @@ fn serialize_spool_entry(entry: &FederationOutboundSpoolEntry) -> Result<Vec<u8>
 }
 
 fn deserialize_spool_entry(bytes: &[u8]) -> Result<FederationOutboundSpoolEntry, NodeCoreError> {
+    serde_json::from_slice(bytes)
+        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
+}
+
+fn serialize_inbound_forward_seen_record(
+    record: &FederationInboundForwardSeenRecord,
+) -> Result<Vec<u8>, NodeCoreError> {
+    serde_json::to_vec(record)
+        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
+}
+
+fn deserialize_inbound_forward_seen_record(
+    bytes: &[u8],
+) -> Result<FederationInboundForwardSeenRecord, NodeCoreError> {
     serde_json::from_slice(bytes)
         .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
 }
