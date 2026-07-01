@@ -790,3 +790,39 @@ fn reject_friend_link_refuses_non_pending_links() -> Result<(), StorageError> {
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
+
+#[test]
+fn remove_friend_link_revokes_capability_for_all_scopes() -> Result<(), StorageError> {
+    let (root, db) = test_db("remove-friend-link-revokes-capability")?;
+
+    for (index, (scope, expected_scope)) in
+        [("me", "me"), ("own_devices", "own_devices"), ("both", "both")].into_iter().enumerate()
+    {
+        let link_id = format!("link_remove_{index}");
+        let requester_id = format!("requester_{index}");
+        let target_id = format!("target_{index}");
+        let removed_at = 3_000 + i64::try_from(index).unwrap_or_default();
+
+        db.establish_friend_link(&link_id, &requester_id, &target_id)?;
+        let removed = db.remove_friend_link(&link_id, scope, removed_at)?;
+        assert_eq!(removed.state, "removed");
+        assert_eq!(removed.remove_scope.as_deref(), Some(expected_scope));
+        assert_eq!(removed.capability_revoked_at, Some(removed_at));
+
+        let peer_link = db
+            .friend_link_for_peer(&target_id)?
+            .ok_or_else(|| StorageError::MessageNotFound(target_id.clone()))?;
+        assert_eq!(peer_link.link_id, link_id);
+        assert!(!friend_link_peer_is_accepted_storage_equivalent(&peer_link));
+
+        let removed_again = db.remove_friend_link(&link_id, scope, removed_at + 100)?;
+        assert_eq!(removed_again.capability_revoked_at, Some(removed_at));
+    }
+
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+fn friend_link_peer_is_accepted_storage_equivalent(link: &FriendLinkRecord) -> bool {
+    link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none()
+}
