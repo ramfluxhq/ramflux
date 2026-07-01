@@ -44,6 +44,7 @@ services:
       RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_PERF: "${RAMFLUX_ITEST_PERF:-0}"
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
       RAMFLUX_ITEST_ROUTER_HTTP_ADDR: "0.0.0.0:18080"
     volumes:
       - ./config/router.toml:/etc/ramflux/config/router.toml:ro

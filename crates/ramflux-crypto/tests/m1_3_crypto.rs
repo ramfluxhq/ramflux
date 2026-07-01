@@ -271,6 +271,7 @@ fn x3dh_prekey_bundle_requires_device_and_lineage_signatures() -> Result<(), Cry
 #[test]
 fn franking_node_tag_is_ed25519_signature() -> Result<(), CryptoError> {
     let node_key = SigningKey::from_bytes(&[0x99; 32]);
+    let fixture_key = SigningKey::from_bytes(&[0x42; 32]);
     let preimage = franking_node_tag_preimage(
         "node-a",
         "env-a",
@@ -291,6 +292,20 @@ fn franking_node_tag_is_ed25519_signature() -> Result<(), CryptoError> {
         &node_key,
     );
     verify_franking_node_tag(&preimage, &signature, &node_key.verifying_key())?;
+    let fixture_signature = sign_franking_node_tag(
+        "node-a",
+        "env-a",
+        "msg-a",
+        &[0xa1; 32],
+        "commitment",
+        "ciphertext-hash",
+        1_760_000_000_001,
+        &fixture_key,
+    );
+    assert!(matches!(
+        verify_franking_node_tag(&preimage, &fixture_signature, &node_key.verifying_key()),
+        Err(CryptoError::VerifyFailed)
+    ));
     Ok(())
 }
 

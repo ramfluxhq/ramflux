@@ -132,6 +132,31 @@ pub fn sign_franking_node_tag(
     encode_base64url(signing_key.sign(&preimage).to_bytes())
 }
 
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn sign_franking_node_tag_with_seed(
+    node_id: &str,
+    envelope_id: &str,
+    message_event_id: &str,
+    sender_device_id_hash: &[u8],
+    commitment: &str,
+    ciphertext_hash: &str,
+    accepted_at_unix_ms: u64,
+    seed: [u8; 32],
+) -> String {
+    let signing_key = SigningKey::from_bytes(&seed);
+    sign_franking_node_tag(
+        node_id,
+        envelope_id,
+        message_event_id,
+        sender_device_id_hash,
+        commitment,
+        ciphertext_hash,
+        accepted_at_unix_ms,
+        &signing_key,
+    )
+}
+
 /// # Errors
 /// Returns an error when the signature is malformed or does not verify.
 pub fn verify_franking_node_tag(
@@ -146,19 +171,4 @@ pub fn verify_franking_node_tag(
         .map_err(|_| CryptoError::InvalidSignatureLength(bytes.len()))?;
     let signature = Signature::from_bytes(&signature_bytes);
     verifying_key.verify_strict(preimage, &signature).map_err(|_err| CryptoError::VerifyFailed)
-}
-
-#[must_use]
-pub fn franking_node_tag(commitment: &str, ciphertext_hash: &str, timestamp: u64) -> String {
-    let signing_key = SigningKey::from_bytes(&[0x42; 32]);
-    sign_franking_node_tag(
-        "fixture-node",
-        "fixture-envelope",
-        "fixture-message",
-        &[0_u8; 32],
-        commitment,
-        ciphertext_hash,
-        timestamp,
-        &signing_key,
-    )
 }

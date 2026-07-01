@@ -39,6 +39,9 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             Some(router) => router,
             None => ramflux_node_core::RouterCore::new(),
         };
+        if let Some(signer) = ramflux_node_core::node_service_signing_key_from_config(&config)? {
+            router.set_node_franking_public_key(Some(signer.public_key_base64url().to_owned()));
+        }
         tracing::info!(service, node_id = config.node_id, "router store initialized");
         let state = Arc::new(router);
         let store = Arc::new(store);

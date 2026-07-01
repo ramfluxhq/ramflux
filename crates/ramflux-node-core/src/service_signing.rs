@@ -13,6 +13,17 @@ pub struct NodeServiceSigningKey {
     public_key_base64url: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct NodeFrankingTagInput<'a> {
+    pub node_id: &'a str,
+    pub envelope_id: &'a str,
+    pub message_event_id: &'a str,
+    pub sender_device_id_hash: &'a [u8],
+    pub commitment: &'a str,
+    pub ciphertext_hash: &'a str,
+    pub accepted_at_unix_ms: u64,
+}
+
 impl NodeServiceSigningKey {
     #[must_use]
     pub fn from_seed(seed: [u8; 32]) -> Self {
@@ -32,6 +43,20 @@ impl NodeServiceSigningKey {
     #[must_use]
     pub fn public_key_base64url(&self) -> &str {
         &self.public_key_base64url
+    }
+
+    #[must_use]
+    pub fn sign_franking_node_tag(&self, input: NodeFrankingTagInput<'_>) -> String {
+        ramflux_crypto::sign_franking_node_tag_with_seed(
+            input.node_id,
+            input.envelope_id,
+            input.message_event_id,
+            input.sender_device_id_hash,
+            input.commitment,
+            input.ciphertext_hash,
+            input.accepted_at_unix_ms,
+            self.seed,
+        )
     }
 
     /// # Errors
@@ -234,6 +259,35 @@ mod tests {
             key.verify_notification_wake(&wake),
             Err(NodeCoreError::Unauthorized(_message))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn node_service_signing_key_signs_franking_node_tag() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let key = NodeServiceSigningKey::from_seed([8_u8; 32]);
+        let sender_device_id_hash = [0xa8; 32];
+        let signature = key.sign_franking_node_tag(NodeFrankingTagInput {
+            node_id: "node-service-franking",
+            envelope_id: "env-service-franking",
+            message_event_id: "msg-service-franking",
+            sender_device_id_hash: &sender_device_id_hash,
+            commitment: "commitment-service-franking",
+            ciphertext_hash: "ciphertext-hash-service-franking",
+            accepted_at_unix_ms: 1_760_000_000_123,
+        });
+        let preimage = ramflux_crypto::franking_node_tag_preimage(
+            "node-service-franking",
+            "env-service-franking",
+            "msg-service-franking",
+            &sender_device_id_hash,
+            "commitment-service-franking",
+            "ciphertext-hash-service-franking",
+            1_760_000_000_123,
+        );
+        let verifying_key =
+            ramflux_crypto::verifying_key_from_base64url(key.public_key_base64url())?;
+        ramflux_crypto::verify_franking_node_tag(&preimage, &signature, &verifying_key)?;
         Ok(())
     }
 

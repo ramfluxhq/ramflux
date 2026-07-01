@@ -157,6 +157,8 @@ pub(super) fn abuse_report(report_id: &str) -> AbuseReportRequest {
         reported_node: "node_keyed.example".to_owned(),
         selected_evidence: SelectedFrankingEvidence {
             evidence_kind: FrankingEvidenceKind::ReceiverAttestedDm,
+            node_id: String::new(),
+            envelope_id: String::new(),
             plaintext_excerpt: "selected excerpt".to_owned(),
             opening_key: "invalid_opening_key".to_owned(),
             commitment_key: "invalid_commitment_key".to_owned(),
