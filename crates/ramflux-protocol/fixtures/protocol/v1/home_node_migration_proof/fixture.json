@@ -16,8 +16,7 @@
   "proof_id": "mig_01",
   "route_record_hash": "cm91dGUtcmVjb3JkLWhhc2g",
   "schema": "ramflux.home_node_migration_proof.v1",
-  "signature": "NKaIUaMWRbtVzdi9OlNfIkyL6YzUyxcENhwLkHe1yc0YsY1dx2EzUEF-X8mtw6mgu80_Oyb3COG7AzZvjvlWAQ",
+  "signature": "FzBS_FEeb8P0AmRzmvT8OUbo8nDuRicHJda8tafYbIim1o509iSoKUaYhJSh6Zd8hKZ74nGTq__P9glmRHdwCQ",
   "signature_alg": "ed25519",
-  "signing_key_id": "fixture-ed25519-01",
-  "version": 1
+  "signing_key_id": "fixture-ed25519-01"
 }

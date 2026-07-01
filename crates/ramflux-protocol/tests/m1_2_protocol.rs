@@ -9,8 +9,8 @@ use ramflux_protocol::{
     UpdateDataModelCommand, canonical_header_bytes, canonical_json_bytes, decode_base64url,
     event_sort_key, fixture_canonical_path, fixture_hash_path, fixture_invalid_signature_path,
     fixture_json_path, fixture_replay_path, fixture_sig_path, hash_hex, header_hash_base64url,
-    parse_fixture_value, signed_value, surface_hash, verify_canonical_signature,
-    verify_json_signature,
+    home_node_migration_proof_signed_bytes, parse_fixture_value, signed_value, surface_hash,
+    verify_canonical_signature, verify_json_signature,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -32,7 +32,7 @@ fn signed_fixtures_verify_and_invalid_signatures_reject() -> Result<(), Box<dyn 
         let fixture = read_json(&json_path)?;
         parse_fixture_value(object, fixture.clone())?;
 
-        let canonical = canonical_json_bytes(&signed_value(&fixture)?)?;
+        let canonical = fixture_signed_bytes(object, &fixture)?;
         let expected_canonical = fs::read(root.join(fixture_canonical_path(object)))?;
         assert_eq!(canonical, expected_canonical, "canonical mismatch for {}", object.dir);
 
@@ -43,18 +43,35 @@ fn signed_fixtures_verify_and_invalid_signatures_reject() -> Result<(), Box<dyn 
         if object.signed {
             let json_sig = required_str(&fixture, "signature")?;
             assert_eq!(json_sig, fixture_sig, "fixture.sig mismatch for {}", object.dir);
-            verify_json_signature(&fixture, &public_key)?;
+            if object.dir == "home_node_migration_proof" {
+                verify_canonical_signature(&canonical, json_sig, &public_key)?;
+            } else {
+                verify_json_signature(&fixture, &public_key)?;
+            }
             verify_canonical_signature(&canonical, &fixture_sig, &public_key)?;
 
             let invalid = read_json(&root.join(fixture_invalid_signature_path(object)))?;
+            let invalid_signature = required_str(&invalid, "signature")?;
             assert!(
-                verify_json_signature(&invalid, &public_key).is_err(),
+                verify_canonical_signature(&canonical, invalid_signature, &public_key).is_err(),
                 "invalid signature accepted for {}",
                 object.dir
             );
         }
     }
     Ok(())
+}
+
+fn fixture_signed_bytes(
+    object: ramflux_protocol::FixtureObject,
+    value: &Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if object.dir == "home_node_migration_proof" {
+        let proof: ramflux_protocol::HomeNodeMigrationProof =
+            serde_json::from_value(value.clone())?;
+        return Ok(home_node_migration_proof_signed_bytes(&proof)?);
+    }
+    Ok(canonical_json_bytes(&signed_value(value)?)?)
 }
 
 #[test]

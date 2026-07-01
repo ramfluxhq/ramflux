@@ -49,4 +49,6 @@ pub enum CryptoError {
     BranchProofReplay,
     #[error("transparency proof failed")]
     TransparencyProofFailed,
+    #[error("invalid home node migration proof: {0}")]
+    InvalidHomeNodeMigrationProof(&'static str),
 }
