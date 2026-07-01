@@ -34,8 +34,7 @@ fn write_fixture(
         set_field(&mut value, "signature_alg", Value::String("ed25519".to_owned()))?;
     }
 
-    let canonical_value = signed_value(&value)?;
-    let canonical = ramflux_protocol::canonical_json_bytes(&canonical_value)?;
+    let canonical = fixture_signed_bytes(object, &value)?;
     let signature = sign_canonical_bytes(&canonical);
 
     if object.signed {
@@ -146,7 +145,6 @@ fn fixture_value(object: FixtureObject) -> Value {
         }),
         "home_node_migration_proof" => json!({
             "schema": domain::HOME_NODE_MIGRATION_PROOF,
-            "version": 1,
             "domain": domain::HOME_NODE_MIGRATION_PROOF,
             "proof_id": "mig_01",
             "identity_commitment": "id_a",
@@ -500,6 +498,20 @@ fn fixture_value(object: FixtureObject) -> Value {
         }
         _ => json!({}),
     }
+}
+
+fn fixture_signed_bytes(
+    object: FixtureObject,
+    value: &Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if object.dir == "home_node_migration_proof" {
+        let mut value = value.clone();
+        set_field(&mut value, "signature", Value::String(String::new()))?;
+        let proof: ramflux_protocol::HomeNodeMigrationProof = serde_json::from_value(value)?;
+        return Ok(ramflux_protocol::home_node_migration_proof_signed_bytes(&proof)?);
+    }
+    let canonical_value = signed_value(value)?;
+    Ok(ramflux_protocol::canonical_json_bytes(&canonical_value)?)
 }
 
 #[allow(dead_code)]

@@ -160,10 +160,7 @@ pub struct BranchProof {
 #[serde(deny_unknown_fields)]
 pub struct HomeNodeMigrationProof {
     pub schema: String,
-    pub version: u32,
     pub domain: String,
-    #[serde(flatten)]
-    pub ext: Ext,
     #[serde(flatten)]
     pub signed: SignedFields,
     pub proof_id: String,

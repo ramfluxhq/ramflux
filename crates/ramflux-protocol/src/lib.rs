@@ -11,6 +11,7 @@ mod error;
 mod events;
 mod fixtures;
 mod header;
+mod home_node_migration;
 mod protocol_object;
 mod replay;
 mod signature;
@@ -42,6 +43,7 @@ pub use fixtures::{
 pub use header::{
     HeaderField, HeaderFieldValue, HeaderKind, canonical_header_bytes, header_hash_base64url,
 };
+pub use home_node_migration::{home_node_migration_proof_signed_bytes, migration_proof_hash};
 pub use protocol_object::ProtocolObject;
 pub use ramflux_core::{ClientEventEnvelope as CoreClientEventEnvelope, DomainTag};
 pub use replay::{

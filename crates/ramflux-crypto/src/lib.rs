@@ -7,6 +7,7 @@ mod double_ratchet;
 mod error;
 mod franking;
 mod group_sender;
+mod home_node_migration;
 mod identity;
 mod kdf;
 mod key_verification;
@@ -26,6 +27,10 @@ pub use franking::{
 pub use group_sender::{
     GroupCiphertext, GroupMemberCommitment, GroupSenderKeyDistribution, GroupSenderKeyState,
     MAX_GROUP_SKIP, create_group_sender_key_distribution, membership_commitment_hash,
+};
+pub use home_node_migration::{
+    branch_proof_document_hash, migration_proof_hash, sign_home_node_migration_proof,
+    verify_home_node_migration_proof,
 };
 pub use identity::{
     BranchProofDocument, DeviceBranch, DeviceRevocationReplayGuard, IdentityRoot,
