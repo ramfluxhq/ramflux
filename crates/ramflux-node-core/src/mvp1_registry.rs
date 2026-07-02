@@ -15,11 +15,11 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const ITEST_MVP1_AUDIENCE: &str = "ramflux-node";
-pub const ITEST_MVP1_BIND_CAPABILITY: &str = "device.delivery.bind";
+pub const IDENTITY_BIND_AUDIENCE: &str = "ramflux-node";
+pub const IDENTITY_BIND_CAPABILITY: &str = "device.delivery.bind";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1RegisterIdentityRequest {
+pub struct IdentityRegisterRequest {
     pub root_public_key: String,
     #[serde(default)]
     pub principal_commitment: String,
@@ -31,13 +31,13 @@ pub struct ItestMvp1RegisterIdentityRequest {
     pub push_alias_hash: Option<String>,
     pub now: i64,
     #[serde(default)]
-    pub registration_pow: Option<ItestRegistrationPowProof>,
+    pub registration_pow: Option<RegistrationPowProof>,
     #[serde(default)]
     pub source_ip_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1IdentityRegistrationResponse {
+pub struct IdentityRegistrationResponse {
     pub principal_id: String,
     pub device_id: String,
     pub device_epoch: u64,
@@ -47,20 +47,20 @@ pub struct ItestMvp1IdentityRegistrationResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestRegistrationPowProof {
+pub struct RegistrationPowProof {
     pub nonce: u64,
     pub difficulty_bits: u8,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestRegistrationPolicy {
+pub struct RegistrationPolicy {
     pub challenge_policy: RegistrationChallengePolicy,
     pub pow_difficulty_bits: u8,
     pub per_source_ip_registration_limit: u32,
     pub registration_window_seconds: u64,
 }
 
-impl Default for ItestRegistrationPolicy {
+impl Default for RegistrationPolicy {
     fn default() -> Self {
         Self {
             challenge_policy: RegistrationChallengePolicy::None,
@@ -91,14 +91,14 @@ pub enum RegistrationTrustTier {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp6FriendRequestBudgetRequest {
+pub struct FriendRequestBudgetRequest {
     pub source_principal_id: String,
     pub target_principal_id: String,
     pub now: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp6FriendRequestBudgetResponse {
+pub struct FriendRequestBudgetResponse {
     pub source_principal_id: String,
     pub target_principal_id: String,
     pub registration_trust_tier: RegistrationTrustTier,
@@ -108,7 +108,7 @@ pub struct ItestMvp6FriendRequestBudgetResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1RevokeDeviceRequest {
+pub struct DeviceRevokeRequest {
     pub device_id: String,
     pub principal_commitment: String,
     pub root_public_key: String,
@@ -117,7 +117,7 @@ pub struct ItestMvp1RevokeDeviceRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1RevokeDeviceResponse {
+pub struct DeviceRevokeResponse {
     pub device_id: String,
     pub revoked: bool,
 }
@@ -130,13 +130,13 @@ struct DeviceRevokeSigningBody<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1PublishPrekeyRequest {
+pub struct PrekeyPublishRequest {
     pub device_id: String,
     pub bundle: ramflux_crypto::PrekeyBundle,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1PrekeyResponse {
+pub struct PrekeyResponse {
     pub device_id: String,
     pub bundle: Option<ramflux_crypto::PrekeyBundle>,
     pub principal_commitment: String,
@@ -144,7 +144,7 @@ pub struct ItestMvp1PrekeyResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1DeviceManifestDevice {
+pub struct DeviceManifestEntry {
     pub principal_id: String,
     pub principal_commitment: String,
     pub device_id: String,
@@ -157,15 +157,15 @@ pub struct ItestMvp1DeviceManifestDevice {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1DeviceManifestResponse {
+pub struct DeviceManifestResponse {
     pub principal_id: String,
     pub principal_commitment: String,
     pub root_public_key: String,
-    pub devices: Vec<ItestMvp1DeviceManifestDevice>,
+    pub devices: Vec<DeviceManifestEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1DeviceAuthKeyResponse {
+pub struct DeviceAuthKeyResponse {
     pub principal_id: String,
     pub device_id: String,
     pub device_epoch: u64,
@@ -175,7 +175,7 @@ pub struct ItestMvp1DeviceAuthKeyResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1InboxResponse {
+pub struct InboxFetchResponse {
     pub target_delivery_id: String,
     pub entries: Vec<InboxEntry>,
 }
@@ -203,7 +203,7 @@ pub struct ItestMvp10OwnDeviceFanoutResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ItestMvp1DeviceRecord {
+pub(crate) struct IdentityDeviceRecord {
     pub(crate) principal_id: String,
     #[serde(default)]
     pub(crate) principal_commitment: String,
@@ -215,16 +215,16 @@ pub(crate) struct ItestMvp1DeviceRecord {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp1IdentityRegistry {
+pub struct IdentityRegistry {
     root_public_keys: BTreeMap<String, String>,
     #[serde(default)]
     root_public_keys_by_commitment: BTreeMap<String, String>,
-    pub(crate) devices: BTreeMap<String, ItestMvp1DeviceRecord>,
+    pub(crate) devices: BTreeMap<String, IdentityDeviceRecord>,
     revoked_devices: BTreeSet<String>,
     seen_proofs: BTreeSet<String>,
     prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
     #[serde(default)]
-    registration_policy: ItestRegistrationPolicy,
+    registration_policy: RegistrationPolicy,
     #[serde(default)]
     registration_trust_tiers: BTreeMap<String, RegistrationTrustTier>,
     #[serde(default)]
@@ -233,7 +233,7 @@ pub struct ItestMvp1IdentityRegistry {
     friend_request_times_by_principal: BTreeMap<String, Vec<i64>>,
 }
 
-impl ItestMvp1IdentityRegistry {
+impl IdentityRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -243,7 +243,7 @@ impl ItestMvp1IdentityRegistry {
     /// Returns an error when the proof is invalid, replayed, expired, or revoked.
     pub fn register_identity(
         &mut self,
-        request: &ItestMvp1RegisterIdentityRequest,
+        request: &IdentityRegisterRequest,
     ) -> Result<(SessionDescriptor, RegistrationTrustTier), NodeCoreError> {
         let registration_trust_tier = self.validate_registration_policy(request)?;
         if self.revoked_devices.contains(&request.proof.device_id) {
@@ -284,8 +284,8 @@ impl ItestMvp1IdentityRegistry {
         ramflux_crypto::verify_branch_proof(
             &root_public_key,
             &request.proof,
-            ITEST_MVP1_AUDIENCE,
-            ITEST_MVP1_BIND_CAPABILITY,
+            IDENTITY_BIND_AUDIENCE,
+            IDENTITY_BIND_CAPABILITY,
             request.now,
         )
         .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
@@ -301,7 +301,7 @@ impl ItestMvp1IdentityRegistry {
             .insert(request.proof.principal_id.clone(), registration_trust_tier.clone());
         self.devices.insert(
             request.proof.device_id.clone(),
-            ItestMvp1DeviceRecord {
+            IdentityDeviceRecord {
                 principal_id: request.proof.principal_id.clone(),
                 principal_commitment: request.principal_commitment.clone(),
                 device_id: request.proof.device_id.clone(),
@@ -327,12 +327,12 @@ impl ItestMvp1IdentityRegistry {
         ))
     }
 
-    pub fn set_registration_policy(&mut self, policy: ItestRegistrationPolicy) {
+    pub fn set_registration_policy(&mut self, policy: RegistrationPolicy) {
         self.registration_policy = policy;
     }
 
     #[must_use]
-    pub const fn registration_policy(&self) -> &ItestRegistrationPolicy {
+    pub const fn registration_policy(&self) -> &RegistrationPolicy {
         &self.registration_policy
     }
 
@@ -348,8 +348,8 @@ impl ItestMvp1IdentityRegistry {
     /// Returns an error when the source exceeds its tier-specific friend-request budget.
     pub fn record_friend_request(
         &mut self,
-        request: &ItestMvp6FriendRequestBudgetRequest,
-    ) -> Result<ItestMvp6FriendRequestBudgetResponse, NodeCoreError> {
+        request: &FriendRequestBudgetRequest,
+    ) -> Result<FriendRequestBudgetResponse, NodeCoreError> {
         let tier = self.registration_trust_tier(&request.source_principal_id);
         let limit = friend_request_budget_limit(&tier);
         let window_start = request.now.saturating_sub(60);
@@ -365,7 +365,7 @@ impl ItestMvp1IdentityRegistry {
             )));
         }
         entries.push(request.now);
-        Ok(ItestMvp6FriendRequestBudgetResponse {
+        Ok(FriendRequestBudgetResponse {
             source_principal_id: request.source_principal_id.clone(),
             target_principal_id: request.target_principal_id.clone(),
             registration_trust_tier: tier,
@@ -377,7 +377,7 @@ impl ItestMvp1IdentityRegistry {
 
     fn validate_registration_policy(
         &mut self,
-        request: &ItestMvp1RegisterIdentityRequest,
+        request: &IdentityRegisterRequest,
     ) -> Result<RegistrationTrustTier, NodeCoreError> {
         self.check_source_registration_budget(request)?;
         match self.registration_policy.challenge_policy {
@@ -402,7 +402,7 @@ impl ItestMvp1IdentityRegistry {
 
     fn check_source_registration_budget(
         &mut self,
-        request: &ItestMvp1RegisterIdentityRequest,
+        request: &IdentityRegisterRequest,
     ) -> Result<(), NodeCoreError> {
         let source_ip_hash = request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip");
         let window_seconds =
@@ -419,7 +419,7 @@ impl ItestMvp1IdentityRegistry {
         Ok(())
     }
 
-    fn record_registration(&mut self, request: &ItestMvp1RegisterIdentityRequest) {
+    fn record_registration(&mut self, request: &IdentityRegisterRequest) {
         let source_ip_hash = request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip");
         self.registration_times_by_source_ip
             .entry(source_ip_hash.to_owned())
@@ -429,10 +429,7 @@ impl ItestMvp1IdentityRegistry {
 
     /// # Errors
     /// Returns an error when the revocation is not signed by the registered principal root.
-    pub fn revoke_device(
-        &mut self,
-        request: &ItestMvp1RevokeDeviceRequest,
-    ) -> Result<bool, NodeCoreError> {
+    pub fn revoke_device(&mut self, request: &DeviceRevokeRequest) -> Result<bool, NodeCoreError> {
         let expected_root = self
             .root_public_keys_by_commitment
             .get(&request.principal_commitment)
@@ -474,10 +471,7 @@ impl ItestMvp1IdentityRegistry {
 
     /// # Errors
     /// Returns an error when the device is unknown, revoked, or bundle verification fails.
-    pub fn publish_prekey(
-        &mut self,
-        request: ItestMvp1PublishPrekeyRequest,
-    ) -> Result<(), NodeCoreError> {
+    pub fn publish_prekey(&mut self, request: PrekeyPublishRequest) -> Result<(), NodeCoreError> {
         if self.revoked_devices.contains(&request.device_id) {
             return Err(NodeCoreError::ItestHttp(format!("device revoked: {}", request.device_id)));
         }
@@ -528,10 +522,7 @@ impl ItestMvp1IdentityRegistry {
     }
 
     #[must_use]
-    pub fn device_manifest(
-        &self,
-        principal_commitment: &str,
-    ) -> Option<ItestMvp1DeviceManifestResponse> {
+    pub fn device_manifest(&self, principal_commitment: &str) -> Option<DeviceManifestResponse> {
         let root_public_key = self.root_public_keys_by_commitment.get(principal_commitment)?;
         let mut devices = self
             .devices
@@ -542,7 +533,7 @@ impl ItestMvp1IdentityRegistry {
             })
             .filter_map(|device| {
                 let prekey_bundle = self.prekey_bundles.get(&device.device_id)?;
-                Some(ItestMvp1DeviceManifestDevice {
+                Some(DeviceManifestEntry {
                     principal_id: device.principal_id.clone(),
                     principal_commitment: device.principal_commitment.clone(),
                     device_id: device.device_id.clone(),
@@ -560,7 +551,7 @@ impl ItestMvp1IdentityRegistry {
             .collect::<Vec<_>>();
         devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
         let principal_id = devices.first()?.principal_id.clone();
-        Some(ItestMvp1DeviceManifestResponse {
+        Some(DeviceManifestResponse {
             principal_id,
             principal_commitment: principal_commitment.to_owned(),
             root_public_key: root_public_key.clone(),
@@ -569,9 +560,9 @@ impl ItestMvp1IdentityRegistry {
     }
 
     #[must_use]
-    pub fn device_auth_key(&self, device_id: &str) -> Option<ItestMvp1DeviceAuthKeyResponse> {
+    pub fn device_auth_key(&self, device_id: &str) -> Option<DeviceAuthKeyResponse> {
         let device = self.devices.get(device_id)?;
-        Some(ItestMvp1DeviceAuthKeyResponse {
+        Some(DeviceAuthKeyResponse {
             principal_id: device.principal_id.clone(),
             device_id: device.device_id.clone(),
             device_epoch: device.device_epoch,

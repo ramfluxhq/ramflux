@@ -30,17 +30,17 @@ pub struct CursorAckState {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp0SubmitResponse {
+pub struct EnvelopeSubmitResponse {
     pub outcome: String,
     pub target_delivery_id: String,
     pub inbox_seq: Option<u64>,
-    pub cursor: Option<ItestMvp0CursorResponse>,
+    pub cursor: Option<InboxCursorResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nack: Option<ramflux_protocol::Nack>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp0CursorResponse {
+pub struct InboxCursorResponse {
     pub target_delivery_id: String,
     pub inbox_seq: u64,
     pub last_envelope_id: Option<String>,
@@ -49,18 +49,18 @@ pub struct ItestMvp0CursorResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp0BoundAckRequest {
+pub struct TargetAckRequest {
     pub target_delivery_id: String,
     pub ack: ramflux_protocol::Ack,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp0BoundNackRequest {
+pub struct TargetNackRequest {
     pub target_delivery_id: String,
     pub nack: ramflux_protocol::Nack,
 }
 
-impl From<&CursorAckState> for ItestMvp0CursorResponse {
+impl From<&CursorAckState> for InboxCursorResponse {
     fn from(cursor: &CursorAckState) -> Self {
         Self {
             target_delivery_id: cursor.target_delivery_id.clone(),

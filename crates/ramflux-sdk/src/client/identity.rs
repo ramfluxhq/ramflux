@@ -162,17 +162,17 @@ impl RamfluxClient {
             &format!("pre_session_for_{device_id}"),
             principal_commitment,
         )?;
-        let response: SdkMvp1IdentityRegistrationResponse =
+        let response: SdkIdentityRegistrationResponse =
             sdk_gateway_post_json(gateway, "/mvp1/identity/register", &request).await?;
         if !response.session_bound {
             return Err(SdkError::GatewaySessionRejected(
                 "identity registration did not bind the gateway session".to_owned(),
             ));
         }
-        let _response: SdkMvp1PrekeyResponse = sdk_gateway_post_json(
+        let _response: SdkPrekeyResponse = sdk_gateway_post_json(
             gateway,
             "/mvp1/prekey/publish",
-            &SdkMvp1PublishPrekeyRequest { device_id: device_id.to_owned(), bundle },
+            &SdkPrekeyPublishRequest { device_id: device_id.to_owned(), bundle },
         )
         .await?;
         Ok(())
@@ -236,7 +236,7 @@ impl RamfluxClient {
         target_delivery_id: &str,
         session_id: &str,
         principal_commitment: &str,
-    ) -> Result<SdkMvp1RegisterIdentityRequest, SdkError> {
+    ) -> Result<SdkIdentityRegisterRequest, SdkError> {
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let now = now_unix_timestamp();
@@ -248,7 +248,7 @@ impl RamfluxClient {
             now,
             now.saturating_add(3_600),
         )?;
-        Ok(SdkMvp1RegisterIdentityRequest {
+        Ok(SdkIdentityRegisterRequest {
             root_public_key: ramflux_protocol::encode_base64url(
                 root.signing_key.verifying_key().to_bytes(),
             ),

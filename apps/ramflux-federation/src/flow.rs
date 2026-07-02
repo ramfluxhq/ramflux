@@ -332,7 +332,7 @@ fn spooled_forward_response(
         accepted: true,
         source_node_id: signed_request.source_node_id.clone(),
         target_node_id: signed_request.target_node_id.clone(),
-        delivery: ramflux_node_core::ItestMvp0SubmitResponse {
+        delivery: ramflux_node_core::EnvelopeSubmitResponse {
             outcome: "federation_spooled_offline_peer".to_owned(),
             target_delivery_id: signed_request.envelope.target_delivery_id.clone(),
             inbox_seq: None,
@@ -432,7 +432,7 @@ pub(crate) fn handle_s8_receive_envelope(
         "accepted federated envelope proof and delivering to local router"
     );
     let step_started = std::time::Instant::now();
-    let delivery: ramflux_node_core::ItestMvp0SubmitResponse = router
+    let delivery: ramflux_node_core::EnvelopeSubmitResponse = router
         .client
         .post_json(
             &router.endpoint,
@@ -518,7 +518,7 @@ fn duplicate_forward_response(
         accepted: false,
         source_node_id: request.source_node_id.clone(),
         target_node_id: request.target_node_id.clone(),
-        delivery: ramflux_node_core::ItestMvp0SubmitResponse {
+        delivery: ramflux_node_core::EnvelopeSubmitResponse {
             outcome: "duplicate_federated_forward".to_owned(),
             target_delivery_id: request.envelope.target_delivery_id.clone(),
             inbox_seq: None,

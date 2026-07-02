@@ -5,8 +5,8 @@
 
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, HomeNodeMigrationRecord,
-    IdentityLifecycleTombstone, InboxEntry, ItestMvp1IdentityRegistry, NodeCoreError,
-    NodeReplayGuardState, OpaqueDeviceInbox, ROUTER_ABUSE_REPORT_KEY, ROUTER_ABUSE_REPORT_TABLE,
+    IdentityLifecycleTombstone, IdentityRegistry, InboxEntry, NodeCoreError, NodeReplayGuardState,
+    OpaqueDeviceInbox, ROUTER_ABUSE_REPORT_KEY, ROUTER_ABUSE_REPORT_TABLE,
     ROUTER_CURSOR_STATE_TABLE, ROUTER_DEACTIVATED_TARGET_TABLE, ROUTER_DEACTIVATED_TARGETS_KEY,
     ROUTER_DELETED_TARGET_TABLE, ROUTER_DELETED_TARGETS_KEY, ROUTER_HOME_NODE_MIGRATION_KEY,
     ROUTER_IDENTITY_REGISTRY_KEY, ROUTER_INBOX_ENTRY_TABLE, ROUTER_INBOX_SLICE_KEY,
@@ -542,7 +542,7 @@ impl RouterRedbStore {
     /// Returns an error when the identity registry cannot be durably recorded.
     pub fn record_identity_registry(
         &self,
-        registry: &ItestMvp1IdentityRegistry,
+        registry: &IdentityRegistry,
     ) -> Result<(), NodeCoreError> {
         save_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY, registry)
     }
@@ -616,7 +616,7 @@ impl RouterRedbStore {
     pub fn record_target_deleted_cleanup(
         &self,
         target_delivery_id: &str,
-        identity_registry: &ItestMvp1IdentityRegistry,
+        identity_registry: &IdentityRegistry,
         lifecycle_record: &AccountLifecycleRecord,
     ) -> Result<(), NodeCoreError> {
         let identity_bytes = serialize_value(identity_registry)?;
@@ -757,7 +757,7 @@ impl RouterRedbStore {
                 .unwrap_or_default();
         if registry == SessionRegistry::default()
             && inbox == OpaqueDeviceInbox::default()
-            && mvp1_identities == ItestMvp1IdentityRegistry::default()
+            && mvp1_identities == IdentityRegistry::default()
             && lifecycle_by_principal.is_empty()
             && lifecycle_tombstones.is_empty()
             && deactivated_delivery_targets.is_empty()

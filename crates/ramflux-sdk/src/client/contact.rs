@@ -3,7 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
-use crate::prekey::{SdkMvp1DeviceManifestDevice, SdkMvp1PrekeyResponse};
+use crate::prekey::{SdkDeviceManifestEntry, SdkPrekeyResponse};
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -14,7 +14,7 @@ impl RamfluxClient {
         manifest: serde_json::Value,
         expected_identity_commitment: &str,
     ) -> Result<(), SdkError> {
-        let manifest: SdkMvp1DeviceManifestResponse = serde_json::from_value(manifest)?;
+        let manifest: SdkDeviceManifestResponse = serde_json::from_value(manifest)?;
         verify_device_manifest(&manifest, expected_identity_commitment)
     }
 
@@ -121,7 +121,7 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         principal_commitment: &str,
         source: &str,
-    ) -> Result<SdkMvp1DeviceManifestResponse, SdkError> {
+    ) -> Result<SdkDeviceManifestResponse, SdkError> {
         let manifest = fetch_verified_device_manifest(gateway, principal_commitment).await?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
@@ -174,7 +174,7 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         device_id: &str,
     ) -> Result<String, SdkError> {
-        let prekey: SdkMvp1PrekeyResponse =
+        let prekey: SdkPrekeyResponse =
             sdk_gateway_get_json(gateway, &format!("/mvp1/prekey/{device_id}")).await?;
         if prekey.principal_commitment.is_empty() {
             return Err(SdkError::LocalBus(format!(
@@ -248,7 +248,7 @@ impl RamfluxClient {
         principal_commitment: &str,
         device_id: &str,
         source: &str,
-    ) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+    ) -> Result<SdkDeviceManifestEntry, SdkError> {
         let manifest =
             self.cache_verified_device_manifest(gateway, principal_commitment, source).await?;
         manifest.devices.into_iter().find(|device| device.device_id == device_id).ok_or_else(|| {
@@ -266,7 +266,7 @@ impl RamfluxClient {
         principal_commitment: &str,
         device_id: &str,
         source: &str,
-    ) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+    ) -> Result<SdkDeviceManifestEntry, SdkError> {
         let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
@@ -722,8 +722,8 @@ fn contact_safety_material_for(identity_commitment: &str) -> ramflux_crypto::Con
 pub(crate) async fn fetch_verified_device_manifest(
     gateway: &GatewaySessionConfig,
     identity_commitment: &str,
-) -> Result<SdkMvp1DeviceManifestResponse, SdkError> {
-    let manifest: Option<SdkMvp1DeviceManifestResponse> =
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let manifest: Option<SdkDeviceManifestResponse> =
         sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{identity_commitment}"))
             .await?;
     let manifest = manifest.ok_or_else(|| {
@@ -741,8 +741,8 @@ pub(crate) async fn fetch_verified_device_manifest(
 pub(crate) fn fetch_verified_device_manifest_from_url(
     manifest_url: &str,
     identity_commitment: &str,
-) -> Result<SdkMvp1DeviceManifestResponse, SdkError> {
-    let manifest: Option<SdkMvp1DeviceManifestResponse> =
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let manifest: Option<SdkDeviceManifestResponse> =
         sdk_http_get_json(manifest_url, &format!("/mvp1/device-manifest/{identity_commitment}"))?;
     let manifest = manifest.ok_or_else(|| {
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
@@ -758,7 +758,7 @@ pub(crate) async fn assert_manifest_active_device(
     gateway: &GatewaySessionConfig,
     principal_commitment: &str,
     device_id: &str,
-) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+) -> Result<SdkDeviceManifestEntry, SdkError> {
     let manifest = fetch_verified_device_manifest(gateway, principal_commitment).await?;
     manifest.devices.into_iter().find(|device| device.device_id == device_id).ok_or_else(|| {
         SdkError::LocalBus(format!(
@@ -774,7 +774,7 @@ pub(crate) async fn assert_target_manifest_active_device(
     gateway: &GatewaySessionConfig,
     principal_commitment: Option<&str>,
     device_id: &str,
-) -> Result<SdkMvp1DeviceManifestDevice, SdkError> {
+) -> Result<SdkDeviceManifestEntry, SdkError> {
     let principal_commitment =
         principal_commitment.filter(|commitment| !commitment.is_empty()).ok_or_else(|| {
             SdkError::LocalBus(
@@ -786,7 +786,7 @@ pub(crate) async fn assert_target_manifest_active_device(
 }
 
 fn verify_device_manifest(
-    manifest: &SdkMvp1DeviceManifestResponse,
+    manifest: &SdkDeviceManifestResponse,
     expected_identity_commitment: &str,
 ) -> Result<(), SdkError> {
     if manifest.principal_commitment != expected_identity_commitment {
@@ -841,7 +841,7 @@ fn verify_device_manifest(
 }
 
 fn contact_safety_material_from_manifest(
-    manifest: &SdkMvp1DeviceManifestResponse,
+    manifest: &SdkDeviceManifestResponse,
 ) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {
     let identity_bytes = manifest.principal_commitment.as_bytes();
     Ok(ramflux_crypto::ContactSafetyMaterial {
@@ -865,7 +865,7 @@ fn contact_safety_material_from_manifest(
 }
 
 fn device_safety_material(
-    device: &crate::prekey::SdkMvp1DeviceManifestDevice,
+    device: &crate::prekey::SdkDeviceManifestEntry,
 ) -> Result<ramflux_crypto::DeviceSafetyMaterial, SdkError> {
     let branch_public_key_bytes = ramflux_protocol::decode_base64url(&device.branch_public_key)
         .map_err(|error| SdkError::LocalBus(format!("invalid branch public key: {error}")))?;
@@ -915,7 +915,7 @@ mod tests {
         branch_seed: [u8; 32],
         x25519_seed: [u8; 32],
         signed_prekey_seed: [u8; 32],
-    ) -> Result<SdkMvp1DeviceManifestResponse, SdkError> {
+    ) -> Result<SdkDeviceManifestResponse, SdkError> {
         let root = ramflux_crypto::create_identity_root(principal_id, root_seed);
         let root_public_key =
             ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
@@ -941,11 +941,11 @@ mod tests {
             None,
             None,
         )?;
-        Ok(SdkMvp1DeviceManifestResponse {
+        Ok(SdkDeviceManifestResponse {
             principal_id: principal_id.to_owned(),
             principal_commitment: principal_commitment.clone(),
             root_public_key,
-            devices: vec![crate::prekey::SdkMvp1DeviceManifestDevice {
+            devices: vec![crate::prekey::SdkDeviceManifestEntry {
                 principal_id: principal_id.to_owned(),
                 principal_commitment,
                 device_id: device_id.to_owned(),

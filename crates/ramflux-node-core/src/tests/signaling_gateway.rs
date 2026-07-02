@@ -529,7 +529,7 @@ fn gateway_auth_replay_guard_rejects_duplicate_signed_request()
 -> Result<(), Box<dyn std::error::Error>> {
     let open = gateway_open_frame("device_replay", "nonce_replay");
     let auth = gateway_auth_frame(&open, "request_replay", 1_760_000_000)?;
-    let registered = ItestMvp1DeviceAuthKeyResponse {
+    let registered = DeviceAuthKeyResponse {
         principal_id: "alice".to_owned(),
         device_id: open.device_id.clone(),
         device_epoch: 1,
@@ -591,7 +591,7 @@ fn gateway_auth_rejects_fixture_signature_when_registered_branch_key_differs()
 -> Result<(), Box<dyn std::error::Error>> {
     let open = gateway_open_frame("device_branch_bound", "nonce_branch_bound");
     let auth = gateway_auth_frame(&open, "request_branch_bound", 1_760_000_000)?;
-    let registered = ItestMvp1DeviceAuthKeyResponse {
+    let registered = DeviceAuthKeyResponse {
         principal_id: "alice".to_owned(),
         device_id: open.device_id.clone(),
         device_epoch: 1,

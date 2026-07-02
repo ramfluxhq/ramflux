@@ -9,13 +9,13 @@ use std::io::{BufRead, BufReader};
 const SDK_HTTP_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub struct SdkMvp1PublishPrekeyRequest {
+pub struct SdkPrekeyPublishRequest {
     pub(crate) device_id: String,
     pub(crate) bundle: ramflux_crypto::PrekeyBundle,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub struct SdkMvp1RegisterIdentityRequest {
+pub struct SdkIdentityRegisterRequest {
     pub(crate) root_public_key: String,
     pub(crate) principal_commitment: String,
     pub(crate) branch_public_key: String,
@@ -30,7 +30,7 @@ pub struct SdkMvp1RegisterIdentityRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub struct SdkMvp1IdentityRegistrationResponse {
+pub struct SdkIdentityRegistrationResponse {
     pub(crate) principal_id: String,
     pub(crate) device_id: String,
     pub(crate) device_epoch: u64,
@@ -40,7 +40,7 @@ pub struct SdkMvp1IdentityRegistrationResponse {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub struct SdkMvp1PrekeyResponse {
+pub struct SdkPrekeyResponse {
     pub(crate) device_id: String,
     pub(crate) bundle: Option<ramflux_crypto::PrekeyBundle>,
     pub(crate) principal_commitment: String,
@@ -49,7 +49,7 @@ pub struct SdkMvp1PrekeyResponse {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkMvp1RevokeDeviceRequest {
+pub(crate) struct SdkDeviceRevokeRequest {
     pub(crate) device_id: String,
     pub(crate) principal_commitment: String,
     pub(crate) root_public_key: String,
@@ -58,20 +58,20 @@ pub(crate) struct SdkMvp1RevokeDeviceRequest {
 }
 
 #[derive(serde::Serialize)]
-pub(crate) struct SdkMvp1RevokeDeviceSigningBody<'a> {
+pub(crate) struct SdkDeviceRevokeSigningBody<'a> {
     pub(crate) device_id: &'a str,
     pub(crate) principal_commitment: &'a str,
     pub(crate) revoked_at: i64,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkMvp1RevokeDeviceResponse {
+pub(crate) struct SdkDeviceRevokeResponse {
     pub(crate) device_id: String,
     pub(crate) revoked: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkMvp1DeviceManifestDevice {
+pub(crate) struct SdkDeviceManifestEntry {
     pub(crate) principal_id: String,
     pub(crate) principal_commitment: String,
     pub(crate) device_id: String,
@@ -84,11 +84,11 @@ pub(crate) struct SdkMvp1DeviceManifestDevice {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkMvp1DeviceManifestResponse {
+pub(crate) struct SdkDeviceManifestResponse {
     pub(crate) principal_id: String,
     pub(crate) principal_commitment: String,
     pub(crate) root_public_key: String,
-    pub(crate) devices: Vec<SdkMvp1DeviceManifestDevice>,
+    pub(crate) devices: Vec<SdkDeviceManifestEntry>,
 }
 
 pub fn identity_root_public_key_commitment(root_public_key: &str) -> Result<String, SdkError> {
@@ -116,18 +116,18 @@ pub(crate) fn sdk_publish_prekey_bundle(
     gateway_url: &str,
     device_id: &str,
     bundle: &ramflux_crypto::PrekeyBundle,
-) -> Result<SdkMvp1PrekeyResponse, SdkError> {
+) -> Result<SdkPrekeyResponse, SdkError> {
     sdk_http_post_json(
         gateway_url,
         "/mvp1/prekey/publish",
-        &SdkMvp1PublishPrekeyRequest { device_id: device_id.to_owned(), bundle: bundle.clone() },
+        &SdkPrekeyPublishRequest { device_id: device_id.to_owned(), bundle: bundle.clone() },
     )
 }
 
 pub(crate) fn sdk_fetch_prekey_bundle(
     gateway_url: &str,
     device_id: &str,
-) -> Result<SdkMvp1PrekeyResponse, SdkError> {
+) -> Result<SdkPrekeyResponse, SdkError> {
     sdk_http_get_json(gateway_url, &format!("/mvp1/prekey/{device_id}"))
 }
 

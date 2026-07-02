@@ -13,7 +13,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub struct ItestHttpRequest {
+pub struct NodeHttpRequest {
     pub method: String,
     pub path: String,
     pub body: Vec<u8>,
@@ -23,13 +23,13 @@ pub struct ItestHttpRequest {
     pub pre_auth_now: Option<u64>,
 }
 
-pub struct ItestHttpResponse {
+pub struct NodeHttpResponse {
     pub status_line: String,
     pub body: Vec<u8>,
     pub keep_alive: bool,
 }
 
-impl ItestHttpResponse {
+impl NodeHttpResponse {
     #[must_use]
     pub fn status_is_success(&self) -> bool {
         self.status_line.starts_with("HTTP/1.1 2") || self.status_line.starts_with("HTTP/1.0 2")
@@ -40,7 +40,7 @@ impl ItestHttpResponse {
 /// Returns an error when the stream cannot be read or the request is malformed.
 pub fn read_itest_http_request(
     stream: &mut TcpStream,
-) -> Result<Option<ItestHttpRequest>, NodeCoreError> {
+) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
     read_itest_http_request_with_timeout(stream, Duration::from_secs(5))
 }
 
@@ -49,7 +49,7 @@ pub fn read_itest_http_request(
 pub fn read_itest_http_request_with_timeout(
     stream: &mut TcpStream,
     read_timeout: Duration,
-) -> Result<Option<ItestHttpRequest>, NodeCoreError> {
+) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
     let source_ip_hash = stream.peer_addr().ok().map(|addr| source_ip_hash(&addr.ip().to_string()));
     stream
         .set_read_timeout(Some(read_timeout))
@@ -112,7 +112,7 @@ pub fn read_itest_http_request_with_timeout(
         body.extend_from_slice(&chunk[..bytes]);
     }
     body.truncate(content_length);
-    Ok(Some(ItestHttpRequest {
+    Ok(Some(NodeHttpRequest {
         method: method.to_owned(),
         path: path.to_owned(),
         body,
@@ -169,7 +169,7 @@ fn http_header_separator_len(raw: &[u8], header_end: usize) -> usize {
 /// Returns an error when the response is malformed or the declared body cannot be read.
 pub fn read_http_response_by_content_length(
     stream: &mut TcpStream,
-) -> Result<ItestHttpResponse, NodeCoreError> {
+) -> Result<NodeHttpResponse, NodeCoreError> {
     let mut raw = Vec::new();
     let Some(header_end) = read_until_http_header_end(stream, &mut raw)? else {
         return Err(NodeCoreError::ItestHttp("missing response header".to_owned()));
@@ -213,7 +213,7 @@ pub fn read_http_response_by_content_length(
         body.extend_from_slice(&chunk[..bytes]);
     }
     body.truncate(content_length);
-    Ok(ItestHttpResponse { status_line: status_line.to_owned(), body, keep_alive })
+    Ok(NodeHttpResponse { status_line: status_line.to_owned(), body, keep_alive })
 }
 
 fn connection_header_requests_keep_alive(value: &str) -> bool {
@@ -360,7 +360,7 @@ fn parse_http_url(url: &str) -> Result<(&str, &str), NodeCoreError> {
 }
 
 fn parse_json_response<R: serde::de::DeserializeOwned>(
-    response: &ItestHttpResponse,
+    response: &NodeHttpResponse,
 ) -> Result<R, NodeCoreError> {
     if !response.status_is_success() {
         let body = String::from_utf8_lossy(&response.body);

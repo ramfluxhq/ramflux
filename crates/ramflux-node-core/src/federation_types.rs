@@ -3,7 +3,7 @@
 
 #![allow(unused_imports)]
 
-use crate::ItestMvp0SubmitResponse;
+use crate::EnvelopeSubmitResponse;
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -187,7 +187,7 @@ pub struct FederatedFriendRequestResponse {
     pub accepted: bool,
     pub source_node_id: String,
     pub target_node_id: String,
-    pub delivery: ItestMvp0SubmitResponse,
+    pub delivery: EnvelopeSubmitResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -217,5 +217,5 @@ pub struct FederatedEnvelopeForwardResponse {
     pub accepted: bool,
     pub source_node_id: String,
     pub target_node_id: String,
-    pub delivery: ItestMvp0SubmitResponse,
+    pub delivery: EnvelopeSubmitResponse,
 }

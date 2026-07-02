@@ -4,8 +4,8 @@
 #![allow(unused_imports)]
 
 use crate::{
-    GATEWAY_DEVICE_PROOF_HASH_DOMAIN, GATEWAY_OPEN_HASH_DOMAIN, GATEWAY_SESSION_PROTOCOL_VERSION,
-    GatewayAuthFrame, GatewayOpenFrame, ItestMvp1DeviceAuthKeyResponse, NodeCoreError,
+    DeviceAuthKeyResponse, GATEWAY_DEVICE_PROOF_HASH_DOMAIN, GATEWAY_OPEN_HASH_DOMAIN,
+    GATEWAY_SESSION_PROTOCOL_VERSION, GatewayAuthFrame, GatewayOpenFrame, NodeCoreError,
     NodeReplayGuardState,
 };
 use redb::{ReadableDatabase, TableDefinition};
@@ -31,7 +31,7 @@ pub fn validate_gateway_auth(
     open: &GatewayOpenFrame,
     auth: &GatewayAuthFrame,
     now: i64,
-    registered: &ItestMvp1DeviceAuthKeyResponse,
+    registered: &DeviceAuthKeyResponse,
 ) -> Result<(), NodeCoreError> {
     if open.protocol_version != GATEWAY_SESSION_PROTOCOL_VERSION {
         return Err(NodeCoreError::ItestHttp("unsupported gateway session protocol".to_owned()));
@@ -113,7 +113,7 @@ pub fn validate_gateway_auth_with_replay(
     auth: &GatewayAuthFrame,
     now: i64,
     replay_guard: &mut NodeReplayGuardState,
-    registered: &ItestMvp1DeviceAuthKeyResponse,
+    registered: &DeviceAuthKeyResponse,
 ) -> Result<(), NodeCoreError> {
     validate_gateway_auth(open, auth, now, registered)?;
     replay_guard.check_signed_request(&auth.signed_request, now)

@@ -5,14 +5,13 @@
 
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, DeliveryDecision,
-    HomeNodeMigratedNackDelivery, HomeNodeMigrationRecord, IdentityLifecycleTombstone, InboxEntry,
-    ItestMvp1DeviceAuthKeyResponse, ItestMvp1DeviceManifestResponse,
-    ItestMvp1IdentityRegistrationResponse, ItestMvp1IdentityRegistry, ItestMvp1InboxResponse,
-    ItestMvp1PrekeyResponse, ItestMvp1PublishPrekeyRequest, ItestMvp1RegisterIdentityRequest,
-    ItestMvp1RevokeDeviceResponse, ItestMvp6FriendRequestBudgetRequest,
-    ItestMvp6FriendRequestBudgetResponse, ItestMvp10OwnDeviceFanoutDelivery,
-    ItestMvp10OwnDeviceFanoutRequest, ItestMvp10OwnDeviceFanoutResponse, ItestRegistrationPolicy,
-    NodeCoreError, NodeReplayGuardState, OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox,
+    DeviceAuthKeyResponse, DeviceManifestResponse, DeviceRevokeResponse,
+    FriendRequestBudgetRequest, FriendRequestBudgetResponse, HomeNodeMigratedNackDelivery,
+    HomeNodeMigrationRecord, IdentityLifecycleTombstone, IdentityRegisterRequest,
+    IdentityRegistrationResponse, IdentityRegistry, InboxEntry, InboxFetchResponse,
+    ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
+    ItestMvp10OwnDeviceFanoutResponse, NodeCoreError, NodeReplayGuardState, OfflineQueuedDelivery,
+    OnlineDelivery, OpaqueDeviceInbox, PrekeyPublishRequest, PrekeyResponse, RegistrationPolicy,
     RouterSubmitOutcome, SessionDescriptor, SessionRegistry, envelope_replay_tuple_key,
 };
 use redb::{ReadableDatabase, TableDefinition};
@@ -71,7 +70,7 @@ pub(crate) struct RouterTargetShard {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RouterControlState {
-    pub(crate) mvp1_identities: ItestMvp1IdentityRegistry,
+    pub(crate) mvp1_identities: IdentityRegistry,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
@@ -83,7 +82,7 @@ pub(crate) struct RouterControlState {
 pub(crate) struct RouterCoreSnapshot {
     pub(crate) registry: SessionRegistry,
     pub(crate) inbox: OpaqueDeviceInbox,
-    pub(crate) mvp1_identities: ItestMvp1IdentityRegistry,
+    pub(crate) mvp1_identities: IdentityRegistry,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
     pub(crate) deactivated_delivery_targets: BTreeSet<String>,
@@ -111,7 +110,7 @@ impl RouterCore {
     }
 
     #[must_use]
-    pub fn mvp1_identities_snapshot(&self) -> ItestMvp1IdentityRegistry {
+    pub fn mvp1_identities_snapshot(&self) -> IdentityRegistry {
         lock_unpoisoned(&self.control).mvp1_identities.clone()
     }
 
@@ -219,8 +218,8 @@ impl RouterCore {
     /// Returns an error when the identity proof is invalid or the session cannot be bound.
     pub fn mvp1_register_identity(
         &self,
-        request: &ItestMvp1RegisterIdentityRequest,
-    ) -> Result<ItestMvp1IdentityRegistrationResponse, NodeCoreError> {
+        request: &IdentityRegisterRequest,
+    ) -> Result<IdentityRegistrationResponse, NodeCoreError> {
         let (mut session, registration_trust_tier) = {
             let mut control = lock_unpoisoned(&self.control);
             if let Some(migration) = effective_migration_for_registration(&control, request) {
@@ -241,7 +240,7 @@ impl RouterCore {
             session.last_cursor.clone_from(&existing.last_cursor);
         }
         self.upsert_session(session)?;
-        Ok(ItestMvp1IdentityRegistrationResponse {
+        Ok(IdentityRegistrationResponse {
             principal_id: request.proof.principal_id.clone(),
             device_id: request.proof.device_id.clone(),
             device_epoch: request.proof.device_epoch,
@@ -251,12 +250,12 @@ impl RouterCore {
         })
     }
 
-    pub fn mvp6_set_registration_policy(&self, policy: ItestRegistrationPolicy) {
+    pub fn mvp6_set_registration_policy(&self, policy: RegistrationPolicy) {
         lock_unpoisoned(&self.control).mvp1_identities.set_registration_policy(policy);
     }
 
     #[must_use]
-    pub fn mvp6_registration_policy(&self) -> ItestRegistrationPolicy {
+    pub fn mvp6_registration_policy(&self) -> RegistrationPolicy {
         lock_unpoisoned(&self.control).mvp1_identities.registration_policy().clone()
     }
 
@@ -264,8 +263,8 @@ impl RouterCore {
     /// Returns an error when the request exceeds the tier-specific budget.
     pub fn mvp6_record_friend_request(
         &self,
-        request: &ItestMvp6FriendRequestBudgetRequest,
-    ) -> Result<ItestMvp6FriendRequestBudgetResponse, NodeCoreError> {
+        request: &FriendRequestBudgetRequest,
+    ) -> Result<FriendRequestBudgetResponse, NodeCoreError> {
         lock_unpoisoned(&self.control).mvp1_identities.record_friend_request(request)
     }
 
@@ -273,22 +272,22 @@ impl RouterCore {
     /// Returns an error when the revocation is not authorized by the principal root key.
     pub fn mvp1_revoke_device(
         &self,
-        request: &crate::ItestMvp1RevokeDeviceRequest,
-    ) -> Result<ItestMvp1RevokeDeviceResponse, NodeCoreError> {
+        request: &crate::DeviceRevokeRequest,
+    ) -> Result<DeviceRevokeResponse, NodeCoreError> {
         let revoked = lock_unpoisoned(&self.control).mvp1_identities.revoke_device(request)?;
-        Ok(ItestMvp1RevokeDeviceResponse { device_id: request.device_id.clone(), revoked })
+        Ok(DeviceRevokeResponse { device_id: request.device_id.clone(), revoked })
     }
 
     /// # Errors
     /// Returns an error when the prekey bundle is invalid or the device cannot publish.
     pub fn mvp1_publish_prekey(
         &self,
-        request: ItestMvp1PublishPrekeyRequest,
-    ) -> Result<ItestMvp1PrekeyResponse, NodeCoreError> {
+        request: PrekeyPublishRequest,
+    ) -> Result<PrekeyResponse, NodeCoreError> {
         let device_id = request.device_id.clone();
         let mut control = lock_unpoisoned(&self.control);
         control.mvp1_identities.publish_prekey(request)?;
-        Ok(ItestMvp1PrekeyResponse {
+        Ok(PrekeyResponse {
             device_id: device_id.clone(),
             bundle: control.mvp1_identities.prekey_bundle(&device_id).cloned(),
             principal_commitment: control
@@ -304,9 +303,9 @@ impl RouterCore {
     }
 
     #[must_use]
-    pub fn mvp1_prekey(&self, device_id: &str) -> ItestMvp1PrekeyResponse {
+    pub fn mvp1_prekey(&self, device_id: &str) -> PrekeyResponse {
         let control = lock_unpoisoned(&self.control);
-        ItestMvp1PrekeyResponse {
+        PrekeyResponse {
             device_id: device_id.to_owned(),
             bundle: control.mvp1_identities.prekey_bundle(device_id).cloned(),
             principal_commitment: control
@@ -325,12 +324,12 @@ impl RouterCore {
     pub fn mvp1_device_manifest(
         &self,
         principal_commitment: &str,
-    ) -> Option<ItestMvp1DeviceManifestResponse> {
+    ) -> Option<DeviceManifestResponse> {
         lock_unpoisoned(&self.control).mvp1_identities.device_manifest(principal_commitment)
     }
 
     #[must_use]
-    pub fn mvp1_device_auth_key(&self, device_id: &str) -> Option<ItestMvp1DeviceAuthKeyResponse> {
+    pub fn mvp1_device_auth_key(&self, device_id: &str) -> Option<DeviceAuthKeyResponse> {
         lock_unpoisoned(&self.control).mvp1_identities.device_auth_key(device_id)
     }
 
@@ -340,8 +339,8 @@ impl RouterCore {
         target_delivery_id: &str,
         after_inbox_seq: u64,
         limit: usize,
-    ) -> ItestMvp1InboxResponse {
-        ItestMvp1InboxResponse {
+    ) -> InboxFetchResponse {
+        InboxFetchResponse {
             target_delivery_id: target_delivery_id.to_owned(),
             entries: self.resume(target_delivery_id, after_inbox_seq, limit),
         }
@@ -842,7 +841,7 @@ impl RouterCore {
 
 fn effective_migration_for_registration(
     control: &RouterControlState,
-    request: &ItestMvp1RegisterIdentityRequest,
+    request: &IdentityRegisterRequest,
 ) -> Option<HomeNodeMigrationRecord> {
     let mut keys = Vec::with_capacity(2);
     if !request.principal_commitment.is_empty() {

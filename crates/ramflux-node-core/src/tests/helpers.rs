@@ -92,9 +92,9 @@ pub(super) fn registration_request(
     principal_id: &str,
     device_id: &str,
     nonce: u64,
-    registration_pow: Option<ItestRegistrationPowProof>,
+    registration_pow: Option<RegistrationPowProof>,
     source_ip: &str,
-) -> Result<ItestMvp1RegisterIdentityRequest, Box<dyn std::error::Error>> {
+) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
     let root_seed = seed_from_nonce(0x31, nonce);
     let device_seed = seed_from_nonce(0x41, nonce);
     let root = ramflux_crypto::create_identity_root(principal_id, root_seed);
@@ -102,15 +102,15 @@ pub(super) fn registration_request(
     let proof = ramflux_crypto::authorize_device_branch(
         &root,
         &device,
-        ITEST_MVP1_AUDIENCE,
-        vec![ITEST_MVP1_BIND_CAPABILITY.to_owned()],
+        IDENTITY_BIND_AUDIENCE,
+        vec![IDENTITY_BIND_CAPABILITY.to_owned()],
         1_760_000_000 + i64::try_from(nonce)?,
         1_760_003_600 + i64::try_from(nonce)?,
     )?;
     let root_public_key =
         ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
     let root_public_key_bytes = ramflux_protocol::decode_base64url(&root_public_key)?;
-    Ok(ItestMvp1RegisterIdentityRequest {
+    Ok(IdentityRegisterRequest {
         principal_commitment: ramflux_crypto::blake3_256_base64url(
             "ramflux.identity.root_public_key.commitment.v1",
             &root_public_key_bytes,
@@ -131,7 +131,7 @@ pub(super) fn registration_request(
 }
 
 pub(super) fn migration_proof_for_registration(
-    request: &ItestMvp1RegisterIdentityRequest,
+    request: &IdentityRegisterRequest,
     signing_nonce: u64,
     proof_id: &str,
     issued_at: i64,
@@ -172,8 +172,8 @@ pub(super) fn migration_proof_for_registration(
     Ok(ramflux_crypto::sign_home_node_migration_proof(proof, &device)?)
 }
 
-pub(super) fn solved_pow(principal_id: &str, difficulty_bits: u8) -> ItestRegistrationPowProof {
-    ItestRegistrationPowProof {
+pub(super) fn solved_pow(principal_id: &str, difficulty_bits: u8) -> RegistrationPowProof {
+    RegistrationPowProof {
         nonce: ramflux_crypto::solve_registration_pow(principal_id, difficulty_bits),
         difficulty_bits,
     }
@@ -183,8 +183,8 @@ pub(super) fn friend_request(
     source_principal_id: &str,
     target_principal_id: &str,
     now: i64,
-) -> ItestMvp6FriendRequestBudgetRequest {
-    ItestMvp6FriendRequestBudgetRequest {
+) -> FriendRequestBudgetRequest {
+    FriendRequestBudgetRequest {
         source_principal_id: source_principal_id.to_owned(),
         target_principal_id: target_principal_id.to_owned(),
         now,

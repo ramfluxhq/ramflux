@@ -141,7 +141,7 @@ pub(crate) async fn handle_gateway_session_transport(
         return Ok(());
     };
 
-    let registered_auth_key: Option<ramflux_node_core::ItestMvp1DeviceAuthKeyResponse> =
+    let registered_auth_key: Option<ramflux_node_core::DeviceAuthKeyResponse> =
         router_get_json(&context.router, &format!("/mvp1/device-auth-key/{}", open.device_id))?;
     let Some(registered_auth_key) = registered_auth_key else {
         write_gateway_frame(
@@ -358,7 +358,7 @@ pub(crate) async fn run_gateway_session_loop(
             ramflux_node_core::GatewayClientFrame::IdentityRegister { mut request } => {
                 request.source_ip_hash =
                     request.source_ip_hash.or_else(|| Some(context.remote_addr.ip().to_string()));
-                let response: ramflux_node_core::ItestMvp1IdentityRegistrationResponse =
+                let response: ramflux_node_core::IdentityRegistrationResponse =
                     router_post_json(&context.router, "/mvp1/identity/register", &request)?;
                 write_gateway_handle(
                     &send,
@@ -367,7 +367,7 @@ pub(crate) async fn run_gateway_session_loop(
                 .await?;
             }
             ramflux_node_core::GatewayClientFrame::PrekeyPublish { request } => {
-                let response: ramflux_node_core::ItestMvp1PrekeyResponse =
+                let response: ramflux_node_core::PrekeyResponse =
                     router_post_json(&context.router, "/mvp1/prekey/publish", &request)?;
                 write_gateway_handle(
                     &send,
@@ -376,7 +376,7 @@ pub(crate) async fn run_gateway_session_loop(
                 .await?;
             }
             ramflux_node_core::GatewayClientFrame::PrekeyFetch { device_id } => {
-                let response: ramflux_node_core::ItestMvp1PrekeyResponse =
+                let response: ramflux_node_core::PrekeyResponse =
                     router_get_json(&context.router, &format!("/mvp1/prekey/{device_id}"))?;
                 write_gateway_handle(
                     &send,
@@ -453,7 +453,7 @@ pub(crate) async fn handle_gateway_submit(
             "envelope": &submit.envelope,
         }),
     );
-    let response: ramflux_node_core::ItestMvp0SubmitResponse =
+    let response: ramflux_node_core::EnvelopeSubmitResponse =
         router_post_json(&context.router, "/mvp0/envelope", &submit.envelope)?;
     if response.outcome.starts_with("rejected_") {
         write_gateway_handle(
@@ -595,11 +595,11 @@ pub(crate) async fn handle_gateway_ack(
     runtime: &GatewaySessionRuntime,
     ack: &ramflux_protocol::Ack,
 ) -> anyhow::Result<()> {
-    let request = ramflux_node_core::ItestMvp0BoundAckRequest {
+    let request = ramflux_node_core::TargetAckRequest {
         target_delivery_id: runtime.target_delivery_id.clone(),
         ack: ack.clone(),
     };
-    let cursor: ramflux_node_core::ItestMvp0CursorResponse =
+    let cursor: ramflux_node_core::InboxCursorResponse =
         match router_post_json(&context.router, "/mvp0/ack-bound", &request) {
             Ok(cursor) => cursor,
             Err(error) => {
@@ -631,11 +631,11 @@ pub(crate) async fn handle_gateway_nack(
     runtime: &GatewaySessionRuntime,
     nack: &ramflux_protocol::Nack,
 ) -> anyhow::Result<()> {
-    let request = ramflux_node_core::ItestMvp0BoundNackRequest {
+    let request = ramflux_node_core::TargetNackRequest {
         target_delivery_id: runtime.target_delivery_id.clone(),
         nack: nack.clone(),
     };
-    let cursor: ramflux_node_core::ItestMvp0CursorResponse =
+    let cursor: ramflux_node_core::InboxCursorResponse =
         match router_post_json(&context.router, "/mvp0/nack-bound", &request) {
             Ok(cursor) => cursor,
             Err(error) => {
