@@ -1,38 +1,35 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
-    GatewayQuicContext, GatewaySendHandle, GatewaySessionHub, GatewaySessionRuntime,
-    NotifyHttpClient, RouterMeshClient, dispatch_quic_json_request, gateway_state,
-    notify_offline_wake, router_cursor, router_get_json, router_inbox, router_post_json,
+    GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime, dispatch_quic_json_request,
+    gateway_state, notify_offline_wake, router_cursor, router_get_json, router_inbox,
+    router_post_json, serve::GatewayListenerContext,
 };
 
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
 
 pub(crate) async fn handle_gateway_quic_connection(
     connection: quinn::Connection,
-    router: RouterMeshClient,
-    notify: NotifyHttpClient,
-    state: Arc<Mutex<ramflux_node_core::GatewayState>>,
-    store: Arc<ramflux_node_core::GatewayRedbStore>,
-    hub: Arc<GatewaySessionHub>,
+    listener: GatewayListenerContext,
 ) {
     loop {
         match connection.accept_bi().await {
             Ok((send, recv)) => {
-                let router = router.clone();
-                let notify = notify.clone();
-                let state = Arc::clone(&state);
-                let store = Arc::clone(&store);
+                let router = listener.router.clone();
+                let notify = listener.notify.clone();
+                let state = Arc::clone(&listener.state);
+                let store = Arc::clone(&listener.store);
                 let context = GatewayQuicContext {
+                    gateway_id: listener.gateway_id.clone(),
                     router,
                     notify,
                     state,
                     store,
-                    hub: Arc::clone(&hub),
+                    hub: Arc::clone(&listener.hub),
                     remote_addr: connection.remote_address(),
                 };
                 tokio::spawn(async move {
@@ -240,7 +237,7 @@ pub(crate) async fn establish_gateway_session(
     let descriptor = ramflux_node_core::SessionDescriptor {
         target_delivery_id: open.target_delivery_id.clone(),
         device_id: open.device_id.clone(),
-        gateway_id: "ramflux-gateway".to_owned(),
+        gateway_id: context.gateway_id.clone(),
         session_id: session_id.clone(),
         device_epoch: auth_frame.device_proof.device_epoch,
         session_seq: now,
@@ -277,7 +274,7 @@ pub(crate) async fn establish_gateway_session(
         &ramflux_node_core::GatewayServerFrame::SessionEstablished {
             session: ramflux_node_core::GatewaySessionEstablishedFrame {
                 session_id: session_id.clone(),
-                gateway_id: "ramflux-gateway".to_owned(),
+                gateway_id: context.gateway_id.clone(),
                 accepted_cursor,
                 resume_token: resume_token.clone(),
                 resume_window_seconds,

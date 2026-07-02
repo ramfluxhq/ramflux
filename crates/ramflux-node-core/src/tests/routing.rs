@@ -68,6 +68,41 @@ fn envelope_routing_uses_target_delivery_id() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn router_sessions_preserve_gateway_instance_ids() -> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let mut east = session("target_gateway_east", SessionLifecycle::Live, 1, 1);
+    east.gateway_id = "gateway-east-1".to_owned();
+    east.session_id = "session-east".to_owned();
+    router.upsert_session(east)?;
+
+    let mut west = session("target_gateway_west", SessionLifecycle::Live, 1, 1);
+    west.gateway_id = "gateway-west-1".to_owned();
+    west.session_id = "session-west".to_owned();
+    router.upsert_session(west)?;
+
+    assert_eq!(
+        router.session("target_gateway_east").ok_or("missing east session")?.gateway_id,
+        "gateway-east-1"
+    );
+    assert_eq!(
+        router.session("target_gateway_west").ok_or("missing west session")?.gateway_id,
+        "gateway-west-1"
+    );
+
+    let submit_outcome = router.submit_envelope(envelope(
+        "env_gateway_west",
+        "target_gateway_west",
+        DeliveryClass::OpaqueEvent,
+    ));
+    let RouterSubmitOutcome::Online(delivery) = submit_outcome else {
+        return Err("expected online delivery".into());
+    };
+    assert_eq!(delivery.gateway_id, "gateway-west-1");
+    assert_eq!(delivery.session_id, "session-west");
+    Ok(())
+}
+
+#[test]
 fn offline_inbox_pull_after_cursor_returns_pending_entries() {
     let mut inbox = OpaqueDeviceInbox::new();
     let first = inbox.append(envelope("env_1", "target_a", DeliveryClass::OpaqueEvent));

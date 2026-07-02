@@ -8,6 +8,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::session::write_gateway_frame;
 
+const DEFAULT_GATEWAY_ID: &str = "ramflux-gateway";
+const GATEWAY_ID_ENV: &str = "RAMFLUX_GATEWAY_ID";
+
 #[derive(Clone)]
 pub(crate) struct RouterMeshClient {
     pub(crate) endpoint: String,
@@ -33,6 +36,7 @@ pub(crate) struct NotifyMeshClient {
 
 #[derive(Clone)]
 pub(crate) struct GatewayQuicContext {
+    pub(crate) gateway_id: String,
     pub(crate) router: RouterMeshClient,
     pub(crate) notify: NotifyHttpClient,
     pub(crate) state: Arc<Mutex<ramflux_node_core::GatewayState>>,
@@ -99,5 +103,25 @@ impl GatewaySessionHub {
         } else {
             Ok(false)
         }
+    }
+}
+
+pub(crate) fn gateway_instance_id_from_env() -> String {
+    gateway_instance_id_from_value(std::env::var(GATEWAY_ID_ENV).ok().as_deref())
+}
+
+fn gateway_instance_id_from_value(value: Option<&str>) -> String {
+    value.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(DEFAULT_GATEWAY_ID).to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_GATEWAY_ID, gateway_instance_id_from_value};
+
+    #[test]
+    fn gateway_instance_id_defaults_and_trims_env_value() {
+        assert_eq!(gateway_instance_id_from_value(None), DEFAULT_GATEWAY_ID);
+        assert_eq!(gateway_instance_id_from_value(Some("   ")), DEFAULT_GATEWAY_ID);
+        assert_eq!(gateway_instance_id_from_value(Some(" gateway-east-1 ")), "gateway-east-1");
     }
 }
