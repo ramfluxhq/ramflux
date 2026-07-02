@@ -4,7 +4,7 @@
 #![allow(unused_imports)]
 
 use crate::{
-    InboxEntry, ItestMvp7MetadataSummary, NodeCoreError, SessionDescriptor, SessionLifecycle,
+    InboxEntry, LifecycleMetadataSummary, NodeCoreError, SessionDescriptor, SessionLifecycle,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -622,7 +622,7 @@ impl ItestMvp1IdentityRegistry {
         pending_inbox_count: usize,
         tombstone_hash: Option<String>,
         deletion_proof_hash: Option<String>,
-    ) -> ItestMvp7MetadataSummary {
+    ) -> LifecycleMetadataSummary {
         let device_ids: BTreeSet<String> = self
             .devices
             .values()
@@ -634,7 +634,7 @@ impl ItestMvp1IdentityRegistry {
             .filter(|device_id| self.prekey_bundles.contains_key(*device_id))
             .count();
         let root_key_present = self.root_public_keys.contains_key(principal_id);
-        ItestMvp7MetadataSummary {
+        LifecycleMetadataSummary {
             principal_id: principal_id.to_owned(),
             metadata_present: root_key_present || !device_ids.is_empty() || prekey_count > 0,
             root_key_present,

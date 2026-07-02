@@ -5,8 +5,8 @@ pub(crate) fn handle_mvp7_lifecycle_event(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp7LifecycleResponse> {
-    let request: ramflux_node_core::ItestMvp7LifecycleRequest = serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::LifecycleResponse> {
+    let request: ramflux_node_core::LifecycleEventRequest = serde_json::from_slice(body)?;
     let response = state.mvp7_apply_lifecycle_event(&request)?;
     store.record_lifecycle_record(&response.record)?;
     if let Some(tombstone) = &response.tombstone {
@@ -19,8 +19,8 @@ pub(crate) fn handle_mvp7_lifecycle_cancel(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp7LifecycleResponse> {
-    let request: ramflux_node_core::ItestMvp7LifecycleCancelRequest = serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::LifecycleResponse> {
+    let request: ramflux_node_core::LifecycleCancelRequest = serde_json::from_slice(body)?;
     let response = state.mvp7_cancel_delete(&request)?;
     store.record_lifecycle_record(&response.record)?;
     Ok(response)
@@ -30,9 +30,8 @@ pub(crate) fn handle_mvp7_lifecycle_finalize(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp7LifecycleResponse> {
-    let request: ramflux_node_core::ItestMvp7LifecycleFinalizeRequest =
-        serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::LifecycleResponse> {
+    let request: ramflux_node_core::LifecycleFinalizeRequest = serde_json::from_slice(body)?;
     let target_delivery_id = state
         .mvp1_identities_snapshot()
         .target_delivery_id_for_principal(&request.principal_id)
@@ -62,7 +61,7 @@ pub(crate) fn handle_mvp7_lifecycle_get(
 pub(crate) fn handle_mvp7_metadata_get(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> ramflux_node_core::ItestMvp7MetadataSummary {
+) -> ramflux_node_core::LifecycleMetadataSummary {
     let principal_id = path.trim_start_matches("/mvp7/metadata/");
     state.mvp7_metadata_summary(principal_id)
 }

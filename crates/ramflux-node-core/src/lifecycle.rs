@@ -60,7 +60,7 @@ pub struct AccountLifecycleRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp7LifecycleRequest {
+pub struct LifecycleEventRequest {
     pub principal_id: String,
     pub event_id: String,
     pub event_type: String,
@@ -77,7 +77,7 @@ pub struct ItestMvp7LifecycleRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp7LifecycleResponse {
+pub struct LifecycleResponse {
     pub record: AccountLifecycleRecord,
     pub metadata_present: bool,
     pub deleted_metadata_count: u64,
@@ -85,19 +85,19 @@ pub struct ItestMvp7LifecycleResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp7LifecycleFinalizeRequest {
+pub struct LifecycleFinalizeRequest {
     pub principal_id: String,
     pub now: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp7LifecycleCancelRequest {
+pub struct LifecycleCancelRequest {
     pub principal_id: String,
     pub now: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestMvp7MetadataSummary {
+pub struct LifecycleMetadataSummary {
     pub principal_id: String,
     pub metadata_present: bool,
     pub root_key_present: bool,

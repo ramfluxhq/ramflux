@@ -110,17 +110,17 @@ pub struct RetentionIdentityDeleteContext {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestRetentionRecordRequest {
+pub struct RetentionRecordRequest {
     pub record: RetentionMetadataRecord,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestRetentionGcRequest {
+pub struct RetentionGcRequest {
     pub now: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestRetentionIdentityDeleteRequest {
+pub struct RetentionIdentityDeleteRequest {
     pub subject_hash: String,
     #[serde(default)]
     pub lifecycle_epoch: u64,
@@ -135,14 +135,14 @@ pub struct ItestRetentionIdentityDeleteRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestRetentionGcResponse {
+pub struct RetentionGcResponse {
     pub deleted_record_ids: Vec<String>,
     pub retained_legal_hold_ids: Vec<String>,
     pub remaining_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItestRetentionIdentityDeleteResponse {
+pub struct RetentionIdentityDeleteResponse {
     pub deleted_record_ids: Vec<String>,
     pub retained_legal_hold_ids: Vec<String>,
     pub remaining_count: usize,
@@ -230,7 +230,7 @@ impl RetentionState {
         self.metadata_by_id.len()
     }
 
-    pub fn gc_expired(&mut self, now: u64) -> ItestRetentionGcResponse {
+    pub fn gc_expired(&mut self, now: u64) -> RetentionGcResponse {
         let mut deleted_record_ids = Vec::new();
         let mut retained_legal_hold_ids = Vec::new();
         self.metadata_by_id.retain(|record_id, record| {
@@ -246,7 +246,7 @@ impl RetentionState {
                 true
             }
         });
-        ItestRetentionGcResponse {
+        RetentionGcResponse {
             deleted_record_ids,
             retained_legal_hold_ids,
             remaining_count: self.metadata_by_id.len(),
@@ -257,7 +257,7 @@ impl RetentionState {
         &mut self,
         context: &RetentionIdentityDeleteContext,
         signer: &RetentionNodeSigner,
-    ) -> ItestRetentionIdentityDeleteResponse {
+    ) -> RetentionIdentityDeleteResponse {
         let mut deleted_record_ids = Vec::new();
         let mut retained_legal_hold_ids = Vec::new();
         let mut deleted_rows = Vec::new();
@@ -296,7 +296,7 @@ impl RetentionState {
                         security_incident_id: None,
                     },
                 );
-                ItestRetentionIdentityDeleteResponse {
+                RetentionIdentityDeleteResponse {
                     deleted_record_ids,
                     retained_legal_hold_ids,
                     remaining_count: self.metadata_by_id.len(),
@@ -342,7 +342,7 @@ impl RetentionState {
                         security_incident_id: Some(incident_id.clone()),
                     },
                 );
-                ItestRetentionIdentityDeleteResponse {
+                RetentionIdentityDeleteResponse {
                     deleted_record_ids,
                     retained_legal_hold_ids,
                     remaining_count: self.metadata_by_id.len(),
@@ -607,8 +607,8 @@ pub fn verify_identity_deletion_proof_tombstone(
     Ok(())
 }
 
-impl From<ItestRetentionIdentityDeleteResponse> for ItestRetentionGcResponse {
-    fn from(value: ItestRetentionIdentityDeleteResponse) -> Self {
+impl From<RetentionIdentityDeleteResponse> for RetentionGcResponse {
+    fn from(value: RetentionIdentityDeleteResponse) -> Self {
         Self {
             deleted_record_ids: value.deleted_record_ids,
             retained_legal_hold_ids: value.retained_legal_hold_ids,
@@ -632,7 +632,7 @@ impl Default for RetentionNodeSigner {
     }
 }
 
-impl ItestRetentionIdentityDeleteRequest {
+impl RetentionIdentityDeleteRequest {
     #[must_use]
     pub fn into_context(self, now: u64) -> RetentionIdentityDeleteContext {
         RetentionIdentityDeleteContext {
@@ -699,11 +699,8 @@ impl RetentionGcSweepRequest {
 
 impl RetentionState {
     #[must_use]
-    pub fn finalize_identity_delete_legacy(
-        &mut self,
-        subject_hash: &str,
-    ) -> ItestRetentionGcResponse {
-        let context = ItestRetentionIdentityDeleteRequest {
+    pub fn finalize_identity_delete_legacy(&mut self, subject_hash: &str) -> RetentionGcResponse {
+        let context = RetentionIdentityDeleteRequest {
             subject_hash: subject_hash.to_owned(),
             lifecycle_epoch: 1,
             identity_deleted_event_id: String::new(),
@@ -813,7 +810,7 @@ impl RetentionRedbStore {
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
-    pub fn gc_expired(&self, now: u64) -> Result<ItestRetentionGcResponse, NodeCoreError> {
+    pub fn gc_expired(&self, now: u64) -> Result<RetentionGcResponse, NodeCoreError> {
         let mut state = self.load_state()?.unwrap_or_default();
         let response = state.gc_expired(now);
         self.save_state(&state)?;
@@ -826,7 +823,7 @@ impl RetentionRedbStore {
         &self,
         context: &RetentionIdentityDeleteContext,
         signer: &RetentionNodeSigner,
-    ) -> Result<ItestRetentionIdentityDeleteResponse, NodeCoreError> {
+    ) -> Result<RetentionIdentityDeleteResponse, NodeCoreError> {
         let mut state = self.load_state()?.unwrap_or_default();
         let response = state.finalize_identity_delete(context, signer);
         self.save_state(&state)?;
@@ -838,7 +835,7 @@ impl RetentionRedbStore {
     pub fn finalize_identity_delete_legacy(
         &self,
         subject_hash: &str,
-    ) -> Result<ItestRetentionGcResponse, NodeCoreError> {
+    ) -> Result<RetentionGcResponse, NodeCoreError> {
         let mut state = self.load_state()?.unwrap_or_default();
         let response = state.finalize_identity_delete_legacy(subject_hash);
         self.save_state(&state)?;
