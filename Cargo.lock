@@ -2402,6 +2402,7 @@ dependencies = [
  "p256",
  "ramflux-node-core",
  "ramflux-protocol",
+ "ramflux-transport",
  "rcgen",
  "rustls",
  "rustls-pemfile",
