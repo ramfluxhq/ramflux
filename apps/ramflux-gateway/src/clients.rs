@@ -3,7 +3,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::{NotifyHttpClient, RouterMeshClient};
+use crate::{NotifyHttpClient, NotifyMeshClient, RouterMeshClient};
+
+const NOTIFY_MESH_ENDPOINT_ENV: &str = "RAMFLUX_NOTIFY_MESH_ENDPOINT";
+const NOTIFY_MESH_SERVER_NAME_ENV: &str = "RAMFLUX_NOTIFY_MESH_SERVER_NAME";
+const NOTIFY_MESH_PEER_CA_PEM_ENV: &str = "RAMFLUX_NOTIFY_MESH_PEER_CA_PEM";
+const NOTIFY_MESH_PEER_CA_PEM_FILE_ENV: &str = "RAMFLUX_NOTIFY_MESH_PEER_CA_PEM_FILE";
 
 pub(crate) fn router_mesh_client(
     config: &ramflux_node_core::NodeServiceConfig,
@@ -31,7 +36,45 @@ pub(crate) fn notify_http_client(
         endpoint: std::env::var("RAMFLUX_NOTIFY_HTTP_URL")
             .unwrap_or_else(|_| "http://ramflux-notify:18083".to_owned()),
         signer: ramflux_node_core::require_node_service_signing_key(config)?,
+        mesh: notify_mesh_client(config)?,
     })
+}
+
+fn notify_mesh_client(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> anyhow::Result<Option<NotifyMeshClient>> {
+    let Some(endpoint) = non_empty_env(NOTIFY_MESH_ENDPOINT_ENV) else {
+        return Ok(None);
+    };
+    Ok(Some(NotifyMeshClient {
+        endpoint,
+        server_name: non_empty_env(NOTIFY_MESH_SERVER_NAME_ENV)
+            .unwrap_or_else(|| "ramflux-notify".to_owned()),
+        tls: ramflux_transport::MeshTlsConfig {
+            ca_cert: config.mesh.ca_cert.clone().into(),
+            service_cert: config.mesh.service_cert.clone().into(),
+            service_key: config.mesh.service_key.clone().into(),
+        },
+        peer_ca_pems: notify_mesh_peer_ca_pems(config)?,
+    }))
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
+}
+
+fn notify_mesh_peer_ca_pems(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> anyhow::Result<Vec<String>> {
+    if let Some(pem) = non_empty_env(NOTIFY_MESH_PEER_CA_PEM_ENV) {
+        return Ok(vec![pem]);
+    }
+    let path = non_empty_env(NOTIFY_MESH_PEER_CA_PEM_FILE_ENV)
+        .unwrap_or_else(|| config.mesh.ca_cert.clone());
+    Ok(vec![std::fs::read_to_string(&path)?])
 }
 
 #[cfg(feature = "itest-http")]
@@ -150,15 +193,45 @@ pub(crate) fn notify_offline_wake(
         encrypted_hint: Some(encrypted_hint),
     };
     notify.signer.sign_notification_wake(&mut wake)?;
-    let _: serde_json::Value = ramflux_node_core::itest_http_post_json(
-        &format!("{}/s13/notify/wake", notify.endpoint),
-        &serde_json::json!({
-            "device_delivery_id": target_delivery_id,
-            "wake": wake,
-            "queued_at": ramflux_node_core::now_unix_seconds()
-        }),
-    )?;
+    let request = S13WakeRequest {
+        device_delivery_id: target_delivery_id.to_owned(),
+        wake,
+        queued_at: ramflux_node_core::now_unix_seconds(),
+    };
+    let response = if let Some(mesh) = &notify.mesh {
+        ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
+            &mesh.endpoint,
+            "/s13/notify/wake",
+            &mesh.tls,
+            &mesh.server_name,
+            &mesh.peer_ca_pems,
+            &request,
+        )?
+    } else {
+        ramflux_node_core::itest_http_post_json(
+            &format!("{}/s13/notify/wake", notify.endpoint),
+            &request,
+        )?
+    };
+    observe_s13_wake_response(&response);
     Ok(())
+}
+
+fn observe_s13_wake_response(response: &S13WakeResponse) {
+    let _observed = (&response.entry.queue_id, response.attempts.len());
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct S13WakeRequest {
+    device_delivery_id: String,
+    wake: ramflux_protocol::NotificationWake,
+    queued_at: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct S13WakeResponse {
+    entry: ramflux_node_core::NotifyQueueEntry,
+    attempts: Vec<ramflux_node_core::ProviderPushAttempt>,
 }
 
 pub(crate) fn notification_class_for_envelope(
@@ -172,5 +245,274 @@ pub(crate) fn notification_class_for_envelope(
             ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
         }
         _ => ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn notify_offline_wake_posts_over_mesh_when_configured()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("gateway_notify_mesh")?;
+        let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let notify = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-notify")?;
+        let (endpoint, received) =
+            spawn_notify_mesh_echo_server(notify.tls.clone(), gateway.ca_pem.clone())?;
+        let signer = ramflux_node_core::NodeServiceSigningKey::from_seed(test_signing_seed());
+        let client = NotifyHttpClient {
+            endpoint: "http://unused-notify-http".to_owned(),
+            signer: signer.clone(),
+            mesh: Some(NotifyMeshClient {
+                endpoint,
+                server_name: "ramflux-notify".to_owned(),
+                tls: gateway.tls,
+                peer_ca_pems: vec![notify.ca_pem],
+            }),
+        };
+        let envelope = test_envelope("env_notify_mesh");
+
+        notify_offline_wake(&client, "target_notify_mesh", &envelope)?;
+
+        let request = received.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(request.device_delivery_id, "target_notify_mesh");
+        assert_eq!(request.wake.wake_id, "wake_env_notify_mesh");
+        assert_eq!(request.wake.push_alias, "target_notify_mesh");
+        assert_eq!(
+            request.wake.delivery_class,
+            ramflux_protocol::NotificationDeliveryClass::UserContentNotification
+        );
+        signer.verify_notification_wake(&request.wake)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn spawn_notify_mesh_echo_server(
+        server_tls: ramflux_transport::MeshTlsConfig,
+        trusted_gateway_ca: String,
+    ) -> Result<(String, mpsc::Receiver<S13WakeRequest>), Box<dyn std::error::Error>> {
+        let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
+        let (request_tx, request_rx) = mpsc::channel::<S13WakeRequest>();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|source| source.to_string());
+            let Ok(runtime) = runtime else {
+                let _ = endpoint_tx.send(runtime.map(|_| String::new()));
+                return;
+            };
+            let result: Result<(), String> = runtime.block_on(async move {
+                let roots = Arc::new(move || Ok(vec![trusted_gateway_ca.clone()]));
+                let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+                    "127.0.0.1:0",
+                    &server_tls,
+                    roots,
+                )
+                .map_err(|source| source.to_string())?;
+                endpoint_tx
+                    .send(
+                        server
+                            .local_addr()
+                            .map(|addr| addr.to_string())
+                            .map_err(|source| source.to_string()),
+                    )
+                    .map_err(|source| source.to_string())?;
+                let connection =
+                    server.accept_connection().await.map_err(|source| source.to_string())?;
+                let accepted =
+                    ramflux_transport::MeshQuicServer::accept_request_on_connection(&connection)
+                        .await
+                        .map_err(|source| source.to_string())?;
+                if accepted.request.method != "POST" || accepted.request.path != "/s13/notify/wake"
+                {
+                    return Err(format!(
+                        "unexpected notify mesh request {} {}",
+                        accepted.request.method, accepted.request.path
+                    ));
+                }
+                let request: S13WakeRequest = serde_json::from_value(accepted.request.body.clone())
+                    .map_err(|source| source.to_string())?;
+                let response = S13WakeResponse {
+                    entry: notify_queue_entry_from_request(&request),
+                    attempts: Vec::new(),
+                };
+                request_tx.send(request).map_err(|source| source.to_string())?;
+                accepted
+                    .write_json_response(200, &response)
+                    .await
+                    .map_err(|source| source.to_string())?;
+                std::future::pending::<()>().await;
+                Ok(())
+            });
+            if let Err(error) = result {
+                tracing::debug!(%error, "gateway notify mesh test server stopped");
+            }
+        });
+        let endpoint = endpoint_rx
+            .recv()
+            .map_err(|source| test_error(source.to_string()))?
+            .map_err(test_error)?;
+        Ok((endpoint, request_rx))
+    }
+
+    fn notify_queue_entry_from_request(
+        request: &S13WakeRequest,
+    ) -> ramflux_node_core::NotifyQueueEntry {
+        ramflux_node_core::NotifyQueueEntry {
+            queue_id: request.wake.wake_id.clone(),
+            device_delivery_id: request.device_delivery_id.clone(),
+            wake: request.wake.clone(),
+            push_alias_hash: "test_push_alias_hash".to_owned(),
+            queued_at: request.queued_at,
+            expires_at: request.queued_at.saturating_add(u64::from(request.wake.ttl)),
+            attempt_count: 0,
+            status: ramflux_node_core::NotifyQueueStatus::Pending,
+            dnd_active: false,
+        }
+    }
+
+    struct TestPeerCerts {
+        tls: ramflux_transport::MeshTlsConfig,
+        ca_pem: String,
+    }
+
+    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ramflux_gateway_{name}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::create_dir_all(&root)?;
+        Ok(root)
+    }
+
+    fn issue_test_ca_and_service_cert(
+        root: &Path,
+        node_id: &str,
+        service_id: &str,
+    ) -> Result<TestPeerCerts, Box<dyn std::error::Error>> {
+        let dir = root.join(service_id);
+        std::fs::create_dir_all(&dir)?;
+        let ca_key = dir.join("ca-key.pem");
+        let ca_cert = dir.join("ca.pem");
+        let service_key = dir.join(format!("{service_id}-key.pem"));
+        let service_csr = dir.join(format!("{service_id}.csr"));
+        let service_cert = dir.join(format!("{service_id}.pem"));
+        let ext = dir.join(format!("{service_id}.ext"));
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out", path_str(&ca_key)?])?;
+        run_openssl(&[
+            "req",
+            "-x509",
+            "-new",
+            "-key",
+            path_str(&ca_key)?,
+            "-out",
+            path_str(&ca_cert)?,
+            "-days",
+            "30",
+            "-subj",
+            "/CN=Ramflux Gateway Notify Mesh Test CA",
+        ])?;
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out", path_str(&service_key)?])?;
+        run_openssl(&[
+            "req",
+            "-new",
+            "-key",
+            path_str(&service_key)?,
+            "-out",
+            path_str(&service_csr)?,
+            "-subj",
+            &format!("/CN={service_id}"),
+        ])?;
+        std::fs::write(
+            &ext,
+            format!(
+                "subjectAltName = DNS:{service_id}, DNS:localhost, URI:spiffe://{node_id}/{service_id}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
+            ),
+        )?;
+        run_openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            path_str(&service_csr)?,
+            "-CA",
+            path_str(&ca_cert)?,
+            "-CAkey",
+            path_str(&ca_key)?,
+            "-CAcreateserial",
+            "-out",
+            path_str(&service_cert)?,
+            "-days",
+            "30",
+            "-extfile",
+            path_str(&ext)?,
+        ])?;
+        Ok(TestPeerCerts {
+            tls: ramflux_transport::MeshTlsConfig {
+                ca_cert: ca_cert.clone(),
+                service_cert,
+                service_key,
+            },
+            ca_pem: std::fs::read_to_string(ca_cert)?,
+        })
+    }
+
+    fn run_openssl(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+        let status = Command::new("openssl").args(args).status()?;
+        if !status.success() {
+            return Err(format!("openssl failed with status {status}: {}", args.join(" ")).into());
+        }
+        Ok(())
+    }
+
+    fn path_str(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
+        path.to_str().ok_or_else(|| format!("non-UTF-8 path {}", path.display()).into())
+    }
+
+    fn test_signing_seed() -> [u8; 32] {
+        [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
+        ]
+    }
+
+    fn test_envelope(envelope_id: &str) -> ramflux_protocol::Envelope {
+        ramflux_protocol::Envelope {
+            schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            version: 1,
+            domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: "test-envelope-key".to_owned(),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: "test-envelope-signature".to_owned(),
+            },
+            envelope_id: envelope_id.to_owned(),
+            source_principal_id: "principal_gateway_test".to_owned(),
+            source_device_id: "device_gateway_test".to_owned(),
+            target_delivery_id: "target_notify_mesh".to_owned(),
+            routing_set_id: None,
+            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            priority: ramflux_protocol::Priority::Normal,
+            ttl: 86_400,
+            created_at: 1_760_000_000,
+            encrypted_payload: "encrypted_payload".to_owned(),
+            payload_hash: "payload_hash".to_owned(),
+        }
+    }
+
+    fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
+        Box::new(std::io::Error::other(message.into()))
     }
 }

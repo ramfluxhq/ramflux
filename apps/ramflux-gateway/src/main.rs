@@ -25,7 +25,7 @@ pub(crate) use quic_dispatch::dispatch_quic_json_request;
 pub(crate) use serve::serve_gateway_quic;
 pub(crate) use state::{
     GatewayQuicContext, GatewaySendHandle, GatewaySessionHub, GatewaySessionRuntime,
-    NotifyHttpClient, RouterMeshClient,
+    NotifyHttpClient, NotifyMeshClient, RouterMeshClient,
 };
 
 fn main() {
