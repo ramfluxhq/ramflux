@@ -46,7 +46,7 @@ impl RouterHandle {
         &self,
         envelope: ramflux_protocol::Envelope,
         total_started: Instant,
-    ) -> anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse> {
+    ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
         match self {
             Self::Tokio(runtime) => crate::router_engine::submit_envelope(
                 runtime.state.as_ref(),
@@ -61,7 +61,7 @@ impl RouterHandle {
     pub(crate) fn apply_ack(
         &self,
         ack: &ramflux_protocol::Ack,
-    ) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
         match self {
             Self::Tokio(runtime) => {
                 crate::router_engine::apply_ack(runtime.state.as_ref(), runtime.store.as_ref(), ack)
@@ -71,8 +71,8 @@ impl RouterHandle {
 
     pub(crate) fn apply_bound_ack(
         &self,
-        request: &ramflux_node_core::ItestMvp0BoundAckRequest,
-    ) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+        request: &ramflux_node_core::TargetAckRequest,
+    ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
         match self {
             Self::Tokio(runtime) => crate::router_engine::apply_bound_ack(
                 runtime.state.as_ref(),
@@ -86,7 +86,7 @@ impl RouterHandle {
     pub(crate) fn apply_nack(
         &self,
         nack: &ramflux_protocol::Nack,
-    ) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
         match self {
             Self::Tokio(runtime) => crate::router_engine::apply_nack(
                 runtime.state.as_ref(),
@@ -98,8 +98,8 @@ impl RouterHandle {
 
     pub(crate) fn apply_bound_nack(
         &self,
-        request: &ramflux_node_core::ItestMvp0BoundNackRequest,
-    ) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+        request: &ramflux_node_core::TargetNackRequest,
+    ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
         match self {
             Self::Tokio(runtime) => crate::router_engine::apply_bound_nack(
                 runtime.state.as_ref(),
@@ -166,7 +166,7 @@ mod tests {
             Instant::now(),
         )?;
         let ack = ack("env_runtime_ack");
-        let ack_request = ramflux_node_core::ItestMvp0BoundAckRequest {
+        let ack_request = ramflux_node_core::TargetAckRequest {
             target_delivery_id: "target_runtime_ack".to_owned(),
             ack: ack.clone(),
         };
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(handle_ack, oracle_ack);
 
         let nack = nack("env_runtime_ack");
-        let nack_request = ramflux_node_core::ItestMvp0BoundNackRequest {
+        let nack_request = ramflux_node_core::TargetNackRequest {
             target_delivery_id: "target_runtime_ack".to_owned(),
             nack,
         };
@@ -333,15 +333,15 @@ mod tests {
         let proof = ramflux_crypto::authorize_device_branch(
             &root,
             &device,
-            ramflux_node_core::ITEST_MVP1_AUDIENCE,
-            vec![ramflux_node_core::ITEST_MVP1_BIND_CAPABILITY.to_owned()],
+            ramflux_node_core::IDENTITY_BIND_AUDIENCE,
+            vec![ramflux_node_core::IDENTITY_BIND_CAPABILITY.to_owned()],
             1_760_000_000 + i64::try_from(nonce)?,
             1_760_003_600 + i64::try_from(nonce)?,
         )?;
         let root_public_key =
             ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
         let root_public_key_bytes = ramflux_protocol::decode_base64url(&root_public_key)?;
-        let request = ramflux_node_core::ItestMvp1RegisterIdentityRequest {
+        let request = ramflux_node_core::IdentityRegisterRequest {
             principal_commitment: ramflux_crypto::blake3_256_base64url(
                 "ramflux.identity.root_public_key.commitment.v1",
                 &root_public_key_bytes,

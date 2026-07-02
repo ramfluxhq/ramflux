@@ -75,8 +75,8 @@ pub use gateway::{
 pub use group::SdkGroupSenderKeyDistribution;
 pub use object::{SdkObjectKeySlot, SdkObjectSharePackage};
 pub use prekey::{
-    SdkMvp1IdentityRegistrationResponse, SdkMvp1PrekeyResponse, SdkMvp1PublishPrekeyRequest,
-    SdkMvp1RegisterIdentityRequest, identity_root_public_key_commitment,
+    SdkIdentityRegisterRequest, SdkIdentityRegistrationResponse, SdkPrekeyPublishRequest,
+    SdkPrekeyResponse, identity_root_public_key_commitment,
     identity_root_public_key_commitment_for_seed,
 };
 pub use records::{

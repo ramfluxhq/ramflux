@@ -4,8 +4,8 @@
 #![allow(unused_imports)]
 
 use crate::{
-    InboxEntry, ItestMvp0CursorResponse, ItestMvp1IdentityRegistrationResponse,
-    ItestMvp1PrekeyResponse, ItestMvp1PublishPrekeyRequest, ItestMvp1RegisterIdentityRequest,
+    IdentityRegisterRequest, IdentityRegistrationResponse, InboxCursorResponse, InboxEntry,
+    PrekeyPublishRequest, PrekeyResponse,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -118,7 +118,7 @@ pub struct GatewayResumeFrame {
 pub struct GatewaySessionEstablishedFrame {
     pub session_id: String,
     pub gateway_id: String,
-    pub accepted_cursor: Option<ItestMvp0CursorResponse>,
+    pub accepted_cursor: Option<InboxCursorResponse>,
     pub resume_token: String,
     pub resume_window_seconds: u64,
 }
@@ -129,8 +129,8 @@ pub enum GatewayClientFrame {
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
     Submit { submit: GatewaySubmitFrame },
-    IdentityRegister { request: ItestMvp1RegisterIdentityRequest },
-    PrekeyPublish { request: ItestMvp1PublishPrekeyRequest },
+    IdentityRegister { request: IdentityRegisterRequest },
+    PrekeyPublish { request: PrekeyPublishRequest },
     PrekeyFetch { device_id: String },
     Ack { ack: ramflux_protocol::Ack },
     Cursor { target_delivery_id: String },
@@ -145,11 +145,11 @@ pub enum GatewayClientFrame {
 pub enum GatewayServerFrame {
     SessionEstablished { session: GatewaySessionEstablishedFrame },
     Deliver { entry: InboxEntry },
-    IdentityRegistered { response: ItestMvp1IdentityRegistrationResponse },
-    PrekeyPublished { response: ItestMvp1PrekeyResponse },
-    Prekey { response: ItestMvp1PrekeyResponse },
-    Ack { cursor: ItestMvp0CursorResponse },
-    Cursor { cursor: Option<ItestMvp0CursorResponse> },
+    IdentityRegistered { response: IdentityRegistrationResponse },
+    PrekeyPublished { response: PrekeyResponse },
+    Prekey { response: PrekeyResponse },
+    Ack { cursor: InboxCursorResponse },
+    Cursor { cursor: Option<InboxCursorResponse> },
     Resume { entries: Vec<InboxEntry> },
     Nack { reason: String },
     Heartbeat { now: u64 },

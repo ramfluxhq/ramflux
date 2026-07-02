@@ -494,7 +494,7 @@ fn replay_guard_rejects_envelope_ttl_above_maximum() {
 fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::error::Error>> {
     const POW_BITS: u8 = 8;
     let router = RouterCore::new();
-    router.mvp6_set_registration_policy(ItestRegistrationPolicy {
+    router.mvp6_set_registration_policy(RegistrationPolicy {
         challenge_policy: RegistrationChallengePolicy::Pow,
         pow_difficulty_bits: POW_BITS,
         per_source_ip_registration_limit: 2,
@@ -518,7 +518,7 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
                 "alice_pow_bad",
                 "alice_device_bad",
                 2,
-                Some(ItestRegistrationPowProof { nonce: 0, difficulty_bits: 0 }),
+                Some(RegistrationPowProof { nonce: 0, difficulty_bits: 0 }),
                 "source_a",
             )?)
             .is_err()

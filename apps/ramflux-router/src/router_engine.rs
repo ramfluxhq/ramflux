@@ -8,7 +8,7 @@ pub(crate) fn submit_envelope(
     store: &ramflux_node_core::RouterRedbStore,
     envelope: ramflux_protocol::Envelope,
     total_started: Instant,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse> {
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     tracing::info!(
         envelope_id = %envelope.envelope_id,
         target_delivery_id = %envelope.target_delivery_id,
@@ -59,20 +59,20 @@ pub(crate) fn apply_ack(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     ack: &ramflux_protocol::Ack,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
     let cursor = state.apply_ack(ack)?;
     store.record_ack_increment(&cursor, &ack.envelope_id)?;
-    Ok(ramflux_node_core::ItestMvp0CursorResponse::from(&cursor))
+    Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
 pub(crate) fn apply_bound_ack(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-    request: &ramflux_node_core::ItestMvp0BoundAckRequest,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    request: &ramflux_node_core::TargetAckRequest,
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
     let cursor = state.apply_ack_for_target(&request.target_delivery_id, &request.ack)?;
     store.record_ack_increment(&cursor, &request.ack.envelope_id)?;
-    Ok(ramflux_node_core::ItestMvp0CursorResponse::from(&cursor))
+    Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
 #[cfg(feature = "itest-http")]
@@ -80,20 +80,20 @@ pub(crate) fn apply_nack(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     nack: &ramflux_protocol::Nack,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
     let cursor = state.apply_nack(nack)?;
     store.record_nack_increment(&cursor)?;
-    Ok(ramflux_node_core::ItestMvp0CursorResponse::from(&cursor))
+    Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
 pub(crate) fn apply_bound_nack(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-    request: &ramflux_node_core::ItestMvp0BoundNackRequest,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+    request: &ramflux_node_core::TargetNackRequest,
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
     let cursor = state.apply_nack_for_target(&request.target_delivery_id, &request.nack)?;
     store.record_nack_increment(&cursor)?;
-    Ok(ramflux_node_core::ItestMvp0CursorResponse::from(&cursor))
+    Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
 pub(crate) fn own_device_fanout(
@@ -160,10 +160,10 @@ pub(crate) fn persistent_entry_from_outcome(
 pub(crate) fn submit_response_from_outcome(
     state: &ramflux_node_core::RouterCore,
     outcome: ramflux_node_core::RouterSubmitOutcome,
-) -> ramflux_node_core::ItestMvp0SubmitResponse {
+) -> ramflux_node_core::EnvelopeSubmitResponse {
     match outcome {
         ramflux_node_core::RouterSubmitOutcome::Online(delivery) => {
-            ramflux_node_core::ItestMvp0SubmitResponse {
+            ramflux_node_core::EnvelopeSubmitResponse {
                 outcome: "online".to_owned(),
                 target_delivery_id: delivery.target_delivery_id,
                 inbox_seq: Some(delivery.inbox_seq),
@@ -173,19 +173,19 @@ pub(crate) fn submit_response_from_outcome(
         }
         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => {
             let target_delivery_id = queued.entry.target_delivery_id;
-            ramflux_node_core::ItestMvp0SubmitResponse {
+            ramflux_node_core::EnvelopeSubmitResponse {
                 outcome: "offline_queued".to_owned(),
                 target_delivery_id: target_delivery_id.clone(),
                 inbox_seq: Some(queued.entry.inbox_seq),
                 cursor: state
                     .cursor_state(&target_delivery_id)
                     .as_ref()
-                    .map(ramflux_node_core::ItestMvp0CursorResponse::from),
+                    .map(ramflux_node_core::InboxCursorResponse::from),
                 nack: None,
             }
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) => {
-            ramflux_node_core::ItestMvp0SubmitResponse {
+            ramflux_node_core::EnvelopeSubmitResponse {
                 outcome: "rejected_home_node_migrated".to_owned(),
                 target_delivery_id: delivery.target_delivery_id,
                 inbox_seq: None,
@@ -194,7 +194,7 @@ pub(crate) fn submit_response_from_outcome(
             }
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { target_delivery_id } => {
-            ramflux_node_core::ItestMvp0SubmitResponse {
+            ramflux_node_core::EnvelopeSubmitResponse {
                 outcome: "rejected_deactivated".to_owned(),
                 target_delivery_id,
                 inbox_seq: None,
@@ -203,7 +203,7 @@ pub(crate) fn submit_response_from_outcome(
             }
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedDeleted { target_delivery_id } => {
-            ramflux_node_core::ItestMvp0SubmitResponse {
+            ramflux_node_core::EnvelopeSubmitResponse {
                 outcome: "rejected_deleted".to_owned(),
                 target_delivery_id,
                 inbox_seq: None,
@@ -212,7 +212,7 @@ pub(crate) fn submit_response_from_outcome(
             }
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { target_delivery_id, reason } => {
-            ramflux_node_core::ItestMvp0SubmitResponse {
+            ramflux_node_core::EnvelopeSubmitResponse {
                 outcome: format!("rejected_security:{reason}"),
                 target_delivery_id,
                 inbox_seq: None,

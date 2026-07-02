@@ -127,7 +127,7 @@ async fn dispatch_device_revoke(
         return Err(SdkError::LocalBus("account manifest root commitment mismatch".to_owned()));
     }
     let revoked_at = now_unix_timestamp();
-    let signing_body = SdkMvp1RevokeDeviceSigningBody {
+    let signing_body = SdkDeviceRevokeSigningBody {
         device_id: &body.device_id,
         principal_commitment: &manifest.principal_commitment,
         revoked_at,
@@ -136,7 +136,7 @@ async fn dispatch_device_revoke(
         &ramflux_protocol::canonical_json_bytes(&signing_body)?,
         manifest.root_seed,
     );
-    let revoke = SdkMvp1RevokeDeviceRequest {
+    let revoke = SdkDeviceRevokeRequest {
         device_id: body.device_id.clone(),
         principal_commitment: manifest.principal_commitment.clone(),
         root_public_key,
@@ -144,7 +144,7 @@ async fn dispatch_device_revoke(
         signature,
     };
     let gateway = GatewaySessionConfig::auto(manifest.gateway.clone());
-    let response: SdkMvp1RevokeDeviceResponse =
+    let response: SdkDeviceRevokeResponse =
         sdk_gateway_post_json(&gateway, "/mvp1/device/revoke", &revoke).await?;
     if response.revoked {
         manifest.devices.retain(|device| device.device_id != body.device_id);

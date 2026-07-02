@@ -284,8 +284,8 @@ impl GatewaySessionEngine {
     /// Returns an error when the gateway rejects identity registration.
     pub(crate) async fn register_identity(
         &mut self,
-        request: SdkMvp1RegisterIdentityRequest,
-    ) -> Result<SdkMvp1IdentityRegistrationResponse, SdkError> {
+        request: SdkIdentityRegisterRequest,
+    ) -> Result<SdkIdentityRegistrationResponse, SdkError> {
         write_gateway_client_frame(
             &mut *self.stream,
             &GatewayClientFrame::IdentityRegister { request },
@@ -306,9 +306,9 @@ impl GatewaySessionEngine {
         &mut self,
         device_id: &str,
         bundle: &ramflux_crypto::PrekeyBundle,
-    ) -> Result<SdkMvp1PrekeyResponse, SdkError> {
+    ) -> Result<SdkPrekeyResponse, SdkError> {
         let request =
-            SdkMvp1PublishPrekeyRequest { device_id: device_id.to_owned(), bundle: bundle.clone() };
+            SdkPrekeyPublishRequest { device_id: device_id.to_owned(), bundle: bundle.clone() };
         write_gateway_client_frame(
             &mut *self.stream,
             &GatewayClientFrame::PrekeyPublish { request },
@@ -328,7 +328,7 @@ impl GatewaySessionEngine {
     pub(crate) async fn fetch_prekey_bundle(
         &mut self,
         device_id: &str,
-    ) -> Result<SdkMvp1PrekeyResponse, SdkError> {
+    ) -> Result<SdkPrekeyResponse, SdkError> {
         write_gateway_client_frame(
             &mut *self.stream,
             &GatewayClientFrame::PrekeyFetch { device_id: device_id.to_owned() },

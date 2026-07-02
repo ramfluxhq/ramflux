@@ -86,7 +86,7 @@ pub(crate) fn handle_itest_request(
 #[cfg(feature = "itest-http")]
 pub(crate) fn handle_preauth_control_request(
     stream: &mut TcpStream,
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
     store: &ramflux_node_core::GatewayRedbStore,
 ) -> anyhow::Result<bool> {
@@ -132,7 +132,7 @@ pub(crate) fn handle_preauth_control_request(
 pub(crate) fn dispatch_protected_itest_request(
     stream: &mut TcpStream,
     router: &RouterMeshClient,
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
 ) -> anyhow::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") => {
@@ -148,49 +148,49 @@ pub(crate) fn dispatch_protected_itest_request(
         ("POST", "/mvp0/envelope") => {
             let envelope: ramflux_protocol::Envelope = serde_json::from_slice(&request.body)?;
             ramflux_node_core::record_gateway_submit_received();
-            let response: ramflux_node_core::ItestMvp0SubmitResponse =
+            let response: ramflux_node_core::EnvelopeSubmitResponse =
                 router_post_json(router, "/mvp0/envelope", &envelope)?;
             log_forwarded_envelope(&envelope, &response);
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp0/ack") => {
             let ack: ramflux_protocol::Ack = serde_json::from_slice(&request.body)?;
-            let response: ramflux_node_core::ItestMvp0CursorResponse =
+            let response: ramflux_node_core::InboxCursorResponse =
                 router_post_json(router, "/mvp0/ack", &ack)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp0/nack") => {
             let nack: ramflux_protocol::Nack = serde_json::from_slice(&request.body)?;
-            let response: ramflux_node_core::ItestMvp0CursorResponse =
+            let response: ramflux_node_core::InboxCursorResponse =
                 router_post_json(router, "/mvp0/nack", &nack)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path) if path.starts_with("/mvp0/cursor/") => {
-            let response: Option<ramflux_node_core::ItestMvp0CursorResponse> =
+            let response: Option<ramflux_node_core::InboxCursorResponse> =
                 router_get_json(router, path)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp1/identity/register") => {
-            let mut registration: ramflux_node_core::ItestMvp1RegisterIdentityRequest =
+            let mut registration: ramflux_node_core::IdentityRegisterRequest =
                 serde_json::from_slice(&request.body)?;
             registration.source_ip_hash =
                 registration.source_ip_hash.or_else(|| request.source_ip_hash.clone());
-            let response: ramflux_node_core::ItestMvp1IdentityRegistrationResponse =
+            let response: ramflux_node_core::IdentityRegistrationResponse =
                 router_post_json(router, "/mvp1/identity/register", &registration)?;
             log_forwarded_identity_registration(&registration, &response);
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp6/registration/policy") => {
-            let request: ramflux_node_core::ItestRegistrationPolicy =
+            let request: ramflux_node_core::RegistrationPolicy =
                 serde_json::from_slice(&request.body)?;
-            let response: ramflux_node_core::ItestRegistrationPolicy =
+            let response: ramflux_node_core::RegistrationPolicy =
                 router_post_json(router, "/mvp6/registration/policy", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp6/friend/request") => {
-            let request: ramflux_node_core::ItestMvp6FriendRequestBudgetRequest =
+            let request: ramflux_node_core::FriendRequestBudgetRequest =
                 serde_json::from_slice(&request.body)?;
-            let response: ramflux_node_core::ItestMvp6FriendRequestBudgetResponse =
+            let response: ramflux_node_core::FriendRequestBudgetResponse =
                 router_post_json(router, "/mvp6/friend/request", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
@@ -208,16 +208,16 @@ pub(crate) fn dispatch_protected_itest_request(
             )?;
         }
         ("POST", "/mvp1/device/revoke") => {
-            let request: ramflux_node_core::ItestMvp1RevokeDeviceRequest =
+            let request: ramflux_node_core::DeviceRevokeRequest =
                 serde_json::from_slice(&request.body)?;
-            let response: ramflux_node_core::ItestMvp1RevokeDeviceResponse =
+            let response: ramflux_node_core::DeviceRevokeResponse =
                 router_post_json(router, "/mvp1/device/revoke", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp1/prekey/publish") => {
-            let request: ramflux_node_core::ItestMvp1PublishPrekeyRequest =
+            let request: ramflux_node_core::PrekeyPublishRequest =
                 serde_json::from_slice(&request.body)?;
-            let response: ramflux_node_core::ItestMvp1PrekeyResponse =
+            let response: ramflux_node_core::PrekeyResponse =
                 router_post_json(router, "/mvp1/prekey/publish", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
@@ -225,7 +225,7 @@ pub(crate) fn dispatch_protected_itest_request(
             write_prekey_fetch(stream, router, path)?;
         }
         ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
-            let response: Option<ramflux_node_core::ItestMvp1DeviceManifestResponse> =
+            let response: Option<ramflux_node_core::DeviceManifestResponse> =
                 router_get_json(router, path)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
@@ -245,7 +245,7 @@ fn write_prekey_fetch(
     router: &RouterMeshClient,
     path: &str,
 ) -> anyhow::Result<()> {
-    let response: ramflux_node_core::ItestMvp1PrekeyResponse = router_get_json(router, path)?;
+    let response: ramflux_node_core::PrekeyResponse = router_get_json(router, path)?;
     log_fetched_prekey(path, &response);
     ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
     Ok(())
@@ -257,7 +257,7 @@ fn write_inbox_fetch(
     router: &RouterMeshClient,
     path: &str,
 ) -> anyhow::Result<()> {
-    let response: ramflux_node_core::ItestMvp1InboxResponse = router_get_json(router, path)?;
+    let response: ramflux_node_core::InboxFetchResponse = router_get_json(router, path)?;
     log_fetched_inbox(path, &response);
     ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
     Ok(())
@@ -266,7 +266,7 @@ fn write_inbox_fetch(
 #[cfg(feature = "itest-http")]
 fn log_forwarded_envelope(
     envelope: &ramflux_protocol::Envelope,
-    response: &ramflux_node_core::ItestMvp0SubmitResponse,
+    response: &ramflux_node_core::EnvelopeSubmitResponse,
 ) {
     tracing::info!(
         envelope_id = %envelope.envelope_id,
@@ -278,8 +278,8 @@ fn log_forwarded_envelope(
 
 #[cfg(feature = "itest-http")]
 fn log_forwarded_identity_registration(
-    registration: &ramflux_node_core::ItestMvp1RegisterIdentityRequest,
-    response: &ramflux_node_core::ItestMvp1IdentityRegistrationResponse,
+    registration: &ramflux_node_core::IdentityRegisterRequest,
+    response: &ramflux_node_core::IdentityRegistrationResponse,
 ) {
     tracing::info!(
         principal_id = %registration.proof.principal_id,
@@ -291,7 +291,7 @@ fn log_forwarded_identity_registration(
 }
 
 #[cfg(feature = "itest-http")]
-fn log_fetched_prekey(path: &str, response: &ramflux_node_core::ItestMvp1PrekeyResponse) {
+fn log_fetched_prekey(path: &str, response: &ramflux_node_core::PrekeyResponse) {
     tracing::info!(
         path,
         device_id = %response.device_id,
@@ -300,7 +300,7 @@ fn log_fetched_prekey(path: &str, response: &ramflux_node_core::ItestMvp1PrekeyR
 }
 
 #[cfg(feature = "itest-http")]
-fn log_fetched_inbox(path: &str, response: &ramflux_node_core::ItestMvp1InboxResponse) {
+fn log_fetched_inbox(path: &str, response: &ramflux_node_core::InboxFetchResponse) {
     tracing::info!(
         path,
         entries = response.entries.len(),

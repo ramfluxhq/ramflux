@@ -122,7 +122,7 @@ pub(crate) fn handle_itest_request(
 #[cfg(feature = "itest-http")]
 fn handle_itest_s1_request(
     stream: &mut TcpStream,
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
@@ -138,7 +138,7 @@ fn handle_itest_s1_request(
 #[cfg(feature = "itest-http")]
 fn handle_itest_mvp0_request(
     stream: &mut TcpStream,
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
@@ -174,7 +174,7 @@ fn handle_itest_mvp0_request(
 #[cfg(feature = "itest-http")]
 fn handle_healthz_request(
     stream: &mut TcpStream,
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
 ) -> anyhow::Result<bool> {
     if (request.method.as_str(), request.path.as_str()) != ("GET", "/healthz") {
         return Ok(false);
@@ -193,7 +193,7 @@ fn handle_healthz_request(
 #[cfg(feature = "itest-http")]
 fn handle_perf_metrics_request(
     stream: &mut TcpStream,
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/perf/metrics") => {
@@ -220,7 +220,7 @@ fn handle_perf_metrics_request(
 }
 
 #[cfg(feature = "itest-http")]
-fn log_router_itest_request(request: &ramflux_node_core::ItestHttpRequest) {
+fn log_router_itest_request(request: &ramflux_node_core::NodeHttpRequest) {
     tracing::info!(
         method = %request.method,
         path = %request.path,
@@ -492,7 +492,7 @@ fn write_mesh_value_response(
 fn handle_mvp0_envelope(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0SubmitResponse> {
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     let total_started = Instant::now();
     let decode_started = Instant::now();
     let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
@@ -508,7 +508,7 @@ fn elapsed_us(started: Instant) -> u64 {
 fn handle_mvp0_ack(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
     let ack: ramflux_protocol::Ack = serde_json::from_slice(body)?;
     router.apply_ack(&ack)
 }
@@ -516,8 +516,8 @@ fn handle_mvp0_ack(
 fn handle_mvp0_ack_bound(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
-    let request: ramflux_node_core::ItestMvp0BoundAckRequest = serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+    let request: ramflux_node_core::TargetAckRequest = serde_json::from_slice(body)?;
     router.apply_bound_ack(&request)
 }
 
@@ -525,7 +525,7 @@ fn handle_mvp0_ack_bound(
 fn handle_mvp0_nack(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
     let nack: ramflux_protocol::Nack = serde_json::from_slice(body)?;
     router.apply_nack(&nack)
 }
@@ -533,20 +533,20 @@ fn handle_mvp0_nack(
 fn handle_mvp0_nack_bound(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-) -> anyhow::Result<ramflux_node_core::ItestMvp0CursorResponse> {
-    let request: ramflux_node_core::ItestMvp0BoundNackRequest = serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
+    let request: ramflux_node_core::TargetNackRequest = serde_json::from_slice(body)?;
     router.apply_bound_nack(&request)
 }
 
 fn handle_mvp0_cursor(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> Option<ramflux_node_core::ItestMvp0CursorResponse> {
+) -> Option<ramflux_node_core::InboxCursorResponse> {
     let target_delivery_id = path.trim_start_matches("/mvp0/cursor/");
     state
         .cursor_state(target_delivery_id)
         .as_ref()
-        .map(ramflux_node_core::ItestMvp0CursorResponse::from)
+        .map(ramflux_node_core::InboxCursorResponse::from)
 }
 
 fn handle_s1_session_upsert(
@@ -576,9 +576,8 @@ fn handle_mvp1_identity_register(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp1IdentityRegistrationResponse> {
-    let request: ramflux_node_core::ItestMvp1RegisterIdentityRequest =
-        serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::IdentityRegistrationResponse> {
+    let request: ramflux_node_core::IdentityRegisterRequest = serde_json::from_slice(body)?;
     tracing::info!(
         principal_id = %request.proof.principal_id,
         device_id = %request.proof.device_id,
@@ -604,7 +603,7 @@ fn handle_mvp1_identity_register(
 fn handle_mvp1_device_auth_key_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> Option<ramflux_node_core::ItestMvp1DeviceAuthKeyResponse> {
+) -> Option<ramflux_node_core::DeviceAuthKeyResponse> {
     let device_id = path.trim_start_matches("/mvp1/device-auth-key/");
     state.mvp1_device_auth_key(device_id)
 }
@@ -613,8 +612,8 @@ fn handle_mvp6_registration_policy(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestRegistrationPolicy> {
-    let request: ramflux_node_core::ItestRegistrationPolicy = serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::RegistrationPolicy> {
+    let request: ramflux_node_core::RegistrationPolicy = serde_json::from_slice(body)?;
     state.mvp6_set_registration_policy(request);
     let response = state.mvp6_registration_policy();
     store.record_identity_registry(&state.mvp1_identities_snapshot())?;
@@ -625,9 +624,8 @@ fn handle_mvp6_friend_request(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp6FriendRequestBudgetResponse> {
-    let request: ramflux_node_core::ItestMvp6FriendRequestBudgetRequest =
-        serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::FriendRequestBudgetResponse> {
+    let request: ramflux_node_core::FriendRequestBudgetRequest = serde_json::from_slice(body)?;
     let response = state.mvp6_record_friend_request(&request)?;
     store.record_identity_registry(&state.mvp1_identities_snapshot())?;
     Ok(response)
@@ -646,8 +644,8 @@ fn handle_mvp1_device_revoke(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp1RevokeDeviceResponse> {
-    let request: ramflux_node_core::ItestMvp1RevokeDeviceRequest = serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::DeviceRevokeResponse> {
+    let request: ramflux_node_core::DeviceRevokeRequest = serde_json::from_slice(body)?;
     let response = state.mvp1_revoke_device(&request)?;
     store.record_identity_registry(&state.mvp1_identities_snapshot())?;
     Ok(response)
@@ -657,8 +655,8 @@ fn handle_mvp1_prekey_publish(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp1PrekeyResponse> {
-    let request: ramflux_node_core::ItestMvp1PublishPrekeyRequest = serde_json::from_slice(body)?;
+) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
+    let request: ramflux_node_core::PrekeyPublishRequest = serde_json::from_slice(body)?;
     tracing::info!(
         device_id = %request.device_id,
         "router decoded mvp1 prekey publish"
@@ -677,7 +675,7 @@ fn handle_mvp1_prekey_publish(
 fn handle_mvp1_prekey_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> ramflux_node_core::ItestMvp1PrekeyResponse {
+) -> ramflux_node_core::PrekeyResponse {
     let device_id = path.trim_start_matches("/mvp1/prekey/");
     let response = state.mvp1_prekey(device_id);
     tracing::info!(
@@ -692,7 +690,7 @@ fn handle_mvp1_prekey_fetch(
 fn handle_mvp1_device_manifest_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> Option<ramflux_node_core::ItestMvp1DeviceManifestResponse> {
+) -> Option<ramflux_node_core::DeviceManifestResponse> {
     let principal_commitment = path.trim_start_matches("/mvp1/device-manifest/");
     let response = state.mvp1_device_manifest(principal_commitment);
     tracing::info!(
@@ -707,7 +705,7 @@ fn handle_mvp1_device_manifest_fetch(
 fn handle_mvp1_inbox_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> anyhow::Result<ramflux_node_core::ItestMvp1InboxResponse> {
+) -> anyhow::Result<ramflux_node_core::InboxFetchResponse> {
     let request = path.trim_start_matches("/mvp1/inbox/");
     let (target_delivery_id, query) = request.split_once('?').unwrap_or((request, ""));
     let mut after_inbox_seq = 0;

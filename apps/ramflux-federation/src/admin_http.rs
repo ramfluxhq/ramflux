@@ -172,7 +172,7 @@ fn proxy_router_get_json(
 
 fn handle_admin_mesh_observability_request(
     stream: &mut TcpStream,
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
     context: &FederationAdminHttpContext,
     admin_token: Option<&str>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
@@ -192,7 +192,7 @@ fn handle_admin_mesh_observability_request(
 }
 
 fn log_admin_request(
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
     discovery: &FederationDiscoverySurface,
 ) {
     tracing::info!(

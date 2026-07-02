@@ -79,7 +79,7 @@ fn notify_mesh_peer_ca_pems(
 
 #[cfg(feature = "itest-http")]
 pub(crate) fn pre_auth_gate(
-    request: &ramflux_node_core::ItestHttpRequest,
+    request: &ramflux_node_core::NodeHttpRequest,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
     store: &ramflux_node_core::GatewayRedbStore,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
@@ -143,7 +143,7 @@ where
 pub(crate) fn router_cursor(
     router: &RouterMeshClient,
     target_delivery_id: &str,
-) -> Result<Option<ramflux_node_core::ItestMvp0CursorResponse>, ramflux_transport::TransportError> {
+) -> Result<Option<ramflux_node_core::InboxCursorResponse>, ramflux_transport::TransportError> {
     router_get_json(router, &format!("/mvp0/cursor/{target_delivery_id}"))
 }
 
@@ -152,7 +152,7 @@ pub(crate) fn router_inbox(
     target_delivery_id: &str,
     after_inbox_seq: u64,
     limit: usize,
-) -> Result<ramflux_node_core::ItestMvp1InboxResponse, ramflux_transport::TransportError> {
+) -> Result<ramflux_node_core::InboxFetchResponse, ramflux_transport::TransportError> {
     router_get_json(
         router,
         &format!("/mvp1/inbox/{target_delivery_id}?after={after_inbox_seq}&limit={limit}"),
