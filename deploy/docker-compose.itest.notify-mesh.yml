@@ -1,0 +1,10 @@
+services:
+  ramflux-gateway:
+    environment:
+      RAMFLUX_NOTIFY_MESH_ENDPOINT: "ramflux-notify:18085"
+      RAMFLUX_NOTIFY_MESH_SERVER_NAME: "ramflux-notify"
+      RAMFLUX_NOTIFY_MESH_PEER_CA_PEM_FILE: "/etc/ramflux/mesh/ca.pem"
+
+  ramflux-notify:
+    environment:
+      RAMFLUX_NOTIFY_MESH_LISTEN_ADDR: "0.0.0.0:18085"
