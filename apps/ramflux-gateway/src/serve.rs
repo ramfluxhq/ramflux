@@ -5,12 +5,13 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use crate::session::{handle_gateway_quic_connection, handle_gateway_tcp_tls_stream};
-use crate::{GatewaySessionHub, NotifyHttpClient, RouterMeshClient};
+use crate::{GatewaySessionHub, NotifyHttpClient, RouterMeshClient, gateway_instance_id_from_env};
 
 const GATEWAY_QUIC_RUNTIME_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RUNTIME";
 
 #[derive(Clone)]
 pub(crate) struct GatewayListenerContext {
+    pub(crate) gateway_id: String,
     pub(crate) router: RouterMeshClient,
     pub(crate) notify: NotifyHttpClient,
     pub(crate) state: Arc<Mutex<ramflux_node_core::GatewayState>>,
@@ -37,6 +38,7 @@ pub(crate) fn serve_gateway_quic(
     let tcp_addr: SocketAddr = tcp_addr.parse()?;
     let tcp_server_config = ramflux_transport::tcp_gateway_server_config(&tls)?;
     let context = GatewayListenerContext {
+        gateway_id: gateway_instance_id_from_env(),
         router,
         notify,
         state,
@@ -174,15 +176,7 @@ async fn run_gateway_quic(
         tokio::spawn(async move {
             match connecting.await {
                 Ok(connection) => {
-                    handle_gateway_quic_connection(
-                        connection,
-                        context.router,
-                        context.notify,
-                        context.state,
-                        context.store,
-                        context.hub,
-                    )
-                    .await;
+                    handle_gateway_quic_connection(connection, context).await;
                 }
                 Err(error) => tracing::warn!(%error, "gateway QUIC handshake rejected"),
             }
@@ -212,6 +206,7 @@ async fn run_gateway_tcp_tls(
                 }
             };
             let context = crate::GatewayQuicContext {
+                gateway_id: context.gateway_id,
                 router: context.router,
                 notify: context.notify,
                 state: context.state,
