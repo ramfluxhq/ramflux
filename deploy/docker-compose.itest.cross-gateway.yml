@@ -1,0 +1,44 @@
+services:
+  ramflux-gateway:
+    environment:
+      RAMFLUX_GATEWAY_ID: "gw-a"
+      RAMFLUX_GATEWAY_PEERS: "gw-b=ramflux-gateway-b:7443|ramflux-gateway"
+
+  ramflux-gateway-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.itest
+      args:
+        BIN: ramflux-gateway
+    command: ["--config", "/etc/ramflux/config/gateway.toml"]
+    environment:
+      RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
+      RAMFLUX_ITEST_HTTP: "1"
+      RAMFLUX_ITEST_PERF: "${RAMFLUX_ITEST_PERF:-0}"
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
+      RAMFLUX_ITEST_GATEWAY_HTTP_ADDR: "0.0.0.0:18081"
+      RAMFLUX_ITEST_GATEWAY_QUIC_ADDR: "0.0.0.0:18443"
+      RAMFLUX_ITEST_GATEWAY_TCP_ADDR: "0.0.0.0:18443"
+      RAMFLUX_ITEST_GATEWAY_FRAME_DELAY_MS: "${RAMFLUX_ITEST_GATEWAY_FRAME_DELAY_MS:-0}"
+      RAMFLUX_GATEWAY_ID: "gw-b"
+      RAMFLUX_GATEWAY_PEERS: "gw-a=ramflux-gateway:7443|ramflux-gateway"
+      RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON: "${RAMFLUX_GATEWAY_B_ITEST_CAPTURE_JSON:-/tmp/ramflux-gateway-b-itest-capture.jsonl}"
+    volumes:
+      - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/gateway:/etc/ramflux/mesh:ro
+      - gateway-b-redb:/var/lib/ramflux/gateway
+    depends_on: [ramflux-router, ramflux-retention]
+    ports:
+      - "${RAMFLUX_ITEST_GATEWAY_B_HTTP_PORT:-18088}:18081"
+      - "${RAMFLUX_ITEST_GATEWAY_B_QUIC_PORT:-18444}:18443/udp"
+      - "${RAMFLUX_ITEST_GATEWAY_B_TCP_PORT:-18444}:18443/tcp"
+    networks:
+      default: {}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ramflux-gateway", "--health-check"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+volumes:
+  gateway-b-redb:
