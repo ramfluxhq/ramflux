@@ -13,7 +13,7 @@ ramflux-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-crypto = { workspace = true }
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = "0.11.0"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
