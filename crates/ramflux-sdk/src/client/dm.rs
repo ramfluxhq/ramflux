@@ -53,7 +53,7 @@ impl RamfluxClient {
             &message.sender_id,
             &message.encrypted_body,
         )?;
-        let envelope = gateway_direct_message_envelope(&engine.config, &message)?;
+        let envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
         engine.submit_envelope(envelope).await
     }
 
@@ -64,7 +64,7 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         message: GatewayDirectMessage,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let envelope = gateway_direct_message_envelope(&engine.config, &message)?;
+        let envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
         engine.submit_envelope(envelope).await
     }
 
@@ -74,19 +74,49 @@ impl RamfluxClient {
     pub async fn send_plaintext_direct_message_via_gateway(
         &self,
         engine: &mut GatewaySessionEngine,
+        message: GatewayDirectMessage,
+        plaintext: &[u8],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        self.send_plaintext_direct_message_via_gateway_inner(engine, message, plaintext, true).await
+    }
+
+    pub(crate) async fn send_plaintext_direct_message_without_franking(
+        &self,
+        engine: &mut GatewaySessionEngine,
+        message: GatewayDirectMessage,
+        plaintext: &[u8],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        self.send_plaintext_direct_message_via_gateway_inner(engine, message, plaintext, false)
+            .await
+    }
+
+    async fn send_plaintext_direct_message_via_gateway_inner(
+        &self,
+        engine: &mut GatewaySessionEngine,
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
+        include_franking_ext: bool,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let conversation_id = message.conversation_id.clone();
         let (mut session, x3dh) = self.load_or_create_send_dm_session(engine, &message).await?;
         let ciphertext = session.encrypt(plaintext, dm_associated_data(&conversation_id))?;
+        let franking =
+            include_franking_ext.then(|| SdkDmFrankingMetadata::from_ciphertext(&ciphertext));
         message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
             schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
             version: 1,
             x3dh,
             ciphertext,
         })?;
-        let entry = self.send_direct_message_via_gateway(engine, message).await?;
+        self.send_direct_message(
+            &message.conversation_id,
+            &message.message_id,
+            &message.sender_id,
+            &message.encrypted_body,
+        )?;
+        let envelope =
+            gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
+        let entry = engine.submit_envelope(envelope).await?;
         self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "send", &session)?;
         Ok(entry)
     }
@@ -99,6 +129,24 @@ impl RamfluxClient {
         message: GatewayDirectMessage,
         plaintext: &[u8],
         attachments: &[LocalBusMessageAttachmentInput],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
+            engine,
+            message,
+            plaintext,
+            attachments,
+            true,
+        )
+        .await
+    }
+
+    async fn send_plaintext_direct_message_with_attachments_via_gateway_inner(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        message: GatewayDirectMessage,
+        plaintext: &[u8],
+        attachments: &[LocalBusMessageAttachmentInput],
+        include_franking_ext: bool,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let mut refs = Vec::with_capacity(attachments.len());
         for attachment in attachments {
@@ -123,7 +171,13 @@ impl RamfluxClient {
             attachments: refs,
         };
         let envelope_plaintext = serde_json::to_vec(&envelope)?;
-        self.send_plaintext_direct_message_via_gateway(engine, message, &envelope_plaintext).await
+        self.send_plaintext_direct_message_via_gateway_inner(
+            engine,
+            message,
+            &envelope_plaintext,
+            include_franking_ext,
+        )
+        .await
     }
 
     /// # Errors

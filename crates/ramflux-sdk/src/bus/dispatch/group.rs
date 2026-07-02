@@ -562,19 +562,20 @@ async fn dispatch_group_control_delivery(
             ttl: 3_600,
         };
         if let Some(federation) = delivery.route.federation.as_ref() {
-            let response = account.client.send_plaintext_federated_direct_message(
-                &engine,
-                message,
-                delivery.payload_bytes,
-                federation,
-            )?;
+            let response =
+                account.client.send_plaintext_federated_direct_message_without_franking(
+                    &engine,
+                    message,
+                    delivery.payload_bytes,
+                    federation,
+                )?;
             let mut value = serde_json::to_value(response)?;
             value["federated"] = serde_json::Value::Bool(true);
             Ok(value)
         } else {
             let entry = account
                 .client
-                .send_plaintext_direct_message_via_gateway(
+                .send_plaintext_direct_message_without_franking(
                     &mut engine,
                     message,
                     delivery.payload_bytes,
@@ -816,27 +817,38 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             created_at: now_unix_timestamp(),
             ttl: 3_600,
         };
-        if let Some(federation) = route.federation.as_ref() {
-            let response = account.client.send_plaintext_federated_direct_message(
-                &engine,
-                message,
-                &serde_json::to_vec(&payload)?,
-                federation,
-            )?;
-            Ok(Some(serde_json::to_value(response)?))
-        } else {
-            let entry = account.client.send_plaintext_direct_message_via_gateway(
-                &mut engine,
-                message,
-                &serde_json::to_vec(&payload)?,
-            )
-            .await?;
-            Ok(Some(serde_json::to_value(entry)?))
-        }
+        let payload_bytes = serde_json::to_vec(&payload)?;
+        let value = send_group_sender_key_distribution_message(
+            &account.client,
+            &mut engine,
+            &route,
+            message,
+            &payload_bytes,
+        )
+        .await?;
+        Ok(Some(value))
     }
     .await;
     account.put_engine(engine);
     result
+}
+
+async fn send_group_sender_key_distribution_message(
+    client: &RamfluxClient,
+    engine: &mut GatewaySessionEngine,
+    route: &LocalBusGroupMemberRoute,
+    message: GatewayDirectMessage,
+    payload: &[u8],
+) -> Result<serde_json::Value, SdkError> {
+    if let Some(federation) = route.federation.as_ref() {
+        let response = client.send_plaintext_federated_direct_message_without_franking(
+            engine, message, payload, federation,
+        )?;
+        return Ok(serde_json::to_value(response)?);
+    }
+    let entry =
+        client.send_plaintext_direct_message_without_franking(engine, message, payload).await?;
+    Ok(serde_json::to_value(entry)?)
 }
 
 async fn resolve_group_route_principal_commitment(
