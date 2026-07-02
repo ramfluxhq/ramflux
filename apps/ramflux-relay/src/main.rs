@@ -307,6 +307,13 @@ fn capture_itest_relay_json(
         "request_body_base64url": ramflux_protocol::encode_base64url(body),
         "response": response_value,
     });
+    let capture_path = std::path::PathBuf::from(capture_path);
+    if let Some(parent) = capture_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
