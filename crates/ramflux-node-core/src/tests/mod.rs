@@ -5,7 +5,8 @@
 
 use super::*;
 use ramflux_protocol::{
-    Ack, DeliveryClass, Envelope, Ext, Nack, NackReason, Priority, SignatureAlg, SignedFields,
+    Ack, DeliveryClass, Envelope, Ext, HomeNodeMigrationProof, Nack, NackReason, Priority,
+    SignatureAlg, SignedFields,
 };
 use std::collections::BTreeSet;
 use std::io::Write;

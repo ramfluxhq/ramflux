@@ -246,6 +246,10 @@ pub struct Nack {
     pub received_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_home_node_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

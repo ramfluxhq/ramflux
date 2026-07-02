@@ -5,14 +5,14 @@
 
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, DeliveryDecision,
-    IdentityLifecycleTombstone, InboxEntry, ItestMvp1DeviceAuthKeyResponse,
-    ItestMvp1DeviceManifestResponse, ItestMvp1IdentityRegistrationResponse,
-    ItestMvp1IdentityRegistry, ItestMvp1InboxResponse, ItestMvp1PrekeyResponse,
-    ItestMvp1PublishPrekeyRequest, ItestMvp1RegisterIdentityRequest, ItestMvp1RevokeDeviceResponse,
-    ItestMvp6FriendRequestBudgetRequest, ItestMvp6FriendRequestBudgetResponse,
-    ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
-    ItestMvp10OwnDeviceFanoutResponse, ItestRegistrationPolicy, NodeCoreError,
-    NodeReplayGuardState, OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox,
+    HomeNodeMigratedNackDelivery, HomeNodeMigrationRecord, IdentityLifecycleTombstone, InboxEntry,
+    ItestMvp1DeviceAuthKeyResponse, ItestMvp1DeviceManifestResponse,
+    ItestMvp1IdentityRegistrationResponse, ItestMvp1IdentityRegistry, ItestMvp1InboxResponse,
+    ItestMvp1PrekeyResponse, ItestMvp1PublishPrekeyRequest, ItestMvp1RegisterIdentityRequest,
+    ItestMvp1RevokeDeviceResponse, ItestMvp6FriendRequestBudgetRequest,
+    ItestMvp6FriendRequestBudgetResponse, ItestMvp10OwnDeviceFanoutDelivery,
+    ItestMvp10OwnDeviceFanoutRequest, ItestMvp10OwnDeviceFanoutResponse, ItestRegistrationPolicy,
+    NodeCoreError, NodeReplayGuardState, OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox,
     RouterSubmitOutcome, SessionDescriptor, SessionRegistry, envelope_replay_tuple_key,
 };
 use redb::{ReadableDatabase, TableDefinition};
@@ -76,6 +76,7 @@ pub(crate) struct RouterControlState {
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
     pub(crate) node_franking_public_key: Option<String>,
+    pub(crate) home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -90,6 +91,7 @@ pub(crate) struct RouterCoreSnapshot {
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
     pub(crate) replay_guard_state: NodeReplayGuardState,
     pub(crate) node_franking_public_key: Option<String>,
+    pub(crate) home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord>,
 }
 
 impl RouterCore {
@@ -138,6 +140,82 @@ impl RouterCore {
     }
 
     /// # Errors
+    /// Returns an error when the proof cannot be verified or would roll back an applied migration.
+    pub fn apply_home_node_migration(
+        &self,
+        proof: &ramflux_protocol::HomeNodeMigrationProof,
+        branch_proof: &ramflux_crypto::BranchProofDocument,
+        now: i64,
+    ) -> Result<HomeNodeMigrationRecord, NodeCoreError> {
+        let mut control = lock_unpoisoned(&self.control);
+        let actor =
+            control.mvp1_identities.device_auth_key(&proof.actor_device_id).ok_or_else(|| {
+                NodeCoreError::ItestHttp(format!(
+                    "unknown migration actor device: {}",
+                    proof.actor_device_id
+                ))
+            })?;
+        if actor.revoked {
+            return Err(NodeCoreError::ItestHttp(format!(
+                "migration actor device revoked: {}",
+                proof.actor_device_id
+            )));
+        }
+        ramflux_crypto::verify_home_node_migration_proof(
+            proof,
+            &actor.branch_public_key,
+            branch_proof,
+            now,
+        )
+        .map_err(|source| {
+            NodeCoreError::ItestHttp(format!("home node migration invalid: {source}"))
+        })?;
+        if proof.identity_commitment != actor.principal_id
+            && control
+                .mvp1_identities
+                .principal_commitment_for_device(&proof.actor_device_id)
+                .is_none_or(|commitment| commitment != proof.identity_commitment)
+        {
+            return Err(NodeCoreError::ItestHttp("migration actor identity mismatch".to_owned()));
+        }
+        let migration_proof_hash = ramflux_crypto::migration_proof_hash(proof)
+            .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
+        let record = HomeNodeMigrationRecord {
+            identity_commitment: proof.identity_commitment.clone(),
+            old_home_node: proof.old_home_node.clone(),
+            new_home_node: proof.new_home_node.clone(),
+            new_home_node_key_hash: proof.new_home_node_key_hash.clone(),
+            route_record_hash: proof.route_record_hash.clone(),
+            effective_at: proof.effective_at,
+            issued_at: proof.issued_at,
+            migration_proof_hash,
+            migrated_at: now,
+        };
+        let existing = control.home_node_migrations.get(&record.identity_commitment);
+        if let Some(existing) = existing {
+            if existing.migration_proof_hash == record.migration_proof_hash {
+                return Ok(existing.clone());
+            }
+            if record.issued_at <= existing.issued_at || record.effective_at < existing.effective_at
+            {
+                return Err(NodeCoreError::ItestHttp(
+                    "home node migration rollback rejected".to_owned(),
+                ));
+            }
+        }
+        control.home_node_migrations.insert(record.identity_commitment.clone(), record.clone());
+        Ok(record)
+    }
+
+    #[must_use]
+    pub fn home_node_migration(
+        &self,
+        identity_commitment: &str,
+    ) -> Option<HomeNodeMigrationRecord> {
+        lock_unpoisoned(&self.control).home_node_migrations.get(identity_commitment).cloned()
+    }
+
+    /// # Errors
     /// Returns an error when the identity proof is invalid or the session cannot be bound.
     pub fn mvp1_register_identity(
         &self,
@@ -145,6 +223,12 @@ impl RouterCore {
     ) -> Result<ItestMvp1IdentityRegistrationResponse, NodeCoreError> {
         let (mut session, registration_trust_tier) = {
             let mut control = lock_unpoisoned(&self.control);
+            if let Some(migration) = effective_migration_for_registration(&control, request) {
+                return Err(NodeCoreError::ItestHttp(format!(
+                    "home node migrated: proof_hash={} new_home_node={}",
+                    migration.migration_proof_hash, migration.new_home_node
+                )));
+            }
             control.mvp1_identities.register_identity(request)?
         };
         if let Some(existing) = self
@@ -298,7 +382,8 @@ impl RouterCore {
         &self,
         accepted: ReplayAcceptedEnvelope,
     ) -> RouterSubmitOutcome {
-        self.submit_envelope_after_replay_check(accepted.envelope)
+        let now_unix_seconds = accepted.envelope.created_at;
+        self.submit_envelope_after_replay_check(accepted.envelope, now_unix_seconds)
     }
 
     /// # Errors
@@ -332,7 +417,8 @@ impl RouterCore {
         &self,
         delivery: ReplayAcceptedFanoutDelivery,
     ) -> (ItestMvp10OwnDeviceFanoutDelivery, Option<InboxEntry>) {
-        let outcome = self.submit_envelope_after_replay_check(delivery.envelope);
+        let now_unix_seconds = delivery.envelope.created_at;
+        let outcome = self.submit_envelope_after_replay_check(delivery.envelope, now_unix_seconds);
         let (outcome, inbox_seq, entry) = match outcome {
             RouterSubmitOutcome::Online(delivery) => (
                 "online".to_owned(),
@@ -354,6 +440,9 @@ impl RouterCore {
             }
             RouterSubmitOutcome::RejectedSecurity { .. } => {
                 ("rejected_security".to_owned(), None, None)
+            }
+            RouterSubmitOutcome::RejectedHomeNodeMigrated(_) => {
+                ("rejected_home_node_migrated".to_owned(), None, None)
             }
         };
         (
@@ -428,13 +517,24 @@ impl RouterCore {
                 reason: error.to_string(),
             };
         }
-        self.submit_envelope_after_replay_check(envelope)
+        self.submit_envelope_after_replay_check(envelope, now_unix_seconds)
     }
 
     fn submit_envelope_after_replay_check(
         &self,
         envelope: ramflux_protocol::Envelope,
+        now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        if let Some(migration) = self.effective_home_node_migration_for_target(
+            &envelope.target_delivery_id,
+            now_unix_seconds,
+        ) {
+            return RouterSubmitOutcome::RejectedHomeNodeMigrated(home_node_migrated_delivery(
+                &envelope,
+                &migration,
+                now_unix_seconds,
+            ));
+        }
         let mut shard = self.target_shard(&envelope.target_delivery_id);
         if shard.deleted_delivery_targets.contains(&envelope.target_delivery_id) {
             return RouterSubmitOutcome::RejectedDeleted {
@@ -569,6 +669,7 @@ impl RouterCore {
             snapshot.lifecycle_tombstones = control.lifecycle_tombstones.clone();
             snapshot.abuse_reports = control.abuse_reports.clone();
             snapshot.node_franking_public_key.clone_from(&control.node_franking_public_key);
+            snapshot.home_node_migrations = control.home_node_migrations.clone();
         }
         for shard in &self.target_shards {
             let shard = lock_unpoisoned(shard);
@@ -600,6 +701,7 @@ impl RouterCore {
                 lifecycle_tombstones: snapshot.lifecycle_tombstones,
                 abuse_reports: snapshot.abuse_reports,
                 node_franking_public_key: snapshot.node_franking_public_key,
+                home_node_migrations: snapshot.home_node_migrations,
             }),
             replay_guard_shards,
         };
@@ -638,6 +740,7 @@ impl RouterCore {
             control.lifecycle_by_principal.extend(snapshot.lifecycle_by_principal);
             control.lifecycle_tombstones.extend(snapshot.lifecycle_tombstones);
             control.abuse_reports.extend(snapshot.abuse_reports);
+            control.home_node_migrations.extend(snapshot.home_node_migrations);
             if control.node_franking_public_key.is_none() {
                 control.node_franking_public_key = snapshot.node_franking_public_key;
             }
@@ -715,6 +818,77 @@ impl RouterCore {
 
     fn indexed_target_for_envelope(&self, envelope_id: &str) -> Option<String> {
         lock_unpoisoned(&self.envelope_target_index).get(envelope_id).cloned()
+    }
+
+    fn effective_home_node_migration_for_target(
+        &self,
+        target_delivery_id: &str,
+        now_unix_seconds: i64,
+    ) -> Option<HomeNodeMigrationRecord> {
+        let control = lock_unpoisoned(&self.control);
+        control
+            .mvp1_identities
+            .identity_keys_for_target_delivery_id(target_delivery_id)
+            .into_iter()
+            .find_map(|key| {
+                control
+                    .home_node_migrations
+                    .get(&key)
+                    .filter(|migration| migration.is_effective(now_unix_seconds))
+                    .cloned()
+            })
+    }
+}
+
+fn effective_migration_for_registration(
+    control: &RouterControlState,
+    request: &ItestMvp1RegisterIdentityRequest,
+) -> Option<HomeNodeMigrationRecord> {
+    let mut keys = Vec::with_capacity(2);
+    if !request.principal_commitment.is_empty() {
+        keys.push(request.principal_commitment.as_str());
+    }
+    if !keys.iter().any(|key| **key == request.proof.principal_id) {
+        keys.push(request.proof.principal_id.as_str());
+    }
+    keys.into_iter().find_map(|key| {
+        control
+            .home_node_migrations
+            .get(key)
+            .filter(|migration| migration.is_effective(request.now))
+            .cloned()
+    })
+}
+
+fn home_node_migrated_delivery(
+    envelope: &ramflux_protocol::Envelope,
+    migration: &HomeNodeMigrationRecord,
+    now_unix_seconds: i64,
+) -> HomeNodeMigratedNackDelivery {
+    let nack = ramflux_protocol::Nack {
+        schema: "ramflux.nack.v1".to_owned(),
+        version: 1,
+        domain: "ramflux.nack.v1".to_owned(),
+        ext: ramflux_protocol::Ext::default(),
+        signed: ramflux_protocol::SignedFields {
+            signing_key_id: "router:home_node_migration".to_owned(),
+            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+            signature: String::new(),
+        },
+        nack_id: format!("nack_home_node_migrated_{}", envelope.envelope_id),
+        envelope_id: envelope.envelope_id.clone(),
+        receiver_device_id: envelope.target_delivery_id.clone(),
+        reason: ramflux_protocol::NackReason::HomeNodeMigrated,
+        received_at: now_unix_seconds,
+        retry_after: None,
+        proof_hash: Some(migration.migration_proof_hash.clone()),
+        new_home_node_hint: Some(migration.new_home_node.clone()),
+    };
+    HomeNodeMigratedNackDelivery {
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        proof_hash: migration.migration_proof_hash.clone(),
+        new_home_node_hint: migration.new_home_node.clone(),
+        nack,
     }
 }
 

@@ -241,6 +241,168 @@ fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn home_node_migration_apply_is_idempotent_and_rejects_rollback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let request = registration_request(
+        "principal_migrate_apply",
+        "device_migrate_apply",
+        801,
+        None,
+        "ip_mig",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let first = migration_proof_for_registration(
+        &request,
+        801,
+        "mig_apply_1",
+        request.now,
+        request.now + 10,
+        "node_new_a.example",
+    )?;
+
+    let applied = router.apply_home_node_migration(&first, &request.proof, request.now + 1)?;
+    let repeated = router.apply_home_node_migration(&first, &request.proof, request.now + 2)?;
+    assert_eq!(applied, repeated);
+    assert_eq!(applied.new_home_node, "node_new_a.example");
+
+    let rollback = migration_proof_for_registration(
+        &request,
+        801,
+        "mig_apply_rollback",
+        request.now + 1,
+        request.now + 5,
+        "node_rollback.example",
+    )?;
+    let rejected = router.apply_home_node_migration(&rollback, &request.proof, request.now + 2);
+    assert!(
+        matches!(rejected, Err(NodeCoreError::ItestHttp(message)) if message.contains("rollback"))
+    );
+
+    let newer = migration_proof_for_registration(
+        &request,
+        801,
+        "mig_apply_2",
+        request.now + 3,
+        request.now + 20,
+        "node_new_b.example",
+    )?;
+    let replaced = router.apply_home_node_migration(&newer, &request.proof, request.now + 4)?;
+    assert_eq!(replaced.new_home_node, "node_new_b.example");
+    assert_eq!(
+        router
+            .home_node_migration(&request.proof.principal_id)
+            .map(|record| record.migration_proof_hash),
+        Some(replaced.migration_proof_hash)
+    );
+    Ok(())
+}
+
+#[test]
+fn home_node_migration_registration_guard_respects_effective_at()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let initial = registration_request(
+        "principal_migrate_register",
+        "device_migrate_root",
+        811,
+        None,
+        "ip_root",
+    )?;
+    router.mvp1_register_identity(&initial)?;
+    let effective_at = initial.now + 100;
+    let proof = migration_proof_for_registration(
+        &initial,
+        811,
+        "mig_register",
+        initial.now,
+        effective_at,
+        "node_new_register.example",
+    )?;
+    router.apply_home_node_migration(&proof, &initial.proof, initial.now + 1)?;
+
+    let before = registration_request(
+        "principal_migrate_register",
+        "device_before_effective",
+        812,
+        None,
+        "ip_before",
+    )?;
+    router.mvp1_register_identity(&before)?;
+
+    let mut after = registration_request(
+        "principal_migrate_register",
+        "device_after_effective",
+        813,
+        None,
+        "ip_after",
+    )?;
+    after.now = effective_at + 1;
+    let rejected = router.mvp1_register_identity(&after);
+    assert!(
+        matches!(rejected, Err(NodeCoreError::ItestHttp(message)) if message.contains("home node migrated"))
+    );
+
+    let mut other = registration_request(
+        "principal_not_migrated",
+        "device_not_migrated",
+        814,
+        None,
+        "ip_other",
+    )?;
+    other.now = effective_at + 1;
+    let accepted = router.mvp1_register_identity(&other)?;
+    assert_eq!(accepted.principal_id, "principal_not_migrated");
+    Ok(())
+}
+
+#[test]
+fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn std::error::Error>>
+{
+    let router = RouterCore::new();
+    let request = registration_request(
+        "principal_migrate_delivery",
+        "device_migrate_delivery",
+        821,
+        None,
+        "ip_delivery",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let proof = migration_proof_for_registration(
+        &request,
+        821,
+        "mig_delivery",
+        request.now,
+        request.now + 1,
+        "node_new_delivery.example",
+    )?;
+    let migration = router.apply_home_node_migration(&proof, &request.proof, request.now + 1)?;
+
+    let mut migrated_envelope =
+        envelope("env_home_node_migrated", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
+    migrated_envelope.created_at = request.now + 2;
+    let rejected = router.submit_envelope_at(migrated_envelope, request.now + 2);
+    let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = rejected else {
+        return Err(format!("expected home-node migrated nack, got {rejected:?}").into());
+    };
+    assert_eq!(delivery.target_delivery_id, request.target_delivery_id);
+    assert_eq!(delivery.proof_hash, migration.migration_proof_hash);
+    assert_eq!(delivery.new_home_node_hint, "node_new_delivery.example");
+    assert_eq!(delivery.nack.reason, NackReason::HomeNodeMigrated);
+    assert_eq!(delivery.nack.proof_hash.as_deref(), Some(migration.migration_proof_hash.as_str()));
+    assert_eq!(delivery.nack.new_home_node_hint.as_deref(), Some("node_new_delivery.example"));
+    assert!(router.resume(&request.target_delivery_id, 0, 10).is_empty());
+
+    let unmigrated = router.submit_envelope(envelope(
+        "env_unmigrated_delivery",
+        "target_unmigrated_delivery",
+        DeliveryClass::OpaqueEvent,
+    ));
+    assert!(matches!(unmigrated, RouterSubmitOutcome::OfflineQueued(_)));
+    Ok(())
+}
+
+#[test]
 fn router_replay_guard_rejects_duplicate_envelope_and_expired_ttl() {
     let router = RouterCore::new();
     let accepted = router.submit_envelope_at(

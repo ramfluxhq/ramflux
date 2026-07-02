@@ -716,6 +716,7 @@ fn spool_failed_forward(
             target_delivery_id: signed_request.envelope.target_delivery_id.clone(),
             inbox_seq: None,
             cursor: None,
+            nack: None,
         },
     })
 }

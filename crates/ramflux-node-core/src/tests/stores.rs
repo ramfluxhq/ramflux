@@ -42,6 +42,59 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn router_redb_store_restores_home_node_migration_state() -> Result<(), Box<dyn std::error::Error>>
+{
+    let path = temp_store_path("router_redb_store_restores_home_node_migration_state")?;
+    let store = RouterRedbStore::open(&path)?;
+    let router = RouterCore::new();
+    let request = registration_request(
+        "principal_migrate_store",
+        "device_migrate_store",
+        831,
+        None,
+        "ip_store",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let proof = migration_proof_for_registration(
+        &request,
+        831,
+        "mig_store",
+        request.now,
+        request.now + 1,
+        "node_new_store.example",
+    )?;
+    let migration = router.apply_home_node_migration(&proof, &request.proof, request.now + 1)?;
+    store.save_router(&router)?;
+    drop(store);
+
+    let reopened = RouterRedbStore::open(&path)?;
+    let restored = reopened
+        .load_router()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("router_migration".to_owned()))?;
+    assert_eq!(
+        restored
+            .home_node_migration(&request.proof.principal_id)
+            .map(|record| record.migration_proof_hash.clone()),
+        Some(migration.migration_proof_hash.clone())
+    );
+
+    let mut envelope = envelope(
+        "env_home_node_migrated_after_restore",
+        &request.target_delivery_id,
+        DeliveryClass::OpaqueEvent,
+    );
+    envelope.created_at = request.now + 2;
+    let rejected = restored.submit_envelope_at(envelope, request.now + 2);
+    let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = rejected else {
+        return Err(format!("expected restored migrated nack, got {rejected:?}").into());
+    };
+    assert_eq!(delivery.proof_hash, migration.migration_proof_hash);
+    assert_eq!(delivery.new_home_node_hint, "node_new_store.example");
+    assert_eq!(delivery.nack.reason, NackReason::HomeNodeMigrated);
+    Ok(())
+}
+
+#[test]
 fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("router_redb_incremental_replay_survives_restart")?;
     let store = RouterRedbStore::open(&path)?;
