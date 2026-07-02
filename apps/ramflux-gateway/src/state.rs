@@ -20,6 +20,15 @@ pub(crate) struct RouterMeshClient {
 pub(crate) struct NotifyHttpClient {
     pub(crate) endpoint: String,
     pub(crate) signer: ramflux_node_core::NodeServiceSigningKey,
+    pub(crate) mesh: Option<NotifyMeshClient>,
+}
+
+#[derive(Clone)]
+pub(crate) struct NotifyMeshClient {
+    pub(crate) endpoint: String,
+    pub(crate) server_name: String,
+    pub(crate) tls: ramflux_transport::MeshTlsConfig,
+    pub(crate) peer_ca_pems: Vec<String>,
 }
 
 #[derive(Clone)]
