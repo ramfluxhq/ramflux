@@ -5,13 +5,18 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use crate::session::{handle_gateway_quic_connection, handle_gateway_tcp_tls_stream};
-use crate::{GatewaySessionHub, NotifyHttpClient, RouterMeshClient, gateway_instance_id_from_env};
+use crate::{
+    GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
+    GatewaySessionHub, NotifyHttpClient, RouterMeshClient, gateway_instance_id_from_env,
+    gateway_peer_directory_from_env,
+};
 
 const GATEWAY_QUIC_RUNTIME_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RUNTIME";
 
 #[derive(Clone)]
 pub(crate) struct GatewayListenerContext {
     pub(crate) gateway_id: String,
+    pub(crate) peers: GatewayPeerDirectory,
     pub(crate) router: RouterMeshClient,
     pub(crate) notify: NotifyHttpClient,
     pub(crate) state: Arc<Mutex<ramflux_node_core::GatewayState>>,
@@ -37,14 +42,24 @@ pub(crate) fn serve_gateway_quic(
     let tcp_addr = gateway_tcp_listen_addr(config)?;
     let tcp_addr: SocketAddr = tcp_addr.parse()?;
     let tcp_server_config = ramflux_transport::tcp_gateway_server_config(&tls)?;
+    let gateway_id = gateway_instance_id_from_env();
+    let peers = gateway_peer_directory_from_env(config, &gateway_id)?;
     let context = GatewayListenerContext {
-        gateway_id: gateway_instance_id_from_env(),
+        gateway_id,
+        peers,
         router,
         notify,
         state,
         store,
         hub: Arc::new(GatewaySessionHub::default()),
     };
+    if let Some(forward_listen_addr) = gateway_forward_listen_addr(config, &context.peers) {
+        spawn_gateway_forward_mesh_thread(
+            forward_listen_addr,
+            gateway_mesh_tls_config(config),
+            context.clone(),
+        )?;
+    }
     match std::env::var(GATEWAY_QUIC_RUNTIME_ENV).as_deref() {
         Ok("compio") => {
             #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
@@ -207,6 +222,7 @@ async fn run_gateway_tcp_tls(
             };
             let context = crate::GatewayQuicContext {
                 gateway_id: context.gateway_id,
+                peers: context.peers,
                 router: context.router,
                 notify: context.notify,
                 state: context.state,
@@ -219,5 +235,271 @@ async fn run_gateway_tcp_tls(
                 tracing::warn!(%error, %remote_addr, "gateway TCP-TLS stream failed");
             }
         });
+    }
+}
+
+fn gateway_forward_listen_addr(
+    config: &ramflux_node_core::NodeServiceConfig,
+    peers: &GatewayPeerDirectory,
+) -> Option<String> {
+    std::env::var("RAMFLUX_GATEWAY_FORWARD_LISTEN_ADDR")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        })
+        .or_else(|| (!peers.is_empty()).then(|| config.mesh.listen_addr.clone()))
+}
+
+fn gateway_mesh_tls_config(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> ramflux_transport::MeshTlsConfig {
+    ramflux_transport::MeshTlsConfig {
+        ca_cert: config.mesh.ca_cert.clone().into(),
+        service_cert: config.mesh.service_cert.clone().into(),
+        service_key: config.mesh.service_key.clone().into(),
+    }
+}
+
+fn spawn_gateway_forward_mesh_thread(
+    listen_addr: String,
+    tls: ramflux_transport::MeshTlsConfig,
+    context: GatewayListenerContext,
+) -> anyhow::Result<()> {
+    std::thread::Builder::new().name("ramflux-gateway-forward-mesh".to_owned()).spawn(
+        move || {
+            if let Err(error) = run_gateway_forward_mesh_listener(&listen_addr, &tls, context) {
+                tracing::error!(%error, "gateway forward mesh listener stopped");
+            }
+        },
+    )?;
+    Ok(())
+}
+
+fn run_gateway_forward_mesh_listener(
+    listen_addr: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    context: GatewayListenerContext,
+) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+        let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+            listen_addr,
+            tls,
+            root_pems_provider,
+        )?;
+        let local_addr = server.local_addr()?;
+        tracing::info!(addr = %local_addr, "gateway forward mesh surface listening");
+        loop {
+            let connection = match server.accept_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(%error, "gateway forward mesh connection rejected");
+                    continue;
+                }
+            };
+            let connection_context = context.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    gateway_forward_mesh_connection_loop(connection, connection_context).await
+                {
+                    tracing::debug!(%error, "gateway forward mesh connection ended");
+                }
+            });
+        }
+    })
+}
+
+async fn gateway_forward_mesh_connection_loop(
+    connection: ramflux_transport::MeshQuicConnection,
+    context: GatewayListenerContext,
+) -> anyhow::Result<()> {
+    loop {
+        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
+            &connection,
+        )
+        .await
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::debug!(%error, "gateway forward mesh stream loop ended");
+                return Ok(());
+            }
+        };
+        let request_context = context.clone();
+        tokio::spawn(async move {
+            if let Err(error) = handle_gateway_forward_mesh_request(accepted, request_context).await
+            {
+                tracing::warn!(%error, "gateway forward mesh request failed");
+            }
+        });
+    }
+}
+
+async fn handle_gateway_forward_mesh_request(
+    accepted: ramflux_transport::MeshQuicAcceptedRequest,
+    context: GatewayListenerContext,
+) -> anyhow::Result<()> {
+    match handle_gateway_forward_request(&accepted.request, &context).await {
+        Ok(response) => {
+            accepted.write_json_response(200, &response).await?;
+        }
+        Err(error) => {
+            accepted.write_text_response(400, &error.to_string()).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_gateway_forward_request(
+    request: &ramflux_transport::GatewayQuicRequest,
+    context: &GatewayListenerContext,
+) -> anyhow::Result<GatewayForwardDeliverResponse> {
+    if request.method != "POST" || request.path != GatewayPeerDirectory::forward_path() {
+        return Err(anyhow::anyhow!("not found"));
+    }
+    let forward: GatewayForwardDeliverRequest = serde_json::from_value(request.body.clone())?;
+    if !forward.forwarded {
+        return Err(anyhow::anyhow!("forward marker is required"));
+    }
+    handle_gateway_forward_deliver(&context.hub, forward).await
+}
+
+async fn handle_gateway_forward_deliver(
+    hub: &GatewaySessionHub,
+    forward: GatewayForwardDeliverRequest,
+) -> anyhow::Result<GatewayForwardDeliverResponse> {
+    if !forward.forwarded {
+        return Err(anyhow::anyhow!("forward marker is required"));
+    }
+    let delivered = hub.send_to(&forward.target_delivery_id, &forward.frame).await?;
+    Ok(GatewayForwardDeliverResponse { delivered })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::Mutex as AsyncMutex;
+
+    use super::{GatewaySessionHub, handle_gateway_forward_deliver};
+    use crate::{GatewayForwardDeliverRequest, GatewaySendHandle};
+
+    #[tokio::test]
+    async fn gateway_forward_deliver_hits_remote_hub_and_reports_miss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source_hub = GatewaySessionHub::default();
+        let receiver_hub = GatewaySessionHub::default();
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        receiver_hub
+            .register(
+                "target_cross_gateway_bob".to_owned(),
+                "session_bob_on_gw_b".to_owned(),
+                recording_send_handle(Arc::clone(&frames)),
+            )
+            .await;
+        let frame = deliver_frame("env_cross_gateway_forward", "target_cross_gateway_bob");
+
+        let delivered = handle_gateway_forward_deliver(
+            &receiver_hub,
+            GatewayForwardDeliverRequest {
+                source_gateway_id: "gw-a".to_owned(),
+                target_delivery_id: "target_cross_gateway_bob".to_owned(),
+                forwarded: true,
+                frame: frame.clone(),
+            },
+        )
+        .await?;
+
+        assert!(delivered.delivered);
+        let recorded_frame = {
+            let recorded = frames.lock().map_err(|error| error.to_string())?;
+            assert_eq!(recorded.len(), 1);
+            serde_json::from_slice::<ramflux_node_core::GatewayServerFrame>(&recorded[0])?
+        };
+        assert_eq!(recorded_frame, frame);
+
+        let missed = handle_gateway_forward_deliver(
+            &source_hub,
+            GatewayForwardDeliverRequest {
+                source_gateway_id: "gw-b".to_owned(),
+                target_delivery_id: "target_cross_gateway_bob".to_owned(),
+                forwarded: true,
+                frame,
+            },
+        )
+        .await?;
+        assert!(!missed.delivered);
+        Ok(())
+    }
+
+    fn recording_send_handle(frames: Arc<Mutex<Vec<Vec<u8>>>>) -> GatewaySendHandle {
+        Arc::new(AsyncMutex::new(Box::new(RecordingSink { frames })))
+    }
+
+    struct RecordingSink {
+        frames: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl ramflux_transport::GatewaySessionFrameSink for RecordingSink {
+        fn send_frame<'a>(
+            &'a mut self,
+            frame: &'a [u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), ramflux_transport::TransportError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let mut frames = self
+                    .frames
+                    .lock()
+                    .map_err(|error| ramflux_transport::TransportError::Quic(error.to_string()))?;
+                frames.push(frame.to_vec());
+                Ok(())
+            })
+        }
+
+        fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
+            Ok(())
+        }
+    }
+
+    fn deliver_frame(
+        envelope_id: &str,
+        target_delivery_id: &str,
+    ) -> ramflux_node_core::GatewayServerFrame {
+        ramflux_node_core::GatewayServerFrame::Deliver {
+            entry: ramflux_node_core::InboxEntry {
+                inbox_seq: 1,
+                target_delivery_id: target_delivery_id.to_owned(),
+                envelope: test_envelope(envelope_id, target_delivery_id),
+            },
+        }
+    }
+
+    fn test_envelope(envelope_id: &str, target_delivery_id: &str) -> ramflux_protocol::Envelope {
+        ramflux_protocol::Envelope {
+            schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            version: 1,
+            domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: "test-envelope-key".to_owned(),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: "test-envelope-signature".to_owned(),
+            },
+            envelope_id: envelope_id.to_owned(),
+            source_principal_id: "principal_gateway_forward".to_owned(),
+            source_device_id: "device_gateway_forward".to_owned(),
+            target_delivery_id: target_delivery_id.to_owned(),
+            routing_set_id: None,
+            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            priority: ramflux_protocol::Priority::Normal,
+            ttl: 86_400,
+            created_at: 1_760_000_000,
+            encrypted_payload: "encrypted_payload".to_owned(),
+            payload_hash: "payload_hash".to_owned(),
+        }
     }
 }

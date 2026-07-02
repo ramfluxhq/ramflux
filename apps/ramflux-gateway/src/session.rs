@@ -5,9 +5,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
+    GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
     GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime, dispatch_quic_json_request,
     gateway_state, notify_offline_wake, router_cursor, router_get_json, router_inbox,
-    router_post_json, serve::GatewayListenerContext,
+    router_post_json, router_session, serve::GatewayListenerContext,
 };
 
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
@@ -25,6 +26,7 @@ pub(crate) async fn handle_gateway_quic_connection(
                 let store = Arc::clone(&listener.store);
                 let context = GatewayQuicContext {
                     gateway_id: listener.gateway_id.clone(),
+                    peers: listener.peers.clone(),
                     router,
                     notify,
                     state,
@@ -480,35 +482,111 @@ pub(crate) async fn handle_gateway_submit(
     );
     write_gateway_handle(send, &frame).await?;
     if response.outcome == "offline_queued" {
-        let notify = context.notify.clone();
-        let target_delivery_id = response.target_delivery_id.clone();
-        let envelope = submit.envelope.clone();
-        match tokio::task::spawn_blocking(move || {
-            notify_offline_wake(&notify, &target_delivery_id, &envelope)
-        })
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "offline notify wake dispatch failed");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "offline notify wake task failed");
-            }
-        }
-        write_gateway_handle(
-            send,
-            &ramflux_node_core::GatewayServerFrame::InBandWake {
-                target_delivery_id: response.target_delivery_id.clone(),
-                delivery_class: ramflux_protocol::DeliveryClass::NotificationWake,
-            },
-        )
-        .await?;
+        dispatch_offline_wake(send, context, &response.target_delivery_id, &submit.envelope)
+            .await?;
     }
     if response.outcome == "online" && response.target_delivery_id != runtime.target_delivery_id {
-        let _sent = context.hub.send_to(&response.target_delivery_id, &frame).await?;
+        let local_delivered = context.hub.send_to(&response.target_delivery_id, &frame).await?;
+        if !local_delivered
+            && !forward_deliver_on_local_miss(context, &response.target_delivery_id, &frame).await?
+        {
+            dispatch_offline_wake(send, context, &response.target_delivery_id, &submit.envelope)
+                .await?;
+        }
     }
     Ok(())
+}
+
+async fn dispatch_offline_wake(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    target_delivery_id: &str,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<()> {
+    let notify = context.notify.clone();
+    let target_delivery_id_owned = target_delivery_id.to_owned();
+    let envelope = envelope.clone();
+    match tokio::task::spawn_blocking(move || {
+        notify_offline_wake(&notify, &target_delivery_id_owned, &envelope)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "offline notify wake dispatch failed");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "offline notify wake task failed");
+        }
+    }
+    write_gateway_handle(
+        send,
+        &ramflux_node_core::GatewayServerFrame::InBandWake {
+            target_delivery_id: target_delivery_id.to_owned(),
+            delivery_class: ramflux_protocol::DeliveryClass::NotificationWake,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn forward_deliver_on_local_miss(
+    context: &GatewayQuicContext,
+    target_delivery_id: &str,
+    frame: &ramflux_node_core::GatewayServerFrame,
+) -> anyhow::Result<bool> {
+    if context.peers.is_empty() {
+        return Ok(false);
+    }
+    let session = match router_session(&context.router, target_delivery_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            tracing::warn!(%error, target_delivery_id, "gateway forward presence lookup failed");
+            return Ok(false);
+        }
+    };
+    if session.gateway_id == context.gateway_id {
+        return Ok(false);
+    }
+    let Some(peer) = context.peers.peer(&session.gateway_id).cloned() else {
+        return Ok(false);
+    };
+    let request = GatewayForwardDeliverRequest {
+        source_gateway_id: context.gateway_id.clone(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        forwarded: true,
+        frame: frame.clone(),
+    };
+    let tls = context.peers.tls().clone();
+    let peer_ca_pems = context.peers.peer_ca_pems().to_vec();
+    let forward_path = GatewayPeerDirectory::forward_path();
+    let result =
+        tokio::task::spawn_blocking(move || {
+            ramflux_transport::mesh_quic_post_json_with_peer_ca_pems::<
+                _,
+                GatewayForwardDeliverResponse,
+            >(
+                &peer.endpoint, forward_path, &tls, &peer.server_name, &peer_ca_pems, &request
+            )
+        })
+        .await;
+    match result {
+        Ok(Ok(response)) => Ok(response.delivered),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %error,
+                target_delivery_id,
+                peer_gateway_id = %session.gateway_id,
+                "gateway forward deliver failed"
+            );
+            Ok(false)
+        }
+        Err(error) => {
+            tracing::warn!(%error, target_delivery_id, "gateway forward deliver task failed");
+            Ok(false)
+        }
+    }
 }
 
 pub(crate) async fn handle_gateway_ack(
