@@ -306,6 +306,8 @@ mod tests {
             reason: ramflux_protocol::NackReason::MissingDependency,
             received_at: 1_760_000_010,
             retry_after: Some(30),
+            proof_hash: None,
+            new_home_node_hint: None,
         }
     }
 

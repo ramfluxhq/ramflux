@@ -35,6 +35,8 @@ pub struct ItestMvp0SubmitResponse {
     pub target_delivery_id: String,
     pub inbox_seq: Option<u64>,
     pub cursor: Option<ItestMvp0CursorResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nack: Option<ramflux_protocol::Nack>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -269,6 +271,7 @@ pub struct OfflineQueuedDelivery {
 pub enum RouterSubmitOutcome {
     Online(OnlineDelivery),
     OfflineQueued(OfflineQueuedDelivery),
+    RejectedHomeNodeMigrated(crate::HomeNodeMigratedNackDelivery),
     RejectedDeactivated { target_delivery_id: String },
     RejectedDeleted { target_delivery_id: String },
     RejectedSecurity { target_delivery_id: String, reason: String },

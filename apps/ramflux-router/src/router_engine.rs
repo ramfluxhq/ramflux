@@ -29,7 +29,11 @@ pub(crate) fn submit_envelope(
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);
-    if !matches!(outcome, ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }) {
+    if !matches!(
+        outcome,
+        ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
+            | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
+    ) {
         store.record_submission_increment(
             &replay_key,
             replay_expires_at,
@@ -148,6 +152,7 @@ pub(crate) fn persistent_entry_from_outcome(
         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => Some(queued.entry.clone()),
         ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedDeleted { .. }
+        | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
         | ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. } => None,
     }
 }
@@ -163,6 +168,7 @@ pub(crate) fn submit_response_from_outcome(
                 target_delivery_id: delivery.target_delivery_id,
                 inbox_seq: Some(delivery.inbox_seq),
                 cursor: None,
+                nack: None,
             }
         }
         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => {
@@ -175,6 +181,16 @@ pub(crate) fn submit_response_from_outcome(
                     .cursor_state(&target_delivery_id)
                     .as_ref()
                     .map(ramflux_node_core::ItestMvp0CursorResponse::from),
+                nack: None,
+            }
+        }
+        ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) => {
+            ramflux_node_core::ItestMvp0SubmitResponse {
+                outcome: "rejected_home_node_migrated".to_owned(),
+                target_delivery_id: delivery.target_delivery_id,
+                inbox_seq: None,
+                cursor: None,
+                nack: Some(delivery.nack),
             }
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { target_delivery_id } => {
@@ -183,6 +199,7 @@ pub(crate) fn submit_response_from_outcome(
                 target_delivery_id,
                 inbox_seq: None,
                 cursor: None,
+                nack: None,
             }
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedDeleted { target_delivery_id } => {
@@ -191,6 +208,7 @@ pub(crate) fn submit_response_from_outcome(
                 target_delivery_id,
                 inbox_seq: None,
                 cursor: None,
+                nack: None,
             }
         }
         ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { target_delivery_id, reason } => {
@@ -199,6 +217,7 @@ pub(crate) fn submit_response_from_outcome(
                 target_delivery_id,
                 inbox_seq: None,
                 cursor: None,
+                nack: None,
             }
         }
     }

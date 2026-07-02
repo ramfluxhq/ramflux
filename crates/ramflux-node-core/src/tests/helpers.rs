@@ -130,6 +130,48 @@ pub(super) fn registration_request(
     })
 }
 
+pub(super) fn migration_proof_for_registration(
+    request: &ItestMvp1RegisterIdentityRequest,
+    signing_nonce: u64,
+    proof_id: &str,
+    issued_at: i64,
+    effective_at: i64,
+    new_home_node: &str,
+) -> Result<HomeNodeMigrationProof, Box<dyn std::error::Error>> {
+    let device = ramflux_crypto::create_device_branch(
+        &request.proof.principal_id,
+        &request.proof.device_id,
+        request.proof.device_epoch,
+        seed_from_nonce(0x41, signing_nonce),
+    );
+    let proof = HomeNodeMigrationProof {
+        schema: ramflux_protocol::domain::HOME_NODE_MIGRATION_PROOF.to_owned(),
+        domain: ramflux_protocol::domain::HOME_NODE_MIGRATION_PROOF.to_owned(),
+        signed: SignedFields {
+            signing_key_id: String::new(),
+            signature_alg: SignatureAlg::Ed25519,
+            signature: String::new(),
+        },
+        proof_id: proof_id.to_owned(),
+        identity_commitment: request.proof.principal_id.clone(),
+        lineage_head: format!("lineage_head_{proof_id}"),
+        actor_device_id: request.proof.device_id.clone(),
+        actor_device_epoch: request.proof.device_epoch,
+        old_home_node: "node_old.example".to_owned(),
+        new_home_node: new_home_node.to_owned(),
+        new_home_node_key_hash: ramflux_protocol::encode_base64url(format!("key_{proof_id}")),
+        route_record_hash: ramflux_protocol::encode_base64url(format!("route_{proof_id}")),
+        effective_at,
+        expires_at: issued_at.saturating_add(3_600),
+        issued_at,
+        nonce: ramflux_protocol::encode_base64url(format!("nonce_{proof_id}")),
+        branch_proof_hash: ramflux_crypto::branch_proof_document_hash(&request.proof)?,
+        previous_home_node_binding_hash: None,
+        old_home_node_handoff_signature: None,
+    };
+    Ok(ramflux_crypto::sign_home_node_migration_proof(proof, &device)?)
+}
+
 pub(super) fn solved_pow(principal_id: &str, difficulty_bits: u8) -> ItestRegistrationPowProof {
     ItestRegistrationPowProof {
         nonce: ramflux_crypto::solve_registration_pow(principal_id, difficulty_bits),
@@ -239,6 +281,8 @@ pub(super) fn nack(envelope_id: &str, reason: NackReason) -> Nack {
         reason,
         received_at: 1_760_000_010,
         retry_after: Some(30),
+        proof_hash: None,
+        new_home_node_hint: None,
     }
 }
 

@@ -510,6 +510,24 @@ impl ItestMvp1IdentityRegistry {
     }
 
     #[must_use]
+    pub fn identity_keys_for_target_delivery_id(&self, target_delivery_id: &str) -> Vec<String> {
+        let Some(device) = self.devices.values().find(|device| {
+            device.target_delivery_id == target_delivery_id
+                && !self.revoked_devices.contains(&device.device_id)
+        }) else {
+            return Vec::new();
+        };
+        let mut keys = Vec::with_capacity(2);
+        if !device.principal_commitment.is_empty() {
+            keys.push(device.principal_commitment.clone());
+        }
+        if !keys.iter().any(|key| key == &device.principal_id) {
+            keys.push(device.principal_id.clone());
+        }
+        keys
+    }
+
+    #[must_use]
     pub fn device_manifest(
         &self,
         principal_commitment: &str,
