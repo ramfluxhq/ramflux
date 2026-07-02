@@ -534,7 +534,7 @@ fn register_object_relay_ttl(
     };
     let tls = mesh_tls_config(config);
     let record = ramflux_node_core::object_relay_retention_record(entry, now);
-    let request = ramflux_node_core::ItestRetentionRecordRequest { record };
+    let request = ramflux_node_core::RetentionRecordRequest { record };
     let _response: ramflux_node_core::RetentionMetadataRecord = retention_client
         .post_json(endpoint, "/retention/v1/object_relay_ttl", &tls, "ramflux-retention", &request)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;

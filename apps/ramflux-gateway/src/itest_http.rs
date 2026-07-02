@@ -341,23 +341,21 @@ pub(crate) fn handle_mvp7_itest_request(
 ) -> anyhow::Result<()> {
     match (method, path) {
         ("POST", "/mvp7/lifecycle/event") => {
-            let request: ramflux_node_core::ItestMvp7LifecycleRequest =
-                serde_json::from_slice(body)?;
-            let response: ramflux_node_core::ItestMvp7LifecycleResponse =
+            let request: ramflux_node_core::LifecycleEventRequest = serde_json::from_slice(body)?;
+            let response: ramflux_node_core::LifecycleResponse =
                 router_post_json(router, "/mvp7/lifecycle/event", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp7/lifecycle/cancel") => {
-            let request: ramflux_node_core::ItestMvp7LifecycleCancelRequest =
-                serde_json::from_slice(body)?;
-            let response: ramflux_node_core::ItestMvp7LifecycleResponse =
+            let request: ramflux_node_core::LifecycleCancelRequest = serde_json::from_slice(body)?;
+            let response: ramflux_node_core::LifecycleResponse =
                 router_post_json(router, "/mvp7/lifecycle/cancel", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp7/lifecycle/finalize") => {
-            let request: ramflux_node_core::ItestMvp7LifecycleFinalizeRequest =
+            let request: ramflux_node_core::LifecycleFinalizeRequest =
                 serde_json::from_slice(body)?;
-            let response: ramflux_node_core::ItestMvp7LifecycleResponse =
+            let response: ramflux_node_core::LifecycleResponse =
                 router_post_json(router, "/mvp7/lifecycle/finalize", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
@@ -367,7 +365,7 @@ pub(crate) fn handle_mvp7_itest_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path) if path.starts_with("/mvp7/metadata/") => {
-            let response: ramflux_node_core::ItestMvp7MetadataSummary =
+            let response: ramflux_node_core::LifecycleMetadataSummary =
                 router_get_json(router, path)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }

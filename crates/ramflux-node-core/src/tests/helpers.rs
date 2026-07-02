@@ -30,8 +30,8 @@ pub(super) fn lifecycle_request(
     lifecycle_epoch: u64,
     now: u64,
     timelock_seconds: Option<u64>,
-) -> ItestMvp7LifecycleRequest {
-    ItestMvp7LifecycleRequest {
+) -> LifecycleEventRequest {
+    LifecycleEventRequest {
         principal_id: principal_id.to_owned(),
         event_id: event_id.to_owned(),
         event_type: event_type.to_owned(),

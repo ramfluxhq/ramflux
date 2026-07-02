@@ -6,8 +6,8 @@
 use crate::{
     AccountLifecycleRecord, AccountLifecycleState, DEFAULT_DELETE_TIMELOCK_SECONDS,
     FederatedLifecycleTombstoneRequest, FederatedLifecycleTombstoneResponse,
-    IdentityLifecycleTombstone, ItestMvp7LifecycleCancelRequest, ItestMvp7LifecycleFinalizeRequest,
-    ItestMvp7LifecycleRequest, ItestMvp7LifecycleResponse, NodeCoreError, RouterCore,
+    IdentityLifecycleTombstone, LifecycleCancelRequest, LifecycleEventRequest,
+    LifecycleFinalizeRequest, LifecycleResponse, NodeCoreError, RouterCore,
     identity_deletion_proof, lifecycle_tombstone_hash, verify_lifecycle_tombstone,
     verify_recovery_quorum_proof,
 };
@@ -25,8 +25,8 @@ impl RouterCore {
     /// Returns an error when the lifecycle transition is invalid.
     pub fn mvp7_apply_lifecycle_event(
         &self,
-        request: &ItestMvp7LifecycleRequest,
-    ) -> Result<ItestMvp7LifecycleResponse, NodeCoreError> {
+        request: &LifecycleEventRequest,
+    ) -> Result<LifecycleResponse, NodeCoreError> {
         let record = match request.event_type.as_str() {
             "identity.deactivated" => AccountLifecycleRecord {
                 principal_id: request.principal_id.clone(),
@@ -98,20 +98,15 @@ impl RouterCore {
             .tombstone_hash
             .as_deref()
             .and_then(|hash| self.lifecycle_tombstone_by_hash(hash));
-        Ok(ItestMvp7LifecycleResponse {
-            record,
-            metadata_present,
-            deleted_metadata_count: 0,
-            tombstone,
-        })
+        Ok(LifecycleResponse { record, metadata_present, deleted_metadata_count: 0, tombstone })
     }
 
     /// # Errors
     /// Returns an error when there is no pending delete for the principal.
     pub fn mvp7_cancel_delete(
         &self,
-        request: &ItestMvp7LifecycleCancelRequest,
-    ) -> Result<ItestMvp7LifecycleResponse, NodeCoreError> {
+        request: &LifecycleCancelRequest,
+    ) -> Result<LifecycleResponse, NodeCoreError> {
         let existing = crate::lock_unpoisoned(&self.control)
             .lifecycle_by_principal
             .get(&request.principal_id)
@@ -139,7 +134,7 @@ impl RouterCore {
             .lifecycle_by_principal
             .insert(request.principal_id.clone(), record.clone());
         let metadata_present = self.mvp7_metadata_summary(&request.principal_id).metadata_present;
-        Ok(ItestMvp7LifecycleResponse {
+        Ok(LifecycleResponse {
             record,
             metadata_present,
             deleted_metadata_count: 0,
@@ -151,8 +146,8 @@ impl RouterCore {
     /// Returns an error when the delete timelock has not expired.
     pub fn mvp7_finalize_delete(
         &self,
-        request: &ItestMvp7LifecycleFinalizeRequest,
-    ) -> Result<ItestMvp7LifecycleResponse, NodeCoreError> {
+        request: &LifecycleFinalizeRequest,
+    ) -> Result<LifecycleResponse, NodeCoreError> {
         let existing = crate::lock_unpoisoned(&self.control)
             .lifecycle_by_principal
             .get(&request.principal_id)
@@ -224,12 +219,7 @@ impl RouterCore {
         crate::lock_unpoisoned(&self.control)
             .lifecycle_by_principal
             .insert(request.principal_id.clone(), record.clone());
-        Ok(ItestMvp7LifecycleResponse {
-            record,
-            metadata_present: false,
-            deleted_metadata_count,
-            tombstone,
-        })
+        Ok(LifecycleResponse { record, metadata_present: false, deleted_metadata_count, tombstone })
     }
 
     #[must_use]
@@ -305,7 +295,7 @@ impl RouterCore {
 
     pub(crate) fn store_lifecycle_tombstone(
         &self,
-        request: &ItestMvp7LifecycleRequest,
+        request: &LifecycleEventRequest,
     ) -> Result<String, NodeCoreError> {
         let tombstone_id = format!("{}_tombstone", request.event_id);
         let actor_public_key = {

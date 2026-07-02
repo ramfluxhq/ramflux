@@ -5,7 +5,7 @@
 
 use crate::{
     AbuseReportRecord, AbuseReportRequest, AbuseReportResponse, FrankingReportStatus,
-    ItestMvp7MetadataSummary, NodeCoreError, RetentionMetadataRecord, RouterCore,
+    LifecycleMetadataSummary, NodeCoreError, RetentionMetadataRecord, RouterCore,
     selected_evidence_hash, verify_selected_franking_evidence,
     verify_selected_franking_evidence_with_node_public_key,
 };
@@ -84,7 +84,7 @@ impl RouterCore {
     }
 
     #[must_use]
-    pub fn mvp7_metadata_summary(&self, principal_id: &str) -> ItestMvp7MetadataSummary {
+    pub fn mvp7_metadata_summary(&self, principal_id: &str) -> LifecycleMetadataSummary {
         let control = crate::lock_unpoisoned(&self.control);
         let target_delivery_id =
             control.mvp1_identities.target_delivery_id_for_principal(principal_id);

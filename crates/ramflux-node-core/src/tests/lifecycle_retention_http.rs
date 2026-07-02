@@ -37,13 +37,13 @@ fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
     assert_eq!(pending.record.state, AccountLifecycleState::DeletePending);
     assert!(
         router
-            .mvp7_finalize_delete(&ItestMvp7LifecycleFinalizeRequest {
+            .mvp7_finalize_delete(&LifecycleFinalizeRequest {
                 principal_id: "principal_delete".to_owned(),
                 now: 1_760_000_015,
             })
             .is_err()
     );
-    let finalized = router.mvp7_finalize_delete(&ItestMvp7LifecycleFinalizeRequest {
+    let finalized = router.mvp7_finalize_delete(&LifecycleFinalizeRequest {
         principal_id: "principal_delete".to_owned(),
         now: 1_760_000_021,
     })?;

@@ -93,7 +93,7 @@ fn handle_itest_request(
             )?;
         }
         ("POST", "/mvp7/retention/record") => {
-            let request: ramflux_node_core::ItestRetentionRecordRequest =
+            let request: ramflux_node_core::RetentionRecordRequest =
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
@@ -101,7 +101,7 @@ fn handle_itest_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &request.record)?;
         }
         ("POST", "/mvp7/retention/gc") => {
-            let request: ramflux_node_core::ItestRetentionGcRequest =
+            let request: ramflux_node_core::RetentionGcRequest =
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
@@ -109,7 +109,7 @@ fn handle_itest_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp7/retention/finalize_identity_delete") => {
-            let request: ramflux_node_core::ItestRetentionIdentityDeleteRequest =
+            let request: ramflux_node_core::RetentionIdentityDeleteRequest =
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
@@ -273,7 +273,7 @@ fn handle_mesh_request(
     );
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/retention/v1/object_relay_ttl") if peer_service_id == "ramflux-relay" => {
-            let request: ramflux_node_core::ItestRetentionRecordRequest =
+            let request: ramflux_node_core::RetentionRecordRequest =
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
