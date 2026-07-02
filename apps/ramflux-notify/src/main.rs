@@ -23,6 +23,7 @@ const NOTIFY_WAL_RAW_ENQUEUE_ENV: &str = "RAMFLUX_NOTIFY_WAL_RAW_ENQUEUE";
 const NOTIFY_BATCH_VERIFY_ENV: &str = "RAMFLUX_NOTIFY_BATCH_VERIFY";
 const NOTIFY_VERIFY_BATCH_MAX_ENV: &str = "RAMFLUX_NOTIFY_VERIFY_BATCH_MAX";
 const NOTIFY_VERIFY_WINDOW_US_ENV: &str = "RAMFLUX_NOTIFY_VERIFY_WINDOW_US";
+const NOTIFY_MESH_LISTEN_ADDR_ENV: &str = "RAMFLUX_NOTIFY_MESH_LISTEN_ADDR";
 const PROVIDER_PUSH_RETRY_DELAYS: [Duration; 3] =
     [Duration::from_millis(100), Duration::from_millis(200), Duration::from_millis(400)];
 
@@ -60,8 +61,11 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         if async_accept {
             start_notify_async_delivery_workers(&store)?;
         }
+        let mesh_listen_addr = notify_mesh_listen_addr();
         #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
+        if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1")
+            || mesh_listen_addr.is_some()
+        {
             let store_gate = Arc::new(Mutex::new(()));
             let runtime = Arc::new(NotifyRuntime::from_env(&store, &store_gate)?);
             let wake_auth = NotifyWakeAuth::from_config(&config)?;
@@ -74,7 +78,20 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
                 wake_auth,
                 wake_verify_batcher,
             });
+            if let Some(listen_addr) = mesh_listen_addr {
+                serve_notify_mesh_quic(&listen_addr, &ingress, &notify_mesh_tls_config(&config))?;
+            }
+            if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() != Some("1") {
+                std::thread::park();
+                return Ok(());
+            }
             return serve_itest_http(&ingress);
+        }
+        #[cfg(not(feature = "itest-http"))]
+        if mesh_listen_addr.is_some() {
+            return Err(ramflux_node_core::NodeCoreError::ItestHttp(
+                "notify mesh ingress requires the itest-http feature".to_owned(),
+            ));
         }
         std::thread::park();
         return Ok(());
@@ -334,6 +351,14 @@ fn itest_error_status(error: &ramflux_node_core::NodeCoreError) -> &'static str 
 }
 
 #[cfg(feature = "itest-http")]
+fn notify_mesh_error_status(error: &ramflux_node_core::NodeCoreError) -> u16 {
+    match error {
+        ramflux_node_core::NodeCoreError::Unauthorized(_message) => 401,
+        _ => 500,
+    }
+}
+
+#[cfg(feature = "itest-http")]
 fn serve_itest_http(
     ingress: &Arc<NotifyIngressState>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
@@ -368,6 +393,150 @@ fn serve_itest_http(
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn serve_notify_mesh_quic(
+    listen_addr: &str,
+    ingress: &Arc<NotifyIngressState>,
+    tls: &ramflux_transport::MeshTlsConfig,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let listen_addr = listen_addr.to_owned();
+    let ingress = Arc::clone(ingress);
+    let tls = tls.clone();
+    std::thread::Builder::new()
+        .name("ramflux-notify-mesh-quic".to_owned())
+        .spawn(move || {
+            if let Err(error) = run_notify_mesh_quic_listener(&listen_addr, ingress, &tls) {
+                tracing::error!(%error, "notify mesh QUIC listener stopped");
+            }
+        })
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn run_notify_mesh_quic_listener(
+    listen_addr: &str,
+    ingress: Arc<NotifyIngressState>,
+    tls: &ramflux_transport::MeshTlsConfig,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    runtime.block_on(async move {
+        let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+        let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+            listen_addr,
+            tls,
+            root_pems_provider,
+        )
+        .map_err(|error| notify_mesh_transport_error(&error))?;
+        let local_addr =
+            server.local_addr().map_err(|error| notify_mesh_transport_error(&error))?;
+        tracing::info!(addr = %local_addr, "notify mesh QUIC surface listening");
+        loop {
+            let connection = match server.accept_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(%error, "notify mesh QUIC connection rejected");
+                    continue;
+                }
+            };
+            let connection_ingress = Arc::clone(&ingress);
+            tokio::spawn(async move {
+                if let Err(error) =
+                    notify_mesh_quic_connection_loop(connection, connection_ingress).await
+                {
+                    tracing::debug!(%error, "notify mesh QUIC connection ended");
+                }
+            });
+        }
+    })
+}
+
+#[cfg(feature = "itest-http")]
+async fn notify_mesh_quic_connection_loop(
+    connection: ramflux_transport::MeshQuicConnection,
+    ingress: Arc<NotifyIngressState>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    loop {
+        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
+            &connection,
+        )
+        .await
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::debug!(%error, "notify mesh QUIC stream loop ended");
+                return Ok(());
+            }
+        };
+        let request_ingress = Arc::clone(&ingress);
+        tokio::spawn(async move {
+            if let Err(error) =
+                handle_notify_mesh_quic_accepted_request(accepted, request_ingress).await
+            {
+                tracing::warn!(%error, "notify mesh QUIC request failed");
+            }
+        });
+    }
+}
+
+#[cfg(feature = "itest-http")]
+async fn handle_notify_mesh_quic_accepted_request(
+    accepted: ramflux_transport::MeshQuicAcceptedRequest,
+    ingress: Arc<NotifyIngressState>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    match handle_notify_mesh_quic_request(&accepted.request, &ingress) {
+        Ok(response) => accepted
+            .write_json_response(response.status, &response.body)
+            .await
+            .map_err(|error| notify_mesh_transport_error(&error)),
+        Err(error) => accepted
+            .write_text_response(notify_mesh_error_status(&error), &error.to_string())
+            .await
+            .map_err(|error| notify_mesh_transport_error(&error)),
+    }
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_notify_mesh_quic_request(
+    request: &ramflux_transport::GatewayQuicRequest,
+    ingress: &NotifyIngressState,
+) -> Result<ramflux_transport::GatewayQuicResponse, ramflux_node_core::NodeCoreError> {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/s13/notify/wake") => {
+            let body: S13WakeRequest =
+                serde_json::from_value(request.body.clone()).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            ingress.wake_auth.verify(&body.wake)?;
+            let response = if ingress.async_accept {
+                handle_s13_wake_async_accept(&ingress.store, &body)?
+            } else {
+                handle_s13_wake_value(&ingress.store, &ingress.store_gate, &ingress.runtime, &body)?
+            };
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(response).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
+        _ => Ok(ramflux_transport::GatewayQuicResponse {
+            status: 404,
+            body: serde_json::json!({ "error": "not found" }),
+        }),
+    }
+}
+
+#[cfg(feature = "itest-http")]
+fn notify_mesh_transport_error(
+    error: &ramflux_transport::TransportError,
+) -> ramflux_node_core::NodeCoreError {
+    ramflux_node_core::NodeCoreError::ItestHttp(error.to_string())
 }
 
 #[cfg(feature = "itest-http")]
@@ -1866,6 +2035,23 @@ fn notify_default_enabled_env(name: &str) -> bool {
     })
 }
 
+fn notify_mesh_listen_addr() -> Option<String> {
+    std::env::var(NOTIFY_MESH_LISTEN_ADDR_ENV).ok().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
+}
+
+fn notify_mesh_tls_config(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> ramflux_transport::MeshTlsConfig {
+    ramflux_transport::MeshTlsConfig {
+        ca_cert: config.mesh.ca_cert.clone().into(),
+        service_cert: config.mesh.service_cert.clone().into(),
+        service_key: config.mesh.service_key.clone().into(),
+    }
+}
+
 fn start_notify_async_delivery_workers(
     store: &Arc<ramflux_node_core::NotifyRedbStore>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
@@ -2985,6 +3171,8 @@ mod tests {
     #[cfg(feature = "itest-http")]
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, mpsc};
+    #[cfg(feature = "itest-http")]
+    use std::{path::Path, process::Command};
 
     const TEST_EC_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgwyBphzPT6zP0T3HT\nmUd3y/OXm9uWxWxy8nbR0YWA22ShRANCAAQAIpCYq6Tsdeuzzy1sjb/0VLEcd1+r\nQs8681WYx7uSG+akC/YXdlGjSeyiRGjZYJ1KHqoa2d4mAQwi9XAZuDT5\n-----END PRIVATE KEY-----\n";
 
@@ -3072,6 +3260,119 @@ mod tests {
                 .unwrap_or_default()
                 .contains("target:")
         );
+    }
+
+    #[cfg(feature = "itest-http")]
+    #[test]
+    fn notify_mesh_quic_accepts_s13_wake() -> Result<(), Box<dyn std::error::Error>> {
+        let root = notify_mesh_test_cert_root("notify_mesh_quic_accepts_s13_wake")?;
+        let gateway = issue_notify_mesh_test_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let notify = issue_notify_mesh_test_cert(&root, "node-mesh-a", "ramflux-notify")?;
+        let store_path = root.join("notify.redb");
+        let store = Arc::new(ramflux_node_core::NotifyRedbStore::open(&store_path)?);
+        let store_gate = Arc::new(Mutex::new(()));
+        let signing_key =
+            ramflux_node_core::NodeServiceSigningKey::from_seed(bench_node_service_signing_seed());
+        let wake_auth = NotifyWakeAuth { require: true, key: Some(signing_key.clone()) };
+        let ingress = Arc::new(NotifyIngressState {
+            store: Arc::clone(&store),
+            runtime: Arc::new(NotifyRuntime::Current),
+            store_gate,
+            async_accept: false,
+            wake_auth,
+            wake_verify_batcher: None,
+        });
+        let endpoint = spawn_notify_mesh_test_listener(
+            notify.tls.clone(),
+            gateway.ca_pem.clone(),
+            Arc::clone(&ingress),
+        )?;
+        let mut wake = test_signed_wake(7);
+        wake.wake_id = "wake_mesh_s13".to_owned();
+        wake.push_alias = "device_mesh_s13".to_owned();
+        wake.collapse_key = Some("target:device_mesh_s13:content".to_owned());
+        signing_key.sign_notification_wake(&mut wake)?;
+        let response: serde_json::Value = ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
+            &endpoint,
+            "/s13/notify/wake",
+            &gateway.tls,
+            "ramflux-notify",
+            std::slice::from_ref(&notify.ca_pem),
+            &serde_json::json!({
+                "device_delivery_id": "device_mesh_s13",
+                "wake": wake,
+                "queued_at": 1_760_000_123_u64,
+                "dnd_active": false
+            }),
+        )?;
+        assert_eq!(response["entry"]["queue_id"], "wake_mesh_s13");
+        assert_eq!(response["entry"]["device_delivery_id"], "device_mesh_s13");
+        assert!(response["attempts"].as_array().is_some_and(Vec::is_empty));
+        let state = store.load_state()?.ok_or("missing notify state")?;
+        let entry = state.entry("wake_mesh_s13").ok_or("missing mesh wake entry")?;
+        assert_eq!(entry.device_delivery_id, "device_mesh_s13");
+        assert_eq!(entry.queued_at, 1_760_000_123);
+        drop(ingress);
+        drop(store);
+        std::fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "itest-http")]
+    fn spawn_notify_mesh_test_listener(
+        server_tls: ramflux_transport::MeshTlsConfig,
+        trusted_gateway_ca: String,
+        ingress: Arc<NotifyIngressState>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
+        let _server_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|source| source.to_string());
+            let Ok(runtime) = runtime else {
+                let _ = endpoint_tx.send(runtime.map(|_| String::new()));
+                return;
+            };
+            let result: Result<(), String> = runtime.block_on(async move {
+                let roots = Arc::new(move || Ok(vec![trusted_gateway_ca.clone()]));
+                let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+                    "127.0.0.1:0",
+                    &server_tls,
+                    roots,
+                )
+                .map_err(|source| source.to_string())?;
+                endpoint_tx
+                    .send(
+                        server
+                            .local_addr()
+                            .map(|addr| addr.to_string())
+                            .map_err(|source| source.to_string()),
+                    )
+                    .map_err(|source| source.to_string())?;
+                loop {
+                    let connection = match server.accept_connection().await {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            tracing::debug!(%error, "notify mesh test listener accept ended");
+                            continue;
+                        }
+                    };
+                    let request_ingress = Arc::clone(&ingress);
+                    tokio::spawn(async move {
+                        if let Err(error) =
+                            notify_mesh_quic_connection_loop(connection, request_ingress).await
+                        {
+                            tracing::debug!(%error, "notify mesh test connection ended");
+                        }
+                    });
+                }
+            });
+            if let Err(error) = result {
+                tracing::debug!(%error, "notify mesh test listener stopped");
+            }
+        });
+        endpoint_rx.recv().map_err(|source| test_error(source.to_string()))?.map_err(test_error)
     }
 
     #[ignore = "microbenchmark; set RAMFLUX_NOTIFY_WAL=1 and run explicitly with --ignored --nocapture"]
@@ -3214,6 +3515,126 @@ mod tests {
             std::process::id(),
             ramflux_node_core::now_unix_seconds()
         ))
+    }
+
+    #[cfg(feature = "itest-http")]
+    struct NotifyMeshTestCert {
+        tls: ramflux_transport::MeshTlsConfig,
+        ca_pem: String,
+    }
+
+    #[cfg(feature = "itest-http")]
+    fn notify_mesh_test_cert_root(
+        name: &str,
+    ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ramflux_notify_{name}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::create_dir_all(&root)?;
+        Ok(root)
+    }
+
+    #[cfg(feature = "itest-http")]
+    fn issue_notify_mesh_test_cert(
+        root: &Path,
+        node_id: &str,
+        service_id: &str,
+    ) -> Result<NotifyMeshTestCert, Box<dyn std::error::Error>> {
+        let dir = root.join(service_id);
+        std::fs::create_dir_all(&dir)?;
+        let ca_key = dir.join("ca-key.pem");
+        let ca_cert = dir.join("ca.pem");
+        let service_key = dir.join(format!("{service_id}-key.pem"));
+        let service_csr = dir.join(format!("{service_id}.csr"));
+        let service_cert = dir.join(format!("{service_id}.pem"));
+        let ext = dir.join(format!("{service_id}.ext"));
+        run_notify_mesh_openssl(&["genpkey", "-algorithm", "ED25519", "-out", path_str(&ca_key)?])?;
+        run_notify_mesh_openssl(&[
+            "req",
+            "-x509",
+            "-new",
+            "-key",
+            path_str(&ca_key)?,
+            "-out",
+            path_str(&ca_cert)?,
+            "-days",
+            "30",
+            "-subj",
+            "/CN=Ramflux Notify Mesh Test CA",
+        ])?;
+        run_notify_mesh_openssl(&[
+            "genpkey",
+            "-algorithm",
+            "ED25519",
+            "-out",
+            path_str(&service_key)?,
+        ])?;
+        run_notify_mesh_openssl(&[
+            "req",
+            "-new",
+            "-key",
+            path_str(&service_key)?,
+            "-out",
+            path_str(&service_csr)?,
+            "-subj",
+            &format!("/CN={service_id}"),
+        ])?;
+        std::fs::write(
+            &ext,
+            format!(
+                "subjectAltName = DNS:{service_id}, DNS:localhost, URI:spiffe://{node_id}/{service_id}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
+            ),
+        )?;
+        run_notify_mesh_openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            path_str(&service_csr)?,
+            "-CA",
+            path_str(&ca_cert)?,
+            "-CAkey",
+            path_str(&ca_key)?,
+            "-CAcreateserial",
+            "-out",
+            path_str(&service_cert)?,
+            "-days",
+            "30",
+            "-extfile",
+            path_str(&ext)?,
+        ])?;
+        Ok(NotifyMeshTestCert {
+            tls: ramflux_transport::MeshTlsConfig {
+                ca_cert: ca_cert.clone(),
+                service_cert,
+                service_key,
+            },
+            ca_pem: std::fs::read_to_string(ca_cert)?,
+        })
+    }
+
+    #[cfg(feature = "itest-http")]
+    fn run_notify_mesh_openssl(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+        let status = Command::new("openssl").args(args).status()?;
+        if !status.success() {
+            return Err(format!("openssl failed with status {status}: {}", args.join(" ")).into());
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "itest-http")]
+    fn path_str(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
+        path.to_str().ok_or_else(|| format!("non-UTF-8 path {}", path.display()).into())
+    }
+
+    #[cfg(feature = "itest-http")]
+    fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
+        Box::new(std::io::Error::other(message.into()))
     }
 
     fn bench_usize_env(name: &str, default: usize) -> usize {
