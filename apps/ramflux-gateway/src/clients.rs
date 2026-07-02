@@ -159,6 +159,13 @@ pub(crate) fn router_inbox(
     )
 }
 
+pub(crate) fn router_session(
+    router: &RouterMeshClient,
+    target_delivery_id: &str,
+) -> Result<Option<ramflux_node_core::SessionDescriptor>, ramflux_transport::TransportError> {
+    router_get_json(router, &format!("/s1/session/{target_delivery_id}"))
+}
+
 pub(crate) fn notify_offline_wake(
     notify: &NotifyHttpClient,
     target_delivery_id: &str,

@@ -22,13 +22,12 @@ pub(crate) fn handle_itest_request(
         return Ok(());
     };
     log_router_itest_request(&request);
-    if handle_healthz_request(stream, &request)? {
+    if handle_healthz_request(stream, &request)? || handle_perf_metrics_request(stream, &request)? {
         return Ok(());
     }
-    if handle_perf_metrics_request(stream, &request)? {
-        return Ok(());
-    }
-    if handle_itest_mvp0_request(stream, &request, router)? {
+    if handle_itest_mvp0_request(stream, &request, router)?
+        || handle_itest_s1_request(stream, &request, router)?
+    {
         return Ok(());
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -118,6 +117,22 @@ pub(crate) fn handle_itest_request(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_itest_s1_request(
+    stream: &mut TcpStream,
+    request: &ramflux_node_core::ItestHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<bool> {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", path) if path.starts_with("/s1/session/") => {
+            let response = handle_s1_session_get(path, router.state());
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 #[cfg(feature = "itest-http")]
@@ -312,6 +327,10 @@ fn handle_mesh_fast_path_value(
                 session_id = %response.session_id,
                 "router mesh session upsert returned"
             );
+            Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
+        }
+        ("GET", path) if path.starts_with("/s1/session/") => {
+            let response = handle_s1_session_get(path, router.state());
             Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
         }
         ("GET", "/healthz") => Ok(MeshResponse::json(
@@ -543,6 +562,14 @@ fn handle_s1_session_upsert(
         .ok_or_else(|| anyhow::anyhow!("session missing after upsert"))?;
     store.record_session_entry(&session)?;
     Ok(descriptor)
+}
+
+fn handle_s1_session_get(
+    path: &str,
+    state: &ramflux_node_core::RouterCore,
+) -> Option<ramflux_node_core::SessionDescriptor> {
+    let target_delivery_id = path.trim_start_matches("/s1/session/");
+    state.session(target_delivery_id)
 }
 
 fn handle_mvp1_identity_register(
