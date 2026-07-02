@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
@@ -25,6 +26,7 @@ pub(crate) async fn handle_gateway_quic_connection(
                 let state = Arc::clone(&listener.state);
                 let store = Arc::clone(&listener.store);
                 let context = GatewayQuicContext {
+                    node_id: listener.node_id.clone(),
                     gateway_id: listener.gateway_id.clone(),
                     peers: listener.peers.clone(),
                     router,
@@ -446,15 +448,25 @@ pub(crate) async fn handle_gateway_submit(
         write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;
         return Ok(());
     }
+    let mut envelope = submit.envelope.clone();
+    let accepted_at_unix_ms = now_unix_millis();
+    if let Err(error) = attach_franking_node_tag(
+        &mut envelope,
+        &context.node_id,
+        &context.notify.signer,
+        accepted_at_unix_ms,
+    ) {
+        tracing::warn!(%error, envelope_id = %envelope.envelope_id, "gateway franking tag not attached");
+    }
     capture_itest_gateway_json(
         "submit",
         &serde_json::json!({
             "path": "/gateway/session/submit",
-            "envelope": &submit.envelope,
+            "envelope": &envelope,
         }),
     );
     let response: ramflux_node_core::EnvelopeSubmitResponse =
-        router_post_json(&context.router, "/mvp0/envelope", &submit.envelope)?;
+        router_post_json(&context.router, "/mvp0/envelope", &envelope)?;
     if response.outcome.starts_with("rejected_") {
         write_gateway_handle(
             send,
@@ -482,19 +494,75 @@ pub(crate) async fn handle_gateway_submit(
     );
     write_gateway_handle(send, &frame).await?;
     if response.outcome == "offline_queued" {
-        dispatch_offline_wake(send, context, &response.target_delivery_id, &submit.envelope)
-            .await?;
+        dispatch_offline_wake(send, context, &response.target_delivery_id, &envelope).await?;
     }
     if response.outcome == "online" && response.target_delivery_id != runtime.target_delivery_id {
         let local_delivered = context.hub.send_to(&response.target_delivery_id, &frame).await?;
         if !local_delivered
             && !forward_deliver_on_local_miss(context, &response.target_delivery_id, &frame).await?
         {
-            dispatch_offline_wake(send, context, &response.target_delivery_id, &submit.envelope)
-                .await?;
+            dispatch_offline_wake(send, context, &response.target_delivery_id, &envelope).await?;
         }
     }
     Ok(())
+}
+
+fn attach_franking_node_tag(
+    envelope: &mut ramflux_protocol::Envelope,
+    node_id: &str,
+    signer: &ramflux_node_core::NodeServiceSigningKey,
+    accepted_at_unix_ms: u64,
+) -> anyhow::Result<bool> {
+    let Some(franking) = envelope.ext.ext.get_mut("franking") else {
+        return Ok(false);
+    };
+    let Some(franking) = franking.as_object_mut() else {
+        anyhow::bail!("envelope franking ext must be a JSON object");
+    };
+    let sender_device_id_hash = required_franking_string(franking, "sender_device_id_hash")
+        .and_then(|value| {
+            let decoded = ramflux_protocol::decode_base64url(&value)?;
+            if decoded.len() != 32 {
+                anyhow::bail!("franking sender_device_id_hash must be 32 bytes");
+            }
+            Ok(decoded)
+        })?;
+    let message_event_id = required_franking_string(franking, "message_event_id")?;
+    let commitment = required_franking_string(franking, "commitment")?;
+    let ciphertext_hash = required_franking_string(franking, "ciphertext_hash")?;
+    let franking_tag = signer.sign_franking_node_tag(ramflux_node_core::NodeFrankingTagInput {
+        node_id,
+        envelope_id: &envelope.envelope_id,
+        message_event_id: &message_event_id,
+        sender_device_id_hash: &sender_device_id_hash,
+        commitment: &commitment,
+        ciphertext_hash: &ciphertext_hash,
+        accepted_at_unix_ms,
+    });
+    franking.insert("franking_tag".to_owned(), serde_json::Value::String(franking_tag));
+    franking.insert("node_id".to_owned(), serde_json::Value::String(node_id.to_owned()));
+    franking.insert(
+        "accepted_at".to_owned(),
+        serde_json::Value::Number(serde_json::Number::from(accepted_at_unix_ms)),
+    );
+    Ok(true)
+}
+
+fn required_franking_string(
+    franking: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> anyhow::Result<String> {
+    franking
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("franking metadata missing string field {field}"))
+}
+
+fn now_unix_millis() -> u64 {
+    let millis =
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_millis());
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 async fn dispatch_offline_wake(
@@ -795,7 +863,7 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
 
 #[cfg(test)]
 mod tests {
-    use super::fresh_gateway_session_id;
+    use super::{attach_franking_node_tag, fresh_gateway_session_id};
 
     #[test]
     fn fresh_gateway_session_id_has_session_level_entropy() -> anyhow::Result<()> {
@@ -807,5 +875,102 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.rsplit_once('_').is_some_and(|(_prefix, nonce)| !nonce.is_empty()));
         Ok(())
+    }
+
+    #[test]
+    fn gateway_accept_attaches_verifiable_franking_node_tag() -> anyhow::Result<()> {
+        let signer = ramflux_node_core::NodeServiceSigningKey::from_seed([0x51; 32]);
+        let sender_device_id_hash = [0x61; 32];
+        let accepted_at_unix_ms = 1_760_001_234_567;
+        let mut envelope = test_envelope_with_franking(sender_device_id_hash);
+
+        assert!(attach_franking_node_tag(
+            &mut envelope,
+            "localhost",
+            &signer,
+            accepted_at_unix_ms,
+        )?);
+
+        let franking = envelope
+            .ext
+            .ext
+            .get("franking")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| anyhow::anyhow!("missing franking object"))?;
+        let franking_tag = franking
+            .get("franking_tag")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing franking_tag"))?;
+        assert_eq!(franking.get("node_id").and_then(serde_json::Value::as_str), Some("localhost"));
+        assert_eq!(
+            franking.get("accepted_at").and_then(serde_json::Value::as_u64),
+            Some(accepted_at_unix_ms)
+        );
+        let preimage = ramflux_crypto::franking_node_tag_preimage(
+            "localhost",
+            &envelope.envelope_id,
+            "msg-event-franking",
+            &sender_device_id_hash,
+            "commitment-franking",
+            "ciphertext-hash-franking",
+            accepted_at_unix_ms,
+        );
+        let verifying_key =
+            ramflux_crypto::verifying_key_from_base64url(signer.public_key_base64url())?;
+        ramflux_crypto::verify_franking_node_tag(&preimage, franking_tag, &verifying_key)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_accept_leaves_non_franking_envelope_unchanged() -> anyhow::Result<()> {
+        let signer = ramflux_node_core::NodeServiceSigningKey::from_seed([0x51; 32]);
+        let mut envelope = test_envelope();
+
+        assert!(!attach_franking_node_tag(&mut envelope, "localhost", &signer, 1)?);
+
+        assert!(envelope.ext.ext.is_empty());
+        Ok(())
+    }
+
+    fn test_envelope_with_franking(sender_device_id_hash: [u8; 32]) -> ramflux_protocol::Envelope {
+        let mut envelope = test_envelope();
+        envelope.ext.ext.insert(
+            "franking".to_owned(),
+            serde_json::json!({
+                "sender_device_id_hash": ramflux_protocol::encode_base64url(sender_device_id_hash),
+                "message_event_id": "msg-event-franking",
+                "commitment": "commitment-franking",
+                "ciphertext_hash": "ciphertext-hash-franking",
+                "franking_tag": "client-forged-tag",
+                "node_id": "client-forged-node",
+                "accepted_at": 42_u64,
+            }),
+        );
+        envelope
+    }
+
+    fn test_envelope() -> ramflux_protocol::Envelope {
+        ramflux_protocol::Envelope {
+            schema: "ramflux.envelope.v1".to_owned(),
+            version: 1,
+            domain: "ramflux.envelope.v1".to_owned(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: "test".to_owned(),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: "test-signature".to_owned(),
+            },
+            envelope_id: "env-franking-accept".to_owned(),
+            source_principal_id: "principal-alice".to_owned(),
+            source_device_id: "alice-device".to_owned(),
+            target_delivery_id: "target-bob".to_owned(),
+            routing_set_id: None,
+            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            priority: ramflux_protocol::Priority::Normal,
+            ttl: 3_600,
+            created_at: 1_760_000_000,
+            encrypted_payload: "payload".to_owned(),
+            payload_hash: "payload-hash".to_owned(),
+        }
     }
 }

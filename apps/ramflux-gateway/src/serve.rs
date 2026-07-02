@@ -15,6 +15,7 @@ const GATEWAY_QUIC_RUNTIME_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RUNTIME";
 
 #[derive(Clone)]
 pub(crate) struct GatewayListenerContext {
+    pub(crate) node_id: String,
     pub(crate) gateway_id: String,
     pub(crate) peers: GatewayPeerDirectory,
     pub(crate) router: RouterMeshClient,
@@ -45,6 +46,7 @@ pub(crate) fn serve_gateway_quic(
     let gateway_id = gateway_instance_id_from_env();
     let peers = gateway_peer_directory_from_env(config, &gateway_id)?;
     let context = GatewayListenerContext {
+        node_id: config.node_id.clone(),
         gateway_id,
         peers,
         router,
@@ -221,6 +223,7 @@ async fn run_gateway_tcp_tls(
                 }
             };
             let context = crate::GatewayQuicContext {
+                node_id: context.node_id,
                 gateway_id: context.gateway_id,
                 peers: context.peers,
                 router: context.router,

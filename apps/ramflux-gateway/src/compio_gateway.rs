@@ -202,6 +202,7 @@ fn spawn_gateway_session_worker(
             }
         };
         let context = GatewayQuicContext {
+            node_id: context.node_id,
             gateway_id: context.gateway_id,
             peers: context.peers,
             router: context.router,

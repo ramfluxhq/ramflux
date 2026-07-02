@@ -38,6 +38,7 @@ pub(crate) struct NotifyMeshClient {
 
 #[derive(Clone)]
 pub(crate) struct GatewayQuicContext {
+    pub(crate) node_id: String,
     pub(crate) gateway_id: String,
     pub(crate) peers: GatewayPeerDirectory,
     pub(crate) router: RouterMeshClient,
