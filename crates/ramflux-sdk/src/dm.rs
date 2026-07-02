@@ -13,6 +13,28 @@ pub(crate) struct SdkDmEncryptedEnvelope {
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct SdkDmFrankingMetadata {
+    pub(crate) sender_device_id_hash: String,
+    pub(crate) message_event_id: String,
+    pub(crate) commitment: String,
+    pub(crate) ciphertext_hash: String,
+}
+
+impl SdkDmFrankingMetadata {
+    #[must_use]
+    pub(crate) fn from_ciphertext(ciphertext: &ramflux_crypto::DmCiphertext) -> Self {
+        Self {
+            sender_device_id_hash: ramflux_protocol::encode_base64url(
+                ciphertext.sender_device_id_hash,
+            ),
+            message_event_id: ciphertext.message_event_id.clone(),
+            commitment: ciphertext.commitment.clone(),
+            ciphertext_hash: ciphertext.ciphertext_hash.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkDmAttachmentEnvelope {
     pub(crate) schema: String,
@@ -89,6 +111,7 @@ pub(crate) enum SdkReceiptEventBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn receipt_event_body_uses_explicit_private_read_variant() -> Result<(), serde_json::Error> {
@@ -121,6 +144,81 @@ mod tests {
                 && reader_identity == "reader_device"
         ));
         Ok(())
+    }
+
+    #[test]
+    fn gateway_dm_envelope_surfaces_franking_metadata_from_ciphertext() -> Result<(), SdkError> {
+        let mut session =
+            ramflux_crypto::DmSession::initiator([7_u8; 32], [1_u8; 32], [2_u8; 32], [3_u8; 32])?;
+        let ciphertext = session.encrypt(b"hello dm", dm_associated_data("conv_franking"))?;
+        let encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+            schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
+            version: 1,
+            x3dh: None,
+            ciphertext: ciphertext.clone(),
+        })?;
+        let franking = SdkDmFrankingMetadata::from_ciphertext(&ciphertext);
+        let envelope = gateway_direct_message_envelope(
+            &test_gateway_config(),
+            &test_message(encrypted_body),
+            Some(&franking),
+        )?;
+        let Some(franking_value) = envelope.ext.ext.get("franking") else {
+            return Err(SdkError::LocalBus("franking metadata missing from envelope".to_owned()));
+        };
+        assert_eq!(
+            franking_value["sender_device_id_hash"],
+            ramflux_protocol::encode_base64url(ciphertext.sender_device_id_hash)
+        );
+        assert_eq!(franking_value["message_event_id"], ciphertext.message_event_id);
+        assert_eq!(franking_value["commitment"], ciphertext.commitment);
+        assert_eq!(franking_value["ciphertext_hash"], ciphertext.ciphertext_hash);
+        assert!(!envelope.signed.signature.is_empty());
+
+        let serialized = serde_json::to_value(&envelope)?;
+        assert_eq!(serialized["ext"]["franking"], *franking_value);
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_dm_envelope_omits_franking_metadata_when_not_supplied() -> Result<(), SdkError> {
+        let envelope = gateway_direct_message_envelope(
+            &test_gateway_config(),
+            &test_message(b"already-encrypted".to_vec()),
+            None,
+        )?;
+        assert!(envelope.ext.ext.is_empty());
+        let serialized = serde_json::to_value(&envelope)?;
+        assert!(serialized.get("ext").is_none());
+        Ok(())
+    }
+
+    fn test_gateway_config() -> GatewaySessionConfig {
+        GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+            bind_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            gateway_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 443)),
+            server_name: "gateway.test".to_owned(),
+            ca_cert: PathBuf::from("ca.pem"),
+            principal_id: "principal_alice".to_owned(),
+            device_id: "alice_device".to_owned(),
+            target_delivery_id: "target_alice".to_owned(),
+            prekey_http_url: None,
+        })
+    }
+
+    fn test_message(encrypted_body: Vec<u8>) -> GatewayDirectMessage {
+        GatewayDirectMessage {
+            conversation_id: "conv_franking".to_owned(),
+            message_id: "msg_franking".to_owned(),
+            envelope_id: "env_franking".to_owned(),
+            source_principal_id: "principal_alice".to_owned(),
+            sender_id: "alice_device".to_owned(),
+            recipient_device_id: Some("bob_device".to_owned()),
+            target_delivery_id: "target_bob".to_owned(),
+            encrypted_body,
+            created_at: 1_900_000_000,
+            ttl: 3_600,
+        }
     }
 }
 
@@ -212,6 +310,7 @@ pub(crate) fn gateway_ack(
 pub(crate) fn gateway_direct_message_envelope(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
+    franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
     let encrypted_payload = ramflux_protocol::encode_base64url(&message.encrypted_body);
     let payload_hash = ramflux_crypto::blake3_256_base64url(
@@ -236,6 +335,9 @@ pub(crate) fn gateway_direct_message_envelope(
         encrypted_payload,
         payload_hash,
     };
+    if let Some(franking) = franking {
+        envelope.ext.ext.insert("franking".to_owned(), serde_json::to_value(franking)?);
+    }
     envelope.signed.signature = ramflux_crypto::sign_protocol_object(&envelope)?;
     Ok(envelope)
 }

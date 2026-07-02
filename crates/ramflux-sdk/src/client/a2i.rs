@@ -34,8 +34,12 @@ impl RamfluxClient {
             created_at: event.created_at,
             ttl: 3_600,
         };
-        self.send_plaintext_direct_message_via_gateway(engine, message, &serde_json::to_vec(event)?)
-            .await
+        self.send_plaintext_direct_message_without_franking(
+            engine,
+            message,
+            &serde_json::to_vec(event)?,
+        )
+        .await
     }
 
     /// # Errors

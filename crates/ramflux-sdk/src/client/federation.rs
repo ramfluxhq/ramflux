@@ -9,9 +9,34 @@ impl RamfluxClient {
     pub fn send_plaintext_federated_direct_message(
         &self,
         engine: &GatewaySessionEngine,
+        message: GatewayDirectMessage,
+        plaintext: &[u8],
+        federation: &LocalBusFederationRoute,
+    ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
+        self.send_plaintext_federated_direct_message_inner(
+            engine, message, plaintext, federation, true,
+        )
+    }
+
+    pub(crate) fn send_plaintext_federated_direct_message_without_franking(
+        &self,
+        engine: &GatewaySessionEngine,
+        message: GatewayDirectMessage,
+        plaintext: &[u8],
+        federation: &LocalBusFederationRoute,
+    ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
+        self.send_plaintext_federated_direct_message_inner(
+            engine, message, plaintext, federation, false,
+        )
+    }
+
+    fn send_plaintext_federated_direct_message_inner(
+        &self,
+        engine: &GatewaySessionEngine,
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
         federation: &LocalBusFederationRoute,
+        include_franking_ext: bool,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         let conversation_id = message.conversation_id.clone();
         let prekey_url =
@@ -22,6 +47,8 @@ impl RamfluxClient {
             &engine.config.device_id,
         )?;
         let ciphertext = session.encrypt(plaintext, dm_associated_data(&conversation_id))?;
+        let franking =
+            include_franking_ext.then(|| SdkDmFrankingMetadata::from_ciphertext(&ciphertext));
         message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
             schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
             version: 1,
@@ -34,7 +61,8 @@ impl RamfluxClient {
             &message.sender_id,
             &message.encrypted_body,
         )?;
-        let envelope = gateway_direct_message_envelope(&engine.config, &message)?;
+        let envelope =
+            gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
         tracing::info!(
             source_node_id = %federation.source_node_id,
             target_node_id = %federation.target_node_id,
@@ -57,7 +85,7 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         federation: &LocalBusFederationRoute,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let envelope = gateway_direct_message_envelope(&engine.config, message)?;
+        let envelope = gateway_direct_message_envelope(&engine.config, message, None)?;
         tracing::info!(
             source_node_id = %federation.source_node_id,
             target_node_id = %federation.target_node_id,
@@ -84,7 +112,7 @@ impl RamfluxClient {
             "requester": request.requester_id,
             "target": request.target_id,
         }))?;
-        self.send_plaintext_federated_direct_message(
+        self.send_plaintext_federated_direct_message_without_franking(
             engine,
             GatewayDirectMessage {
                 conversation_id: request.conversation_id.clone(),
