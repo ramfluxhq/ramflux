@@ -64,3 +64,27 @@ pub(crate) fn object_share_grant_from_row(
         revoked_at: row.get(6)?,
     })
 }
+
+pub(crate) fn guardian_recovery_share_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<GuardianRecoveryShareRecord> {
+    Ok(GuardianRecoveryShareRecord {
+        owner_principal_id: row.get(0)?,
+        guardian_principal_id: row.get(1)?,
+        recovery_quorum_id: row.get(2)?,
+        share_id: row.get(3)?,
+        threshold: row.get(4)?,
+        total: row.get(5)?,
+        member_kind: row.get(6)?,
+        share_value: row.get(7)?,
+        inviter_device_id: row.get(8)?,
+        inviter_device_public_key_base64url: row.get(9)?,
+        invite_id: row.get(10)?,
+        accepted_at: row.get(11)?,
+        accepted_by_device_id: row.get(12)?,
+        accept_signature: row.get(13)?,
+        state: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
+    })
+}

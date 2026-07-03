@@ -11,6 +11,7 @@ pub mod identity;
 pub mod mcp;
 pub mod message;
 pub mod object;
+pub mod recovery;
 
 pub use account::*;
 pub use bot::*;
@@ -22,3 +23,4 @@ pub use identity::*;
 pub use mcp::*;
 pub use message::*;
 pub use object::*;
+pub use recovery::*;
