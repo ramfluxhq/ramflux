@@ -182,7 +182,9 @@ pub(crate) async fn handle_gateway_session_transport(
         return Ok(());
     }
 
-    let runtime = establish_gateway_session(&mut *send, &context, &open, &auth_frame).await?;
+    let runtime =
+        establish_gateway_session(&mut *send, &context, &open, &auth_frame, registered_auth_key)
+            .await?;
     let target_delivery_id = runtime.target_delivery_id.clone();
     let session_id = runtime.session_id.clone();
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
@@ -230,6 +232,7 @@ pub(crate) async fn establish_gateway_session(
     context: &GatewayQuicContext,
     open: &ramflux_node_core::GatewayOpenFrame,
     auth_frame: &ramflux_node_core::GatewayAuthFrame,
+    registered_auth_key: ramflux_node_core::DeviceAuthKeyResponse,
 ) -> anyhow::Result<GatewaySessionRuntime> {
     let now = ramflux_node_core::now_unix_seconds();
     let resume_window_seconds = gateway_resume_window_seconds();
@@ -289,6 +292,8 @@ pub(crate) async fn establish_gateway_session(
     Ok(GatewaySessionRuntime {
         session_id,
         resume_token,
+        principal_id: registered_auth_key.principal_id,
+        device_id: open.device_id.clone(),
         target_delivery_id: open.target_delivery_id.clone(),
     })
 }
@@ -356,6 +361,9 @@ pub(crate) async fn run_gateway_session_loop(
         match frame {
             ramflux_node_core::GatewayClientFrame::Submit { submit } => {
                 handle_gateway_submit(&send, &context, &runtime, &submit).await?;
+            }
+            ramflux_node_core::GatewayClientFrame::OwnDeviceFanout { fanout } => {
+                handle_gateway_own_device_fanout(&send, &context, &runtime, &fanout).await?;
             }
             ramflux_node_core::GatewayClientFrame::IdentityRegister { mut request } => {
                 request.source_ip_hash =
@@ -505,6 +513,123 @@ pub(crate) async fn handle_gateway_submit(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn handle_gateway_own_device_fanout(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    fanout: &ramflux_node_core::GatewayOwnDeviceFanoutFrame,
+) -> anyhow::Result<()> {
+    if let Some(reason) = own_device_fanout_session_rejection(runtime, fanout) {
+        write_gateway_handle(
+            send,
+            &ramflux_node_core::GatewayServerFrame::Nack { reason: reason.to_owned() },
+        )
+        .await?;
+        return Ok(());
+    }
+    let submit_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    let replay_rejection = {
+        let mut gateway = gateway_state(&context.state)?;
+        let result = gateway
+            .replay_guard_state_mut()
+            .check_signed_request(&fanout.signed_request, submit_now);
+        let rejection = result.err().map(|error| format!("fanout replay rejected: {error}"));
+        context.store.save_state(&gateway)?;
+        rejection
+    };
+    if let Some(reason) = replay_rejection {
+        write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;
+        return Ok(());
+    }
+
+    let request = ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest {
+        principal_id: fanout.principal_id.clone(),
+        source_device_id: fanout.source_device_id.clone(),
+        envelope: fanout.envelope.clone(),
+    };
+    capture_itest_gateway_json(
+        "own_device_fanout",
+        &serde_json::json!({
+            "path": "/gateway/session/own-device-fanout",
+            "principal_id": &request.principal_id,
+            "source_device_id": &request.source_device_id,
+            "envelope": &request.envelope,
+        }),
+    );
+    let shim_response: ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse =
+        match router_post_json(&context.router, "/mvp10/own-devices/fanout", &request) {
+            Ok(response) => response,
+            Err(error) => {
+                write_gateway_handle(
+                    send,
+                    &ramflux_node_core::GatewayServerFrame::Nack {
+                        reason: format!("own-device fanout rejected: {error}"),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+    let response = ramflux_node_core::GatewayOwnDeviceFanoutResponse::from(shim_response);
+    for delivery in &response.delivered {
+        deliver_own_device_fanout_entry(send, context, runtime, delivery).await?;
+    }
+    write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::OwnDeviceFanout { response })
+        .await
+}
+
+async fn deliver_own_device_fanout_entry(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    delivery: &ramflux_node_core::GatewayOwnDeviceFanoutDelivery,
+) -> anyhow::Result<()> {
+    let Some(inbox_seq) = delivery.inbox_seq else {
+        return Ok(());
+    };
+    let after = inbox_seq.saturating_sub(1);
+    let inbox = router_inbox(&context.router, &delivery.target_delivery_id, after, 1)?;
+    let Some(entry) = inbox.entries.into_iter().find(|entry| entry.inbox_seq == inbox_seq) else {
+        return Err(anyhow::anyhow!(
+            "gateway fanout did not find inbox entry for {} at seq {}",
+            delivery.target_delivery_id,
+            inbox_seq
+        ));
+    };
+    let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry: entry.clone() };
+    match delivery.outcome.as_str() {
+        "online" if delivery.target_delivery_id != runtime.target_delivery_id => {
+            let local_delivered = context.hub.send_to(&delivery.target_delivery_id, &frame).await?;
+            if !local_delivered
+                && !forward_deliver_on_local_miss(context, &delivery.target_delivery_id, &frame)
+                    .await?
+            {
+                dispatch_offline_wake(send, context, &delivery.target_delivery_id, &entry.envelope)
+                    .await?;
+            }
+        }
+        "offline_queued" => {
+            dispatch_offline_wake(send, context, &delivery.target_delivery_id, &entry.envelope)
+                .await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn own_device_fanout_session_rejection(
+    runtime: &GatewaySessionRuntime,
+    fanout: &ramflux_node_core::GatewayOwnDeviceFanoutFrame,
+) -> Option<&'static str> {
+    if fanout.source_device_id != runtime.device_id {
+        return Some("own-device fanout source device does not match authenticated session");
+    }
+    if fanout.principal_id != runtime.principal_id {
+        return Some("own-device fanout principal does not match authenticated session");
+    }
+    None
 }
 
 fn attach_franking_node_tag(
@@ -863,7 +988,9 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_franking_node_tag, fresh_gateway_session_id};
+    use super::{
+        attach_franking_node_tag, fresh_gateway_session_id, own_device_fanout_session_rejection,
+    };
 
     #[test]
     fn fresh_gateway_session_id_has_session_level_entropy() -> anyhow::Result<()> {
@@ -932,6 +1059,36 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn own_device_fanout_session_rejects_cross_principal_or_source_device() {
+        let runtime = crate::GatewaySessionRuntime {
+            session_id: "session_test".to_owned(),
+            resume_token: "resume_test".to_owned(),
+            principal_id: "principal_a".to_owned(),
+            device_id: "device_a".to_owned(),
+            target_delivery_id: "target_a".to_owned(),
+        };
+        let mut fanout = ramflux_node_core::GatewayOwnDeviceFanoutFrame {
+            signed_request: test_signed_request("device_a"),
+            principal_id: "principal_a".to_owned(),
+            source_device_id: "device_a".to_owned(),
+            envelope: test_envelope(),
+        };
+        assert_eq!(own_device_fanout_session_rejection(&runtime, &fanout), None);
+
+        fanout.source_device_id = "device_b".to_owned();
+        assert_eq!(
+            own_device_fanout_session_rejection(&runtime, &fanout),
+            Some("own-device fanout source device does not match authenticated session")
+        );
+        fanout.source_device_id = "device_a".to_owned();
+        fanout.principal_id = "principal_b".to_owned();
+        assert_eq!(
+            own_device_fanout_session_rejection(&runtime, &fanout),
+            Some("own-device fanout principal does not match authenticated session")
+        );
+    }
+
     fn test_envelope_with_franking(sender_device_id_hash: [u8; 32]) -> ramflux_protocol::Envelope {
         let mut envelope = test_envelope();
         envelope.ext.ext.insert(
@@ -971,6 +1128,29 @@ mod tests {
             created_at: 1_760_000_000,
             encrypted_payload: "payload".to_owned(),
             payload_hash: "payload-hash".to_owned(),
+        }
+    }
+
+    fn test_signed_request(source_device_id: &str) -> ramflux_protocol::SignedRequest {
+        ramflux_protocol::SignedRequest {
+            schema: "ramflux.signed_request.v1".to_owned(),
+            version: 1,
+            domain: "ramflux.signed_request.v1".to_owned(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: "test".to_owned(),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: "sig".to_owned(),
+            },
+            source_device_id: source_device_id.to_owned(),
+            request_id: "req_test_fanout".to_owned(),
+            method: ramflux_protocol::HttpMethod::POST,
+            path: "/gateway/session/own-device-fanout".to_owned(),
+            device_proof_hash: "already_authed".to_owned(),
+            body_hash: "body_hash".to_owned(),
+            nonce: "nonce_test_fanout".to_owned(),
+            created_at: 1,
+            expires_at: 2,
         }
     }
 }

@@ -52,6 +52,8 @@ pub(crate) struct GatewayQuicContext {
 pub(crate) struct GatewaySessionRuntime {
     pub(crate) session_id: String,
     pub(crate) resume_token: String,
+    pub(crate) principal_id: String,
+    pub(crate) device_id: String,
     pub(crate) target_delivery_id: String,
 }
 

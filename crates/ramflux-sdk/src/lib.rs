@@ -70,10 +70,11 @@ pub use federation::{
 };
 pub use gateway::{
     GatewayAuthFrame, GatewayClientFrame, GatewayCursor, GatewayDirectMessage, GatewayInboxEntry,
-    GatewayOpenFrame, GatewayPlaintextDelivery, GatewayQuicEndpointConfig, GatewayResumeFrame,
-    GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine, GatewaySessionEstablishedFrame,
-    GatewaySessionState, GatewaySessionTransportKind, GatewaySubmitFrame,
-    GatewayTcpTlsEndpointConfig,
+    GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery, GatewayOwnDeviceFanoutFrame,
+    GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery, GatewayQuicEndpointConfig,
+    GatewayResumeFrame, GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine,
+    GatewaySessionEstablishedFrame, GatewaySessionState, GatewaySessionTransportKind,
+    GatewaySubmitFrame, GatewayTcpTlsEndpointConfig,
 };
 pub use group::SdkGroupSenderKeyDistribution;
 pub use object::{SdkObjectKeySlot, SdkObjectSharePackage};

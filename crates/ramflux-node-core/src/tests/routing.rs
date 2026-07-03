@@ -237,6 +237,57 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
     assert_eq!(first_entries[0].envelope.envelope_id, mvp10_fanout_envelope_id("a:b", "c"));
     assert_eq!(second_entries[0].envelope.envelope_id, mvp10_fanout_envelope_id("a", "b:c"));
     assert_ne!(first_entries[0].envelope.envelope_id, second_entries[0].envelope.envelope_id);
+
+    let cross_principal = router.mvp10_own_device_fanout(ItestMvp10OwnDeviceFanoutRequest {
+        principal_id: "principal_fanout_collision_b".to_owned(),
+        source_device_id: "source_a".to_owned(),
+        envelope: envelope(
+            "cross_principal",
+            "unused_fanout_target",
+            DeliveryClass::SelfDeviceControl,
+        ),
+    });
+    assert!(
+        matches!(cross_principal, Err(NodeCoreError::ItestHttp(message)) if message.contains("source device is not registered for principal"))
+    );
+    Ok(())
+}
+
+#[test]
+fn gateway_own_device_fanout_frame_round_trips_json() -> Result<(), Box<dyn std::error::Error>> {
+    let frame = GatewayClientFrame::OwnDeviceFanout {
+        fanout: GatewayOwnDeviceFanoutFrame {
+            signed_request: gateway_fanout_signed_request("device_frame_fanout"),
+            principal_id: "principal_frame_fanout".to_owned(),
+            source_device_id: "device_frame_fanout".to_owned(),
+            envelope: envelope(
+                "env_frame_fanout",
+                "fanout-placeholder",
+                DeliveryClass::SelfDeviceControl,
+            ),
+        },
+    };
+    let value = serde_json::to_value(&frame)?;
+    assert_eq!(value["frame_type"], "own_device_fanout");
+    let decoded: GatewayClientFrame = serde_json::from_value(value)?;
+    assert_eq!(decoded, frame);
+
+    let response = GatewayServerFrame::OwnDeviceFanout {
+        response: GatewayOwnDeviceFanoutResponse {
+            principal_id: "principal_frame_fanout".to_owned(),
+            source_device_id: "device_frame_fanout".to_owned(),
+            delivered: vec![GatewayOwnDeviceFanoutDelivery {
+                device_id: "device_frame_peer".to_owned(),
+                target_delivery_id: "target_frame_peer".to_owned(),
+                outcome: "online".to_owned(),
+                inbox_seq: Some(7),
+            }],
+        },
+    };
+    let value = serde_json::to_value(&response)?;
+    assert_eq!(value["frame_type"], "own_device_fanout");
+    let decoded: GatewayServerFrame = serde_json::from_value(value)?;
+    assert_eq!(decoded, response);
     Ok(())
 }
 
