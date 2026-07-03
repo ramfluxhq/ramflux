@@ -264,6 +264,12 @@ pub struct LocalBusMessageReceiveRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusMessageFrankingEvidenceRequest {
+    pub conversation_id: String,
+    pub message_id: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusMessageAckRequest {
     pub envelope_id: String,
     pub receiver_device_id: String,

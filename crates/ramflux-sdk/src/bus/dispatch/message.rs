@@ -63,6 +63,17 @@ pub(crate) async fn dispatch_message_bus_request(
                 "rejected": rejected,
             })))
         }
+        "message.franking_evidence" => {
+            let account_id = request_account_id(request)?;
+            let body: LocalBusMessageFrankingEvidenceRequest =
+                serde_json::from_value(request.body.clone())?;
+            let account = local_bus_account(state, account_id)?;
+            let evidence = account.client.selected_franking_evidence_for_direct_message(
+                &body.conversation_id,
+                &body.message_id,
+            )?;
+            Ok(local_bus_ok(serde_json::to_value(evidence)?))
+        }
         "conversation.list" => {
             let account_id = request_account_id(request)?;
             let account = local_bus_account(state, account_id)?;
