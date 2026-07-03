@@ -15,6 +15,7 @@ use std::sync::Mutex;
 
 const ROUTER_ASYNC_INGRESS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS";
 const ROUTER_ASYNC_LISTEN_ADDR_ENV: &str = "RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR";
+const ROUTER_ASYNC_WORKER_THREADS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_WORKER_THREADS";
 
 #[cfg(feature = "itest-http")]
 pub(crate) fn serve_itest_http(
@@ -149,7 +150,11 @@ fn run_router_async_mesh_quic_listener(
     tls: &ramflux_transport::MeshTlsConfig,
     router: Arc<crate::router_runtime::RouterHandle>,
 ) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let worker_threads = router_async_worker_threads();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()?;
     runtime.block_on(async move {
         let root_pems_provider = Arc::new(|| Ok(Vec::new()));
         let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
@@ -158,7 +163,11 @@ fn run_router_async_mesh_quic_listener(
             root_pems_provider,
         )?;
         let local_addr = server.local_addr()?;
-        tracing::info!(addr = %local_addr, "router async QUIC ingress listening");
+        tracing::info!(
+            addr = %local_addr,
+            worker_threads,
+            "router async QUIC ingress listening"
+        );
         loop {
             let connection = match server.accept_connection().await {
                 Ok(connection) => connection,
@@ -177,6 +186,17 @@ fn run_router_async_mesh_quic_listener(
             });
         }
     })
+}
+
+fn router_async_worker_threads() -> usize {
+    std::env::var(ROUTER_ASYNC_WORKER_THREADS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        })
+        .max(1)
 }
 
 async fn router_async_mesh_quic_connection_loop(

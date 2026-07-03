@@ -42,6 +42,11 @@ static ROUTER_SAVE_MUTATION_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SAVE_MUTATION_US_MAX: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SAVE_COMMIT_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SAVE_COMMIT_US_MAX: AtomicU64 = AtomicU64::new(0);
+static ROUTER_WAL_BATCHES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ROUTER_WAL_RECORDS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ROUTER_WAL_BATCH_SIZE_MAX: AtomicU64 = AtomicU64::new(0);
+static ROUTER_WAL_SYNC_ALL_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ROUTER_WAL_SYNC_ALL_US_MAX: AtomicU64 = AtomicU64::new(0);
 static PERF_ENABLED: OnceLock<bool> = OnceLock::new();
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -85,6 +90,11 @@ pub struct NodePerfSnapshot {
     pub router_save_mutation_us_max: u64,
     pub router_save_commit_us_total: u64,
     pub router_save_commit_us_max: u64,
+    pub router_wal_batches_total: u64,
+    pub router_wal_records_total: u64,
+    pub router_wal_batch_size_max: u64,
+    pub router_wal_sync_all_us_total: u64,
+    pub router_wal_sync_all_us_max: u64,
 }
 
 #[must_use]
@@ -194,6 +204,17 @@ pub(crate) fn record_router_save_commit_us(us: u64) {
     record_duration(&ROUTER_SAVE_COMMIT_US_TOTAL, &ROUTER_SAVE_COMMIT_US_MAX, us);
 }
 
+pub(crate) fn record_router_wal_batch(record_count: usize, sync_all_us: u64) {
+    if node_perf_enabled() {
+        ROUTER_WAL_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let record_count = u64::try_from(record_count).unwrap_or(u64::MAX);
+        ROUTER_WAL_RECORDS_TOTAL.fetch_add(record_count, Ordering::Relaxed);
+        ROUTER_WAL_BATCH_SIZE_MAX.fetch_max(record_count, Ordering::Relaxed);
+        ROUTER_WAL_SYNC_ALL_US_TOTAL.fetch_add(sync_all_us, Ordering::Relaxed);
+        ROUTER_WAL_SYNC_ALL_US_MAX.fetch_max(sync_all_us, Ordering::Relaxed);
+    }
+}
+
 fn record_duration(total: &AtomicU64, max: &AtomicU64, us: u64) {
     if node_perf_enabled() {
         total.fetch_add(us, Ordering::Relaxed);
@@ -251,6 +272,11 @@ pub fn node_perf_snapshot() -> NodePerfSnapshot {
         router_save_mutation_us_max: ROUTER_SAVE_MUTATION_US_MAX.load(Ordering::Relaxed),
         router_save_commit_us_total: ROUTER_SAVE_COMMIT_US_TOTAL.load(Ordering::Relaxed),
         router_save_commit_us_max: ROUTER_SAVE_COMMIT_US_MAX.load(Ordering::Relaxed),
+        router_wal_batches_total: ROUTER_WAL_BATCHES_TOTAL.load(Ordering::Relaxed),
+        router_wal_records_total: ROUTER_WAL_RECORDS_TOTAL.load(Ordering::Relaxed),
+        router_wal_batch_size_max: ROUTER_WAL_BATCH_SIZE_MAX.load(Ordering::Relaxed),
+        router_wal_sync_all_us_total: ROUTER_WAL_SYNC_ALL_US_TOTAL.load(Ordering::Relaxed),
+        router_wal_sync_all_us_max: ROUTER_WAL_SYNC_ALL_US_MAX.load(Ordering::Relaxed),
     }
 }
 
@@ -294,5 +320,10 @@ pub fn node_perf_reset() {
         ROUTER_SAVE_MUTATION_US_MAX.store(0, Ordering::Relaxed);
         ROUTER_SAVE_COMMIT_US_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_SAVE_COMMIT_US_MAX.store(0, Ordering::Relaxed);
+        ROUTER_WAL_BATCHES_TOTAL.store(0, Ordering::Relaxed);
+        ROUTER_WAL_RECORDS_TOTAL.store(0, Ordering::Relaxed);
+        ROUTER_WAL_BATCH_SIZE_MAX.store(0, Ordering::Relaxed);
+        ROUTER_WAL_SYNC_ALL_US_TOTAL.store(0, Ordering::Relaxed);
+        ROUTER_WAL_SYNC_ALL_US_MAX.store(0, Ordering::Relaxed);
     }
 }
