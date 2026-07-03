@@ -185,7 +185,21 @@ where
         )
         .await;
     }
-    router_post_json(router, path, value)
+    // Without a configured async router endpoint, fall back to the blocking mesh client.
+    // That client blocks on a std mpsc recv, so it must not run directly on the async
+    // gateway QUIC worker (it would stall the runtime and the gateway never becomes ready).
+    // Run it on a blocking thread instead.
+    let router = router.clone();
+    let path = path.to_owned();
+    let body = serde_json::to_value(value)?;
+    let response: serde_json::Value = tokio::task::spawn_blocking(move || {
+        router_post_json::<serde_json::Value, serde_json::Value>(&router, &path, &body)
+    })
+    .await
+    .map_err(|error| {
+        ramflux_transport::TransportError::Quic(format!("router blocking join failed: {error}"))
+    })??;
+    Ok(serde_json::from_value(response)?)
 }
 
 pub(crate) fn router_get_json<R>(
