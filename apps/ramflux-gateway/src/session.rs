@@ -9,7 +9,7 @@ use crate::{
     GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
     GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime, dispatch_quic_json_request,
     gateway_state, notify_offline_wake, router_cursor, router_get_json, router_inbox,
-    router_post_json, router_session, serve::GatewayListenerContext,
+    router_post_json, router_post_json_async, router_session, serve::GatewayListenerContext,
 };
 
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
@@ -65,7 +65,7 @@ pub(crate) async fn handle_gateway_quic_stream(
         handle_gateway_session_stream(send, recv, context, frame).await?;
     } else {
         let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-        let response = dispatch_quic_json_request(&context.router, request)?;
+        let response = dispatch_quic_json_request(&context.router, request).await?;
         ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
     }
     Ok(())
@@ -93,7 +93,7 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
     } else {
         let mut send = Box::new(send);
         let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-        let response = dispatch_quic_json_request(&context.router, request)?;
+        let response = dispatch_quic_json_request(&context.router, request).await?;
         ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
     }
     Ok(())
@@ -474,7 +474,7 @@ pub(crate) async fn handle_gateway_submit(
         }),
     );
     let response: ramflux_node_core::EnvelopeSubmitResponse =
-        router_post_json(&context.router, "/mvp0/envelope", &envelope)?;
+        router_post_json_async(&context.router, "/mvp0/envelope", &envelope).await?;
     if response.outcome.starts_with("rejected_") {
         write_gateway_handle(
             send,

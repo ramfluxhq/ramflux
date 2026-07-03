@@ -52,13 +52,35 @@ struct MeshQuicPoolKey {
 }
 
 struct MeshQuicClientJob {
+    request: MeshQuicClientRequestJob,
+    response: MeshQuicClientResponse,
+}
+
+struct MeshQuicClientRequestJob {
     endpoint: String,
     server_name: String,
     tls: MeshTlsConfig,
     peer_ca_pems: Vec<String>,
     request: GatewayQuicRequest,
     enqueued_at: std::time::Instant,
-    response: mpsc::Sender<Result<GatewayQuicResponse, TransportError>>,
+}
+
+enum MeshQuicClientResponse {
+    Sync(mpsc::Sender<Result<GatewayQuicResponse, TransportError>>),
+    Async(tokio::sync::oneshot::Sender<Result<GatewayQuicResponse, TransportError>>),
+}
+
+impl MeshQuicClientResponse {
+    fn send(self, result: Result<GatewayQuicResponse, TransportError>) {
+        match self {
+            Self::Sync(sender) => {
+                let _sent = sender.send(result);
+            }
+            Self::Async(sender) => {
+                let _sent = sender.send(result);
+            }
+        }
+    }
 }
 
 struct MeshQuicClientRuntime {
@@ -235,6 +257,37 @@ where
     }
 }
 
+/// # Errors
+/// Returns an error when the JSON request cannot be encoded, QUIC/TLS fails, or
+/// the response cannot be decoded.
+pub async fn mesh_quic_post_json_with_peer_ca_pems_async<T, R>(
+    endpoint: &str,
+    path: &str,
+    tls: &MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+    value: &T,
+) -> Result<R, TransportError>
+where
+    T: serde::Serialize,
+    R: serde::de::DeserializeOwned,
+{
+    let body = serde_json::to_value(value)?;
+    let response = run_mesh_quic_request_async(
+        endpoint,
+        tls,
+        server_name,
+        peer_ca_pems,
+        GatewayQuicRequest { method: "POST".to_owned(), path: path.to_owned(), body },
+    )
+    .await?;
+    if (200..300).contains(&response.status) {
+        Ok(serde_json::from_value(response.body)?)
+    } else {
+        Err(TransportError::Http(format!("HTTP {}: {}", response.status, response.body)))
+    }
+}
+
 fn run_mesh_quic_request(
     endpoint: &str,
     tls: &MeshTlsConfig,
@@ -243,6 +296,18 @@ fn run_mesh_quic_request(
     request: GatewayQuicRequest,
 ) -> Result<GatewayQuicResponse, TransportError> {
     mesh_quic_client_runtime().request(endpoint, tls, server_name, peer_ca_pems, request)
+}
+
+async fn run_mesh_quic_request_async(
+    endpoint: &str,
+    tls: &MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+    request: GatewayQuicRequest,
+) -> Result<GatewayQuicResponse, TransportError> {
+    mesh_quic_client_runtime()
+        .request_async(endpoint, tls, server_name, peer_ca_pems, request)
+        .await
 }
 
 impl MeshQuicClientRuntime {
@@ -257,17 +322,46 @@ impl MeshQuicClientRuntime {
         let (response, receiver) = mpsc::channel();
         self.jobs
             .send(MeshQuicClientJob {
-                endpoint: endpoint.to_owned(),
-                server_name: server_name.to_owned(),
-                tls: tls.clone(),
-                peer_ca_pems: peer_ca_pems.to_vec(),
-                request,
-                enqueued_at: std::time::Instant::now(),
-                response,
+                request: MeshQuicClientRequestJob {
+                    endpoint: endpoint.to_owned(),
+                    server_name: server_name.to_owned(),
+                    tls: tls.clone(),
+                    peer_ca_pems: peer_ca_pems.to_vec(),
+                    request,
+                    enqueued_at: std::time::Instant::now(),
+                },
+                response: MeshQuicClientResponse::Sync(response),
             })
             .map_err(|error| TransportError::Quic(format!("mesh QUIC runtime stopped: {error}")))?;
         receiver
             .recv()
+            .map_err(|error| TransportError::Quic(format!("mesh QUIC runtime stopped: {error}")))?
+    }
+
+    async fn request_async(
+        &self,
+        endpoint: &str,
+        tls: &MeshTlsConfig,
+        server_name: &str,
+        peer_ca_pems: &[String],
+        request: GatewayQuicRequest,
+    ) -> Result<GatewayQuicResponse, TransportError> {
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        self.jobs
+            .send(MeshQuicClientJob {
+                request: MeshQuicClientRequestJob {
+                    endpoint: endpoint.to_owned(),
+                    server_name: server_name.to_owned(),
+                    tls: tls.clone(),
+                    peer_ca_pems: peer_ca_pems.to_vec(),
+                    request,
+                    enqueued_at: std::time::Instant::now(),
+                },
+                response: MeshQuicClientResponse::Async(response),
+            })
+            .map_err(|error| TransportError::Quic(format!("mesh QUIC runtime stopped: {error}")))?;
+        receiver
+            .await
             .map_err(|error| TransportError::Quic(format!("mesh QUIC runtime stopped: {error}")))?
     }
 }
@@ -295,12 +389,12 @@ fn run_mesh_quic_client_runtime(
     let connections =
         Arc::new(Mutex::new(HashMap::<MeshQuicPoolKey, MeshQuicCachedConnection>::new()));
     for job in receiver {
-        record_mesh_client_runtime_queue_wait(job.enqueued_at.elapsed());
+        record_mesh_client_runtime_queue_wait(job.request.enqueued_at.elapsed());
         let connections = Arc::clone(&connections);
-        let response_sender = job.response.clone();
         handle.spawn(async move {
-            let response = mesh_quic_cached_request(connections, job).await;
-            let _ = response_sender.send(response);
+            let MeshQuicClientJob { request, response: response_sender } = job;
+            let response = mesh_quic_cached_request(connections, request).await;
+            response_sender.send(response);
         });
     }
     Ok(())
@@ -308,7 +402,7 @@ fn run_mesh_quic_client_runtime(
 
 async fn mesh_quic_cached_request(
     connections: Arc<Mutex<HashMap<MeshQuicPoolKey, MeshQuicCachedConnection>>>,
-    job: MeshQuicClientJob,
+    job: MeshQuicClientRequestJob,
 ) -> Result<GatewayQuicResponse, TransportError> {
     record_mesh_client_request();
     let peer_addr = resolve_endpoint(&job.endpoint)?;

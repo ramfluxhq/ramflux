@@ -6,11 +6,15 @@ use std::thread;
 
 #[cfg(feature = "itest-http")]
 use crate::handlers::handle_itest_request;
+use crate::handlers::handle_mesh_quic_request_value;
 use crate::handlers::handle_mesh_request;
 #[cfg(feature = "itest-http")]
 use std::net::{TcpListener, TcpStream};
 #[cfg(feature = "itest-http")]
 use std::sync::Mutex;
+
+const ROUTER_ASYNC_INGRESS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS";
+const ROUTER_ASYNC_LISTEN_ADDR_ENV: &str = "RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR";
 
 #[cfg(feature = "itest-http")]
 pub(crate) fn serve_itest_http(
@@ -98,6 +102,125 @@ pub(crate) fn serve_router_mesh_mtls(
             tracing::error!(%error, "router mesh mTLS listener stopped");
         }
     });
+    if router_async_ingress_enabled()
+        && let Some(listen_addr) = router_async_listen_addr(config)
+    {
+        spawn_router_async_mesh_quic_thread(listen_addr, mesh_tls_config(config), router)?;
+    }
+    Ok(())
+}
+
+fn router_async_ingress_enabled() -> bool {
+    std::env::var(ROUTER_ASYNC_INGRESS_ENV).is_ok_and(|value| {
+        let trimmed = value.trim();
+        trimmed == "1"
+            || trimmed.eq_ignore_ascii_case("true")
+            || trimmed.eq_ignore_ascii_case("on")
+            || trimmed.eq_ignore_ascii_case("yes")
+    })
+}
+
+fn router_async_listen_addr(config: &ramflux_node_core::NodeServiceConfig) -> Option<String> {
+    std::env::var(ROUTER_ASYNC_LISTEN_ADDR_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| config.mesh.endpoints.get("router-async-listen").cloned())
+}
+
+fn spawn_router_async_mesh_quic_thread(
+    listen_addr: String,
+    tls: ramflux_transport::MeshTlsConfig,
+    router: &Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    let router = Arc::clone(router);
+    thread::Builder::new().name("ramflux-router-async-quic-ingress".to_owned()).spawn(
+        move || {
+            if let Err(error) = run_router_async_mesh_quic_listener(&listen_addr, &tls, router) {
+                tracing::error!(%error, "router async QUIC ingress stopped");
+            }
+        },
+    )?;
+    Ok(())
+}
+
+fn run_router_async_mesh_quic_listener(
+    listen_addr: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    router: Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+        let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+            listen_addr,
+            tls,
+            root_pems_provider,
+        )?;
+        let local_addr = server.local_addr()?;
+        tracing::info!(addr = %local_addr, "router async QUIC ingress listening");
+        loop {
+            let connection = match server.accept_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(%error, "router async QUIC connection rejected");
+                    continue;
+                }
+            };
+            let connection_router = Arc::clone(&router);
+            tokio::spawn(async move {
+                if let Err(error) =
+                    router_async_mesh_quic_connection_loop(connection, connection_router).await
+                {
+                    tracing::debug!(%error, "router async QUIC connection ended");
+                }
+            });
+        }
+    })
+}
+
+async fn router_async_mesh_quic_connection_loop(
+    connection: ramflux_transport::MeshQuicConnection,
+    router: Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    loop {
+        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
+            &connection,
+        )
+        .await
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::debug!(%error, "router async QUIC stream loop ended");
+                return Ok(());
+            }
+        };
+        let request_router = Arc::clone(&router);
+        tokio::spawn(async move {
+            if let Err(error) =
+                handle_router_async_mesh_quic_request(accepted, request_router).await
+            {
+                tracing::warn!(%error, "router async QUIC request failed");
+            }
+        });
+    }
+}
+
+async fn handle_router_async_mesh_quic_request(
+    accepted: ramflux_transport::MeshQuicAcceptedRequest,
+    router: Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    match handle_mesh_quic_request_value(&accepted.request, &router, "ramflux-gateway").await {
+        Ok(response) if (200..300).contains(&response.status) => {
+            accepted.write_json_response(response.status, &response.body).await?;
+        }
+        Ok(response) => {
+            accepted.write_text_response(response.status, &response.body.to_string()).await?;
+        }
+        Err(error) => {
+            accepted.write_text_response(500, &error.to_string()).await?;
+        }
+    }
     Ok(())
 }
 

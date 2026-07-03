@@ -39,7 +39,7 @@ pub use mesh_http::{
 };
 pub use mesh_quic::{
     MeshQuicAcceptedRequest, MeshQuicConnection, MeshQuicServer,
-    mesh_quic_post_json_with_peer_ca_pems,
+    mesh_quic_post_json_with_peer_ca_pems, mesh_quic_post_json_with_peer_ca_pems_async,
 };
 pub use mesh_tls::{
     MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, extract_spiffe_uri_from_certificate,

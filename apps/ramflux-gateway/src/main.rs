@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) use clients::{
     gateway_state, notify_http_client, notify_offline_wake, router_cursor, router_get_json,
-    router_inbox, router_mesh_client, router_post_json, router_session,
+    router_inbox, router_mesh_client, router_post_json, router_post_json_async, router_session,
 };
 #[cfg(feature = "itest-http")]
 pub(crate) use clients::{is_timeout_error, pre_auth_gate};
@@ -26,8 +26,8 @@ pub(crate) use serve::serve_gateway_quic;
 pub(crate) use state::{
     GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
     GatewayQuicContext, GatewaySendHandle, GatewaySessionHub, GatewaySessionRuntime,
-    NotifyHttpClient, NotifyMeshClient, RouterMeshClient, gateway_instance_id_from_env,
-    gateway_peer_directory_from_env,
+    NotifyHttpClient, NotifyMeshClient, RouterAsyncMeshClient, RouterMeshClient,
+    gateway_instance_id_from_env, gateway_peer_directory_from_env,
 };
 
 fn main() {
