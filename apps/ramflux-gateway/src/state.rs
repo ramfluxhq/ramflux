@@ -247,7 +247,13 @@ fn default_gateway_peer_server_name(endpoint: &str) -> String {
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        // Treat an unexpanded compose/shell variable (podman-compose leaves ${VAR:-default}
+        // literal when the var is unset) as absent rather than a real value.
+        if trimmed.is_empty() || trimmed.starts_with("${") {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
     })
 }
 
