@@ -6,10 +6,10 @@
 use crate::{
     AccountLifecycleRecord, AccountLifecycleState, DEFAULT_DELETE_TIMELOCK_SECONDS,
     FederatedLifecycleTombstoneRequest, FederatedLifecycleTombstoneResponse,
-    IdentityLifecycleTombstone, LifecycleCancelRequest, LifecycleEventRequest,
-    LifecycleFinalizeRequest, LifecycleResponse, NodeCoreError, RouterCore,
-    identity_deletion_proof, lifecycle_tombstone_hash, verify_lifecycle_tombstone,
-    verify_recovery_quorum_proof,
+    IdentityLifecycleTombstone, IdentityLineageEventRecord, LifecycleCancelRequest,
+    LifecycleEventRequest, LifecycleFinalizeRequest, LifecycleResponse, NodeCoreError,
+    RouterControlState, RouterCore, identity_deletion_proof, lifecycle_tombstone_hash,
+    recovery_quorum_proof_hash, verify_lifecycle_tombstone, verify_recovery_quorum_proof,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ impl RouterCore {
         &self,
         request: &LifecycleEventRequest,
     ) -> Result<LifecycleResponse, NodeCoreError> {
+        let mut lineage_events = Vec::new();
+        let mut recovery_lineage_head = None;
         let record = match request.event_type.as_str() {
             "identity.deactivated" => AccountLifecycleRecord {
                 principal_id: request.principal_id.clone(),
@@ -51,6 +53,9 @@ impl RouterCore {
                         ));
                     }
                     verify_recovery_quorum_proof(quorum, proof, request.now)?;
+                    lineage_events = self.record_recovery_reactivation_lineage(request, proof)?;
+                    recovery_lineage_head =
+                        lineage_events.last().map(|event| event.lineage_head.clone());
                 } else if request.recovery_quorum.is_some()
                     || request.recovery_quorum_proof.is_some()
                 {
@@ -98,7 +103,14 @@ impl RouterCore {
             .tombstone_hash
             .as_deref()
             .and_then(|hash| self.lifecycle_tombstone_by_hash(hash));
-        Ok(LifecycleResponse { record, metadata_present, deleted_metadata_count: 0, tombstone })
+        Ok(LifecycleResponse {
+            record,
+            metadata_present,
+            deleted_metadata_count: 0,
+            tombstone,
+            lineage_events,
+            recovery_lineage_head,
+        })
     }
 
     /// # Errors
@@ -139,6 +151,8 @@ impl RouterCore {
             metadata_present,
             deleted_metadata_count: 0,
             tombstone: None,
+            lineage_events: Vec::new(),
+            recovery_lineage_head: None,
         })
     }
 
@@ -219,7 +233,14 @@ impl RouterCore {
         crate::lock_unpoisoned(&self.control)
             .lifecycle_by_principal
             .insert(request.principal_id.clone(), record.clone());
-        Ok(LifecycleResponse { record, metadata_present: false, deleted_metadata_count, tombstone })
+        Ok(LifecycleResponse {
+            record,
+            metadata_present: false,
+            deleted_metadata_count,
+            tombstone,
+            lineage_events: Vec::new(),
+            recovery_lineage_head: None,
+        })
     }
 
     #[must_use]
@@ -293,6 +314,91 @@ impl RouterCore {
         }
     }
 
+    fn record_recovery_reactivation_lineage(
+        &self,
+        request: &LifecycleEventRequest,
+        proof: &ramflux_protocol::RecoveryQuorumProof,
+    ) -> Result<Vec<IdentityLineageEventRecord>, NodeCoreError> {
+        let proof_hash = recovery_quorum_proof_hash(proof)?;
+        let recovery_id = proof.context.recovery_id.clone();
+        let previous_lineage_head = proof.context.lineage_head.clone();
+        let mut control = crate::lock_unpoisoned(&self.control);
+        let mut current_head = control
+            .identity_lineage_heads
+            .get(&request.principal_id)
+            .cloned()
+            .or(previous_lineage_head);
+        let mut events = Vec::with_capacity(4);
+        events.push(append_identity_lineage_event(
+            &mut control,
+            IdentityLineageAppend {
+                principal_id: &request.principal_id,
+                event_id: &format!("{}:recovery_initiated", request.event_id),
+                event_type: "recovery.initiated",
+                created_at: request.now,
+                body: ramflux_protocol::IdentityEventBody::RecoveryInitiated {
+                    recovery_id: recovery_id.clone(),
+                    identity_commitment: request.principal_id.clone(),
+                    lifecycle_epoch: request.lifecycle_epoch,
+                    previous_lineage_head: current_head.clone(),
+                    timelock_until: proof.context.timelock_until,
+                },
+            },
+            &mut current_head,
+        )?);
+        events.push(append_identity_lineage_event(
+            &mut control,
+            IdentityLineageAppend {
+                principal_id: &request.principal_id,
+                event_id: &format!("{}:recovery_finalized", request.event_id),
+                event_type: "recovery.finalized",
+                created_at: request.now,
+                body: ramflux_protocol::IdentityEventBody::RecoveryFinalized {
+                    recovery_id: recovery_id.clone(),
+                    identity_commitment: request.principal_id.clone(),
+                    lifecycle_epoch: request.lifecycle_epoch,
+                    recovery_quorum_proof_hash: proof_hash.clone(),
+                    recovery_quorum_proof: proof.clone(),
+                },
+            },
+            &mut current_head,
+        )?);
+        events.push(append_identity_lineage_event(
+            &mut control,
+            IdentityLineageAppend {
+                principal_id: &request.principal_id,
+                event_id: &format!("{}:recovery_authorized", request.event_id),
+                event_type: "identity.recovery_authorized",
+                created_at: request.now,
+                body: ramflux_protocol::IdentityEventBody::RecoveryAuthorized {
+                    recovery_id,
+                    new_device_id: request.actor_device_id.clone(),
+                    recovery_method: "social_quorum".to_owned(),
+                    recovery_quorum_proof: proof.clone(),
+                },
+            },
+            &mut current_head,
+        )?);
+        events.push(append_identity_lineage_event(
+            &mut control,
+            IdentityLineageAppend {
+                principal_id: &request.principal_id,
+                event_id: &request.event_id,
+                event_type: "identity.reactivated",
+                created_at: request.now,
+                body: ramflux_protocol::IdentityEventBody::IdentityReactivated {
+                    identity_commitment: request.principal_id.clone(),
+                    lifecycle_epoch: request.lifecycle_epoch,
+                    previous_deactivation_event_id: request.reason_code.clone(),
+                    recovery_quorum_proof_hash: proof_hash,
+                    recovery_quorum_proof: Some(proof.clone()),
+                },
+            },
+            &mut current_head,
+        )?);
+        Ok(events)
+    }
+
     pub(crate) fn store_lifecycle_tombstone(
         &self,
         request: &LifecycleEventRequest,
@@ -332,7 +438,6 @@ impl RouterCore {
         crate::lock_unpoisoned(&self.control).lifecycle_tombstones.insert(tombstone_id, tombstone);
         Ok(tombstone_hash)
     }
-
     pub(crate) fn lifecycle_tombstone_by_hash(
         &self,
         tombstone_hash: &str,
@@ -343,4 +448,69 @@ impl RouterCore {
             .find(|tombstone| tombstone.tombstone_hash == tombstone_hash)
             .cloned()
     }
+}
+
+struct IdentityLineageAppend<'a> {
+    principal_id: &'a str,
+    event_id: &'a str,
+    event_type: &'a str,
+    body: ramflux_protocol::IdentityEventBody,
+    created_at: u64,
+}
+
+fn append_identity_lineage_event(
+    control: &mut RouterControlState,
+    input: IdentityLineageAppend<'_>,
+    current_head: &mut Option<String>,
+) -> Result<IdentityLineageEventRecord, NodeCoreError> {
+    if let Some(existing) = control
+        .identity_lineage_events
+        .get(input.principal_id)
+        .and_then(|events| events.iter().find(|event| event.event_id == input.event_id))
+        .cloned()
+    {
+        *current_head = Some(existing.lineage_head.clone());
+        return Ok(existing);
+    }
+    let previous_lineage_head = current_head.clone();
+    let lineage_head = identity_lineage_event_head(
+        previous_lineage_head.as_deref(),
+        input.event_id,
+        input.event_type,
+        &input.body,
+    )?;
+    let record = IdentityLineageEventRecord {
+        event_id: input.event_id.to_owned(),
+        event_type: input.event_type.to_owned(),
+        principal_id: input.principal_id.to_owned(),
+        previous_lineage_head,
+        lineage_head: lineage_head.clone(),
+        created_at: input.created_at,
+        body: input.body,
+    };
+    control
+        .identity_lineage_events
+        .entry(input.principal_id.to_owned())
+        .or_default()
+        .push(record.clone());
+    control.identity_lineage_heads.insert(input.principal_id.to_owned(), lineage_head.clone());
+    *current_head = Some(lineage_head);
+    Ok(record)
+}
+
+fn identity_lineage_event_head(
+    previous_lineage_head: Option<&str>,
+    event_id: &str,
+    event_type: &str,
+    body: &ramflux_protocol::IdentityEventBody,
+) -> Result<String, NodeCoreError> {
+    let material = serde_json::json!({
+        "previous_lineage_head": previous_lineage_head,
+        "event_id": event_id,
+        "event_type": event_type,
+        "body": body,
+    });
+    let bytes = ramflux_protocol::canonical_json_bytes(&material)
+        .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+    Ok(ramflux_crypto::blake3_256_base64url("ramflux.identity_lineage.event_head.v1", &bytes))
 }

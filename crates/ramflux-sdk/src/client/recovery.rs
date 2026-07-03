@@ -360,6 +360,18 @@ pub fn initiate_recovery(
         timelock_until: request.timelock_until,
         context: &context,
     })?;
+    append_identity_event_if_missing(
+        client,
+        &format!("recovery:{}:initiated", request.recovery_id),
+        "recovery.initiated",
+        &ramflux_protocol::IdentityEventBody::RecoveryInitiated {
+            recovery_id: request.recovery_id.clone(),
+            identity_commitment: request.owner_principal_id.clone(),
+            lifecycle_epoch: request.lifecycle_epoch,
+            previous_lineage_head: request.lineage_head.clone(),
+            timelock_until: request.timelock_until,
+        },
+    )?;
     recovery_state(client, &request.recovery_id)
 }
 
@@ -425,15 +437,42 @@ pub fn collect_recovery_approval(
         approval,
         approved_at: now_unix_timestamp(),
     })?;
+    append_identity_event_if_missing(
+        client,
+        &format!("recovery:{recovery_id}:approval:{}", approval.signing_key_id),
+        "recovery.approval_collected",
+        &ramflux_protocol::IdentityEventBody::RecoveryApprovalCollected {
+            recovery_id: recovery_id.to_owned(),
+            signing_key_id: approval.signing_key_id.clone(),
+            member_kind: approval.member_kind.clone(),
+        },
+    )?;
     let approval_count = client.account_db()?.pending_recovery_approvals(recovery_id)?.len();
     if approval_count >= usize::from(pending.recovery_quorum.threshold) {
-        transition_recovery_state(
+        let status = transition_recovery_state(
             client,
             recovery_id,
             SdkPendingRecoveryState::CollectingApprovals,
             SdkPendingRecoveryState::QuorumReached,
             None,
-        )
+        )?;
+        let approvals = client.account_db()?.pending_recovery_approvals(recovery_id)?;
+        let proof = ramflux_protocol::RecoveryQuorumProof {
+            context: pending.context.clone(),
+            approvals: approvals.into_iter().map(|record| record.approval).collect(),
+        };
+        append_identity_event_if_missing(
+            client,
+            &format!("recovery:{recovery_id}:authorized"),
+            "identity.recovery_authorized",
+            &ramflux_protocol::IdentityEventBody::RecoveryAuthorized {
+                recovery_id: recovery_id.to_owned(),
+                new_device_id: current_recovery_device_id(client)?,
+                recovery_method: "social_quorum".to_owned(),
+                recovery_quorum_proof: proof,
+            },
+        )?;
+        Ok(status)
     } else {
         recovery_state(client, recovery_id)
     }
@@ -493,13 +532,27 @@ pub fn finalize_recovery(
             None,
         )?;
     }
+    let proof = ramflux_protocol::RecoveryQuorumProof {
+        context: pending.context.clone(),
+        approvals: approvals.into_iter().map(|record| record.approval).collect(),
+    };
+    let proof_hash = recovery_quorum_proof_hash(&proof)?;
+    append_identity_event_if_missing(
+        client,
+        &format!("recovery:{recovery_id}:finalized"),
+        "recovery.finalized",
+        &ramflux_protocol::IdentityEventBody::RecoveryFinalized {
+            recovery_id: recovery_id.to_owned(),
+            identity_commitment: pending.owner_principal_id.clone(),
+            lifecycle_epoch: pending.lifecycle_epoch,
+            recovery_quorum_proof_hash: proof_hash,
+            recovery_quorum_proof: proof.clone(),
+        },
+    )?;
     Ok(SdkFinalizedRecovery {
         recovery_id: recovery_id.to_owned(),
         recovery_quorum: pending.recovery_quorum,
-        proof: ramflux_protocol::RecoveryQuorumProof {
-            context: pending.context,
-            approvals: approvals.into_iter().map(|record| record.approval).collect(),
-        },
+        proof,
     })
 }
 
@@ -519,6 +572,33 @@ fn transition_recovery_state(
     )?;
     let approvals = client.account_db()?.pending_recovery_approvals(recovery_id)?;
     pending_recovery_status(&pending, approvals.len(), now_unix_timestamp())
+}
+
+fn append_identity_event_if_missing(
+    client: &RamfluxClient,
+    event_id: &str,
+    event_type: &str,
+    body: &ramflux_protocol::IdentityEventBody,
+) -> Result<(), SdkError> {
+    if client.event_body(event_id)?.is_none() {
+        client.append_event(event_id, event_type, &serde_json::to_vec(body)?)?;
+    }
+    Ok(())
+}
+
+fn current_recovery_device_id(client: &RamfluxClient) -> Result<String, SdkError> {
+    client
+        .device_branch
+        .as_ref()
+        .map(|branch| branch.device_id.clone())
+        .ok_or(SdkError::IdentityRootMissing)
+}
+
+fn recovery_quorum_proof_hash(
+    proof: &ramflux_protocol::RecoveryQuorumProof,
+) -> Result<String, SdkError> {
+    let signed_bytes = ramflux_protocol::signed_bytes(proof)?;
+    Ok(ramflux_crypto::blake3_256_base64url("ramflux.recovery_quorum_proof.v1", &signed_bytes))
 }
 
 /// Builds a signed guardian invite control message for E2EE transport.
@@ -1062,8 +1142,29 @@ mod tests {
             alice.recovery_state("recovery_pending")?.state,
             SdkPendingRecoveryState::ReadyToFinalize
         );
+        assert_pending_recovery_lineage_events(&alice)?;
         let _ = std::fs::remove_dir_all(alice_root);
         let _ = std::fs::remove_dir_all(guardian_root);
+        Ok(())
+    }
+
+    fn assert_pending_recovery_lineage_events(client: &RamfluxClient) -> Result<(), SdkError> {
+        assert!(matches!(
+            identity_event_body(client, "recovery:recovery_pending:initiated")?,
+            ramflux_protocol::IdentityEventBody::RecoveryInitiated { .. }
+        ));
+        assert!(matches!(
+            identity_event_body(client, "recovery:recovery_pending:approval:root-share")?,
+            ramflux_protocol::IdentityEventBody::RecoveryApprovalCollected { .. }
+        ));
+        assert!(matches!(
+            identity_event_body(client, "recovery:recovery_pending:authorized")?,
+            ramflux_protocol::IdentityEventBody::RecoveryAuthorized { .. }
+        ));
+        assert!(matches!(
+            identity_event_body(client, "recovery:recovery_pending:finalized")?,
+            ramflux_protocol::IdentityEventBody::RecoveryFinalized { .. }
+        ));
         Ok(())
     }
 
@@ -1208,6 +1309,16 @@ mod tests {
                 [0x33; 32],
             ),
         ]
+    }
+
+    fn identity_event_body(
+        client: &RamfluxClient,
+        event_id: &str,
+    ) -> Result<ramflux_protocol::IdentityEventBody, SdkError> {
+        let body = client
+            .event_body(event_id)?
+            .ok_or_else(|| SdkError::LocalBus(format!("missing event body: {event_id}")))?;
+        Ok(serde_json::from_slice(&body)?)
     }
 
     fn member(

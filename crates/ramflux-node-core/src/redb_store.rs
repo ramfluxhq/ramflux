@@ -43,6 +43,8 @@ pub(crate) const ROUTER_DELETED_TARGETS_KEY: &str = "deleted_delivery_targets";
 pub(crate) const ROUTER_ABUSE_REPORT_KEY: &str = "abuse_report_state";
 pub(crate) const ROUTER_REPLAY_GUARD_STATE_KEY: &str = "replay_guard_state";
 pub(crate) const ROUTER_HOME_NODE_MIGRATION_KEY: &str = "home_node_migration_state";
+pub(crate) const ROUTER_IDENTITY_LINEAGE_EVENTS_KEY: &str = "identity_lineage_events";
+pub(crate) const ROUTER_IDENTITY_LINEAGE_HEADS_KEY: &str = "identity_lineage_heads";
 pub(crate) const RETENTION_STATE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("retention_state_v1");
 pub(crate) const RETENTION_STATE_KEY: &str = "retention_state";

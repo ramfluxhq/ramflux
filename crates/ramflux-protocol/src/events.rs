@@ -67,6 +67,27 @@ pub enum IdentityEventBody {
     RecoveryQuorumConfigured {
         recovery_quorum: RecoveryQuorumConfigured,
     },
+    RecoveryFinalized {
+        recovery_id: String,
+        identity_commitment: String,
+        lifecycle_epoch: u64,
+        recovery_quorum_proof_hash: String,
+        recovery_quorum_proof: RecoveryQuorumProof,
+    },
+    RecoveryInitiated {
+        recovery_id: String,
+        identity_commitment: String,
+        lifecycle_epoch: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_lineage_head: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timelock_until: Option<u64>,
+    },
+    RecoveryApprovalCollected {
+        recovery_id: String,
+        signing_key_id: String,
+        member_kind: RecoveryQuorumMemberKind,
+    },
     DeviceBranchAuthorized {
         device_id: String,
         device_epoch: u64,
@@ -129,6 +150,13 @@ pub enum IdentityEventBody {
         migration_proof_hash: String,
         lineage_head: String,
         effective_at: i64,
+    },
+    LineageCheckpoint {
+        identity_commitment: String,
+        lineage_head: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_lineage_head: Option<String>,
+        causal_event_id: String,
     },
 }
 
