@@ -5,11 +5,11 @@
 
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, HomeNodeMigrationRecord,
-    IdentityLifecycleTombstone, IdentityLineageEventRecord, IdentityRegistry, InboxEntry,
-    NodeCoreError, NodeReplayGuardState, OpaqueDeviceInbox, ROUTER_ABUSE_REPORT_KEY,
+    HomeNodeRouteRecord, IdentityLifecycleTombstone, IdentityLineageEventRecord, IdentityRegistry,
+    InboxEntry, NodeCoreError, NodeReplayGuardState, OpaqueDeviceInbox, ROUTER_ABUSE_REPORT_KEY,
     ROUTER_ABUSE_REPORT_TABLE, ROUTER_CURSOR_STATE_TABLE, ROUTER_DEACTIVATED_TARGET_TABLE,
     ROUTER_DEACTIVATED_TARGETS_KEY, ROUTER_DELETED_TARGET_TABLE, ROUTER_DELETED_TARGETS_KEY,
-    ROUTER_HOME_NODE_MIGRATION_KEY, ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
+    ROUTER_HOME_NODE_MIGRATION_KEY, ROUTER_HOME_NODE_ROUTE_KEY, ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
     ROUTER_IDENTITY_LINEAGE_HEADS_KEY, ROUTER_IDENTITY_REGISTRY_KEY, ROUTER_INBOX_ENTRY_TABLE,
     ROUTER_INBOX_SLICE_KEY, ROUTER_LIFECYCLE_RECORD_TABLE, ROUTER_LIFECYCLE_STATE_KEY,
     ROUTER_LIFECYCLE_TOMBSTONE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_TABLE,
@@ -345,6 +345,12 @@ impl RouterRedbStore {
             ROUTER_SNAPSHOT_TABLE,
             ROUTER_HOME_NODE_MIGRATION_KEY,
             &snapshot.home_node_migrations,
+        )?;
+        save_snapshot(
+            &self.db,
+            ROUTER_SNAPSHOT_TABLE,
+            ROUTER_HOME_NODE_ROUTE_KEY,
+            &snapshot.home_node_routes,
         )?;
         save_snapshot(
             &self.db,
@@ -769,6 +775,9 @@ impl RouterRedbStore {
         let home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord> =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_HOME_NODE_MIGRATION_KEY)?
                 .unwrap_or_default();
+        let home_node_routes: BTreeMap<String, HomeNodeRouteRecord> =
+            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_HOME_NODE_ROUTE_KEY)?
+                .unwrap_or_default();
         let identity_lineage_events: BTreeMap<String, Vec<IdentityLineageEventRecord>> =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_LINEAGE_EVENTS_KEY)?
                 .unwrap_or_default();
@@ -786,6 +795,7 @@ impl RouterRedbStore {
             && deleted_delivery_targets.is_empty()
             && abuse_reports.is_empty()
             && home_node_migrations.is_empty()
+            && home_node_routes.is_empty()
             && replay_guard_state == NodeReplayGuardState::default()
         {
             return Ok(None);
@@ -802,6 +812,7 @@ impl RouterRedbStore {
             replay_guard_state,
             node_franking_public_key: None,
             home_node_migrations,
+            home_node_routes,
             identity_lineage_events,
             identity_lineage_heads,
         })))

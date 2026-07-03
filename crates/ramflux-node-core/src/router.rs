@@ -7,9 +7,10 @@ use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, DeliveryDecision,
     DeviceAuthKeyResponse, DeviceManifestResponse, DeviceRevokeResponse,
     FriendRequestBudgetRequest, FriendRequestBudgetResponse, HomeNodeMigratedNackDelivery,
-    HomeNodeMigrationRecord, IdentityLifecycleTombstone, IdentityLineageEventRecord,
-    IdentityRegisterRequest, IdentityRegistrationResponse, IdentityRegistry, InboxEntry,
-    InboxFetchResponse, ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
+    HomeNodeMigrationRecord, HomeNodeRouteRecord, HomeNodeRouteUpdateProof,
+    IdentityLifecycleTombstone, IdentityLineageEventRecord, IdentityRegisterRequest,
+    IdentityRegistrationResponse, IdentityRegistry, InboxEntry, InboxFetchResponse,
+    ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
     ItestMvp10OwnDeviceFanoutResponse, NodeCoreError, NodeReplayGuardState, NodeServiceSigningKey,
     OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox, PrekeyPublishRequest, PrekeyResponse,
     RegistrationPolicy, RouterSubmitOutcome, SessionDescriptor, SessionRegistry,
@@ -80,6 +81,7 @@ pub(crate) struct RouterControlState {
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
     pub(crate) node_franking_public_key: Option<String>,
     pub(crate) home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord>,
+    pub(crate) home_node_routes: BTreeMap<String, HomeNodeRouteRecord>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -97,6 +99,7 @@ pub(crate) struct RouterCoreSnapshot {
     pub(crate) replay_guard_state: NodeReplayGuardState,
     pub(crate) node_franking_public_key: Option<String>,
     pub(crate) home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord>,
+    pub(crate) home_node_routes: BTreeMap<String, HomeNodeRouteRecord>,
 }
 
 impl RouterCore {
@@ -240,6 +243,91 @@ impl RouterCore {
         identity_commitment: &str,
     ) -> Option<HomeNodeMigrationRecord> {
         lock_unpoisoned(&self.control).home_node_migrations.get(identity_commitment).cloned()
+    }
+
+    /// # Errors
+    /// Returns an error when the route proof is invalid, unsigned by the new home node,
+    /// or does not reference an applied home-node migration.
+    pub fn apply_home_node_route_update_proof(
+        &self,
+        proof: &HomeNodeRouteUpdateProof,
+        now: i64,
+    ) -> Result<HomeNodeRouteRecord, NodeCoreError> {
+        validate_home_node_route_update_proof(proof, now)?;
+        let mut control = lock_unpoisoned(&self.control);
+        let migration =
+            control.home_node_migrations.get(&proof.identity_commitment).ok_or_else(|| {
+                NodeCoreError::ItestHttp(format!(
+                    "home node route update references unknown migration: {}",
+                    proof.identity_commitment
+                ))
+            })?;
+        if migration.migration_proof_hash != proof.migration_proof_hash {
+            return Err(NodeCoreError::ItestHttp(
+                "home node route update migration proof hash mismatch".to_owned(),
+            ));
+        }
+        if migration.new_home_node != proof.new_home_node {
+            return Err(NodeCoreError::ItestHttp(
+                "home node route update new home node mismatch".to_owned(),
+            ));
+        }
+        if migration.new_home_node_key_hash != proof.new_home_node_key_hash {
+            return Err(NodeCoreError::ItestHttp(
+                "home node route update key hash mismatch".to_owned(),
+            ));
+        }
+        if migration.route_record_hash != proof.route_record_hash {
+            return Err(NodeCoreError::ItestHttp(
+                "home node route update route record hash mismatch".to_owned(),
+            ));
+        }
+        let computed_key_hash = ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::FEDERATION_HANDSHAKE,
+            proof.node_public_key.as_bytes(),
+        );
+        if computed_key_hash != proof.new_home_node_key_hash {
+            return Err(NodeCoreError::ItestHttp(
+                "home node route update public key hash mismatch".to_owned(),
+            ));
+        }
+        let route_hash = crate::home_node_route_record_hash(
+            &crate::home_node_route_commitment_from_update(proof),
+        )?;
+        if route_hash != proof.route_record_hash {
+            return Err(NodeCoreError::ItestHttp(
+                "home node route update route commitment mismatch".to_owned(),
+            ));
+        }
+        ramflux_protocol::verify_signed_fields(proof, &proof.signed, &proof.node_public_key)
+            .map_err(|source| {
+                NodeCoreError::Unauthorized(format!(
+                    "home node route update signature rejected: {source}"
+                ))
+            })?;
+        let route_update_proof_hash = crate::home_node_route_update_proof_hash(proof)?;
+        let record = HomeNodeRouteRecord {
+            identity_commitment: proof.identity_commitment.clone(),
+            home_node: proof.new_home_node.clone(),
+            home_node_key_hash: proof.new_home_node_key_hash.clone(),
+            node_public_key: proof.node_public_key.clone(),
+            node_endpoint: proof.node_endpoint.clone(),
+            route_record_hash: proof.route_record_hash.clone(),
+            migration_proof_hash: proof.migration_proof_hash.clone(),
+            route_update_proof_hash,
+            updated_at: proof.issued_at,
+            expires_at: proof.expires_at,
+        };
+        control.home_node_routes.insert(record.identity_commitment.clone(), record.clone());
+        Ok(record)
+    }
+
+    #[must_use]
+    pub fn resolve_home_node_route(
+        &self,
+        identity_commitment: &str,
+    ) -> Option<HomeNodeRouteRecord> {
+        lock_unpoisoned(&self.control).home_node_routes.get(identity_commitment).cloned()
     }
 
     /// # Errors
@@ -700,6 +788,7 @@ impl RouterCore {
             snapshot.abuse_reports = control.abuse_reports.clone();
             snapshot.node_franking_public_key.clone_from(&control.node_franking_public_key);
             snapshot.home_node_migrations = control.home_node_migrations.clone();
+            snapshot.home_node_routes = control.home_node_routes.clone();
         }
         for shard in &self.target_shards {
             let shard = lock_unpoisoned(shard);
@@ -734,6 +823,7 @@ impl RouterCore {
                 abuse_reports: snapshot.abuse_reports,
                 node_franking_public_key: snapshot.node_franking_public_key,
                 home_node_migrations: snapshot.home_node_migrations,
+                home_node_routes: snapshot.home_node_routes,
             }),
             replay_guard_shards,
             node_service_signer: Mutex::new(None),
@@ -776,6 +866,7 @@ impl RouterCore {
             control.identity_lineage_heads.extend(snapshot.identity_lineage_heads);
             control.abuse_reports.extend(snapshot.abuse_reports);
             control.home_node_migrations.extend(snapshot.home_node_migrations);
+            control.home_node_routes.extend(snapshot.home_node_routes);
             if control.node_franking_public_key.is_none() {
                 control.node_franking_public_key = snapshot.node_franking_public_key;
             }
@@ -893,6 +984,40 @@ fn effective_migration_for_registration(
             .filter(|migration| migration.is_effective(request.now))
             .cloned()
     })
+}
+
+fn validate_home_node_route_update_proof(
+    proof: &HomeNodeRouteUpdateProof,
+    now: i64,
+) -> Result<(), NodeCoreError> {
+    if proof.schema != crate::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN
+        || proof.domain != crate::HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN
+    {
+        return Err(NodeCoreError::ItestHttp(
+            "home node route update proof schema rejected".to_owned(),
+        ));
+    }
+    if proof.identity_commitment.is_empty()
+        || proof.new_home_node.is_empty()
+        || proof.new_home_node_key_hash.is_empty()
+        || proof.node_public_key.is_empty()
+        || proof.node_endpoint.is_empty()
+        || proof.route_record_hash.is_empty()
+        || proof.migration_proof_hash.is_empty()
+    {
+        return Err(NodeCoreError::ItestHttp(
+            "home node route update proof missing required field".to_owned(),
+        ));
+    }
+    if proof.issued_at > now {
+        return Err(NodeCoreError::ItestHttp(
+            "home node route update proof issued in the future".to_owned(),
+        ));
+    }
+    if proof.expires_at <= now || proof.expires_at <= proof.issued_at {
+        return Err(NodeCoreError::ItestHttp("home node route update proof expired".to_owned()));
+    }
+    Ok(())
 }
 
 fn home_node_migrated_delivery(

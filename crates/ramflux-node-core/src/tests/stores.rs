@@ -95,6 +95,41 @@ fn router_redb_store_restores_home_node_migration_state() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn router_redb_store_restores_home_node_route_state() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("router_redb_store_restores_home_node_route_state")?;
+    let store = RouterRedbStore::open(&path)?;
+    let router = RouterCore::new();
+    let request = registration_request(
+        "principal_route_store",
+        "device_route_store",
+        842,
+        None,
+        "ip_route_store",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let signer = NodeServiceSigningKey::from_seed([0x93; 32]);
+    let (migration_proof, route_update) = route_update_fixture(
+        &request,
+        842,
+        "mig_route_store",
+        "node_new_route_store.example",
+        "node-new-route-store.example:7443",
+        &signer,
+    )?;
+    router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 1)?;
+    let route = router.apply_home_node_route_update_proof(&route_update, request.now + 2)?;
+    store.save_router(&router)?;
+    drop(store);
+
+    let reopened = RouterRedbStore::open(&path)?;
+    let restored = reopened
+        .load_router()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("router_home_node_route".to_owned()))?;
+    assert_eq!(restored.resolve_home_node_route(&request.proof.principal_id), Some(route));
+    Ok(())
+}
+
+#[test]
 fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("router_redb_incremental_replay_survives_restart")?;
     let store = RouterRedbStore::open(&path)?;
