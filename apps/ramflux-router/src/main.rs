@@ -13,6 +13,11 @@ use std::sync::Arc;
 use serve::serve_itest_http;
 use serve::serve_router_mesh_mtls;
 
+const ROUTER_FEDERATION_FORWARD_URL_ENV: &str = "RAMFLUX_ROUTER_FEDERATION_FORWARD_URL";
+const ROUTER_FEDERATION_FORWARD_TOKEN_ENV: &str = "RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN";
+const ROUTER_FEDERATION_FORWARD_SOURCE_NODE_ID_ENV: &str =
+    "RAMFLUX_ROUTER_FEDERATION_FORWARD_SOURCE_NODE_ID";
+
 fn main() {
     if let Err(error) = run_service("ramflux-router") {
         eprintln!("ramflux-router: {error}");
@@ -44,9 +49,10 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             router.set_node_service_signer(Some(signer));
         }
         tracing::info!(service, node_id = config.node_id, "router store initialized");
+        let home_node_forward = local_federation_forward_client_from_env(&config);
         let state = Arc::new(router);
         let store = Arc::new(store);
-        let router = Arc::new(router_handle_from_env(state, store));
+        let router = Arc::new(router_handle_from_env(state, store, home_node_forward));
         serve_router_mesh_from_env(&config, &router)?;
         #[cfg(feature = "itest-http")]
         if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
@@ -116,6 +122,32 @@ fn serve_router_mesh_from_env(
 fn router_handle_from_env(
     state: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
+    home_node_forward: Option<router_runtime::LocalFederationForwardClient>,
 ) -> router_runtime::RouterHandle {
-    router_runtime::RouterHandle::tokio(state, store)
+    router_runtime::RouterHandle::tokio(state, store, home_node_forward)
+}
+
+fn local_federation_forward_client_from_env(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> Option<router_runtime::LocalFederationForwardClient> {
+    let url = non_empty_env(ROUTER_FEDERATION_FORWARD_URL_ENV)?;
+    let source_node_id = non_empty_env(ROUTER_FEDERATION_FORWARD_SOURCE_NODE_ID_ENV)
+        .unwrap_or_else(|| config.node_id.clone());
+    tracing::info!(
+        url = %url,
+        source_node_id = %source_node_id,
+        "router home-node migration federation forward client enabled"
+    );
+    Some(router_runtime::LocalFederationForwardClient {
+        url,
+        admin_token: non_empty_env(ROUTER_FEDERATION_FORWARD_TOKEN_ENV),
+        source_node_id,
+    })
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
 }
