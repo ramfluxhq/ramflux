@@ -16,7 +16,7 @@ const ROUTER_WAL_SEGMENT_BYTES_DEFAULT: u64 = 64 * 1024 * 1024;
 const ROUTER_WAL_BATCH_MAX_ENV: &str = "RAMFLUX_ROUTER_WAL_BATCH_MAX";
 const ROUTER_WAL_BATCH_MAX_DEFAULT: usize = 256;
 const ROUTER_WAL_COMMIT_WINDOW_US_ENV: &str = "RAMFLUX_ROUTER_WAL_COMMIT_WINDOW_US";
-const ROUTER_WAL_COMMIT_WINDOW_US_DEFAULT: u64 = 1_000;
+const ROUTER_WAL_COMMIT_WINDOW_US_DEFAULT: u64 = 0;
 const ROUTER_WAL_QUEUE_CAPACITY_ENV: &str = "RAMFLUX_ROUTER_WAL_QUEUE_CAPACITY";
 const ROUTER_WAL_QUEUE_CAPACITY_DEFAULT: usize = 65_536;
 const ROUTER_WAL_MAGIC: &[u8] = b"ramflux-router-wal-v1\n";
@@ -531,6 +531,9 @@ fn router_wal_writer_loop(
                 Ok(request) => batch.push(request),
                 Err(mpsc::TryRecvError::Disconnected) => break,
                 Err(mpsc::TryRecvError::Empty) => {
+                    if window.is_zero() {
+                        break;
+                    }
                     let now = Instant::now();
                     if now >= deadline {
                         break;
