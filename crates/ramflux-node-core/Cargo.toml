@@ -14,6 +14,7 @@ default = []
 itest-http = []
 
 [dependencies]
+arc-swap = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-crypto = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
