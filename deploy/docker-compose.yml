@@ -41,6 +41,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      RAMFLUX_ROUTER_ADMIN_TOKEN: "${RAMFLUX_ROUTER_ADMIN_TOKEN:-}"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18082/internal/home-node-migration/forward"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RAMFLUX_FEDERATION_ADMIN_TOKEN:-ramflux-local-admin-token}"
     volumes:

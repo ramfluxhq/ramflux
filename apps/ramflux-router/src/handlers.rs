@@ -5,6 +5,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use crate::lifecycle::{
+    handle_home_node_migration_apply, handle_home_node_route_update_apply,
     handle_mvp7_abuse_report, handle_mvp7_abuse_report_get, handle_mvp7_federated_tombstone,
     handle_mvp7_lifecycle_cancel, handle_mvp7_lifecycle_event, handle_mvp7_lifecycle_finalize,
     handle_mvp7_lifecycle_get, handle_mvp7_metadata_get,
@@ -27,6 +28,7 @@ pub(crate) fn handle_itest_request(
     }
     if handle_itest_mvp0_request(stream, &request, router)?
         || handle_itest_s1_request(stream, &request, router)?
+        || handle_itest_admin_request(stream, &request, router)?
     {
         return Ok(());
     }
@@ -117,6 +119,28 @@ pub(crate) fn handle_itest_request(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_itest_admin_request(
+    stream: &mut TcpStream,
+    request: &ramflux_node_core::NodeHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<bool> {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/admin/home-node-migration/apply") => {
+            let response =
+                handle_home_node_migration_apply(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("POST", "/admin/home-node-route/update/apply") => {
+            let response =
+                handle_home_node_route_update_apply(&request.body, router.state(), router.store())?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 #[cfg(feature = "itest-http")]
@@ -433,6 +457,15 @@ fn handle_mesh_general_value(
         }
         ("POST", "/mvp7/federation/tombstone/apply") => {
             let response = handle_mvp7_federated_tombstone(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/admin/home-node-migration/apply") => {
+            let response = handle_home_node_migration_apply(body, router.state(), router.store())?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("POST", "/admin/home-node-route/update/apply") => {
+            let response =
+                handle_home_node_route_update_apply(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
         ("POST", "/mvp7/abuse/report") => {
