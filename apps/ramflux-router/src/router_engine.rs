@@ -39,12 +39,15 @@ pub(crate) fn submit_envelope(
         outcome,
         ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
             | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
-    ) {
-        store.record_submission_increment(
-            &replay_key,
-            replay_expires_at,
-            persistent_entry.as_ref(),
-        )?;
+    ) && let Err(error) =
+        store.record_submission_increment(&replay_key, replay_expires_at, persistent_entry.as_ref())
+    {
+        tracing::error!(
+            error = %error,
+            replay_key = %replay_key,
+            "router submit persistence failed after in-memory accept; aborting to avoid state fork"
+        );
+        std::process::abort();
     }
     ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
     let response_started = Instant::now();

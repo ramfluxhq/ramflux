@@ -14,8 +14,8 @@ use crate::{
     ROUTER_INBOX_SLICE_KEY, ROUTER_LIFECYCLE_RECORD_TABLE, ROUTER_LIFECYCLE_STATE_KEY,
     ROUTER_LIFECYCLE_TOMBSTONE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_TABLE,
     ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE, ROUTER_SESSION_CHECKPOINT_KEY,
-    ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore, SessionDescriptor,
-    SessionRegistry, load_snapshot, now_unix_seconds, save_snapshot,
+    ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore, RouterWalStore,
+    SessionDescriptor, SessionRegistry, load_snapshot, now_unix_seconds, save_snapshot,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -35,11 +35,14 @@ const ROUTER_COMMIT_WINDOW_US_DEFAULT: u64 = 1_000;
 const ROUTER_COMMIT_QUEUE_CAPACITY_ENV: &str = "RAMFLUX_ROUTER_COMMIT_QUEUE_CAPACITY";
 const ROUTER_COMMIT_QUEUE_CAPACITY_DEFAULT: usize = 4_096;
 const ROUTER_GROUP_COMMIT_ENV: &str = "RAMFLUX_ROUTER_GROUP_COMMIT";
+const ROUTER_WAL_ENABLED_ENV: &str = "RAMFLUX_ROUTER_WAL";
+const ROUTER_WAL_DIR_ENV: &str = "RAMFLUX_ROUTER_WAL_DIR";
 
 pub struct RouterRedbStore {
     db: Arc<redb::Database>,
     path: PathBuf,
     commit_writer: Option<RouterCommitWriter>,
+    submission_wal: Option<RouterWalStore>,
 }
 
 struct RouterCommitWriter {
@@ -228,6 +231,31 @@ impl RouterRedbStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
+        let wal_root = if router_wal_enabled() {
+            Some(router_wal_root_for_redb_path(path.as_ref()))
+        } else {
+            None
+        };
+        Self::open_with_wal_root(path, wal_root.as_deref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_wal(
+        path: impl AsRef<Path>,
+        wal_root: impl AsRef<Path>,
+    ) -> Result<Self, NodeCoreError> {
+        Self::open_with_wal_root(path, Some(wal_root.as_ref()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_without_wal(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
+        Self::open_with_wal_root(path, None)
+    }
+
+    fn open_with_wal_root(
+        path: impl AsRef<Path>,
+        wal_root: Option<&Path>,
+    ) -> Result<Self, NodeCoreError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -281,7 +309,8 @@ impl RouterRedbStore {
         } else {
             None
         };
-        Ok(Self { db, path: path.to_path_buf(), commit_writer })
+        let submission_wal = wal_root.map(RouterWalStore::open).transpose()?;
+        Ok(Self { db, path: path.to_path_buf(), commit_writer, submission_wal })
     }
 
     #[must_use]
@@ -457,13 +486,17 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         let save_started = Instant::now();
         let replay_started = Instant::now();
-        self.commit_router_op(RouterCommitOp::Submission {
-            replay_key: replay_key.to_owned(),
-            replay_expires_at,
-            entry: entry.cloned().map(Box::new),
-        })?;
+        if let Some(wal) = &self.submission_wal {
+            let _location = wal.record_submission(replay_key, replay_expires_at, entry)?;
+        } else {
+            self.commit_router_op(RouterCommitOp::Submission {
+                replay_key: replay_key.to_owned(),
+                replay_expires_at,
+                entry: entry.cloned().map(Box::new),
+            })?;
+            crate::record_router_replay_guard_redb_write();
+        }
         crate::record_router_save_replay_guard_us(elapsed_us(replay_started));
-        crate::record_router_replay_guard_redb_write();
         crate::record_router_save_total_us(elapsed_us(save_started));
         Ok(())
     }
@@ -727,11 +760,16 @@ impl RouterRedbStore {
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn load_router(&self) -> Result<Option<RouterCore>, NodeCoreError> {
         let mut registry = self.load_session_registry()?;
-        let incremental_entries = self.load_incremental_inbox_entries()?;
+        let now = i64::try_from(now_unix_seconds()).unwrap_or(i64::MAX);
+        let mut incremental_entries = self.load_incremental_inbox_entries()?;
         let incremental_cursors = self.load_incremental_cursor_states()?;
-        let incremental_replay_tuples = self.load_incremental_replay_tuples(
-            i64::try_from(now_unix_seconds()).unwrap_or(i64::MAX),
-        )?;
+        let mut incremental_replay_tuples = self.load_incremental_replay_tuples(now)?;
+        self.merge_wal_submissions(
+            now,
+            &incremental_cursors,
+            &mut incremental_entries,
+            &mut incremental_replay_tuples,
+        );
         let has_incremental_inbox =
             !incremental_entries.is_empty() || !incremental_cursors.is_empty();
         let has_incremental_replay = !incremental_replay_tuples.is_empty();
@@ -816,6 +854,43 @@ impl RouterRedbStore {
             identity_lineage_events,
             identity_lineage_heads,
         })))
+    }
+
+    fn merge_wal_submissions(
+        &self,
+        now_unix_seconds: i64,
+        incremental_cursors: &[CursorAckState],
+        incremental_entries: &mut Vec<InboxEntry>,
+        incremental_replay_tuples: &mut Vec<(String, i64)>,
+    ) {
+        let Some(wal) = &self.submission_wal else {
+            return;
+        };
+        for submission in wal.submissions(now_unix_seconds) {
+            if !incremental_replay_tuples
+                .iter()
+                .any(|(key, _expires_at)| key == &submission.replay_key)
+            {
+                incremental_replay_tuples
+                    .push((submission.replay_key.clone(), submission.replay_expires_at));
+            }
+            let Some(entry) = submission.entry else {
+                continue;
+            };
+            if incremental_cursors
+                .iter()
+                .any(|cursor| cursor.acked_envelope_ids.contains(&entry.envelope.envelope_id))
+            {
+                continue;
+            }
+            if incremental_entries
+                .iter()
+                .any(|existing| existing.envelope.envelope_id == entry.envelope.envelope_id)
+            {
+                continue;
+            }
+            incremental_entries.push(entry);
+        }
     }
 
     fn replace_incremental_router_tables(
@@ -1058,6 +1133,29 @@ fn router_u64_env(name: &str, default: u64) -> u64 {
 fn router_group_commit_enabled() -> bool {
     std::env::var(ROUTER_GROUP_COMMIT_ENV)
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn router_wal_enabled() -> bool {
+    std::env::var(ROUTER_WAL_ENABLED_ENV).map_or(true, |value| {
+        let trimmed = value.trim();
+        !(trimmed == "0"
+            || trimmed.eq_ignore_ascii_case("false")
+            || trimmed.eq_ignore_ascii_case("off")
+            || trimmed.eq_ignore_ascii_case("no"))
+    })
+}
+
+fn router_wal_root_for_redb_path(redb_path: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var(ROUTER_WAL_DIR_ENV)
+        && !path.trim().is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    let file_name = redb_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map_or_else(|| "router.redb".to_owned(), ToOwned::to_owned);
+    redb_path.with_file_name(format!("{file_name}.wal"))
 }
 
 fn load_table_values<T: serde::de::DeserializeOwned>(
