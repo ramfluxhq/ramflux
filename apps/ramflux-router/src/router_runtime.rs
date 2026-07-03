@@ -86,13 +86,6 @@ impl RouterHandle {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "async router ingress is the next P-B slice; current mesh/HTTP ingress is blocking"
-        )
-    )]
     pub(crate) async fn submit_envelope_async(
         &self,
         envelope: ramflux_protocol::Envelope,

@@ -19,6 +19,15 @@ pub(crate) struct RouterMeshClient {
     pub(crate) server_name: String,
     pub(crate) tls: ramflux_transport::MeshTlsConfig,
     pub(crate) client: ramflux_transport::MeshHttpClient,
+    pub(crate) async_mesh: Option<RouterAsyncMeshClient>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RouterAsyncMeshClient {
+    pub(crate) endpoint: String,
+    pub(crate) server_name: String,
+    pub(crate) tls: ramflux_transport::MeshTlsConfig,
+    pub(crate) peer_ca_pems: Vec<String>,
 }
 
 #[derive(Clone)]

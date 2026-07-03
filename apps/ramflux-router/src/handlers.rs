@@ -310,6 +310,36 @@ pub(crate) fn handle_mesh_request_value(
     handle_mesh_general_value(&method, &path, &body, router)
 }
 
+pub(crate) async fn handle_mesh_quic_request_value(
+    request: &ramflux_transport::GatewayQuicRequest,
+    router: &crate::router_runtime::RouterHandle,
+    peer_service_id: &str,
+) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
+    let body = serde_json::to_vec(&request.body)?;
+    if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp0/envelope") {
+        let response = handle_mvp0_envelope_async(&body, router).await?;
+        return Ok(ramflux_transport::GatewayQuicResponse {
+            status: 200,
+            body: serde_json::to_value(response)?,
+        });
+    }
+    let response = handle_mesh_request_value(
+        ramflux_transport::MeshHttpRequest {
+            method: request.method.clone(),
+            path: request.path.clone(),
+            body,
+        },
+        router,
+        peer_service_id,
+    )?;
+    Ok(ramflux_transport::GatewayQuicResponse {
+        status: mesh_response_status_code(response.status),
+        body: serde_json::from_slice(&response.body).unwrap_or_else(
+            |_| serde_json::json!({ "error": String::from_utf8_lossy(&response.body) }),
+        ),
+    })
+}
+
 fn handle_mesh_retention_value(
     method: &str,
     path: &str,
@@ -531,6 +561,21 @@ fn handle_mvp0_envelope(
     let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
     ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
     router.submit_envelope(envelope, total_started)
+}
+
+async fn handle_mvp0_envelope_async(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    let total_started = Instant::now();
+    let decode_started = Instant::now();
+    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
+    router.submit_envelope_async(envelope, total_started).await
+}
+
+fn mesh_response_status_code(status: &str) -> u16 {
+    status.split_ascii_whitespace().next().and_then(|code| code.parse::<u16>().ok()).unwrap_or(500)
 }
 
 fn elapsed_us(started: Instant) -> u64 {
@@ -759,4 +804,89 @@ fn handle_mvp1_inbox_fetch(
         "router mvp1 inbox fetch outcome"
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
+
+    use super::*;
+
+    #[test]
+    fn mesh_quic_request_submit_uses_async_router_path() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let path = temp_path("mesh_quic_request_submit_uses_async_router_path")?;
+        let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
+        let router = Arc::new(ramflux_node_core::RouterCore::new());
+        let handle = crate::router_runtime::RouterHandle::tokio(router, store, None);
+        let envelope = current_envelope("env_router_async_ingress", "target_router_async_ingress");
+        let request = ramflux_transport::GatewayQuicRequest {
+            method: "POST".to_owned(),
+            path: "/mvp0/envelope".to_owned(),
+            body: serde_json::to_value(&envelope)?,
+        };
+
+        let accepted = runtime.block_on(handle_mesh_quic_request_value(
+            &request,
+            &handle,
+            "ramflux-gateway",
+        ))?;
+        assert_eq!(accepted.status, 200);
+        let accepted: ramflux_node_core::EnvelopeSubmitResponse =
+            serde_json::from_value(accepted.body)?;
+        assert_eq!(accepted.outcome, "offline_queued");
+
+        let replay = runtime.block_on(handle_mesh_quic_request_value(
+            &request,
+            &handle,
+            "ramflux-gateway",
+        ))?;
+        let replay: ramflux_node_core::EnvelopeSubmitResponse =
+            serde_json::from_value(replay.body)?;
+        assert!(replay.outcome.starts_with("rejected_security:"));
+        assert!(replay.outcome.contains("replay:"));
+
+        let _removed = std::fs::remove_file(&path);
+        let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
+        Ok(())
+    }
+
+    fn current_envelope(envelope_id: &str, target_delivery_id: &str) -> Envelope {
+        Envelope {
+            schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            version: 1,
+            domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            ext: Ext::default(),
+            signed: SignedFields {
+                signing_key_id: "router_async_ingress_test".to_owned(),
+                signature_alg: SignatureAlg::Ed25519,
+                signature: "signature".to_owned(),
+            },
+            envelope_id: envelope_id.to_owned(),
+            source_principal_id: "principal_router_async_ingress".to_owned(),
+            source_device_id: "device_router_async_ingress".to_owned(),
+            target_delivery_id: target_delivery_id.to_owned(),
+            routing_set_id: None,
+            delivery_class: DeliveryClass::OpaqueEvent,
+            priority: Priority::Normal,
+            ttl: 300,
+            created_at: i64::try_from(ramflux_node_core::now_unix_seconds())
+                .unwrap_or(i64::MAX - 300),
+            encrypted_payload: "ciphertext".to_owned(),
+            payload_hash: "payload_hash".to_owned(),
+        }
+    }
+
+    fn temp_path(test_name: &str) -> anyhow::Result<PathBuf> {
+        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        Ok(std::env::temp_dir().join(format!(
+            "ramflux-router-{test_name}-{}-{}",
+            std::process::id(),
+            elapsed.as_nanos()
+        )))
+    }
 }

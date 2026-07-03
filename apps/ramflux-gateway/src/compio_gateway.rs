@@ -233,7 +233,12 @@ async fn dispatch_gateway_request_blocking(
     let (sender, receiver) =
         tokio::sync::oneshot::channel::<anyhow::Result<ramflux_transport::GatewayQuicResponse>>();
     thread::Builder::new().name("ramflux-gateway-compio-request".to_owned()).spawn(move || {
-        let _result = sender.send(dispatch_quic_json_request(&router, request));
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(Into::into)
+            .and_then(|runtime| runtime.block_on(dispatch_quic_json_request(&router, request)));
+        let _result = sender.send(result);
     })?;
     receiver.await?
 }

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use crate::{RouterMeshClient, router_get_json, router_post_json};
+use crate::{RouterMeshClient, router_get_json, router_post_json, router_post_json_async};
 
-pub(crate) fn dispatch_quic_json_request(
+pub(crate) async fn dispatch_quic_json_request(
     router: &RouterMeshClient,
     request: ramflux_transport::GatewayQuicRequest,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
@@ -17,7 +17,7 @@ pub(crate) fn dispatch_quic_json_request(
             let envelope: ramflux_protocol::Envelope = serde_json::from_value(request.body)?;
             ramflux_node_core::record_gateway_submit_received();
             let response: ramflux_node_core::EnvelopeSubmitResponse =
-                router_post_json(router, "/mvp0/envelope", &envelope)?;
+                router_post_json_async(router, "/mvp0/envelope", &envelope).await?;
             tracing::info!(
                 envelope_id = %envelope.envelope_id,
                 target_delivery_id = %envelope.target_delivery_id,
