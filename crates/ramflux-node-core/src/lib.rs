@@ -77,7 +77,7 @@ pub(crate) use perf_metrics::{
     record_router_replay_guard_check_us, record_router_replay_guard_redb_write,
     record_router_save_begin_write_us, record_router_save_commit_us, record_router_save_inbox_us,
     record_router_save_mutation_us, record_router_save_replay_guard_us,
-    record_router_save_total_us, record_router_snapshot_save,
+    record_router_save_total_us, record_router_snapshot_save, record_router_wal_batch,
 };
 pub(crate) use redb_store::{
     FEDERATION_BAD_NODE_ADVISORY_KEY, FEDERATION_DISCOVERY_PIN_KEY,

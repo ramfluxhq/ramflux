@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use quinn::VarInt;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::server::{WebPkiClientVerifier, danger::ClientCertVerifier};
 use rustls::{
@@ -18,6 +19,9 @@ pub(crate) type MeshRootPemProvider =
     Arc<dyn Fn() -> Result<Vec<String>, TransportError> + Send + Sync>;
 
 static RUSTLS_PROVIDER: Once = Once::new();
+const MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV: &str =
+    "RAMFLUX_MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS";
+const MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT: u32 = 4096;
 
 /// # Errors
 /// Returns an error when the mesh CA, certificate, or private key cannot be loaded or validated.
@@ -93,7 +97,9 @@ pub(crate) fn mesh_quic_server_config_with_dynamic_pem_roots(
     let server_config = mesh_server_config_with_dynamic_pem_roots(tls, root_pems_provider)?;
     let quic_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
         .map_err(|error| TransportError::Tls(error.to_string()))?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_config)))
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_config));
+    server_config.transport_config(mesh_quic_transport_config());
+    Ok(server_config)
 }
 
 pub(crate) fn mesh_quic_client_config_with_pem_roots(
@@ -103,7 +109,20 @@ pub(crate) fn mesh_quic_client_config_with_pem_roots(
     let client_config = mesh_client_config_with_pem_roots(tls, root_pems)?;
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
         .map_err(|error| TransportError::Tls(error.to_string()))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+    client_config.transport_config(mesh_quic_transport_config());
+    Ok(client_config)
+}
+
+fn mesh_quic_transport_config() -> Arc<quinn::TransportConfig> {
+    let stream_limit = std::env::var(MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT);
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(stream_limit));
+    Arc::new(transport)
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]

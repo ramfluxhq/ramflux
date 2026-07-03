@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use crate::perf_metrics::{
     record_mesh_client_cached_request_failure, record_mesh_client_connect,
-    record_mesh_client_pool_hit, record_mesh_client_pool_miss, record_mesh_client_request,
-    record_mesh_client_request_timeout, record_mesh_client_retry, record_mesh_client_retry_failure,
-    record_mesh_client_retry_success, record_mesh_client_runtime_queue_wait,
-    record_mesh_client_tls_handshake, record_mesh_server_quic_connection_accepted,
-    record_mesh_server_quic_request_read, record_mesh_server_quic_response_write,
-    record_mesh_server_quic_stream_accepted,
+    record_mesh_client_exchange, record_mesh_client_pool_hit, record_mesh_client_pool_miss,
+    record_mesh_client_request, record_mesh_client_request_timeout, record_mesh_client_retry,
+    record_mesh_client_retry_failure, record_mesh_client_retry_success,
+    record_mesh_client_runtime_queue_wait, record_mesh_client_tls_handshake,
+    record_mesh_server_quic_connection_accepted, record_mesh_server_quic_request_read,
+    record_mesh_server_quic_response_write, record_mesh_server_quic_stream_accepted,
 };
 use crate::tls_config::{
     MeshRootPemProvider, mesh_quic_client_config_with_pem_roots,
@@ -28,6 +28,9 @@ use tokio::sync::Mutex;
 const MESH_QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MESH_QUIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const MESH_QUIC_CLIENT_POOL_SIZE_ENV: &str = "RAMFLUX_MESH_QUIC_CLIENT_POOL_SIZE";
+const ROUTER_ASYNC_POOL_SIZE_ENV: &str = "RAMFLUX_ROUTER_ASYNC_POOL_SIZE";
+const MESH_QUIC_CLIENT_POOL_SIZE_DEFAULT: usize = 8;
 
 pub struct MeshQuicServer {
     endpoint: quinn::Endpoint,
@@ -90,6 +93,54 @@ struct MeshQuicClientRuntime {
 struct MeshQuicCachedConnection {
     _endpoint: quinn::Endpoint,
     connection: quinn::Connection,
+}
+
+#[derive(Default)]
+struct MeshQuicConnectionPool {
+    next: usize,
+    connections: Vec<MeshQuicCachedConnection>,
+}
+
+impl MeshQuicConnectionPool {
+    fn retain_live(&mut self) {
+        self.connections.retain(|cached| cached.connection.close_reason().is_none());
+        if self.connections.is_empty() {
+            self.next = 0;
+        } else {
+            self.next %= self.connections.len();
+        }
+    }
+
+    fn needs_more_connections(&mut self, pool_size: usize) -> bool {
+        self.retain_live();
+        self.connections.len() < pool_size.max(1)
+    }
+
+    fn select_connection(&mut self) -> Option<quinn::Connection> {
+        self.retain_live();
+        if self.connections.is_empty() {
+            return None;
+        }
+        let index = self.next % self.connections.len();
+        self.next = self.next.wrapping_add(1);
+        Some(self.connections[index].connection.clone())
+    }
+
+    fn insert_or_select(
+        &mut self,
+        cached: MeshQuicCachedConnection,
+        pool_size: usize,
+    ) -> quinn::Connection {
+        self.retain_live();
+        if self.connections.len() < pool_size.max(1) {
+            let connection = cached.connection.clone();
+            self.connections.push(cached);
+            self.next = self.next.wrapping_add(1);
+            connection
+        } else {
+            self.select_connection().unwrap_or(cached.connection)
+        }
+    }
 }
 
 impl MeshQuicServer {
@@ -373,8 +424,9 @@ fn mesh_quic_client_runtime() -> &'static MeshQuicClientRuntime {
 
 fn spawn_mesh_quic_client_runtime() -> MeshQuicClientRuntime {
     let (jobs, receiver) = mpsc::channel();
+    let pool_size = mesh_quic_client_pool_size();
     std::thread::spawn(move || {
-        if let Err(error) = run_mesh_quic_client_runtime(receiver) {
+        if let Err(error) = run_mesh_quic_client_runtime(receiver, pool_size) {
             tracing::error!(%error, "mesh QUIC client runtime stopped");
         }
     });
@@ -383,17 +435,19 @@ fn spawn_mesh_quic_client_runtime() -> MeshQuicClientRuntime {
 
 fn run_mesh_quic_client_runtime(
     receiver: mpsc::Receiver<MeshQuicClientJob>,
+    pool_size: usize,
 ) -> Result<(), TransportError> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let handle = runtime.handle().clone();
     let connections =
-        Arc::new(Mutex::new(HashMap::<MeshQuicPoolKey, MeshQuicCachedConnection>::new()));
+        Arc::new(Mutex::new(HashMap::<MeshQuicPoolKey, MeshQuicConnectionPool>::new()));
+    tracing::info!(pool_size, "mesh QUIC client connection pool configured");
     for job in receiver {
         record_mesh_client_runtime_queue_wait(job.request.enqueued_at.elapsed());
         let connections = Arc::clone(&connections);
         handle.spawn(async move {
             let MeshQuicClientJob { request, response: response_sender } = job;
-            let response = mesh_quic_cached_request(connections, request).await;
+            let response = mesh_quic_cached_request(connections, request, pool_size).await;
             response_sender.send(response);
         });
     }
@@ -401,8 +455,9 @@ fn run_mesh_quic_client_runtime(
 }
 
 async fn mesh_quic_cached_request(
-    connections: Arc<Mutex<HashMap<MeshQuicPoolKey, MeshQuicCachedConnection>>>,
+    connections: Arc<Mutex<HashMap<MeshQuicPoolKey, MeshQuicConnectionPool>>>,
     job: MeshQuicClientRequestJob,
+    pool_size: usize,
 ) -> Result<GatewayQuicResponse, TransportError> {
     record_mesh_client_request();
     let peer_addr = resolve_endpoint(&job.endpoint)?;
@@ -413,11 +468,9 @@ async fn mesh_quic_cached_request(
         peer_ca_pems: job.peer_ca_pems.clone(),
     };
     let cached_connection = {
-        let connections = connections.lock().await;
-        connections
-            .get(&key)
-            .filter(|cached| cached.connection.close_reason().is_none())
-            .map(|cached| cached.connection.clone())
+        let mut connections = connections.lock().await;
+        let pool = connections.entry(key.clone()).or_default();
+        if pool.needs_more_connections(pool_size) { None } else { pool.select_connection() }
     };
     let (connection, reused_cached_connection) = if let Some(connection) = cached_connection {
         record_mesh_client_pool_hit();
@@ -426,8 +479,10 @@ async fn mesh_quic_cached_request(
         record_mesh_client_pool_miss();
         let cached =
             mesh_quic_connect(peer_addr, &job.tls, &job.server_name, &job.peer_ca_pems).await?;
-        let connection = cached.connection.clone();
-        connections.lock().await.insert(key.clone(), cached);
+        let connection = {
+            let mut connections = connections.lock().await;
+            connections.entry(key.clone()).or_default().insert_or_select(cached, pool_size)
+        };
         (connection, false)
     };
     let request_timeout = if reused_cached_connection {
@@ -435,7 +490,7 @@ async fn mesh_quic_cached_request(
     } else {
         MESH_QUIC_REQUEST_TIMEOUT
     };
-    match mesh_quic_request_on_connection(&connection, &job.request, request_timeout).await {
+    match timed_mesh_quic_request_on_connection(&connection, &job.request, request_timeout).await {
         Ok(response) => Ok(response),
         Err(error) if reused_cached_connection => {
             record_mesh_client_cached_request_failure();
@@ -449,9 +504,11 @@ async fn mesh_quic_cached_request(
             connections.lock().await.remove(&key);
             let cached =
                 mesh_quic_connect(peer_addr, &job.tls, &job.server_name, &job.peer_ca_pems).await?;
-            let connection = cached.connection.clone();
-            connections.lock().await.insert(key.clone(), cached);
-            match mesh_quic_request_on_connection(
+            let connection = {
+                let mut connections = connections.lock().await;
+                connections.entry(key.clone()).or_default().insert_or_select(cached, pool_size)
+            };
+            match timed_mesh_quic_request_on_connection(
                 &connection,
                 &job.request,
                 MESH_QUIC_REQUEST_TIMEOUT,
@@ -484,6 +541,15 @@ async fn mesh_quic_cached_request(
             Err(error)
         }
     }
+}
+
+fn mesh_quic_client_pool_size() -> usize {
+    std::env::var(ROUTER_ASYNC_POOL_SIZE_ENV)
+        .or_else(|_| std::env::var(MESH_QUIC_CLIENT_POOL_SIZE_ENV))
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MESH_QUIC_CLIENT_POOL_SIZE_DEFAULT)
 }
 
 async fn mesh_quic_connect(
@@ -547,6 +613,17 @@ async fn mesh_quic_request_on_connection(
         record_mesh_client_request_timeout();
         TransportError::Quic(error.to_string())
     })?
+}
+
+async fn timed_mesh_quic_request_on_connection(
+    connection: &quinn::Connection,
+    request: &GatewayQuicRequest,
+    timeout: Duration,
+) -> Result<GatewayQuicResponse, TransportError> {
+    let started = std::time::Instant::now();
+    let result = mesh_quic_request_on_connection(connection, request, timeout).await;
+    record_mesh_client_exchange(started.elapsed());
+    result
 }
 
 async fn drain_quic_recv_to_fin(recv: &mut quinn::RecvStream) -> Result<(), TransportError> {

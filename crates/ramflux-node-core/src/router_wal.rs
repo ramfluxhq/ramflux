@@ -483,7 +483,9 @@ impl RouterWalWriterState {
         crate::record_router_save_mutation_us(elapsed_us(write_started));
         let sync_started = Instant::now();
         self.file.sync_all().map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        crate::record_router_save_commit_us(elapsed_us(sync_started));
+        let sync_us = elapsed_us(sync_started);
+        crate::record_router_save_commit_us(sync_us);
+        crate::record_router_wal_batch(payloads.len(), sync_us);
         Ok(locations)
     }
 
