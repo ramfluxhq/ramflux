@@ -3,6 +3,7 @@
 
 #![allow(clippy::wildcard_imports)]
 use crate::*;
+use rusqlite::types::Type;
 
 pub(crate) fn contact_verification_from_row(
     row: &rusqlite::Row<'_>,
@@ -86,5 +87,46 @@ pub(crate) fn guardian_recovery_share_from_row(
         state: row.get(14)?,
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
+    })
+}
+
+pub(crate) fn pending_recovery_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PendingRecoveryRecord> {
+    let recovery_quorum_json: Vec<u8> = row.get(9)?;
+    let context_json: Vec<u8> = row.get(10)?;
+    Ok(PendingRecoveryRecord {
+        recovery_id: row.get(0)?,
+        owner_principal_id: row.get(1)?,
+        recovery_quorum_id: row.get(2)?,
+        lifecycle_epoch: row.get(3)?,
+        lineage_head: row.get(4)?,
+        event_type: row.get(5)?,
+        timelock_started_at: row.get(6)?,
+        timelock_until: row.get(7)?,
+        state: row.get(8)?,
+        recovery_quorum: serde_json::from_slice(&recovery_quorum_json).map_err(|source| {
+            rusqlite::Error::FromSqlConversionFailure(9, Type::Blob, Box::new(source))
+        })?,
+        context: serde_json::from_slice(&context_json).map_err(|source| {
+            rusqlite::Error::FromSqlConversionFailure(10, Type::Blob, Box::new(source))
+        })?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+pub(crate) fn pending_recovery_approval_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PendingRecoveryApprovalRecord> {
+    let approval_json: Vec<u8> = row.get(3)?;
+    Ok(PendingRecoveryApprovalRecord {
+        recovery_id: row.get(0)?,
+        signing_key_id: row.get(1)?,
+        member_kind: row.get(2)?,
+        approval: serde_json::from_slice(&approval_json).map_err(|source| {
+            rusqlite::Error::FromSqlConversionFailure(3, Type::Blob, Box::new(source))
+        })?,
+        approved_at: row.get(4)?,
     })
 }

@@ -717,6 +717,40 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 ON guardian_recovery_share_projection(owner_principal_id, state);
         ",
     },
+    AccountMigration {
+        schema_version: 6,
+        app_version: "v1-r2",
+        checksum: "2026-07-03-pending-recovery-state-v1",
+        notes: "pending social recovery state machine and quorum approval collection",
+        sql: r"
+            CREATE TABLE IF NOT EXISTS pending_recovery_projection (
+                recovery_id TEXT PRIMARY KEY,
+                owner_principal_id TEXT NOT NULL,
+                recovery_quorum_id TEXT NOT NULL,
+                lifecycle_epoch INTEGER NOT NULL,
+                lineage_head TEXT,
+                event_type TEXT NOT NULL,
+                timelock_started_at INTEGER,
+                timelock_until INTEGER,
+                state TEXT NOT NULL,
+                recovery_quorum_json BLOB NOT NULL,
+                context_json BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_recovery_owner
+                ON pending_recovery_projection(owner_principal_id, state);
+            CREATE TABLE IF NOT EXISTS pending_recovery_approval_projection (
+                recovery_id TEXT NOT NULL,
+                signing_key_id TEXT NOT NULL,
+                member_kind TEXT NOT NULL,
+                approval_json BLOB NOT NULL,
+                approved_at INTEGER NOT NULL,
+                PRIMARY KEY(recovery_id, signing_key_id),
+                FOREIGN KEY(recovery_id) REFERENCES pending_recovery_projection(recovery_id)
+            );
+        ",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {
@@ -885,6 +919,39 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_device_directory_table(connection)?;
     ensure_object_share_grant_table(connection)?;
     ensure_guardian_recovery_share_table(connection)?;
+    ensure_pending_recovery_tables(connection)?;
+    Ok(())
+}
+
+fn ensure_pending_recovery_tables(connection: &Connection) -> Result<(), StorageError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pending_recovery_projection (
+            recovery_id TEXT PRIMARY KEY,
+            owner_principal_id TEXT NOT NULL,
+            recovery_quorum_id TEXT NOT NULL,
+            lifecycle_epoch INTEGER NOT NULL,
+            lineage_head TEXT,
+            event_type TEXT NOT NULL,
+            timelock_started_at INTEGER,
+            timelock_until INTEGER,
+            state TEXT NOT NULL,
+            recovery_quorum_json BLOB NOT NULL,
+            context_json BLOB NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_recovery_owner
+            ON pending_recovery_projection(owner_principal_id, state);
+        CREATE TABLE IF NOT EXISTS pending_recovery_approval_projection (
+            recovery_id TEXT NOT NULL,
+            signing_key_id TEXT NOT NULL,
+            member_kind TEXT NOT NULL,
+            approval_json BLOB NOT NULL,
+            approved_at INTEGER NOT NULL,
+            PRIMARY KEY(recovery_id, signing_key_id),
+            FOREIGN KEY(recovery_id) REFERENCES pending_recovery_projection(recovery_id)
+        );",
+    )?;
     Ok(())
 }
 

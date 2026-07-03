@@ -56,9 +56,10 @@ pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
 pub use client::recovery::{
-    SdkGuardianAcceptMessage, SdkGuardianInviteMessage, SdkGuardianRecoveryShare,
-    SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember, recovery_member_public_key_base64url,
-    verify_guardian_accept,
+    SdkFinalizedRecovery, SdkGuardianAcceptMessage, SdkGuardianInviteMessage,
+    SdkGuardianRecoveryShare, SdkPendingRecoveryState, SdkPendingRecoveryStatus,
+    SdkRecoveryInitiateRequest, SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember,
+    recovery_member_public_key_base64url, verify_guardian_accept,
 };
 pub use constants::*;
 pub use dm::{

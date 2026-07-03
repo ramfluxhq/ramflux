@@ -95,6 +95,8 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "object_tombstone",
     "object_share_grant_projection",
     "guardian_recovery_share_projection",
+    "pending_recovery_projection",
+    "pending_recovery_approval_projection",
     "self_device_control_log",
     "a2ui_surface_cache",
     "mcp_server_registry",
@@ -199,7 +201,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 46);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 48);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -778,7 +780,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2, 3, 4, 5]);
+    assert_eq!(before, vec![1, 2, 3, 4, 5, 6]);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -982,4 +984,87 @@ fn guardian_recovery_share_record_query_and_upsert() -> Result<(), StorageError>
     assert_eq!(db.guardian_recovery_shares_for_owner("principal_alice")?.len(), 1);
     let _ = fs::remove_dir_all(root);
     Ok(())
+}
+
+#[test]
+fn pending_recovery_tracks_state_and_rejects_duplicate_approvals() -> Result<(), StorageError> {
+    let (root, db) = test_db("pending-recovery")?;
+    let quorum = test_recovery_quorum();
+    let context = ramflux_protocol::RecoveryApprovalContext {
+        recovery_id: "recovery_a".to_owned(),
+        event_type: "identity.reactivated".to_owned(),
+        principal_id: "principal_alice".to_owned(),
+        lifecycle_epoch: 7,
+        lineage_head: Some("lineage_a".to_owned()),
+        timelock_until: Some(1_900_000_100),
+    };
+    let pending = db.create_pending_recovery(&PendingRecoveryWrite {
+        recovery_id: "recovery_a",
+        owner_principal_id: "principal_alice",
+        recovery_quorum: &quorum,
+        lifecycle_epoch: 7,
+        lineage_head: Some("lineage_a"),
+        event_type: "identity.reactivated",
+        timelock_until: Some(1_900_000_100),
+        context: &context,
+    })?;
+    assert_eq!(pending.state, "initiated");
+    assert_eq!(pending.recovery_quorum, quorum);
+    assert_eq!(pending.context, context);
+
+    let started = db.transition_pending_recovery(
+        "recovery_a",
+        "initiated",
+        "timelock_started",
+        Some(1_900_000_000),
+    )?;
+    assert_eq!(started.timelock_started_at, Some(1_900_000_000));
+    assert!(matches!(
+        db.transition_pending_recovery("recovery_a", "initiated", "collecting_approvals", None),
+        Err(StorageError::InvalidRecoveryState { .. })
+    ));
+
+    let approval = ramflux_protocol::RecoveryApproval {
+        member_kind: ramflux_protocol::RecoveryQuorumMemberKind::RootShare,
+        signing_key_id: "root-share".to_owned(),
+        signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+        signature: "sig".to_owned(),
+    };
+    let recorded = db.record_pending_recovery_approval(&PendingRecoveryApprovalWrite {
+        recovery_id: "recovery_a",
+        approval: &approval,
+        approved_at: 1_900_000_010,
+    })?;
+    assert_eq!(recorded.approval, approval);
+    assert!(matches!(
+        db.record_pending_recovery_approval(&PendingRecoveryApprovalWrite {
+            recovery_id: "recovery_a",
+            approval: &approval,
+            approved_at: 1_900_000_011,
+        }),
+        Err(StorageError::MessageIdConflict(_))
+    ));
+    assert_eq!(db.pending_recovery_approvals("recovery_a")?.len(), 1);
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+fn test_recovery_quorum() -> ramflux_protocol::RecoveryQuorumConfigured {
+    ramflux_protocol::RecoveryQuorumConfigured {
+        recovery_quorum_id: "quorum_a".to_owned(),
+        threshold: 2,
+        total: 2,
+        members: vec![
+            ramflux_protocol::RecoveryQuorumMemberCommitment {
+                member_kind: ramflux_protocol::RecoveryQuorumMemberKind::RootShare,
+                signing_key_id: "root-share".to_owned(),
+                public_key_base64url: "root-pub".to_owned(),
+            },
+            ramflux_protocol::RecoveryQuorumMemberCommitment {
+                member_kind: ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                signing_key_id: "guardian-share".to_owned(),
+                public_key_base64url: "guardian-pub".to_owned(),
+            },
+        ],
+    }
 }

@@ -12,6 +12,17 @@ pub struct SdkRecoveryQuorumMember {
     pub public_key_base64url: String,
 }
 
+impl SdkRecoveryQuorumMember {
+    #[must_use]
+    pub fn commitment(&self) -> ramflux_protocol::RecoveryQuorumMemberCommitment {
+        ramflux_protocol::RecoveryQuorumMemberCommitment {
+            member_kind: self.member_kind.clone(),
+            signing_key_id: self.signing_key_id.clone(),
+            public_key_base64url: self.public_key_base64url.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SdkRecoveryQuorumConfiguration {
     pub recovery_quorum: ramflux_protocol::RecoveryQuorumConfigured,
@@ -62,6 +73,45 @@ pub struct SdkGuardianAcceptMessage {
     pub accepted_at: i64,
     #[serde(flatten)]
     pub signed: ramflux_protocol::SignedFields,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkPendingRecoveryState {
+    Initiated,
+    TimelockStarted,
+    CollectingApprovals,
+    QuorumReached,
+    ReadyToFinalize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SdkRecoveryInitiateRequest {
+    pub recovery_id: String,
+    pub owner_principal_id: String,
+    pub recovery_quorum: ramflux_protocol::RecoveryQuorumConfigured,
+    pub lifecycle_epoch: u64,
+    pub lineage_head: Option<String>,
+    pub timelock_until: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SdkPendingRecoveryStatus {
+    pub recovery_id: String,
+    pub owner_principal_id: String,
+    pub recovery_quorum_id: String,
+    pub state: SdkPendingRecoveryState,
+    pub approvals_collected: usize,
+    pub threshold: u8,
+    pub timelock_until: Option<u64>,
+    pub ready_to_finalize: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SdkFinalizedRecovery {
+    pub recovery_id: String,
+    pub recovery_quorum: ramflux_protocol::RecoveryQuorumConfigured,
+    pub proof: ramflux_protocol::RecoveryQuorumProof,
 }
 
 impl SdkRecoveryQuorumConfiguration {
@@ -143,6 +193,85 @@ impl RamfluxClient {
     ) -> Result<Vec<GuardianRecoveryShareRecord>, SdkError> {
         Ok(self.account_db()?.guardian_recovery_shares_for_owner(owner_principal_id)?)
     }
+
+    /// Creates a pending social recovery record in the initial state.
+    pub fn initiate_recovery(
+        &self,
+        request: &SdkRecoveryInitiateRequest,
+    ) -> Result<SdkPendingRecoveryStatus, SdkError> {
+        initiate_recovery(self, request)
+    }
+
+    /// Moves a pending recovery from `initiated` to `timelock_started`.
+    pub fn start_recovery_timelock(
+        &self,
+        recovery_id: &str,
+    ) -> Result<SdkPendingRecoveryStatus, SdkError> {
+        transition_recovery_state(
+            self,
+            recovery_id,
+            SdkPendingRecoveryState::Initiated,
+            SdkPendingRecoveryState::TimelockStarted,
+            Some(now_unix_timestamp()),
+        )
+    }
+
+    /// Moves a pending recovery from `timelock_started` to `collecting_approvals`.
+    pub fn begin_recovery_approval_collection(
+        &self,
+        recovery_id: &str,
+    ) -> Result<SdkPendingRecoveryStatus, SdkError> {
+        transition_recovery_state(
+            self,
+            recovery_id,
+            SdkPendingRecoveryState::TimelockStarted,
+            SdkPendingRecoveryState::CollectingApprovals,
+            None,
+        )
+    }
+
+    /// Builds a guardian approval after checking the guardian has the accepted shard locally.
+    pub fn guardian_approve_recovery(
+        &self,
+        owner_principal_id: &str,
+        recovery_quorum_id: &str,
+        context: &ramflux_protocol::RecoveryApprovalContext,
+    ) -> Result<ramflux_protocol::RecoveryApproval, SdkError> {
+        guardian_approve_recovery(self, owner_principal_id, recovery_quorum_id, context)
+    }
+
+    /// Records a non-guardian or guardian approval against a pending recovery.
+    pub fn collect_recovery_approval(
+        &self,
+        recovery_id: &str,
+        approval: &ramflux_protocol::RecoveryApproval,
+    ) -> Result<SdkPendingRecoveryStatus, SdkError> {
+        collect_recovery_approval(self, recovery_id, approval)
+    }
+
+    /// Records a guardian approval, refusing non-guardian approvals on this entry point.
+    pub fn collect_guardian_approval(
+        &self,
+        recovery_id: &str,
+        approval: &ramflux_protocol::RecoveryApproval,
+    ) -> Result<SdkPendingRecoveryStatus, SdkError> {
+        if approval.member_kind != ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare {
+            return Err(SdkError::LocalBus(
+                "collect_guardian_approval requires guardian_share approval".to_owned(),
+            ));
+        }
+        collect_recovery_approval(self, recovery_id, approval)
+    }
+
+    /// Returns the current pending recovery state.
+    pub fn recovery_state(&self, recovery_id: &str) -> Result<SdkPendingRecoveryStatus, SdkError> {
+        recovery_state(self, recovery_id)
+    }
+
+    /// Finalizes local quorum collection and returns a proof ready for the lifecycle endpoint.
+    pub fn finalize_recovery(&self, recovery_id: &str) -> Result<SdkFinalizedRecovery, SdkError> {
+        finalize_recovery(self, recovery_id)
+    }
 }
 
 /// Creates a k-of-n recovery quorum configuration and Shamir shares for member distribution.
@@ -202,6 +331,194 @@ pub fn build_recovery_proof(
     approvals: Vec<ramflux_protocol::RecoveryApproval>,
 ) -> ramflux_protocol::RecoveryQuorumProof {
     ramflux_protocol::RecoveryQuorumProof { context, approvals }
+}
+
+/// Creates a pending recovery in the initial state.
+///
+/// # Errors
+/// Returns an error when the quorum is malformed or the pending record cannot be stored.
+pub fn initiate_recovery(
+    client: &RamfluxClient,
+    request: &SdkRecoveryInitiateRequest,
+) -> Result<SdkPendingRecoveryStatus, SdkError> {
+    validate_recovery_quorum_shape(&request.recovery_quorum)?;
+    let context = ramflux_protocol::RecoveryApprovalContext {
+        recovery_id: request.recovery_id.clone(),
+        event_type: "identity.reactivated".to_owned(),
+        principal_id: request.owner_principal_id.clone(),
+        lifecycle_epoch: request.lifecycle_epoch,
+        lineage_head: request.lineage_head.clone(),
+        timelock_until: request.timelock_until,
+    };
+    client.account_db()?.create_pending_recovery(&PendingRecoveryWrite {
+        recovery_id: &request.recovery_id,
+        owner_principal_id: &request.owner_principal_id,
+        recovery_quorum: &request.recovery_quorum,
+        lifecycle_epoch: request.lifecycle_epoch,
+        lineage_head: request.lineage_head.as_deref(),
+        event_type: "identity.reactivated",
+        timelock_until: request.timelock_until,
+        context: &context,
+    })?;
+    recovery_state(client, &request.recovery_id)
+}
+
+/// Builds a guardian recovery approval from a locally accepted guardian shard.
+///
+/// # Errors
+/// Returns an error when the local account is not a guardian for the owner/quorum or signing fails.
+pub fn guardian_approve_recovery(
+    client: &RamfluxClient,
+    owner_principal_id: &str,
+    recovery_quorum_id: &str,
+    context: &ramflux_protocol::RecoveryApprovalContext,
+) -> Result<ramflux_protocol::RecoveryApproval, SdkError> {
+    let branch = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let Some(share) = client.account_db()?.guardian_recovery_share(
+        owner_principal_id,
+        recovery_quorum_id,
+        &branch.principal_id,
+    )?
+    else {
+        return Err(SdkError::LocalBus(format!(
+            "guardian share missing for owner {owner_principal_id} quorum {recovery_quorum_id}"
+        )));
+    };
+    if share.state != "accepted" {
+        return Err(SdkError::LocalBus(format!("guardian share is not accepted: {}", share.state)));
+    }
+    if context.principal_id != owner_principal_id {
+        return Err(SdkError::LocalBus("guardian approval context owner mismatch".to_owned()));
+    }
+    Ok(ramflux_protocol::RecoveryApproval {
+        member_kind: ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+        signing_key_id: format!("device:{}", branch.device_id),
+        signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+        signature: ramflux_crypto::sign_protocol_object_with_device_branch(branch, context)?,
+    })
+}
+
+/// Records an approval and advances to `quorum_reached` exactly when threshold is met.
+///
+/// # Errors
+/// Returns an error when the pending recovery is not collecting approvals, the approval is invalid,
+/// or the member already approved.
+pub fn collect_recovery_approval(
+    client: &RamfluxClient,
+    recovery_id: &str,
+    approval: &ramflux_protocol::RecoveryApproval,
+) -> Result<SdkPendingRecoveryStatus, SdkError> {
+    let pending = pending_recovery_required(client, recovery_id)?;
+    let state = parse_pending_recovery_state(&pending.state)?;
+    if state != SdkPendingRecoveryState::CollectingApprovals {
+        return Err(SdkError::LocalBus(format!(
+            "pending recovery {recovery_id} is not collecting approvals"
+        )));
+    }
+    validate_recovery_approval_against_quorum(
+        &pending.context,
+        &pending.recovery_quorum,
+        approval,
+    )?;
+    client.account_db()?.record_pending_recovery_approval(&PendingRecoveryApprovalWrite {
+        recovery_id,
+        approval,
+        approved_at: now_unix_timestamp(),
+    })?;
+    let approval_count = client.account_db()?.pending_recovery_approvals(recovery_id)?.len();
+    if approval_count >= usize::from(pending.recovery_quorum.threshold) {
+        transition_recovery_state(
+            client,
+            recovery_id,
+            SdkPendingRecoveryState::CollectingApprovals,
+            SdkPendingRecoveryState::QuorumReached,
+            None,
+        )
+    } else {
+        recovery_state(client, recovery_id)
+    }
+}
+
+/// Returns the current pending recovery state.
+///
+/// # Errors
+/// Returns an error when the recovery does not exist or state is invalid.
+pub fn recovery_state(
+    client: &RamfluxClient,
+    recovery_id: &str,
+) -> Result<SdkPendingRecoveryStatus, SdkError> {
+    let pending = pending_recovery_required(client, recovery_id)?;
+    let approvals = client.account_db()?.pending_recovery_approvals(recovery_id)?;
+    pending_recovery_status(&pending, approvals.len(), now_unix_timestamp())
+}
+
+/// Finalizes local quorum collection into a recovery proof.
+///
+/// # Errors
+/// Returns an error when quorum or timelock gates are not satisfied.
+pub fn finalize_recovery(
+    client: &RamfluxClient,
+    recovery_id: &str,
+) -> Result<SdkFinalizedRecovery, SdkError> {
+    let pending = pending_recovery_required(client, recovery_id)?;
+    let state = parse_pending_recovery_state(&pending.state)?;
+    if state != SdkPendingRecoveryState::QuorumReached
+        && state != SdkPendingRecoveryState::ReadyToFinalize
+    {
+        return Err(SdkError::LocalBus(format!(
+            "pending recovery {recovery_id} has not reached quorum"
+        )));
+    }
+    let now = now_unix_u64()?;
+    if let Some(timelock_until) = pending.context.timelock_until
+        && now < timelock_until
+    {
+        return Err(SdkError::LocalBus("recovery timelock is still active".to_owned()));
+    }
+    let approvals = client.account_db()?.pending_recovery_approvals(recovery_id)?;
+    if approvals.len() < usize::from(pending.recovery_quorum.threshold) {
+        return Err(SdkError::LocalBus("recovery quorum threshold not met".to_owned()));
+    }
+    if !approvals.iter().any(|record| {
+        record.approval.member_kind != ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare
+    }) {
+        return Err(SdkError::LocalBus("guardian-only recovery quorum rejected".to_owned()));
+    }
+    if state == SdkPendingRecoveryState::QuorumReached {
+        let _ready = transition_recovery_state(
+            client,
+            recovery_id,
+            SdkPendingRecoveryState::QuorumReached,
+            SdkPendingRecoveryState::ReadyToFinalize,
+            None,
+        )?;
+    }
+    Ok(SdkFinalizedRecovery {
+        recovery_id: recovery_id.to_owned(),
+        recovery_quorum: pending.recovery_quorum,
+        proof: ramflux_protocol::RecoveryQuorumProof {
+            context: pending.context,
+            approvals: approvals.into_iter().map(|record| record.approval).collect(),
+        },
+    })
+}
+
+fn transition_recovery_state(
+    client: &RamfluxClient,
+    recovery_id: &str,
+    expected: SdkPendingRecoveryState,
+    next: SdkPendingRecoveryState,
+    timelock_started_at: Option<i64>,
+) -> Result<SdkPendingRecoveryStatus, SdkError> {
+    validate_state_transition(expected, next)?;
+    let pending = client.account_db()?.transition_pending_recovery(
+        recovery_id,
+        pending_recovery_state_name(expected),
+        pending_recovery_state_name(next),
+        timelock_started_at,
+    )?;
+    let approvals = client.account_db()?.pending_recovery_approvals(recovery_id)?;
+    pending_recovery_status(&pending, approvals.len(), now_unix_timestamp())
 }
 
 /// Builds a signed guardian invite control message for E2EE transport.
@@ -355,6 +672,139 @@ fn decode_guardian_share_value(share: &SdkGuardianRecoveryShare) -> Result<[u8; 
         SdkError::LocalBus(format!("guardian share has invalid length: {}", bytes.len()))
     })?;
     Ok(value)
+}
+
+fn pending_recovery_required(
+    client: &RamfluxClient,
+    recovery_id: &str,
+) -> Result<PendingRecoveryRecord, SdkError> {
+    client
+        .account_db()?
+        .pending_recovery(recovery_id)?
+        .ok_or_else(|| SdkError::LocalBus(format!("pending recovery not found: {recovery_id}")))
+}
+
+fn pending_recovery_status(
+    pending: &PendingRecoveryRecord,
+    approvals_collected: usize,
+    now: i64,
+) -> Result<SdkPendingRecoveryStatus, SdkError> {
+    let state = parse_pending_recovery_state(&pending.state)?;
+    let now_u64 = u64::try_from(now).unwrap_or(0);
+    let ready_to_finalize = approvals_collected >= usize::from(pending.recovery_quorum.threshold)
+        && pending.context.timelock_until.is_none_or(|timelock_until| now_u64 >= timelock_until);
+    Ok(SdkPendingRecoveryStatus {
+        recovery_id: pending.recovery_id.clone(),
+        owner_principal_id: pending.owner_principal_id.clone(),
+        recovery_quorum_id: pending.recovery_quorum_id.clone(),
+        state,
+        approvals_collected,
+        threshold: pending.recovery_quorum.threshold,
+        timelock_until: pending.context.timelock_until,
+        ready_to_finalize,
+    })
+}
+
+fn validate_state_transition(
+    expected: SdkPendingRecoveryState,
+    next: SdkPendingRecoveryState,
+) -> Result<(), SdkError> {
+    let valid = matches!(
+        (expected, next),
+        (SdkPendingRecoveryState::Initiated, SdkPendingRecoveryState::TimelockStarted)
+            | (
+                SdkPendingRecoveryState::TimelockStarted,
+                SdkPendingRecoveryState::CollectingApprovals
+            )
+            | (
+                SdkPendingRecoveryState::CollectingApprovals,
+                SdkPendingRecoveryState::QuorumReached
+            )
+            | (SdkPendingRecoveryState::QuorumReached, SdkPendingRecoveryState::ReadyToFinalize)
+    );
+    if valid {
+        Ok(())
+    } else {
+        Err(SdkError::LocalBus(format!(
+            "illegal recovery state transition: {} -> {}",
+            pending_recovery_state_name(expected),
+            pending_recovery_state_name(next)
+        )))
+    }
+}
+
+fn pending_recovery_state_name(state: SdkPendingRecoveryState) -> &'static str {
+    match state {
+        SdkPendingRecoveryState::Initiated => "initiated",
+        SdkPendingRecoveryState::TimelockStarted => "timelock_started",
+        SdkPendingRecoveryState::CollectingApprovals => "collecting_approvals",
+        SdkPendingRecoveryState::QuorumReached => "quorum_reached",
+        SdkPendingRecoveryState::ReadyToFinalize => "ready_to_finalize",
+    }
+}
+
+fn parse_pending_recovery_state(state: &str) -> Result<SdkPendingRecoveryState, SdkError> {
+    match state {
+        "initiated" => Ok(SdkPendingRecoveryState::Initiated),
+        "timelock_started" => Ok(SdkPendingRecoveryState::TimelockStarted),
+        "collecting_approvals" => Ok(SdkPendingRecoveryState::CollectingApprovals),
+        "quorum_reached" => Ok(SdkPendingRecoveryState::QuorumReached),
+        "ready_to_finalize" => Ok(SdkPendingRecoveryState::ReadyToFinalize),
+        other => Err(SdkError::LocalBus(format!("unknown pending recovery state: {other}"))),
+    }
+}
+
+fn validate_recovery_quorum_shape(
+    quorum: &ramflux_protocol::RecoveryQuorumConfigured,
+) -> Result<(), SdkError> {
+    if quorum.threshold == 0 || quorum.total == 0 || quorum.threshold > quorum.total {
+        return Err(SdkError::LocalBus("invalid recovery quorum threshold".to_owned()));
+    }
+    if usize::from(quorum.total) != quorum.members.len() {
+        return Err(SdkError::LocalBus("invalid recovery quorum member count".to_owned()));
+    }
+    let mut seen = BTreeSet::new();
+    for member in &quorum.members {
+        if !seen.insert(member.signing_key_id.as_str()) {
+            return Err(SdkError::LocalBus("duplicate recovery quorum member".to_owned()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_recovery_approval_against_quorum(
+    context: &ramflux_protocol::RecoveryApprovalContext,
+    quorum: &ramflux_protocol::RecoveryQuorumConfigured,
+    approval: &ramflux_protocol::RecoveryApproval,
+) -> Result<(), SdkError> {
+    validate_recovery_quorum_shape(quorum)?;
+    if approval.signature_alg != ramflux_protocol::SignatureAlg::Ed25519 {
+        return Err(SdkError::LocalBus(
+            "recovery approval signature algorithm rejected".to_owned(),
+        ));
+    }
+    let member = quorum
+        .members
+        .iter()
+        .find(|member| member.signing_key_id == approval.signing_key_id)
+        .ok_or_else(|| {
+            SdkError::LocalBus("recovery approval member is not configured".to_owned())
+        })?;
+    if member.member_kind != approval.member_kind {
+        return Err(SdkError::LocalBus("recovery approval member kind mismatch".to_owned()));
+    }
+    let signed_bytes = ramflux_protocol::signed_bytes(context)?;
+    ramflux_crypto::verify_canonical_signature(
+        &signed_bytes,
+        &approval.signature,
+        &member.public_key_base64url,
+    )?;
+    Ok(())
+}
+
+fn now_unix_u64() -> Result<u64, SdkError> {
+    u64::try_from(now_unix_timestamp())
+        .map_err(|_error| SdkError::LocalBus("system clock is before unix epoch".to_owned()))
 }
 
 #[must_use]
@@ -526,6 +976,224 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn pending_recovery_collects_quorum_and_finalizes_after_timelock() -> Result<(), SdkError> {
+        let (alice, alice_root) =
+            unlocked_client("pending-happy-alice", "principal_alice", "alice_device", [0x71; 32])?;
+        let (guardian, guardian_root) =
+            unlocked_client("pending-happy-bob", "principal_bob", "bob_device", [0x72; 32])?;
+        let quorum = ramflux_protocol::RecoveryQuorumConfigured {
+            recovery_quorum_id: "quorum_pending".to_owned(),
+            threshold: 2,
+            total: 2,
+            members: vec![
+                member(
+                    ramflux_protocol::RecoveryQuorumMemberKind::RootShare,
+                    "root-share",
+                    [0x11; 32],
+                )
+                .commitment(),
+                member_with_public_key(
+                    ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                    "device:bob_device",
+                    recovery_member_public_key_base64url([0x72; 32]),
+                )
+                .commitment(),
+            ],
+        };
+        let mut guardian_share =
+            ramflux_crypto::create_recovery_quorum([0x81; 32], 2, 2)?.remove(1);
+        guardian_share.member_kind = Some(ramflux_crypto::RecoveryQuorumMemberKind::GuardianShare);
+        let invite = alice.invite_guardian(
+            "invite_pending_bob",
+            "quorum_pending",
+            "principal_bob",
+            &guardian_share,
+            now_unix_timestamp() + 300,
+        )?;
+        let _accept = guardian.accept_guardian_invite(&invite)?;
+
+        let timelock_until = now_unix_u64()?.saturating_sub(1);
+        let initiated = alice.initiate_recovery(&SdkRecoveryInitiateRequest {
+            recovery_id: "recovery_pending".to_owned(),
+            owner_principal_id: "principal_alice".to_owned(),
+            recovery_quorum: quorum.clone(),
+            lifecycle_epoch: 3,
+            lineage_head: Some("lineage_pending".to_owned()),
+            timelock_until: Some(timelock_until),
+        })?;
+        assert_eq!(initiated.state, SdkPendingRecoveryState::Initiated);
+        assert!(alice.begin_recovery_approval_collection("recovery_pending").is_err());
+        assert_eq!(
+            alice.start_recovery_timelock("recovery_pending")?.state,
+            SdkPendingRecoveryState::TimelockStarted
+        );
+        assert_eq!(
+            alice.begin_recovery_approval_collection("recovery_pending")?.state,
+            SdkPendingRecoveryState::CollectingApprovals
+        );
+        let context = alice
+            .account_db()?
+            .pending_recovery("recovery_pending")?
+            .ok_or_else(|| SdkError::LocalBus("pending recovery missing".to_owned()))?
+            .context;
+        let root_approval = RamfluxClient::approve_recovery(
+            ramflux_protocol::RecoveryQuorumMemberKind::RootShare,
+            "root-share",
+            [0x11; 32],
+            &context,
+        )?;
+        let after_root = alice.collect_recovery_approval("recovery_pending", &root_approval)?;
+        assert_eq!(after_root.state, SdkPendingRecoveryState::CollectingApprovals);
+        assert_eq!(after_root.approvals_collected, 1);
+        let guardian_approval =
+            guardian.guardian_approve_recovery("principal_alice", "quorum_pending", &context)?;
+        let quorum_reached =
+            alice.collect_guardian_approval("recovery_pending", &guardian_approval)?;
+        assert_eq!(quorum_reached.state, SdkPendingRecoveryState::QuorumReached);
+        assert!(quorum_reached.ready_to_finalize);
+
+        let finalized = alice.finalize_recovery("recovery_pending")?;
+        assert_eq!(finalized.recovery_id, "recovery_pending");
+        assert_eq!(finalized.recovery_quorum, quorum);
+        assert_eq!(finalized.proof.context, context);
+        assert_eq!(finalized.proof.approvals.len(), 2);
+        assert_eq!(
+            alice.recovery_state("recovery_pending")?.state,
+            SdkPendingRecoveryState::ReadyToFinalize
+        );
+        let _ = std::fs::remove_dir_all(alice_root);
+        let _ = std::fs::remove_dir_all(guardian_root);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_recovery_rejects_timelock_shortfall_duplicate_and_guardian_only()
+    -> Result<(), SdkError> {
+        let (alice, alice_root) =
+            unlocked_client("pending-reject-alice", "principal_alice", "alice_device", [0x91; 32])?;
+        let quorum = ramflux_protocol::RecoveryQuorumConfigured {
+            recovery_quorum_id: "quorum_reject".to_owned(),
+            threshold: 2,
+            total: 3,
+            members: vec![
+                member(
+                    ramflux_protocol::RecoveryQuorumMemberKind::RootShare,
+                    "root-share",
+                    [0x21; 32],
+                )
+                .commitment(),
+                member(
+                    ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                    "guardian-a",
+                    [0x22; 32],
+                )
+                .commitment(),
+                member(
+                    ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                    "guardian-b",
+                    [0x23; 32],
+                )
+                .commitment(),
+            ],
+        };
+        alice.initiate_recovery(&SdkRecoveryInitiateRequest {
+            recovery_id: "recovery_reject".to_owned(),
+            owner_principal_id: "principal_alice".to_owned(),
+            recovery_quorum: quorum,
+            lifecycle_epoch: 4,
+            lineage_head: None,
+            timelock_until: Some(now_unix_u64()?.saturating_add(300)),
+        })?;
+        alice.start_recovery_timelock("recovery_reject")?;
+        alice.begin_recovery_approval_collection("recovery_reject")?;
+        let context = alice
+            .account_db()?
+            .pending_recovery("recovery_reject")?
+            .ok_or_else(|| SdkError::LocalBus("pending recovery missing".to_owned()))?
+            .context;
+        let root_approval = RamfluxClient::approve_recovery(
+            ramflux_protocol::RecoveryQuorumMemberKind::RootShare,
+            "root-share",
+            [0x21; 32],
+            &context,
+        )?;
+        alice.collect_recovery_approval("recovery_reject", &root_approval)?;
+        assert!(alice.collect_recovery_approval("recovery_reject", &root_approval).is_err());
+        assert!(alice.finalize_recovery("recovery_reject").is_err());
+
+        let guardian_a = RamfluxClient::approve_recovery(
+            ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+            "guardian-a",
+            [0x22; 32],
+            &context,
+        )?;
+        alice.collect_guardian_approval("recovery_reject", &guardian_a)?;
+        assert!(alice.finalize_recovery("recovery_reject").is_err());
+
+        assert_guardian_only_recovery_rejected()?;
+        let _ = std::fs::remove_dir_all(alice_root);
+        Ok(())
+    }
+
+    fn assert_guardian_only_recovery_rejected() -> Result<(), SdkError> {
+        let (client, client_root) = unlocked_client(
+            "pending-guardian-only",
+            "principal_alice",
+            "alice_device_go",
+            [0x92; 32],
+        )?;
+        client.initiate_recovery(&SdkRecoveryInitiateRequest {
+            recovery_id: "recovery_guardian_only".to_owned(),
+            owner_principal_id: "principal_alice".to_owned(),
+            recovery_quorum: guardian_only_quorum(),
+            lifecycle_epoch: 5,
+            lineage_head: None,
+            timelock_until: Some(now_unix_u64()?.saturating_sub(1)),
+        })?;
+        client.start_recovery_timelock("recovery_guardian_only")?;
+        client.begin_recovery_approval_collection("recovery_guardian_only")?;
+        let context = client
+            .account_db()?
+            .pending_recovery("recovery_guardian_only")?
+            .ok_or_else(|| SdkError::LocalBus("pending recovery missing".to_owned()))?
+            .context;
+        for (signing_key_id, seed) in [("guardian-a", [0x32; 32]), ("guardian-b", [0x33; 32])] {
+            let approval = RamfluxClient::approve_recovery(
+                ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                signing_key_id,
+                seed,
+                &context,
+            )?;
+            client.collect_guardian_approval("recovery_guardian_only", &approval)?;
+        }
+        assert!(client.finalize_recovery("recovery_guardian_only").is_err());
+        let _ = std::fs::remove_dir_all(client_root);
+        Ok(())
+    }
+
+    fn guardian_only_quorum() -> ramflux_protocol::RecoveryQuorumConfigured {
+        ramflux_protocol::RecoveryQuorumConfigured {
+            recovery_quorum_id: "quorum_guardian_only".to_owned(),
+            threshold: 2,
+            total: 2,
+            members: vec![
+                member(
+                    ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                    "guardian-a",
+                    [0x32; 32],
+                )
+                .commitment(),
+                member(
+                    ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                    "guardian-b",
+                    [0x33; 32],
+                )
+                .commitment(),
+            ],
+        }
+    }
+
     fn recovery_members() -> Vec<SdkRecoveryQuorumMember> {
         vec![
             member(ramflux_protocol::RecoveryQuorumMemberKind::RootShare, "root-share", [0x11; 32]),
@@ -547,10 +1215,22 @@ mod tests {
         signing_key_id: &str,
         seed: [u8; 32],
     ) -> SdkRecoveryQuorumMember {
+        member_with_public_key(
+            member_kind,
+            signing_key_id,
+            recovery_member_public_key_base64url(seed),
+        )
+    }
+
+    fn member_with_public_key(
+        member_kind: ramflux_protocol::RecoveryQuorumMemberKind,
+        signing_key_id: &str,
+        public_key_base64url: String,
+    ) -> SdkRecoveryQuorumMember {
         SdkRecoveryQuorumMember {
             member_kind,
             signing_key_id: signing_key_id.to_owned(),
-            public_key_base64url: recovery_member_public_key_base64url(seed),
+            public_key_base64url,
         }
     }
 
