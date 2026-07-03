@@ -10,9 +10,10 @@ use crate::{
     HomeNodeMigrationRecord, IdentityLifecycleTombstone, IdentityRegisterRequest,
     IdentityRegistrationResponse, IdentityRegistry, InboxEntry, InboxFetchResponse,
     ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
-    ItestMvp10OwnDeviceFanoutResponse, NodeCoreError, NodeReplayGuardState, OfflineQueuedDelivery,
-    OnlineDelivery, OpaqueDeviceInbox, PrekeyPublishRequest, PrekeyResponse, RegistrationPolicy,
-    RouterSubmitOutcome, SessionDescriptor, SessionRegistry, envelope_replay_tuple_key,
+    ItestMvp10OwnDeviceFanoutResponse, NodeCoreError, NodeReplayGuardState, NodeServiceSigningKey,
+    OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox, PrekeyPublishRequest, PrekeyResponse,
+    RegistrationPolicy, RouterSubmitOutcome, SessionDescriptor, SessionRegistry,
+    envelope_replay_tuple_key,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,7 @@ pub struct RouterCore {
     envelope_target_index: Mutex<BTreeMap<String, String>>,
     pub(crate) control: Mutex<RouterControlState>,
     pub(crate) replay_guard_shards: Vec<Mutex<NodeReplayGuardState>>,
+    node_service_signer: Mutex<Option<NodeServiceSigningKey>>,
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +138,14 @@ impl RouterCore {
     #[must_use]
     pub fn node_franking_public_key(&self) -> Option<String> {
         crate::lock_unpoisoned(&self.control).node_franking_public_key.clone()
+    }
+
+    pub fn set_node_service_signer(&self, signer: Option<NodeServiceSigningKey>) {
+        *lock_unpoisoned(&self.node_service_signer) = signer;
+    }
+
+    fn node_service_signer(&self) -> Option<NodeServiceSigningKey> {
+        lock_unpoisoned(&self.node_service_signer).clone()
     }
 
     /// # Errors
@@ -532,6 +542,7 @@ impl RouterCore {
                 &envelope,
                 &migration,
                 now_unix_seconds,
+                self.node_service_signer().as_ref(),
             ));
         }
         let mut shard = self.target_shard(&envelope.target_delivery_id);
@@ -703,6 +714,7 @@ impl RouterCore {
                 home_node_migrations: snapshot.home_node_migrations,
             }),
             replay_guard_shards,
+            node_service_signer: Mutex::new(None),
         };
         for (key, expires_at) in snapshot.replay_guard_state.accepted_entries() {
             let index = replay_guard_shard_index(key);
@@ -863,8 +875,9 @@ fn home_node_migrated_delivery(
     envelope: &ramflux_protocol::Envelope,
     migration: &HomeNodeMigrationRecord,
     now_unix_seconds: i64,
+    node_service_signer: Option<&NodeServiceSigningKey>,
 ) -> HomeNodeMigratedNackDelivery {
-    let nack = ramflux_protocol::Nack {
+    let mut nack = ramflux_protocol::Nack {
         schema: "ramflux.nack.v1".to_owned(),
         version: 1,
         domain: "ramflux.nack.v1".to_owned(),
@@ -883,6 +896,12 @@ fn home_node_migrated_delivery(
         proof_hash: Some(migration.migration_proof_hash.clone()),
         new_home_node_hint: Some(migration.new_home_node.clone()),
     };
+    if let Some(signer) = node_service_signer {
+        let fallback_signed = nack.signed.clone();
+        if signer.sign_nack(&mut nack).is_err() {
+            nack.signed = fallback_signed;
+        }
+    }
     HomeNodeMigratedNackDelivery {
         target_delivery_id: envelope.target_delivery_id.clone(),
         proof_hash: migration.migration_proof_hash.clone(),
@@ -899,7 +918,9 @@ impl Default for RouterCore {
 
 impl Clone for RouterCore {
     fn clone(&self) -> Self {
-        Self::from_snapshot(self.snapshot())
+        let cloned = Self::from_snapshot(self.snapshot());
+        cloned.set_node_service_signer(self.node_service_signer());
+        cloned
     }
 }
 
