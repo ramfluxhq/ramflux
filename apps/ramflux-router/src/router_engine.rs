@@ -63,6 +63,71 @@ pub(crate) fn submit_envelope(
     Ok(response)
 }
 
+pub(crate) async fn submit_envelope_async(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    tracing::info!(
+        envelope_id = %envelope.envelope_id,
+        target_delivery_id = %envelope.target_delivery_id,
+        source_device_id = %envelope.source_device_id,
+        "router decoded mvp0 envelope"
+    );
+    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&envelope);
+    let replay_expires_at = envelope
+        .created_at
+        .checked_add(i64::from(envelope.ttl))
+        .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
+    ramflux_node_core::record_router_submit_lock_wait_us(0);
+    let dispatch_started = Instant::now();
+    let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    let outcome = match home_node_forward {
+        Some(client) => {
+            state.submit_envelope_with_home_node_forward_at(envelope, now_unix_seconds, |plan| {
+                client.forward(plan)
+            })
+        }
+        None => state.submit_envelope_at(envelope, now_unix_seconds),
+    };
+    ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
+    let save_started = Instant::now();
+    let persistent_entry = persistent_entry_from_outcome(&outcome);
+    if !matches!(
+        outcome,
+        ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
+            | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
+    ) && let Err(error) = store
+        .record_submission_increment_async(
+            &replay_key,
+            replay_expires_at,
+            persistent_entry.as_ref(),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %error,
+            replay_key = %replay_key,
+            "router submit persistence failed after in-memory accept; aborting to avoid state fork"
+        );
+        std::process::abort();
+    }
+    ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
+    let response_started = Instant::now();
+    let response = submit_response_from_outcome(state, outcome);
+    tracing::info!(
+        target_delivery_id = %response.target_delivery_id,
+        outcome = %response.outcome,
+        inbox_seq = ?response.inbox_seq,
+        "router mvp0 envelope outcome"
+    );
+    ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
+    ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
+    Ok(response)
+}
+
 #[cfg(feature = "itest-http")]
 pub(crate) fn apply_ack(
     state: &ramflux_node_core::RouterCore,

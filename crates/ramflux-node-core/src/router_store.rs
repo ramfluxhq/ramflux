@@ -502,6 +502,32 @@ impl RouterRedbStore {
     }
 
     /// # Errors
+    /// Returns an error when the incremental submission cannot be durably recorded.
+    pub async fn record_submission_increment_async(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+    ) -> Result<(), NodeCoreError> {
+        let save_started = Instant::now();
+        let replay_started = Instant::now();
+        if let Some(wal) = &self.submission_wal {
+            let _location =
+                wal.record_submission_async(replay_key, replay_expires_at, entry).await?;
+        } else {
+            self.commit_router_op(RouterCommitOp::Submission {
+                replay_key: replay_key.to_owned(),
+                replay_expires_at,
+                entry: entry.cloned().map(Box::new),
+            })?;
+            crate::record_router_replay_guard_redb_write();
+        }
+        crate::record_router_save_replay_guard_us(elapsed_us(replay_started));
+        crate::record_router_save_total_us(elapsed_us(save_started));
+        Ok(())
+    }
+
+    /// # Errors
     /// Returns an error when the replay tuple cannot be durably recorded.
     pub fn record_replay_tuple(
         &self,

@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 ramflux-crypto = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

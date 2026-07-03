@@ -195,6 +195,49 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
 }
 
 #[test]
+fn router_wal_async_submission_restores_replay_and_inbox_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("router_wal_async_submission_restores_replay_and_inbox_atomically")?;
+    let wal_root = path.with_extension("async_submission.wal");
+    let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
+    let router = RouterCore::new();
+    store.save_router(&router)?;
+    let submitted = current_envelope(
+        "env_router_wal_async_submission",
+        "target_router_wal_async",
+        DeliveryClass::OpaqueEvent,
+    );
+    let replay_key = envelope_replay_tuple_key(&submitted);
+    let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
+    let accepted = router.submit_envelope_at(submitted.clone(), submitted.created_at + 1);
+    let entry = match accepted {
+        RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
+        other => return Err(format!("expected offline queue, got {other:?}").into()),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(store.record_submission_increment_async(
+        &replay_key,
+        replay_expires_at,
+        Some(&entry),
+    ))?;
+    drop(store);
+
+    let redb_only = RouterRedbStore::open_without_wal(&path)?;
+    assert!(redb_only.load_router()?.is_none());
+    drop(redb_only);
+
+    let reopened = RouterRedbStore::open_with_wal(&path, &wal_root)?;
+    let restored = reopened
+        .load_router()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("router_wal_async_submission".to_owned()))?;
+    assert_eq!(restored.resume("target_router_wal_async", 0, 10).len(), 1);
+    let replay = restored.submit_envelope_at(submitted, replay_expires_at - 1);
+    assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
+    let _removed = std::fs::remove_dir_all(wal_root);
+    Ok(())
+}
+
+#[test]
 fn router_wal_submission_respects_redb_ack_cursor_on_restore()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("router_wal_submission_respects_redb_ack_cursor_on_restore")?;

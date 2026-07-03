@@ -86,6 +86,32 @@ impl RouterHandle {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "async router ingress is the next P-B slice; current mesh/HTTP ingress is blocking"
+        )
+    )]
+    pub(crate) async fn submit_envelope_async(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        total_started: Instant,
+    ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+        match self {
+            Self::Tokio(runtime) => {
+                crate::router_engine::submit_envelope_async(
+                    runtime.state.as_ref(),
+                    runtime.store.as_ref(),
+                    runtime.home_node_forward.as_ref(),
+                    envelope,
+                    total_started,
+                )
+                .await
+            }
+        }
+    }
+
     #[cfg(feature = "itest-http")]
     pub(crate) fn apply_ack(
         &self,
@@ -182,6 +208,21 @@ mod tests {
         assert_eq!(via_handle, oracle);
 
         let replay = handle.submit_envelope(envelope, Instant::now())?;
+        assert!(replay.outcome.starts_with("rejected_security:"));
+        assert!(replay.outcome.contains("replay:"));
+        Ok(())
+    }
+
+    #[test]
+    fn tokio_handle_async_submit_matches_replay_oracle() -> anyhow::Result<()> {
+        let envelope = current_envelope("env_runtime_async_submit", "target_runtime_async_submit");
+        let (handle, _handle_path) = test_handle("async_submit_handle")?;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let via_handle =
+            runtime.block_on(handle.submit_envelope_async(envelope.clone(), Instant::now()))?;
+        assert_eq!(via_handle.outcome, "offline_queued");
+
+        let replay = runtime.block_on(handle.submit_envelope_async(envelope, Instant::now()))?;
         assert!(replay.outcome.starts_with("rejected_security:"));
         assert!(replay.outcome.contains("replay:"));
         Ok(())
