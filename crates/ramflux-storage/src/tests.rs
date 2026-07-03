@@ -94,6 +94,7 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "object_transfer_state",
     "object_tombstone",
     "object_share_grant_projection",
+    "guardian_recovery_share_projection",
     "self_device_control_log",
     "a2ui_surface_cache",
     "mcp_server_registry",
@@ -198,7 +199,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 45);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 46);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -777,7 +778,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2, 3, 4]);
+    assert_eq!(before, vec![1, 2, 3, 4, 5]);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -941,4 +942,44 @@ fn remove_friend_link_revokes_capability_for_all_scopes() -> Result<(), StorageE
 
 fn friend_link_peer_is_accepted_storage_equivalent(link: &FriendLinkRecord) -> bool {
     link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none()
+}
+
+#[test]
+fn guardian_recovery_share_record_query_and_upsert() -> Result<(), StorageError> {
+    let (root, db) = test_db("guardian-recovery-share")?;
+    let write = GuardianRecoveryShareWrite {
+        owner_principal_id: "principal_alice",
+        guardian_principal_id: "principal_bob",
+        recovery_quorum_id: "quorum_a",
+        share_id: 2,
+        threshold: 2,
+        total: 3,
+        member_kind: "guardian_share",
+        share_value: &[0x44; 32],
+        inviter_device_id: "alice_device",
+        inviter_device_public_key_base64url: "alice_pub",
+        invite_id: "invite_a",
+        accepted_at: 1_900_000_000,
+        accepted_by_device_id: "bob_device",
+        accept_signature: "sig_a",
+        state: "accepted",
+    };
+    let record = db.record_guardian_recovery_share(&write)?;
+    assert_eq!(record.share_id, 2);
+    assert_eq!(record.share_value, vec![0x44; 32]);
+    assert_eq!(record.state, "accepted");
+
+    let fetched = db
+        .guardian_recovery_share("principal_alice", "quorum_a", "principal_bob")?
+        .ok_or_else(|| StorageError::MessageNotFound("guardian share missing".to_owned()))?;
+    assert_eq!(fetched.invite_id, "invite_a");
+
+    let updated_write =
+        GuardianRecoveryShareWrite { share_value: &[0x55; 32], invite_id: "invite_b", ..write };
+    let updated = db.record_guardian_recovery_share(&updated_write)?;
+    assert_eq!(updated.share_value, vec![0x55; 32]);
+    assert_eq!(updated.invite_id, "invite_b");
+    assert_eq!(db.guardian_recovery_shares_for_owner("principal_alice")?.len(), 1);
+    let _ = fs::remove_dir_all(root);
+    Ok(())
 }

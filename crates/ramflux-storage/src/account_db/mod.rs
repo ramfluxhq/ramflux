@@ -27,6 +27,7 @@ pub mod identity_verification;
 pub mod mcp;
 pub mod messages;
 pub mod object;
+pub mod recovery;
 
 pub struct AccountDb {
     pub local_account_id: String,

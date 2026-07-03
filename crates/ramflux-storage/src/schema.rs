@@ -687,6 +687,36 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 ON object_share_grant_projection(recipient_principal_id, revoked_at);
         ",
     },
+    AccountMigration {
+        schema_version: 5,
+        app_version: "v1-r1",
+        checksum: "2026-07-03-guardian-recovery-share-v1",
+        notes: "guardian recovery share projection for social recovery invite acceptance",
+        sql: r"
+            CREATE TABLE IF NOT EXISTS guardian_recovery_share_projection (
+                owner_principal_id TEXT NOT NULL,
+                guardian_principal_id TEXT NOT NULL,
+                recovery_quorum_id TEXT NOT NULL,
+                share_id INTEGER NOT NULL,
+                threshold INTEGER NOT NULL,
+                total INTEGER NOT NULL,
+                member_kind TEXT NOT NULL,
+                share_value BLOB NOT NULL,
+                inviter_device_id TEXT NOT NULL,
+                inviter_device_public_key_base64url TEXT NOT NULL,
+                invite_id TEXT NOT NULL,
+                accepted_at INTEGER NOT NULL,
+                accepted_by_device_id TEXT NOT NULL,
+                accept_signature TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(owner_principal_id, recovery_quorum_id, guardian_principal_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_guardian_recovery_share_owner
+                ON guardian_recovery_share_projection(owner_principal_id, state);
+        ",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {
@@ -854,6 +884,35 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_object_transfer_state_columns(connection)?;
     ensure_device_directory_table(connection)?;
     ensure_object_share_grant_table(connection)?;
+    ensure_guardian_recovery_share_table(connection)?;
+    Ok(())
+}
+
+fn ensure_guardian_recovery_share_table(connection: &Connection) -> Result<(), StorageError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS guardian_recovery_share_projection (
+            owner_principal_id TEXT NOT NULL,
+            guardian_principal_id TEXT NOT NULL,
+            recovery_quorum_id TEXT NOT NULL,
+            share_id INTEGER NOT NULL,
+            threshold INTEGER NOT NULL,
+            total INTEGER NOT NULL,
+            member_kind TEXT NOT NULL,
+            share_value BLOB NOT NULL,
+            inviter_device_id TEXT NOT NULL,
+            inviter_device_public_key_base64url TEXT NOT NULL,
+            invite_id TEXT NOT NULL,
+            accepted_at INTEGER NOT NULL,
+            accepted_by_device_id TEXT NOT NULL,
+            accept_signature TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(owner_principal_id, recovery_quorum_id, guardian_principal_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_guardian_recovery_share_owner
+            ON guardian_recovery_share_projection(owner_principal_id, state);",
+    )?;
     Ok(())
 }
 
