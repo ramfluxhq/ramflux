@@ -73,6 +73,16 @@ impl NodeServiceSigningKey {
     }
 
     /// # Errors
+    /// Returns an error when the nack cannot be canonicalized or signed.
+    pub fn sign_nack(&self, nack: &mut ramflux_protocol::Nack) -> Result<(), NodeCoreError> {
+        self.signing_key_id().clone_into(&mut nack.signed.signing_key_id);
+        nack.signed.signature_alg = ramflux_protocol::SignatureAlg::Ed25519;
+        nack.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(nack, self.seed)
+            .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
+        Ok(())
+    }
+
+    /// # Errors
     /// Returns an error when the wake signature is missing, uses the wrong key, or fails
     /// canonical Ed25519 verification.
     pub fn verify_notification_wake(

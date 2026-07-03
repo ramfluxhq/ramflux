@@ -426,6 +426,8 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
     assert_eq!(delivery.nack.reason, NackReason::HomeNodeMigrated);
     assert_eq!(delivery.nack.proof_hash.as_deref(), Some(migration.migration_proof_hash.as_str()));
     assert_eq!(delivery.nack.new_home_node_hint.as_deref(), Some("node_new_delivery.example"));
+    assert_eq!(delivery.nack.signed.signing_key_id, "router:home_node_migration");
+    assert!(delivery.nack.signed.signature.is_empty());
     assert!(router.resume(&request.target_delivery_id, 0, 10).is_empty());
 
     let unmigrated = router.submit_envelope(envelope(
@@ -434,6 +436,62 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
         DeliveryClass::OpaqueEvent,
     ));
     assert!(matches!(unmigrated, RouterSubmitOutcome::OfflineQueued(_)));
+    Ok(())
+}
+
+#[test]
+fn home_node_migration_delivery_signs_nack_when_node_service_signer_is_configured()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let signer = NodeServiceSigningKey::from_seed([0x73; 32]);
+    router.set_node_service_signer(Some(signer.clone()));
+    let request = registration_request(
+        "principal_migrate_signed_nack",
+        "device_migrate_signed_nack",
+        822,
+        None,
+        "ip_signed_nack",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let proof = migration_proof_for_registration(
+        &request,
+        822,
+        "mig_signed_nack",
+        request.now,
+        request.now + 1,
+        "node_new_signed_nack.example",
+    )?;
+    let migration = router.apply_home_node_migration(&proof, &request.proof, request.now + 1)?;
+
+    let mut migrated_envelope = envelope(
+        "env_home_node_migrated_signed",
+        &request.target_delivery_id,
+        DeliveryClass::OpaqueEvent,
+    );
+    migrated_envelope.created_at = request.now + 2;
+    let rejected = router.submit_envelope_at(migrated_envelope, request.now + 2);
+    let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = rejected else {
+        return Err(format!("expected signed home-node migrated nack, got {rejected:?}").into());
+    };
+    assert_eq!(delivery.proof_hash, migration.migration_proof_hash);
+    assert_eq!(delivery.nack.signed.signing_key_id, signer.signing_key_id());
+    assert!(!delivery.nack.signed.signature.is_empty());
+    ramflux_protocol::verify_signed_fields(
+        &delivery.nack,
+        &delivery.nack.signed,
+        signer.public_key_base64url(),
+    )?;
+
+    let mut tampered = delivery.nack.clone();
+    tampered.new_home_node_hint = Some("node_tampered.example".to_owned());
+    assert!(
+        ramflux_protocol::verify_signed_fields(
+            &tampered,
+            &tampered.signed,
+            signer.public_key_base64url(),
+        )
+        .is_err()
+    );
     Ok(())
 }
 
