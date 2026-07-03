@@ -75,6 +75,33 @@ pub struct HomeNodeMigrationForwardDelivery {
     pub delivery: crate::EnvelopeSubmitResponse,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeNodeMigrationApplyRequest {
+    #[serde(default)]
+    pub admin_token: String,
+    pub proof: ramflux_protocol::HomeNodeMigrationProof,
+    pub branch_proof: ramflux_crypto::BranchProofDocument,
+    pub now: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeNodeMigrationApplyResponse {
+    pub record: HomeNodeMigrationRecord,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeNodeRouteUpdateApplyRequest {
+    #[serde(default)]
+    pub admin_token: String,
+    pub proof: HomeNodeRouteUpdateProof,
+    pub now: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeNodeRouteUpdateApplyResponse {
+    pub record: HomeNodeRouteRecord,
+}
+
 /// Canonical route commitment referenced by a home-node migration proof.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
