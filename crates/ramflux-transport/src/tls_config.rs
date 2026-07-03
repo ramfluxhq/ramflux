@@ -22,6 +22,9 @@ static RUSTLS_PROVIDER: Once = Once::new();
 const MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV: &str =
     "RAMFLUX_MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS";
 const MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT: u32 = 4096;
+const GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV: &str =
+    "RAMFLUX_GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS";
+const GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT: u32 = 4096;
 
 /// # Errors
 /// Returns an error when the mesh CA, certificate, or private key cannot be loaded or validated.
@@ -115,11 +118,10 @@ pub(crate) fn mesh_quic_client_config_with_pem_roots(
 }
 
 fn mesh_quic_transport_config() -> Arc<quinn::TransportConfig> {
-    let stream_limit = std::env::var(MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT);
+    let stream_limit = positive_u32_from_value(
+        std::env::var(MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV).ok().as_deref(),
+        MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT,
+    );
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_bidi_streams(VarInt::from_u32(stream_limit));
     Arc::new(transport)
@@ -250,19 +252,38 @@ pub fn quic_gateway_server_config(
     tls: &MeshTlsConfig,
 ) -> Result<quinn::ServerConfig, TransportError> {
     ensure_ring_crypto_provider_installed();
-    quinn::ServerConfig::with_single_cert(
+    let mut config = quinn::ServerConfig::with_single_cert(
         load_certs(&tls.service_cert)?,
         load_private_key(&tls.service_key)?,
     )
-    .map_err(|error| TransportError::Tls(error.to_string()))
+    .map_err(|error| TransportError::Tls(error.to_string()))?;
+    config.transport_config(gateway_quic_transport_config());
+    Ok(config)
 }
 
 /// # Errors
 /// Returns an error when the CA bundle cannot produce a QUIC client config.
 pub fn quic_gateway_client_config(ca_cert: &Path) -> Result<quinn::ClientConfig, TransportError> {
     ensure_ring_crypto_provider_installed();
-    quinn::ClientConfig::with_root_certificates(Arc::new(mesh_root_store(ca_cert)?))
-        .map_err(|error| TransportError::Tls(error.to_string()))
+    let mut config =
+        quinn::ClientConfig::with_root_certificates(Arc::new(mesh_root_store(ca_cert)?))
+            .map_err(|error| TransportError::Tls(error.to_string()))?;
+    config.transport_config(gateway_quic_transport_config());
+    Ok(config)
+}
+
+fn gateway_quic_transport_config() -> Arc<quinn::TransportConfig> {
+    let stream_limit = positive_u32_from_value(
+        std::env::var(GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV).ok().as_deref(),
+        GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT,
+    );
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(stream_limit));
+    Arc::new(transport)
+}
+
+fn positive_u32_from_value(value: Option<&str>, default: u32) -> u32 {
+    value.and_then(|value| value.parse::<u32>().ok()).filter(|value| *value > 0).unwrap_or(default)
 }
 
 /// # Errors
@@ -328,4 +349,20 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TransportErro
     let mut reader = BufReader::new(File::open(path)?);
     rustls_pemfile::private_key(&mut reader)?
         .ok_or_else(|| TransportError::Tls(format!("missing private key in {}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT, positive_u32_from_value};
+
+    #[test]
+    fn gateway_quic_stream_limit_parse_positive_env_value() {
+        assert_eq!(positive_u32_from_value(Some("8192"), 4096), 8192);
+        assert_eq!(positive_u32_from_value(Some("0"), 4096), 4096);
+        assert_eq!(positive_u32_from_value(Some("bad"), 4096), 4096);
+        assert_eq!(
+            positive_u32_from_value(None, GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT),
+            4096
+        );
+    }
 }

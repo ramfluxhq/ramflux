@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use crate::{RouterMeshClient, router_get_json, router_post_json, router_post_json_async};
+use std::time::Instant;
 
 pub(crate) async fn dispatch_quic_json_request(
     router: &RouterMeshClient,
@@ -14,17 +15,28 @@ pub(crate) async fn dispatch_quic_json_request(
     );
     let body = match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/mvp0/envelope") => {
+            let total_started = Instant::now();
+            let decode_started = Instant::now();
             let envelope: ramflux_protocol::Envelope = serde_json::from_value(request.body)?;
+            ramflux_node_core::record_gateway_submit_decode_us(elapsed_us(decode_started));
             ramflux_node_core::record_gateway_submit_received();
+            let router_started = Instant::now();
             let response: ramflux_node_core::EnvelopeSubmitResponse =
                 router_post_json_async(router, "/mvp0/envelope", &envelope).await?;
+            ramflux_node_core::record_gateway_submit_router_us(elapsed_us(router_started));
             tracing::info!(
                 envelope_id = %envelope.envelope_id,
                 target_delivery_id = %envelope.target_delivery_id,
                 outcome = %response.outcome,
                 "gateway QUIC forwarded envelope to router"
             );
-            serde_json::to_value(response)?
+            let response_started = Instant::now();
+            let body = serde_json::to_value(response)?;
+            ramflux_node_core::record_gateway_submit_response_encode_us(elapsed_us(
+                response_started,
+            ));
+            ramflux_node_core::record_gateway_submit_total_us(elapsed_us(total_started));
+            body
         }
         ("POST", "/mvp0/ack") => {
             let ack: ramflux_protocol::Ack = serde_json::from_value(request.body)?;
@@ -75,4 +87,8 @@ pub(crate) async fn dispatch_quic_json_request(
         }
     };
     Ok(ramflux_transport::GatewayQuicResponse { status: 200, body })
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }

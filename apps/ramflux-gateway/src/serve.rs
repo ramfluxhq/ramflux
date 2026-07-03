@@ -12,6 +12,7 @@ use crate::{
 };
 
 const GATEWAY_QUIC_RUNTIME_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RUNTIME";
+const GATEWAY_QUIC_WORKER_THREADS_ENV: &str = "RAMFLUX_GATEWAY_QUIC_WORKER_THREADS";
 
 #[derive(Clone)]
 pub(crate) struct GatewayListenerContext {
@@ -95,8 +96,9 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
     std::thread::Builder::new().name("ramflux-gateway-quic".to_owned()).spawn(move || {
+        let worker_threads = gateway_quic_worker_threads();
         let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            .worker_threads(worker_threads)
             .enable_all()
             .build()
         {
@@ -106,6 +108,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
                 return;
             }
         };
+        tracing::info!(worker_threads, "gateway QUIC runtime configured");
         runtime.block_on(async move {
             let quic_task = tokio::spawn(run_gateway_quic(addr, server_config, context.clone()));
             let tcp_task = tokio::spawn(run_gateway_tcp_tls(tcp_addr, tcp_server_config, context));
@@ -124,6 +127,22 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
         });
     })?;
     Ok(())
+}
+
+fn gateway_quic_worker_threads() -> usize {
+    let default = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    gateway_quic_worker_threads_from_value(
+        std::env::var(GATEWAY_QUIC_WORKER_THREADS_ENV).ok().as_deref(),
+        default,
+    )
+}
+
+fn gateway_quic_worker_threads_from_value(value: Option<&str>, default: usize) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default.max(1))
+        .max(1)
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
@@ -388,8 +407,19 @@ mod tests {
 
     use tokio::sync::Mutex as AsyncMutex;
 
-    use super::{GatewaySessionHub, handle_gateway_forward_deliver};
+    use super::{
+        GatewaySessionHub, gateway_quic_worker_threads_from_value, handle_gateway_forward_deliver,
+    };
     use crate::{GatewayForwardDeliverRequest, GatewaySendHandle};
+
+    #[test]
+    fn gateway_quic_worker_threads_parse_positive_env_value() {
+        assert_eq!(gateway_quic_worker_threads_from_value(Some("16"), 4), 16);
+        assert_eq!(gateway_quic_worker_threads_from_value(Some("0"), 4), 4);
+        assert_eq!(gateway_quic_worker_threads_from_value(Some("not-a-number"), 4), 4);
+        assert_eq!(gateway_quic_worker_threads_from_value(None, 4), 4);
+        assert_eq!(gateway_quic_worker_threads_from_value(None, 0), 1);
+    }
 
     #[tokio::test]
     async fn gateway_forward_deliver_hits_remote_hub_and_reports_miss()
