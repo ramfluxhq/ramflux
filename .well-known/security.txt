@@ -1,0 +1,8 @@
+# Ramflux security contact information (RFC 9116).
+# Canonical hosted location: https://ramflux.org/.well-known/security.txt
+
+Contact: mailto:security@spanbrain.org
+Expires: 2027-07-01T00:00:00.000Z
+Preferred-Languages: en, zh
+Canonical: https://ramflux.org/.well-known/security.txt
+Policy: https://github.com/ramfluxhq/ramflux/blob/main/SECURITY.md

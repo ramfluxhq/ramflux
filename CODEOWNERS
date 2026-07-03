@@ -1,0 +1,24 @@
+# Code owners for ramflux.
+#
+# Review routing for pull requests. Security-, crypto-, and protocol-sensitive
+# paths require review from a security maintainer (see GOVERNANCE.md and
+# MAINTAINERS.md). Everything else falls back to the general maintainers.
+#
+# GitHub teams referenced here are maintained under the ramfluxhq org; the
+# people behind them are listed in MAINTAINERS.md.
+
+# Default: any change needs a maintainer review.
+*                                   @ramfluxhq/maintainers
+
+# Security-, crypto-, and protocol-sensitive paths: security maintainer required.
+/crates/ramflux-crypto/            @ramfluxhq/security-maintainers
+/crates/ramflux-protocol/          @ramfluxhq/security-maintainers
+/crates/ramflux-node-core/         @ramfluxhq/security-maintainers
+/crates/ramflux-transport/         @ramfluxhq/security-maintainers
+/deny.toml                          @ramfluxhq/security-maintainers
+/SECURITY.md                        @ramfluxhq/security-maintainers
+/docs/threat-model.md               @ramfluxhq/security-maintainers
+
+# CI / release / supply-chain surface: security maintainer required.
+/.github/                           @ramfluxhq/security-maintainers
+/scripts/                           @ramfluxhq/security-maintainers
