@@ -39,3 +39,46 @@ pub struct GuardianRecoveryShareWrite<'a> {
     pub accept_signature: &'a str,
     pub state: &'a str,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PendingRecoveryRecord {
+    pub recovery_id: String,
+    pub owner_principal_id: String,
+    pub recovery_quorum_id: String,
+    pub lifecycle_epoch: u64,
+    pub lineage_head: Option<String>,
+    pub event_type: String,
+    pub timelock_started_at: Option<i64>,
+    pub timelock_until: Option<u64>,
+    pub state: String,
+    pub recovery_quorum: ramflux_protocol::RecoveryQuorumConfigured,
+    pub context: ramflux_protocol::RecoveryApprovalContext,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct PendingRecoveryWrite<'a> {
+    pub recovery_id: &'a str,
+    pub owner_principal_id: &'a str,
+    pub recovery_quorum: &'a ramflux_protocol::RecoveryQuorumConfigured,
+    pub lifecycle_epoch: u64,
+    pub lineage_head: Option<&'a str>,
+    pub event_type: &'a str,
+    pub timelock_until: Option<u64>,
+    pub context: &'a ramflux_protocol::RecoveryApprovalContext,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PendingRecoveryApprovalRecord {
+    pub recovery_id: String,
+    pub signing_key_id: String,
+    pub member_kind: String,
+    pub approval: ramflux_protocol::RecoveryApproval,
+    pub approved_at: i64,
+}
+
+pub struct PendingRecoveryApprovalWrite<'a> {
+    pub recovery_id: &'a str,
+    pub approval: &'a ramflux_protocol::RecoveryApproval,
+    pub approved_at: i64,
+}

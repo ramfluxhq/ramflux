@@ -4,7 +4,9 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
-use crate::row_mappers::guardian_recovery_share_from_row;
+use crate::row_mappers::{
+    guardian_recovery_share_from_row, pending_recovery_approval_from_row, pending_recovery_from_row,
+};
 use rusqlite::OptionalExtension;
 
 impl AccountDb {
@@ -104,5 +106,149 @@ impl AccountDb {
             shares.push(row?);
         }
         Ok(shares)
+    }
+
+    pub fn create_pending_recovery(
+        &self,
+        write: &PendingRecoveryWrite<'_>,
+    ) -> Result<PendingRecoveryRecord, StorageError> {
+        let now = self.now_unix();
+        let inserted = self.connection.execute(
+            "INSERT OR IGNORE INTO pending_recovery_projection (
+                recovery_id, owner_principal_id, recovery_quorum_id, lifecycle_epoch, lineage_head,
+                event_type, timelock_started_at, timelock_until, state, recovery_quorum_json,
+                context_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, 'initiated', ?8, ?9, ?10, ?10)",
+            params![
+                write.recovery_id,
+                write.owner_principal_id,
+                write.recovery_quorum.recovery_quorum_id,
+                write.lifecycle_epoch,
+                write.lineage_head,
+                write.event_type,
+                write.timelock_until,
+                serde_json::to_vec(write.recovery_quorum)?,
+                serde_json::to_vec(write.context)?,
+                now,
+            ],
+        )?;
+        if inserted == 0 {
+            return Err(StorageError::MessageIdConflict(write.recovery_id.to_owned()));
+        }
+        self.pending_recovery(write.recovery_id)?
+            .ok_or_else(|| StorageError::MessageNotFound(write.recovery_id.to_owned()))
+    }
+
+    pub fn pending_recovery(
+        &self,
+        recovery_id: &str,
+    ) -> Result<Option<PendingRecoveryRecord>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT recovery_id, owner_principal_id, recovery_quorum_id, lifecycle_epoch,
+                        lineage_head, event_type, timelock_started_at, timelock_until, state,
+                        recovery_quorum_json, context_json, created_at, updated_at
+                   FROM pending_recovery_projection
+                  WHERE recovery_id = ?1",
+                params![recovery_id],
+                pending_recovery_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn transition_pending_recovery(
+        &self,
+        recovery_id: &str,
+        expected_state: &str,
+        next_state: &str,
+        timelock_started_at: Option<i64>,
+    ) -> Result<PendingRecoveryRecord, StorageError> {
+        let updated = self.connection.execute(
+            "UPDATE pending_recovery_projection
+                SET state = ?3,
+                    timelock_started_at = COALESCE(timelock_started_at, ?4),
+                    updated_at = ?5
+              WHERE recovery_id = ?1 AND state = ?2",
+            params![recovery_id, expected_state, next_state, timelock_started_at, self.now_unix()],
+        )?;
+        if updated == 0 {
+            return Err(StorageError::InvalidRecoveryState {
+                recovery_id: recovery_id.to_owned(),
+                expected: expected_state.to_owned(),
+            });
+        }
+        self.pending_recovery(recovery_id)?
+            .ok_or_else(|| StorageError::MessageNotFound(recovery_id.to_owned()))
+    }
+
+    pub fn record_pending_recovery_approval(
+        &self,
+        write: &PendingRecoveryApprovalWrite<'_>,
+    ) -> Result<PendingRecoveryApprovalRecord, StorageError> {
+        let inserted = self.connection.execute(
+            "INSERT OR IGNORE INTO pending_recovery_approval_projection (
+                recovery_id, signing_key_id, member_kind, approval_json, approved_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                write.recovery_id,
+                write.approval.signing_key_id,
+                recovery_member_kind_name(&write.approval.member_kind),
+                serde_json::to_vec(write.approval)?,
+                write.approved_at,
+            ],
+        )?;
+        if inserted == 0 {
+            return Err(StorageError::MessageIdConflict(format!(
+                "{}:{}",
+                write.recovery_id, write.approval.signing_key_id
+            )));
+        }
+        self.pending_recovery_approval(write.recovery_id, &write.approval.signing_key_id)?
+            .ok_or_else(|| StorageError::MessageNotFound(write.recovery_id.to_owned()))
+    }
+
+    pub fn pending_recovery_approval(
+        &self,
+        recovery_id: &str,
+        signing_key_id: &str,
+    ) -> Result<Option<PendingRecoveryApprovalRecord>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT recovery_id, signing_key_id, member_kind, approval_json, approved_at
+                   FROM pending_recovery_approval_projection
+                  WHERE recovery_id = ?1 AND signing_key_id = ?2",
+                params![recovery_id, signing_key_id],
+                pending_recovery_approval_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn pending_recovery_approvals(
+        &self,
+        recovery_id: &str,
+    ) -> Result<Vec<PendingRecoveryApprovalRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT recovery_id, signing_key_id, member_kind, approval_json, approved_at
+               FROM pending_recovery_approval_projection
+              WHERE recovery_id = ?1
+              ORDER BY approved_at ASC, signing_key_id ASC",
+        )?;
+        let rows = statement.query_map(params![recovery_id], pending_recovery_approval_from_row)?;
+        let mut approvals = Vec::new();
+        for row in rows {
+            approvals.push(row?);
+        }
+        Ok(approvals)
+    }
+}
+
+fn recovery_member_kind_name(kind: &ramflux_protocol::RecoveryQuorumMemberKind) -> &'static str {
+    match kind {
+        ramflux_protocol::RecoveryQuorumMemberKind::RootShare => "root_share",
+        ramflux_protocol::RecoveryQuorumMemberKind::DeviceShare => "device_share",
+        ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare => "guardian_share",
+        ramflux_protocol::RecoveryQuorumMemberKind::HardwareTokenShare => "hardware_token_share",
     }
 }
