@@ -547,6 +547,63 @@ fn home_node_migration_delivery_signs_nack_when_node_service_signer_is_configure
 }
 
 #[test]
+fn home_node_route_update_proof_applies_and_rejects_invalid_inputs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let request = registration_request(
+        "principal_route_update",
+        "device_route_update",
+        841,
+        None,
+        "ip_route_update",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let route_signer = NodeServiceSigningKey::from_seed([0x91; 32]);
+    let (migration_proof, mut route_update) = route_update_fixture(
+        &request,
+        841,
+        "mig_route_update",
+        "node_new_route.example",
+        "node-new-route.example:7443",
+        &route_signer,
+    )?;
+    let migration =
+        router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 1)?;
+
+    let applied = router.apply_home_node_route_update_proof(&route_update, request.now + 2)?;
+    assert_eq!(applied.identity_commitment, request.proof.principal_id);
+    assert_eq!(applied.home_node, migration.new_home_node);
+    assert_eq!(applied.node_endpoint, "node-new-route.example:7443");
+    assert_eq!(applied.migration_proof_hash, migration.migration_proof_hash);
+    assert_eq!(router.resolve_home_node_route(&request.proof.principal_id), Some(applied.clone()));
+
+    let empty_router = RouterCore::new();
+    assert!(matches!(
+        empty_router.apply_home_node_route_update_proof(&route_update, request.now + 2),
+        Err(NodeCoreError::ItestHttp(message)) if message.contains("unknown migration")
+    ));
+
+    let mut wrong_hash = route_update.clone();
+    wrong_hash.migration_proof_hash.push_str("_wrong");
+    assert!(matches!(
+        router.apply_home_node_route_update_proof(&wrong_hash, request.now + 2),
+        Err(NodeCoreError::ItestHttp(message)) if message.contains("migration proof hash mismatch")
+    ));
+
+    let mut tampered = route_update.clone();
+    tampered.node_endpoint = "node-tampered-route.example:7443".to_owned();
+    assert!(router.apply_home_node_route_update_proof(&tampered, request.now + 2).is_err());
+
+    let wrong_signer = NodeServiceSigningKey::from_seed([0x92; 32]);
+    wrong_signer.sign_home_node_route_update_proof(&mut route_update)?;
+    assert!(matches!(
+        router.apply_home_node_route_update_proof(&route_update, request.now + 2),
+        Err(NodeCoreError::Unauthorized(message)) if message.contains("signature rejected")
+    ));
+    Ok(())
+}
+
+#[test]
 fn router_replay_guard_rejects_duplicate_envelope_and_expired_ttl() {
     let router = RouterCore::new();
     let accepted = router.submit_envelope_at(

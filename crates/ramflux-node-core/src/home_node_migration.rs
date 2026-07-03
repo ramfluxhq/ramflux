@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use crate::NodeCoreError;
 use serde::{Deserialize, Serialize};
+
+pub const HOME_NODE_ROUTE_RECORD_DOMAIN: &str = "ramflux.home_node_route_record.v1";
+pub const HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN: &str = "ramflux.home_node_route_update_proof.v1";
 
 /// Applied home-node migration state for one identity binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -30,4 +34,86 @@ pub struct HomeNodeMigratedNackDelivery {
     pub proof_hash: String,
     pub new_home_node_hint: String,
     pub nack: ramflux_protocol::Nack,
+}
+
+/// Canonical route commitment referenced by a home-node migration proof.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeNodeRouteRecordCommitment {
+    pub schema: String,
+    pub domain: String,
+    pub new_home_node: String,
+    pub new_home_node_key_hash: String,
+    pub node_public_key: String,
+    pub node_endpoint: String,
+    pub expires_at: i64,
+}
+
+/// Directory route update proof that binds a migrated identity to its new home node route.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeNodeRouteUpdateProof {
+    pub schema: String,
+    pub domain: String,
+    #[serde(flatten)]
+    pub signed: ramflux_protocol::SignedFields,
+    pub identity_commitment: String,
+    pub new_home_node: String,
+    pub new_home_node_key_hash: String,
+    pub node_public_key: String,
+    pub node_endpoint: String,
+    pub route_record_hash: String,
+    pub migration_proof_hash: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+/// Applied directory route projection for one identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeNodeRouteRecord {
+    pub identity_commitment: String,
+    pub home_node: String,
+    pub home_node_key_hash: String,
+    pub node_public_key: String,
+    pub node_endpoint: String,
+    pub route_record_hash: String,
+    pub migration_proof_hash: String,
+    pub route_update_proof_hash: String,
+    pub updated_at: i64,
+    pub expires_at: i64,
+}
+
+/// # Errors
+/// Returns an error when the route commitment cannot be canonicalized.
+pub fn home_node_route_record_hash(
+    commitment: &HomeNodeRouteRecordCommitment,
+) -> Result<String, NodeCoreError> {
+    let canonical = ramflux_protocol::canonical_json_bytes(commitment)
+        .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+    Ok(ramflux_crypto::blake3_256_base64url(HOME_NODE_ROUTE_RECORD_DOMAIN, &canonical))
+}
+
+/// # Errors
+/// Returns an error when the proof cannot be canonicalized.
+pub fn home_node_route_update_proof_hash(
+    proof: &HomeNodeRouteUpdateProof,
+) -> Result<String, NodeCoreError> {
+    let signed_bytes = ramflux_protocol::signed_bytes(proof)
+        .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+    Ok(ramflux_crypto::blake3_256_base64url(HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN, &signed_bytes))
+}
+
+#[must_use]
+pub fn home_node_route_commitment_from_update(
+    proof: &HomeNodeRouteUpdateProof,
+) -> HomeNodeRouteRecordCommitment {
+    HomeNodeRouteRecordCommitment {
+        schema: HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
+        domain: HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
+        new_home_node: proof.new_home_node.clone(),
+        new_home_node_key_hash: proof.new_home_node_key_hash.clone(),
+        node_public_key: proof.node_public_key.clone(),
+        node_endpoint: proof.node_endpoint.clone(),
+        expires_at: proof.expires_at,
+    }
 }

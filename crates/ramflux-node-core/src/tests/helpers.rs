@@ -172,6 +172,69 @@ pub(super) fn migration_proof_for_registration(
     Ok(ramflux_crypto::sign_home_node_migration_proof(proof, &device)?)
 }
 
+pub(super) fn route_update_fixture(
+    request: &IdentityRegisterRequest,
+    signing_nonce: u64,
+    proof_id: &str,
+    new_home_node: &str,
+    node_endpoint: &str,
+    route_signer: &NodeServiceSigningKey,
+) -> Result<(HomeNodeMigrationProof, HomeNodeRouteUpdateProof), Box<dyn std::error::Error>> {
+    let new_home_node_key_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::FEDERATION_HANDSHAKE,
+        route_signer.public_key_base64url().as_bytes(),
+    );
+    let expires_at = request.now.saturating_add(3_600);
+    let route_commitment = HomeNodeRouteRecordCommitment {
+        schema: HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
+        domain: HOME_NODE_ROUTE_RECORD_DOMAIN.to_owned(),
+        new_home_node: new_home_node.to_owned(),
+        new_home_node_key_hash: new_home_node_key_hash.clone(),
+        node_public_key: route_signer.public_key_base64url().to_owned(),
+        node_endpoint: node_endpoint.to_owned(),
+        expires_at,
+    };
+    let route_record_hash = home_node_route_record_hash(&route_commitment)?;
+    let mut proof = migration_proof_for_registration(
+        request,
+        signing_nonce,
+        proof_id,
+        request.now,
+        request.now + 1,
+        new_home_node,
+    )?;
+    proof.new_home_node_key_hash = new_home_node_key_hash.clone();
+    proof.route_record_hash.clone_from(&route_record_hash);
+    let device = ramflux_crypto::create_device_branch(
+        &request.proof.principal_id,
+        &request.proof.device_id,
+        request.proof.device_epoch,
+        seed_from_nonce(0x41, signing_nonce),
+    );
+    proof = ramflux_crypto::sign_home_node_migration_proof(proof, &device)?;
+    let migration_proof_hash = ramflux_crypto::migration_proof_hash(&proof)?;
+    let mut route_update = HomeNodeRouteUpdateProof {
+        schema: HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN.to_owned(),
+        domain: HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN.to_owned(),
+        signed: SignedFields {
+            signing_key_id: String::new(),
+            signature_alg: SignatureAlg::Ed25519,
+            signature: String::new(),
+        },
+        identity_commitment: request.proof.principal_id.clone(),
+        new_home_node: new_home_node.to_owned(),
+        new_home_node_key_hash,
+        node_public_key: route_signer.public_key_base64url().to_owned(),
+        node_endpoint: node_endpoint.to_owned(),
+        route_record_hash,
+        migration_proof_hash,
+        issued_at: request.now + 2,
+        expires_at,
+    };
+    route_signer.sign_home_node_route_update_proof(&mut route_update)?;
+    Ok((proof, route_update))
+}
+
 pub(super) fn solved_pow(principal_id: &str, difficulty_bits: u8) -> RegistrationPowProof {
     RegistrationPowProof {
         nonce: ramflux_crypto::solve_registration_pow(principal_id, difficulty_bits),

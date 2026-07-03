@@ -83,6 +83,19 @@ impl NodeServiceSigningKey {
     }
 
     /// # Errors
+    /// Returns an error when the route update proof cannot be canonicalized or signed.
+    pub fn sign_home_node_route_update_proof(
+        &self,
+        proof: &mut crate::HomeNodeRouteUpdateProof,
+    ) -> Result<(), NodeCoreError> {
+        self.signing_key_id().clone_into(&mut proof.signed.signing_key_id);
+        proof.signed.signature_alg = ramflux_protocol::SignatureAlg::Ed25519;
+        proof.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(proof, self.seed)
+            .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
+        Ok(())
+    }
+
+    /// # Errors
     /// Returns an error when the wake signature is missing, uses the wrong key, or fails
     /// canonical Ed25519 verification.
     pub fn verify_notification_wake(
