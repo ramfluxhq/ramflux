@@ -689,6 +689,69 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
 }
 
 #[test]
+fn home_node_migration_new_home_accepts_forwarded_local_delivery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    router.set_local_home_node_id(Some("node_new_local.example".to_owned()));
+    let request = registration_request(
+        "principal_forward_new_home",
+        "device_forward_new_home",
+        845,
+        None,
+        "ip_forward_new_home",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let signer = NodeServiceSigningKey::from_seed([0x97; 32]);
+    let (migration_proof, route_update) = route_update_fixture(
+        &request,
+        845,
+        "mig_forward_new_home",
+        "node_new_local.example",
+        "node-new-local.example:7443",
+        &signer,
+    )?;
+    router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 1)?;
+    router.apply_home_node_route_update_proof(&route_update, request.now + 2)?;
+
+    let mut forwarded =
+        envelope("env_forward_new_home", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
+    forwarded.created_at = request.now + 3;
+    forwarded
+        .ext
+        .ext
+        .insert(HOME_NODE_FORWARD_COUNT_EXT_KEY.to_owned(), serde_json::Value::from(1_u64));
+    let outcome =
+        router.submit_envelope_with_home_node_forward_at(forwarded, request.now + 3, |_plan| {
+            Err(NodeCoreError::ItestHttp("new home must not re-forward".to_owned()))
+        });
+
+    let (target_delivery_id, envelope_id) = match outcome {
+        RouterSubmitOutcome::Online(delivery) => {
+            (delivery.target_delivery_id, delivery.envelope.envelope_id)
+        }
+        RouterSubmitOutcome::OfflineQueued(delivery) => {
+            (delivery.entry.target_delivery_id, delivery.entry.envelope.envelope_id)
+        }
+        other => {
+            return Err(format!("expected new home local delivery, got {other:?}").into());
+        }
+    };
+    assert_eq!(target_delivery_id, request.target_delivery_id);
+    assert_eq!(envelope_id, "env_forward_new_home");
+
+    let mut new_device = registration_request(
+        "principal_forward_new_home",
+        "device_forward_new_home_after",
+        846,
+        None,
+        "ip_forward_new_home_after",
+    )?;
+    new_device.now = request.now + 4;
+    assert!(router.mvp1_register_identity(&new_device).is_ok());
+    Ok(())
+}
+
+#[test]
 fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = RouterCore::new();

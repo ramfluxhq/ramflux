@@ -43,6 +43,7 @@ pub struct RouterCore {
     pub(crate) control: Mutex<RouterControlState>,
     pub(crate) replay_guard_shards: Vec<Mutex<NodeReplayGuardState>>,
     node_service_signer: Mutex<Option<NodeServiceSigningKey>>,
+    local_home_node_id: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +169,14 @@ impl RouterCore {
 
     fn node_service_signer(&self) -> Option<NodeServiceSigningKey> {
         lock_unpoisoned(&self.node_service_signer).clone()
+    }
+
+    pub fn set_local_home_node_id(&self, node_id: Option<String>) {
+        *lock_unpoisoned(&self.local_home_node_id) = node_id;
+    }
+
+    fn local_home_node_id(&self) -> Option<String> {
+        lock_unpoisoned(&self.local_home_node_id).clone()
     }
 
     /// # Errors
@@ -337,9 +346,14 @@ impl RouterCore {
         &self,
         request: &IdentityRegisterRequest,
     ) -> Result<IdentityRegistrationResponse, NodeCoreError> {
+        let local_home_node_id = self.local_home_node_id();
         let (mut session, registration_trust_tier) = {
             let mut control = lock_unpoisoned(&self.control);
-            if let Some(migration) = effective_migration_for_registration(&control, request) {
+            if let Some(migration) = effective_migration_for_registration(
+                &control,
+                local_home_node_id.as_deref(),
+                request,
+            ) {
                 return Err(NodeCoreError::ItestHttp(format!(
                     "home node migrated: proof_hash={} new_home_node={}",
                     migration.migration_proof_hash, migration.new_home_node
@@ -904,6 +918,7 @@ impl RouterCore {
             }),
             replay_guard_shards,
             node_service_signer: Mutex::new(None),
+            local_home_node_id: Mutex::new(None),
         };
         for (key, expires_at) in snapshot.replay_guard_state.accepted_entries() {
             let index = replay_guard_shard_index(key);
@@ -1038,8 +1053,15 @@ impl RouterCore {
                     .home_node_migrations
                     .get(&key)
                     .filter(|migration| migration.is_effective(now_unix_seconds))
+                    .filter(|migration| self.migration_blocks_local_node(migration))
                     .cloned()
             })
+    }
+
+    fn migration_blocks_local_node(&self, migration: &HomeNodeMigrationRecord) -> bool {
+        self.local_home_node_id()
+            .as_deref()
+            .is_none_or(|local_node_id| local_node_id != migration.new_home_node)
     }
 
     fn home_node_migration_forward_plan(
@@ -1077,6 +1099,7 @@ impl RouterCore {
 
 fn effective_migration_for_registration(
     control: &RouterControlState,
+    local_home_node_id: Option<&str>,
     request: &IdentityRegisterRequest,
 ) -> Option<HomeNodeMigrationRecord> {
     let mut keys = Vec::with_capacity(2);
@@ -1091,6 +1114,10 @@ fn effective_migration_for_registration(
             .home_node_migrations
             .get(key)
             .filter(|migration| migration.is_effective(request.now))
+            .filter(|migration| {
+                local_home_node_id
+                    .is_none_or(|local_node_id| local_node_id != migration.new_home_node)
+            })
             .cloned()
     })
 }
@@ -1149,7 +1176,12 @@ fn envelope_home_node_forward_count(envelope: &ramflux_protocol::Envelope) -> u8
 }
 
 fn federation_forward_succeeded(response: &FederatedEnvelopeForwardResponse) -> bool {
-    response.accepted || response.delivery.outcome == "duplicate_federated_forward"
+    response.delivery.outcome == "duplicate_federated_forward"
+        || response.accepted
+            && matches!(
+                response.delivery.outcome.as_str(),
+                "online" | "offline_queued" | "federation_spooled_offline_peer"
+            )
 }
 
 fn home_node_migrated_delivery(
@@ -1201,6 +1233,7 @@ impl Clone for RouterCore {
     fn clone(&self) -> Self {
         let cloned = Self::from_snapshot(self.snapshot());
         cloned.set_node_service_signer(self.node_service_signer());
+        cloned.set_local_home_node_id(self.local_home_node_id());
         cloned
     }
 }
