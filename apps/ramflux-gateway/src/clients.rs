@@ -86,6 +86,13 @@ fn notify_mesh_client(
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
+        // podman-compose does not expand ${VAR:-default}, so an unset compose var can
+        // arrive as the literal "${VAR:-...}". Treat that as absent instead of a real
+        // value (otherwise e.g. an empty async router endpoint reads as configured and
+        // then tries to open a literal PEM path).
+        if trimmed.starts_with("${") {
+            return None;
+        }
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     })
 }
