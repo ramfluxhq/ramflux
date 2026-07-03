@@ -45,10 +45,10 @@ pub use bus::{
     LocalBusGroupSenderKeyImportRequest, LocalBusMcpApprovalDecisionRequest,
     LocalBusMcpApprovalGrantRequest, LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest,
     LocalBusMessageAckRequest, LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
-    LocalBusMessageReceiptDeliveredRequest, LocalBusMessageReceiptReadRequest,
-    LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest, LocalBusObjectDeleteRequest,
-    LocalBusObjectGetRequest, LocalBusObjectImportRequest, LocalBusObjectPutRequest,
-    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusMessageFrankingEvidenceRequest, LocalBusMessageReceiptDeliveredRequest,
+    LocalBusMessageReceiptReadRequest, LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest,
+    LocalBusObjectDeleteRequest, LocalBusObjectGetRequest, LocalBusObjectImportRequest,
+    LocalBusObjectPutRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
     LocalMcpStandingApprovalSigningBody, serve_local_bus, serve_local_bus_until,
 };
@@ -59,7 +59,10 @@ pub use client::recovery::{
     SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember, recovery_member_public_key_base64url,
 };
 pub use constants::*;
-pub use dm::{SdkDmAttachmentImportResult, SdkDmX3dhHeader};
+pub use dm::{
+    SdkDmAttachmentImportResult, SdkDmX3dhHeader, SdkFrankingEvidenceKind,
+    SdkSelectedFrankingEvidence,
+};
 pub use error::SdkError;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,

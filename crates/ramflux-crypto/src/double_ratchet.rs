@@ -125,6 +125,13 @@ pub struct DmCiphertext {
     pub ciphertext_hash: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DmDecryptionOutput {
+    pub plaintext: Vec<u8>,
+    pub opening_key: [u8; 32],
+    pub commitment_key: [u8; 32],
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct MessageKeys {
     pub aead_key: [u8; 32],
@@ -450,6 +457,16 @@ impl DmSession {
         ciphertext: &DmCiphertext,
         associated_data: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
+        Ok(self.decrypt_with_franking_keys(ciphertext, associated_data)?.plaintext)
+    }
+
+    /// # Errors
+    /// Returns an error when ratchet validation, commitment verification, or decryption fails.
+    pub fn decrypt_with_franking_keys(
+        &mut self,
+        ciphertext: &DmCiphertext,
+        associated_data: &[u8],
+    ) -> Result<DmDecryptionOutput, CryptoError> {
         let header = DmHeader {
             ratchet_session_id: ciphertext.session_id.clone(),
             sender_device_id_hash: ciphertext.sender_device_id_hash,
@@ -520,7 +537,11 @@ impl DmSession {
             )?);
             self.receive_counter = self.receive_counter.saturating_add(1);
         }
-        Ok(plaintext)
+        Ok(DmDecryptionOutput {
+            plaintext,
+            opening_key: message_keys.opening_key,
+            commitment_key: message_keys.commitment_key,
+        })
     }
 
     #[must_use]

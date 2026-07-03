@@ -35,6 +35,47 @@ impl SdkDmFrankingMetadata {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+pub(crate) struct SdkReceivedFrankingMetadata {
+    pub(crate) sender_device_id_hash: String,
+    pub(crate) message_event_id: String,
+    pub(crate) commitment: String,
+    pub(crate) ciphertext_hash: String,
+    pub(crate) franking_tag: String,
+    pub(crate) node_id: String,
+    pub(crate) accepted_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum SdkFrankingEvidenceKind {
+    ReceiverAttestedDm,
+    SenderBoundGroup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SdkSelectedFrankingEvidence {
+    pub evidence_kind: SdkFrankingEvidenceKind,
+    pub node_id: String,
+    pub envelope_id: String,
+    pub plaintext_excerpt: String,
+    pub opening_key: String,
+    pub commitment_key: String,
+    pub sender_device_id_hash: String,
+    pub msg_event_id: String,
+    pub canonical_header_bytes: String,
+    pub associated_data: String,
+    pub ciphertext: String,
+    pub header_hash: String,
+    pub associated_data_hash: String,
+    pub ciphertext_hash: String,
+    pub franking_commitment: String,
+    pub commitment: String,
+    pub franking_tag: String,
+    pub franking_timestamp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_header_signature: Option<String>,
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkDmAttachmentEnvelope {
     pub(crate) schema: String,

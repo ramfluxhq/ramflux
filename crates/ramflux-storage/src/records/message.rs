@@ -27,10 +27,37 @@ pub struct DirectMessageWrite<'a> {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MessageMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub franking_report: Option<FrankingReportMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<ReplyToMetadata>,
+    #[serde(default)]
     pub mentions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarded_from: Option<ForwardedFromMetadata>,
+    #[serde(default)]
     pub forward_count: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FrankingReportMetadata {
+    pub node_id: String,
+    pub envelope_id: String,
+    pub plaintext_base64: String,
+    pub opening_key: String,
+    pub commitment_key: String,
+    pub sender_device_id_hash: String,
+    pub msg_event_id: String,
+    pub canonical_header_bytes: String,
+    pub associated_data: String,
+    pub ciphertext: String,
+    pub header_hash: String,
+    pub associated_data_hash: String,
+    pub ciphertext_hash: String,
+    pub franking_commitment: String,
+    pub commitment: String,
+    pub franking_tag: String,
+    pub franking_timestamp: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

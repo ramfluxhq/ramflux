@@ -248,8 +248,11 @@ impl RamfluxClient {
             let envelope: SdkDmEncryptedEnvelope = serde_json::from_slice(&ciphertext_bytes)?;
             let mut session =
                 self.load_or_create_recv_dm_session(conversation_id, envelope.x3dh.as_ref())?;
-            let body =
-                session.decrypt(&envelope.ciphertext, dm_associated_data(conversation_id))?;
+            let decrypted = session.decrypt_with_franking_keys(
+                &envelope.ciphertext,
+                dm_associated_data(conversation_id),
+            )?;
+            let body = decrypted.plaintext.clone();
             self.persist_dm_session(
                 conversation_id,
                 &entry.envelope.envelope_id,
@@ -278,6 +281,12 @@ impl RamfluxClient {
                 continue;
             }
             let (projection_body, attachment_refs) = decode_dm_attachment_body(&body)?;
+            let metadata = franking_report_metadata_for_delivery(
+                conversation_id,
+                &entry,
+                &envelope,
+                &decrypted,
+            )?;
             let mut attachments = Vec::new();
             if auto_fetch_attachments {
                 for attachment in &attachment_refs {
@@ -287,7 +296,12 @@ impl RamfluxClient {
                     )?);
                 }
             }
-            self.append_plaintext_projection_once(conversation_id, &entry, &projection_body)?;
+            self.append_plaintext_projection_once(
+                conversation_id,
+                &entry,
+                &projection_body,
+                metadata.as_ref(),
+            )?;
             self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
             plaintext.push(GatewayPlaintextDelivery {
                 conversation_id: conversation_id.to_owned(),
@@ -299,6 +313,55 @@ impl RamfluxClient {
             });
         }
         Ok(plaintext)
+    }
+
+    /// # Errors
+    /// Returns an error when the message is missing, has no stored franking report metadata, or
+    /// the stored plaintext cannot be represented as the selected evidence string.
+    pub fn selected_franking_evidence_for_direct_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<SdkSelectedFrankingEvidence, SdkError> {
+        let message = self
+            .direct_message_by_id(message_id)?
+            .ok_or_else(|| SdkError::LocalBus(format!("message not found: {message_id}")))?;
+        if message.conversation_id != conversation_id {
+            return Err(SdkError::LocalBus(format!(
+                "message {message_id} is not in conversation {conversation_id}"
+            )));
+        }
+        let Some(franking) = message.metadata.franking_report else {
+            return Err(SdkError::LocalBus(format!(
+                "message has no stored franking evidence: {message_id}"
+            )));
+        };
+        let plaintext = ramflux_protocol::decode_base64url(&franking.plaintext_base64)
+            .map_err(|error| SdkError::LocalBus(format!("invalid stored plaintext: {error}")))?;
+        let plaintext_excerpt = String::from_utf8(plaintext).map_err(|error| {
+            SdkError::LocalBus(format!("stored plaintext is not UTF-8 evidence: {error}"))
+        })?;
+        Ok(SdkSelectedFrankingEvidence {
+            evidence_kind: SdkFrankingEvidenceKind::ReceiverAttestedDm,
+            node_id: franking.node_id,
+            envelope_id: franking.envelope_id,
+            plaintext_excerpt,
+            opening_key: franking.opening_key,
+            commitment_key: franking.commitment_key,
+            sender_device_id_hash: franking.sender_device_id_hash,
+            msg_event_id: franking.msg_event_id,
+            canonical_header_bytes: franking.canonical_header_bytes,
+            associated_data: franking.associated_data,
+            ciphertext: franking.ciphertext,
+            header_hash: franking.header_hash,
+            associated_data_hash: franking.associated_data_hash,
+            ciphertext_hash: franking.ciphertext_hash,
+            franking_commitment: franking.franking_commitment,
+            commitment: franking.commitment,
+            franking_tag: franking.franking_tag,
+            franking_timestamp: franking.franking_timestamp,
+            group_header_signature: None,
+        })
     }
 
     /// # Errors
@@ -347,6 +410,7 @@ impl RamfluxClient {
         conversation_id: &str,
         entry: &GatewayInboxEntry,
         plaintext: &[u8],
+        metadata: Option<&MessageMetadata>,
     ) -> Result<(), SdkError> {
         let message_id = &entry.envelope.envelope_id;
         if self
@@ -356,12 +420,22 @@ impl RamfluxClient {
         {
             return Ok(());
         }
-        self.send_direct_message(
-            conversation_id,
-            message_id,
-            &entry.envelope.source_principal_id,
-            plaintext,
-        )
+        if let Some(metadata) = metadata {
+            self.send_direct_message_with_metadata(
+                conversation_id,
+                message_id,
+                &entry.envelope.source_principal_id,
+                plaintext,
+                metadata,
+            )
+        } else {
+            self.send_direct_message(
+                conversation_id,
+                message_id,
+                &entry.envelope.source_principal_id,
+                plaintext,
+            )
+        }
     }
 
     fn apply_receipt_event_plaintext(
@@ -450,6 +524,71 @@ impl RamfluxClient {
     }
 }
 
+fn franking_report_metadata_for_delivery(
+    conversation_id: &str,
+    entry: &GatewayInboxEntry,
+    envelope: &SdkDmEncryptedEnvelope,
+    decrypted: &ramflux_crypto::DmDecryptionOutput,
+) -> Result<Option<MessageMetadata>, SdkError> {
+    let Some(franking_value) = entry.envelope.ext.ext.get("franking") else {
+        return Ok(None);
+    };
+    if franking_value.get("franking_tag").is_none()
+        || franking_value.get("node_id").is_none()
+        || franking_value.get("accepted_at").is_none()
+    {
+        return Ok(None);
+    }
+    let franking: SdkReceivedFrankingMetadata = serde_json::from_value(franking_value.clone())?;
+    if franking.sender_device_id_hash
+        != ramflux_protocol::encode_base64url(envelope.ciphertext.sender_device_id_hash)
+        || franking.message_event_id != envelope.ciphertext.message_event_id
+        || franking.commitment != envelope.ciphertext.commitment
+        || franking.ciphertext_hash != envelope.ciphertext.ciphertext_hash
+    {
+        return Err(SdkError::LocalBus(
+            "received franking metadata does not match DM ciphertext".to_owned(),
+        ));
+    }
+    let commitment =
+        ramflux_crypto::franking_commitment(&ramflux_crypto::FrankingCommitmentInput {
+            plaintext: &decrypted.plaintext,
+            sender_device_id_hash: &envelope.ciphertext.sender_device_id_hash,
+            message_event_id: &envelope.ciphertext.message_event_id,
+            canonical_header_bytes: &envelope.ciphertext.canonical_header_bytes,
+            associated_data: dm_associated_data(conversation_id),
+            ciphertext: &envelope.ciphertext.ciphertext,
+            opening_key: &decrypted.opening_key,
+            commitment_key: &decrypted.commitment_key,
+        });
+    Ok(Some(MessageMetadata {
+        franking_report: Some(FrankingReportMetadata {
+            node_id: franking.node_id,
+            envelope_id: entry.envelope.envelope_id.clone(),
+            plaintext_base64: ramflux_protocol::encode_base64url(&decrypted.plaintext),
+            opening_key: ramflux_protocol::encode_base64url(decrypted.opening_key),
+            commitment_key: ramflux_protocol::encode_base64url(decrypted.commitment_key),
+            sender_device_id_hash: franking.sender_device_id_hash,
+            msg_event_id: franking.message_event_id,
+            canonical_header_bytes: ramflux_protocol::encode_base64url(
+                &envelope.ciphertext.canonical_header_bytes,
+            ),
+            associated_data: ramflux_protocol::encode_base64url(dm_associated_data(
+                conversation_id,
+            )),
+            ciphertext: ramflux_protocol::encode_base64url(&envelope.ciphertext.ciphertext),
+            header_hash: commitment.header_hash,
+            associated_data_hash: commitment.associated_data_hash,
+            ciphertext_hash: commitment.ciphertext_hash,
+            franking_commitment: commitment.franking_commitment,
+            commitment: commitment.commitment,
+            franking_tag: franking.franking_tag,
+            franking_timestamp: franking.accepted_at,
+        }),
+        ..MessageMetadata::default()
+    }))
+}
+
 fn decode_dm_attachment_body(body: &[u8]) -> Result<(Vec<u8>, Vec<SdkDmAttachmentRef>), SdkError> {
     let Ok(envelope) = serde_json::from_slice::<SdkDmAttachmentEnvelope>(body) else {
         return Ok((body.to_vec(), Vec::new()));
@@ -460,4 +599,71 @@ fn decode_dm_attachment_body(body: &[u8]) -> Result<(Vec<u8>, Vec<SdkDmAttachmen
     let body = ramflux_protocol::decode_base64url(&envelope.body_base64)
         .map_err(|error| SdkError::LocalBus(format!("invalid DM attachment body: {error}")))?;
     Ok((body, envelope.attachments))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(test_name: &str) -> PathBuf {
+        let nanos =
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+        std::env::temp_dir()
+            .join(format!("ramflux-sdk-dm-{test_name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn test_client(test_name: &str) -> Result<(PathBuf, RamfluxClient), SdkError> {
+        let root = temp_root(test_name);
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("acct", "principal")?;
+        client.unlock_account("acct", b"test-secret")?;
+        Ok((root, client))
+    }
+
+    #[test]
+    fn selected_franking_evidence_is_built_from_stored_message_metadata() -> Result<(), SdkError> {
+        let (root, client) = test_client("franking-evidence")?;
+        let metadata = MessageMetadata {
+            franking_report: Some(FrankingReportMetadata {
+                node_id: "localhost".to_owned(),
+                envelope_id: "env_report".to_owned(),
+                plaintext_base64: ramflux_protocol::encode_base64url(b"selected report text"),
+                opening_key: "opening".to_owned(),
+                commitment_key: "commitment-key".to_owned(),
+                sender_device_id_hash: "sender-hash".to_owned(),
+                msg_event_id: "msg-event".to_owned(),
+                canonical_header_bytes: "header".to_owned(),
+                associated_data: "ad".to_owned(),
+                ciphertext: "ciphertext".to_owned(),
+                header_hash: "header-hash".to_owned(),
+                associated_data_hash: "ad-hash".to_owned(),
+                ciphertext_hash: "ciphertext-hash".to_owned(),
+                franking_commitment: "franking-commitment".to_owned(),
+                commitment: "commitment".to_owned(),
+                franking_tag: "node-tag".to_owned(),
+                franking_timestamp: 1_760_001_234_567,
+            }),
+            ..MessageMetadata::default()
+        };
+        client.send_direct_message_with_metadata(
+            "conv_report",
+            "msg_report",
+            "alice",
+            b"selected report text",
+            &metadata,
+        )?;
+
+        let evidence =
+            client.selected_franking_evidence_for_direct_message("conv_report", "msg_report")?;
+        assert_eq!(evidence.evidence_kind, SdkFrankingEvidenceKind::ReceiverAttestedDm);
+        assert_eq!(evidence.node_id, "localhost");
+        assert_eq!(evidence.envelope_id, "env_report");
+        assert_eq!(evidence.plaintext_excerpt, "selected report text");
+        assert_eq!(evidence.franking_tag, "node-tag");
+        assert_eq!(evidence.franking_timestamp, 1_760_001_234_567);
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
 }

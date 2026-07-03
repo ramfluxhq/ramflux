@@ -450,6 +450,53 @@ fn account_db_clock_controls_default_storage_timestamps() -> Result<(), StorageE
 }
 
 #[test]
+fn direct_message_metadata_stores_optional_franking_report() -> Result<(), StorageError> {
+    let (root, db) = test_db("dm-franking-report-metadata")?;
+    let metadata = MessageMetadata {
+        franking_report: Some(FrankingReportMetadata {
+            node_id: "localhost".to_owned(),
+            envelope_id: "env_franking_meta".to_owned(),
+            plaintext_base64: "aGVsbG8".to_owned(),
+            opening_key: "opening".to_owned(),
+            commitment_key: "commitment-key".to_owned(),
+            sender_device_id_hash: "sender-hash".to_owned(),
+            msg_event_id: "msg-event".to_owned(),
+            canonical_header_bytes: "header".to_owned(),
+            associated_data: "ad".to_owned(),
+            ciphertext: "ciphertext".to_owned(),
+            header_hash: "header-hash".to_owned(),
+            associated_data_hash: "ad-hash".to_owned(),
+            ciphertext_hash: "ciphertext-hash".to_owned(),
+            franking_commitment: "franking-commitment".to_owned(),
+            commitment: "commitment".to_owned(),
+            franking_tag: "node-tag".to_owned(),
+            franking_timestamp: 1_760_001_234_567,
+        }),
+        ..MessageMetadata::default()
+    };
+    db.send_direct_message_with_metadata(
+        "conv_franking_meta",
+        "msg_franking_meta",
+        "alice",
+        b"hello",
+        &metadata,
+    )?;
+    assert_eq!(
+        db.message_metadata("conv_franking_meta", "msg_franking_meta")?.franking_report,
+        metadata.franking_report
+    );
+    let legacy: MessageMetadata = serde_json::from_value(serde_json::json!({
+        "reply_to": null,
+        "mentions": [],
+        "forwarded_from": null,
+        "forward_count": 0
+    }))?;
+    assert_eq!(legacy.franking_report, None);
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
 fn dm_receipts_are_idempotent_monotonic_and_read_wins() -> Result<(), StorageError> {
     let (_root, mut db) = test_db("dm-receipts-monotonic")?;
     db.set_clock(AccountClock::sequence(1_900_000_300));
