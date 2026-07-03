@@ -269,6 +269,23 @@ impl RouterWalStore {
         })
     }
 
+    /// # Errors
+    /// Returns an error when the submission cannot be durably appended.
+    pub async fn record_submission_async(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+    ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        self.writer
+            .append_async(RouterWalPayload::Submission {
+                replay_key: replay_key.to_owned(),
+                replay_expires_at,
+                entry: entry.cloned().map(Box::new),
+            })
+            .await
+    }
+
     #[must_use]
     pub fn submissions(&self, now_unix_seconds: i64) -> Vec<RouterWalSubmissionRecord> {
         self.state.lock().map_or_else(
@@ -302,7 +319,25 @@ struct RouterWalWriter {
 
 struct RouterWalAppendRequest {
     payload: RouterWalPayload,
-    reply: mpsc::SyncSender<Result<RouterWalRecordLocation, NodeCoreError>>,
+    reply: RouterWalAppendReply,
+}
+
+enum RouterWalAppendReply {
+    Sync(mpsc::SyncSender<Result<RouterWalRecordLocation, NodeCoreError>>),
+    Async(tokio::sync::oneshot::Sender<Result<RouterWalRecordLocation, NodeCoreError>>),
+}
+
+impl RouterWalAppendReply {
+    fn send(self, result: Result<RouterWalRecordLocation, NodeCoreError>) {
+        match self {
+            Self::Sync(reply) => {
+                let _sent = reply.send(result);
+            }
+            Self::Async(reply) => {
+                let _sent = reply.send(result);
+            }
+        }
+    }
 }
 
 impl RouterWalWriter {
@@ -329,16 +364,54 @@ impl RouterWalWriter {
 
     fn append(&self, payload: RouterWalPayload) -> Result<RouterWalRecordLocation, NodeCoreError> {
         let (reply, response) = mpsc::sync_channel(1);
-        self.sender
-            .as_ref()
-            .ok_or_else(|| NodeCoreError::ItestJson("router WAL writer stopped".to_owned()))?
-            .send(RouterWalAppendRequest { payload, reply })
-            .map_err(|source| {
-                NodeCoreError::ItestJson(format!("router WAL writer stopped: {source}"))
-            })?;
+        self.submit(RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Sync(reply) })?;
         response.recv().map_err(|source| {
             NodeCoreError::ItestJson(format!("router WAL append response closed: {source}"))
         })?
+    }
+
+    async fn append_async(
+        &self,
+        payload: RouterWalPayload,
+    ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.submit_async(RouterWalAppendRequest {
+            payload,
+            reply: RouterWalAppendReply::Async(reply),
+        })
+        .await?;
+        response.await.map_err(|source| {
+            NodeCoreError::ItestJson(format!("router WAL append response closed: {source}"))
+        })?
+    }
+
+    fn submit(&self, request: RouterWalAppendRequest) -> Result<(), NodeCoreError> {
+        self.sender
+            .as_ref()
+            .ok_or_else(|| NodeCoreError::ItestJson("router WAL writer stopped".to_owned()))?
+            .send(request)
+            .map_err(|source| {
+                NodeCoreError::ItestJson(format!("router WAL writer stopped: {source}"))
+            })
+    }
+
+    async fn submit_async(&self, mut request: RouterWalAppendRequest) -> Result<(), NodeCoreError> {
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or_else(|| NodeCoreError::ItestJson("router WAL writer stopped".to_owned()))?;
+        loop {
+            match sender.try_send(request) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    request = returned;
+                    tokio::task::yield_now().await;
+                }
+                Err(mpsc::TrySendError::Disconnected(_returned)) => {
+                    return Err(NodeCoreError::ItestJson("router WAL writer stopped".to_owned()));
+                }
+            }
+        }
     }
 }
 
@@ -491,12 +564,12 @@ fn router_wal_ack_success(
     match update_result {
         Ok(()) => {
             for (request, location) in batch.into_iter().zip(locations) {
-                let _sent = request.reply.send(Ok(location));
+                request.reply.send(Ok(location));
             }
         }
         Err(error) => {
             for request in batch {
-                let _sent = request.reply.send(Err(NodeCoreError::ItestJson(format!(
+                request.reply.send(Err(NodeCoreError::ItestJson(format!(
                     "router WAL index lock poisoned: {error}"
                 ))));
             }
@@ -507,7 +580,7 @@ fn router_wal_ack_success(
 fn router_wal_ack_error(batch: Vec<RouterWalAppendRequest>, error: &NodeCoreError) {
     let message = error.to_string();
     for request in batch {
-        let _sent = request.reply.send(Err(NodeCoreError::ItestJson(message.clone())));
+        request.reply.send(Err(NodeCoreError::ItestJson(message.clone())));
     }
 }
 
@@ -736,6 +809,46 @@ mod tests {
     }
 
     #[test]
+    fn router_wal_async_append_recovers_after_await() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_router_wal_dir("router_wal_async_append_recovers_after_await")?;
+        let store = Arc::new(RouterWalStore::open(&root)?);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        runtime.block_on(async {
+            let task_count = 64usize;
+            let mut tasks = tokio::task::JoinSet::new();
+            for task_index in 0..task_count {
+                let task_store = Arc::clone(&store);
+                tasks.spawn(async move {
+                    let entry = router_wal_inbox_entry(
+                        &format!("env_router_wal_async_{task_index}"),
+                        "target_router_wal_async",
+                    );
+                    task_store
+                        .record_submission_async(
+                            &format!(
+                                "device_router_wal_async:{}:{}",
+                                entry.envelope.envelope_id, entry.envelope.envelope_id
+                            ),
+                            9_999_999_999,
+                            Some(&entry),
+                        )
+                        .await
+                });
+            }
+            while let Some(result) = tasks.join_next().await {
+                result.map_err(|source| io::Error::other(source.to_string()))??;
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+        drop(store);
+
+        let reopened = RouterWalStore::open(&root)?;
+        assert_eq!(reopened.submissions(0).len(), 64);
+        remove_router_wal_dir(root);
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "set RAMFLUX_ROUTER_WAL_BENCH=1 to run the router WAL throughput bench"]
     fn router_wal_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var("RAMFLUX_ROUTER_WAL_BENCH").as_deref() != Ok("1") {
@@ -789,6 +902,67 @@ mod tests {
         let ops_per_sec = completed_ops_f64 / elapsed.as_secs_f64();
         eprintln!(
             "ROUTER_WAL_BENCH ops_per_sec={ops_per_sec:.2} total_ops={completed_ops} threads={thread_count} elapsed_ms={:.2}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+        remove_router_wal_dir(root);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "set RAMFLUX_ROUTER_WAL_BENCH=1 to run the async router WAL throughput bench"]
+    fn router_wal_async_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var("RAMFLUX_ROUTER_WAL_BENCH").as_deref() != Ok("1") {
+            eprintln!("ROUTER_WAL_ASYNC_BENCH skipped set RAMFLUX_ROUTER_WAL_BENCH=1 to run");
+            return Ok(());
+        }
+        let concurrency =
+            router_wal_bench_env_usize("RAMFLUX_ROUTER_WAL_BENCH_CONCURRENCY", 1024).max(1);
+        let total_ops =
+            router_wal_bench_env_usize("RAMFLUX_ROUTER_WAL_BENCH_TOTAL", 200_000).max(1);
+        let root = temp_router_wal_dir("router_wal_async_throughput_bench")?;
+        let store = Arc::new(RouterWalStore::open(&root)?);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let begun_at = Instant::now();
+        let completed_ops = runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            let ops_per_task = total_ops.div_ceil(concurrency);
+            for task_index in 0..concurrency {
+                let task_store = Arc::clone(&store);
+                let first_op = task_index * ops_per_task;
+                let end_op = total_ops.min(first_op + ops_per_task);
+                tasks.spawn(async move {
+                    for op_index in first_op..end_op {
+                        let target = format!("target_router_wal_async_bench_{}", op_index % 4096);
+                        let entry = router_wal_inbox_entry(
+                            &format!("env_router_wal_async_bench_{op_index}"),
+                            &target,
+                        );
+                        task_store
+                            .record_submission_async(
+                                &format!(
+                                    "device_router_wal_async_bench:{}:{}",
+                                    entry.envelope.envelope_id, entry.envelope.envelope_id
+                                ),
+                                9_999_999_999,
+                                Some(&entry),
+                            )
+                            .await?;
+                    }
+                    Ok::<usize, NodeCoreError>(end_op.saturating_sub(first_op))
+                });
+            }
+            let mut completed_ops = 0usize;
+            while let Some(result) = tasks.join_next().await {
+                completed_ops +=
+                    result.map_err(|source| io::Error::other(source.to_string()))??;
+            }
+            Ok::<usize, Box<dyn std::error::Error>>(completed_ops)
+        })?;
+        let elapsed = begun_at.elapsed();
+        let completed_ops_f64 = f64::from(u32::try_from(completed_ops).unwrap_or(u32::MAX));
+        let ops_per_sec = completed_ops_f64 / elapsed.as_secs_f64();
+        eprintln!(
+            "ROUTER_WAL_ASYNC_BENCH ops_per_sec={ops_per_sec:.2} total_ops={completed_ops} concurrency={concurrency} elapsed_ms={:.2}",
             elapsed.as_secs_f64() * 1000.0
         );
         remove_router_wal_dir(root);
