@@ -244,6 +244,29 @@ impl MeshQuicServer {
     }
 
     /// # Errors
+    /// Returns an error when TLS material cannot be loaded or QUIC cannot use the socket.
+    pub fn bind_with_udp_socket_and_pem_roots_provider(
+        socket: std::net::UdpSocket,
+        tls: &MeshTlsConfig,
+        root_pems_provider: MeshRootPemProvider,
+    ) -> Result<Self, TransportError> {
+        let socket_addr = socket.local_addr()?;
+        tracing::info!(addr = %socket_addr, "binding mesh QUIC endpoint from UDP socket");
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(mesh_quic_server_config_with_dynamic_pem_roots(tls, root_pems_provider)?),
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )?;
+        tracing::info!(
+            addr = %socket_addr,
+            local_addr = %endpoint.local_addr()?,
+            "mesh QUIC endpoint bound from UDP socket"
+        );
+        Ok(Self { endpoint })
+    }
+
+    /// # Errors
     /// Returns an error when the local UDP address cannot be read.
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         Ok(self.endpoint.local_addr()?)
