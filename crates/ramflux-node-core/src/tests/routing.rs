@@ -604,6 +604,145 @@ fn home_node_route_update_proof_applies_and_rejects_invalid_inputs()
 }
 
 #[test]
+fn home_node_migration_forwards_within_window_and_nacks_after_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let request = registration_request(
+        "principal_forward_window",
+        "device_forward_window",
+        843,
+        None,
+        "ip_forward_window",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let signer = NodeServiceSigningKey::from_seed([0x94; 32]);
+    let (migration_proof, route_update) = route_update_fixture(
+        &request,
+        843,
+        "mig_forward_window",
+        "node_new_forward.example",
+        "node-new-forward.example:7443",
+        &signer,
+    )?;
+    let migration =
+        router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 1)?;
+    router.apply_home_node_route_update_proof(&route_update, request.now + 2)?;
+
+    let mut forwarded = false;
+    let mut migrated_envelope =
+        envelope("env_forward_window", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
+    migrated_envelope.created_at = request.now + 3;
+    let outcome = router.submit_envelope_with_home_node_forward_at(
+        migrated_envelope.clone(),
+        request.now + 3,
+        |plan| {
+            forwarded = true;
+            assert_eq!(plan.proof_hash, migration.migration_proof_hash);
+            assert_eq!(plan.route.home_node, "node_new_forward.example");
+            assert_eq!(plan.route.node_endpoint, "node-new-forward.example:7443");
+            assert_eq!(
+                plan.envelope
+                    .ext
+                    .ext
+                    .get(HOME_NODE_FORWARD_COUNT_EXT_KEY)
+                    .and_then(serde_json::Value::as_u64),
+                Some(1)
+            );
+            let request = plan.federated_forward_request("node_old.example");
+            assert_eq!(request.source_node_id, "node_old.example");
+            assert_eq!(request.target_node_id, "node_new_forward.example");
+            assert_eq!(request.delivery_class, "opaque_event");
+            assert_eq!(request.required_capability, "opaque_delivery");
+            assert_eq!(request.envelope.envelope_id, "env_forward_window");
+            Ok(FederatedEnvelopeForwardResponse {
+                accepted: true,
+                source_node_id: request.source_node_id,
+                target_node_id: request.target_node_id,
+                delivery: EnvelopeSubmitResponse {
+                    outcome: "offline_queued".to_owned(),
+                    target_delivery_id: request.envelope.target_delivery_id,
+                    inbox_seq: Some(1),
+                    cursor: None,
+                    nack: None,
+                },
+            })
+        },
+    );
+    assert!(forwarded);
+    let RouterSubmitOutcome::ForwardedHomeNodeMigrated(delivery) = outcome else {
+        return Err(format!("expected migrated forward, got {outcome:?}").into());
+    };
+    assert_eq!(delivery.proof_hash, migration.migration_proof_hash);
+    assert_eq!(delivery.new_home_node_hint, "node_new_forward.example");
+    assert_eq!(delivery.delivery.outcome, "offline_queued");
+
+    let mut expired_window =
+        envelope("env_forward_expired", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
+    expired_window.created_at = migration.effective_at + HOME_NODE_FORWARD_WINDOW_SECONDS + 1;
+    let outcome = router.submit_envelope_with_home_node_forward_at(
+        expired_window,
+        migration.effective_at + HOME_NODE_FORWARD_WINDOW_SECONDS + 1,
+        |_plan| Err(NodeCoreError::ItestHttp("must not forward after window".to_owned())),
+    );
+    assert!(matches!(outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));
+    Ok(())
+}
+
+#[test]
+fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    router.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([0x95; 32])));
+    let request = registration_request(
+        "principal_forward_fallback",
+        "device_forward_fallback",
+        844,
+        None,
+        "ip_forward_fallback",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let signer = NodeServiceSigningKey::from_seed([0x96; 32]);
+    let (migration_proof, route_update) = route_update_fixture(
+        &request,
+        844,
+        "mig_forward_fallback",
+        "node_new_forward_fallback.example",
+        "node-new-forward-fallback.example:7443",
+        &signer,
+    )?;
+    router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 1)?;
+    router.apply_home_node_route_update_proof(&route_update, request.now + 2)?;
+
+    let mut failed_forward =
+        envelope("env_forward_failure", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
+    failed_forward.created_at = request.now + 3;
+    let outcome = router.submit_envelope_with_home_node_forward_at(
+        failed_forward,
+        request.now + 3,
+        |_plan| Err(NodeCoreError::ItestHttp("peer unavailable".to_owned())),
+    );
+    let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = outcome else {
+        return Err(format!("expected fallback nack, got {outcome:?}").into());
+    };
+    assert_eq!(delivery.nack.reason, NackReason::HomeNodeMigrated);
+    assert!(!delivery.nack.signed.signature.is_empty());
+
+    let mut loop_guarded =
+        envelope("env_forward_loop_guard", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
+    loop_guarded.created_at = request.now + 4;
+    loop_guarded
+        .ext
+        .ext
+        .insert(HOME_NODE_FORWARD_COUNT_EXT_KEY.to_owned(), serde_json::Value::from(1_u64));
+    let outcome =
+        router.submit_envelope_with_home_node_forward_at(loop_guarded, request.now + 4, |_plan| {
+            Err(NodeCoreError::ItestHttp("must not forward twice".to_owned()))
+        });
+    assert!(matches!(outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));
+    Ok(())
+}
+
+#[test]
 fn router_replay_guard_rejects_duplicate_envelope_and_expired_ttl() {
     let router = RouterCore::new();
     let accepted = router.submit_envelope_at(

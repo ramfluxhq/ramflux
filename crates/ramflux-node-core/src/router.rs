@@ -6,7 +6,8 @@
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, DeliveryDecision,
     DeviceAuthKeyResponse, DeviceManifestResponse, DeviceRevokeResponse,
-    FriendRequestBudgetRequest, FriendRequestBudgetResponse, HomeNodeMigratedNackDelivery,
+    FederatedEnvelopeForwardResponse, FriendRequestBudgetRequest, FriendRequestBudgetResponse,
+    HomeNodeMigratedNackDelivery, HomeNodeMigrationForwardDelivery, HomeNodeMigrationForwardPlan,
     HomeNodeMigrationRecord, HomeNodeRouteRecord, HomeNodeRouteUpdateProof,
     IdentityLifecycleTombstone, IdentityLineageEventRecord, IdentityRegisterRequest,
     IdentityRegistrationResponse, IdentityRegistry, InboxEntry, InboxFetchResponse,
@@ -556,6 +557,9 @@ impl RouterCore {
             RouterSubmitOutcome::RejectedSecurity { .. } => {
                 ("rejected_security".to_owned(), None, None)
             }
+            RouterSubmitOutcome::ForwardedHomeNodeMigrated(_) => {
+                ("forwarded_home_node_migrated".to_owned(), None, None)
+            }
             RouterSubmitOutcome::RejectedHomeNodeMigrated(_) => {
                 ("rejected_home_node_migrated".to_owned(), None, None)
             }
@@ -635,6 +639,30 @@ impl RouterCore {
         self.submit_envelope_after_replay_check(envelope, now_unix_seconds)
     }
 
+    pub fn submit_envelope_with_home_node_forward_at<F>(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        now_unix_seconds: i64,
+        forward: F,
+    ) -> RouterSubmitOutcome
+    where
+        F: FnOnce(
+            &HomeNodeMigrationForwardPlan,
+        ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError>,
+    {
+        if let Err(error) = self.check_envelope_replay_once(&envelope, now_unix_seconds) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: error.to_string(),
+            };
+        }
+        self.submit_envelope_after_replay_check_with_home_node_forward(
+            envelope,
+            now_unix_seconds,
+            forward,
+        )
+    }
+
     fn submit_envelope_after_replay_check(
         &self,
         envelope: ramflux_protocol::Envelope,
@@ -651,6 +679,55 @@ impl RouterCore {
                 self.node_service_signer().as_ref(),
             ));
         }
+        self.submit_local_envelope_after_migration_check(envelope)
+    }
+
+    fn submit_envelope_after_replay_check_with_home_node_forward<F>(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        now_unix_seconds: i64,
+        forward: F,
+    ) -> RouterSubmitOutcome
+    where
+        F: FnOnce(
+            &HomeNodeMigrationForwardPlan,
+        ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError>,
+    {
+        if let Some(migration) = self.effective_home_node_migration_for_target(
+            &envelope.target_delivery_id,
+            now_unix_seconds,
+        ) {
+            let forwarded = self
+                .home_node_migration_forward_plan(&envelope, &migration, now_unix_seconds)
+                .and_then(|plan| {
+                    let response = forward(&plan).ok()?;
+                    federation_forward_succeeded(&response).then_some((plan, response))
+                });
+            if let Some((plan, response)) = forwarded {
+                return RouterSubmitOutcome::ForwardedHomeNodeMigrated(Box::new(
+                    HomeNodeMigrationForwardDelivery {
+                        target_delivery_id: envelope.target_delivery_id,
+                        proof_hash: migration.migration_proof_hash,
+                        new_home_node_hint: migration.new_home_node,
+                        route: plan.route,
+                        delivery: response.delivery,
+                    },
+                ));
+            }
+            return RouterSubmitOutcome::RejectedHomeNodeMigrated(home_node_migrated_delivery(
+                &envelope,
+                &migration,
+                now_unix_seconds,
+                self.node_service_signer().as_ref(),
+            ));
+        }
+        self.submit_local_envelope_after_migration_check(envelope)
+    }
+
+    fn submit_local_envelope_after_migration_check(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> RouterSubmitOutcome {
         let mut shard = self.target_shard(&envelope.target_delivery_id);
         if shard.deleted_delivery_targets.contains(&envelope.target_delivery_id) {
             return RouterSubmitOutcome::RejectedDeleted {
@@ -964,6 +1041,38 @@ impl RouterCore {
                     .cloned()
             })
     }
+
+    fn home_node_migration_forward_plan(
+        &self,
+        envelope: &ramflux_protocol::Envelope,
+        migration: &HomeNodeMigrationRecord,
+        now_unix_seconds: i64,
+    ) -> Option<HomeNodeMigrationForwardPlan> {
+        if !home_node_forward_window_is_open(migration, now_unix_seconds) {
+            return None;
+        }
+        let forward_count = envelope_home_node_forward_count(envelope);
+        if forward_count > 0 {
+            return None;
+        }
+        let route = self.resolve_home_node_route(&migration.identity_commitment)?;
+        if route.home_node != migration.new_home_node || route.expires_at <= now_unix_seconds {
+            return None;
+        }
+        let mut forwarded_envelope = envelope.clone();
+        forwarded_envelope.ext.ext.insert(
+            crate::HOME_NODE_FORWARD_COUNT_EXT_KEY.to_owned(),
+            serde_json::Value::from(u64::from(forward_count.saturating_add(1))),
+        );
+        Some(HomeNodeMigrationForwardPlan {
+            target_delivery_id: envelope.target_delivery_id.clone(),
+            proof_hash: migration.migration_proof_hash.clone(),
+            new_home_node: migration.new_home_node.clone(),
+            route,
+            envelope: forwarded_envelope,
+            forward_count: forward_count.saturating_add(1),
+        })
+    }
 }
 
 fn effective_migration_for_registration(
@@ -1018,6 +1127,29 @@ fn validate_home_node_route_update_proof(
         return Err(NodeCoreError::ItestHttp("home node route update proof expired".to_owned()));
     }
     Ok(())
+}
+
+fn home_node_forward_window_is_open(
+    migration: &HomeNodeMigrationRecord,
+    now_unix_seconds: i64,
+) -> bool {
+    now_unix_seconds >= migration.effective_at
+        && now_unix_seconds.saturating_sub(migration.effective_at)
+            < crate::HOME_NODE_FORWARD_WINDOW_SECONDS
+}
+
+fn envelope_home_node_forward_count(envelope: &ramflux_protocol::Envelope) -> u8 {
+    envelope
+        .ext
+        .ext
+        .get(crate::HOME_NODE_FORWARD_COUNT_EXT_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn federation_forward_succeeded(response: &FederatedEnvelopeForwardResponse) -> bool {
+    response.accepted || response.delivery.outcome == "duplicate_federated_forward"
 }
 
 fn home_node_migrated_delivery(

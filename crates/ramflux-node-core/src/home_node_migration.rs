@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub const HOME_NODE_ROUTE_RECORD_DOMAIN: &str = "ramflux.home_node_route_record.v1";
 pub const HOME_NODE_ROUTE_UPDATE_PROOF_DOMAIN: &str = "ramflux.home_node_route_update_proof.v1";
+pub const HOME_NODE_FORWARD_WINDOW_SECONDS: i64 = 24 * 60 * 60;
+pub const HOME_NODE_FORWARD_COUNT_EXT_KEY: &str = "home_node_migration_forward_count";
 
 /// Applied home-node migration state for one identity binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -34,6 +36,43 @@ pub struct HomeNodeMigratedNackDelivery {
     pub proof_hash: String,
     pub new_home_node_hint: String,
     pub nack: ramflux_protocol::Nack,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeNodeMigrationForwardPlan {
+    pub target_delivery_id: String,
+    pub proof_hash: String,
+    pub new_home_node: String,
+    pub route: HomeNodeRouteRecord,
+    pub envelope: ramflux_protocol::Envelope,
+    pub forward_count: u8,
+}
+
+impl HomeNodeMigrationForwardPlan {
+    #[must_use]
+    pub fn federated_forward_request(
+        &self,
+        source_node_id: &str,
+    ) -> crate::FederatedEnvelopeForwardRequest {
+        crate::FederatedEnvelopeForwardRequest {
+            signed: crate::default_federation_forward_signed_fields(),
+            admin_token: String::new(),
+            source_node_id: source_node_id.to_owned(),
+            target_node_id: self.route.home_node.clone(),
+            delivery_class: "opaque_event".to_owned(),
+            required_capability: "opaque_delivery".to_owned(),
+            envelope: self.envelope.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeNodeMigrationForwardDelivery {
+    pub target_delivery_id: String,
+    pub proof_hash: String,
+    pub new_home_node_hint: String,
+    pub route: HomeNodeRouteRecord,
+    pub delivery: crate::EnvelopeSubmitResponse,
 }
 
 /// Canonical route commitment referenced by a home-node migration proof.

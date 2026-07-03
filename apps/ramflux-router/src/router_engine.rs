@@ -150,7 +150,8 @@ pub(crate) fn persistent_entry_from_outcome(
             })
         }
         ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => Some(queued.entry.clone()),
-        ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { .. }
+        ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(_)
+        | ramflux_node_core::RouterSubmitOutcome::RejectedDeactivated { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedDeleted { .. }
         | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
         | ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. } => None,
@@ -181,6 +182,15 @@ pub(crate) fn submit_response_from_outcome(
                     .cursor_state(&target_delivery_id)
                     .as_ref()
                     .map(ramflux_node_core::InboxCursorResponse::from),
+                nack: None,
+            }
+        }
+        ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(delivery) => {
+            ramflux_node_core::EnvelopeSubmitResponse {
+                outcome: "forwarded_home_node_migrated".to_owned(),
+                target_delivery_id: delivery.target_delivery_id,
+                inbox_seq: delivery.delivery.inbox_seq,
+                cursor: delivery.delivery.cursor,
                 nack: None,
             }
         }
