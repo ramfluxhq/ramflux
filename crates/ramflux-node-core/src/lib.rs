@@ -66,7 +66,10 @@ pub use mvp1_registry::*;
 pub use notify::*;
 pub use notify_wal::*;
 pub use perf_metrics::{
-    NodePerfSnapshot, node_perf_reset, node_perf_snapshot, record_gateway_submit_received,
+    NodePerfSnapshot, node_perf_reset, node_perf_snapshot, record_gateway_quic_request_read_us,
+    record_gateway_quic_response_write_us, record_gateway_submit_decode_us,
+    record_gateway_submit_received, record_gateway_submit_response_encode_us,
+    record_gateway_submit_router_us, record_gateway_submit_total_us,
     record_router_submit_decode_us, record_router_submit_dispatch_us,
     record_router_submit_lock_wait_us, record_router_submit_response_us,
     record_router_submit_save_us, record_router_submit_target_local_us,

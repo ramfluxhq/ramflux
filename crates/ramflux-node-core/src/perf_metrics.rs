@@ -5,6 +5,18 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static GATEWAY_SUBMIT_RECEIVED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_QUIC_REQUEST_READ_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_QUIC_REQUEST_READ_US_MAX: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_QUIC_RESPONSE_WRITE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_QUIC_RESPONSE_WRITE_US_MAX: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_DECODE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_DECODE_US_MAX: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_ROUTER_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_ROUTER_US_MAX: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_RESPONSE_ENCODE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_RESPONSE_ENCODE_US_MAX: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_TOTAL_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GATEWAY_SUBMIT_TOTAL_US_MAX: AtomicU64 = AtomicU64::new(0);
 static ROUTER_ENVELOPE_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_REPLAY_GUARD_CHECKS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_REPLAY_GUARD_REDB_WRITES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -53,6 +65,18 @@ static PERF_ENABLED: OnceLock<bool> = OnceLock::new();
 pub struct NodePerfSnapshot {
     pub enabled: bool,
     pub gateway_submit_received_total: u64,
+    pub gateway_quic_request_read_us_total: u64,
+    pub gateway_quic_request_read_us_max: u64,
+    pub gateway_quic_response_write_us_total: u64,
+    pub gateway_quic_response_write_us_max: u64,
+    pub gateway_submit_decode_us_total: u64,
+    pub gateway_submit_decode_us_max: u64,
+    pub gateway_submit_router_us_total: u64,
+    pub gateway_submit_router_us_max: u64,
+    pub gateway_submit_response_encode_us_total: u64,
+    pub gateway_submit_response_encode_us_max: u64,
+    pub gateway_submit_total_us_total: u64,
+    pub gateway_submit_total_us_max: u64,
     pub router_envelope_accepted_total: u64,
     pub router_replay_guard_checks_total: u64,
     pub router_replay_guard_redb_writes_total: u64,
@@ -106,6 +130,34 @@ pub fn record_gateway_submit_received() {
     if node_perf_enabled() {
         GATEWAY_SUBMIT_RECEIVED_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+pub fn record_gateway_quic_request_read_us(us: u64) {
+    record_duration(&GATEWAY_QUIC_REQUEST_READ_US_TOTAL, &GATEWAY_QUIC_REQUEST_READ_US_MAX, us);
+}
+
+pub fn record_gateway_quic_response_write_us(us: u64) {
+    record_duration(&GATEWAY_QUIC_RESPONSE_WRITE_US_TOTAL, &GATEWAY_QUIC_RESPONSE_WRITE_US_MAX, us);
+}
+
+pub fn record_gateway_submit_decode_us(us: u64) {
+    record_duration(&GATEWAY_SUBMIT_DECODE_US_TOTAL, &GATEWAY_SUBMIT_DECODE_US_MAX, us);
+}
+
+pub fn record_gateway_submit_router_us(us: u64) {
+    record_duration(&GATEWAY_SUBMIT_ROUTER_US_TOTAL, &GATEWAY_SUBMIT_ROUTER_US_MAX, us);
+}
+
+pub fn record_gateway_submit_response_encode_us(us: u64) {
+    record_duration(
+        &GATEWAY_SUBMIT_RESPONSE_ENCODE_US_TOTAL,
+        &GATEWAY_SUBMIT_RESPONSE_ENCODE_US_MAX,
+        us,
+    );
+}
+
+pub fn record_gateway_submit_total_us(us: u64) {
+    record_duration(&GATEWAY_SUBMIT_TOTAL_US_TOTAL, &GATEWAY_SUBMIT_TOTAL_US_MAX, us);
 }
 
 pub(crate) fn record_router_envelope_accepted() {
@@ -227,6 +279,23 @@ pub fn node_perf_snapshot() -> NodePerfSnapshot {
     NodePerfSnapshot {
         enabled: node_perf_enabled(),
         gateway_submit_received_total: GATEWAY_SUBMIT_RECEIVED_TOTAL.load(Ordering::Relaxed),
+        gateway_quic_request_read_us_total: GATEWAY_QUIC_REQUEST_READ_US_TOTAL
+            .load(Ordering::Relaxed),
+        gateway_quic_request_read_us_max: GATEWAY_QUIC_REQUEST_READ_US_MAX.load(Ordering::Relaxed),
+        gateway_quic_response_write_us_total: GATEWAY_QUIC_RESPONSE_WRITE_US_TOTAL
+            .load(Ordering::Relaxed),
+        gateway_quic_response_write_us_max: GATEWAY_QUIC_RESPONSE_WRITE_US_MAX
+            .load(Ordering::Relaxed),
+        gateway_submit_decode_us_total: GATEWAY_SUBMIT_DECODE_US_TOTAL.load(Ordering::Relaxed),
+        gateway_submit_decode_us_max: GATEWAY_SUBMIT_DECODE_US_MAX.load(Ordering::Relaxed),
+        gateway_submit_router_us_total: GATEWAY_SUBMIT_ROUTER_US_TOTAL.load(Ordering::Relaxed),
+        gateway_submit_router_us_max: GATEWAY_SUBMIT_ROUTER_US_MAX.load(Ordering::Relaxed),
+        gateway_submit_response_encode_us_total: GATEWAY_SUBMIT_RESPONSE_ENCODE_US_TOTAL
+            .load(Ordering::Relaxed),
+        gateway_submit_response_encode_us_max: GATEWAY_SUBMIT_RESPONSE_ENCODE_US_MAX
+            .load(Ordering::Relaxed),
+        gateway_submit_total_us_total: GATEWAY_SUBMIT_TOTAL_US_TOTAL.load(Ordering::Relaxed),
+        gateway_submit_total_us_max: GATEWAY_SUBMIT_TOTAL_US_MAX.load(Ordering::Relaxed),
         router_envelope_accepted_total: ROUTER_ENVELOPE_ACCEPTED_TOTAL.load(Ordering::Relaxed),
         router_replay_guard_checks_total: ROUTER_REPLAY_GUARD_CHECKS_TOTAL.load(Ordering::Relaxed),
         router_replay_guard_redb_writes_total: ROUTER_REPLAY_GUARD_REDB_WRITES_TOTAL
@@ -283,6 +352,18 @@ pub fn node_perf_snapshot() -> NodePerfSnapshot {
 pub fn node_perf_reset() {
     if node_perf_enabled() {
         GATEWAY_SUBMIT_RECEIVED_TOTAL.store(0, Ordering::Relaxed);
+        GATEWAY_QUIC_REQUEST_READ_US_TOTAL.store(0, Ordering::Relaxed);
+        GATEWAY_QUIC_REQUEST_READ_US_MAX.store(0, Ordering::Relaxed);
+        GATEWAY_QUIC_RESPONSE_WRITE_US_TOTAL.store(0, Ordering::Relaxed);
+        GATEWAY_QUIC_RESPONSE_WRITE_US_MAX.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_DECODE_US_TOTAL.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_DECODE_US_MAX.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_ROUTER_US_TOTAL.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_ROUTER_US_MAX.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_RESPONSE_ENCODE_US_TOTAL.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_RESPONSE_ENCODE_US_MAX.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_TOTAL_US_TOTAL.store(0, Ordering::Relaxed);
+        GATEWAY_SUBMIT_TOTAL_US_MAX.store(0, Ordering::Relaxed);
         ROUTER_ENVELOPE_ACCEPTED_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_REPLAY_GUARD_CHECKS_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_REPLAY_GUARD_REDB_WRITES_TOTAL.store(0, Ordering::Relaxed);

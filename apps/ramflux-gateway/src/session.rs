@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
@@ -59,14 +59,18 @@ pub(crate) async fn handle_gateway_quic_stream(
     mut recv: quinn::RecvStream,
     context: GatewayQuicContext,
 ) -> anyhow::Result<()> {
+    let read_started = Instant::now();
     let first_frame: serde_json::Value = ramflux_transport::read_quic_json_frame(&mut recv).await?;
+    ramflux_node_core::record_gateway_quic_request_read_us(elapsed_us(read_started));
     if first_frame.get("frame_type").is_some() {
         let frame: ramflux_node_core::GatewayClientFrame = serde_json::from_value(first_frame)?;
         handle_gateway_session_stream(send, recv, context, frame).await?;
     } else {
         let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
         let response = dispatch_quic_json_request(&context.router, request).await?;
+        let write_started = Instant::now();
         ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
+        ramflux_node_core::record_gateway_quic_response_write_us(elapsed_us(write_started));
     }
     Ok(())
 }
@@ -688,6 +692,10 @@ fn now_unix_millis() -> u64 {
     let millis =
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_millis());
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 async fn dispatch_offline_wake(
