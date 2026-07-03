@@ -5,7 +5,7 @@
 
 use crate::{
     IdentityRegisterRequest, IdentityRegistrationResponse, InboxCursorResponse, InboxEntry,
-    PrekeyPublishRequest, PrekeyResponse,
+    ItestMvp10OwnDeviceFanoutResponse, PrekeyPublishRequest, PrekeyResponse,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -107,6 +107,48 @@ pub struct GatewaySubmitFrame {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GatewayOwnDeviceFanoutFrame {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub principal_id: String,
+    pub source_device_id: String,
+    pub envelope: ramflux_protocol::Envelope,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GatewayOwnDeviceFanoutDelivery {
+    pub device_id: String,
+    pub target_delivery_id: String,
+    pub outcome: String,
+    pub inbox_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GatewayOwnDeviceFanoutResponse {
+    pub principal_id: String,
+    pub source_device_id: String,
+    pub delivered: Vec<GatewayOwnDeviceFanoutDelivery>,
+}
+
+impl From<ItestMvp10OwnDeviceFanoutResponse> for GatewayOwnDeviceFanoutResponse {
+    fn from(response: ItestMvp10OwnDeviceFanoutResponse) -> Self {
+        Self {
+            principal_id: response.principal_id,
+            source_device_id: response.source_device_id,
+            delivered: response
+                .delivered
+                .into_iter()
+                .map(|delivery| GatewayOwnDeviceFanoutDelivery {
+                    device_id: delivery.device_id,
+                    target_delivery_id: delivery.target_delivery_id,
+                    outcome: delivery.outcome,
+                    inbox_seq: delivery.inbox_seq,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GatewayResumeFrame {
     pub target_delivery_id: String,
     pub after_inbox_seq: u64,
@@ -129,6 +171,7 @@ pub enum GatewayClientFrame {
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
     Submit { submit: GatewaySubmitFrame },
+    OwnDeviceFanout { fanout: GatewayOwnDeviceFanoutFrame },
     IdentityRegister { request: IdentityRegisterRequest },
     PrekeyPublish { request: PrekeyPublishRequest },
     PrekeyFetch { device_id: String },
@@ -145,6 +188,7 @@ pub enum GatewayClientFrame {
 pub enum GatewayServerFrame {
     SessionEstablished { session: GatewaySessionEstablishedFrame },
     Deliver { entry: InboxEntry },
+    OwnDeviceFanout { response: GatewayOwnDeviceFanoutResponse },
     IdentityRegistered { response: IdentityRegistrationResponse },
     PrekeyPublished { response: PrekeyResponse },
     Prekey { response: PrekeyResponse },

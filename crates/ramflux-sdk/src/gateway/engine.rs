@@ -200,6 +200,56 @@ impl GatewaySessionEngine {
     }
 
     /// # Errors
+    /// Returns an error when the gateway rejects or cannot fan out the envelope.
+    pub async fn own_device_fanout(
+        &mut self,
+        principal_id: impl Into<String>,
+        source_device_id: impl Into<String>,
+        envelope: ramflux_protocol::Envelope,
+    ) -> Result<GatewayOwnDeviceFanoutResponse, SdkError> {
+        let principal_id = principal_id.into();
+        let source_device_id = source_device_id.into();
+        let signed_body = serde_json::json!({
+            "principal_id": principal_id,
+            "source_device_id": source_device_id,
+            "envelope": envelope,
+        });
+        let fanout = GatewayOwnDeviceFanoutFrame {
+            signed_request: self.signed_request(
+                "POST",
+                "/gateway/session/own-device-fanout",
+                "already_authed",
+                &signed_body,
+            )?,
+            principal_id,
+            source_device_id,
+            envelope,
+        };
+        write_gateway_client_frame(
+            &mut *self.stream,
+            &GatewayClientFrame::OwnDeviceFanout { fanout },
+        )
+        .await?;
+        loop {
+            match self.read_gateway_frame("own-device fanout response").await? {
+                GatewayServerFrame::OwnDeviceFanout { response } => return Ok(response),
+                GatewayServerFrame::Deliver { entry } => {
+                    self.pending_deliveries.push_back(entry);
+                }
+                GatewayServerFrame::InBandWake { .. } => {}
+                GatewayServerFrame::Nack { reason } => {
+                    return Err(SdkError::GatewaySessionRejected(reason));
+                }
+                other => {
+                    return Err(SdkError::GatewaySessionRejected(format!(
+                        "expected own-device fanout response, got {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// # Errors
     /// Returns an error when the gateway rejects the ack or returns an unexpected frame.
     pub async fn ack(&mut self, ack: ramflux_protocol::Ack) -> Result<GatewayCursor, SdkError> {
         write_gateway_client_frame(&mut *self.stream, &GatewayClientFrame::Ack { ack }).await?;

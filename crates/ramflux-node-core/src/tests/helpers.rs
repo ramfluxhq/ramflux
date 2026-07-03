@@ -294,6 +294,27 @@ pub(super) fn signed_fields() -> SignedFields {
     }
 }
 
+pub(super) fn gateway_fanout_signed_request(
+    source_device_id: &str,
+) -> ramflux_protocol::SignedRequest {
+    ramflux_protocol::SignedRequest {
+        schema: "ramflux.signed_request.v1".to_owned(),
+        version: 1,
+        domain: "ramflux.signed_request.v1".to_owned(),
+        ext: Ext::default(),
+        signed: signed_fields(),
+        source_device_id: source_device_id.to_owned(),
+        request_id: format!("req_fanout_{source_device_id}"),
+        method: ramflux_protocol::HttpMethod::POST,
+        path: "/gateway/session/own-device-fanout".to_owned(),
+        device_proof_hash: "already_authed".to_owned(),
+        body_hash: "body_hash".to_owned(),
+        nonce: format!("nonce_fanout_{source_device_id}"),
+        created_at: 1_760_000_010,
+        expires_at: 1_760_000_310,
+    }
+}
+
 pub(super) fn security_incident(incident_id: &str) -> SecurityIncident {
     SecurityIncident {
         incident_id: incident_id.to_owned(),

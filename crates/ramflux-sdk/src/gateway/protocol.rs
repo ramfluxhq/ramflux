@@ -234,6 +234,29 @@ pub struct GatewaySubmitFrame {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayOwnDeviceFanoutFrame {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub principal_id: String,
+    pub source_device_id: String,
+    pub envelope: ramflux_protocol::Envelope,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayOwnDeviceFanoutDelivery {
+    pub device_id: String,
+    pub target_delivery_id: String,
+    pub outcome: String,
+    pub inbox_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayOwnDeviceFanoutResponse {
+    pub principal_id: String,
+    pub source_device_id: String,
+    pub delivered: Vec<GatewayOwnDeviceFanoutDelivery>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct GatewayResumeFrame {
     pub target_delivery_id: String,
     pub after_inbox_seq: u64,
@@ -256,6 +279,7 @@ pub enum GatewayClientFrame {
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
     Submit { submit: GatewaySubmitFrame },
+    OwnDeviceFanout { fanout: GatewayOwnDeviceFanoutFrame },
     IdentityRegister { request: SdkIdentityRegisterRequest },
     PrekeyPublish { request: SdkPrekeyPublishRequest },
     PrekeyFetch { device_id: String },
@@ -272,6 +296,7 @@ pub enum GatewayClientFrame {
 pub enum GatewayServerFrame {
     SessionEstablished { session: GatewaySessionEstablishedFrame },
     Deliver { entry: GatewayInboxEntry },
+    OwnDeviceFanout { response: GatewayOwnDeviceFanoutResponse },
     IdentityRegistered { response: SdkIdentityRegistrationResponse },
     PrekeyPublished { response: SdkPrekeyResponse },
     Prekey { response: SdkPrekeyResponse },
