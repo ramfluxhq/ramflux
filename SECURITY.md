@@ -11,8 +11,9 @@ Report privately through either:
 
 - **GitHub Security Advisories** — "Report a vulnerability" on the repository's
   Security tab (preferred), or
-- **Email** — security@spanbrain.org (PGP key published at
-  `/.well-known/security.txt` — TODO: publish key).
+- **Email** — security@spanbrain.org. Machine-readable contact metadata is
+  published at [`/.well-known/security.txt`](.well-known/security.txt) (RFC 9116).
+  A PGP key for encrypted reports will be linked from that file when published.
 
 Please include:
 
@@ -59,5 +60,4 @@ justification.
 | Advisory | Crate | Status | Justification |
 |----------|-------|--------|---------------|
 | RUSTSEC-2023-0089 | `atomic-polyfill` | suppressed | Transitive through `postcard` / `heapless`; tracked for migration while P3 preserves the dependency graph. |
-| RUSTSEC-2024-0384 | `instant` | suppressed | Transitive through `glommio`; tracked for gateway runtime dependency migration. |
 | RUSTSEC-2025-0134 | `rustls-pemfile` | suppressed | Direct PEM loader dependency; tracked for migration to `rustls-pki-types` PEM APIs. |
