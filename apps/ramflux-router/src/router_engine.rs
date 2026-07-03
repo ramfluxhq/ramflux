@@ -6,6 +6,7 @@ use std::time::Instant;
 pub(crate) fn submit_envelope(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
+    home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
     envelope: ramflux_protocol::Envelope,
     total_started: Instant,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
@@ -22,10 +23,15 @@ pub(crate) fn submit_envelope(
         .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
     ramflux_node_core::record_router_submit_lock_wait_us(0);
     let dispatch_started = Instant::now();
-    let outcome = state.submit_envelope_at(
-        envelope,
-        i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX),
-    );
+    let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    let outcome = match home_node_forward {
+        Some(client) => {
+            state.submit_envelope_with_home_node_forward_at(envelope, now_unix_seconds, |plan| {
+                client.forward(plan)
+            })
+        }
+        None => state.submit_envelope_at(envelope, now_unix_seconds),
+    };
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);

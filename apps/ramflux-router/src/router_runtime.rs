@@ -7,14 +7,16 @@ use std::time::Instant;
 pub(crate) struct TokioRouterRuntime {
     state: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
+    home_node_forward: Option<LocalFederationForwardClient>,
 }
 
 impl TokioRouterRuntime {
     pub(crate) fn new(
         state: Arc<ramflux_node_core::RouterCore>,
         store: Arc<ramflux_node_core::RouterRedbStore>,
+        home_node_forward: Option<LocalFederationForwardClient>,
     ) -> Self {
-        Self { state, store }
+        Self { state, store, home_node_forward }
     }
 }
 
@@ -22,12 +24,38 @@ pub(crate) enum RouterHandle {
     Tokio(Arc<TokioRouterRuntime>),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalFederationForwardClient {
+    pub(crate) url: String,
+    pub(crate) admin_token: Option<String>,
+    pub(crate) source_node_id: String,
+}
+
+impl LocalFederationForwardClient {
+    pub(crate) fn forward(
+        &self,
+        plan: &ramflux_node_core::HomeNodeMigrationForwardPlan,
+    ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError>
+    {
+        let mut request = plan.federated_forward_request(&self.source_node_id);
+        if let Some(admin_token) = &self.admin_token {
+            admin_token.clone_into(&mut request.admin_token);
+        }
+        let body = serde_json::json!({
+            "admin_token": self.admin_token.as_deref().unwrap_or_default(),
+            "forward": request,
+        });
+        ramflux_node_core::itest_http_post_json(&self.url, &body)
+    }
+}
+
 impl RouterHandle {
     pub(crate) fn tokio(
         state: Arc<ramflux_node_core::RouterCore>,
         store: Arc<ramflux_node_core::RouterRedbStore>,
+        home_node_forward: Option<LocalFederationForwardClient>,
     ) -> Self {
-        Self::Tokio(Arc::new(TokioRouterRuntime::new(state, store)))
+        Self::Tokio(Arc::new(TokioRouterRuntime::new(state, store, home_node_forward)))
     }
 
     pub(crate) fn state(&self) -> &ramflux_node_core::RouterCore {
@@ -51,6 +79,7 @@ impl RouterHandle {
             Self::Tokio(runtime) => crate::router_engine::submit_envelope(
                 runtime.state.as_ref(),
                 runtime.store.as_ref(),
+                runtime.home_node_forward.as_ref(),
                 envelope,
                 total_started,
             ),
@@ -125,8 +154,11 @@ impl RouterHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use ramflux_protocol::{DeliveryClass, Ext, Priority, SignatureAlg, SignedFields};
@@ -140,6 +172,7 @@ mod tests {
         let oracle = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
+            None,
             envelope.clone(),
             Instant::now(),
         )?;
@@ -162,6 +195,7 @@ mod tests {
         let _submitted = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
+            None,
             envelope.clone(),
             Instant::now(),
         )?;
@@ -220,9 +254,74 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn local_federation_forward_client_posts_source_node_and_admin_token() -> anyhow::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/internal/home-node-migration/forward", listener.local_addr()?);
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener.accept().map_err(|source| source.to_string())?;
+            let request = ramflux_node_core::read_itest_http_request(&mut stream)
+                .map_err(|source| source.to_string())?
+                .ok_or_else(|| "missing forward request".to_owned())?;
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
+            let admin_token = body
+                .get("admin_token")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing admin token".to_owned())?
+                .to_owned();
+            let forward: ramflux_node_core::FederatedEnvelopeForwardRequest =
+                serde_json::from_value(
+                    body.get("forward")
+                        .cloned()
+                        .ok_or_else(|| "missing forward request".to_owned())?,
+                )
+                .map_err(|source| source.to_string())?;
+            let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
+                accepted: true,
+                source_node_id: forward.source_node_id.clone(),
+                target_node_id: forward.target_node_id.clone(),
+                delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                    outcome: "federation_spooled_offline_peer".to_owned(),
+                    target_delivery_id: forward.envelope.target_delivery_id.clone(),
+                    inbox_seq: None,
+                    cursor: None,
+                    nack: None,
+                },
+            };
+            request_tx
+                .send((request.path, admin_token, forward))
+                .map_err(|source| source.to_string())?;
+            ramflux_node_core::write_itest_json_response(&mut stream, "200 OK", &response)
+                .map_err(|source| source.to_string())
+        });
+
+        let client = LocalFederationForwardClient {
+            url,
+            admin_token: Some("local-token".to_owned()),
+            source_node_id: "node-a".to_owned(),
+        };
+        let response = client.forward(&forward_plan())?;
+        assert!(response.accepted);
+        assert_eq!(response.source_node_id, "node-a");
+        assert_eq!(response.target_node_id, "node-b");
+        assert_eq!(response.delivery.outcome, "federation_spooled_offline_peer");
+        let (path, admin_token, forward) = request_rx.recv()?;
+        assert_eq!(path, "/internal/home-node-migration/forward");
+        assert_eq!(forward.source_node_id, "node-a");
+        assert_eq!(admin_token, "local-token");
+        assert_eq!(forward.target_node_id, "node-b");
+        match server.join() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+            Err(_) => Err(anyhow::anyhow!("stub federation server panicked")),
+        }
+    }
+
     fn test_handle(name: &str) -> anyhow::Result<(RouterHandle, PathBuf)> {
         let (state, store, path) = test_router(name)?;
-        Ok((RouterHandle::tokio(state, store), path))
+        Ok((RouterHandle::tokio(state, store, None), path))
     }
 
     fn test_router(
@@ -250,6 +349,28 @@ mod tests {
             principal_id: "alice".to_owned(),
             source_device_id: "alice_phone".to_owned(),
             envelope: current_envelope(envelope_id, "target_unused"),
+        }
+    }
+
+    fn forward_plan() -> ramflux_node_core::HomeNodeMigrationForwardPlan {
+        ramflux_node_core::HomeNodeMigrationForwardPlan {
+            target_delivery_id: "target-b".to_owned(),
+            proof_hash: "proof-hash".to_owned(),
+            new_home_node: "node-b".to_owned(),
+            route: ramflux_node_core::HomeNodeRouteRecord {
+                identity_commitment: "identity-b".to_owned(),
+                home_node: "node-b".to_owned(),
+                home_node_key_hash: "node-b-key-hash".to_owned(),
+                node_public_key: "node-b-public-key".to_owned(),
+                node_endpoint: "node-b:7443".to_owned(),
+                route_record_hash: "route-record-hash".to_owned(),
+                migration_proof_hash: "migration-proof-hash".to_owned(),
+                route_update_proof_hash: "route-update-proof-hash".to_owned(),
+                updated_at: 1,
+                expires_at: 2,
+            },
+            envelope: envelope("env_forward", "target-b", DeliveryClass::OpaqueEvent),
+            forward_count: 1,
         }
     }
 
