@@ -31,9 +31,9 @@ const GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT: u32 = 4096;
 const GATEWAY_QUIC_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RECEIVE_WINDOW";
 const GATEWAY_QUIC_STREAM_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_STREAM_RECEIVE_WINDOW";
 const GATEWAY_QUIC_SEND_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_SEND_WINDOW";
-const QUIC_RECEIVE_WINDOW_DEFAULT: u64 = 256 * 1024 * 1024;
-const QUIC_STREAM_RECEIVE_WINDOW_DEFAULT: u64 = 4 * 1024 * 1024;
-const QUIC_SEND_WINDOW_DEFAULT: u64 = 256 * 1024 * 1024;
+const QUIC_RECEIVE_WINDOW_DEFAULT: u64 = 16 * 1024 * 1024;
+const QUIC_STREAM_RECEIVE_WINDOW_DEFAULT: u64 = 1024 * 1024;
+const QUIC_SEND_WINDOW_DEFAULT: u64 = 16 * 1024 * 1024;
 
 /// # Errors
 /// Returns an error when the mesh CA, certificate, or private key cannot be loaded or validated.
@@ -440,16 +440,16 @@ mod tests {
 
     #[test]
     fn quic_flow_control_window_defaults_are_high_bandwidth_safe() {
-        assert_eq!(QUIC_RECEIVE_WINDOW_DEFAULT, 256 * 1024 * 1024);
-        assert_eq!(QUIC_SEND_WINDOW_DEFAULT, 256 * 1024 * 1024);
-        assert_eq!(QUIC_STREAM_RECEIVE_WINDOW_DEFAULT, 4 * 1024 * 1024);
+        assert_eq!(QUIC_RECEIVE_WINDOW_DEFAULT, 16 * 1024 * 1024);
+        assert_eq!(QUIC_SEND_WINDOW_DEFAULT, 16 * 1024 * 1024);
+        assert_eq!(QUIC_STREAM_RECEIVE_WINDOW_DEFAULT, 1024 * 1024);
         assert_eq!(
             quic_varint_from_value(None, QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
-            256 * 1024 * 1024
+            16 * 1024 * 1024
         );
         assert_eq!(
             quic_varint_from_value(Some("0"), QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
-            256 * 1024 * 1024
+            16 * 1024 * 1024
         );
         assert_eq!(
             quic_varint_from_value(Some("8388608"), QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),

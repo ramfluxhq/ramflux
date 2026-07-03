@@ -17,6 +17,7 @@ use crate::{
     RegistrationPolicy, RouterSubmitOutcome, SessionDescriptor, SessionRegistry,
     envelope_replay_tuple_key,
 };
+use arc_swap::ArcSwap;
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
@@ -25,11 +26,12 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ROUTER_TARGET_SHARD_COUNT: usize = 64;
 const ROUTER_REPLAY_GUARD_SHARD_COUNT: usize = 64;
+const ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT: usize = 64;
 
 #[must_use]
 pub fn mvp10_fanout_envelope_id(base_envelope_id: &str, device_id: &str) -> String {
@@ -39,8 +41,9 @@ pub fn mvp10_fanout_envelope_id(base_envelope_id: &str, device_id: &str) -> Stri
 #[derive(Debug)]
 pub struct RouterCore {
     pub(crate) target_shards: Vec<Mutex<RouterTargetShard>>,
-    envelope_target_index: Mutex<BTreeMap<String, String>>,
+    envelope_target_index_shards: Vec<Mutex<BTreeMap<String, String>>>,
     pub(crate) control: Mutex<RouterControlState>,
+    migration_read_snapshot: ArcSwap<RouterMigrationReadSnapshot>,
     pub(crate) replay_guard_shards: Vec<Mutex<NodeReplayGuardState>>,
     node_service_signer: Mutex<Option<NodeServiceSigningKey>>,
     local_home_node_id: Mutex<Option<String>>,
@@ -84,6 +87,32 @@ pub(crate) struct RouterControlState {
     pub(crate) node_franking_public_key: Option<String>,
     pub(crate) home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord>,
     pub(crate) home_node_routes: BTreeMap<String, HomeNodeRouteRecord>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct RouterMigrationReadSnapshot {
+    identity_keys_by_target: BTreeMap<String, Vec<String>>,
+    home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord>,
+}
+
+impl RouterMigrationReadSnapshot {
+    fn from_control(control: &RouterControlState) -> Self {
+        let mut identity_keys_by_target = BTreeMap::new();
+        for target_delivery_id in control
+            .mvp1_identities
+            .devices
+            .values()
+            .map(|device| device.target_delivery_id.as_str())
+            .collect::<BTreeSet<_>>()
+        {
+            let keys =
+                control.mvp1_identities.identity_keys_for_target_delivery_id(target_delivery_id);
+            if !keys.is_empty() {
+                identity_keys_by_target.insert(target_delivery_id.to_owned(), keys);
+            }
+        }
+        Self { identity_keys_by_target, home_node_migrations: control.home_node_migrations.clone() }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -244,6 +273,7 @@ impl RouterCore {
             }
         }
         control.home_node_migrations.insert(record.identity_commitment.clone(), record.clone());
+        self.refresh_migration_read_snapshot_from_control(&control);
         Ok(record)
     }
 
@@ -359,7 +389,9 @@ impl RouterCore {
                     migration.migration_proof_hash, migration.new_home_node
                 )));
             }
-            control.mvp1_identities.register_identity(request)?
+            let registered = control.mvp1_identities.register_identity(request)?;
+            self.refresh_migration_read_snapshot_from_control(&control);
+            registered
         };
         if let Some(existing) = self
             .target_shard(&session.target_delivery_id)
@@ -405,7 +437,12 @@ impl RouterCore {
         &self,
         request: &crate::DeviceRevokeRequest,
     ) -> Result<DeviceRevokeResponse, NodeCoreError> {
-        let revoked = lock_unpoisoned(&self.control).mvp1_identities.revoke_device(request)?;
+        let revoked = {
+            let mut control = lock_unpoisoned(&self.control);
+            let revoked = control.mvp1_identities.revoke_device(request)?;
+            self.refresh_migration_read_snapshot_from_control(&control);
+            revoked
+        };
         Ok(DeviceRevokeResponse { device_id: request.device_id.clone(), revoked })
     }
 
@@ -899,23 +936,29 @@ impl RouterCore {
         let target_shards = (0..ROUTER_TARGET_SHARD_COUNT)
             .map(|_index| Mutex::new(RouterTargetShard::default()))
             .collect::<Vec<_>>();
+        let envelope_target_index_shards = (0..ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
+            .map(|_index| Mutex::new(BTreeMap::new()))
+            .collect::<Vec<_>>();
         let replay_guard_shards = (0..ROUTER_REPLAY_GUARD_SHARD_COUNT)
             .map(|_index| Mutex::new(NodeReplayGuardState::new()))
             .collect::<Vec<_>>();
+        let control = RouterControlState {
+            mvp1_identities: snapshot.mvp1_identities,
+            lifecycle_by_principal: snapshot.lifecycle_by_principal,
+            lifecycle_tombstones: snapshot.lifecycle_tombstones,
+            identity_lineage_events: snapshot.identity_lineage_events,
+            identity_lineage_heads: snapshot.identity_lineage_heads,
+            abuse_reports: snapshot.abuse_reports,
+            node_franking_public_key: snapshot.node_franking_public_key,
+            home_node_migrations: snapshot.home_node_migrations,
+            home_node_routes: snapshot.home_node_routes,
+        };
+        let migration_read_snapshot = RouterMigrationReadSnapshot::from_control(&control);
         let router = Self {
             target_shards,
-            envelope_target_index: Mutex::new(BTreeMap::new()),
-            control: Mutex::new(RouterControlState {
-                mvp1_identities: snapshot.mvp1_identities,
-                lifecycle_by_principal: snapshot.lifecycle_by_principal,
-                lifecycle_tombstones: snapshot.lifecycle_tombstones,
-                identity_lineage_events: snapshot.identity_lineage_events,
-                identity_lineage_heads: snapshot.identity_lineage_heads,
-                abuse_reports: snapshot.abuse_reports,
-                node_franking_public_key: snapshot.node_franking_public_key,
-                home_node_migrations: snapshot.home_node_migrations,
-                home_node_routes: snapshot.home_node_routes,
-            }),
+            envelope_target_index_shards,
+            control: Mutex::new(control),
+            migration_read_snapshot: ArcSwap::from_pointee(migration_read_snapshot),
             replay_guard_shards,
             node_service_signer: Mutex::new(None),
             local_home_node_id: Mutex::new(None),
@@ -962,6 +1005,7 @@ impl RouterCore {
             if control.node_franking_public_key.is_none() {
                 control.node_franking_public_key = snapshot.node_franking_public_key;
             }
+            self.refresh_migration_read_snapshot_from_control(&control);
         }
         {
             for (key, expires_at) in snapshot.replay_guard_state.accepted_entries() {
@@ -1015,27 +1059,40 @@ impl RouterCore {
     }
 
     fn index_envelope_target(&self, entry: &InboxEntry) {
-        lock_unpoisoned(&self.envelope_target_index)
-            .insert(entry.envelope.envelope_id.clone(), entry.target_delivery_id.clone());
+        lock_unpoisoned(
+            &self.envelope_target_index_shards
+                [envelope_target_index_shard_index(&entry.envelope.envelope_id)],
+        )
+        .insert(entry.envelope.envelope_id.clone(), entry.target_delivery_id.clone());
     }
 
     fn index_cursor_targets(&self, cursor: &CursorAckState) {
-        let mut index = lock_unpoisoned(&self.envelope_target_index);
         for envelope_id in &cursor.acked_envelope_ids {
-            index.insert(envelope_id.clone(), cursor.target_delivery_id.clone());
+            lock_unpoisoned(
+                &self.envelope_target_index_shards[envelope_target_index_shard_index(envelope_id)],
+            )
+            .insert(envelope_id.clone(), cursor.target_delivery_id.clone());
         }
         for envelope_id in cursor.nacked_envelope_ids.keys() {
-            index.insert(envelope_id.clone(), cursor.target_delivery_id.clone());
+            lock_unpoisoned(
+                &self.envelope_target_index_shards[envelope_target_index_shard_index(envelope_id)],
+            )
+            .insert(envelope_id.clone(), cursor.target_delivery_id.clone());
         }
     }
 
     pub(crate) fn remove_target_index(&self, target_delivery_id: &str) {
-        lock_unpoisoned(&self.envelope_target_index)
-            .retain(|_envelope_id, target| target != target_delivery_id);
+        for index in &self.envelope_target_index_shards {
+            lock_unpoisoned(index).retain(|_envelope_id, target| target != target_delivery_id);
+        }
     }
 
     fn indexed_target_for_envelope(&self, envelope_id: &str) -> Option<String> {
-        lock_unpoisoned(&self.envelope_target_index).get(envelope_id).cloned()
+        lock_unpoisoned(
+            &self.envelope_target_index_shards[envelope_target_index_shard_index(envelope_id)],
+        )
+        .get(envelope_id)
+        .cloned()
     }
 
     fn effective_home_node_migration_for_target(
@@ -1043,19 +1100,22 @@ impl RouterCore {
         target_delivery_id: &str,
         now_unix_seconds: i64,
     ) -> Option<HomeNodeMigrationRecord> {
-        let control = lock_unpoisoned(&self.control);
-        control
-            .mvp1_identities
-            .identity_keys_for_target_delivery_id(target_delivery_id)
-            .into_iter()
-            .find_map(|key| {
-                control
+        let snapshot = self.migration_read_snapshot.load();
+        snapshot.identity_keys_by_target.get(target_delivery_id).into_iter().flatten().find_map(
+            |key| {
+                snapshot
                     .home_node_migrations
-                    .get(&key)
+                    .get(key.as_str())
                     .filter(|migration| migration.is_effective(now_unix_seconds))
                     .filter(|migration| self.migration_blocks_local_node(migration))
                     .cloned()
-            })
+            },
+        )
+    }
+
+    fn refresh_migration_read_snapshot_from_control(&self, control: &RouterControlState) {
+        self.migration_read_snapshot
+            .store(Arc::new(RouterMigrationReadSnapshot::from_control(control)));
     }
 
     fn migration_blocks_local_node(&self, migration: &HomeNodeMigrationRecord) -> bool {
@@ -1247,17 +1307,21 @@ impl PartialEq for RouterCore {
 impl Eq for RouterCore {}
 
 fn target_shard_index(target_delivery_id: &str) -> usize {
-    let mut hasher = DefaultHasher::new();
-    target_delivery_id.hash(&mut hasher);
-    let shard_count = u64::try_from(ROUTER_TARGET_SHARD_COUNT).unwrap_or(1);
-    let index = hasher.finish() % shard_count;
-    usize::try_from(index).unwrap_or(0)
+    hash_shard_index(target_delivery_id, ROUTER_TARGET_SHARD_COUNT)
 }
 
 fn replay_guard_shard_index(replay_key: &str) -> usize {
+    hash_shard_index(replay_key, ROUTER_REPLAY_GUARD_SHARD_COUNT)
+}
+
+fn envelope_target_index_shard_index(envelope_id: &str) -> usize {
+    hash_shard_index(envelope_id, ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT)
+}
+
+fn hash_shard_index(value: &str, shard_count: usize) -> usize {
     let mut hasher = DefaultHasher::new();
-    replay_key.hash(&mut hasher);
-    let shard_count = u64::try_from(ROUTER_REPLAY_GUARD_SHARD_COUNT).unwrap_or(1);
+    value.hash(&mut hasher);
+    let shard_count = u64::try_from(shard_count).unwrap_or(1);
     let index = hasher.finish() % shard_count;
     usize::try_from(index).unwrap_or(0)
 }

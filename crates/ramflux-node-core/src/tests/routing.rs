@@ -183,6 +183,48 @@ fn bound_ack_and_nack_reject_other_target_envelope() {
 }
 
 #[test]
+fn router_target_index_supports_concurrent_submit_and_ack() -> Result<(), Box<dyn std::error::Error>>
+{
+    let router = std::sync::Arc::new(RouterCore::new());
+    let worker_count = 16usize;
+    let envelopes_per_worker = 32usize;
+    let mut workers = Vec::with_capacity(worker_count);
+    for worker_index in 0..worker_count {
+        let router = std::sync::Arc::clone(&router);
+        workers.push(std::thread::spawn(move || {
+            for envelope_index in 0..envelopes_per_worker {
+                let envelope_id = format!("env_index_{worker_index}_{envelope_index}");
+                let target_delivery_id = format!("target_index_{worker_index}_{envelope_index}");
+                let outcome = router.submit_envelope(envelope(
+                    &envelope_id,
+                    &target_delivery_id,
+                    DeliveryClass::OpaqueEvent,
+                ));
+                if !matches!(outcome, RouterSubmitOutcome::OfflineQueued(_)) {
+                    return Err(format!("unexpected submit outcome: {outcome:?}"));
+                }
+            }
+            Ok::<(), String>(())
+        }));
+    }
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| std::io::Error::other("target index worker panicked"))?
+            .map_err(std::io::Error::other)?;
+    }
+    for worker_index in 0..worker_count {
+        for envelope_index in 0..envelopes_per_worker {
+            let envelope_id = format!("env_index_{worker_index}_{envelope_index}");
+            let target_delivery_id = format!("target_index_{worker_index}_{envelope_index}");
+            assert_eq!(router.target_for_envelope_id(&envelope_id), Some(target_delivery_id));
+            router.apply_ack(&ack(&envelope_id))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
 -> Result<(), Box<dyn std::error::Error>> {
     assert_ne!(mvp10_fanout_envelope_id("a:b", "c"), mvp10_fanout_envelope_id("a", "b:c"));
