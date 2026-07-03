@@ -31,6 +31,7 @@ compio-quic = { version = "=0.8.0", optional = true }
 compio-tls = { version = "=0.10.0", default-features = false, features = ["ring"], optional = true }
 
 [dependencies]
+arc-swap = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-core = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
