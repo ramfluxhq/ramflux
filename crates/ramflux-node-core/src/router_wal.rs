@@ -19,6 +19,8 @@ const ROUTER_WAL_COMMIT_WINDOW_US_ENV: &str = "RAMFLUX_ROUTER_WAL_COMMIT_WINDOW_
 const ROUTER_WAL_COMMIT_WINDOW_US_DEFAULT: u64 = 0;
 const ROUTER_WAL_QUEUE_CAPACITY_ENV: &str = "RAMFLUX_ROUTER_WAL_QUEUE_CAPACITY";
 const ROUTER_WAL_QUEUE_CAPACITY_DEFAULT: usize = 65_536;
+const ROUTER_WAL_SHARDS_ENV: &str = "RAMFLUX_ROUTER_WAL_SHARDS";
+const ROUTER_WAL_SHARD_DIR_PREFIX: &str = "router-wal-shard-";
 const ROUTER_WAL_MAGIC: &[u8] = b"ramflux-router-wal-v1\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -235,22 +237,21 @@ impl RouterWalStore {
     /// # Errors
     /// Returns an error when the WAL directory cannot be created, recovered, or opened.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
+        Self::open_with_shards(root, router_wal_shard_count())
+    }
+
+    fn open_with_shards(root: impl AsRef<Path>, shard_count: usize) -> Result<Self, NodeCoreError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)
             .map_err(|source| NodeCoreError::StoreDirectory { path: root.clone(), source })?;
+        let shard_count = shard_count.max(1);
         let segment_bytes =
             router_wal_u64_env(ROUTER_WAL_SEGMENT_BYTES_ENV, ROUTER_WAL_SEGMENT_BYTES_DEFAULT)
                 .max(1024 * 1024);
         let recovered = recover_router_wal(&root)?;
-        let next_segment_id = recovered.last_segment_id.unwrap_or(0);
-        let writer_state = RouterWalWriterState::open(
-            root,
-            next_segment_id,
-            recovered.current_offset,
-            segment_bytes,
-        )?;
         let state = Arc::new(Mutex::new(recovered.state));
-        let writer = RouterWalWriter::start(writer_state, Arc::clone(&state))?;
+        let writer =
+            RouterWalWriter::start(&root, segment_bytes, shard_count, &recovered.shards, &state)?;
         Ok(Self { state, writer })
     }
 
@@ -313,6 +314,10 @@ impl RouterWalStore {
 }
 
 struct RouterWalWriter {
+    shards: Vec<RouterWalWriterShard>,
+}
+
+struct RouterWalWriterShard {
     sender: Option<mpsc::SyncSender<RouterWalAppendRequest>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -342,8 +347,11 @@ impl RouterWalAppendReply {
 
 impl RouterWalWriter {
     fn start(
-        state: RouterWalWriterState,
-        wal_state: Arc<Mutex<RouterWalState>>,
+        root: &Path,
+        segment_bytes: u64,
+        shard_count: usize,
+        recovered_shards: &BTreeMap<usize, RouterWalRecoveredShard>,
+        wal_state: &Arc<Mutex<RouterWalState>>,
     ) -> Result<Self, NodeCoreError> {
         let batch_max =
             router_wal_usize_env(ROUTER_WAL_BATCH_MAX_ENV, ROUTER_WAL_BATCH_MAX_DEFAULT).max(1);
@@ -354,17 +362,36 @@ impl RouterWalWriter {
             ROUTER_WAL_COMMIT_WINDOW_US_ENV,
             ROUTER_WAL_COMMIT_WINDOW_US_DEFAULT,
         ));
-        let (sender, receiver) = mpsc::sync_channel(queue_capacity);
-        let thread = thread::Builder::new()
-            .name("ramflux-router-wal-writer".to_owned())
-            .spawn(move || router_wal_writer_loop(state, &receiver, &wal_state, batch_max, window))
-            .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        Ok(Self { sender: Some(sender), thread: Some(thread) })
+        let mut shards = Vec::with_capacity(shard_count);
+        for shard_id in 0..shard_count {
+            let shard_root = router_wal_shard_root(root, shard_id);
+            let recovered = recovered_shards.get(&shard_id).cloned().unwrap_or_default();
+            let state = RouterWalWriterState::open(
+                shard_root,
+                recovered.last_segment_id.unwrap_or(0),
+                recovered.current_offset,
+                segment_bytes,
+            )?;
+            let wal_state = Arc::clone(wal_state);
+            let (sender, receiver) = mpsc::sync_channel(queue_capacity);
+            let thread = thread::Builder::new()
+                .name(format!("ramflux-router-wal-writer-{shard_id}"))
+                .spawn(move || {
+                    router_wal_writer_loop(state, &receiver, &wal_state, batch_max, window);
+                })
+                .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+            shards.push(RouterWalWriterShard { sender: Some(sender), thread: Some(thread) });
+        }
+        Ok(Self { shards })
     }
 
     fn append(&self, payload: RouterWalPayload) -> Result<RouterWalRecordLocation, NodeCoreError> {
         let (reply, response) = mpsc::sync_channel(1);
-        self.submit(RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Sync(reply) })?;
+        let shard = self.shard_for_payload(&payload)?;
+        self.submit(
+            shard,
+            RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Sync(reply) },
+        )?;
         response.recv().map_err(|source| {
             NodeCoreError::ItestJson(format!("router WAL append response closed: {source}"))
         })?
@@ -375,19 +402,28 @@ impl RouterWalWriter {
         payload: RouterWalPayload,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.submit_async(RouterWalAppendRequest {
-            payload,
-            reply: RouterWalAppendReply::Async(reply),
-        })
+        let shard = self.shard_for_payload(&payload)?;
+        self.submit_async(
+            shard,
+            RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Async(reply) },
+        )
         .await?;
         response.await.map_err(|source| {
             NodeCoreError::ItestJson(format!("router WAL append response closed: {source}"))
         })?
     }
 
-    fn submit(&self, request: RouterWalAppendRequest) -> Result<(), NodeCoreError> {
-        self.sender
-            .as_ref()
+    fn shard_for_payload(&self, payload: &RouterWalPayload) -> Result<usize, NodeCoreError> {
+        if self.shards.is_empty() {
+            return Err(NodeCoreError::ItestJson("router WAL writer stopped".to_owned()));
+        }
+        Ok(router_wal_shard_for_payload(payload, self.shards.len()))
+    }
+
+    fn submit(&self, shard: usize, request: RouterWalAppendRequest) -> Result<(), NodeCoreError> {
+        self.shards
+            .get(shard)
+            .and_then(|shard| shard.sender.as_ref())
             .ok_or_else(|| NodeCoreError::ItestJson("router WAL writer stopped".to_owned()))?
             .send(request)
             .map_err(|source| {
@@ -395,10 +431,15 @@ impl RouterWalWriter {
             })
     }
 
-    async fn submit_async(&self, mut request: RouterWalAppendRequest) -> Result<(), NodeCoreError> {
+    async fn submit_async(
+        &self,
+        shard: usize,
+        mut request: RouterWalAppendRequest,
+    ) -> Result<(), NodeCoreError> {
         let sender = self
-            .sender
-            .as_ref()
+            .shards
+            .get(shard)
+            .and_then(|shard| shard.sender.as_ref())
             .ok_or_else(|| NodeCoreError::ItestJson("router WAL writer stopped".to_owned()))?;
         loop {
             match sender.try_send(request) {
@@ -417,9 +458,13 @@ impl RouterWalWriter {
 
 impl Drop for RouterWalWriter {
     fn drop(&mut self) {
-        self.sender.take();
-        if let Some(thread) = self.thread.take() {
-            let _joined = thread.join();
+        for shard in &mut self.shards {
+            shard.sender.take();
+        }
+        for shard in &mut self.shards {
+            if let Some(thread) = shard.thread.take() {
+                let _joined = thread.join();
+            }
         }
     }
 }
@@ -439,6 +484,8 @@ impl RouterWalWriterState {
         offset: u64,
         segment_bytes: u64,
     ) -> Result<Self, NodeCoreError> {
+        fs::create_dir_all(&root)
+            .map_err(|source| NodeCoreError::StoreDirectory { path: root.clone(), source })?;
         let path = router_wal_segment_path(&root, segment_id);
         let mut file = OpenOptions::new()
             .create(true)
@@ -591,25 +638,45 @@ fn router_wal_ack_error(batch: Vec<RouterWalAppendRequest>, error: &NodeCoreErro
 
 struct RouterWalRecovery {
     state: RouterWalState,
+    shards: BTreeMap<usize, RouterWalRecoveredShard>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RouterWalRecoveredShard {
     last_segment_id: Option<u64>,
     current_offset: u64,
 }
 
 fn recover_router_wal(root: &Path) -> Result<RouterWalRecovery, NodeCoreError> {
     let mut state = RouterWalState::default();
+    let _legacy = recover_router_wal_directory(root, &mut state)?;
+    let mut shards = BTreeMap::new();
+    for (shard_id, shard_root) in router_wal_existing_shard_roots(root)? {
+        let recovered = recover_router_wal_directory(&shard_root, &mut state)?;
+        if recovered.last_segment_id.is_some() {
+            shards.insert(shard_id, recovered);
+        }
+    }
+    Ok(RouterWalRecovery { state, shards })
+}
+
+fn recover_router_wal_directory(
+    root: &Path,
+    state: &mut RouterWalState,
+) -> Result<RouterWalRecoveredShard, NodeCoreError> {
     let mut segments = router_wal_segment_ids(root)?;
     if segments.is_empty() {
-        return Ok(RouterWalRecovery { state, last_segment_id: None, current_offset: 0 });
+        return Ok(RouterWalRecoveredShard::default());
     }
     segments.sort_unstable();
     let mut current_offset = 0_u64;
     let mut last_segment_id = None;
     for segment_id in segments {
-        let offset = recover_router_wal_segment(root, segment_id, &mut state)?;
+        let offset = recover_router_wal_segment(root, segment_id, state)?;
         current_offset = offset;
         last_segment_id = Some(segment_id);
     }
-    Ok(RouterWalRecovery { state, last_segment_id, current_offset })
+    Ok(RouterWalRecoveredShard { last_segment_id, current_offset })
 }
 
 fn recover_router_wal_segment(
@@ -680,6 +747,9 @@ fn read_router_wal_record(
 
 fn router_wal_segment_ids(root: &Path) -> Result<Vec<u64>, NodeCoreError> {
     let mut ids = Vec::new();
+    if !root.exists() {
+        return Ok(ids);
+    }
     for entry in fs::read_dir(root)
         .map_err(|source| NodeCoreError::StoreDirectory { path: root.to_path_buf(), source })?
     {
@@ -694,14 +764,56 @@ fn router_wal_segment_ids(root: &Path) -> Result<Vec<u64>, NodeCoreError> {
     Ok(ids)
 }
 
+fn router_wal_existing_shard_roots(root: &Path) -> Result<Vec<(usize, PathBuf)>, NodeCoreError> {
+    let mut shards = Vec::new();
+    for entry in fs::read_dir(root)
+        .map_err(|source| NodeCoreError::StoreDirectory { path: root.to_path_buf(), source })?
+    {
+        let entry = entry.map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+        if !entry
+            .file_type()
+            .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?
+            .is_dir()
+        {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Some(shard_id) = router_wal_shard_id_from_name(&name) {
+            shards.push((shard_id, entry.path()));
+        }
+    }
+    shards.sort_unstable_by_key(|(shard_id, _path)| *shard_id);
+    Ok(shards)
+}
+
 fn router_wal_segment_id_from_name(name: &str) -> Option<u64> {
     name.strip_prefix("router-wal-")
         .and_then(|value| value.strip_suffix(".wal"))
         .and_then(|value| value.parse().ok())
 }
 
+fn router_wal_shard_id_from_name(name: &str) -> Option<usize> {
+    name.strip_prefix(ROUTER_WAL_SHARD_DIR_PREFIX).and_then(|value| value.parse().ok())
+}
+
+fn router_wal_shard_root(root: &Path, shard_id: usize) -> PathBuf {
+    root.join(format!("{ROUTER_WAL_SHARD_DIR_PREFIX}{shard_id:04}"))
+}
+
 fn router_wal_segment_path(root: &Path, segment_id: u64) -> PathBuf {
     root.join(format!("router-wal-{segment_id:020}.wal"))
+}
+
+fn router_wal_shard_for_payload(payload: &RouterWalPayload, shard_count: usize) -> usize {
+    let key = match payload {
+        RouterWalPayload::Submission { replay_key, entry, .. } => {
+            entry.as_ref().map_or(replay_key.as_str(), |entry| entry.target_delivery_id.as_str())
+        }
+    };
+    let hash = crc32fast::hash(key.as_bytes());
+    usize::try_from(u64::from(hash) % u64::try_from(shard_count.max(1)).unwrap_or(1)).unwrap_or(0)
 }
 
 fn write_router_wal_record_to_file(file: &mut File, encoded: &[u8]) -> Result<(), NodeCoreError> {
@@ -730,6 +842,15 @@ fn router_wal_u64_env(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn router_wal_shard_count() -> usize {
+    std::env::var(ROUTER_WAL_SHARDS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(8, usize::from))
+        .max(1)
+}
+
 fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -753,7 +874,7 @@ mod tests {
         )?;
         drop(store);
 
-        let segment = router_wal_segment_path(&root, 0);
+        let segment = first_router_wal_segment_file(&root)?;
         let mut file = OpenOptions::new().append(true).open(&segment)?;
         file.write_all(&32_u32.to_le_bytes())?;
         file.write_all(&123_u32.to_le_bytes())?;
@@ -771,6 +892,74 @@ mod tests {
         assert!(fs::metadata(&segment)?.len() < len_with_tail);
         remove_router_wal_dir(root);
         Ok(())
+    }
+
+    #[test]
+    fn router_wal_shards_route_by_target_and_recover_all_shards()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_router_wal_dir("router_wal_shards_route_by_target_and_recover_all_shards")?;
+        let shard_count = 4usize;
+        let (left_target, right_target) = different_shard_targets(shard_count);
+        let store = RouterWalStore::open_with_shards(&root, shard_count)?;
+        let left_entry = router_wal_inbox_entry("env_router_wal_shard_left", &left_target);
+        let right_entry = router_wal_inbox_entry("env_router_wal_shard_right", &right_target);
+        let left_replay_key = format!(
+            "device_router_wal_shard:{}:{}",
+            left_entry.envelope.envelope_id, left_entry.envelope.envelope_id
+        );
+        let right_replay_key = format!(
+            "device_router_wal_shard:{}:{}",
+            right_entry.envelope.envelope_id, right_entry.envelope.envelope_id
+        );
+
+        store.record_submission(&left_replay_key, 9_999_999_999, Some(&left_entry))?;
+        store.record_submission(&right_replay_key, 9_999_999_999, Some(&right_entry))?;
+        let left_shard = router_wal_shard_for_payload(
+            &RouterWalPayload::Submission {
+                replay_key: left_replay_key.clone(),
+                replay_expires_at: 9_999_999_999,
+                entry: Some(Box::new(left_entry)),
+            },
+            shard_count,
+        );
+        let right_shard = router_wal_shard_for_payload(
+            &RouterWalPayload::Submission {
+                replay_key: right_replay_key.clone(),
+                replay_expires_at: 9_999_999_999,
+                entry: Some(Box::new(right_entry)),
+            },
+            shard_count,
+        );
+        drop(store);
+
+        assert!(router_wal_segment_path(&router_wal_shard_root(&root, left_shard), 0).exists());
+        assert!(router_wal_segment_path(&router_wal_shard_root(&root, right_shard), 0).exists());
+        let reopened = RouterWalStore::open_with_shards(&root, shard_count)?;
+        let submissions = reopened.submissions(0);
+        assert_eq!(submissions.len(), 2);
+        assert!(submissions.iter().any(|submission| submission.replay_key == left_replay_key));
+        assert!(submissions.iter().any(|submission| submission.replay_key == right_replay_key));
+        remove_router_wal_dir(root);
+        Ok(())
+    }
+
+    #[test]
+    fn router_wal_shard_routing_keeps_same_target_on_same_writer() {
+        let shard_count = 8usize;
+        let first = router_wal_submission_payload(
+            "replay_router_wal_same_target_1",
+            "env_router_wal_same_target_1",
+            "target_router_wal_same_target",
+        );
+        let second = router_wal_submission_payload(
+            "replay_router_wal_same_target_2",
+            "env_router_wal_same_target_2",
+            "target_router_wal_same_target",
+        );
+        assert_eq!(
+            router_wal_shard_for_payload(&first, shard_count),
+            router_wal_shard_for_payload(&second, shard_count)
+        );
     }
 
     #[test]
@@ -982,6 +1171,37 @@ mod tests {
         }
     }
 
+    fn router_wal_submission_payload(
+        replay_key: &str,
+        envelope_id: &str,
+        target_delivery_id: &str,
+    ) -> RouterWalPayload {
+        RouterWalPayload::Submission {
+            replay_key: replay_key.to_owned(),
+            replay_expires_at: 9_999_999_999,
+            entry: Some(Box::new(router_wal_inbox_entry(envelope_id, target_delivery_id))),
+        }
+    }
+
+    fn different_shard_targets(shard_count: usize) -> (String, String) {
+        let left = "target_router_wal_shard_0".to_owned();
+        let left_shard = router_wal_shard_for_payload(
+            &router_wal_submission_payload("replay_left", "env_left", &left),
+            shard_count,
+        );
+        for index in 1..1024 {
+            let right = format!("target_router_wal_shard_{index}");
+            let right_shard = router_wal_shard_for_payload(
+                &router_wal_submission_payload("replay_right", "env_right", &right),
+                shard_count,
+            );
+            if right_shard != left_shard {
+                return (left, right);
+            }
+        }
+        (left, "target_router_wal_shard_fallback".to_owned())
+    }
+
     fn router_wal_envelope(envelope_id: &str, target_delivery_id: &str) -> Envelope {
         Envelope {
             schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
@@ -1018,6 +1238,28 @@ mod tests {
 
     fn remove_router_wal_dir(path: PathBuf) {
         let _removed = fs::remove_dir_all(path);
+    }
+
+    fn first_router_wal_segment_file(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            for entry in fs::read_dir(&path)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    stack.push(entry.path());
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if router_wal_segment_id_from_name(name).is_some() {
+                    return Ok(entry.path());
+                }
+            }
+        }
+        Err(io::Error::new(io::ErrorKind::NotFound, "router WAL segment file not found").into())
     }
 
     fn router_wal_bench_env_usize(name: &str, default: usize) -> usize {

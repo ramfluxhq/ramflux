@@ -22,9 +22,18 @@ static RUSTLS_PROVIDER: Once = Once::new();
 const MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV: &str =
     "RAMFLUX_MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS";
 const MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT: u32 = 4096;
+const MESH_QUIC_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_MESH_QUIC_RECEIVE_WINDOW";
+const MESH_QUIC_STREAM_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_MESH_QUIC_STREAM_RECEIVE_WINDOW";
+const MESH_QUIC_SEND_WINDOW_ENV: &str = "RAMFLUX_MESH_QUIC_SEND_WINDOW";
 const GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV: &str =
     "RAMFLUX_GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS";
 const GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT: u32 = 4096;
+const GATEWAY_QUIC_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RECEIVE_WINDOW";
+const GATEWAY_QUIC_STREAM_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_STREAM_RECEIVE_WINDOW";
+const GATEWAY_QUIC_SEND_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_SEND_WINDOW";
+const QUIC_RECEIVE_WINDOW_DEFAULT: u64 = 256 * 1024 * 1024;
+const QUIC_STREAM_RECEIVE_WINDOW_DEFAULT: u64 = 4 * 1024 * 1024;
+const QUIC_SEND_WINDOW_DEFAULT: u64 = 256 * 1024 * 1024;
 
 /// # Errors
 /// Returns an error when the mesh CA, certificate, or private key cannot be loaded or validated.
@@ -118,12 +127,17 @@ pub(crate) fn mesh_quic_client_config_with_pem_roots(
 }
 
 fn mesh_quic_transport_config() -> Arc<quinn::TransportConfig> {
-    let stream_limit = positive_u32_from_value(
-        std::env::var(MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV).ok().as_deref(),
+    let mut transport = quinn::TransportConfig::default();
+    apply_quic_transport_limits(
+        &mut transport,
+        QuicTransportLimitEnv {
+            max_concurrent_bidi_streams: MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV,
+            receive_window: MESH_QUIC_RECEIVE_WINDOW_ENV,
+            stream_receive_window: MESH_QUIC_STREAM_RECEIVE_WINDOW_ENV,
+            send_window: MESH_QUIC_SEND_WINDOW_ENV,
+        },
         MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT,
     );
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_concurrent_bidi_streams(VarInt::from_u32(stream_limit));
     Arc::new(transport)
 }
 
@@ -273,13 +287,67 @@ pub fn quic_gateway_client_config(ca_cert: &Path) -> Result<quinn::ClientConfig,
 }
 
 fn gateway_quic_transport_config() -> Arc<quinn::TransportConfig> {
-    let stream_limit = positive_u32_from_value(
-        std::env::var(GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV).ok().as_deref(),
+    let mut transport = quinn::TransportConfig::default();
+    apply_quic_transport_limits(
+        &mut transport,
+        QuicTransportLimitEnv {
+            max_concurrent_bidi_streams: GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV,
+            receive_window: GATEWAY_QUIC_RECEIVE_WINDOW_ENV,
+            stream_receive_window: GATEWAY_QUIC_STREAM_RECEIVE_WINDOW_ENV,
+            send_window: GATEWAY_QUIC_SEND_WINDOW_ENV,
+        },
         GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT,
     );
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_concurrent_bidi_streams(VarInt::from_u32(stream_limit));
     Arc::new(transport)
+}
+
+#[derive(Clone, Copy)]
+struct QuicTransportLimitEnv {
+    max_concurrent_bidi_streams: &'static str,
+    receive_window: &'static str,
+    stream_receive_window: &'static str,
+    send_window: &'static str,
+}
+
+fn apply_quic_transport_limits(
+    transport: &mut quinn::TransportConfig,
+    env: QuicTransportLimitEnv,
+    default_stream_limit: u32,
+) {
+    let stream_limit = positive_u32_from_value(
+        std::env::var(env.max_concurrent_bidi_streams).ok().as_deref(),
+        default_stream_limit,
+    );
+    let receive_window = quic_varint_env(env.receive_window, QUIC_RECEIVE_WINDOW_DEFAULT);
+    let stream_receive_window =
+        quic_varint_env(env.stream_receive_window, QUIC_STREAM_RECEIVE_WINDOW_DEFAULT);
+    let send_window = positive_u64_env(env.send_window, QUIC_SEND_WINDOW_DEFAULT);
+    transport
+        .max_concurrent_bidi_streams(VarInt::from_u32(stream_limit))
+        .receive_window(receive_window)
+        .stream_receive_window(stream_receive_window)
+        .send_window(send_window);
+}
+
+fn quic_varint_env(name: &str, default: u64) -> VarInt {
+    quic_varint_from_value(std::env::var(name).ok().as_deref(), default)
+}
+
+fn quic_varint_from_value(value: Option<&str>, default: u64) -> VarInt {
+    let value = value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+        .min(VarInt::MAX.into_inner());
+    VarInt::from_u64(value).unwrap_or(VarInt::MAX)
+}
+
+fn positive_u64_env(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 fn positive_u32_from_value(value: Option<&str>, default: u32) -> u32 {
@@ -353,7 +421,11 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TransportErro
 
 #[cfg(test)]
 mod tests {
-    use super::{GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT, positive_u32_from_value};
+    use super::{
+        GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT, QUIC_RECEIVE_WINDOW_DEFAULT,
+        QUIC_SEND_WINDOW_DEFAULT, QUIC_STREAM_RECEIVE_WINDOW_DEFAULT, positive_u32_from_value,
+        quic_varint_from_value,
+    };
 
     #[test]
     fn gateway_quic_stream_limit_parse_positive_env_value() {
@@ -363,6 +435,25 @@ mod tests {
         assert_eq!(
             positive_u32_from_value(None, GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT),
             4096
+        );
+    }
+
+    #[test]
+    fn quic_flow_control_window_defaults_are_high_bandwidth_safe() {
+        assert_eq!(QUIC_RECEIVE_WINDOW_DEFAULT, 256 * 1024 * 1024);
+        assert_eq!(QUIC_SEND_WINDOW_DEFAULT, 256 * 1024 * 1024);
+        assert_eq!(QUIC_STREAM_RECEIVE_WINDOW_DEFAULT, 4 * 1024 * 1024);
+        assert_eq!(
+            quic_varint_from_value(None, QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            quic_varint_from_value(Some("0"), QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            quic_varint_from_value(Some("8388608"), QUIC_RECEIVE_WINDOW_DEFAULT).into_inner(),
+            8 * 1024 * 1024
         );
     }
 }
