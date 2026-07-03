@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
@@ -8,6 +9,7 @@ use std::thread;
 use crate::handlers::handle_itest_request;
 use crate::handlers::handle_mesh_quic_request_value;
 use crate::handlers::handle_mesh_request;
+use socket2::{Domain, Protocol, Socket, Type};
 #[cfg(feature = "itest-http")]
 use std::net::{TcpListener, TcpStream};
 #[cfg(feature = "itest-http")]
@@ -15,6 +17,7 @@ use std::sync::Mutex;
 
 const ROUTER_ASYNC_INGRESS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS";
 const ROUTER_ASYNC_LISTEN_ADDR_ENV: &str = "RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR";
+const ROUTER_ASYNC_INGRESS_SOCKETS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS_SOCKETS";
 const ROUTER_ASYNC_WORKER_THREADS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_WORKER_THREADS";
 
 #[cfg(feature = "itest-http")]
@@ -156,6 +159,51 @@ fn run_router_async_mesh_quic_listener(
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        let socket_count = router_async_ingress_socket_count();
+        let servers = bind_router_async_mesh_quic_servers(listen_addr, tls, socket_count)?;
+        tracing::info!(
+            listen_addr,
+            worker_threads,
+            socket_count,
+            "router async QUIC ingress listening"
+        );
+        for (endpoint_index, server) in servers.into_iter().enumerate() {
+            let endpoint_router = Arc::clone(&router);
+            tokio::spawn(async move {
+                router_async_mesh_quic_accept_loop(endpoint_index, server, endpoint_router).await;
+            });
+        }
+        std::future::pending::<()>().await;
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn router_async_worker_threads() -> usize {
+    positive_usize_from_value(
+        std::env::var(ROUTER_ASYNC_WORKER_THREADS_ENV).ok().as_deref(),
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+    )
+}
+
+fn router_async_ingress_socket_count() -> usize {
+    positive_usize_from_value(std::env::var(ROUTER_ASYNC_INGRESS_SOCKETS_ENV).ok().as_deref(), 1)
+}
+
+fn positive_usize_from_value(value: Option<&str>, default: usize) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+        .max(1)
+}
+
+fn bind_router_async_mesh_quic_servers(
+    listen_addr: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    socket_count: usize,
+) -> anyhow::Result<Vec<ramflux_transport::MeshQuicServer>> {
+    if socket_count <= 1 {
         let root_pems_provider = Arc::new(|| Ok(Vec::new()));
         let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
             listen_addr,
@@ -163,40 +211,86 @@ fn run_router_async_mesh_quic_listener(
             root_pems_provider,
         )?;
         let local_addr = server.local_addr()?;
-        tracing::info!(
-            addr = %local_addr,
-            worker_threads,
-            "router async QUIC ingress listening"
+        tracing::info!(addr = %local_addr, "router async QUIC endpoint bound");
+        return Ok(vec![server]);
+    }
+
+    let addr = listen_addr.parse::<SocketAddr>()?;
+    if addr.port() == 0 {
+        anyhow::bail!(
+            "{ROUTER_ASYNC_INGRESS_SOCKETS_ENV}={socket_count} requires a fixed UDP port"
         );
-        loop {
-            let connection = match server.accept_connection().await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::warn!(%error, "router async QUIC connection rejected");
-                    continue;
-                }
-            };
-            let connection_router = Arc::clone(&router);
-            tokio::spawn(async move {
-                if let Err(error) =
-                    router_async_mesh_quic_connection_loop(connection, connection_router).await
-                {
-                    tracing::debug!(%error, "router async QUIC connection ended");
-                }
-            });
-        }
-    })
+    }
+
+    let mut servers = Vec::with_capacity(socket_count);
+    for endpoint_index in 0..socket_count {
+        let socket = bind_router_async_reuse_port_socket(addr)?;
+        let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+        let server =
+            ramflux_transport::MeshQuicServer::bind_with_udp_socket_and_pem_roots_provider(
+                socket,
+                tls,
+                root_pems_provider,
+            )?;
+        let local_addr = server.local_addr()?;
+        tracing::info!(
+            endpoint_index,
+            addr = %local_addr,
+            "router async QUIC SO_REUSEPORT endpoint bound"
+        );
+        servers.push(server);
+    }
+    Ok(servers)
 }
 
-fn router_async_worker_threads() -> usize {
-    std::env::var(ROUTER_ASYNC_WORKER_THREADS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-        })
-        .max(1)
+fn bind_router_async_reuse_port_socket(addr: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
+    let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    set_router_async_reuse_port(&socket)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
+#[cfg(not(any(
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "cygwin",
+    target_os = "wasi"
+)))]
+fn set_router_async_reuse_port(socket: &Socket) -> anyhow::Result<()> {
+    socket.set_reuse_port(true)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin", target_os = "wasi"))]
+fn set_router_async_reuse_port(_socket: &Socket) -> anyhow::Result<()> {
+    anyhow::bail!("SO_REUSEPORT is unavailable on this target")
+}
+
+async fn router_async_mesh_quic_accept_loop(
+    endpoint_index: usize,
+    server: ramflux_transport::MeshQuicServer,
+    router: Arc<crate::router_runtime::RouterHandle>,
+) {
+    loop {
+        let connection = match server.accept_connection().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(endpoint_index, %error, "router async QUIC connection rejected");
+                continue;
+            }
+        };
+        let connection_router = Arc::clone(&router);
+        tokio::spawn(async move {
+            if let Err(error) =
+                router_async_mesh_quic_connection_loop(connection, connection_router).await
+            {
+                tracing::debug!(endpoint_index, %error, "router async QUIC connection ended");
+            }
+        });
+    }
 }
 
 async fn router_async_mesh_quic_connection_loop(
@@ -306,5 +400,24 @@ pub(crate) fn mesh_tls_config(
         ca_cert: config.mesh.ca_cert.clone().into(),
         service_cert: config.mesh.service_cert.clone().into(),
         service_key: config.mesh.service_key.clone().into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::positive_usize_from_value;
+
+    #[test]
+    fn positive_usize_from_value_rejects_empty_zero_and_invalid() {
+        assert_eq!(positive_usize_from_value(None, 7), 7);
+        assert_eq!(positive_usize_from_value(Some(""), 7), 7);
+        assert_eq!(positive_usize_from_value(Some("0"), 7), 7);
+        assert_eq!(positive_usize_from_value(Some("not-a-number"), 7), 7);
+    }
+
+    #[test]
+    fn positive_usize_from_value_accepts_trimmed_positive_values() {
+        assert_eq!(positive_usize_from_value(Some(" 4 "), 1), 4);
+        assert_eq!(positive_usize_from_value(Some("1"), 8), 1);
     }
 }

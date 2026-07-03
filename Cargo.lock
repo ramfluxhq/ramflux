@@ -2496,6 +2496,7 @@ dependencies = [
  "ramflux-protocol",
  "ramflux-transport",
  "serde_json",
+ "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",
