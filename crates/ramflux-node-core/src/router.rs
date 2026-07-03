@@ -7,9 +7,9 @@ use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, DeliveryDecision,
     DeviceAuthKeyResponse, DeviceManifestResponse, DeviceRevokeResponse,
     FriendRequestBudgetRequest, FriendRequestBudgetResponse, HomeNodeMigratedNackDelivery,
-    HomeNodeMigrationRecord, IdentityLifecycleTombstone, IdentityRegisterRequest,
-    IdentityRegistrationResponse, IdentityRegistry, InboxEntry, InboxFetchResponse,
-    ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
+    HomeNodeMigrationRecord, IdentityLifecycleTombstone, IdentityLineageEventRecord,
+    IdentityRegisterRequest, IdentityRegistrationResponse, IdentityRegistry, InboxEntry,
+    InboxFetchResponse, ItestMvp10OwnDeviceFanoutDelivery, ItestMvp10OwnDeviceFanoutRequest,
     ItestMvp10OwnDeviceFanoutResponse, NodeCoreError, NodeReplayGuardState, NodeServiceSigningKey,
     OfflineQueuedDelivery, OnlineDelivery, OpaqueDeviceInbox, PrekeyPublishRequest, PrekeyResponse,
     RegistrationPolicy, RouterSubmitOutcome, SessionDescriptor, SessionRegistry,
@@ -75,6 +75,8 @@ pub(crate) struct RouterControlState {
     pub(crate) mvp1_identities: IdentityRegistry,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
+    pub(crate) identity_lineage_events: BTreeMap<String, Vec<IdentityLineageEventRecord>>,
+    pub(crate) identity_lineage_heads: BTreeMap<String, String>,
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
     pub(crate) node_franking_public_key: Option<String>,
     pub(crate) home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord>,
@@ -87,6 +89,8 @@ pub(crate) struct RouterCoreSnapshot {
     pub(crate) mvp1_identities: IdentityRegistry,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
+    pub(crate) identity_lineage_events: BTreeMap<String, Vec<IdentityLineageEventRecord>>,
+    pub(crate) identity_lineage_heads: BTreeMap<String, String>,
     pub(crate) deactivated_delivery_targets: BTreeSet<String>,
     pub(crate) deleted_delivery_targets: BTreeSet<String>,
     pub(crate) abuse_reports: BTreeMap<String, AbuseReportRecord>,
@@ -114,6 +118,20 @@ impl RouterCore {
     #[must_use]
     pub fn mvp1_identities_snapshot(&self) -> IdentityRegistry {
         lock_unpoisoned(&self.control).mvp1_identities.clone()
+    }
+
+    #[must_use]
+    pub fn identity_lineage_events(&self, principal_id: &str) -> Vec<IdentityLineageEventRecord> {
+        lock_unpoisoned(&self.control)
+            .identity_lineage_events
+            .get(principal_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn identity_lineage_head(&self, principal_id: &str) -> Option<String> {
+        lock_unpoisoned(&self.control).identity_lineage_heads.get(principal_id).cloned()
     }
 
     #[must_use]
@@ -677,6 +695,8 @@ impl RouterCore {
             snapshot.mvp1_identities = control.mvp1_identities.clone();
             snapshot.lifecycle_by_principal = control.lifecycle_by_principal.clone();
             snapshot.lifecycle_tombstones = control.lifecycle_tombstones.clone();
+            snapshot.identity_lineage_events = control.identity_lineage_events.clone();
+            snapshot.identity_lineage_heads = control.identity_lineage_heads.clone();
             snapshot.abuse_reports = control.abuse_reports.clone();
             snapshot.node_franking_public_key.clone_from(&control.node_franking_public_key);
             snapshot.home_node_migrations = control.home_node_migrations.clone();
@@ -709,6 +729,8 @@ impl RouterCore {
                 mvp1_identities: snapshot.mvp1_identities,
                 lifecycle_by_principal: snapshot.lifecycle_by_principal,
                 lifecycle_tombstones: snapshot.lifecycle_tombstones,
+                identity_lineage_events: snapshot.identity_lineage_events,
+                identity_lineage_heads: snapshot.identity_lineage_heads,
                 abuse_reports: snapshot.abuse_reports,
                 node_franking_public_key: snapshot.node_franking_public_key,
                 home_node_migrations: snapshot.home_node_migrations,
@@ -750,6 +772,8 @@ impl RouterCore {
             let mut control = lock_unpoisoned(&self.control);
             control.lifecycle_by_principal.extend(snapshot.lifecycle_by_principal);
             control.lifecycle_tombstones.extend(snapshot.lifecycle_tombstones);
+            control.identity_lineage_events.extend(snapshot.identity_lineage_events);
+            control.identity_lineage_heads.extend(snapshot.identity_lineage_heads);
             control.abuse_reports.extend(snapshot.abuse_reports);
             control.home_node_migrations.extend(snapshot.home_node_migrations);
             if control.node_franking_public_key.is_none() {

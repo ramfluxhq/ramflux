@@ -60,6 +60,17 @@ pub struct AccountLifecycleRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IdentityLineageEventRecord {
+    pub event_id: String,
+    pub event_type: String,
+    pub principal_id: String,
+    pub previous_lineage_head: Option<String>,
+    pub lineage_head: String,
+    pub created_at: u64,
+    pub body: ramflux_protocol::IdentityEventBody,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LifecycleEventRequest {
     pub principal_id: String,
     pub event_id: String,
@@ -82,6 +93,10 @@ pub struct LifecycleResponse {
     pub metadata_present: bool,
     pub deleted_metadata_count: u64,
     pub tombstone: Option<IdentityLifecycleTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage_events: Vec<IdentityLineageEventRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_lineage_head: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -224,6 +239,14 @@ pub fn verify_recovery_quorum_proof(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn recovery_quorum_proof_hash(
+    proof: &ramflux_protocol::RecoveryQuorumProof,
+) -> Result<String, NodeCoreError> {
+    let signed_bytes = ramflux_protocol::signed_bytes(proof)
+        .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+    Ok(ramflux_crypto::blake3_256_base64url("ramflux.recovery_quorum_proof.v1", &signed_bytes))
 }
 
 pub(crate) fn identity_deletion_proof(

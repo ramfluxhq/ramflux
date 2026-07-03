@@ -5,15 +5,17 @@
 
 use crate::{
     AbuseReportRecord, AccountLifecycleRecord, CursorAckState, HomeNodeMigrationRecord,
-    IdentityLifecycleTombstone, IdentityRegistry, InboxEntry, NodeCoreError, NodeReplayGuardState,
-    OpaqueDeviceInbox, ROUTER_ABUSE_REPORT_KEY, ROUTER_ABUSE_REPORT_TABLE,
-    ROUTER_CURSOR_STATE_TABLE, ROUTER_DEACTIVATED_TARGET_TABLE, ROUTER_DEACTIVATED_TARGETS_KEY,
-    ROUTER_DELETED_TARGET_TABLE, ROUTER_DELETED_TARGETS_KEY, ROUTER_HOME_NODE_MIGRATION_KEY,
-    ROUTER_IDENTITY_REGISTRY_KEY, ROUTER_INBOX_ENTRY_TABLE, ROUTER_INBOX_SLICE_KEY,
-    ROUTER_LIFECYCLE_RECORD_TABLE, ROUTER_LIFECYCLE_STATE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_KEY,
-    ROUTER_LIFECYCLE_TOMBSTONE_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE,
-    ROUTER_SESSION_CHECKPOINT_KEY, ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore,
-    SessionDescriptor, SessionRegistry, load_snapshot, now_unix_seconds, save_snapshot,
+    IdentityLifecycleTombstone, IdentityLineageEventRecord, IdentityRegistry, InboxEntry,
+    NodeCoreError, NodeReplayGuardState, OpaqueDeviceInbox, ROUTER_ABUSE_REPORT_KEY,
+    ROUTER_ABUSE_REPORT_TABLE, ROUTER_CURSOR_STATE_TABLE, ROUTER_DEACTIVATED_TARGET_TABLE,
+    ROUTER_DEACTIVATED_TARGETS_KEY, ROUTER_DELETED_TARGET_TABLE, ROUTER_DELETED_TARGETS_KEY,
+    ROUTER_HOME_NODE_MIGRATION_KEY, ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
+    ROUTER_IDENTITY_LINEAGE_HEADS_KEY, ROUTER_IDENTITY_REGISTRY_KEY, ROUTER_INBOX_ENTRY_TABLE,
+    ROUTER_INBOX_SLICE_KEY, ROUTER_LIFECYCLE_RECORD_TABLE, ROUTER_LIFECYCLE_STATE_KEY,
+    ROUTER_LIFECYCLE_TOMBSTONE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_TABLE,
+    ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE, ROUTER_SESSION_CHECKPOINT_KEY,
+    ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore, SessionDescriptor,
+    SessionRegistry, load_snapshot, now_unix_seconds, save_snapshot,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -343,6 +345,18 @@ impl RouterRedbStore {
             ROUTER_SNAPSHOT_TABLE,
             ROUTER_HOME_NODE_MIGRATION_KEY,
             &snapshot.home_node_migrations,
+        )?;
+        save_snapshot(
+            &self.db,
+            ROUTER_SNAPSHOT_TABLE,
+            ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
+            &snapshot.identity_lineage_events,
+        )?;
+        save_snapshot(
+            &self.db,
+            ROUTER_SNAPSHOT_TABLE,
+            ROUTER_IDENTITY_LINEAGE_HEADS_KEY,
+            &snapshot.identity_lineage_heads,
         )?;
         self.replace_per_key_router_tables(&snapshot)?;
         let replay_guard_started = Instant::now();
@@ -755,11 +769,19 @@ impl RouterRedbStore {
         let home_node_migrations: BTreeMap<String, HomeNodeMigrationRecord> =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_HOME_NODE_MIGRATION_KEY)?
                 .unwrap_or_default();
+        let identity_lineage_events: BTreeMap<String, Vec<IdentityLineageEventRecord>> =
+            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_LINEAGE_EVENTS_KEY)?
+                .unwrap_or_default();
+        let identity_lineage_heads: BTreeMap<String, String> =
+            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_LINEAGE_HEADS_KEY)?
+                .unwrap_or_default();
         if registry == SessionRegistry::default()
             && inbox == OpaqueDeviceInbox::default()
             && mvp1_identities == IdentityRegistry::default()
             && lifecycle_by_principal.is_empty()
             && lifecycle_tombstones.is_empty()
+            && identity_lineage_events.is_empty()
+            && identity_lineage_heads.is_empty()
             && deactivated_delivery_targets.is_empty()
             && deleted_delivery_targets.is_empty()
             && abuse_reports.is_empty()
@@ -780,6 +802,8 @@ impl RouterRedbStore {
             replay_guard_state,
             node_franking_public_key: None,
             home_node_migrations,
+            identity_lineage_events,
+            identity_lineage_heads,
         })))
     }
 

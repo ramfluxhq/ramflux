@@ -256,6 +256,85 @@ fn recovery_quorum_rejects_guardian_only_and_active_timelock()
     Ok(())
 }
 
+#[test]
+fn lifecycle_reactivate_appends_ordered_recovery_lineage_events()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let quorum = recovery_quorum_config(&[
+        (ramflux_protocol::RecoveryQuorumMemberKind::RootShare, "root-share", [0x61; 32]),
+        (ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare, "guardian-share", [0x62; 32]),
+    ]);
+    let proof = recovery_proof(
+        &recovery_context(None),
+        &[
+            (ramflux_protocol::RecoveryQuorumMemberKind::RootShare, "root-share", [0x61; 32]),
+            (
+                ramflux_protocol::RecoveryQuorumMemberKind::GuardianShare,
+                "guardian-share",
+                [0x62; 32],
+            ),
+        ],
+    )?;
+    let mut request = lifecycle_request(
+        "principal_recovery",
+        "evt_recovery_reactivate_ordered",
+        "identity.reactivated",
+        1,
+        1_760_000_000,
+        None,
+    );
+    request.actor_device_id = "recovered_device".to_owned();
+    request.reason_code = "evt_previous_deactivation".to_owned();
+    request.recovery_quorum = Some(quorum.clone());
+    request.recovery_quorum_proof = Some(proof.clone());
+
+    let response = router.mvp7_apply_lifecycle_event(&request)?;
+    let event_types =
+        response.lineage_events.iter().map(|event| event.event_type.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        event_types,
+        vec![
+            "recovery.initiated",
+            "recovery.finalized",
+            "identity.recovery_authorized",
+            "identity.reactivated",
+        ]
+    );
+    assert_eq!(
+        response.lineage_events[0].previous_lineage_head.as_deref(),
+        Some("lineage_head_test")
+    );
+    for window in response.lineage_events.windows(2) {
+        assert_eq!(
+            window[1].previous_lineage_head.as_deref(),
+            Some(window[0].lineage_head.as_str())
+        );
+    }
+    let final_head =
+        response.recovery_lineage_head.as_deref().ok_or("missing recovery lineage head")?;
+    assert_ne!(final_head, "lineage_head_test");
+    assert_eq!(router.identity_lineage_head("principal_recovery").as_deref(), Some(final_head));
+    assert_eq!(router.identity_lineage_events("principal_recovery"), response.lineage_events);
+    assert!(matches!(
+        &response.lineage_events[2].body,
+        ramflux_protocol::IdentityEventBody::RecoveryAuthorized { recovery_quorum_proof, .. }
+            if recovery_quorum_proof == &proof
+    ));
+
+    let rejected_router = RouterCore::new();
+    let mut forged_proof = proof;
+    forged_proof.approvals[0].signature = "forged".to_owned();
+    let mut forged_request = request;
+    forged_request.recovery_quorum = Some(quorum);
+    forged_request.recovery_quorum_proof = Some(forged_proof);
+    assert!(matches!(
+        rejected_router.mvp7_apply_lifecycle_event(&forged_request),
+        Err(NodeCoreError::Unauthorized(_))
+    ));
+    assert!(rejected_router.identity_lineage_events("principal_recovery").is_empty());
+    Ok(())
+}
+
 fn recovery_quorum_config(
     members: &[(ramflux_protocol::RecoveryQuorumMemberKind, &str, [u8; 32])],
 ) -> ramflux_protocol::RecoveryQuorumConfigured {
