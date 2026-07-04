@@ -356,7 +356,7 @@ where
     Ok(serde_json::from_slice(&body)?)
 }
 
-async fn write_quic_raw_frame(
+pub(crate) async fn write_quic_raw_frame(
     send: &mut quinn::SendStream,
     frame: &[u8],
 ) -> Result<(), TransportError> {
@@ -369,7 +369,9 @@ async fn write_quic_raw_frame(
     Ok(())
 }
 
-async fn read_quic_raw_frame(recv: &mut quinn::RecvStream) -> Result<Vec<u8>, TransportError> {
+pub(crate) async fn read_quic_raw_frame(
+    recv: &mut quinn::RecvStream,
+) -> Result<Vec<u8>, TransportError> {
     tracing::trace!("quinn QUIC reading JSON frame length");
     let mut len_bytes = [0_u8; 4];
     recv.read_exact(&mut len_bytes).await.map_err(|error| match error {

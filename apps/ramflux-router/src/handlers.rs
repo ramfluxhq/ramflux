@@ -563,7 +563,7 @@ fn handle_mvp0_envelope(
     router.submit_envelope(envelope, total_started)
 }
 
-async fn handle_mvp0_envelope_async(
+pub(crate) async fn handle_mvp0_envelope_async(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {

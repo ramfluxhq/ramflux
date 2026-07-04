@@ -298,17 +298,18 @@ async fn router_async_mesh_quic_connection_loop(
     router: Arc<crate::router_runtime::RouterHandle>,
 ) -> anyhow::Result<()> {
     loop {
-        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
-            &connection,
-        )
-        .await
-        {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::debug!(%error, "router async QUIC stream loop ended");
-                return Ok(());
-            }
-        };
+        let accepted =
+            match ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(
+                &connection,
+            )
+            .await
+            {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::debug!(%error, "router async QUIC stream loop ended");
+                    return Ok(());
+                }
+            };
         let request_router = Arc::clone(&router);
         tokio::spawn(async move {
             if let Err(error) =
@@ -321,20 +322,53 @@ async fn router_async_mesh_quic_connection_loop(
 }
 
 async fn handle_router_async_mesh_quic_request(
-    accepted: ramflux_transport::MeshQuicAcceptedRequest,
+    accepted: ramflux_transport::MeshQuicAcceptedWireRequest,
     router: Arc<crate::router_runtime::RouterHandle>,
 ) -> anyhow::Result<()> {
-    match handle_mesh_quic_request_value(&accepted.request, &router, "ramflux-gateway").await {
-        Ok(response) if (200..300).contains(&response.status) => {
-            accepted.write_json_response(response.status, &response.body).await?;
+    match accepted {
+        ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) => {
+            match handle_mesh_quic_request_value(&accepted.request, &router, "ramflux-gateway")
+                .await
+            {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    accepted.write_json_response(response.status, &response.body).await?;
+                }
+                Ok(response) => {
+                    accepted
+                        .write_text_response(response.status, &response.body.to_string())
+                        .await?;
+                }
+                Err(error) => {
+                    accepted.write_text_response(500, &error.to_string()).await?;
+                }
+            }
         }
-        Ok(response) => {
-            accepted.write_text_response(response.status, &response.body.to_string()).await?;
-        }
-        Err(error) => {
-            accepted.write_text_response(500, &error.to_string()).await?;
+        ramflux_transport::MeshQuicAcceptedWireRequest::Postcard(accepted) => {
+            let response = handle_router_postcard_mesh_quic_request(accepted, &router).await;
+            if let Err(error) = response {
+                tracing::warn!(%error, "router async postcard request failed");
+            }
         }
     }
+    Ok(())
+}
+
+async fn handle_router_postcard_mesh_quic_request(
+    accepted: ramflux_transport::MeshQuicPostcardAcceptedRequest,
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<()> {
+    if (accepted.method.as_str(), accepted.path.as_str()) == ("POST", "/mvp0/envelope") {
+        match crate::handlers::handle_mvp0_envelope_async(&accepted.body, router).await {
+            Ok(response) => {
+                accepted.write_postcard_response(200, &response).await?;
+            }
+            Err(error) => {
+                accepted.write_text_response(500, &error.to_string()).await?;
+            }
+        }
+        return Ok(());
+    }
+    accepted.write_text_response(404, "not found").await?;
     Ok(())
 }
 

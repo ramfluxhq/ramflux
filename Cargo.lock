@@ -2578,6 +2578,7 @@ dependencies = [
  "compio-tls",
  "h2",
  "http",
+ "postcard",
  "quinn",
  "ramflux-core",
  "ramflux-protocol",
