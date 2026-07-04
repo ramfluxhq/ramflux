@@ -280,21 +280,131 @@ struct RouterSubmitBridge {
     tokio: tokio::runtime::Handle,
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+struct BridgeReplyState<T> {
+    result: std::sync::Mutex<Option<anyhow::Result<T>>>,
+    waker: std::sync::Mutex<Option<std::task::Waker>>,
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+struct BridgeReplySender<T> {
+    state: Option<Arc<BridgeReplyState<T>>>,
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+struct BridgeReply<T> {
+    state: Arc<BridgeReplyState<T>>,
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+fn bridge_reply_channel<T>() -> (BridgeReplySender<T>, BridgeReply<T>) {
+    let state = Arc::new(BridgeReplyState {
+        result: std::sync::Mutex::new(None),
+        waker: std::sync::Mutex::new(None),
+    });
+    (BridgeReplySender { state: Some(Arc::clone(&state)) }, BridgeReply { state })
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+impl<T> BridgeReplySender<T> {
+    fn send(mut self, result: anyhow::Result<T>) {
+        if let Some(state) = self.state.take() {
+            complete_bridge_reply(&state, result);
+        }
+    }
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+impl<T> Drop for BridgeReplySender<T> {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            complete_bridge_reply(
+                &state,
+                Err(anyhow::anyhow!("router submit bridge sender dropped before response")),
+            );
+        }
+    }
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+fn complete_bridge_reply<T>(state: &Arc<BridgeReplyState<T>>, result: anyhow::Result<T>) {
+    let Ok(mut result_guard) = state.result.lock() else {
+        return;
+    };
+    if result_guard.is_some() {
+        return;
+    }
+    *result_guard = Some(result);
+    drop(result_guard);
+
+    let Ok(mut waker_guard) = state.waker.lock() else {
+        return;
+    };
+    if let Some(waker) = waker_guard.take() {
+        waker.wake();
+    }
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
+impl<T> std::future::Future for BridgeReply<T> {
+    type Output = anyhow::Result<T>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match self.state.result.lock() {
+            Ok(mut result_guard) => {
+                if let Some(result) = result_guard.take() {
+                    return std::task::Poll::Ready(result);
+                }
+            }
+            Err(_) => {
+                return std::task::Poll::Ready(Err(anyhow::anyhow!(
+                    "router submit bridge result lock poisoned"
+                )));
+            }
+        }
+
+        match self.state.waker.lock() {
+            Ok(mut waker_guard) => {
+                *waker_guard = Some(context.waker().clone());
+            }
+            Err(_) => {
+                return std::task::Poll::Ready(Err(anyhow::anyhow!(
+                    "router submit bridge waker lock poisoned"
+                )));
+            }
+        }
+
+        match self.state.result.lock() {
+            Ok(mut result_guard) => {
+                if let Some(result) = result_guard.take() {
+                    std::task::Poll::Ready(result)
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+            Err(_) => std::task::Poll::Ready(Err(anyhow::anyhow!(
+                "router submit bridge result lock poisoned"
+            ))),
+        }
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 impl RouterSubmitBridge {
     async fn handle_json_request(
         &self,
         request: ramflux_transport::GatewayQuicRequest,
     ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
-        let (sender, receiver) = tokio::sync::oneshot::channel::<
-            anyhow::Result<ramflux_transport::GatewayQuicResponse>,
-        >();
+        let (sender, receiver) = bridge_reply_channel::<ramflux_transport::GatewayQuicResponse>();
         let router = Arc::clone(&self.router);
         self.tokio.spawn(async move {
             let result = handle_mesh_quic_request_value(&request, &router, "ramflux-gateway").await;
-            let _sent = sender.send(result);
+            sender.send(result);
         });
-        receiver.await?
+        receiver.await
     }
 
     async fn submit_raw_envelope(
@@ -302,9 +412,8 @@ impl RouterSubmitBridge {
         body: Vec<u8>,
         total_started: std::time::Instant,
     ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-        let (sender, receiver) = tokio::sync::oneshot::channel::<
-            anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse>,
-        >();
+        let (sender, receiver) =
+            bridge_reply_channel::<ramflux_node_core::EnvelopeSubmitResponse>();
         let router = Arc::clone(&self.router);
         self.tokio.spawn(async move {
             let result = async move {
@@ -312,9 +421,9 @@ impl RouterSubmitBridge {
                 router.submit_envelope_async(envelope, total_started).await
             }
             .await;
-            let _sent = sender.send(result);
+            sender.send(result);
         });
-        receiver.await?
+        receiver.await
     }
 }
 
@@ -652,7 +761,7 @@ pub(crate) fn mesh_tls_config(
 
 #[cfg(test)]
 mod tests {
-    use super::positive_usize_from_value;
+    use super::{bridge_reply_channel, positive_usize_from_value};
 
     #[test]
     fn positive_usize_from_value_rejects_empty_zero_and_invalid() {
@@ -666,5 +775,28 @@ mod tests {
     fn positive_usize_from_value_accepts_trimmed_positive_values() {
         assert_eq!(positive_usize_from_value(Some(" 4 "), 1), 4);
         assert_eq!(positive_usize_from_value(Some("1"), 8), 1);
+    }
+
+    #[test]
+    fn bridge_reply_channel_wakes_cross_thread_waiter() -> anyhow::Result<()> {
+        let (sender, receiver) = bridge_reply_channel::<usize>();
+        let sender_thread = std::thread::spawn(move || {
+            sender.send(Ok(7));
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let value = runtime.block_on(receiver)?;
+        sender_thread.join().map_err(|_| anyhow::anyhow!("bridge sender thread panicked"))?;
+        assert_eq!(value, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn bridge_reply_channel_reports_dropped_sender() -> anyhow::Result<()> {
+        let (sender, receiver) = bridge_reply_channel::<usize>();
+        drop(sender);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let result = runtime.block_on(receiver);
+        assert!(result.is_err());
+        Ok(())
     }
 }
