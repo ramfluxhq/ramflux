@@ -83,7 +83,11 @@ services:
     ports:
       - "${RAMFLUX_ITEST_ROUTER_HTTP_PORT:-18080}:18080"
       - "${RAMFLUX_ITEST_ROUTER_MESH_PORT:-17443}:7443"
-      - "${RAMFLUX_ITEST_ROUTER_ASYNC_QUIC_PORT:-17444}:17444/udp"
+      # NOTE: the async QUIC ingress (17444) is reached container-to-container over
+      # the compose network (gateway -> ramflux-router:17444); it deliberately has
+      # NO host port mapping. A fixed host mapping collided on the host in two-node
+      # tests (node-a and node-b both binding host 17444), starving node-b and
+      # hanging federation/discovery/friend tests.
     networks:
       default: {}
     healthcheck:
