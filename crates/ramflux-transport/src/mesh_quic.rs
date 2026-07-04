@@ -141,6 +141,24 @@ struct MeshQuicCachedConnection {
     connection: quinn::Connection,
 }
 
+struct MeshQuicSelectedConnection {
+    cached: Arc<MeshQuicCachedConnection>,
+}
+
+impl MeshQuicSelectedConnection {
+    fn connection(&self) -> &quinn::Connection {
+        &self.cached.connection
+    }
+
+    fn remote_address(&self) -> SocketAddr {
+        self.cached.connection.remote_address()
+    }
+
+    fn stable_id(&self) -> usize {
+        self.cached.connection.stable_id()
+    }
+}
+
 #[derive(Default)]
 struct MeshQuicPoolRegistry {
     pools: ArcSwap<HashMap<MeshQuicPoolKey, Arc<MeshQuicConnectionPool>>>,
@@ -176,7 +194,7 @@ struct MeshQuicConnectionPool {
 }
 
 impl MeshQuicConnectionPool {
-    fn select_connection(&self) -> Option<quinn::Connection> {
+    fn select_connection(&self) -> Option<MeshQuicSelectedConnection> {
         let connections = self.connections.load();
         if connections.is_empty() {
             return None;
@@ -186,7 +204,7 @@ impl MeshQuicConnectionPool {
             let index = start.wrapping_add(offset) % connections.len();
             let cached = &connections[index];
             if cached.connection.close_reason().is_none() {
-                return Some(cached.connection.clone());
+                return Some(MeshQuicSelectedConnection { cached: Arc::clone(cached) });
             }
         }
         None
@@ -224,23 +242,33 @@ impl MeshQuicConnectionPool {
         &self,
         cached: MeshQuicCachedConnection,
         pool_size: usize,
-    ) -> quinn::Connection {
-        let connection = cached.connection.clone();
+    ) -> MeshQuicSelectedConnection {
+        let cached = Arc::new(cached);
         let _guard = self.write_lock.lock().await;
         let mut next = self.live_connections_snapshot();
         if next.len() < pool_size.max(1) {
-            next.push(Arc::new(cached));
+            next.push(Arc::clone(&cached));
             self.connections.store(Arc::new(next));
         } else {
             self.connections.store(Arc::new(next));
         }
         self.notify.notify_waiters();
-        connection
+        MeshQuicSelectedConnection { cached }
     }
 
-    async fn clear(&self) {
+    async fn remove_connection(&self, target: &MeshQuicSelectedConnection) {
         let _guard = self.write_lock.lock().await;
-        self.connections.store(Arc::new(Vec::new()));
+        let snapshot = self.connections.load();
+        let next: Vec<_> = snapshot
+            .iter()
+            .filter(|cached| {
+                !Arc::ptr_eq(cached, &target.cached) && cached.connection.close_reason().is_none()
+            })
+            .cloned()
+            .collect();
+        if next.len() != snapshot.len() {
+            self.connections.store(Arc::new(next));
+        }
         self.notify.notify_waiters();
     }
 
@@ -784,7 +812,13 @@ async fn mesh_quic_cached_request(
     } else {
         MESH_QUIC_REQUEST_TIMEOUT
     };
-    match timed_mesh_quic_request_on_connection(&connection, &job.request, request_timeout).await {
+    match timed_mesh_quic_request_on_connection(
+        connection.connection(),
+        &job.request,
+        request_timeout,
+    )
+    .await
+    {
         Ok(response) => Ok(response),
         Err(error) if reused_cached_connection => {
             record_mesh_client_cached_request_failure();
@@ -792,14 +826,15 @@ async fn mesh_quic_cached_request(
             tracing::warn!(
                 %error,
                 peer_addr = %connection.remote_address(),
+                connection_id = connection.stable_id(),
                 retry_peer_addr = %peer_addr,
                 "mesh QUIC cached request failed; dropping cached connection and retrying once"
             );
-            pool.clear().await;
-            let (connection, _reused_retry_connection) =
+            pool.remove_connection(&connection).await;
+            let (retry_connection, _reused_retry_connection) =
                 mesh_quic_acquire_connection(&pool, peer_addr, &job, pool_size).await?;
             match timed_mesh_quic_request_on_connection(
-                &connection,
+                retry_connection.connection(),
                 &job.request,
                 MESH_QUIC_REQUEST_TIMEOUT,
             )
@@ -813,10 +848,11 @@ async fn mesh_quic_cached_request(
                     record_mesh_client_retry_failure();
                     tracing::warn!(
                         %retry_error,
-                        peer_addr = %connection.remote_address(),
+                        peer_addr = %retry_connection.remote_address(),
+                        connection_id = retry_connection.stable_id(),
                         "mesh QUIC request failed after reconnect; dropping cached connection"
                     );
-                    pool.clear().await;
+                    pool.remove_connection(&retry_connection).await;
                     Err(retry_error)
                 }
             }
@@ -825,9 +861,10 @@ async fn mesh_quic_cached_request(
             tracing::warn!(
                 %error,
                 peer_addr = %connection.remote_address(),
+                connection_id = connection.stable_id(),
                 "mesh QUIC request failed on fresh connection; dropping cached connection"
             );
-            pool.clear().await;
+            pool.remove_connection(&connection).await;
             Err(error)
         }
     }
@@ -838,7 +875,7 @@ async fn mesh_quic_acquire_connection(
     peer_addr: SocketAddr,
     job: &MeshQuicClientRequestJob,
     pool_size: usize,
-) -> Result<(quinn::Connection, bool), TransportError> {
+) -> Result<(MeshQuicSelectedConnection, bool), TransportError> {
     loop {
         // Register this waiter with the Notify BEFORE checking pool state. tokio's
         // notify_waiters() only wakes waiters already enqueued; a bare `notified()`
@@ -867,7 +904,7 @@ async fn mesh_quic_connect_and_insert(
     peer_addr: SocketAddr,
     job: &MeshQuicClientRequestJob,
     pool_size: usize,
-) -> Result<quinn::Connection, TransportError> {
+) -> Result<MeshQuicSelectedConnection, TransportError> {
     let connect_result =
         mesh_quic_connect(peer_addr, &job.tls, &job.server_name, &job.peer_ca_pems).await;
     pool.finish_connect_reservation();
