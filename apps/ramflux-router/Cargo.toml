@@ -11,7 +11,11 @@ commercial-license = true
 
 [features]
 default = []
+compio-mesh = ["dep:compio", "ramflux-transport/compio-mesh"]
 itest-http = ["ramflux-node-core/itest-http"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+compio = { version = "=0.19.1", optional = true }
 
 [dependencies]
 anyhow = { workspace = true }

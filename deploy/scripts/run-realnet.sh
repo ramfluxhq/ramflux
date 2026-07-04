@@ -82,7 +82,13 @@ if [ "${RAMFLUX_GATEWAY_COMPIO:-0}" = "1" ]; then
 else
   DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-gateway"
 fi
-DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-router"
+if [ "${RAMFLUX_ROUTER_COMPIO:-0}" = "1" ]; then
+  printf '>> host pre-build: compiling ramflux-router with compio-mesh feature\n'
+  ( cd "$WORKSPACE" && cargo $TC build --locked $BUILD_PROFILE_FLAG \
+      --features itest-http,compio-mesh --bin ramflux-router )
+else
+  DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-router"
+fi
 if [ "${RAMFLUX_FEDERATION_COMPIO:-0}" = "1" ]; then
   printf '>> host pre-build: compiling ramflux-federation with compio-mesh feature\n'
   ( cd "$WORKSPACE" && cargo $TC build --locked $BUILD_PROFILE_FLAG \
