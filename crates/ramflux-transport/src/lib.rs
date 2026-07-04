@@ -27,7 +27,8 @@ pub use compio_gateway::{
 };
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 pub use compio_mesh::{
-    CompioMeshQuicAcceptedRequest, CompioMeshQuicConnection, CompioMeshQuicServer,
+    CompioMeshQuicAcceptedRequest, CompioMeshQuicAcceptedWireRequest, CompioMeshQuicConnection,
+    CompioMeshQuicPostcardAcceptedRequest, CompioMeshQuicServer,
     compio_mesh_quic_post_json_with_peer_ca_pems,
 };
 pub use error::TransportError;

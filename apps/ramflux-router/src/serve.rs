@@ -16,6 +16,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
 
 const ROUTER_ASYNC_INGRESS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS";
+const ROUTER_ASYNC_INGRESS_RUNTIME_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME";
 const ROUTER_ASYNC_LISTEN_ADDR_ENV: &str = "RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR";
 const ROUTER_ASYNC_INGRESS_SOCKETS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS_SOCKETS";
 const ROUTER_ASYNC_WORKER_THREADS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_WORKER_THREADS";
@@ -109,7 +110,7 @@ pub(crate) fn serve_router_mesh_mtls(
     if router_async_ingress_enabled()
         && let Some(listen_addr) = router_async_listen_addr(config)
     {
-        spawn_router_async_mesh_quic_thread(listen_addr, mesh_tls_config(config), router)?;
+        spawn_router_async_mesh_quic_listener(listen_addr, mesh_tls_config(config), router)?;
     }
     Ok(())
 }
@@ -132,7 +133,21 @@ fn router_async_listen_addr(config: &ramflux_node_core::NodeServiceConfig) -> Op
         .or_else(|| config.mesh.endpoints.get("router-async-listen").cloned())
 }
 
-fn spawn_router_async_mesh_quic_thread(
+fn spawn_router_async_mesh_quic_listener(
+    listen_addr: String,
+    tls: ramflux_transport::MeshTlsConfig,
+    router: &Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    match std::env::var(ROUTER_ASYNC_INGRESS_RUNTIME_ENV).as_deref() {
+        Ok("compio") => spawn_router_async_compio_mesh_quic_thread(listen_addr, tls, router),
+        Ok("tokio" | "quinn") | Err(_) => {
+            spawn_router_async_tokio_mesh_quic_thread(listen_addr, tls, router)
+        }
+        Ok(other) => anyhow::bail!("unsupported router async ingress runtime {other}"),
+    }
+}
+
+fn spawn_router_async_tokio_mesh_quic_thread(
     listen_addr: String,
     tls: ramflux_transport::MeshTlsConfig,
     router: &Arc<crate::router_runtime::RouterHandle>,
@@ -146,6 +161,36 @@ fn spawn_router_async_mesh_quic_thread(
         },
     )?;
     Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+fn spawn_router_async_compio_mesh_quic_thread(
+    listen_addr: String,
+    tls: ramflux_transport::MeshTlsConfig,
+    router: &Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    let router = Arc::clone(router);
+    thread::Builder::new().name("ramflux-router-async-compio-quic-ingress".to_owned()).spawn(
+        move || {
+            if let Err(error) =
+                run_router_async_compio_mesh_quic_listener(&listen_addr, &tls, router)
+            {
+                tracing::error!(%error, "router async compio QUIC ingress stopped");
+            }
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", feature = "compio-mesh")))]
+fn spawn_router_async_compio_mesh_quic_thread(
+    _listen_addr: String,
+    _tls: ramflux_transport::MeshTlsConfig,
+    _router: &Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "{ROUTER_ASYNC_INGRESS_RUNTIME_ENV}=compio requested but ramflux-router compio-mesh is not compiled"
+    )
 }
 
 fn run_router_async_mesh_quic_listener(
@@ -177,6 +222,100 @@ fn run_router_async_mesh_quic_listener(
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     })
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+fn run_router_async_compio_mesh_quic_listener(
+    listen_addr: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    router: Arc<crate::router_runtime::RouterHandle>,
+) -> anyhow::Result<()> {
+    let submit_worker_threads = router_async_worker_threads();
+    let submit_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(submit_worker_threads)
+        .enable_all()
+        .build()?;
+    let bridge = RouterSubmitBridge { router, tokio: submit_runtime.handle().clone() };
+    let runtime = compio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+        let server = ramflux_transport::CompioMeshQuicServer::bind_with_pem_roots_provider(
+            listen_addr,
+            tls,
+            root_pems_provider,
+        )
+        .await?;
+        let local_addr = server.local_addr()?;
+        tracing::info!(
+            addr = %local_addr,
+            submit_worker_threads,
+            "router async compio QUIC ingress listening"
+        );
+        loop {
+            let connection = match server.accept_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(%error, "router async compio QUIC connection rejected");
+                    continue;
+                }
+            };
+            let connection_bridge = bridge.clone();
+            compio::runtime::spawn(async move {
+                if let Err(error) =
+                    router_async_compio_mesh_quic_connection_loop(connection, connection_bridge)
+                        .await
+                {
+                    tracing::debug!(%error, "router async compio QUIC connection ended");
+                }
+            })
+            .detach();
+        }
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+#[derive(Clone)]
+struct RouterSubmitBridge {
+    router: Arc<crate::router_runtime::RouterHandle>,
+    tokio: tokio::runtime::Handle,
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+impl RouterSubmitBridge {
+    async fn handle_json_request(
+        &self,
+        request: ramflux_transport::GatewayQuicRequest,
+    ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<
+            anyhow::Result<ramflux_transport::GatewayQuicResponse>,
+        >();
+        let router = Arc::clone(&self.router);
+        self.tokio.spawn(async move {
+            let result = handle_mesh_quic_request_value(&request, &router, "ramflux-gateway").await;
+            let _sent = sender.send(result);
+        });
+        receiver.await?
+    }
+
+    async fn submit_raw_envelope(
+        &self,
+        body: Vec<u8>,
+        total_started: std::time::Instant,
+    ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<
+            anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse>,
+        >();
+        let router = Arc::clone(&self.router);
+        self.tokio.spawn(async move {
+            let result = async move {
+                let envelope = serde_json::from_slice::<ramflux_protocol::Envelope>(&body)?;
+                router.submit_envelope_async(envelope, total_started).await
+            }
+            .await;
+            let _sent = sender.send(result);
+        });
+        receiver.await?
+    }
 }
 
 fn router_async_worker_threads() -> usize {
@@ -359,6 +498,80 @@ async fn handle_router_postcard_mesh_quic_request(
 ) -> anyhow::Result<()> {
     if (accepted.method.as_str(), accepted.path.as_str()) == ("POST", "/mvp0/envelope") {
         match crate::handlers::handle_mvp0_envelope_async(&accepted.body, router).await {
+            Ok(response) => {
+                accepted.write_postcard_response(200, &response).await?;
+            }
+            Err(error) => {
+                accepted.write_text_response(500, &error.to_string()).await?;
+            }
+        }
+        return Ok(());
+    }
+    accepted.write_text_response(404, "not found").await?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+async fn router_async_compio_mesh_quic_connection_loop(
+    connection: ramflux_transport::CompioMeshQuicConnection,
+    bridge: RouterSubmitBridge,
+) -> anyhow::Result<()> {
+    loop {
+        let accepted = match ramflux_transport::CompioMeshQuicServer::accept_json_or_postcard_request_on_connection(&connection).await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::debug!(%error, "router async compio QUIC stream loop ended");
+                return Ok(());
+            }
+        };
+        let request_bridge = bridge.clone();
+        compio::runtime::spawn(async move {
+            if let Err(error) =
+                handle_router_async_compio_mesh_quic_request(accepted, request_bridge).await
+            {
+                tracing::warn!(%error, "router async compio QUIC request failed");
+            }
+        })
+        .detach();
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+async fn handle_router_async_compio_mesh_quic_request(
+    accepted: ramflux_transport::CompioMeshQuicAcceptedWireRequest,
+    bridge: RouterSubmitBridge,
+) -> anyhow::Result<()> {
+    match accepted {
+        ramflux_transport::CompioMeshQuicAcceptedWireRequest::Json(accepted) => {
+            match bridge.handle_json_request(accepted.request).await {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    accepted.write_json_response(response.status, &response.body).await?;
+                }
+                Ok(response) => {
+                    accepted
+                        .write_text_response(response.status, &response.body.to_string())
+                        .await?;
+                }
+                Err(error) => {
+                    accepted.write_text_response(500, &error.to_string()).await?;
+                }
+            }
+        }
+        ramflux_transport::CompioMeshQuicAcceptedWireRequest::Postcard(accepted) => {
+            handle_router_compio_postcard_mesh_quic_request(accepted, &bridge).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+async fn handle_router_compio_postcard_mesh_quic_request(
+    mut accepted: ramflux_transport::CompioMeshQuicPostcardAcceptedRequest,
+    bridge: &RouterSubmitBridge,
+) -> anyhow::Result<()> {
+    if (accepted.method.as_str(), accepted.path.as_str()) == ("POST", "/mvp0/envelope") {
+        let body = std::mem::take(&mut accepted.body);
+        match bridge.submit_raw_envelope(body, std::time::Instant::now()).await {
             Ok(response) => {
                 accepted.write_postcard_response(200, &response).await?;
             }

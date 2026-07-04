@@ -14,6 +14,7 @@ use crate::tls_config::{
 use crate::{GatewayQuicRequest, GatewayQuicResponse, MeshTlsConfig, TransportError};
 
 const COMP_IO_MESH_FRAME_MAX_BYTES: usize = 1024 * 1024;
+const COMP_IO_MESH_POSTCARD_MAGIC: &[u8] = b"ramflux.mesh.postcard.v1\0";
 
 pub struct CompioMeshQuicServer {
     endpoint: compio_quic::Endpoint,
@@ -29,6 +30,33 @@ pub struct CompioMeshQuicAcceptedRequest {
     peer_spiffe_uri: Option<String>,
     send: compio_quic::SendStream,
     recv: compio_quic::RecvStream,
+}
+
+pub struct CompioMeshQuicPostcardAcceptedRequest {
+    pub method: String,
+    pub path: String,
+    pub body: Vec<u8>,
+    peer_spiffe_uri: Option<String>,
+    send: compio_quic::SendStream,
+    recv: compio_quic::RecvStream,
+}
+
+pub enum CompioMeshQuicAcceptedWireRequest {
+    Json(CompioMeshQuicAcceptedRequest),
+    Postcard(CompioMeshQuicPostcardAcceptedRequest),
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct CompioMeshQuicPostcardRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct CompioMeshQuicPostcardResponse {
+    status: u16,
+    body: Vec<u8>,
 }
 
 impl CompioMeshQuicServer {
@@ -103,6 +131,50 @@ impl CompioMeshQuicServer {
             recv,
         })
     }
+
+    /// # Errors
+    /// Returns an error when stream accept or request decoding fails.
+    pub async fn accept_json_or_postcard_request_on_connection(
+        connection: &CompioMeshQuicConnection,
+    ) -> Result<CompioMeshQuicAcceptedWireRequest, TransportError> {
+        let (send, mut recv) = connection
+            .connection
+            .accept_bi()
+            .await
+            .map_err(|error| TransportError::Quic(error.to_string()))?;
+        tracing::trace!("compio mesh accepted bidirectional stream; reading wire request frame");
+        let frame = compio_read_raw_frame(&mut recv).await?;
+        if let Some(body) = frame.strip_prefix(COMP_IO_MESH_POSTCARD_MAGIC) {
+            let request = postcard_from_bytes::<CompioMeshQuicPostcardRequest>(body)?;
+            tracing::trace!(
+                method = %request.method,
+                path = %request.path,
+                "compio mesh postcard request frame decoded"
+            );
+            return Ok(CompioMeshQuicAcceptedWireRequest::Postcard(
+                CompioMeshQuicPostcardAcceptedRequest {
+                    method: request.method,
+                    path: request.path,
+                    body: request.body,
+                    peer_spiffe_uri: connection.peer_spiffe_uri.clone(),
+                    send,
+                    recv,
+                },
+            ));
+        }
+        let request: GatewayQuicRequest = serde_json::from_slice(&frame)?;
+        tracing::trace!(
+            method = %request.method,
+            path = %request.path,
+            "compio mesh JSON request frame decoded"
+        );
+        Ok(CompioMeshQuicAcceptedWireRequest::Json(CompioMeshQuicAcceptedRequest {
+            request,
+            peer_spiffe_uri: connection.peer_spiffe_uri.clone(),
+            send,
+            recv,
+        }))
+    }
 }
 
 impl CompioMeshQuicConnection {
@@ -151,6 +223,45 @@ impl CompioMeshQuicAcceptedRequest {
         response: &T,
     ) -> Result<(), TransportError> {
         compio_write_json_message(&mut self.send, response).await?;
+        compio_finish_send_stream(&mut self.send)?;
+        compio_drain_recv_to_fin(&mut self.recv).await
+    }
+}
+
+impl CompioMeshQuicPostcardAcceptedRequest {
+    #[must_use]
+    pub fn peer_spiffe_uri(&self) -> Option<&str> {
+        self.peer_spiffe_uri.as_deref()
+    }
+
+    /// # Errors
+    /// Returns an error when response serialization or stream writes fail.
+    pub async fn write_postcard_response<T: Serialize>(
+        mut self,
+        status: u16,
+        value: &T,
+    ) -> Result<(), TransportError> {
+        let body = serde_json::to_vec(value)?;
+        let response = CompioMeshQuicPostcardResponse { status, body };
+        self.write_response_and_drain_request(&response).await
+    }
+
+    /// # Errors
+    /// Returns an error when response serialization or stream writes fail.
+    pub async fn write_text_response(
+        mut self,
+        status: u16,
+        body: &str,
+    ) -> Result<(), TransportError> {
+        let response = CompioMeshQuicPostcardResponse { status, body: body.as_bytes().to_vec() };
+        self.write_response_and_drain_request(&response).await
+    }
+
+    async fn write_response_and_drain_request<T: Serialize>(
+        &mut self,
+        response: &T,
+    ) -> Result<(), TransportError> {
+        compio_write_postcard_message(&mut self.send, response).await?;
         compio_finish_send_stream(&mut self.send)?;
         compio_drain_recv_to_fin(&mut self.recv).await
     }
@@ -238,6 +349,20 @@ async fn compio_write_json_message<T: Serialize>(
     Ok(())
 }
 
+async fn compio_write_postcard_message<T: Serialize>(
+    send: &mut compio_quic::SendStream,
+    value: &T,
+) -> Result<(), TransportError> {
+    let payload = postcard_to_allocvec(value)?;
+    let mut body =
+        Vec::with_capacity(COMP_IO_MESH_POSTCARD_MAGIC.len().saturating_add(payload.len()));
+    body.extend_from_slice(COMP_IO_MESH_POSTCARD_MAGIC);
+    body.extend_from_slice(&payload);
+    compio_write_raw_frame(send, &body).await?;
+    tracing::trace!(len = body.len(), "compio mesh postcard frame written");
+    Ok(())
+}
+
 async fn compio_read_json_frame<T: DeserializeOwned>(
     recv: &mut compio_quic::RecvStream,
 ) -> Result<T, TransportError> {
@@ -252,6 +377,51 @@ async fn compio_read_json_frame<T: DeserializeOwned>(
     let mut body = vec![0_u8; len];
     compio_read_exact(recv, &mut body).await?;
     Ok(serde_json::from_slice(&body)?)
+}
+
+async fn compio_write_raw_frame(
+    send: &mut compio_quic::SendStream,
+    body: &[u8],
+) -> Result<(), TransportError> {
+    let len = u32::try_from(body.len())
+        .map_err(|_error| TransportError::FrameTooLarge { len: body.len() })?;
+    if body.len() > COMP_IO_MESH_FRAME_MAX_BYTES {
+        return Err(TransportError::FrameTooLarge { len: body.len() });
+    }
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(body);
+    let mut chunks = [Bytes::from(frame)];
+    send.write_all_chunks(&mut chunks)
+        .await
+        .map_err(|error| TransportError::Quic(error.to_string()))?;
+    Ok(())
+}
+
+async fn compio_read_raw_frame(
+    recv: &mut compio_quic::RecvStream,
+) -> Result<Vec<u8>, TransportError> {
+    tracing::trace!("compio mesh reading raw frame length");
+    let mut len_bytes = [0_u8; 4];
+    compio_read_exact(recv, &mut len_bytes).await?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    if len > COMP_IO_MESH_FRAME_MAX_BYTES {
+        return Err(TransportError::FrameTooLarge { len });
+    }
+    tracing::trace!(len, "compio mesh reading raw frame body");
+    let mut body = vec![0_u8; len];
+    compio_read_exact(recv, &mut body).await?;
+    Ok(body)
+}
+
+fn postcard_to_allocvec<T: Serialize>(value: &T) -> Result<Vec<u8>, TransportError> {
+    postcard::to_allocvec(value)
+        .map_err(|error| TransportError::Quic(format!("postcard encode failed: {error}")))
+}
+
+fn postcard_from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, TransportError> {
+    postcard::from_bytes(bytes)
+        .map_err(|error| TransportError::Quic(format!("postcard decode failed: {error}")))
 }
 
 async fn compio_read_exact(
