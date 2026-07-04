@@ -34,6 +34,9 @@ use tokio::sync::{Mutex, Notify};
 const MESH_QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MESH_QUIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+// Backstop poll interval for the pool-acquire wait: even if a wakeup is ever missed,
+// re-check pool state at least this often instead of blocking forever.
+const MESH_QUIC_ACQUIRE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MESH_QUIC_CLIENT_POOL_SIZE_ENV: &str = "RAMFLUX_MESH_QUIC_CLIENT_POOL_SIZE";
 const ROUTER_ASYNC_POOL_SIZE_ENV: &str = "RAMFLUX_ROUTER_ASYNC_POOL_SIZE";
 const MESH_QUIC_CLIENT_POOL_SIZE_DEFAULT: usize = 8;
@@ -837,7 +840,14 @@ async fn mesh_quic_acquire_connection(
     pool_size: usize,
 ) -> Result<(quinn::Connection, bool), TransportError> {
     loop {
+        // Register this waiter with the Notify BEFORE checking pool state. tokio's
+        // notify_waiters() only wakes waiters already enqueued; a bare `notified()`
+        // future is not enqueued until first polled. Without `pin!`+`enable()` here,
+        // any notify_waiters() firing between the checks below and the `.await` is
+        // lost, and a waiter can then block forever once the peer goes quiet.
         let notified = pool.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if pool.try_reserve_connect(pool_size) {
             record_mesh_client_pool_miss();
             let connection = mesh_quic_connect_and_insert(pool, peer_addr, job, pool_size).await?;
@@ -847,7 +857,8 @@ async fn mesh_quic_acquire_connection(
             record_mesh_client_pool_hit();
             return Ok((connection, true));
         }
-        notified.await;
+        // Bounded wait: a missed wakeup self-heals on the next poll instead of hanging.
+        let _ = tokio::time::timeout(MESH_QUIC_ACQUIRE_POLL_INTERVAL, notified.as_mut()).await;
     }
 }
 
