@@ -182,7 +182,7 @@ where
     R: serde::de::DeserializeOwned,
 {
     if let Some(async_mesh) = &router.async_mesh {
-        return ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async(
+        return ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
             &async_mesh.endpoint,
             path,
             &async_mesh.tls,
@@ -515,31 +515,59 @@ mod tests {
                     .map_err(|source| source.to_string())?;
                 let connection =
                     server.accept_connection().await.map_err(|source| source.to_string())?;
-                let accepted =
-                    ramflux_transport::MeshQuicServer::accept_request_on_connection(&connection)
-                        .await
-                        .map_err(|source| source.to_string())?;
-                if accepted.request.method != "POST" || accepted.request.path != "/mvp0/envelope" {
-                    return Err(format!(
-                        "unexpected router mesh request {} {}",
-                        accepted.request.method, accepted.request.path
-                    ));
-                }
-                let request: ramflux_protocol::Envelope =
-                    serde_json::from_value(accepted.request.body.clone())
-                        .map_err(|source| source.to_string())?;
-                let response = ramflux_node_core::EnvelopeSubmitResponse {
-                    outcome: "offline_queued".to_owned(),
-                    target_delivery_id: request.target_delivery_id.clone(),
-                    inbox_seq: Some(1),
-                    cursor: None,
-                    nack: None,
-                };
-                request_tx.send(request).map_err(|source| source.to_string())?;
-                accepted
-                    .write_json_response(200, &response)
+                let accepted = ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(&connection)
                     .await
                     .map_err(|source| source.to_string())?;
+                match accepted {
+                    ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) => {
+                        if accepted.request.method != "POST"
+                            || accepted.request.path != "/mvp0/envelope"
+                        {
+                            return Err(format!(
+                                "unexpected router mesh request {} {}",
+                                accepted.request.method, accepted.request.path
+                            ));
+                        }
+                        let request: ramflux_protocol::Envelope =
+                            serde_json::from_value(accepted.request.body.clone())
+                                .map_err(|source| source.to_string())?;
+                        let response = ramflux_node_core::EnvelopeSubmitResponse {
+                            outcome: "offline_queued".to_owned(),
+                            target_delivery_id: request.target_delivery_id.clone(),
+                            inbox_seq: Some(1),
+                            cursor: None,
+                            nack: None,
+                        };
+                        request_tx.send(request).map_err(|source| source.to_string())?;
+                        accepted
+                            .write_json_response(200, &response)
+                            .await
+                            .map_err(|source| source.to_string())?;
+                    }
+                    ramflux_transport::MeshQuicAcceptedWireRequest::Postcard(accepted) => {
+                        if accepted.method != "POST" || accepted.path != "/mvp0/envelope" {
+                            return Err(format!(
+                                "unexpected router mesh request {} {}",
+                                accepted.method, accepted.path
+                            ));
+                        }
+                        let request: ramflux_protocol::Envelope =
+                            serde_json::from_slice(&accepted.body)
+                                .map_err(|source| source.to_string())?;
+                        let response = ramflux_node_core::EnvelopeSubmitResponse {
+                            outcome: "offline_queued".to_owned(),
+                            target_delivery_id: request.target_delivery_id.clone(),
+                            inbox_seq: Some(1),
+                            cursor: None,
+                            nack: None,
+                        };
+                        request_tx.send(request).map_err(|source| source.to_string())?;
+                        accepted
+                            .write_postcard_response(200, &response)
+                            .await
+                            .map_err(|source| source.to_string())?;
+                    }
+                }
                 std::future::pending::<()>().await;
                 Ok(())
             });
