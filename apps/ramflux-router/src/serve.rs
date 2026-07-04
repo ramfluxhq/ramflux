@@ -543,7 +543,7 @@ async fn handle_router_async_compio_mesh_quic_request(
 ) -> anyhow::Result<()> {
     match accepted {
         ramflux_transport::CompioMeshQuicAcceptedWireRequest::Json(accepted) => {
-            match bridge.handle_json_request(accepted.request).await {
+            match bridge.handle_json_request(accepted.request.clone()).await {
                 Ok(response) if (200..300).contains(&response.status) => {
                     accepted.write_json_response(response.status, &response.body).await?;
                 }
