@@ -19,6 +19,7 @@ compio-mesh = [
     "dep:compio",
     "dep:compio-buf",
     "dep:compio-io",
+    "dep:compio-net",
     "dep:compio-quic",
     "dep:compio-tls",
 ]
@@ -27,6 +28,7 @@ compio-mesh = [
 compio = { version = "=0.19.1", optional = true }
 compio-buf = { version = "=0.8.3", optional = true }
 compio-io = { version = "=0.10.1", optional = true }
+compio-net = { version = "=0.12.1", optional = true }
 compio-quic = { version = "=0.8.0", optional = true }
 compio-tls = { version = "=0.10.0", default-features = false, features = ["ring"], optional = true }
 

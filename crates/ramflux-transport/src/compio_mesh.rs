@@ -77,6 +77,24 @@ impl CompioMeshQuicServer {
     }
 
     /// # Errors
+    /// Returns an error when the UDP socket cannot be registered or TLS material cannot be loaded.
+    pub fn bind_with_udp_socket_and_pem_roots_provider(
+        socket: std::net::UdpSocket,
+        tls: &MeshTlsConfig,
+        root_pems_provider: MeshRootPemProvider,
+    ) -> Result<Self, TransportError> {
+        let socket = compio_net::UdpSocket::from_std(socket).map_err(TransportError::Io)?;
+        let endpoint = compio_quic::Endpoint::new(
+            socket,
+            compio_quic::EndpointConfig::default(),
+            Some(compio_mesh_quic_server_config_with_dynamic_pem_roots(tls, root_pems_provider)?),
+            None,
+        )
+        .map_err(TransportError::Io)?;
+        Ok(Self { endpoint })
+    }
+
+    /// # Errors
     /// Returns an error when the local UDP address cannot be read.
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         Ok(self.endpoint.local_addr()?)
