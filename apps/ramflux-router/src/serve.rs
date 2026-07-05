@@ -236,9 +236,85 @@ fn run_router_async_compio_mesh_quic_listener(
         .enable_all()
         .build()?;
     let bridge = RouterSubmitBridge { router, tokio: submit_runtime.handle().clone() };
+    let socket_count = router_async_compio_ingress_socket_count();
+    tracing::info!(
+        listen_addr,
+        submit_worker_threads,
+        socket_count,
+        "router async compio QUIC ingress starting"
+    );
+
+    let mut handles = Vec::with_capacity(socket_count);
+    for endpoint_index in 0..socket_count {
+        let listen_addr = listen_addr.to_owned();
+        let tls = tls.clone();
+        let endpoint_bridge = bridge.clone();
+        let handle = thread::Builder::new()
+            .name(format!("ramflux-router-async-compio-quic-ingress-{endpoint_index}"))
+            .spawn(move || {
+                if let Err(error) = run_router_async_compio_mesh_quic_reactor(
+                    endpoint_index,
+                    &listen_addr,
+                    &tls,
+                    endpoint_bridge,
+                    socket_count,
+                ) {
+                    tracing::error!(
+                        endpoint_index,
+                        %error,
+                        "router async compio QUIC reactor stopped"
+                    );
+                }
+            })?;
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        if let Err(_panic) = handle.join() {
+            tracing::error!("router async compio QUIC reactor thread panicked");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+fn run_router_async_compio_mesh_quic_reactor(
+    endpoint_index: usize,
+    listen_addr: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    bridge: RouterSubmitBridge,
+    socket_count: usize,
+) -> anyhow::Result<()> {
     let runtime = compio::runtime::Runtime::new()?;
     runtime.block_on(async move {
-        let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+        let server = bind_router_async_compio_mesh_quic_server(
+            endpoint_index,
+            listen_addr,
+            tls,
+            socket_count,
+        )
+        .await?;
+        let local_addr = server.local_addr()?;
+        tracing::info!(
+            endpoint_index,
+            addr = %local_addr,
+            "router async compio QUIC reactor listening"
+        );
+        router_async_compio_mesh_quic_accept_loop(endpoint_index, server, bridge).await;
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+async fn bind_router_async_compio_mesh_quic_server(
+    endpoint_index: usize,
+    listen_addr: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    socket_count: usize,
+) -> anyhow::Result<ramflux_transport::CompioMeshQuicServer> {
+    let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+    if socket_count <= 1 {
         let server = ramflux_transport::CompioMeshQuicServer::bind_with_pem_roots_provider(
             listen_addr,
             tls,
@@ -247,30 +323,67 @@ fn run_router_async_compio_mesh_quic_listener(
         .await?;
         let local_addr = server.local_addr()?;
         tracing::info!(
+            endpoint_index,
             addr = %local_addr,
-            submit_worker_threads,
-            "router async compio QUIC ingress listening"
+            "router async compio QUIC endpoint bound"
         );
-        loop {
-            let connection = match server.accept_connection().await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::warn!(%error, "router async compio QUIC connection rejected");
-                    continue;
-                }
-            };
-            let connection_bridge = bridge.clone();
-            compio::runtime::spawn(async move {
-                if let Err(error) =
-                    router_async_compio_mesh_quic_connection_loop(connection, connection_bridge)
-                        .await
-                {
-                    tracing::debug!(%error, "router async compio QUIC connection ended");
-                }
-            })
-            .detach();
-        }
-    })
+        return Ok(server);
+    }
+
+    let addr = listen_addr.parse::<SocketAddr>()?;
+    if addr.port() == 0 {
+        anyhow::bail!(
+            "{ROUTER_ASYNC_INGRESS_SOCKETS_ENV}={socket_count} requires a fixed UDP port"
+        );
+    }
+    let socket = bind_router_async_reuse_port_socket(addr)?;
+    let server =
+        ramflux_transport::CompioMeshQuicServer::bind_with_udp_socket_and_pem_roots_provider(
+            socket,
+            tls,
+            root_pems_provider,
+        )?;
+    let local_addr = server.local_addr()?;
+    tracing::info!(
+        endpoint_index,
+        addr = %local_addr,
+        "router async compio QUIC SO_REUSEPORT endpoint bound"
+    );
+    Ok(server)
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+async fn router_async_compio_mesh_quic_accept_loop(
+    endpoint_index: usize,
+    server: ramflux_transport::CompioMeshQuicServer,
+    bridge: RouterSubmitBridge,
+) {
+    loop {
+        let connection = match server.accept_connection().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(
+                    endpoint_index,
+                    %error,
+                    "router async compio QUIC connection rejected"
+                );
+                continue;
+            }
+        };
+        let connection_bridge = bridge.clone();
+        compio::runtime::spawn(async move {
+            if let Err(error) =
+                router_async_compio_mesh_quic_connection_loop(connection, connection_bridge).await
+            {
+                tracing::debug!(
+                    endpoint_index,
+                    %error,
+                    "router async compio QUIC connection ended"
+                );
+            }
+        })
+        .detach();
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -436,6 +549,14 @@ fn router_async_worker_threads() -> usize {
 
 fn router_async_ingress_socket_count() -> usize {
     positive_usize_from_value(std::env::var(ROUTER_ASYNC_INGRESS_SOCKETS_ENV).ok().as_deref(), 1)
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+fn router_async_compio_ingress_socket_count() -> usize {
+    positive_usize_from_value(
+        std::env::var(ROUTER_ASYNC_INGRESS_SOCKETS_ENV).ok().as_deref(),
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+    )
 }
 
 fn positive_usize_from_value(value: Option<&str>, default: usize) -> usize {

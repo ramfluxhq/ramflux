@@ -2575,6 +2575,7 @@ dependencies = [
  "compio",
  "compio-buf",
  "compio-io",
+ "compio-net",
  "compio-quic",
  "compio-tls",
  "h2",
