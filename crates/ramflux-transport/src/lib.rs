@@ -39,9 +39,10 @@ pub use mesh_http::{
     write_mesh_text_response,
 };
 pub use mesh_quic::{
-    MeshQuicAcceptedRequest, MeshQuicAcceptedWireRequest, MeshQuicConnection,
-    MeshQuicPostcardAcceptedRequest, MeshQuicServer, mesh_quic_post_json_with_peer_ca_pems,
-    mesh_quic_post_json_with_peer_ca_pems_async, mesh_quic_post_postcard_with_peer_ca_pems_async,
+    MeshQuicAcceptedBiStream, MeshQuicAcceptedRequest, MeshQuicAcceptedWireRequest,
+    MeshQuicConnection, MeshQuicPostcardAcceptedRequest, MeshQuicServer,
+    mesh_quic_post_json_with_peer_ca_pems, mesh_quic_post_json_with_peer_ca_pems_async,
+    mesh_quic_post_postcard_with_peer_ca_pems_async,
 };
 pub use mesh_tls::{
     MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, extract_spiffe_uri_from_certificate,
