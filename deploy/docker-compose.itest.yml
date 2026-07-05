@@ -88,6 +88,13 @@ services:
       # NO host port mapping. A fixed host mapping collided on the host in two-node
       # tests (node-a and node-b both binding host 17444), starving node-b and
       # hanging federation/discovery/friend tests.
+    # The optional compio/io_uring async ingress needs the io_uring_setup/enter/
+    # register syscalls, which podman's default seccomp profile returns ENOSYS for
+    # ("Function not implemented"). Relax seccomp for this itest-only router so the
+    # RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME=compio path can start; the default tokio
+    # ingress does not require this.
+    security_opt:
+      - seccomp=unconfined
     networks:
       default: {}
     healthcheck:
