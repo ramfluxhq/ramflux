@@ -20,6 +20,16 @@ static MESH_CLIENT_REQUEST_TIMEOUTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static MESH_CLIENT_EXCHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 static MESH_CLIENT_EXCHANGE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static MESH_CLIENT_EXCHANGE_US_MAX: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_TASK_SCHED_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_TASK_SCHED_US_MAX: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_ACQUIRE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_ACQUIRE_US_MAX: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_OPEN_BI_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_OPEN_BI_US_MAX: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_REQUEST_WRITE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_REQUEST_WRITE_US_MAX: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_RESPONSE_READ_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MESH_CLIENT_RESPONSE_READ_US_MAX: AtomicU64 = AtomicU64::new(0);
 static MESH_CLIENT_RUNTIME_QUEUE_WAIT_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static MESH_CLIENT_RUNTIME_QUEUE_WAIT_US_MAX: AtomicU64 = AtomicU64::new(0);
 static MESH_CLIENT_RUNTIME_JOBS_DEQUEUED_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -52,6 +62,16 @@ pub struct MeshHttpPerfSnapshot {
     pub mesh_client_exchange_count: u64,
     pub mesh_client_exchange_us_total: u64,
     pub mesh_client_exchange_us_max: u64,
+    pub mesh_client_task_sched_us_total: u64,
+    pub mesh_client_task_sched_us_max: u64,
+    pub mesh_client_acquire_us_total: u64,
+    pub mesh_client_acquire_us_max: u64,
+    pub mesh_client_open_bi_us_total: u64,
+    pub mesh_client_open_bi_us_max: u64,
+    pub mesh_client_request_write_us_total: u64,
+    pub mesh_client_request_write_us_max: u64,
+    pub mesh_client_response_read_us_total: u64,
+    pub mesh_client_response_read_us_max: u64,
     pub mesh_client_runtime_queue_wait_us_total: u64,
     pub mesh_client_runtime_queue_wait_us_max: u64,
     pub mesh_client_runtime_jobs_dequeued_total: u64,
@@ -146,6 +166,34 @@ pub(crate) fn record_mesh_client_exchange(duration: Duration) {
     }
 }
 
+pub(crate) fn record_mesh_client_task_sched(duration: Duration) {
+    record_duration(&MESH_CLIENT_TASK_SCHED_US_TOTAL, &MESH_CLIENT_TASK_SCHED_US_MAX, duration);
+}
+
+pub(crate) fn record_mesh_client_acquire(duration: Duration) {
+    record_duration(&MESH_CLIENT_ACQUIRE_US_TOTAL, &MESH_CLIENT_ACQUIRE_US_MAX, duration);
+}
+
+pub(crate) fn record_mesh_client_open_bi(duration: Duration) {
+    record_duration(&MESH_CLIENT_OPEN_BI_US_TOTAL, &MESH_CLIENT_OPEN_BI_US_MAX, duration);
+}
+
+pub(crate) fn record_mesh_client_request_write(duration: Duration) {
+    record_duration(
+        &MESH_CLIENT_REQUEST_WRITE_US_TOTAL,
+        &MESH_CLIENT_REQUEST_WRITE_US_MAX,
+        duration,
+    );
+}
+
+pub(crate) fn record_mesh_client_response_read(duration: Duration) {
+    record_duration(
+        &MESH_CLIENT_RESPONSE_READ_US_TOTAL,
+        &MESH_CLIENT_RESPONSE_READ_US_MAX,
+        duration,
+    );
+}
+
 pub(crate) fn record_mesh_client_runtime_queue_wait(duration: Duration) {
     if mesh_perf_enabled() {
         MESH_CLIENT_RUNTIME_JOBS_DEQUEUED_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -227,6 +275,18 @@ pub fn mesh_perf_snapshot() -> MeshHttpPerfSnapshot {
         mesh_client_exchange_count: MESH_CLIENT_EXCHANGE_COUNT.load(Ordering::Relaxed),
         mesh_client_exchange_us_total: MESH_CLIENT_EXCHANGE_US_TOTAL.load(Ordering::Relaxed),
         mesh_client_exchange_us_max: MESH_CLIENT_EXCHANGE_US_MAX.load(Ordering::Relaxed),
+        mesh_client_task_sched_us_total: MESH_CLIENT_TASK_SCHED_US_TOTAL.load(Ordering::Relaxed),
+        mesh_client_task_sched_us_max: MESH_CLIENT_TASK_SCHED_US_MAX.load(Ordering::Relaxed),
+        mesh_client_acquire_us_total: MESH_CLIENT_ACQUIRE_US_TOTAL.load(Ordering::Relaxed),
+        mesh_client_acquire_us_max: MESH_CLIENT_ACQUIRE_US_MAX.load(Ordering::Relaxed),
+        mesh_client_open_bi_us_total: MESH_CLIENT_OPEN_BI_US_TOTAL.load(Ordering::Relaxed),
+        mesh_client_open_bi_us_max: MESH_CLIENT_OPEN_BI_US_MAX.load(Ordering::Relaxed),
+        mesh_client_request_write_us_total: MESH_CLIENT_REQUEST_WRITE_US_TOTAL
+            .load(Ordering::Relaxed),
+        mesh_client_request_write_us_max: MESH_CLIENT_REQUEST_WRITE_US_MAX.load(Ordering::Relaxed),
+        mesh_client_response_read_us_total: MESH_CLIENT_RESPONSE_READ_US_TOTAL
+            .load(Ordering::Relaxed),
+        mesh_client_response_read_us_max: MESH_CLIENT_RESPONSE_READ_US_MAX.load(Ordering::Relaxed),
         mesh_client_runtime_queue_wait_us_total: MESH_CLIENT_RUNTIME_QUEUE_WAIT_US_TOTAL
             .load(Ordering::Relaxed),
         mesh_client_runtime_queue_wait_us_max: MESH_CLIENT_RUNTIME_QUEUE_WAIT_US_MAX
@@ -270,6 +330,16 @@ pub fn mesh_perf_reset() {
         MESH_CLIENT_EXCHANGE_COUNT.store(0, Ordering::Relaxed);
         MESH_CLIENT_EXCHANGE_US_TOTAL.store(0, Ordering::Relaxed);
         MESH_CLIENT_EXCHANGE_US_MAX.store(0, Ordering::Relaxed);
+        MESH_CLIENT_TASK_SCHED_US_TOTAL.store(0, Ordering::Relaxed);
+        MESH_CLIENT_TASK_SCHED_US_MAX.store(0, Ordering::Relaxed);
+        MESH_CLIENT_ACQUIRE_US_TOTAL.store(0, Ordering::Relaxed);
+        MESH_CLIENT_ACQUIRE_US_MAX.store(0, Ordering::Relaxed);
+        MESH_CLIENT_OPEN_BI_US_TOTAL.store(0, Ordering::Relaxed);
+        MESH_CLIENT_OPEN_BI_US_MAX.store(0, Ordering::Relaxed);
+        MESH_CLIENT_REQUEST_WRITE_US_TOTAL.store(0, Ordering::Relaxed);
+        MESH_CLIENT_REQUEST_WRITE_US_MAX.store(0, Ordering::Relaxed);
+        MESH_CLIENT_RESPONSE_READ_US_TOTAL.store(0, Ordering::Relaxed);
+        MESH_CLIENT_RESPONSE_READ_US_MAX.store(0, Ordering::Relaxed);
         MESH_CLIENT_RUNTIME_QUEUE_WAIT_US_TOTAL.store(0, Ordering::Relaxed);
         MESH_CLIENT_RUNTIME_QUEUE_WAIT_US_MAX.store(0, Ordering::Relaxed);
         MESH_CLIENT_RUNTIME_JOBS_DEQUEUED_TOTAL.store(0, Ordering::Relaxed);

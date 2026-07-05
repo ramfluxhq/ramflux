@@ -11,11 +11,13 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::perf_metrics::{
-    record_mesh_client_cached_request_failure, record_mesh_client_connect,
-    record_mesh_client_exchange, record_mesh_client_pool_hit, record_mesh_client_pool_miss,
-    record_mesh_client_request, record_mesh_client_request_timeout, record_mesh_client_retry,
-    record_mesh_client_retry_failure, record_mesh_client_retry_success,
-    record_mesh_client_runtime_queue_wait, record_mesh_client_tls_handshake,
+    record_mesh_client_acquire, record_mesh_client_cached_request_failure,
+    record_mesh_client_connect, record_mesh_client_exchange, record_mesh_client_open_bi,
+    record_mesh_client_pool_hit, record_mesh_client_pool_miss, record_mesh_client_request,
+    record_mesh_client_request_timeout, record_mesh_client_request_write,
+    record_mesh_client_response_read, record_mesh_client_retry, record_mesh_client_retry_failure,
+    record_mesh_client_retry_success, record_mesh_client_runtime_queue_wait,
+    record_mesh_client_task_sched, record_mesh_client_tls_handshake,
     record_mesh_server_quic_connection_accepted, record_mesh_server_quic_request_read,
     record_mesh_server_quic_response_write, record_mesh_server_quic_stream_accepted,
 };
@@ -806,7 +808,9 @@ fn run_mesh_quic_client_runtime(
     for job in receiver {
         record_mesh_client_runtime_queue_wait(job.request.enqueued_at.elapsed());
         let pools = Arc::clone(&pools);
+        let sched_started = std::time::Instant::now();
         handle.spawn(async move {
+            record_mesh_client_task_sched(sched_started.elapsed());
             let MeshQuicClientJob { request, response: response_sender } = job;
             let response = mesh_quic_cached_request(pools, request, pool_size).await;
             response_sender.send(response);
@@ -828,9 +832,11 @@ async fn mesh_quic_cached_request(
         peer_addr,
         peer_ca_pems: job.peer_ca_pems.clone(),
     };
+    let acquire_started = std::time::Instant::now();
     let pool = pools.pool_for(key).await;
     let (connection, reused_cached_connection) =
         mesh_quic_acquire_connection(&pool, peer_addr, &job, pool_size).await?;
+    record_mesh_client_acquire(acquire_started.elapsed());
     let request_timeout = if reused_cached_connection {
         MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT
     } else {
@@ -855,8 +861,10 @@ async fn mesh_quic_cached_request(
                 "mesh QUIC cached request failed; dropping cached connection and retrying once"
             );
             pool.remove_connection(&connection).await;
+            let retry_acquire_started = std::time::Instant::now();
             let (retry_connection, _reused_retry_connection) =
                 mesh_quic_acquire_connection(&pool, peer_addr, &job, pool_size).await?;
+            record_mesh_client_acquire(retry_acquire_started.elapsed());
             match timed_mesh_quic_request_on_connection(
                 retry_connection.connection(),
                 &job.request,
@@ -993,33 +1001,48 @@ async fn mesh_quic_request_on_connection(
     timeout: Duration,
 ) -> Result<MeshQuicClientResponsePayload, TransportError> {
     tokio::time::timeout(timeout, async {
-        let (mut send, mut recv) =
-            connection.open_bi().await.map_err(|error| TransportError::Quic(error.to_string()))?;
-        match request {
-            MeshQuicClientRequestPayload::Json(request) => {
-                write_quic_json_message(&mut send, request).await?;
+        let open_bi_started = std::time::Instant::now();
+        let open_bi_result =
+            connection.open_bi().await.map_err(|error| TransportError::Quic(error.to_string()));
+        record_mesh_client_open_bi(open_bi_started.elapsed());
+        let (mut send, mut recv) = open_bi_result?;
+        let request_write_started = std::time::Instant::now();
+        let request_write_result = async {
+            match request {
+                MeshQuicClientRequestPayload::Json(request) => {
+                    write_quic_json_message(&mut send, request).await?;
+                }
+                MeshQuicClientRequestPayload::Postcard(request) => {
+                    write_postcard_frame(&mut send, request).await?;
+                }
             }
-            MeshQuicClientRequestPayload::Postcard(request) => {
-                write_postcard_frame(&mut send, request).await?;
-            }
+            send.finish().map_err(|error| TransportError::Quic(error.to_string()))
         }
-        send.finish().map_err(|error| TransportError::Quic(error.to_string()))?;
-        let response = match request {
-            MeshQuicClientRequestPayload::Json(_request) => {
-                MeshQuicClientResponsePayload::Json(read_quic_json_frame(&mut recv).await?)
-            }
-            MeshQuicClientRequestPayload::Postcard(_request) => {
-                let frame = read_quic_raw_frame(&mut recv).await?;
-                let body = frame.strip_prefix(MESH_QUIC_POSTCARD_MAGIC).ok_or_else(|| {
-                    TransportError::Quic(
-                        "mesh QUIC postcard response missing binary magic".to_owned(),
-                    )
-                })?;
-                MeshQuicClientResponsePayload::Postcard(postcard_from_bytes(body)?)
-            }
-        };
-        drain_quic_recv_to_fin(&mut recv).await?;
-        Ok(response)
+        .await;
+        record_mesh_client_request_write(request_write_started.elapsed());
+        request_write_result?;
+        let response_read_started = std::time::Instant::now();
+        let response_read_result = async {
+            let response = match request {
+                MeshQuicClientRequestPayload::Json(_request) => {
+                    MeshQuicClientResponsePayload::Json(read_quic_json_frame(&mut recv).await?)
+                }
+                MeshQuicClientRequestPayload::Postcard(_request) => {
+                    let frame = read_quic_raw_frame(&mut recv).await?;
+                    let body = frame.strip_prefix(MESH_QUIC_POSTCARD_MAGIC).ok_or_else(|| {
+                        TransportError::Quic(
+                            "mesh QUIC postcard response missing binary magic".to_owned(),
+                        )
+                    })?;
+                    MeshQuicClientResponsePayload::Postcard(postcard_from_bytes(body)?)
+                }
+            };
+            drain_quic_recv_to_fin(&mut recv).await?;
+            Ok(response)
+        }
+        .await;
+        record_mesh_client_response_read(response_read_started.elapsed());
+        response_read_result
     })
     .await
     .map_err(|error| {
