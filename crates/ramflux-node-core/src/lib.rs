@@ -70,10 +70,11 @@ pub use perf_metrics::{
     record_gateway_quic_response_write_us, record_gateway_submit_decode_us,
     record_gateway_submit_received, record_gateway_submit_response_encode_us,
     record_gateway_submit_router_us, record_gateway_submit_total_us,
-    record_router_submit_decode_us, record_router_submit_dispatch_us,
-    record_router_submit_lock_wait_us, record_router_submit_response_us,
-    record_router_submit_save_us, record_router_submit_target_local_us,
-    record_router_submit_target_remote_us, record_router_submit_total_us,
+    record_router_submit_completed, record_router_submit_decode_us,
+    record_router_submit_dispatch_us, record_router_submit_lock_wait_us,
+    record_router_submit_response_us, record_router_submit_save_us, record_router_submit_started,
+    record_router_submit_target_local_us, record_router_submit_target_remote_us,
+    record_router_submit_total_us,
 };
 pub(crate) use perf_metrics::{
     record_router_ack, record_router_envelope_accepted, record_router_replay_guard_check,
@@ -81,6 +82,7 @@ pub(crate) use perf_metrics::{
     record_router_save_begin_write_us, record_router_save_commit_us, record_router_save_inbox_us,
     record_router_save_mutation_us, record_router_save_replay_guard_us,
     record_router_save_total_us, record_router_snapshot_save, record_router_wal_batch,
+    record_router_wal_submit_backpressure_yield,
 };
 pub(crate) use redb_store::{
     FEDERATION_BAD_NODE_ADVISORY_KEY, FEDERATION_DISCOVERY_PIN_KEY,

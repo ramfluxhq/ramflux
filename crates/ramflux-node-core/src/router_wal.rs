@@ -446,6 +446,7 @@ impl RouterWalWriter {
                 Ok(()) => return Ok(()),
                 Err(mpsc::TrySendError::Full(returned)) => {
                     request = returned;
+                    crate::record_router_wal_submit_backpressure_yield();
                     tokio::task::yield_now().await;
                 }
                 Err(mpsc::TrySendError::Disconnected(_returned)) => {
