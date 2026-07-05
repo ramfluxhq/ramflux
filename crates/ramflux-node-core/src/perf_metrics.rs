@@ -34,6 +34,8 @@ static ROUTER_SUBMIT_RESPONSE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SUBMIT_RESPONSE_US_MAX: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SUBMIT_TOTAL_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SUBMIT_TOTAL_US_MAX: AtomicU64 = AtomicU64::new(0);
+static ROUTER_SUBMIT_STARTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ROUTER_SUBMIT_COMPLETED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SUBMIT_TARGET_LOCAL_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SUBMIT_TARGET_REMOTE_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_SUBMIT_TARGET_LOCAL_US_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -59,6 +61,7 @@ static ROUTER_WAL_RECORDS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_WAL_BATCH_SIZE_MAX: AtomicU64 = AtomicU64::new(0);
 static ROUTER_WAL_SYNC_ALL_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ROUTER_WAL_SYNC_ALL_US_MAX: AtomicU64 = AtomicU64::new(0);
+static ROUTER_WAL_SUBMIT_BACKPRESSURE_YIELDS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static PERF_ENABLED: OnceLock<bool> = OnceLock::new();
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -94,6 +97,8 @@ pub struct NodePerfSnapshot {
     pub router_submit_response_us_max: u64,
     pub router_submit_total_us_total: u64,
     pub router_submit_total_us_max: u64,
+    pub router_submit_started_total: u64,
+    pub router_submit_completed_total: u64,
     pub router_submit_target_local_total: u64,
     pub router_submit_target_remote_total: u64,
     pub router_submit_target_local_us_total: u64,
@@ -119,6 +124,7 @@ pub struct NodePerfSnapshot {
     pub router_wal_batch_size_max: u64,
     pub router_wal_sync_all_us_total: u64,
     pub router_wal_sync_all_us_max: u64,
+    pub router_wal_submit_backpressure_yields_total: u64,
 }
 
 #[must_use]
@@ -214,6 +220,14 @@ pub fn record_router_submit_total_us(us: u64) {
     record_duration(&ROUTER_SUBMIT_TOTAL_US_TOTAL, &ROUTER_SUBMIT_TOTAL_US_MAX, us);
 }
 
+pub fn record_router_submit_started() {
+    ROUTER_SUBMIT_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_router_submit_completed() {
+    ROUTER_SUBMIT_COMPLETED_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn record_router_submit_target_local_us(us: u64) {
     if node_perf_enabled() {
         ROUTER_SUBMIT_TARGET_LOCAL_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -267,6 +281,10 @@ pub(crate) fn record_router_wal_batch(record_count: usize, sync_all_us: u64) {
     }
 }
 
+pub(crate) fn record_router_wal_submit_backpressure_yield() {
+    ROUTER_WAL_SUBMIT_BACKPRESSURE_YIELDS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
 fn record_duration(total: &AtomicU64, max: &AtomicU64, us: u64) {
     if node_perf_enabled() {
         total.fetch_add(us, Ordering::Relaxed);
@@ -314,6 +332,8 @@ pub fn node_perf_snapshot() -> NodePerfSnapshot {
         router_submit_response_us_max: ROUTER_SUBMIT_RESPONSE_US_MAX.load(Ordering::Relaxed),
         router_submit_total_us_total: ROUTER_SUBMIT_TOTAL_US_TOTAL.load(Ordering::Relaxed),
         router_submit_total_us_max: ROUTER_SUBMIT_TOTAL_US_MAX.load(Ordering::Relaxed),
+        router_submit_started_total: ROUTER_SUBMIT_STARTED_TOTAL.load(Ordering::Relaxed),
+        router_submit_completed_total: ROUTER_SUBMIT_COMPLETED_TOTAL.load(Ordering::Relaxed),
         router_submit_target_local_total: ROUTER_SUBMIT_TARGET_LOCAL_TOTAL.load(Ordering::Relaxed),
         router_submit_target_remote_total: ROUTER_SUBMIT_TARGET_REMOTE_TOTAL
             .load(Ordering::Relaxed),
@@ -346,6 +366,8 @@ pub fn node_perf_snapshot() -> NodePerfSnapshot {
         router_wal_batch_size_max: ROUTER_WAL_BATCH_SIZE_MAX.load(Ordering::Relaxed),
         router_wal_sync_all_us_total: ROUTER_WAL_SYNC_ALL_US_TOTAL.load(Ordering::Relaxed),
         router_wal_sync_all_us_max: ROUTER_WAL_SYNC_ALL_US_MAX.load(Ordering::Relaxed),
+        router_wal_submit_backpressure_yields_total: ROUTER_WAL_SUBMIT_BACKPRESSURE_YIELDS_TOTAL
+            .load(Ordering::Relaxed),
     }
 }
 
@@ -381,6 +403,8 @@ pub fn node_perf_reset() {
         ROUTER_SUBMIT_RESPONSE_US_MAX.store(0, Ordering::Relaxed);
         ROUTER_SUBMIT_TOTAL_US_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_SUBMIT_TOTAL_US_MAX.store(0, Ordering::Relaxed);
+        ROUTER_SUBMIT_STARTED_TOTAL.store(0, Ordering::Relaxed);
+        ROUTER_SUBMIT_COMPLETED_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_SUBMIT_TARGET_LOCAL_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_SUBMIT_TARGET_REMOTE_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_SUBMIT_TARGET_LOCAL_US_TOTAL.store(0, Ordering::Relaxed);
@@ -406,5 +430,6 @@ pub fn node_perf_reset() {
         ROUTER_WAL_BATCH_SIZE_MAX.store(0, Ordering::Relaxed);
         ROUTER_WAL_SYNC_ALL_US_TOTAL.store(0, Ordering::Relaxed);
         ROUTER_WAL_SYNC_ALL_US_MAX.store(0, Ordering::Relaxed);
+        ROUTER_WAL_SUBMIT_BACKPRESSURE_YIELDS_TOTAL.store(0, Ordering::Relaxed);
     }
 }

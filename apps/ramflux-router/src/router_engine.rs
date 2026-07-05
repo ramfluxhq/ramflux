@@ -10,6 +10,7 @@ pub(crate) fn submit_envelope(
     envelope: ramflux_protocol::Envelope,
     total_started: Instant,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    ramflux_node_core::record_router_submit_started();
     tracing::info!(
         envelope_id = %envelope.envelope_id,
         target_delivery_id = %envelope.target_delivery_id,
@@ -49,6 +50,7 @@ pub(crate) fn submit_envelope(
         );
         std::process::abort();
     }
+    ramflux_node_core::record_router_submit_completed();
     ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
     let response_started = Instant::now();
     let response = submit_response_from_outcome(state, outcome);
@@ -70,6 +72,7 @@ pub(crate) async fn submit_envelope_async(
     envelope: ramflux_protocol::Envelope,
     total_started: Instant,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    ramflux_node_core::record_router_submit_started();
     tracing::info!(
         envelope_id = %envelope.envelope_id,
         target_delivery_id = %envelope.target_delivery_id,
@@ -114,6 +117,7 @@ pub(crate) async fn submit_envelope_async(
         );
         std::process::abort();
     }
+    ramflux_node_core::record_router_submit_completed();
     ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
     let response_started = Instant::now();
     let response = submit_response_from_outcome(state, outcome);
