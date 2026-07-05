@@ -667,20 +667,24 @@ async fn router_async_mesh_quic_connection_loop(
     router: Arc<crate::router_runtime::RouterHandle>,
 ) -> anyhow::Result<()> {
     loop {
-        let accepted =
-            match ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(
-                &connection,
-            )
-            .await
-            {
-                Ok(accepted) => accepted,
+        let stream =
+            match ramflux_transport::MeshQuicServer::accept_bi_on_connection(&connection).await {
+                Ok(stream) => stream,
                 Err(error) => {
-                    tracing::debug!(%error, "router async QUIC stream loop ended");
+                    tracing::debug!(%error, "router async QUIC stream accept loop ended");
                     return Ok(());
                 }
             };
         let request_router = Arc::clone(&router);
         tokio::spawn(async move {
+            let accepted =
+                match ramflux_transport::MeshQuicServer::read_wire_request_from_bi(stream).await {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::warn!(%error, "router async QUIC request frame read failed");
+                        return;
+                    }
+                };
             if let Err(error) =
                 handle_router_async_mesh_quic_request(accepted, request_router).await
             {

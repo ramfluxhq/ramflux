@@ -64,6 +64,12 @@ pub struct MeshQuicPostcardAcceptedRequest {
     recv: quinn::RecvStream,
 }
 
+pub struct MeshQuicAcceptedBiStream {
+    pub send: quinn::SendStream,
+    pub recv: quinn::RecvStream,
+    pub remote_address: SocketAddr,
+}
+
 pub enum MeshQuicAcceptedWireRequest {
     Json(MeshQuicAcceptedRequest),
     Postcard(MeshQuicPostcardAcceptedRequest),
@@ -367,13 +373,13 @@ impl MeshQuicServer {
     }
 
     /// # Errors
-    /// Returns an error when QUIC accept, stream accept, or request decoding fails.
-    pub async fn accept_json_or_postcard_request_on_connection(
+    /// Returns an error when accepting a bidirectional QUIC stream fails.
+    pub async fn accept_bi_on_connection(
         connection: &MeshQuicConnection,
-    ) -> Result<MeshQuicAcceptedWireRequest, TransportError> {
+    ) -> Result<MeshQuicAcceptedBiStream, TransportError> {
         let remote_address = connection.remote_address();
         let stream_accept_started = std::time::Instant::now();
-        let (send, mut recv) = connection
+        let (send, recv) = connection
             .connection
             .accept_bi()
             .await
@@ -384,6 +390,15 @@ impl MeshQuicServer {
                 ))
             })?;
         record_mesh_server_quic_stream_accepted(stream_accept_started.elapsed());
+        Ok(MeshQuicAcceptedBiStream { send, recv, remote_address })
+    }
+
+    /// # Errors
+    /// Returns an error when request framing or decoding fails.
+    pub async fn read_wire_request_from_bi(
+        stream: MeshQuicAcceptedBiStream,
+    ) -> Result<MeshQuicAcceptedWireRequest, TransportError> {
+        let MeshQuicAcceptedBiStream { send, mut recv, remote_address } = stream;
         let request_read_started = std::time::Instant::now();
         let frame = read_quic_raw_frame(&mut recv).await.map_err(|error| {
             tracing::error!(%remote_address, %error, "mesh QUIC request frame decode failed");
@@ -402,6 +417,15 @@ impl MeshQuicServer {
         }
         let request = serde_json::from_slice::<GatewayQuicRequest>(&frame)?;
         Ok(MeshQuicAcceptedWireRequest::Json(MeshQuicAcceptedRequest { request, send, recv }))
+    }
+
+    /// # Errors
+    /// Returns an error when QUIC accept, stream accept, or request decoding fails.
+    pub async fn accept_json_or_postcard_request_on_connection(
+        connection: &MeshQuicConnection,
+    ) -> Result<MeshQuicAcceptedWireRequest, TransportError> {
+        let stream = Self::accept_bi_on_connection(connection).await?;
+        Self::read_wire_request_from_bi(stream).await
     }
 
     /// # Errors
