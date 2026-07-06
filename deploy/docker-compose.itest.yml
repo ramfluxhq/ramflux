@@ -70,6 +70,7 @@ services:
       RAMFLUX_ROUTER_WAL_QUEUE_CAPACITY: "${RAMFLUX_ROUTER_WAL_QUEUE_CAPACITY:-4096}"
       RAMFLUX_ROUTER_WAL_COMMIT_WINDOW_US: "${RAMFLUX_ROUTER_WAL_COMMIT_WINDOW_US:-0}"
       RAMFLUX_ROUTER_WAL_PIPELINE: "${RAMFLUX_ROUTER_WAL_PIPELINE:-0}"
+      RAMFLUX_ROUTER_WAL_DIR: "${RAMFLUX_ROUTER_WAL_DIR:-}"
       RAMFLUX_ROUTER_WAL_SHARDS: "${RAMFLUX_ROUTER_WAL_SHARDS:-}"
       RAMFLUX_MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS: "${RAMFLUX_MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS:-4096}"
       RAMFLUX_MESH_QUIC_RECEIVE_WINDOW: "${RAMFLUX_MESH_QUIC_RECEIVE_WINDOW:-16777216}"
@@ -82,6 +83,10 @@ services:
       - ./config/router.toml:/etc/ramflux/config/router.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/router:/etc/ramflux/mesh:ro
       - router-redb:/var/lib/ramflux/router
+    # RAM-backed mount for the router WAL, used only when RAMFLUX_ROUTER_WAL_DIR
+    # points here (perf isolation of fsync/disk from the architecture ceiling).
+    tmpfs:
+      - /var/lib/ramflux/router-wal:size=2147483648
     ports:
       - "${RAMFLUX_ITEST_ROUTER_HTTP_PORT:-18080}:18080"
       - "${RAMFLUX_ITEST_ROUTER_MESH_PORT:-17443}:7443"
