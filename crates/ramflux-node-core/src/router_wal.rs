@@ -20,6 +20,7 @@ const ROUTER_WAL_COMMIT_WINDOW_US_DEFAULT: u64 = 0;
 const ROUTER_WAL_QUEUE_CAPACITY_ENV: &str = "RAMFLUX_ROUTER_WAL_QUEUE_CAPACITY";
 const ROUTER_WAL_QUEUE_CAPACITY_DEFAULT: usize = 65_536;
 const ROUTER_WAL_SHARDS_ENV: &str = "RAMFLUX_ROUTER_WAL_SHARDS";
+const ROUTER_WAL_PIPELINE_ENV: &str = "RAMFLUX_ROUTER_WAL_PIPELINE";
 const ROUTER_WAL_SHARD_DIR_PREFIX: &str = "router-wal-shard-";
 const ROUTER_WAL_MAGIC: &[u8] = b"ramflux-router-wal-v1\n";
 
@@ -241,6 +242,14 @@ impl RouterWalStore {
     }
 
     fn open_with_shards(root: impl AsRef<Path>, shard_count: usize) -> Result<Self, NodeCoreError> {
+        Self::open_with_shards_config(root, shard_count, router_wal_pipeline_enabled())
+    }
+
+    fn open_with_shards_config(
+        root: impl AsRef<Path>,
+        shard_count: usize,
+        pipeline: bool,
+    ) -> Result<Self, NodeCoreError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)
             .map_err(|source| NodeCoreError::StoreDirectory { path: root.clone(), source })?;
@@ -250,8 +259,14 @@ impl RouterWalStore {
                 .max(1024 * 1024);
         let recovered = recover_router_wal(&root)?;
         let state = Arc::new(Mutex::new(recovered.state));
-        let writer =
-            RouterWalWriter::start(&root, segment_bytes, shard_count, &recovered.shards, &state)?;
+        let writer = RouterWalWriter::start(
+            &root,
+            segment_bytes,
+            shard_count,
+            &recovered.shards,
+            &state,
+            pipeline,
+        )?;
         Ok(Self { state, writer })
     }
 
@@ -320,6 +335,7 @@ struct RouterWalWriter {
 struct RouterWalWriterShard {
     sender: Option<mpsc::SyncSender<RouterWalAppendRequest>>,
     thread: Option<thread::JoinHandle<()>>,
+    fsync_thread: Option<thread::JoinHandle<()>>,
 }
 
 struct RouterWalAppendRequest {
@@ -352,6 +368,7 @@ impl RouterWalWriter {
         shard_count: usize,
         recovered_shards: &BTreeMap<usize, RouterWalRecoveredShard>,
         wal_state: &Arc<Mutex<RouterWalState>>,
+        pipeline: bool,
     ) -> Result<Self, NodeCoreError> {
         let batch_max =
             router_wal_usize_env(ROUTER_WAL_BATCH_MAX_ENV, ROUTER_WAL_BATCH_MAX_DEFAULT).max(1);
@@ -374,13 +391,45 @@ impl RouterWalWriter {
             )?;
             let wal_state = Arc::clone(wal_state);
             let (sender, receiver) = mpsc::sync_channel(queue_capacity);
-            let thread = thread::Builder::new()
-                .name(format!("ramflux-router-wal-writer-{shard_id}"))
-                .spawn(move || {
-                    router_wal_writer_loop(state, &receiver, &wal_state, batch_max, window);
-                })
-                .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-            shards.push(RouterWalWriterShard { sender: Some(sender), thread: Some(thread) });
+            if pipeline {
+                let (fsync_sender, fsync_receiver) = mpsc::sync_channel(queue_capacity);
+                let fsync_wal_state = Arc::clone(&wal_state);
+                let fsync_thread = thread::Builder::new()
+                    .name(format!("ramflux-router-wal-fsync-{shard_id}"))
+                    .spawn(move || {
+                        router_wal_fsync_loop(&fsync_receiver, &fsync_wal_state);
+                    })
+                    .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+                let thread = thread::Builder::new()
+                    .name(format!("ramflux-router-wal-writer-{shard_id}"))
+                    .spawn(move || {
+                        router_wal_pipeline_writer_loop(
+                            state,
+                            &receiver,
+                            fsync_sender,
+                            batch_max,
+                            window,
+                        );
+                    })
+                    .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+                shards.push(RouterWalWriterShard {
+                    sender: Some(sender),
+                    thread: Some(thread),
+                    fsync_thread: Some(fsync_thread),
+                });
+            } else {
+                let thread = thread::Builder::new()
+                    .name(format!("ramflux-router-wal-writer-{shard_id}"))
+                    .spawn(move || {
+                        router_wal_writer_loop(state, &receiver, &wal_state, batch_max, window);
+                    })
+                    .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+                shards.push(RouterWalWriterShard {
+                    sender: Some(sender),
+                    thread: Some(thread),
+                    fsync_thread: None,
+                });
+            }
         }
         Ok(Self { shards })
     }
@@ -467,6 +516,11 @@ impl Drop for RouterWalWriter {
                 let _joined = thread.join();
             }
         }
+        for shard in &mut self.shards {
+            if let Some(thread) = shard.fsync_thread.take() {
+                let _joined = thread.join();
+            }
+        }
     }
 }
 
@@ -475,7 +529,7 @@ struct RouterWalWriterState {
     segment_bytes: u64,
     segment_id: u64,
     offset: u64,
-    file: File,
+    file: Arc<File>,
 }
 
 impl RouterWalWriterState {
@@ -502,7 +556,7 @@ impl RouterWalWriterState {
         let offset = file
             .seek(io::SeekFrom::End(0))
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        Ok(Self { root, segment_bytes, segment_id, offset, file })
+        Ok(Self { root, segment_bytes, segment_id, offset, file: Arc::new(file) })
     }
 
     fn append_batch(
@@ -537,11 +591,37 @@ impl RouterWalWriterState {
         Ok(locations)
     }
 
+    fn append_batch_no_sync(
+        &mut self,
+        payloads: &[RouterWalPayload],
+    ) -> Result<RouterWalAppendGroup, NodeCoreError> {
+        let mut locations = Vec::with_capacity(payloads.len());
+        let mut sync_files = Vec::with_capacity(1);
+        let write_started = Instant::now();
+        for payload in payloads {
+            let stored = StoredRouterWalPayload::try_from(payload)?;
+            let encoded = postcard::to_allocvec(&stored)
+                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+            let frame_len = 8_u64
+                .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+                .ok_or_else(|| NodeCoreError::ItestJson("router WAL frame too large".to_owned()))?;
+            if self.offset > u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0)
+                && self.offset.saturating_add(frame_len) > self.segment_bytes
+            {
+                self.roll_segment()?;
+            }
+            push_unique_router_wal_file(&mut sync_files, &self.file);
+            locations.push(self.write_record(&encoded)?);
+        }
+        crate::record_router_save_mutation_us(elapsed_us(write_started));
+        Ok(RouterWalAppendGroup { locations, sync_files })
+    }
+
     fn write_record(&mut self, encoded: &[u8]) -> Result<RouterWalRecordLocation, NodeCoreError> {
         let len = u32::try_from(encoded.len())
             .map_err(|_| NodeCoreError::ItestJson("router WAL record too large".to_owned()))?;
         let offset = self.offset;
-        write_router_wal_record_to_file(&mut self.file, encoded)?;
+        write_router_wal_record_to_file(&self.file, encoded)?;
         self.offset = self.offset.saturating_add(8 + u64::from(len));
         Ok(RouterWalRecordLocation { segment_id: self.segment_id, offset, len })
     }
@@ -549,18 +629,30 @@ impl RouterWalWriterState {
     fn roll_segment(&mut self) -> Result<(), NodeCoreError> {
         self.segment_id = self.segment_id.saturating_add(1);
         let path = router_wal_segment_path(&self.root, self.segment_id);
-        self.file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .read(true)
             .open(path)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        self.file
-            .write_all(ROUTER_WAL_MAGIC)
+        file.write_all(ROUTER_WAL_MAGIC)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+        self.file = Arc::new(file);
         self.offset = u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0);
         Ok(())
     }
+}
+
+struct RouterWalAppendGroup {
+    locations: Vec<RouterWalRecordLocation>,
+    sync_files: Vec<Arc<File>>,
+}
+
+struct RouterWalFsyncGroup {
+    batch: Vec<RouterWalAppendRequest>,
+    payloads: Vec<RouterWalPayload>,
+    locations: Vec<RouterWalRecordLocation>,
+    sync_files: Vec<Arc<File>>,
 }
 
 fn router_wal_writer_loop(
@@ -599,6 +691,104 @@ fn router_wal_writer_loop(
         match state.append_batch(&payloads) {
             Ok(locations) => router_wal_ack_success(batch, &payloads, locations, wal_state),
             Err(error) => router_wal_ack_error(batch, &error),
+        }
+    }
+}
+
+fn router_wal_pipeline_writer_loop(
+    mut state: RouterWalWriterState,
+    receiver: &mpsc::Receiver<RouterWalAppendRequest>,
+    fsync_sender: mpsc::SyncSender<RouterWalFsyncGroup>,
+    batch_max: usize,
+    window: Duration,
+) {
+    while let Ok(first) = receiver.recv() {
+        let mut batch = Vec::with_capacity(batch_max);
+        batch.push(first);
+        let deadline = Instant::now() + window;
+        while batch.len() < batch_max {
+            match receiver.try_recv() {
+                Ok(request) => batch.push(request),
+                Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    if window.is_zero() {
+                        break;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
+                        Ok(request) => batch.push(request),
+                        Err(
+                            mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected,
+                        ) => break,
+                    }
+                }
+            }
+        }
+        let payloads = batch.iter().map(|request| request.payload.clone()).collect::<Vec<_>>();
+        match state.append_batch_no_sync(&payloads) {
+            Ok(group) => {
+                let fsync_group = RouterWalFsyncGroup {
+                    batch,
+                    payloads,
+                    locations: group.locations,
+                    sync_files: group.sync_files,
+                };
+                if let Err(error) = fsync_sender.send(fsync_group) {
+                    router_wal_ack_error(
+                        error.0.batch,
+                        &NodeCoreError::ItestJson("router WAL fsync writer stopped".to_owned()),
+                    );
+                }
+            }
+            Err(error) => router_wal_ack_error(batch, &error),
+        }
+    }
+    drop(fsync_sender);
+}
+
+fn router_wal_fsync_loop(
+    receiver: &mpsc::Receiver<RouterWalFsyncGroup>,
+    wal_state: &Arc<Mutex<RouterWalState>>,
+) {
+    while let Ok(first) = receiver.recv() {
+        let mut groups = vec![first];
+        while let Ok(group) = receiver.try_recv() {
+            groups.push(group);
+        }
+
+        let mut sync_files = Vec::new();
+        let mut record_count = 0usize;
+        for group in &groups {
+            record_count = record_count.saturating_add(group.payloads.len());
+            for file in &group.sync_files {
+                push_unique_router_wal_file(&mut sync_files, file);
+            }
+        }
+
+        let sync_started = Instant::now();
+        let sync_result = sync_router_wal_files(&sync_files);
+        let sync_us = elapsed_us(sync_started);
+        match sync_result {
+            Ok(()) => {
+                crate::record_router_save_commit_us(sync_us);
+                crate::record_router_wal_batch(record_count, sync_us);
+                for group in groups {
+                    router_wal_ack_success(
+                        group.batch,
+                        &group.payloads,
+                        group.locations,
+                        wal_state,
+                    );
+                }
+            }
+            Err(error) => {
+                for group in groups {
+                    router_wal_ack_error(group.batch, &error);
+                }
+            }
         }
     }
 }
@@ -817,13 +1007,28 @@ fn router_wal_shard_for_payload(payload: &RouterWalPayload, shard_count: usize) 
     usize::try_from(u64::from(hash) % u64::try_from(shard_count.max(1)).unwrap_or(1)).unwrap_or(0)
 }
 
-fn write_router_wal_record_to_file(file: &mut File, encoded: &[u8]) -> Result<(), NodeCoreError> {
+fn push_unique_router_wal_file(files: &mut Vec<Arc<File>>, file: &Arc<File>) {
+    if !files.iter().any(|existing| Arc::ptr_eq(existing, file)) {
+        files.push(Arc::clone(file));
+    }
+}
+
+fn sync_router_wal_files(files: &[Arc<File>]) -> Result<(), NodeCoreError> {
+    for file in files {
+        file.sync_all().map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+    }
+    Ok(())
+}
+
+fn write_router_wal_record_to_file(file: &File, encoded: &[u8]) -> Result<(), NodeCoreError> {
     let len = u32::try_from(encoded.len())
         .map_err(|_| NodeCoreError::ItestJson("router WAL record too large".to_owned()))?;
     let crc = crc32fast::hash(encoded);
-    file.write_all(&len.to_le_bytes())
-        .and_then(|()| file.write_all(&crc.to_le_bytes()))
-        .and_then(|()| file.write_all(encoded))
+    let mut writer = file;
+    writer
+        .write_all(&len.to_le_bytes())
+        .and_then(|()| writer.write_all(&crc.to_le_bytes()))
+        .and_then(|()| writer.write_all(encoded))
         .map_err(|source| NodeCoreError::ItestJson(source.to_string()))
 }
 
@@ -841,6 +1046,12 @@ fn router_wal_u64_env(name: &str, default: u64) -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn router_wal_pipeline_enabled() -> bool {
+    std::env::var(ROUTER_WAL_PIPELINE_ENV).is_ok_and(|value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
+    })
 }
 
 fn router_wal_shard_count() -> usize {
@@ -1039,6 +1250,31 @@ mod tests {
 
         let reopened = RouterWalStore::open(&root)?;
         assert_eq!(reopened.submissions(0).len(), 64);
+        remove_router_wal_dir(root);
+        Ok(())
+    }
+
+    #[test]
+    fn router_wal_pipeline_append_recovers_submission() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_router_wal_dir("router_wal_pipeline_append_recovers_submission")?;
+        let store = RouterWalStore::open_with_shards_config(&root, 1, true)?;
+        let entry =
+            router_wal_inbox_entry("env_router_wal_pipeline_recover", "target_router_wal_pipeline");
+        let replay_key = format!(
+            "device_router_wal_pipeline:{}:{}",
+            entry.envelope.envelope_id, entry.envelope.envelope_id
+        );
+        store.record_submission(&replay_key, 9_999_999_999, Some(&entry))?;
+        drop(store);
+
+        let reopened = RouterWalStore::open_with_shards_config(&root, 1, true)?;
+        let submissions = reopened.submissions(0);
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0].replay_key, replay_key);
+        assert_eq!(
+            submissions[0].entry.as_ref().map(|entry| entry.target_delivery_id.as_str()),
+            Some("target_router_wal_pipeline")
+        );
         remove_router_wal_dir(root);
         Ok(())
     }
