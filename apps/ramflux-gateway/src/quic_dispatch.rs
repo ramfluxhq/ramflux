@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use crate::{RouterMeshClient, router_get_json, router_post_json, router_post_json_async};
+use crate::{RouterMeshClient, router_get_json_async, router_post_json, router_post_json_async};
 use std::time::Instant;
 
 pub(crate) async fn dispatch_quic_json_request(
@@ -67,16 +67,17 @@ pub(crate) async fn dispatch_quic_json_request(
         }
         ("GET", path) if path.starts_with("/mvp0/cursor/") => {
             let response: Option<ramflux_node_core::InboxCursorResponse> =
-                router_get_json(router, path)?;
+                router_get_json_async(router, path).await?;
             serde_json::to_value(response)?
         }
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response: ramflux_node_core::PrekeyResponse = router_get_json(router, path)?;
+            let response: ramflux_node_core::PrekeyResponse =
+                router_get_json_async(router, path).await?;
             serde_json::to_value(response)?
         }
         ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
             let response: Option<ramflux_node_core::DeviceManifestResponse> =
-                router_get_json(router, path)?;
+                router_get_json_async(router, path).await?;
             serde_json::to_value(response)?
         }
         _ => {
