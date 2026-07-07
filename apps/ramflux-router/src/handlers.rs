@@ -855,6 +855,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn mesh_quic_request_enforces_retention_peer_path_gate() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let path = temp_path("mesh_quic_request_enforces_retention_peer_path_gate")?;
+        let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
+        let router = Arc::new(ramflux_node_core::RouterCore::new());
+        let handle = crate::router_runtime::RouterHandle::tokio(router, store, None);
+        let request = ramflux_transport::GatewayQuicRequest {
+            method: "GET".to_owned(),
+            path: "/mvp1/prekey/device-a".to_owned(),
+            body: serde_json::Value::Null,
+        };
+
+        let response = runtime.block_on(handle_mesh_quic_request_value(
+            &request,
+            &handle,
+            "ramflux-retention",
+        ))?;
+        assert_eq!(response.status, 403);
+        assert_eq!(response.body["error"], "retention peer is only authorized for gc_sweep");
+
+        let _removed = std::fs::remove_file(&path);
+        let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
+        Ok(())
+    }
+
     fn current_envelope(envelope_id: &str, target_delivery_id: &str) -> Envelope {
         Envelope {
             schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
