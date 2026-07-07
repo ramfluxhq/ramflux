@@ -12,6 +12,7 @@ const RETENTION_ASYNC_INGRESS_ENV: &str = "RAMFLUX_RETENTION_ASYNC_INGRESS";
 const RETENTION_ASYNC_LISTEN_ADDR_ENV: &str = "RAMFLUX_RETENTION_ASYNC_LISTEN_ADDR";
 const RETENTION_ASYNC_INGRESS_RUNTIME_ENV: &str = "RAMFLUX_RETENTION_ASYNC_INGRESS_RUNTIME";
 const ROUTER_ASYNC_ENDPOINT_ENV: &str = "RAMFLUX_ROUTER_ASYNC_ENDPOINT";
+const FEDERATION_MESH_ENDPOINT_ENV: &str = "RAMFLUX_FEDERATION_MESH_ENDPOINT";
 const DEFAULT_RETENTION_ASYNC_LISTEN_ADDR: &str = "0.0.0.0:17446";
 const DEFAULT_ROUTER_ASYNC_ENDPOINT: &str = "ramflux-router:17444";
 const RETENTION_GC_SWEEP_PATH: &str = "/internal/retention/gc_sweep";
@@ -387,19 +388,22 @@ fn run_gc_sweep_once(
     mesh_client: &ramflux_transport::MeshHttpClient,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let router_async_endpoint = std::env::var(ROUTER_ASYNC_ENDPOINT_ENV).ok();
-    run_gc_sweep_once_with_router_async_endpoint(
+    let federation_mesh_endpoint = std::env::var(FEDERATION_MESH_ENDPOINT_ENV).ok();
+    run_gc_sweep_once_with_async_endpoints(
         store,
         config,
         mesh_client,
         router_async_endpoint.as_deref(),
+        federation_mesh_endpoint.as_deref(),
     )
 }
 
-fn run_gc_sweep_once_with_router_async_endpoint(
+fn run_gc_sweep_once_with_async_endpoints(
     store: &ramflux_node_core::RetentionRedbStore,
     config: &ramflux_node_core::NodeServiceConfig,
     mesh_client: &ramflux_transport::MeshHttpClient,
     router_async_endpoint: Option<&str>,
+    federation_mesh_endpoint: Option<&str>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let now = now_unix_seconds();
     let local = store.gc_expired(now)?;
@@ -415,6 +419,19 @@ fn run_gc_sweep_once_with_router_async_endpoint(
     };
     let router_async_mesh =
         router_gc_async_mesh_client_from_endpoint_value(config, router_async_endpoint)?;
+    let federation_async_mesh = config
+        .mesh
+        .endpoints
+        .get("federation")
+        .map(|endpoint| {
+            federation_gc_async_mesh_client_from_endpoint_value(
+                config,
+                endpoint,
+                federation_mesh_endpoint,
+            )
+        })
+        .transpose()?
+        .flatten();
     for service_id in ["gateway", "router", "notify", "signaling", "federation"] {
         let Some(endpoint) = config.mesh.endpoints.get(service_id) else {
             continue;
@@ -427,6 +444,14 @@ fn run_gc_sweep_once_with_router_async_endpoint(
         };
         let response = if service_id == "router" {
             post_router_gc_sweep(mesh_client, endpoint, &tls, &request, router_async_mesh.as_ref())?
+        } else if service_id == "federation" {
+            post_federation_gc_sweep(
+                mesh_client,
+                endpoint,
+                &tls,
+                &request,
+                federation_async_mesh.as_ref(),
+            )?
         } else {
             post_gc_sweep_blocking(mesh_client, endpoint, &tls, service_id, &request)?
         };
@@ -438,6 +463,22 @@ fn run_gc_sweep_once_with_router_async_endpoint(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn run_gc_sweep_once_with_router_async_endpoint(
+    store: &ramflux_node_core::RetentionRedbStore,
+    config: &ramflux_node_core::NodeServiceConfig,
+    mesh_client: &ramflux_transport::MeshHttpClient,
+    router_async_endpoint: Option<&str>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    run_gc_sweep_once_with_async_endpoints(
+        store,
+        config,
+        mesh_client,
+        router_async_endpoint,
+        Some("0"),
+    )
 }
 
 fn router_gc_async_mesh_client_from_endpoint_value(
@@ -459,6 +500,27 @@ fn router_gc_async_mesh_client_from_endpoint_value(
     }))
 }
 
+fn federation_gc_async_mesh_client_from_endpoint_value(
+    config: &ramflux_node_core::NodeServiceConfig,
+    blocking_endpoint: &str,
+    endpoint_value: Option<&str>,
+) -> Result<Option<RetentionGcAsyncMeshClient>, ramflux_node_core::NodeCoreError> {
+    let Some(endpoint) = federation_gc_async_endpoint_from_value(blocking_endpoint, endpoint_value)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(RetentionGcAsyncMeshClient {
+        endpoint,
+        server_name: "ramflux-federation".to_owned(),
+        tls: mesh_tls_config(config),
+        peer_ca_pems: vec![
+            std::fs::read_to_string(&config.mesh.ca_cert).map_err(|source| {
+                ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
+            })?,
+        ],
+    }))
+}
+
 fn router_gc_async_endpoint_from_value(value: Option<&str>) -> Option<String> {
     let Some(value) = value else {
         return Some(DEFAULT_ROUTER_ASYNC_ENDPOINT.to_owned());
@@ -466,6 +528,23 @@ fn router_gc_async_endpoint_from_value(value: Option<&str>) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.starts_with("${") {
         return Some(DEFAULT_ROUTER_ASYNC_ENDPOINT.to_owned());
+    }
+    if trimmed.is_empty() || is_env_disabled(trimmed) {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+fn federation_gc_async_endpoint_from_value(
+    blocking_endpoint: &str,
+    value: Option<&str>,
+) -> Option<String> {
+    let Some(value) = value else {
+        return Some(blocking_endpoint.to_owned());
+    };
+    let trimmed = value.trim();
+    if trimmed.starts_with("${") {
+        return Some(blocking_endpoint.to_owned());
     }
     if trimmed.is_empty() || is_env_disabled(trimmed) {
         return None;
@@ -512,6 +591,40 @@ fn post_router_gc_sweep(
         }
     }
     post_gc_sweep_blocking(mesh_client, blocking_endpoint, blocking_tls, "router", request)
+}
+
+fn post_federation_gc_sweep(
+    mesh_client: &ramflux_transport::MeshHttpClient,
+    blocking_endpoint: &str,
+    blocking_tls: &ramflux_transport::MeshTlsConfig,
+    request: &ramflux_node_core::RetentionGcSweepRequest,
+    async_mesh: Option<&RetentionGcAsyncMeshClient>,
+) -> Result<ramflux_node_core::RetentionGcSweepResponse, ramflux_node_core::NodeCoreError> {
+    if let Some(async_mesh) = async_mesh {
+        match ramflux_transport::mesh_quic_post_json_with_peer_ca_pems::<
+            _,
+            ramflux_node_core::RetentionGcSweepResponse,
+        >(
+            &async_mesh.endpoint,
+            RETENTION_GC_SWEEP_PATH,
+            &async_mesh.tls,
+            &async_mesh.server_name,
+            &async_mesh.peer_ca_pems,
+            request,
+        ) {
+            Ok(response) => return Ok(response),
+            Err(error @ ramflux_transport::TransportError::Quic(_)) => {
+                tracing::warn!(
+                    %error,
+                    "retention federation gc_sweep QUIC mesh failed; falling back to blocking mesh"
+                );
+            }
+            Err(error) => {
+                return Err(ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()));
+            }
+        }
+    }
+    post_gc_sweep_blocking(mesh_client, blocking_endpoint, blocking_tls, "federation", request)
 }
 
 fn post_gc_sweep_blocking(
@@ -740,6 +853,40 @@ mod tests {
     }
 
     #[test]
+    fn federation_gc_async_endpoint_defaults_to_mesh_endpoint_and_can_be_opted_out() {
+        assert_eq!(
+            federation_gc_async_endpoint_from_value("ramflux-federation:7443", None).as_deref(),
+            Some("ramflux-federation:7443")
+        );
+        assert_eq!(
+            federation_gc_async_endpoint_from_value(
+                "ramflux-federation:7443",
+                Some("${RAMFLUX_FEDERATION_MESH_ENDPOINT:-}")
+            )
+            .as_deref(),
+            Some("ramflux-federation:7443")
+        );
+        assert_eq!(
+            federation_gc_async_endpoint_from_value(
+                "ramflux-federation:7443",
+                Some(" 127.0.0.1:7443 ")
+            )
+            .as_deref(),
+            Some("127.0.0.1:7443")
+        );
+        assert!(
+            federation_gc_async_endpoint_from_value("ramflux-federation:7443", Some("")).is_none()
+        );
+        assert!(
+            federation_gc_async_endpoint_from_value("ramflux-federation:7443", Some("0")).is_none()
+        );
+        assert!(
+            federation_gc_async_endpoint_from_value("ramflux-federation:7443", Some("off"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn retention_router_gc_sweep_uses_quic_when_async_mesh_available()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_cert_root("retention_router_gc_sweep_uses_quic")?;
@@ -813,6 +960,100 @@ mod tests {
 
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.owner_service, "router");
+        cleanup_store(&store_path);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn retention_federation_gc_sweep_uses_quic_when_async_mesh_available()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("retention_federation_gc_sweep_uses_quic")?;
+        let ca = issue_test_ca(&root)?;
+        let retention = issue_test_service_cert(&ca, "node-retention-a", "ramflux-retention")?;
+        let federation = issue_test_service_cert(&ca, "node-retention-a", "ramflux-federation")?;
+        let (federation_quic_endpoint, received) =
+            spawn_router_gc_quic_server(federation.tls.clone(), retention.ca_pem.clone())?;
+        let (store, store_path) = temp_retention_store("retention_federation_gc_sweep_uses_quic")?;
+        let config = test_retention_config_with_endpoint(
+            &retention.tls,
+            "federation",
+            &federation_quic_endpoint,
+        );
+
+        run_gc_sweep_once_with_async_endpoints(
+            &store,
+            &config,
+            &ramflux_transport::MeshHttpClient::new(),
+            Some("0"),
+            None,
+        )?;
+
+        let request = received.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(request.owner_service, "federation");
+        assert!(request.sweep_id.starts_with("retention_gc:federation:"));
+        cleanup_store(&store_path);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn retention_federation_gc_sweep_opt_out_uses_blocking_mesh()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("retention_federation_gc_sweep_opt_out")?;
+        let ca = issue_test_ca(&root)?;
+        let retention = issue_test_service_cert(&ca, "node-retention-a", "ramflux-retention")?;
+        let federation = issue_test_service_cert(&ca, "node-retention-a", "ramflux-federation")?;
+        let (federation_blocking_endpoint, received) =
+            spawn_router_gc_blocking_server(federation.tls.clone(), retention.ca_pem.clone())?;
+        let (store, store_path) = temp_retention_store("retention_federation_gc_sweep_opt_out")?;
+        let config = test_retention_config_with_endpoint(
+            &retention.tls,
+            "federation",
+            &federation_blocking_endpoint,
+        );
+
+        run_gc_sweep_once_with_async_endpoints(
+            &store,
+            &config,
+            &ramflux_transport::MeshHttpClient::new(),
+            Some("0"),
+            Some("0"),
+        )?;
+
+        let request = received.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(request.owner_service, "federation");
+        cleanup_store(&store_path);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn retention_federation_gc_sweep_falls_back_when_quic_transport_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("retention_federation_gc_sweep_fallback")?;
+        let ca = issue_test_ca(&root)?;
+        let retention = issue_test_service_cert(&ca, "node-retention-a", "ramflux-retention")?;
+        let federation = issue_test_service_cert(&ca, "node-retention-a", "ramflux-federation")?;
+        let (federation_blocking_endpoint, received) =
+            spawn_router_gc_blocking_server(federation.tls.clone(), retention.ca_pem.clone())?;
+        let (store, store_path) = temp_retention_store("retention_federation_gc_sweep_fallback")?;
+        let config = test_retention_config_with_endpoint(
+            &retention.tls,
+            "federation",
+            &federation_blocking_endpoint,
+        );
+
+        run_gc_sweep_once_with_async_endpoints(
+            &store,
+            &config,
+            &ramflux_transport::MeshHttpClient::new(),
+            Some("0"),
+            Some("127.0.0.1:not-a-port"),
+        )?;
+
+        let request = received.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(request.owner_service, "federation");
         cleanup_store(&store_path);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -1023,8 +1264,16 @@ mod tests {
         tls: &ramflux_transport::MeshTlsConfig,
         router_endpoint: &str,
     ) -> ramflux_node_core::NodeServiceConfig {
+        test_retention_config_with_endpoint(tls, "router", router_endpoint)
+    }
+
+    fn test_retention_config_with_endpoint(
+        tls: &ramflux_transport::MeshTlsConfig,
+        service_id: &str,
+        endpoint: &str,
+    ) -> ramflux_node_core::NodeServiceConfig {
         let mut endpoints = BTreeMap::new();
-        endpoints.insert("router".to_owned(), router_endpoint.to_owned());
+        endpoints.insert(service_id.to_owned(), endpoint.to_owned());
         ramflux_node_core::NodeServiceConfig {
             node_id: "node-retention-a".to_owned(),
             service_id: "ramflux-retention".to_owned(),
