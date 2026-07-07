@@ -8,8 +8,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::{
     GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
     GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime, dispatch_quic_json_request,
-    gateway_state, notify_offline_wake, router_cursor, router_get_json, router_inbox,
-    router_post_json, router_post_json_async, router_session, serve::GatewayListenerContext,
+    gateway_state, notify_offline_wake, router_cursor_async, router_get_json_async,
+    router_inbox_async, router_post_json, router_post_json_async, router_session_async,
+    serve::GatewayListenerContext,
 };
 
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
@@ -148,7 +149,11 @@ pub(crate) async fn handle_gateway_session_transport(
     };
 
     let registered_auth_key: Option<ramflux_node_core::DeviceAuthKeyResponse> =
-        router_get_json(&context.router, &format!("/mvp1/device-auth-key/{}", open.device_id))?;
+        router_get_json_async(
+            &context.router,
+            &format!("/mvp1/device-auth-key/{}", open.device_id),
+        )
+        .await?;
     let Some(registered_auth_key) = registered_auth_key else {
         write_gateway_frame(
             &mut *send,
@@ -279,7 +284,7 @@ pub(crate) async fn establish_gateway_session(
         context.store.save_state(&gateway)?;
         resume.token
     };
-    let accepted_cursor = router_cursor(&context.router, &open.target_delivery_id)?;
+    let accepted_cursor = router_cursor_async(&context.router, &open.target_delivery_id).await?;
     write_gateway_frame(
         send,
         &ramflux_node_core::GatewayServerFrame::SessionEstablished {
@@ -391,7 +396,8 @@ pub(crate) async fn run_gateway_session_loop(
             }
             ramflux_node_core::GatewayClientFrame::PrekeyFetch { device_id } => {
                 let response: ramflux_node_core::PrekeyResponse =
-                    router_get_json(&context.router, &format!("/mvp1/prekey/{device_id}"))?;
+                    router_get_json_async(&context.router, &format!("/mvp1/prekey/{device_id}"))
+                        .await?;
                 write_gateway_handle(
                     &send,
                     &ramflux_node_core::GatewayServerFrame::Prekey { response },
@@ -402,7 +408,7 @@ pub(crate) async fn run_gateway_session_loop(
                 handle_gateway_ack(&send, &context, &runtime, &ack).await?;
             }
             ramflux_node_core::GatewayClientFrame::Cursor { target_delivery_id } => {
-                let cursor = router_cursor(&context.router, &target_delivery_id)?;
+                let cursor = router_cursor_async(&context.router, &target_delivery_id).await?;
                 write_gateway_handle(
                     &send,
                     &ramflux_node_core::GatewayServerFrame::Cursor { cursor },
@@ -488,7 +494,7 @@ pub(crate) async fn handle_gateway_submit(
         return Ok(());
     }
     let after = response.inbox_seq.unwrap_or(1).saturating_sub(1);
-    let inbox = router_inbox(&context.router, &response.target_delivery_id, after, 1)?;
+    let inbox = router_inbox_async(&context.router, &response.target_delivery_id, after, 1).await?;
     let Some(entry) = inbox.entries.into_iter().next() else {
         return Err(anyhow::anyhow!(
             "gateway submit did not find inbox entry for {} after seq {}",
@@ -594,7 +600,7 @@ async fn deliver_own_device_fanout_entry(
         return Ok(());
     };
     let after = inbox_seq.saturating_sub(1);
-    let inbox = router_inbox(&context.router, &delivery.target_delivery_id, after, 1)?;
+    let inbox = router_inbox_async(&context.router, &delivery.target_delivery_id, after, 1).await?;
     let Some(entry) = inbox.entries.into_iter().find(|entry| entry.inbox_seq == inbox_seq) else {
         return Err(anyhow::anyhow!(
             "gateway fanout did not find inbox entry for {} at seq {}",
@@ -739,7 +745,7 @@ async fn forward_deliver_on_local_miss(
     if context.peers.is_empty() {
         return Ok(false);
     }
-    let session = match router_session(&context.router, target_delivery_id) {
+    let session = match router_session_async(&context.router, target_delivery_id).await {
         Ok(Some(session)) => session,
         Ok(None) => return Ok(false),
         Err(error) => {
@@ -873,12 +879,13 @@ pub(crate) async fn handle_gateway_resume(
         .await?;
         return Ok(());
     }
-    let inbox = router_inbox(
+    let inbox = router_inbox_async(
         &context.router,
         &resume.target_delivery_id,
         resume.after_inbox_seq,
         resume.limit,
-    )?;
+    )
+    .await?;
     capture_itest_gateway_json(
         "resume",
         &serde_json::json!({

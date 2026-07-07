@@ -285,30 +285,81 @@ where
     router.client.get_json(&router.endpoint, path, &router.tls, &router.server_name)
 }
 
-pub(crate) fn router_cursor(
+pub(crate) async fn router_get_json_async<R>(
+    router: &RouterMeshClient,
+    path: &str,
+) -> Result<R, ramflux_transport::TransportError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    if let Some(async_mesh) = &router.async_mesh {
+        match ramflux_transport::mesh_quic_get_json_with_peer_ca_pems_async(
+            &async_mesh.endpoint,
+            path,
+            &async_mesh.tls,
+            &async_mesh.server_name,
+            &async_mesh.peer_ca_pems,
+        )
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(error @ ramflux_transport::TransportError::Quic(_)) => {
+                tracing::warn!(
+                    %error,
+                    "router async QUIC GET mesh failed; falling back to blocking mesh"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    router_get_json_blocking_async(router, path).await
+}
+
+async fn router_get_json_blocking_async<R>(
+    router: &RouterMeshClient,
+    path: &str,
+) -> Result<R, ramflux_transport::TransportError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let router = router.clone();
+    let path = path.to_owned();
+    let response: serde_json::Value =
+        tokio::task::spawn_blocking(move || router_get_json::<serde_json::Value>(&router, &path))
+            .await
+            .map_err(|error| {
+                ramflux_transport::TransportError::Quic(format!(
+                    "router blocking GET join failed: {error}"
+                ))
+            })??;
+    Ok(serde_json::from_value(response)?)
+}
+
+pub(crate) async fn router_cursor_async(
     router: &RouterMeshClient,
     target_delivery_id: &str,
 ) -> Result<Option<ramflux_node_core::InboxCursorResponse>, ramflux_transport::TransportError> {
-    router_get_json(router, &format!("/mvp0/cursor/{target_delivery_id}"))
+    router_get_json_async(router, &format!("/mvp0/cursor/{target_delivery_id}")).await
 }
 
-pub(crate) fn router_inbox(
+pub(crate) async fn router_inbox_async(
     router: &RouterMeshClient,
     target_delivery_id: &str,
     after_inbox_seq: u64,
     limit: usize,
 ) -> Result<ramflux_node_core::InboxFetchResponse, ramflux_transport::TransportError> {
-    router_get_json(
+    router_get_json_async(
         router,
         &format!("/mvp1/inbox/{target_delivery_id}?after={after_inbox_seq}&limit={limit}"),
     )
+    .await
 }
 
-pub(crate) fn router_session(
+pub(crate) async fn router_session_async(
     router: &RouterMeshClient,
     target_delivery_id: &str,
 ) -> Result<Option<ramflux_node_core::SessionDescriptor>, ramflux_transport::TransportError> {
-    router_get_json(router, &format!("/s1/session/{target_delivery_id}"))
+    router_get_json_async(router, &format!("/s1/session/{target_delivery_id}")).await
 }
 
 pub(crate) fn notify_offline_wake(
@@ -594,6 +645,122 @@ mod tests {
     }
 
     #[test]
+    fn router_get_json_async_gets_over_mesh_when_configured()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("gateway_router_async_get_mesh")?;
+        let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let router = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-router")?;
+        let (endpoint, received) = spawn_router_mesh_get_server(
+            router.tls.clone(),
+            gateway.ca_pem.clone(),
+            "/mvp0/cursor/target_async_get",
+            "quic",
+        )?;
+        let client = RouterMeshClient {
+            endpoint: "unused-blocking-router".to_owned(),
+            server_name: "ramflux-router".to_owned(),
+            tls: gateway.tls.clone(),
+            client: ramflux_transport::MeshHttpClient::new(),
+            async_mesh: Some(RouterAsyncMeshClient {
+                endpoint,
+                server_name: "ramflux-router".to_owned(),
+                tls: gateway.tls,
+                peer_ca_pems: vec![router.ca_pem],
+            }),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+
+        let response: serde_json::Value =
+            runtime.block_on(router_get_json_async(&client, "/mvp0/cursor/target_async_get"))?;
+
+        assert_eq!(response["transport"], "quic");
+        assert_eq!(received.recv_timeout(Duration::from_secs(5))?, "/mvp0/cursor/target_async_get");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn router_get_json_async_without_async_mesh_uses_blocking_mesh()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("gateway_router_async_get_opt_out")?;
+        let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let router = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-router")?;
+        let (endpoint, received) = spawn_router_blocking_mesh_get_server(
+            router.tls.clone(),
+            gateway.ca_pem.clone(),
+            "/mvp0/cursor/target_get_opt_out",
+            "blocking",
+        )?;
+        let gateway_tls_trusting_router = ramflux_transport::MeshTlsConfig {
+            ca_cert: router.tls.ca_cert.clone(),
+            service_cert: gateway.tls.service_cert.clone(),
+            service_key: gateway.tls.service_key.clone(),
+        };
+        let client = RouterMeshClient {
+            endpoint,
+            server_name: "ramflux-router".to_owned(),
+            tls: gateway_tls_trusting_router,
+            client: ramflux_transport::MeshHttpClient::new(),
+            async_mesh: None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+
+        let response: serde_json::Value =
+            runtime.block_on(router_get_json_async(&client, "/mvp0/cursor/target_get_opt_out"))?;
+
+        assert_eq!(response["transport"], "blocking");
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5))?,
+            "/mvp0/cursor/target_get_opt_out"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn router_get_json_async_falls_back_to_blocking_mesh_when_quic_transport_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("gateway_router_async_get_fallback")?;
+        let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let router = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-router")?;
+        let (endpoint, received) = spawn_router_blocking_mesh_get_server(
+            router.tls.clone(),
+            gateway.ca_pem.clone(),
+            "/mvp0/cursor/target_get_fallback",
+            "fallback",
+        )?;
+        let gateway_tls_trusting_router = ramflux_transport::MeshTlsConfig {
+            ca_cert: router.tls.ca_cert.clone(),
+            service_cert: gateway.tls.service_cert.clone(),
+            service_key: gateway.tls.service_key.clone(),
+        };
+        let client = RouterMeshClient {
+            endpoint,
+            server_name: "ramflux-router".to_owned(),
+            tls: gateway_tls_trusting_router.clone(),
+            client: ramflux_transport::MeshHttpClient::new(),
+            async_mesh: Some(RouterAsyncMeshClient {
+                endpoint: "127.0.0.1:0".to_owned(),
+                server_name: "ramflux-router".to_owned(),
+                tls: gateway_tls_trusting_router,
+                peer_ca_pems: vec![router.ca_pem],
+            }),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+
+        let response: serde_json::Value =
+            runtime.block_on(router_get_json_async(&client, "/mvp0/cursor/target_get_fallback"))?;
+
+        assert_eq!(response["transport"], "fallback");
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5))?,
+            "/mvp0/cursor/target_get_fallback"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn gateway_clients_default_router_to_quic_and_notify_to_http_when_env_absent()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_cert_root("gateway_default_quic_clients")?;
@@ -758,6 +925,46 @@ mod tests {
         Ok((endpoint, request_rx))
     }
 
+    fn spawn_router_blocking_mesh_get_server(
+        server_tls: ramflux_transport::MeshTlsConfig,
+        trusted_gateway_ca: String,
+        expected_path: &str,
+        transport: &str,
+    ) -> Result<(String, mpsc::Receiver<String>), Box<dyn std::error::Error>> {
+        let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
+        let endpoint = server.local_addr()?.to_string();
+        let expected_path = expected_path.to_owned();
+        let transport = transport.to_owned();
+        let (request_tx, request_rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                let mut accepted = server
+                    .accept_authenticated_with_pem_roots(&server_tls, &[trusted_gateway_ca])
+                    .map_err(|source| source.to_string())?
+                    .stream;
+                let request = ramflux_transport::read_mesh_http_request(&mut accepted)
+                    .map_err(|source| source.to_string())?
+                    .ok_or_else(|| "missing router blocking mesh GET request".to_owned())?;
+                if request.method != "GET" || request.path != expected_path {
+                    return Err(format!(
+                        "unexpected router blocking mesh GET request {} {}",
+                        request.method, request.path
+                    ));
+                }
+                request_tx.send(request.path).map_err(|source| source.to_string())?;
+                let response = serde_json::json!({ "transport": transport });
+                ramflux_transport::write_mesh_json_response(&mut accepted, "200 OK", &response)
+                    .map_err(|source| source.to_string())?;
+                ramflux_transport::close_mesh_server_stream(&mut accepted)
+                    .map_err(|source| source.to_string())
+            })();
+            if let Err(error) = result {
+                tracing::debug!(%error, "gateway router blocking mesh GET test server stopped");
+            }
+        });
+        Ok((endpoint, request_rx))
+    }
+
     fn spawn_router_mesh_echo_server(
         server_tls: ramflux_transport::MeshTlsConfig,
         trusted_gateway_ca: String,
@@ -850,6 +1057,75 @@ mod tests {
             });
             if let Err(error) = result {
                 tracing::debug!(%error, "gateway router async mesh test server stopped");
+            }
+        });
+        let endpoint = endpoint_rx
+            .recv()
+            .map_err(|source| test_error(source.to_string()))?
+            .map_err(test_error)?;
+        Ok((endpoint, request_rx))
+    }
+
+    fn spawn_router_mesh_get_server(
+        server_tls: ramflux_transport::MeshTlsConfig,
+        trusted_gateway_ca: String,
+        expected_path: &str,
+        transport: &str,
+    ) -> Result<(String, mpsc::Receiver<String>), Box<dyn std::error::Error>> {
+        let expected_path = expected_path.to_owned();
+        let transport = transport.to_owned();
+        let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
+        let (request_tx, request_rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|source| source.to_string());
+            let Ok(runtime) = runtime else {
+                let _ = endpoint_tx.send(runtime.map(|_| String::new()));
+                return;
+            };
+            let result: Result<(), String> = runtime.block_on(async move {
+                let roots = Arc::new(move || Ok(vec![trusted_gateway_ca.clone()]));
+                let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+                    "127.0.0.1:0",
+                    &server_tls,
+                    roots,
+                )
+                .map_err(|source| source.to_string())?;
+                endpoint_tx
+                    .send(
+                        server
+                            .local_addr()
+                            .map(|addr| addr.to_string())
+                            .map_err(|source| source.to_string()),
+                    )
+                    .map_err(|source| source.to_string())?;
+                let connection =
+                    server.accept_connection().await.map_err(|source| source.to_string())?;
+                let accepted =
+                    ramflux_transport::MeshQuicServer::accept_request_on_connection(&connection)
+                        .await
+                        .map_err(|source| source.to_string())?;
+                if accepted.request.method != "GET" || accepted.request.path != expected_path {
+                    return Err(format!(
+                        "unexpected router mesh GET request {} {}",
+                        accepted.request.method, accepted.request.path
+                    ));
+                }
+                request_tx
+                    .send(accepted.request.path.clone())
+                    .map_err(|source| source.to_string())?;
+                let response = serde_json::json!({ "transport": transport });
+                accepted
+                    .write_json_response(200, &response)
+                    .await
+                    .map_err(|source| source.to_string())?;
+                std::future::pending::<()>().await;
+                Ok(())
+            });
+            if let Err(error) = result {
+                tracing::debug!(%error, "gateway router async mesh GET test server stopped");
             }
         });
         let endpoint = endpoint_rx
