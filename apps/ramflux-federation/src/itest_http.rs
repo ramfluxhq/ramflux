@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::flow::ensure_receive_target_node;
 use crate::{
     FederationDiscoverySurface, RouterMeshClient, S12DiscoveryResolveRequest,
-    SharedFederationTrustState, now_unix_seconds,
+    SharedFederationTrustState, now_unix_seconds, router_post_json,
 };
 #[cfg(feature = "itest-http")]
 use crate::{ItestMvp4CanDeliverResponse, ItestMvp4TrustStatusRequest, SharedMeshObservability};
@@ -489,16 +489,8 @@ pub(crate) fn handle_mvp8_friend_request(
         envelope_id = %request.envelope.envelope_id,
         "federated friend request trust accepted; delivering to local router"
     );
-    let delivery: ramflux_node_core::EnvelopeSubmitResponse = router
-        .client
-        .post_json(
-            &router.endpoint,
-            "/mvp0/envelope",
-            &router.tls,
-            &router.server_name,
-            &request.envelope,
-        )
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    let delivery: ramflux_node_core::EnvelopeSubmitResponse =
+        router_post_json(router, "/mvp0/envelope", &request.envelope)?;
     tracing::info!(
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,
@@ -794,16 +786,8 @@ pub(crate) fn handle_s8_receive_envelope(
         target_delivery_id = request.envelope.target_delivery_id,
         "accepted federated envelope proof and delivering to local router"
     );
-    let delivery: ramflux_node_core::EnvelopeSubmitResponse = router
-        .client
-        .post_json(
-            &router.endpoint,
-            "/mvp0/envelope",
-            &router.tls,
-            &router.server_name,
-            &request.envelope,
-        )
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    let delivery: ramflux_node_core::EnvelopeSubmitResponse =
+        router_post_json(router, "/mvp0/envelope", &request.envelope)?;
     tracing::info!(
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,
@@ -831,16 +815,8 @@ pub(crate) fn handle_federated_tombstone(
     if let Some(tombstone) = request.tombstone.as_ref() {
         ramflux_node_core::verify_lifecycle_tombstone(tombstone)?;
     }
-    let response: ramflux_node_core::FederatedLifecycleTombstoneResponse = router
-        .client
-        .post_json(
-            &router.endpoint,
-            "/mvp7/federation/tombstone/apply",
-            &router.tls,
-            &router.server_name,
-            &request,
-        )
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    let response: ramflux_node_core::FederatedLifecycleTombstoneResponse =
+        router_post_json(router, "/mvp7/federation/tombstone/apply", request)?;
     state.update_and_save(store, |state| {
         state.record_lifecycle_tombstone(response.clone());
         Ok(())

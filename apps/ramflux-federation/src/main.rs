@@ -18,7 +18,7 @@ pub(crate) use flow::{
 };
 pub(crate) use helpers::{
     federation_discovery_surface, federation_node_signing_seed, mesh_tls_config,
-    mesh_transport_error, now_unix_seconds, router_mesh_client,
+    mesh_transport_error, now_unix_seconds, router_get_json, router_mesh_client, router_post_json,
 };
 #[cfg(feature = "itest-http")]
 pub(crate) use itest_http::serve_itest_http;
@@ -26,8 +26,8 @@ pub(crate) use mesh::serve_federation_mesh_mtls;
 pub(crate) use state::{
     FederationAdminDiscoverRequest, FederationAdminPeerRequest, FederationAdminPeerResponse,
     FederationDiscoverySurface, FederationMeshObservability, MeshInboundTransport,
-    RouterMeshClient, S12DiscoveryResolveRequest, SharedFederationTrustState,
-    SharedMeshObservability,
+    RouterAsyncMeshClient, RouterMeshClient, S12DiscoveryResolveRequest,
+    SharedFederationTrustState, SharedMeshObservability,
 };
 #[cfg(feature = "itest-http")]
 pub(crate) use state::{ItestMvp4CanDeliverResponse, ItestMvp4TrustStatusRequest};

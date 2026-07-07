@@ -3,7 +3,7 @@
 
 use crate::{
     FederationDiscoverySurface, FederationMeshObservability, RouterMeshClient,
-    S12DiscoveryResolveRequest, now_unix_seconds,
+    S12DiscoveryResolveRequest, now_unix_seconds, router_post_json,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -432,16 +432,8 @@ pub(crate) fn handle_s8_receive_envelope(
         "accepted federated envelope proof and delivering to local router"
     );
     let step_started = std::time::Instant::now();
-    let delivery: ramflux_node_core::EnvelopeSubmitResponse = router
-        .client
-        .post_json(
-            &router.endpoint,
-            "/mvp0/envelope",
-            &router.tls,
-            &router.server_name,
-            &request.envelope,
-        )
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    let delivery: ramflux_node_core::EnvelopeSubmitResponse =
+        router_post_json(router, "/mvp0/envelope", &request.envelope)?;
     if let Some(observability) = observability {
         observability.record_receive_router_post(step_started.elapsed());
     }
