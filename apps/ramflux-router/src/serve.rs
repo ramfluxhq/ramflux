@@ -265,7 +265,7 @@ fn spawn_router_async_compio_mesh_quic_thread(
     thread::Builder::new().name("ramflux-router-async-compio-quic-ingress".to_owned()).spawn(
         move || {
             if let Err(error) =
-                run_router_async_compio_mesh_quic_listener(&listen_addr, &tls, router, peer_auth)
+                run_router_async_compio_mesh_quic_listener(&listen_addr, &tls, router, &peer_auth)
             {
                 tracing::error!(%error, "router async compio QUIC ingress stopped");
             }
@@ -330,7 +330,7 @@ fn run_router_async_compio_mesh_quic_listener(
     listen_addr: &str,
     tls: &ramflux_transport::MeshTlsConfig,
     router: Arc<crate::router_runtime::RouterHandle>,
-    peer_auth: RouterAsyncMeshPeerAuth,
+    peer_auth: &RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     let submit_worker_threads = router_async_worker_threads();
     let submit_runtime = tokio::runtime::Builder::new_multi_thread()
