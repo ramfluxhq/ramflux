@@ -9,7 +9,8 @@ use crate::SharedMeshObservability;
 use crate::{
     FederationAdminDiscoverRequest, FederationAdminPeerRequest, FederationAdminPeerResponse,
     FederationDiscoverySurface, RouterMeshClient, S12DiscoveryResolveRequest,
-    handle_s8_forward_envelope, handle_s12_discovery_resolve, now_unix_seconds,
+    handle_s8_forward_envelope, handle_s12_discovery_resolve, now_unix_seconds, router_get_json,
+    router_post_json,
 };
 
 #[derive(serde::Deserialize)]
@@ -110,18 +111,8 @@ pub(crate) fn handle_admin_request(
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
-            let response: serde_json::Value = router
-                .client
-                .post_json(
-                    &router.endpoint,
-                    "/mvp1/prekey/fetch",
-                    &router.tls,
-                    &router.server_name,
-                    &value,
-                )
-                .map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
-                })?;
+            let response: serde_json::Value =
+                router_post_json(router, "/mvp1/prekey/fetch", &value)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/s8/federation/forward") => {
@@ -166,10 +157,7 @@ fn proxy_router_get_json(
     router: &RouterMeshClient,
     path: &str,
 ) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
-    router
-        .client
-        .get_json(&router.endpoint, path, &router.tls, &router.server_name)
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))
+    router_get_json(router, path)
 }
 
 fn handle_admin_mesh_observability_request(

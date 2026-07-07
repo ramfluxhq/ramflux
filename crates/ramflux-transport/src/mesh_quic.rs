@@ -586,6 +586,37 @@ where
 /// # Errors
 /// Returns an error when the JSON request cannot be encoded, QUIC/TLS fails, or
 /// the response cannot be decoded.
+pub fn mesh_quic_get_json_with_peer_ca_pems<R>(
+    endpoint: &str,
+    path: &str,
+    tls: &MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+) -> Result<R, TransportError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let response = run_mesh_quic_request(
+        endpoint,
+        tls,
+        server_name,
+        peer_ca_pems,
+        GatewayQuicRequest {
+            method: "GET".to_owned(),
+            path: path.to_owned(),
+            body: serde_json::Value::Null,
+        },
+    )?;
+    if (200..300).contains(&response.status) {
+        Ok(serde_json::from_value(response.body)?)
+    } else {
+        Err(TransportError::Http(format!("HTTP {}: {}", response.status, response.body)))
+    }
+}
+
+/// # Errors
+/// Returns an error when the JSON request cannot be encoded, QUIC/TLS fails, or
+/// the response cannot be decoded.
 pub async fn mesh_quic_post_json_with_peer_ca_pems_async<T, R>(
     endpoint: &str,
     path: &str,
@@ -605,6 +636,38 @@ where
         server_name,
         peer_ca_pems,
         GatewayQuicRequest { method: "POST".to_owned(), path: path.to_owned(), body },
+    )
+    .await?;
+    if (200..300).contains(&response.status) {
+        Ok(serde_json::from_value(response.body)?)
+    } else {
+        Err(TransportError::Http(format!("HTTP {}: {}", response.status, response.body)))
+    }
+}
+
+/// # Errors
+/// Returns an error when the JSON request cannot be encoded, QUIC/TLS fails, or
+/// the response cannot be decoded.
+pub async fn mesh_quic_get_json_with_peer_ca_pems_async<R>(
+    endpoint: &str,
+    path: &str,
+    tls: &MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+) -> Result<R, TransportError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let response = run_mesh_quic_request_async(
+        endpoint,
+        tls,
+        server_name,
+        peer_ca_pems,
+        GatewayQuicRequest {
+            method: "GET".to_owned(),
+            path: path.to_owned(),
+            body: serde_json::Value::Null,
+        },
     )
     .await?;
     if (200..300).contains(&response.status) {
@@ -1106,12 +1169,19 @@ fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, TransportError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{MeshQuicConnectionPool, MeshQuicPoolKey, MeshQuicPoolRegistry};
+    use super::{
+        GatewayQuicRequest, MeshQuicConnectionPool, MeshQuicPoolKey, MeshQuicPoolRegistry,
+        MeshQuicServer, MeshTlsConfig, mesh_quic_get_json_with_peer_ca_pems,
+    };
 
     #[test]
     fn mesh_quic_pool_reserves_at_most_configured_connects_under_concurrency()
@@ -1141,6 +1211,31 @@ mod tests {
     }
 
     #[test]
+    fn mesh_quic_get_json_sends_get_with_null_body() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("mesh_quic_get_json_sends_get_with_null_body")?;
+        let ca = issue_test_ca(&root)?;
+        let client = issue_test_service_cert(&ca, "node-quic-get-a", "ramflux-federation")?;
+        let server = issue_test_service_cert(&ca, "node-quic-get-a", "ramflux-router")?;
+        let (endpoint, received) =
+            spawn_mesh_quic_get_echo_server(server.tls.clone(), client.ca_pem.clone())?;
+
+        let response: serde_json::Value = mesh_quic_get_json_with_peer_ca_pems(
+            &endpoint,
+            "/mvp1/prekey/device-a",
+            &client.tls,
+            "ramflux-router",
+            &[server.ca_pem],
+        )?;
+
+        assert_eq!(response, serde_json::json!({"ok": true}));
+        let request = received.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/mvp1/prekey/device-a");
+        assert!(request.body.is_null());
+        Ok(())
+    }
+
+    #[test]
     fn mesh_quic_pool_registry_reuses_existing_pool_for_same_key()
     -> Result<(), Box<dyn std::error::Error>> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -1162,5 +1257,170 @@ mod tests {
             peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 7443)),
             peer_ca_pems: vec!["ca".to_owned()],
         }
+    }
+
+    fn spawn_mesh_quic_get_echo_server(
+        server_tls: MeshTlsConfig,
+        trusted_client_ca: String,
+    ) -> Result<(String, mpsc::Receiver<GatewayQuicRequest>), Box<dyn std::error::Error>> {
+        let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
+        let (request_tx, request_rx) = mpsc::channel::<GatewayQuicRequest>();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|source| source.to_string());
+            let Ok(runtime) = runtime else {
+                let _ = endpoint_tx.send(runtime.map(|_| String::new()));
+                return;
+            };
+            let result: Result<(), String> = runtime.block_on(async move {
+                let roots = Arc::new(move || Ok(vec![trusted_client_ca.clone()]));
+                let server =
+                    MeshQuicServer::bind_with_pem_roots_provider("127.0.0.1:0", &server_tls, roots)
+                        .map_err(|source| source.to_string())?;
+                endpoint_tx
+                    .send(
+                        server
+                            .local_addr()
+                            .map(|addr| addr.to_string())
+                            .map_err(|source| source.to_string()),
+                    )
+                    .map_err(|source| source.to_string())?;
+                let connection =
+                    server.accept_connection().await.map_err(|source| source.to_string())?;
+                let accepted = MeshQuicServer::accept_request_on_connection(&connection)
+                    .await
+                    .map_err(|source| source.to_string())?;
+                request_tx.send(accepted.request.clone()).map_err(|source| source.to_string())?;
+                accepted
+                    .write_json_response(200, &serde_json::json!({"ok": true}))
+                    .await
+                    .map_err(|source| source.to_string())?;
+                std::future::pending::<()>().await;
+                Ok(())
+            });
+            if let Err(error) = result {
+                tracing::debug!(%error, "mesh QUIC GET test server stopped");
+            }
+        });
+        let endpoint = endpoint_rx
+            .recv()
+            .map_err(|source| test_error(source.to_string()))?
+            .map_err(test_error)?;
+        Ok((endpoint, request_rx))
+    }
+
+    struct TestCa {
+        cert: PathBuf,
+        key: PathBuf,
+        pem: String,
+    }
+
+    struct TestPeerCerts {
+        tls: MeshTlsConfig,
+        ca_pem: String,
+    }
+
+    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ramflux_mesh_quic_{name}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::create_dir_all(&root)?;
+        Ok(root)
+    }
+
+    fn issue_test_ca(root: &Path) -> Result<TestCa, Box<dyn std::error::Error>> {
+        let ca_key = root.join("ca-key.pem");
+        let ca_cert = root.join("ca.pem");
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out", path_str(&ca_key)?])?;
+        run_openssl(&[
+            "req",
+            "-x509",
+            "-new",
+            "-key",
+            path_str(&ca_key)?,
+            "-out",
+            path_str(&ca_cert)?,
+            "-days",
+            "30",
+            "-subj",
+            "/CN=Ramflux Mesh QUIC GET Test CA",
+        ])?;
+        Ok(TestCa { pem: std::fs::read_to_string(&ca_cert)?, cert: ca_cert, key: ca_key })
+    }
+
+    fn issue_test_service_cert(
+        ca: &TestCa,
+        node_id: &str,
+        service_id: &str,
+    ) -> Result<TestPeerCerts, Box<dyn std::error::Error>> {
+        let service_dir =
+            ca.cert.parent().ok_or_else(|| test_error("CA cert has no parent"))?.join(service_id);
+        std::fs::create_dir_all(&service_dir)?;
+        let service_key = service_dir.join(format!("{service_id}-key.pem"));
+        let service_csr = service_dir.join(format!("{service_id}.csr"));
+        let service_cert = service_dir.join(format!("{service_id}.pem"));
+        let ext = service_dir.join(format!("{service_id}.ext"));
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out", path_str(&service_key)?])?;
+        run_openssl(&[
+            "req",
+            "-new",
+            "-key",
+            path_str(&service_key)?,
+            "-out",
+            path_str(&service_csr)?,
+            "-subj",
+            &format!("/CN={service_id}"),
+        ])?;
+        std::fs::write(
+            &ext,
+            format!(
+                "subjectAltName = DNS:{service_id}, DNS:localhost, URI:spiffe://{node_id}/{service_id}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
+            ),
+        )?;
+        run_openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            path_str(&service_csr)?,
+            "-CA",
+            path_str(&ca.cert)?,
+            "-CAkey",
+            path_str(&ca.key)?,
+            "-CAcreateserial",
+            "-out",
+            path_str(&service_cert)?,
+            "-days",
+            "30",
+            "-extfile",
+            path_str(&ext)?,
+        ])?;
+        Ok(TestPeerCerts {
+            tls: MeshTlsConfig { ca_cert: ca.cert.clone(), service_cert, service_key },
+            ca_pem: ca.pem.clone(),
+        })
+    }
+
+    fn run_openssl(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+        let status = Command::new("openssl").args(args).status()?;
+        if !status.success() {
+            return Err(format!("openssl failed with status {status}: {}", args.join(" ")).into());
+        }
+        Ok(())
+    }
+
+    fn path_str(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
+        path.to_str().ok_or_else(|| format!("non-UTF-8 path {}", path.display()).into())
+    }
+
+    fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
+        message.into().into()
     }
 }

@@ -41,6 +41,7 @@ pub use mesh_http::{
 pub use mesh_quic::{
     MeshQuicAcceptedBiStream, MeshQuicAcceptedRequest, MeshQuicAcceptedWireRequest,
     MeshQuicConnection, MeshQuicPostcardAcceptedRequest, MeshQuicServer,
+    mesh_quic_get_json_with_peer_ca_pems, mesh_quic_get_json_with_peer_ca_pems_async,
     mesh_quic_post_json_with_peer_ca_pems, mesh_quic_post_json_with_peer_ca_pems_async,
     mesh_quic_post_postcard_with_peer_ca_pems_async,
 };
