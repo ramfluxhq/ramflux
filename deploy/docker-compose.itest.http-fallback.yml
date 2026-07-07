@@ -1,0 +1,9 @@
+services:
+  ramflux-gateway:
+    environment:
+      RAMFLUX_ROUTER_ASYNC_ENDPOINT: ""
+      RAMFLUX_NOTIFY_MESH_ENDPOINT: ""
+
+  ramflux-router:
+    environment:
+      RAMFLUX_ROUTER_ASYNC_INGRESS: "0"
