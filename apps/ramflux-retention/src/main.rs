@@ -8,6 +8,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "itest-http")]
 use std::net::{TcpListener, TcpStream};
 
+const RETENTION_ASYNC_INGRESS_ENV: &str = "RAMFLUX_RETENTION_ASYNC_INGRESS";
+const RETENTION_ASYNC_LISTEN_ADDR_ENV: &str = "RAMFLUX_RETENTION_ASYNC_LISTEN_ADDR";
+const RETENTION_ASYNC_INGRESS_RUNTIME_ENV: &str = "RAMFLUX_RETENTION_ASYNC_INGRESS_RUNTIME";
+const DEFAULT_RETENTION_ASYNC_LISTEN_ADDR: &str = "0.0.0.0:17446";
+
 fn main() {
     if let Err(error) = run_service("ramflux-retention") {
         eprintln!("ramflux-retention: {error}");
@@ -33,6 +38,16 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         store.save_state(&state)?;
         start_gc_scheduler(Arc::clone(&store), config.clone());
         serve_retention_mesh_mtls(&config, Arc::clone(&store))?;
+        if retention_async_ingress_enabled()
+            && let Some(listen_addr) = retention_async_listen_addr()
+        {
+            spawn_retention_async_mesh_quic_listener(
+                listen_addr,
+                mesh_tls_config(&config),
+                Arc::clone(&store),
+                Arc::new(config.clone()),
+            )?;
+        }
         tracing::info!(service, node_id = config.node_id, "retention store initialized");
         #[cfg(feature = "itest-http")]
         if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
@@ -45,6 +60,250 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     }
     std::thread::park();
     Ok(())
+}
+
+fn retention_async_ingress_enabled() -> bool {
+    retention_async_ingress_enabled_from_value(
+        std::env::var(RETENTION_ASYNC_INGRESS_ENV).ok().as_deref(),
+    )
+}
+
+fn retention_async_ingress_enabled_from_value(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let trimmed = value.trim();
+    !(trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed.eq_ignore_ascii_case("no"))
+}
+
+fn retention_async_listen_addr() -> Option<String> {
+    retention_async_listen_addr_from_value(
+        std::env::var(RETENTION_ASYNC_LISTEN_ADDR_ENV).ok().as_deref(),
+    )
+}
+
+fn retention_async_listen_addr_from_value(value: Option<&str>) -> Option<String> {
+    let Some(value) = value else {
+        return Some(DEFAULT_RETENTION_ASYNC_LISTEN_ADDR.to_owned());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("${") {
+        return Some(DEFAULT_RETENTION_ASYNC_LISTEN_ADDR.to_owned());
+    }
+    Some(trimmed.to_owned())
+}
+
+fn spawn_retention_async_mesh_quic_listener(
+    listen_addr: String,
+    tls: ramflux_transport::MeshTlsConfig,
+    store: Arc<ramflux_node_core::RetentionRedbStore>,
+    config: Arc<ramflux_node_core::NodeServiceConfig>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let runtime = std::env::var(RETENTION_ASYNC_INGRESS_RUNTIME_ENV)
+        .ok()
+        .unwrap_or_else(|| "tokio".to_owned());
+    if !runtime.trim().starts_with("${") && !matches!(runtime.trim(), "" | "tokio" | "quinn") {
+        tracing::warn!(
+            runtime = %runtime,
+            "unsupported retention async ingress runtime; using tokio"
+        );
+    }
+    thread::Builder::new()
+        .name("ramflux-retention-async-quic-ingress".to_owned())
+        .spawn(move || {
+            if let Err(error) =
+                run_retention_async_mesh_quic_listener(&listen_addr, &tls, store, config)
+            {
+                tracing::error!(%error, "retention async QUIC ingress stopped");
+            }
+        })
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    Ok(())
+}
+
+fn run_retention_async_mesh_quic_listener(
+    listen_addr: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    store: Arc<ramflux_node_core::RetentionRedbStore>,
+    config: Arc<ramflux_node_core::NodeServiceConfig>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    runtime.block_on(async move {
+        let root_pems_provider = Arc::new(|| Ok(Vec::new()));
+        let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+            listen_addr,
+            tls,
+            root_pems_provider,
+        )
+        .map_err(|error| retention_transport_error(&error))?;
+        let local_addr = server.local_addr().map_err(|error| retention_transport_error(&error))?;
+        tracing::info!(addr = %local_addr, "retention async QUIC ingress listening");
+        loop {
+            let connection = match server.accept_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(%error, "retention async QUIC connection rejected");
+                    continue;
+                }
+            };
+            let store = Arc::clone(&store);
+            let config = Arc::clone(&config);
+            tokio::spawn(async move {
+                if let Err(error) =
+                    retention_async_quic_connection_loop(connection, store, config).await
+                {
+                    tracing::debug!(%error, "retention async QUIC connection ended");
+                }
+            });
+        }
+    })
+}
+
+async fn retention_async_quic_connection_loop(
+    connection: ramflux_transport::MeshQuicConnection,
+    store: Arc<ramflux_node_core::RetentionRedbStore>,
+    config: Arc<ramflux_node_core::NodeServiceConfig>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    loop {
+        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
+            &connection,
+        )
+        .await
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::debug!(%error, "retention async QUIC stream loop ended");
+                return Ok(());
+            }
+        };
+        let store = Arc::clone(&store);
+        let config = Arc::clone(&config);
+        tokio::spawn(async move {
+            if let Err(error) = handle_retention_async_quic_request(accepted, store, config).await {
+                tracing::warn!(%error, "retention async QUIC request failed");
+            }
+        });
+    }
+}
+
+async fn handle_retention_async_quic_request(
+    accepted: ramflux_transport::MeshQuicAcceptedRequest,
+    store: Arc<ramflux_node_core::RetentionRedbStore>,
+    config: Arc<ramflux_node_core::NodeServiceConfig>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let response = handle_retention_quic_request_value(&accepted.request, &store, &config)?;
+    if (200..300).contains(&response.status) {
+        accepted
+            .write_json_response(response.status, &response.body)
+            .await
+            .map_err(|error| retention_transport_error(&error))
+    } else {
+        accepted
+            .write_text_response(response.status, retention_quic_error_text(&response.body))
+            .await
+            .map_err(|error| retention_transport_error(&error))
+    }
+}
+
+fn handle_retention_quic_request_value(
+    request: &ramflux_transport::GatewayQuicRequest,
+    store: &ramflux_node_core::RetentionRedbStore,
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> Result<ramflux_transport::GatewayQuicResponse, ramflux_node_core::NodeCoreError> {
+    tracing::info!(
+        method = %request.method,
+        path = %request.path,
+        "retention async QUIC request received"
+    );
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/mvp7/retention/record") => {
+            let request: ramflux_node_core::RetentionRecordRequest =
+                serde_json::from_value(request.body.clone()).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            store.record_metadata(request.record.clone())?;
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(&request.record).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
+        ("POST", "/mvp7/retention/gc") => {
+            let request: ramflux_node_core::RetentionGcRequest =
+                serde_json::from_value(request.body.clone()).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            let response = store.gc_expired(request.now)?;
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(response).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
+        ("POST", "/mvp7/retention/finalize_identity_delete") => {
+            let request: ramflux_node_core::RetentionIdentityDeleteRequest =
+                serde_json::from_value(request.body.clone()).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            let signer = retention_node_signer(config);
+            let context = request.into_context(now_unix_seconds());
+            let response = store.finalize_identity_delete(&context, &signer)?;
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(response).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
+        ("GET", "/mvp7/retention/state") => {
+            let state = store.load_state()?.unwrap_or_default();
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(state).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
+        ("POST", "/retention/v1/object_relay_ttl") => {
+            let request: ramflux_node_core::RetentionRecordRequest =
+                serde_json::from_value(request.body.clone()).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            store.record_metadata(request.record.clone())?;
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(&request.record).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
+        _ => Ok(retention_text_quic_response(404, "not found")),
+    }
+}
+
+fn retention_text_quic_response(status: u16, body: &str) -> ramflux_transport::GatewayQuicResponse {
+    ramflux_transport::GatewayQuicResponse { status, body: serde_json::json!({ "error": body }) }
+}
+
+fn retention_quic_error_text(body: &serde_json::Value) -> &str {
+    body.get("error").and_then(serde_json::Value::as_str).unwrap_or("retention mesh request failed")
+}
+
+fn retention_transport_error(
+    error: &ramflux_transport::TransportError,
+) -> ramflux_node_core::NodeCoreError {
+    ramflux_node_core::NodeCoreError::ItestHttp(error.to_string())
 }
 
 #[cfg(feature = "itest-http")]
@@ -311,7 +570,6 @@ fn mesh_tls_config(
     }
 }
 
-#[cfg(feature = "itest-http")]
 fn retention_node_signer(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> ramflux_node_core::RetentionNodeSigner {
@@ -335,4 +593,43 @@ fn retention_node_signer(
 
 fn now_unix_seconds() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retention_async_ingress_defaults_on_and_opt_out_disables_it() {
+        assert!(retention_async_ingress_enabled_from_value(None));
+        assert!(retention_async_ingress_enabled_from_value(Some("1")));
+        assert!(retention_async_ingress_enabled_from_value(Some("true")));
+        assert!(retention_async_ingress_enabled_from_value(Some(
+            "${RAMFLUX_RETENTION_ASYNC_INGRESS:-1}"
+        )));
+        assert!(!retention_async_ingress_enabled_from_value(Some("0")));
+        assert!(!retention_async_ingress_enabled_from_value(Some("false")));
+        assert!(!retention_async_ingress_enabled_from_value(Some("off")));
+        assert!(!retention_async_ingress_enabled_from_value(Some("no")));
+    }
+
+    #[test]
+    fn retention_async_listen_addr_defaults_and_can_be_cleared() {
+        assert_eq!(
+            retention_async_listen_addr_from_value(None).as_deref(),
+            Some(DEFAULT_RETENTION_ASYNC_LISTEN_ADDR)
+        );
+        assert_eq!(
+            retention_async_listen_addr_from_value(Some(
+                "${RAMFLUX_RETENTION_ASYNC_LISTEN_ADDR:-0.0.0.0:17446}"
+            ))
+            .as_deref(),
+            Some(DEFAULT_RETENTION_ASYNC_LISTEN_ADDR)
+        );
+        assert_eq!(
+            retention_async_listen_addr_from_value(Some(" 127.0.0.1:17446 ")).as_deref(),
+            Some("127.0.0.1:17446")
+        );
+        assert!(retention_async_listen_addr_from_value(Some("")).is_none());
+    }
 }

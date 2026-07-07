@@ -19,6 +19,7 @@ ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
