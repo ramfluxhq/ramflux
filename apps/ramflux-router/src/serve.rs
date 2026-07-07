@@ -20,6 +20,7 @@ const ROUTER_ASYNC_INGRESS_RUNTIME_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS_RUN
 const ROUTER_ASYNC_LISTEN_ADDR_ENV: &str = "RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR";
 const ROUTER_ASYNC_INGRESS_SOCKETS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_INGRESS_SOCKETS";
 const ROUTER_ASYNC_WORKER_THREADS_ENV: &str = "RAMFLUX_ROUTER_ASYNC_WORKER_THREADS";
+const DEFAULT_ROUTER_ASYNC_LISTEN_ADDR: &str = "0.0.0.0:17444";
 
 #[cfg(feature = "itest-http")]
 pub(crate) fn serve_itest_http(
@@ -116,21 +117,37 @@ pub(crate) fn serve_router_mesh_mtls(
 }
 
 fn router_async_ingress_enabled() -> bool {
-    std::env::var(ROUTER_ASYNC_INGRESS_ENV).is_ok_and(|value| {
-        let trimmed = value.trim();
-        trimmed == "1"
-            || trimmed.eq_ignore_ascii_case("true")
-            || trimmed.eq_ignore_ascii_case("on")
-            || trimmed.eq_ignore_ascii_case("yes")
-    })
+    router_async_ingress_enabled_from_value(std::env::var(ROUTER_ASYNC_INGRESS_ENV).ok().as_deref())
+}
+
+fn router_async_ingress_enabled_from_value(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let trimmed = value.trim();
+    !(trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed.eq_ignore_ascii_case("no"))
 }
 
 fn router_async_listen_addr(config: &ramflux_node_core::NodeServiceConfig) -> Option<String> {
-    std::env::var(ROUTER_ASYNC_LISTEN_ADDR_ENV)
-        .ok()
-        .map(|value| value.trim().to_owned())
+    router_async_listen_addr_from_value(
+        config,
+        std::env::var(ROUTER_ASYNC_LISTEN_ADDR_ENV).ok().as_deref(),
+    )
+}
+
+fn router_async_listen_addr_from_value(
+    config: &ramflux_node_core::NodeServiceConfig,
+    env_value: Option<&str>,
+) -> Option<String> {
+    env_value
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_owned)
         .or_else(|| config.mesh.endpoints.get("router-async-listen").cloned())
+        .or_else(|| Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR.to_owned()))
 }
 
 fn spawn_router_async_mesh_quic_listener(
@@ -886,7 +903,12 @@ pub(crate) fn mesh_tls_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{bridge_reply_channel, positive_usize_from_value};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{
+        DEFAULT_ROUTER_ASYNC_LISTEN_ADDR, bridge_reply_channel, positive_usize_from_value,
+        router_async_ingress_enabled_from_value, router_async_listen_addr_from_value,
+    };
 
     #[test]
     fn positive_usize_from_value_rejects_empty_zero_and_invalid() {
@@ -900,6 +922,44 @@ mod tests {
     fn positive_usize_from_value_accepts_trimmed_positive_values() {
         assert_eq!(positive_usize_from_value(Some(" 4 "), 1), 4);
         assert_eq!(positive_usize_from_value(Some("1"), 8), 1);
+    }
+
+    #[test]
+    fn router_async_ingress_is_enabled_by_default_and_opt_out() {
+        assert!(router_async_ingress_enabled_from_value(None));
+        assert!(router_async_ingress_enabled_from_value(Some("")));
+        assert!(router_async_ingress_enabled_from_value(Some("true")));
+        assert!(router_async_ingress_enabled_from_value(Some("yes")));
+        assert!(!router_async_ingress_enabled_from_value(Some("0")));
+        assert!(!router_async_ingress_enabled_from_value(Some("false")));
+        assert!(!router_async_ingress_enabled_from_value(Some("off")));
+        assert!(!router_async_ingress_enabled_from_value(Some("no")));
+    }
+
+    #[test]
+    fn router_async_listen_addr_defaults_when_env_and_config_absent() {
+        let config = test_config(BTreeMap::new());
+
+        assert_eq!(
+            router_async_listen_addr_from_value(&config, None).as_deref(),
+            Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR)
+        );
+    }
+
+    #[test]
+    fn router_async_listen_addr_prefers_env_then_config() {
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert("router-async-listen".to_owned(), "127.0.0.1:27444".to_owned());
+        let config = test_config(endpoints);
+
+        assert_eq!(
+            router_async_listen_addr_from_value(&config, Some("127.0.0.1:37444")).as_deref(),
+            Some("127.0.0.1:37444")
+        );
+        assert_eq!(
+            router_async_listen_addr_from_value(&config, None).as_deref(),
+            Some("127.0.0.1:27444")
+        );
     }
 
     #[test]
@@ -923,5 +983,27 @@ mod tests {
         let result = runtime.block_on(receiver);
         assert!(result.is_err());
         Ok(())
+    }
+
+    fn test_config(endpoints: BTreeMap<String, String>) -> ramflux_node_core::NodeServiceConfig {
+        let mut allowed_service_ids = BTreeSet::new();
+        allowed_service_ids.insert("ramflux-router".to_owned());
+        ramflux_node_core::NodeServiceConfig {
+            node_id: "test-node".to_owned(),
+            service_id: "ramflux-router".to_owned(),
+            redb_path: "test.redb".to_owned(),
+            node_service_signing_seed_b64url: None,
+            mesh: ramflux_node_core::MeshConfig {
+                listen_addr: "127.0.0.1:0".to_owned(),
+                ca_cert: "ca.pem".to_owned(),
+                service_cert: "router.pem".to_owned(),
+                service_key: "router-key.pem".to_owned(),
+                allowed_service_ids,
+                endpoints,
+            },
+            gateway: None,
+            signaling: None,
+            relay: None,
+        }
     }
 }

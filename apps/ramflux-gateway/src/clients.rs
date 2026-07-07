@@ -13,6 +13,8 @@ const NOTIFY_MESH_ENDPOINT_ENV: &str = "RAMFLUX_NOTIFY_MESH_ENDPOINT";
 const NOTIFY_MESH_SERVER_NAME_ENV: &str = "RAMFLUX_NOTIFY_MESH_SERVER_NAME";
 const NOTIFY_MESH_PEER_CA_PEM_ENV: &str = "RAMFLUX_NOTIFY_MESH_PEER_CA_PEM";
 const NOTIFY_MESH_PEER_CA_PEM_FILE_ENV: &str = "RAMFLUX_NOTIFY_MESH_PEER_CA_PEM_FILE";
+const DEFAULT_ROUTER_ASYNC_ENDPOINT: &str = "ramflux-router:17444";
+const DEFAULT_NOTIFY_MESH_ENDPOINT: &str = "ramflux-notify:18085";
 
 pub(crate) fn router_mesh_client(
     config: &ramflux_node_core::NodeServiceConfig,
@@ -37,7 +39,9 @@ pub(crate) fn router_mesh_client(
 fn router_async_mesh_client(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<Option<RouterAsyncMeshClient>> {
-    let Some(endpoint) = non_empty_env(ROUTER_ASYNC_ENDPOINT_ENV) else {
+    let Some(endpoint) =
+        env_default_endpoint(ROUTER_ASYNC_ENDPOINT_ENV, DEFAULT_ROUTER_ASYNC_ENDPOINT)
+    else {
         return Ok(None);
     };
     Ok(Some(RouterAsyncMeshClient {
@@ -67,7 +71,9 @@ pub(crate) fn notify_http_client(
 fn notify_mesh_client(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<Option<NotifyMeshClient>> {
-    let Some(endpoint) = non_empty_env(NOTIFY_MESH_ENDPOINT_ENV) else {
+    let Some(endpoint) =
+        env_default_endpoint(NOTIFY_MESH_ENDPOINT_ENV, DEFAULT_NOTIFY_MESH_ENDPOINT)
+    else {
         return Ok(None);
     };
     Ok(Some(NotifyMeshClient {
@@ -95,6 +101,35 @@ fn non_empty_env(name: &str) -> Option<String> {
         }
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     })
+}
+
+fn env_default_endpoint(name: &str, default: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => endpoint_from_env_value(Some(&value), default),
+        Err(std::env::VarError::NotPresent) => endpoint_from_env_value(None, default),
+        Err(std::env::VarError::NotUnicode(_)) => None,
+    }
+}
+
+fn endpoint_from_env_value(value: Option<&str>, default: &str) -> Option<String> {
+    let Some(value) = value else {
+        return Some(default.to_owned());
+    };
+    let trimmed = value.trim();
+    if trimmed.starts_with("${") {
+        return Some(default.to_owned());
+    }
+    if trimmed.is_empty() || is_env_disabled(trimmed) {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+fn is_env_disabled(value: &str) -> bool {
+    value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("no")
 }
 
 fn notify_mesh_peer_ca_pems(
@@ -182,7 +217,7 @@ where
     R: serde::de::DeserializeOwned,
 {
     if let Some(async_mesh) = &router.async_mesh {
-        return ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
+        match ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
             &async_mesh.endpoint,
             path,
             &async_mesh.tls,
@@ -190,8 +225,27 @@ where
             &async_mesh.peer_ca_pems,
             value,
         )
-        .await;
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(error @ ramflux_transport::TransportError::Quic(_)) => {
+                tracing::warn!(%error, "router async QUIC mesh failed; falling back to blocking mesh");
+            }
+            Err(error) => return Err(error),
+        }
     }
+    router_post_json_blocking_async(router, path, value).await
+}
+
+async fn router_post_json_blocking_async<T, R>(
+    router: &RouterMeshClient,
+    path: &str,
+    value: &T,
+) -> Result<R, ramflux_transport::TransportError>
+where
+    T: serde::Serialize,
+    R: serde::de::DeserializeOwned,
+{
     // Without a configured async router endpoint, fall back to the blocking mesh client.
     // That client blocks on a std mpsc recv, so it must not run directly on the async
     // gateway QUIC worker (it would stall the runtime and the gateway never becomes ready).
@@ -285,22 +339,36 @@ pub(crate) fn notify_offline_wake(
         queued_at: ramflux_node_core::now_unix_seconds(),
     };
     let response = if let Some(mesh) = &notify.mesh {
-        ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
+        match ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
             &mesh.endpoint,
             "/s13/notify/wake",
             &mesh.tls,
             &mesh.server_name,
             &mesh.peer_ca_pems,
             &request,
-        )?
+        ) {
+            Ok(response) => response,
+            Err(error @ ramflux_transport::TransportError::Quic(_)) => {
+                tracing::warn!(%error, "notify QUIC mesh failed; falling back to HTTP notify path");
+                notify_offline_wake_http(notify, &request)?
+            }
+            Err(error) => return Err(error.into()),
+        }
     } else {
-        ramflux_node_core::itest_http_post_json(
-            &format!("{}/s13/notify/wake", notify.endpoint),
-            &request,
-        )?
+        notify_offline_wake_http(notify, &request)?
     };
     observe_s13_wake_response(&response);
     Ok(())
+}
+
+fn notify_offline_wake_http(
+    notify: &NotifyHttpClient,
+    request: &S13WakeRequest,
+) -> anyhow::Result<S13WakeResponse> {
+    Ok(ramflux_node_core::itest_http_post_json(
+        &format!("{}/s13/notify/wake", notify.endpoint),
+        request,
+    )?)
 }
 
 fn observe_s13_wake_response(response: &S13WakeResponse) {
@@ -336,12 +404,43 @@ pub(crate) fn notification_class_for_envelope(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn default_mesh_endpoints_enable_quic_and_explicit_close_disables_it() {
+        assert_eq!(
+            endpoint_from_env_value(None, DEFAULT_ROUTER_ASYNC_ENDPOINT).as_deref(),
+            Some(DEFAULT_ROUTER_ASYNC_ENDPOINT)
+        );
+        assert_eq!(
+            endpoint_from_env_value(
+                Some("${RAMFLUX_ROUTER_ASYNC_ENDPOINT:-}"),
+                DEFAULT_ROUTER_ASYNC_ENDPOINT
+            )
+            .as_deref(),
+            Some(DEFAULT_ROUTER_ASYNC_ENDPOINT)
+        );
+        assert_eq!(
+            endpoint_from_env_value(None, DEFAULT_NOTIFY_MESH_ENDPOINT).as_deref(),
+            Some(DEFAULT_NOTIFY_MESH_ENDPOINT)
+        );
+        assert_eq!(
+            endpoint_from_env_value(Some(" custom-router:17444 "), DEFAULT_ROUTER_ASYNC_ENDPOINT)
+                .as_deref(),
+            Some("custom-router:17444")
+        );
+        assert!(endpoint_from_env_value(Some(""), DEFAULT_ROUTER_ASYNC_ENDPOINT).is_none());
+        assert!(endpoint_from_env_value(Some("0"), DEFAULT_ROUTER_ASYNC_ENDPOINT).is_none());
+        assert!(endpoint_from_env_value(Some("off"), DEFAULT_NOTIFY_MESH_ENDPOINT).is_none());
+        assert!(endpoint_from_env_value(Some("false"), DEFAULT_NOTIFY_MESH_ENDPOINT).is_none());
+    }
 
     #[test]
     fn notify_offline_wake_posts_over_mesh_when_configured()
@@ -380,6 +479,36 @@ mod tests {
     }
 
     #[test]
+    fn notify_offline_wake_falls_back_to_http_when_quic_transport_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("gateway_notify_mesh_fallback")?;
+        let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let notify = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-notify")?;
+        let (endpoint, received) = spawn_notify_http_echo_server()?;
+        let signer = ramflux_node_core::NodeServiceSigningKey::from_seed(test_signing_seed());
+        let client = NotifyHttpClient {
+            endpoint: format!("http://{endpoint}"),
+            signer: signer.clone(),
+            mesh: Some(NotifyMeshClient {
+                endpoint: "127.0.0.1:0".to_owned(),
+                server_name: "ramflux-notify".to_owned(),
+                tls: gateway.tls,
+                peer_ca_pems: vec![notify.ca_pem],
+            }),
+        };
+        let envelope = test_envelope("env_notify_mesh_fallback");
+
+        notify_offline_wake(&client, "target_notify_mesh_fallback", &envelope)?;
+
+        let request = received.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(request.device_delivery_id, "target_notify_mesh_fallback");
+        assert_eq!(request.wake.wake_id, "wake_env_notify_mesh_fallback");
+        signer.verify_notification_wake(&request.wake)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn router_post_json_async_posts_over_mesh_when_configured()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_cert_root("gateway_router_async_mesh")?;
@@ -410,6 +539,97 @@ mod tests {
         assert_eq!(request.envelope_id, "env_router_async_mesh");
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn router_post_json_async_falls_back_to_blocking_mesh_when_quic_transport_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("gateway_router_async_mesh_fallback")?;
+        let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let router = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-router")?;
+        let (endpoint, received) =
+            spawn_router_blocking_mesh_echo_server(router.tls.clone(), gateway.ca_pem.clone())?;
+        let gateway_tls_trusting_router = ramflux_transport::MeshTlsConfig {
+            ca_cert: router.tls.ca_cert.clone(),
+            service_cert: gateway.tls.service_cert.clone(),
+            service_key: gateway.tls.service_key.clone(),
+        };
+        let client = RouterMeshClient {
+            endpoint,
+            server_name: "ramflux-router".to_owned(),
+            tls: gateway_tls_trusting_router.clone(),
+            client: ramflux_transport::MeshHttpClient::new(),
+            async_mesh: Some(RouterAsyncMeshClient {
+                endpoint: "127.0.0.1:0".to_owned(),
+                server_name: "ramflux-router".to_owned(),
+                tls: gateway_tls_trusting_router,
+                peer_ca_pems: vec![router.ca_pem],
+            }),
+        };
+        let envelope = test_envelope("env_router_async_mesh_fallback");
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let response: ramflux_node_core::EnvelopeSubmitResponse =
+            runtime.block_on(router_post_json_async(&client, "/mvp0/envelope", &envelope))?;
+
+        assert_eq!(response.outcome, "offline_queued");
+        assert_eq!(response.target_delivery_id, "target_notify_mesh");
+        let request = received.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(request.envelope_id, "env_router_async_mesh_fallback");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_clients_default_to_quic_mesh_endpoints_when_env_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("gateway_default_quic_clients")?;
+        let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
+        let config = test_gateway_config(&gateway.tls);
+
+        let router = router_async_mesh_client(&config)?.ok_or_else(|| {
+            test_error("router async mesh client should default to production QUIC")
+        })?;
+        let notify = notify_mesh_client(&config)?
+            .ok_or_else(|| test_error("notify mesh client should default to production QUIC"))?;
+
+        assert_eq!(router.endpoint, DEFAULT_ROUTER_ASYNC_ENDPOINT);
+        assert_eq!(notify.endpoint, DEFAULT_NOTIFY_MESH_ENDPOINT);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn spawn_notify_http_echo_server()
+    -> Result<(String, mpsc::Receiver<S13WakeRequest>), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?.to_string();
+        let (request_tx, request_rx) = mpsc::channel::<S13WakeRequest>();
+        std::thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                let (mut stream, _) = listener.accept().map_err(|source| source.to_string())?;
+                let request = ramflux_node_core::read_itest_http_request(&mut stream)
+                    .map_err(|source| source.to_string())?
+                    .ok_or_else(|| "missing notify HTTP request".to_owned())?;
+                if request.method != "POST" || request.path != "/s13/notify/wake" {
+                    return Err(format!(
+                        "unexpected notify HTTP request {} {}",
+                        request.method, request.path
+                    ));
+                }
+                let request: S13WakeRequest =
+                    serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
+                let response = S13WakeResponse {
+                    entry: notify_queue_entry_from_request(&request),
+                    attempts: Vec::new(),
+                };
+                request_tx.send(request).map_err(|source| source.to_string())?;
+                ramflux_node_core::write_itest_json_response(&mut stream, "200 OK", &response)
+                    .map_err(|source| source.to_string())
+            })();
+            if let Err(error) = result {
+                tracing::debug!(%error, "gateway notify HTTP fallback test server stopped");
+            }
+        });
+        Ok((endpoint, request_rx))
     }
 
     fn spawn_notify_mesh_echo_server(
@@ -478,6 +698,51 @@ mod tests {
             .recv()
             .map_err(|source| test_error(source.to_string()))?
             .map_err(test_error)?;
+        Ok((endpoint, request_rx))
+    }
+
+    fn spawn_router_blocking_mesh_echo_server(
+        server_tls: ramflux_transport::MeshTlsConfig,
+        trusted_gateway_ca: String,
+    ) -> Result<(String, mpsc::Receiver<ramflux_protocol::Envelope>), Box<dyn std::error::Error>>
+    {
+        let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
+        let endpoint = server.local_addr()?.to_string();
+        let (request_tx, request_rx) = mpsc::channel::<ramflux_protocol::Envelope>();
+        std::thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                let mut accepted = server
+                    .accept_authenticated_with_pem_roots(&server_tls, &[trusted_gateway_ca])
+                    .map_err(|source| source.to_string())?
+                    .stream;
+                let request = ramflux_transport::read_mesh_http_request(&mut accepted)
+                    .map_err(|source| source.to_string())?
+                    .ok_or_else(|| "missing router blocking mesh request".to_owned())?;
+                if request.method != "POST" || request.path != "/mvp0/envelope" {
+                    return Err(format!(
+                        "unexpected router blocking mesh request {} {}",
+                        request.method, request.path
+                    ));
+                }
+                let request: ramflux_protocol::Envelope =
+                    serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
+                let response = ramflux_node_core::EnvelopeSubmitResponse {
+                    outcome: "offline_queued".to_owned(),
+                    target_delivery_id: request.target_delivery_id.clone(),
+                    inbox_seq: Some(1),
+                    cursor: None,
+                    nack: None,
+                };
+                request_tx.send(request).map_err(|source| source.to_string())?;
+                ramflux_transport::write_mesh_json_response(&mut accepted, "200 OK", &response)
+                    .map_err(|source| source.to_string())?;
+                ramflux_transport::close_mesh_server_stream(&mut accepted)
+                    .map_err(|source| source.to_string())
+            })();
+            if let Err(error) = result {
+                tracing::debug!(%error, "gateway router blocking mesh fallback test server stopped");
+            }
+        });
         Ok((endpoint, request_rx))
     }
 
@@ -729,6 +994,33 @@ mod tests {
             created_at: 1_760_000_000,
             encrypted_payload: "encrypted_payload".to_owned(),
             payload_hash: "payload_hash".to_owned(),
+        }
+    }
+
+    fn test_gateway_config(
+        tls: &ramflux_transport::MeshTlsConfig,
+    ) -> ramflux_node_core::NodeServiceConfig {
+        let mut allowed_service_ids = BTreeSet::new();
+        allowed_service_ids.insert("ramflux-gateway".to_owned());
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert("router".to_owned(), "ramflux-router:7443".to_owned());
+        endpoints.insert("notify".to_owned(), "ramflux-notify:7443".to_owned());
+        ramflux_node_core::NodeServiceConfig {
+            node_id: "test-node".to_owned(),
+            service_id: "ramflux-gateway".to_owned(),
+            redb_path: "test.redb".to_owned(),
+            node_service_signing_seed_b64url: None,
+            mesh: ramflux_node_core::MeshConfig {
+                listen_addr: "127.0.0.1:0".to_owned(),
+                ca_cert: tls.ca_cert.display().to_string(),
+                service_cert: tls.service_cert.display().to_string(),
+                service_key: tls.service_key.display().to_string(),
+                allowed_service_ids,
+                endpoints,
+            },
+            gateway: None,
+            signaling: None,
+            relay: None,
         }
     }
 
