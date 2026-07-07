@@ -111,7 +111,12 @@ pub(crate) fn serve_router_mesh_mtls(
     if router_async_ingress_enabled()
         && let Some(listen_addr) = router_async_listen_addr(config)
     {
-        spawn_router_async_mesh_quic_listener(listen_addr, mesh_tls_config(config), router)?;
+        spawn_router_async_mesh_quic_listener(
+            listen_addr,
+            mesh_tls_config(config),
+            router,
+            RouterAsyncMeshPeerAuth::from_config(config),
+        )?;
     }
     Ok(())
 }
@@ -142,25 +147,91 @@ fn router_async_listen_addr_from_value(
     config: &ramflux_node_core::NodeServiceConfig,
     env_value: Option<&str>,
 ) -> Option<String> {
-    env_value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| config.mesh.endpoints.get("router-async-listen").cloned())
-        .or_else(|| Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR.to_owned()))
+    let Some(value) = env_value else {
+        return config
+            .mesh
+            .endpoints
+            .get("router-async-listen")
+            .cloned()
+            .or_else(|| Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR.to_owned()));
+    };
+    let trimmed = value.trim();
+    if trimmed.starts_with("${") {
+        return Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR.to_owned());
+    }
+    if trimmed.is_empty() {
+        return config
+            .mesh
+            .endpoints
+            .get("router-async-listen")
+            .cloned()
+            .or_else(|| Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR.to_owned()));
+    }
+    Some(trimmed.to_owned())
+}
+
+#[derive(Clone)]
+struct RouterAsyncMeshPeerAuth {
+    local_service_id: String,
+    allowed_service_ids: std::collections::BTreeSet<String>,
+}
+
+impl RouterAsyncMeshPeerAuth {
+    fn from_config(config: &ramflux_node_core::NodeServiceConfig) -> Self {
+        Self {
+            local_service_id: config.service_id.clone(),
+            allowed_service_ids: config.mesh.allowed_service_ids.clone(),
+        }
+    }
+
+    fn authorize(&self, peer_spiffe_uri: Option<&str>) -> anyhow::Result<String> {
+        Ok(ramflux_node_core::authorize_mesh_peer(
+            &self.local_service_id,
+            &self.allowed_service_ids,
+            peer_spiffe_uri,
+        )?
+        .service_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RouterAsyncIngressRuntime {
+    Tokio,
+    Compio,
+}
+
+fn router_async_ingress_runtime_from_value(value: Option<&str>) -> RouterAsyncIngressRuntime {
+    match value.map(str::trim) {
+        Some("compio") => RouterAsyncIngressRuntime::Compio,
+        Some("tokio" | "quinn") | None => RouterAsyncIngressRuntime::Tokio,
+        Some(value) if value.is_empty() || value.starts_with("${") => {
+            RouterAsyncIngressRuntime::Tokio
+        }
+        Some(other) => {
+            tracing::warn!(
+                runtime = %other,
+                "unsupported router async ingress runtime; using tokio"
+            );
+            RouterAsyncIngressRuntime::Tokio
+        }
+    }
 }
 
 fn spawn_router_async_mesh_quic_listener(
     listen_addr: String,
     tls: ramflux_transport::MeshTlsConfig,
     router: &Arc<crate::router_runtime::RouterHandle>,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
-    match std::env::var(ROUTER_ASYNC_INGRESS_RUNTIME_ENV).as_deref() {
-        Ok("compio") => spawn_router_async_compio_mesh_quic_thread(listen_addr, tls, router),
-        Ok("tokio" | "quinn") | Err(_) => {
-            spawn_router_async_tokio_mesh_quic_thread(listen_addr, tls, router)
+    match router_async_ingress_runtime_from_value(
+        std::env::var(ROUTER_ASYNC_INGRESS_RUNTIME_ENV).ok().as_deref(),
+    ) {
+        RouterAsyncIngressRuntime::Compio => {
+            spawn_router_async_compio_mesh_quic_thread(listen_addr, tls, router, peer_auth)
         }
-        Ok(other) => anyhow::bail!("unsupported router async ingress runtime {other}"),
+        RouterAsyncIngressRuntime::Tokio => {
+            spawn_router_async_tokio_mesh_quic_thread(listen_addr, tls, router, peer_auth)
+        }
     }
 }
 
@@ -168,11 +239,14 @@ fn spawn_router_async_tokio_mesh_quic_thread(
     listen_addr: String,
     tls: ramflux_transport::MeshTlsConfig,
     router: &Arc<crate::router_runtime::RouterHandle>,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     let router = Arc::clone(router);
     thread::Builder::new().name("ramflux-router-async-quic-ingress".to_owned()).spawn(
         move || {
-            if let Err(error) = run_router_async_mesh_quic_listener(&listen_addr, &tls, router) {
+            if let Err(error) =
+                run_router_async_mesh_quic_listener(&listen_addr, &tls, router, peer_auth)
+            {
                 tracing::error!(%error, "router async QUIC ingress stopped");
             }
         },
@@ -185,12 +259,13 @@ fn spawn_router_async_compio_mesh_quic_thread(
     listen_addr: String,
     tls: ramflux_transport::MeshTlsConfig,
     router: &Arc<crate::router_runtime::RouterHandle>,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     let router = Arc::clone(router);
     thread::Builder::new().name("ramflux-router-async-compio-quic-ingress".to_owned()).spawn(
         move || {
             if let Err(error) =
-                run_router_async_compio_mesh_quic_listener(&listen_addr, &tls, router)
+                run_router_async_compio_mesh_quic_listener(&listen_addr, &tls, router, peer_auth)
             {
                 tracing::error!(%error, "router async compio QUIC ingress stopped");
             }
@@ -204,6 +279,7 @@ fn spawn_router_async_compio_mesh_quic_thread(
     _listen_addr: String,
     _tls: ramflux_transport::MeshTlsConfig,
     _router: &Arc<crate::router_runtime::RouterHandle>,
+    _peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "{ROUTER_ASYNC_INGRESS_RUNTIME_ENV}=compio requested but ramflux-router compio-mesh is not compiled"
@@ -214,6 +290,7 @@ fn run_router_async_mesh_quic_listener(
     listen_addr: &str,
     tls: &ramflux_transport::MeshTlsConfig,
     router: Arc<crate::router_runtime::RouterHandle>,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     let worker_threads = router_async_worker_threads();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -231,8 +308,15 @@ fn run_router_async_mesh_quic_listener(
         );
         for (endpoint_index, server) in servers.into_iter().enumerate() {
             let endpoint_router = Arc::clone(&router);
+            let endpoint_peer_auth = peer_auth.clone();
             tokio::spawn(async move {
-                router_async_mesh_quic_accept_loop(endpoint_index, server, endpoint_router).await;
+                router_async_mesh_quic_accept_loop(
+                    endpoint_index,
+                    server,
+                    endpoint_router,
+                    endpoint_peer_auth,
+                )
+                .await;
             });
         }
         std::future::pending::<()>().await;
@@ -246,6 +330,7 @@ fn run_router_async_compio_mesh_quic_listener(
     listen_addr: &str,
     tls: &ramflux_transport::MeshTlsConfig,
     router: Arc<crate::router_runtime::RouterHandle>,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     let submit_worker_threads = router_async_worker_threads();
     let submit_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -266,6 +351,7 @@ fn run_router_async_compio_mesh_quic_listener(
         let listen_addr = listen_addr.to_owned();
         let tls = tls.clone();
         let endpoint_bridge = bridge.clone();
+        let endpoint_peer_auth = peer_auth.clone();
         let handle = thread::Builder::new()
             .name(format!("ramflux-router-async-compio-quic-ingress-{endpoint_index}"))
             .spawn(move || {
@@ -274,6 +360,7 @@ fn run_router_async_compio_mesh_quic_listener(
                     &listen_addr,
                     &tls,
                     endpoint_bridge,
+                    endpoint_peer_auth,
                     socket_count,
                 ) {
                     tracing::error!(
@@ -300,6 +387,7 @@ fn run_router_async_compio_mesh_quic_reactor(
     listen_addr: &str,
     tls: &ramflux_transport::MeshTlsConfig,
     bridge: RouterSubmitBridge,
+    peer_auth: RouterAsyncMeshPeerAuth,
     socket_count: usize,
 ) -> anyhow::Result<()> {
     let runtime = compio::runtime::Runtime::new()?;
@@ -317,7 +405,7 @@ fn run_router_async_compio_mesh_quic_reactor(
             addr = %local_addr,
             "router async compio QUIC reactor listening"
         );
-        router_async_compio_mesh_quic_accept_loop(endpoint_index, server, bridge).await;
+        router_async_compio_mesh_quic_accept_loop(endpoint_index, server, bridge, peer_auth).await;
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     })
@@ -374,6 +462,7 @@ async fn router_async_compio_mesh_quic_accept_loop(
     endpoint_index: usize,
     server: ramflux_transport::CompioMeshQuicServer,
     bridge: RouterSubmitBridge,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) {
     loop {
         let connection = match server.accept_connection().await {
@@ -388,9 +477,14 @@ async fn router_async_compio_mesh_quic_accept_loop(
             }
         };
         let connection_bridge = bridge.clone();
+        let connection_peer_auth = peer_auth.clone();
         compio::runtime::spawn(async move {
-            if let Err(error) =
-                router_async_compio_mesh_quic_connection_loop(connection, connection_bridge).await
+            if let Err(error) = router_async_compio_mesh_quic_connection_loop(
+                connection,
+                connection_bridge,
+                connection_peer_auth,
+            )
+            .await
             {
                 tracing::debug!(
                     endpoint_index,
@@ -527,11 +621,12 @@ impl RouterSubmitBridge {
     async fn handle_json_request(
         &self,
         request: ramflux_transport::GatewayQuicRequest,
+        peer_service_id: String,
     ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
         let (sender, receiver) = bridge_reply_channel::<ramflux_transport::GatewayQuicResponse>();
         let router = Arc::clone(&self.router);
         self.tokio.spawn(async move {
-            let result = handle_mesh_quic_request_value(&request, &router, "ramflux-gateway").await;
+            let result = handle_mesh_quic_request_value(&request, &router, &peer_service_id).await;
             sender.send(result);
         });
         receiver.await
@@ -659,6 +754,7 @@ async fn router_async_mesh_quic_accept_loop(
     endpoint_index: usize,
     server: ramflux_transport::MeshQuicServer,
     router: Arc<crate::router_runtime::RouterHandle>,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) {
     loop {
         let connection = match server.accept_connection().await {
@@ -669,9 +765,14 @@ async fn router_async_mesh_quic_accept_loop(
             }
         };
         let connection_router = Arc::clone(&router);
+        let connection_peer_auth = peer_auth.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                router_async_mesh_quic_connection_loop(connection, connection_router).await
+            if let Err(error) = router_async_mesh_quic_connection_loop(
+                connection,
+                connection_router,
+                connection_peer_auth,
+            )
+            .await
             {
                 tracing::debug!(endpoint_index, %error, "router async QUIC connection ended");
             }
@@ -682,7 +783,9 @@ async fn router_async_mesh_quic_accept_loop(
 async fn router_async_mesh_quic_connection_loop(
     connection: ramflux_transport::MeshQuicConnection,
     router: Arc<crate::router_runtime::RouterHandle>,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
+    let peer_service_id = Arc::new(peer_auth.authorize(connection.peer_spiffe_uri())?);
     loop {
         let stream =
             match ramflux_transport::MeshQuicServer::accept_bi_on_connection(&connection).await {
@@ -693,6 +796,7 @@ async fn router_async_mesh_quic_connection_loop(
                 }
             };
         let request_router = Arc::clone(&router);
+        let peer_service_id = Arc::clone(&peer_service_id);
         tokio::spawn(async move {
             let accepted =
                 match ramflux_transport::MeshQuicServer::read_wire_request_from_bi(stream).await {
@@ -702,8 +806,12 @@ async fn router_async_mesh_quic_connection_loop(
                         return;
                     }
                 };
-            if let Err(error) =
-                handle_router_async_mesh_quic_request(accepted, request_router).await
+            if let Err(error) = handle_router_async_mesh_quic_request(
+                accepted,
+                request_router,
+                peer_service_id.as_str(),
+            )
+            .await
             {
                 tracing::warn!(%error, "router async QUIC request failed");
             }
@@ -714,11 +822,11 @@ async fn router_async_mesh_quic_connection_loop(
 async fn handle_router_async_mesh_quic_request(
     accepted: ramflux_transport::MeshQuicAcceptedWireRequest,
     router: Arc<crate::router_runtime::RouterHandle>,
+    peer_service_id: &str,
 ) -> anyhow::Result<()> {
     match accepted {
         ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) => {
-            match handle_mesh_quic_request_value(&accepted.request, &router, "ramflux-gateway")
-                .await
+            match handle_mesh_quic_request_value(&accepted.request, &router, peer_service_id).await
             {
                 Ok(response) if (200..300).contains(&response.status) => {
                     accepted.write_json_response(response.status, &response.body).await?;
@@ -766,7 +874,9 @@ async fn handle_router_postcard_mesh_quic_request(
 async fn router_async_compio_mesh_quic_connection_loop(
     connection: ramflux_transport::CompioMeshQuicConnection,
     bridge: RouterSubmitBridge,
+    peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
+    let peer_service_id = Arc::new(peer_auth.authorize(connection.peer_spiffe_uri())?);
     loop {
         let accepted = match ramflux_transport::CompioMeshQuicServer::accept_json_or_postcard_request_on_connection(&connection).await {
             Ok(accepted) => accepted,
@@ -776,9 +886,14 @@ async fn router_async_compio_mesh_quic_connection_loop(
             }
         };
         let request_bridge = bridge.clone();
+        let peer_service_id = Arc::clone(&peer_service_id);
         compio::runtime::spawn(async move {
-            if let Err(error) =
-                handle_router_async_compio_mesh_quic_request(accepted, request_bridge).await
+            if let Err(error) = handle_router_async_compio_mesh_quic_request(
+                accepted,
+                request_bridge,
+                peer_service_id.as_str(),
+            )
+            .await
             {
                 tracing::warn!(%error, "router async compio QUIC request failed");
             }
@@ -791,10 +906,14 @@ async fn router_async_compio_mesh_quic_connection_loop(
 async fn handle_router_async_compio_mesh_quic_request(
     accepted: ramflux_transport::CompioMeshQuicAcceptedWireRequest,
     bridge: RouterSubmitBridge,
+    peer_service_id: &str,
 ) -> anyhow::Result<()> {
     match accepted {
         ramflux_transport::CompioMeshQuicAcceptedWireRequest::Json(accepted) => {
-            match bridge.handle_json_request(accepted.request.clone()).await {
+            match bridge
+                .handle_json_request(accepted.request.clone(), peer_service_id.to_owned())
+                .await
+            {
                 Ok(response) if (200..300).contains(&response.status) => {
                     accepted.write_json_response(response.status, &response.body).await?;
                 }
@@ -906,8 +1025,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        DEFAULT_ROUTER_ASYNC_LISTEN_ADDR, bridge_reply_channel, positive_usize_from_value,
-        router_async_ingress_enabled_from_value, router_async_listen_addr_from_value,
+        DEFAULT_ROUTER_ASYNC_LISTEN_ADDR, RouterAsyncIngressRuntime, RouterAsyncMeshPeerAuth,
+        bridge_reply_channel, positive_usize_from_value, router_async_ingress_enabled_from_value,
+        router_async_ingress_runtime_from_value, router_async_listen_addr_from_value,
     };
 
     #[test]
@@ -960,6 +1080,49 @@ mod tests {
             router_async_listen_addr_from_value(&config, None).as_deref(),
             Some("127.0.0.1:27444")
         );
+    }
+
+    #[test]
+    fn router_async_listen_addr_and_runtime_tolerate_literal_compose_defaults() {
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert("router-async-listen".to_owned(), "127.0.0.1:27444".to_owned());
+        let config = test_config(endpoints);
+
+        assert_eq!(
+            router_async_listen_addr_from_value(
+                &config,
+                Some("${RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR:-0.0.0.0:17444}")
+            )
+            .as_deref(),
+            Some(DEFAULT_ROUTER_ASYNC_LISTEN_ADDR)
+        );
+        assert_eq!(
+            router_async_ingress_runtime_from_value(Some(
+                "${RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME:-tokio}"
+            )),
+            RouterAsyncIngressRuntime::Tokio
+        );
+        assert_eq!(
+            router_async_ingress_runtime_from_value(Some("unsupported")),
+            RouterAsyncIngressRuntime::Tokio
+        );
+        assert_eq!(
+            router_async_ingress_runtime_from_value(Some("compio")),
+            RouterAsyncIngressRuntime::Compio
+        );
+    }
+
+    #[test]
+    fn router_async_peer_auth_uses_certificate_peer_service_id() -> anyhow::Result<()> {
+        let mut config = test_config(BTreeMap::new());
+        config.mesh.allowed_service_ids.insert("ramflux-retention".to_owned());
+        let peer_auth = RouterAsyncMeshPeerAuth::from_config(&config);
+
+        let peer_service_id = peer_auth.authorize(Some("spiffe://node-a/ramflux-retention"))?;
+        assert_eq!(peer_service_id, "ramflux-retention");
+        assert!(peer_auth.authorize(Some("spiffe://node-a/ramflux-unknown")).is_err());
+        assert!(peer_auth.authorize(None).is_err());
+        Ok(())
     }
 
     #[test]

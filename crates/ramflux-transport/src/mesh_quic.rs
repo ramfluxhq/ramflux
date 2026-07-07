@@ -10,6 +10,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::mesh_tls::extract_spiffe_uri_from_certificate;
 use crate::perf_metrics::{
     record_mesh_client_acquire, record_mesh_client_cached_request_failure,
     record_mesh_client_connect, record_mesh_client_exchange, record_mesh_client_open_bi,
@@ -50,6 +51,7 @@ pub struct MeshQuicServer {
 
 pub struct MeshQuicConnection {
     connection: quinn::Connection,
+    peer_spiffe_uri: Option<String>,
 }
 
 pub struct MeshQuicAcceptedRequest {
@@ -371,7 +373,8 @@ impl MeshQuicServer {
         })?;
         record_mesh_server_quic_connection_accepted();
         tracing::info!(%remote_address, "mesh QUIC handshake completed");
-        Ok(MeshQuicConnection { connection })
+        let peer_spiffe_uri = quinn_peer_spiffe_uri(&connection)?;
+        Ok(MeshQuicConnection { connection, peer_spiffe_uri })
     }
 
     /// # Errors
@@ -469,6 +472,24 @@ impl MeshQuicConnection {
     #[must_use]
     pub fn remote_address(&self) -> SocketAddr {
         self.connection.remote_address()
+    }
+
+    #[must_use]
+    pub fn peer_spiffe_uri(&self) -> Option<&str> {
+        self.peer_spiffe_uri.as_deref()
+    }
+}
+
+fn quinn_peer_spiffe_uri(connection: &quinn::Connection) -> Result<Option<String>, TransportError> {
+    let Some(peer_identity) = connection.peer_identity() else {
+        return Ok(None);
+    };
+    match peer_identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>() {
+        Ok(certs) => match certs.first() {
+            Some(cert) => extract_spiffe_uri_from_certificate(cert),
+            None => Ok(None),
+        },
+        Err(_identity) => Ok(None),
     }
 }
 
@@ -1183,6 +1204,8 @@ mod tests {
         MeshQuicServer, MeshTlsConfig, mesh_quic_get_json_with_peer_ca_pems,
     };
 
+    type CapturedQuicRequest = (Option<String>, GatewayQuicRequest);
+
     #[test]
     fn mesh_quic_pool_reserves_at_most_configured_connects_under_concurrency()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1228,7 +1251,9 @@ mod tests {
         )?;
 
         assert_eq!(response, serde_json::json!({"ok": true}));
-        let request = received.recv_timeout(std::time::Duration::from_secs(5))?;
+        let (peer_spiffe_uri, request) =
+            received.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert_eq!(peer_spiffe_uri.as_deref(), Some("spiffe://node-quic-get-a/ramflux-federation"));
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/mvp1/prekey/device-a");
         assert!(request.body.is_null());
@@ -1262,9 +1287,9 @@ mod tests {
     fn spawn_mesh_quic_get_echo_server(
         server_tls: MeshTlsConfig,
         trusted_client_ca: String,
-    ) -> Result<(String, mpsc::Receiver<GatewayQuicRequest>), Box<dyn std::error::Error>> {
+    ) -> Result<(String, mpsc::Receiver<CapturedQuicRequest>), Box<dyn std::error::Error>> {
         let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
-        let (request_tx, request_rx) = mpsc::channel::<GatewayQuicRequest>();
+        let (request_tx, request_rx) = mpsc::channel::<CapturedQuicRequest>();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1292,7 +1317,12 @@ mod tests {
                 let accepted = MeshQuicServer::accept_request_on_connection(&connection)
                     .await
                     .map_err(|source| source.to_string())?;
-                request_tx.send(accepted.request.clone()).map_err(|source| source.to_string())?;
+                request_tx
+                    .send((
+                        connection.peer_spiffe_uri().map(str::to_owned),
+                        accepted.request.clone(),
+                    ))
+                    .map_err(|source| source.to_string())?;
                 accepted
                     .write_json_response(200, &serde_json::json!({"ok": true}))
                     .await
