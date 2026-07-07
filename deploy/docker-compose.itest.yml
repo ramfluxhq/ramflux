@@ -65,7 +65,11 @@ services:
       RAMFLUX_ITEST_ROUTER_HTTP_ADDR: "0.0.0.0:18080"
       RAMFLUX_ROUTER_GROUP_COMMIT: "${RAMFLUX_ROUTER_GROUP_COMMIT:-0}"
       RAMFLUX_ROUTER_ASYNC_INGRESS: "1"
-      RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME: "${RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME:-tokio}"
+      # Plain literal (not ${VAR:-tokio}): podman compose does not expand
+      # ${VAR:-default}, so the literal string would reach the router and the
+      # runtime match rejects it ("unsupported ... runtime") now that async
+      # ingress defaults on. Perf runs select compio via the *-compio overlay.
+      RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME: "tokio"
       RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR: "0.0.0.0:17444"
       RAMFLUX_ROUTER_ASYNC_INGRESS_SOCKETS: "${RAMFLUX_ROUTER_ASYNC_INGRESS_SOCKETS:-1}"
       RAMFLUX_ROUTER_ASYNC_WORKER_THREADS: "${RAMFLUX_ROUTER_ASYNC_WORKER_THREADS:-}"
