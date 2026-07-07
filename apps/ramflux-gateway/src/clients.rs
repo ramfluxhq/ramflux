@@ -14,7 +14,6 @@ const NOTIFY_MESH_SERVER_NAME_ENV: &str = "RAMFLUX_NOTIFY_MESH_SERVER_NAME";
 const NOTIFY_MESH_PEER_CA_PEM_ENV: &str = "RAMFLUX_NOTIFY_MESH_PEER_CA_PEM";
 const NOTIFY_MESH_PEER_CA_PEM_FILE_ENV: &str = "RAMFLUX_NOTIFY_MESH_PEER_CA_PEM_FILE";
 const DEFAULT_ROUTER_ASYNC_ENDPOINT: &str = "ramflux-router:17444";
-const DEFAULT_NOTIFY_MESH_ENDPOINT: &str = "ramflux-notify:18085";
 
 pub(crate) fn router_mesh_client(
     config: &ramflux_node_core::NodeServiceConfig,
@@ -71,9 +70,7 @@ pub(crate) fn notify_http_client(
 fn notify_mesh_client(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<Option<NotifyMeshClient>> {
-    let Some(endpoint) =
-        env_default_endpoint(NOTIFY_MESH_ENDPOINT_ENV, DEFAULT_NOTIFY_MESH_ENDPOINT)
-    else {
+    let Some(endpoint) = env_configured_endpoint(NOTIFY_MESH_ENDPOINT_ENV) else {
         return Ok(None);
     };
     Ok(Some(NotifyMeshClient {
@@ -109,6 +106,21 @@ fn env_default_endpoint(name: &str, default: &str) -> Option<String> {
         Err(std::env::VarError::NotPresent) => endpoint_from_env_value(None, default),
         Err(std::env::VarError::NotUnicode(_)) => None,
     }
+}
+
+fn env_configured_endpoint(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => endpoint_from_configured_env_value(&value),
+        Err(std::env::VarError::NotPresent | std::env::VarError::NotUnicode(_)) => None,
+    }
+}
+
+fn endpoint_from_configured_env_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("${") || trimmed.is_empty() || is_env_disabled(trimmed) {
+        return None;
+    }
+    Some(trimmed.to_owned())
 }
 
 fn endpoint_from_env_value(value: Option<&str>, default: &str) -> Option<String> {
@@ -414,7 +426,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_mesh_endpoints_enable_quic_and_explicit_close_disables_it() {
+    fn mesh_endpoint_defaults_keep_router_quic_and_notify_opt_in() {
         assert_eq!(
             endpoint_from_env_value(None, DEFAULT_ROUTER_ASYNC_ENDPOINT).as_deref(),
             Some(DEFAULT_ROUTER_ASYNC_ENDPOINT)
@@ -428,18 +440,20 @@ mod tests {
             Some(DEFAULT_ROUTER_ASYNC_ENDPOINT)
         );
         assert_eq!(
-            endpoint_from_env_value(None, DEFAULT_NOTIFY_MESH_ENDPOINT).as_deref(),
-            Some(DEFAULT_NOTIFY_MESH_ENDPOINT)
-        );
-        assert_eq!(
             endpoint_from_env_value(Some(" custom-router:17444 "), DEFAULT_ROUTER_ASYNC_ENDPOINT)
                 .as_deref(),
             Some("custom-router:17444")
         );
         assert!(endpoint_from_env_value(Some(""), DEFAULT_ROUTER_ASYNC_ENDPOINT).is_none());
         assert!(endpoint_from_env_value(Some("0"), DEFAULT_ROUTER_ASYNC_ENDPOINT).is_none());
-        assert!(endpoint_from_env_value(Some("off"), DEFAULT_NOTIFY_MESH_ENDPOINT).is_none());
-        assert!(endpoint_from_env_value(Some("false"), DEFAULT_NOTIFY_MESH_ENDPOINT).is_none());
+        assert!(endpoint_from_configured_env_value("").is_none());
+        assert!(endpoint_from_configured_env_value("${RAMFLUX_NOTIFY_MESH_ENDPOINT:-}").is_none());
+        assert!(endpoint_from_configured_env_value("off").is_none());
+        assert!(endpoint_from_configured_env_value("false").is_none());
+        assert_eq!(
+            endpoint_from_configured_env_value(" ramflux-notify:18085 ").as_deref(),
+            Some("ramflux-notify:18085")
+        );
     }
 
     #[test]
@@ -580,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_clients_default_to_quic_mesh_endpoints_when_env_absent()
+    fn gateway_clients_default_router_to_quic_and_notify_to_http_when_env_absent()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_cert_root("gateway_default_quic_clients")?;
         let gateway = issue_test_ca_and_service_cert(&root, "node-mesh-a", "ramflux-gateway")?;
@@ -589,11 +603,9 @@ mod tests {
         let router = router_async_mesh_client(&config)?.ok_or_else(|| {
             test_error("router async mesh client should default to production QUIC")
         })?;
-        let notify = notify_mesh_client(&config)?
-            .ok_or_else(|| test_error("notify mesh client should default to production QUIC"))?;
 
         assert_eq!(router.endpoint, DEFAULT_ROUTER_ASYNC_ENDPOINT);
-        assert_eq!(notify.endpoint, DEFAULT_NOTIFY_MESH_ENDPOINT);
+        assert!(notify_mesh_client(&config)?.is_none());
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

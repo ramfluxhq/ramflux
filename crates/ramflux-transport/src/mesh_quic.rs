@@ -312,7 +312,7 @@ impl MeshQuicServer {
         let endpoint = quinn::Endpoint::server(
             mesh_quic_server_config_with_dynamic_pem_roots(tls, root_pems_provider)?,
             addr.parse::<SocketAddr>()
-                .map_err(|error| TransportError::Http(format!("bad QUIC bind addr: {error}")))?,
+                .map_err(|error| TransportError::Quic(format!("bad QUIC bind addr: {error}")))?,
         )?;
         tracing::info!(
             addr,
@@ -1048,7 +1048,7 @@ async fn mesh_quic_connect(
     let mut endpoint = quinn::Endpoint::client(
         bind_addr
             .parse()
-            .map_err(|error| TransportError::Http(format!("bad QUIC bind addr: {error}")))?,
+            .map_err(|error| TransportError::Quic(format!("bad QUIC bind addr: {error}")))?,
     )?;
     endpoint.set_default_client_config(mesh_quic_client_config_with_pem_roots(tls, peer_ca_pems)?);
     let connecting = endpoint
@@ -1183,9 +1183,9 @@ fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, TransportError> {
         .unwrap_or(endpoint);
     endpoint
         .to_socket_addrs()
-        .map_err(|source| TransportError::Http(format!("bad endpoint {endpoint}: {source}")))?
+        .map_err(|source| TransportError::Quic(format!("bad endpoint {endpoint}: {source}")))?
         .next()
-        .ok_or_else(|| TransportError::Http(format!("bad endpoint {endpoint}: no addresses")))
+        .ok_or_else(|| TransportError::Quic(format!("bad endpoint {endpoint}: no addresses")))
 }
 
 #[cfg(test)]
@@ -1201,8 +1201,9 @@ mod tests {
 
     use super::{
         GatewayQuicRequest, MeshQuicConnectionPool, MeshQuicPoolKey, MeshQuicPoolRegistry,
-        MeshQuicServer, MeshTlsConfig, mesh_quic_get_json_with_peer_ca_pems,
+        MeshQuicServer, MeshTlsConfig, mesh_quic_get_json_with_peer_ca_pems, resolve_endpoint,
     };
+    use crate::TransportError;
 
     type CapturedQuicRequest = (Option<String>, GatewayQuicRequest);
 
@@ -1240,7 +1241,7 @@ mod tests {
         let client = issue_test_service_cert(&ca, "node-quic-get-a", "ramflux-federation")?;
         let server = issue_test_service_cert(&ca, "node-quic-get-a", "ramflux-router")?;
         let (endpoint, received) =
-            spawn_mesh_quic_get_echo_server(server.tls.clone(), client.ca_pem.clone())?;
+            spawn_mesh_quic_get_echo_server(server.tls.clone(), client.ca_pem.clone(), 200)?;
 
         let response: serde_json::Value = mesh_quic_get_json_with_peer_ca_pems(
             &endpoint,
@@ -1257,6 +1258,57 @@ mod tests {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/mvp1/prekey/device-a");
         assert!(request.body.is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_quic_endpoint_resolution_failure_is_quic_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Err(error) = resolve_endpoint("127.0.0.1:not-a-port") else {
+            return Err("bad endpoint should fail resolution".into());
+        };
+
+        assert!(matches!(error, TransportError::Quic(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_quic_http_status_error_remains_http_error() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("mesh_quic_http_status_error_remains_http_error")?;
+        let ca = issue_test_ca(&root)?;
+        let client = issue_test_service_cert(&ca, "node-quic-http-a", "ramflux-federation")?;
+        let server = issue_test_service_cert(&ca, "node-quic-http-a", "ramflux-router")?;
+        let (endpoint, received) =
+            spawn_mesh_quic_get_echo_server(server.tls.clone(), client.ca_pem.clone(), 404)?;
+
+        let Err(error) = mesh_quic_get_json_with_peer_ca_pems::<serde_json::Value>(
+            &endpoint,
+            "/mvp1/prekey/missing-device",
+            &client.tls,
+            "ramflux-router",
+            &[server.ca_pem],
+        ) else {
+            return Err("HTTP 404 response should remain a business HTTP error".into());
+        };
+
+        match error {
+            TransportError::Http(message) => assert!(message.contains("HTTP 404")),
+            TransportError::Quic(message) => {
+                return Err(format!(
+                    "business HTTP response must not become QUIC fallback error: {message}"
+                )
+                .into());
+            }
+            other => {
+                return Err(
+                    format!("business HTTP response returned unexpected error: {other}").into()
+                );
+            }
+        }
+        let (_peer_spiffe_uri, request) =
+            received.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/mvp1/prekey/missing-device");
         Ok(())
     }
 
@@ -1287,6 +1339,7 @@ mod tests {
     fn spawn_mesh_quic_get_echo_server(
         server_tls: MeshTlsConfig,
         trusted_client_ca: String,
+        response_status: u16,
     ) -> Result<(String, mpsc::Receiver<CapturedQuicRequest>), Box<dyn std::error::Error>> {
         let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
         let (request_tx, request_rx) = mpsc::channel::<CapturedQuicRequest>();
@@ -1324,7 +1377,7 @@ mod tests {
                     ))
                     .map_err(|source| source.to_string())?;
                 accepted
-                    .write_json_response(200, &serde_json::json!({"ok": true}))
+                    .write_json_response(response_status, &serde_json::json!({"ok": true}))
                     .await
                     .map_err(|source| source.to_string())?;
                 std::future::pending::<()>().await;
