@@ -23,7 +23,10 @@ const NOTIFY_WAL_RAW_ENQUEUE_ENV: &str = "RAMFLUX_NOTIFY_WAL_RAW_ENQUEUE";
 const NOTIFY_BATCH_VERIFY_ENV: &str = "RAMFLUX_NOTIFY_BATCH_VERIFY";
 const NOTIFY_VERIFY_BATCH_MAX_ENV: &str = "RAMFLUX_NOTIFY_VERIFY_BATCH_MAX";
 const NOTIFY_VERIFY_WINDOW_US_ENV: &str = "RAMFLUX_NOTIFY_VERIFY_WINDOW_US";
+const NOTIFY_MESH_INGRESS_ENV: &str = "RAMFLUX_NOTIFY_MESH_INGRESS";
 const NOTIFY_MESH_LISTEN_ADDR_ENV: &str = "RAMFLUX_NOTIFY_MESH_LISTEN_ADDR";
+const NOTIFY_MESH_INGRESS_RUNTIME_ENV: &str = "RAMFLUX_NOTIFY_MESH_INGRESS_RUNTIME";
+const DEFAULT_NOTIFY_MESH_LISTEN_ADDR: &str = "0.0.0.0:18085";
 const PROVIDER_PUSH_RETRY_DELAYS: [Duration; 3] =
     [Duration::from_millis(100), Duration::from_millis(200), Duration::from_millis(400)];
 
@@ -61,37 +64,26 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         if async_accept {
             start_notify_async_delivery_workers(&store)?;
         }
-        let mesh_listen_addr = notify_mesh_listen_addr();
-        #[cfg(feature = "itest-http")]
-        if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1")
-            || mesh_listen_addr.is_some()
+        let store_gate = Arc::new(Mutex::new(()));
+        let runtime = Arc::new(NotifyRuntime::from_env(&store, &store_gate)?);
+        let wake_auth = NotifyWakeAuth::from_config(&config)?;
+        let wake_verify_batcher = NotifyWakeVerifyBatcher::from_env(&wake_auth, &store)?;
+        let ingress = Arc::new(NotifyIngressState {
+            store,
+            runtime,
+            store_gate,
+            async_accept,
+            wake_auth,
+            wake_verify_batcher,
+        });
+        if notify_mesh_ingress_enabled()
+            && let Some(listen_addr) = notify_mesh_listen_addr()
         {
-            let store_gate = Arc::new(Mutex::new(()));
-            let runtime = Arc::new(NotifyRuntime::from_env(&store, &store_gate)?);
-            let wake_auth = NotifyWakeAuth::from_config(&config)?;
-            let wake_verify_batcher = NotifyWakeVerifyBatcher::from_env(&wake_auth, &store)?;
-            let ingress = Arc::new(NotifyIngressState {
-                store,
-                runtime,
-                store_gate,
-                async_accept,
-                wake_auth,
-                wake_verify_batcher,
-            });
-            if let Some(listen_addr) = mesh_listen_addr {
-                serve_notify_mesh_quic(&listen_addr, &ingress, &notify_mesh_tls_config(&config))?;
-            }
-            if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() != Some("1") {
-                std::thread::park();
-                return Ok(());
-            }
-            return serve_itest_http(&ingress);
+            serve_notify_mesh_quic(&listen_addr, &ingress, &notify_mesh_tls_config(&config))?;
         }
-        #[cfg(not(feature = "itest-http"))]
-        if mesh_listen_addr.is_some() {
-            return Err(ramflux_node_core::NodeCoreError::ItestHttp(
-                "notify mesh ingress requires the itest-http feature".to_owned(),
-            ));
+        #[cfg(feature = "itest-http")]
+        if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
+            return serve_itest_http(&ingress);
         }
         std::thread::park();
         return Ok(());
@@ -104,7 +96,6 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     Ok(())
 }
 
-#[cfg(feature = "itest-http")]
 struct NotifyIngressState {
     store: Arc<ramflux_node_core::NotifyRedbStore>,
     runtime: Arc<NotifyRuntime>,
@@ -114,14 +105,12 @@ struct NotifyIngressState {
     wake_verify_batcher: Option<NotifyWakeVerifyBatcher>,
 }
 
-#[cfg(feature = "itest-http")]
 #[derive(Clone)]
 struct NotifyWakeAuth {
     require: bool,
     key: Option<ramflux_node_core::NodeServiceSigningKey>,
 }
 
-#[cfg(feature = "itest-http")]
 impl NotifyWakeAuth {
     fn from_config(
         config: &ramflux_node_core::NodeServiceConfig,
@@ -164,19 +153,16 @@ impl NotifyWakeAuth {
     }
 }
 
-#[cfg(feature = "itest-http")]
 fn notify_require_wake_auth() -> bool {
     std::env::var("RAMFLUX_NOTIFY_REQUIRE_WAKE_AUTH")
         .map_or(true, |value| value != "0" && !value.eq_ignore_ascii_case("false"))
 }
 
-#[cfg(feature = "itest-http")]
 #[derive(Clone)]
 struct NotifyWakeVerifyBatcher {
     senders: Arc<Vec<tokio::sync::mpsc::Sender<WakeVerifyRequest>>>,
 }
 
-#[cfg(feature = "itest-http")]
 impl NotifyWakeVerifyBatcher {
     fn from_env(
         wake_auth: &NotifyWakeAuth,
@@ -250,7 +236,6 @@ impl NotifyWakeVerifyBatcher {
     }
 }
 
-#[cfg(feature = "itest-http")]
 struct WakeVerifyRequest {
     wake: ramflux_protocol::NotificationWake,
     raw_body: Vec<u8>,
@@ -258,7 +243,6 @@ struct WakeVerifyRequest {
     reply: tokio::sync::oneshot::Sender<Result<(), ramflux_node_core::NodeCoreError>>,
 }
 
-#[cfg(feature = "itest-http")]
 fn wake_verify_batcher_loop(
     wake_auth: &NotifyWakeAuth,
     store: &ramflux_node_core::NotifyRedbStore,
@@ -287,7 +271,6 @@ fn wake_verify_batcher_loop(
     }
 }
 
-#[cfg(feature = "itest-http")]
 fn verify_and_enqueue_wake_batch(
     wake_auth: &NotifyWakeAuth,
     store: &ramflux_node_core::NotifyRedbStore,
@@ -337,7 +320,6 @@ fn verify_and_enqueue_wake_batch(
     }
 }
 
-#[cfg(feature = "itest-http")]
 fn notify_batch_verify_enabled() -> bool {
     notify_default_enabled_env(NOTIFY_BATCH_VERIFY_ENV)
 }
@@ -350,7 +332,6 @@ fn itest_error_status(error: &ramflux_node_core::NodeCoreError) -> &'static str 
     }
 }
 
-#[cfg(feature = "itest-http")]
 fn notify_mesh_error_status(error: &ramflux_node_core::NodeCoreError) -> u16 {
     match error {
         ramflux_node_core::NodeCoreError::Unauthorized(_message) => 401,
@@ -395,12 +376,14 @@ fn serve_itest_http(
     Ok(())
 }
 
-#[cfg(feature = "itest-http")]
 fn serve_notify_mesh_quic(
     listen_addr: &str,
     ingress: &Arc<NotifyIngressState>,
     tls: &ramflux_transport::MeshTlsConfig,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    match notify_mesh_ingress_runtime() {
+        NotifyMeshIngressRuntime::Tokio => {}
+    }
     let listen_addr = listen_addr.to_owned();
     let ingress = Arc::clone(ingress);
     let tls = tls.clone();
@@ -415,7 +398,6 @@ fn serve_notify_mesh_quic(
     Ok(())
 }
 
-#[cfg(feature = "itest-http")]
 fn run_notify_mesh_quic_listener(
     listen_addr: &str,
     ingress: Arc<NotifyIngressState>,
@@ -456,7 +438,6 @@ fn run_notify_mesh_quic_listener(
     })
 }
 
-#[cfg(feature = "itest-http")]
 async fn notify_mesh_quic_connection_loop(
     connection: ramflux_transport::MeshQuicConnection,
     ingress: Arc<NotifyIngressState>,
@@ -484,7 +465,6 @@ async fn notify_mesh_quic_connection_loop(
     }
 }
 
-#[cfg(feature = "itest-http")]
 async fn handle_notify_mesh_quic_accepted_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     ingress: Arc<NotifyIngressState>,
@@ -501,7 +481,6 @@ async fn handle_notify_mesh_quic_accepted_request(
     }
 }
 
-#[cfg(feature = "itest-http")]
 fn handle_notify_mesh_quic_request(
     request: &ramflux_transport::GatewayQuicRequest,
     ingress: &NotifyIngressState,
@@ -518,6 +497,11 @@ fn handle_notify_mesh_quic_request(
             } else {
                 handle_s13_wake_value(&ingress.store, &ingress.store_gate, &ingress.runtime, &body)?
             };
+            tracing::info!(
+                queue_id = %response.entry.queue_id,
+                device_delivery_id = body.device_delivery_id,
+                "notify mesh QUIC wake accepted"
+            );
             Ok(ramflux_transport::GatewayQuicResponse {
                 status: 200,
                 body: serde_json::to_value(response).map_err(|source| {
@@ -532,7 +516,6 @@ fn handle_notify_mesh_quic_request(
     }
 }
 
-#[cfg(feature = "itest-http")]
 fn notify_mesh_transport_error(
     error: &ramflux_transport::TransportError,
 ) -> ramflux_node_core::NodeCoreError {
@@ -1392,6 +1375,41 @@ enum NotifyRuntime {
     Compio(CompioNotifyRuntime),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotifyMeshIngressRuntime {
+    Tokio,
+}
+
+fn notify_mesh_ingress_runtime() -> NotifyMeshIngressRuntime {
+    notify_mesh_ingress_runtime_from_value(
+        std::env::var(NOTIFY_MESH_INGRESS_RUNTIME_ENV).ok().as_deref(),
+    )
+}
+
+fn notify_mesh_ingress_runtime_from_value(value: Option<&str>) -> NotifyMeshIngressRuntime {
+    let Some(value) = value else {
+        return NotifyMeshIngressRuntime::Tokio;
+    };
+    let trimmed = value.trim();
+    if trimmed.starts_with("${") || trimmed.is_empty() {
+        if !trimmed.is_empty() {
+            tracing::warn!(
+                runtime = %trimmed,
+                "unsupported notify mesh ingress runtime; using tokio"
+            );
+        }
+        return NotifyMeshIngressRuntime::Tokio;
+    }
+    if matches!(trimmed, "tokio" | "quinn") {
+        return NotifyMeshIngressRuntime::Tokio;
+    }
+    tracing::warn!(
+        runtime = %trimmed,
+        "unsupported notify mesh ingress runtime; using tokio"
+    );
+    NotifyMeshIngressRuntime::Tokio
+}
+
 impl NotifyRuntime {
     fn from_env(
         store: &Arc<ramflux_node_core::NotifyRedbStore>,
@@ -2026,20 +2044,44 @@ fn notify_wal_raw_enqueue_enabled() -> bool {
 }
 
 fn notify_default_enabled_env(name: &str) -> bool {
-    std::env::var(name).map_or(true, |value| {
-        let trimmed = value.trim();
-        !(trimmed == "0"
-            || trimmed.eq_ignore_ascii_case("false")
-            || trimmed.eq_ignore_ascii_case("off")
-            || trimmed.eq_ignore_ascii_case("no"))
-    })
+    notify_default_enabled_from_value(std::env::var(name).ok().as_deref())
+}
+
+fn notify_default_enabled_from_value(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let trimmed = value.trim();
+    !(trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed.eq_ignore_ascii_case("no"))
+}
+
+fn notify_mesh_ingress_enabled() -> bool {
+    notify_mesh_ingress_enabled_from_value(std::env::var(NOTIFY_MESH_INGRESS_ENV).ok().as_deref())
+}
+
+fn notify_mesh_ingress_enabled_from_value(value: Option<&str>) -> bool {
+    notify_default_enabled_from_value(value)
 }
 
 fn notify_mesh_listen_addr() -> Option<String> {
-    std::env::var(NOTIFY_MESH_LISTEN_ADDR_ENV).ok().and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    })
+    notify_mesh_listen_addr_from_value(std::env::var(NOTIFY_MESH_LISTEN_ADDR_ENV).ok().as_deref())
+}
+
+fn notify_mesh_listen_addr_from_value(value: Option<&str>) -> Option<String> {
+    let Some(value) = value else {
+        return Some(DEFAULT_NOTIFY_MESH_LISTEN_ADDR.to_owned());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("${") {
+        return Some(DEFAULT_NOTIFY_MESH_LISTEN_ADDR.to_owned());
+    }
+    Some(trimmed.to_owned())
 }
 
 fn notify_mesh_tls_config(
@@ -3259,6 +3301,66 @@ mod tests {
                 .map(String::as_str)
                 .unwrap_or_default()
                 .contains("target:")
+        );
+    }
+
+    #[test]
+    fn notify_mesh_ingress_defaults_on_and_opt_out_disables_it() {
+        assert!(notify_mesh_ingress_enabled_from_value(None));
+        assert!(notify_mesh_ingress_enabled_from_value(Some("1")));
+        assert!(notify_mesh_ingress_enabled_from_value(Some("true")));
+        assert!(notify_mesh_ingress_enabled_from_value(Some("on")));
+        assert!(!notify_mesh_ingress_enabled_from_value(Some("0")));
+        assert!(!notify_mesh_ingress_enabled_from_value(Some("false")));
+        assert!(!notify_mesh_ingress_enabled_from_value(Some("off")));
+        assert!(!notify_mesh_ingress_enabled_from_value(Some("no")));
+    }
+
+    #[test]
+    fn notify_mesh_listen_addr_defaults_and_guards_compose_literal() {
+        assert_eq!(
+            notify_mesh_listen_addr_from_value(None).as_deref(),
+            Some(DEFAULT_NOTIFY_MESH_LISTEN_ADDR)
+        );
+        assert_eq!(
+            notify_mesh_listen_addr_from_value(Some("${RAMFLUX_NOTIFY_MESH_LISTEN_ADDR:-}"))
+                .as_deref(),
+            Some(DEFAULT_NOTIFY_MESH_LISTEN_ADDR)
+        );
+        assert_eq!(
+            notify_mesh_listen_addr_from_value(Some(
+                "${RAMFLUX_NOTIFY_MESH_LISTEN_ADDR:-0.0.0.0:18085}"
+            ))
+            .as_deref(),
+            Some(DEFAULT_NOTIFY_MESH_LISTEN_ADDR)
+        );
+        assert_eq!(
+            notify_mesh_listen_addr_from_value(Some(" 127.0.0.1:18085 ")).as_deref(),
+            Some("127.0.0.1:18085")
+        );
+        assert!(notify_mesh_listen_addr_from_value(Some("")).is_none());
+    }
+
+    #[test]
+    fn notify_mesh_ingress_runtime_defaults_to_tokio_and_unknown_values_do_not_error() {
+        assert_eq!(notify_mesh_ingress_runtime_from_value(None), NotifyMeshIngressRuntime::Tokio);
+        assert_eq!(
+            notify_mesh_ingress_runtime_from_value(Some("tokio")),
+            NotifyMeshIngressRuntime::Tokio
+        );
+        assert_eq!(
+            notify_mesh_ingress_runtime_from_value(Some("quinn")),
+            NotifyMeshIngressRuntime::Tokio
+        );
+        assert_eq!(
+            notify_mesh_ingress_runtime_from_value(Some(
+                "${RAMFLUX_NOTIFY_MESH_INGRESS_RUNTIME:-tokio}"
+            )),
+            NotifyMeshIngressRuntime::Tokio
+        );
+        assert_eq!(
+            notify_mesh_ingress_runtime_from_value(Some("future-runtime")),
+            NotifyMeshIngressRuntime::Tokio
         );
     }
 
