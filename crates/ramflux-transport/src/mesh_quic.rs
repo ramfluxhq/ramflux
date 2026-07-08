@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex as StdMutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
     mpsc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::mesh_tls::extract_spiffe_uri_from_certificate;
 use crate::perf_metrics::{
@@ -34,7 +34,8 @@ use crate::{
 use arc_swap::ArcSwap;
 use tokio::sync::{Mutex, Notify};
 
-const MESH_QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MESH_QUIC_CONNECT_TIMEOUT_DEFAULT: Duration = Duration::from_secs(3);
+const MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT: Duration = Duration::from_secs(5);
 const MESH_QUIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 // Backstop poll interval for the pool-acquire wait: even if a wakeup is ever missed,
@@ -42,6 +43,9 @@ const MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(
 const MESH_QUIC_ACQUIRE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MESH_QUIC_CLIENT_POOL_SIZE_ENV: &str = "RAMFLUX_MESH_QUIC_CLIENT_POOL_SIZE";
 const ROUTER_ASYNC_POOL_SIZE_ENV: &str = "RAMFLUX_ROUTER_ASYNC_POOL_SIZE";
+const MESH_QUIC_CONNECT_TIMEOUT_MS_ENV: &str = "RAMFLUX_MESH_QUIC_CONNECT_TIMEOUT_MS";
+const MESH_QUIC_CONNECT_BREAKER_COOLDOWN_MS_ENV: &str =
+    "RAMFLUX_MESH_QUIC_CONNECT_BREAKER_COOLDOWN_MS";
 const MESH_QUIC_CLIENT_POOL_SIZE_DEFAULT: usize = 8;
 const MESH_QUIC_POSTCARD_MAGIC: &[u8] = b"ramflux.mesh.postcard.v1\0";
 
@@ -166,6 +170,86 @@ impl MeshQuicSelectedConnection {
 
     fn stable_id(&self) -> usize {
         self.cached.connection.stable_id()
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MeshQuicCircuitBreakerKey {
+    peer_addr: SocketAddr,
+    server_name: String,
+}
+
+#[derive(Clone, Debug)]
+struct MeshQuicCircuitProbe {
+    key: MeshQuicCircuitBreakerKey,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MeshQuicCircuitBreakerState {
+    Open { retry_after: Instant },
+    HalfOpen,
+}
+
+#[derive(Default)]
+struct MeshQuicCircuitBreakers {
+    states: StdMutex<HashMap<MeshQuicCircuitBreakerKey, MeshQuicCircuitBreakerState>>,
+}
+
+impl MeshQuicCircuitBreakers {
+    fn before_connect(
+        &self,
+        peer_addr: SocketAddr,
+        server_name: &str,
+        now: Instant,
+    ) -> Result<MeshQuicCircuitProbe, TransportError> {
+        let key = MeshQuicCircuitBreakerKey { peer_addr, server_name: server_name.to_owned() };
+        let mut states = self.states.lock().map_err(|error| {
+            TransportError::Quic(format!("mesh QUIC circuit breaker lock poisoned: {error}"))
+        })?;
+        match states.get(&key).copied() {
+            Some(MeshQuicCircuitBreakerState::Open { retry_after }) if now < retry_after => {
+                let remaining_ms = retry_after.saturating_duration_since(now).as_millis();
+                Err(TransportError::Quic(format!(
+                    "mesh QUIC circuit breaker open for {server_name}@{peer_addr}; skipping connect for {remaining_ms}ms"
+                )))
+            }
+            Some(MeshQuicCircuitBreakerState::Open { .. }) => {
+                states.insert(key.clone(), MeshQuicCircuitBreakerState::HalfOpen);
+                Ok(MeshQuicCircuitProbe { key })
+            }
+            Some(MeshQuicCircuitBreakerState::HalfOpen) => Err(TransportError::Quic(format!(
+                "mesh QUIC circuit breaker half-open probe already in flight for {server_name}@{peer_addr}; skipping connect"
+            ))),
+            None => Ok(MeshQuicCircuitProbe { key }),
+        }
+    }
+
+    fn record_connect_failure(
+        &self,
+        probe: &MeshQuicCircuitProbe,
+        now: Instant,
+        cooldown: Duration,
+    ) {
+        let retry_after = now + cooldown;
+        match self.states.lock() {
+            Ok(mut states) => {
+                states.insert(probe.key.clone(), MeshQuicCircuitBreakerState::Open { retry_after });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "mesh QUIC circuit breaker lock poisoned while recording failure");
+            }
+        }
+    }
+
+    fn record_connect_success(&self, probe: &MeshQuicCircuitProbe) {
+        match self.states.lock() {
+            Ok(mut states) => {
+                states.remove(&probe.key);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "mesh QUIC circuit breaker lock poisoned while recording success");
+            }
+        }
     }
 }
 
@@ -888,15 +972,17 @@ fn run_mesh_quic_client_runtime(
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let handle = runtime.handle().clone();
     let pools = Arc::new(MeshQuicPoolRegistry::default());
+    let breakers = Arc::new(MeshQuicCircuitBreakers::default());
     tracing::info!(pool_size, "mesh QUIC client connection pool configured");
     for job in receiver {
         record_mesh_client_runtime_queue_wait(job.request.enqueued_at.elapsed());
         let pools = Arc::clone(&pools);
+        let breakers = Arc::clone(&breakers);
         let sched_started = std::time::Instant::now();
         handle.spawn(async move {
             record_mesh_client_task_sched(sched_started.elapsed());
             let MeshQuicClientJob { request, response: response_sender } = job;
-            let response = mesh_quic_cached_request(pools, request, pool_size).await;
+            let response = mesh_quic_cached_request(pools, breakers, request, pool_size).await;
             response_sender.send(response);
         });
     }
@@ -905,6 +991,7 @@ fn run_mesh_quic_client_runtime(
 
 async fn mesh_quic_cached_request(
     pools: Arc<MeshQuicPoolRegistry>,
+    breakers: Arc<MeshQuicCircuitBreakers>,
     job: MeshQuicClientRequestJob,
     pool_size: usize,
 ) -> Result<MeshQuicClientResponsePayload, TransportError> {
@@ -919,7 +1006,7 @@ async fn mesh_quic_cached_request(
     let acquire_started = std::time::Instant::now();
     let pool = pools.pool_for(key).await;
     let (connection, reused_cached_connection) =
-        mesh_quic_acquire_connection(&pool, peer_addr, &job, pool_size).await?;
+        mesh_quic_acquire_connection(&pool, &breakers, peer_addr, &job, pool_size).await?;
     record_mesh_client_acquire(acquire_started.elapsed());
     let request_timeout = if reused_cached_connection {
         MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT
@@ -947,7 +1034,7 @@ async fn mesh_quic_cached_request(
             pool.remove_connection(&connection).await;
             let retry_acquire_started = std::time::Instant::now();
             let (retry_connection, _reused_retry_connection) =
-                mesh_quic_acquire_connection(&pool, peer_addr, &job, pool_size).await?;
+                mesh_quic_acquire_connection(&pool, &breakers, peer_addr, &job, pool_size).await?;
             record_mesh_client_acquire(retry_acquire_started.elapsed());
             match timed_mesh_quic_request_on_connection(
                 retry_connection.connection(),
@@ -988,6 +1075,7 @@ async fn mesh_quic_cached_request(
 
 async fn mesh_quic_acquire_connection(
     pool: &MeshQuicConnectionPool,
+    breakers: &MeshQuicCircuitBreakers,
     peer_addr: SocketAddr,
     job: &MeshQuicClientRequestJob,
     pool_size: usize,
@@ -1003,7 +1091,8 @@ async fn mesh_quic_acquire_connection(
         notified.as_mut().enable();
         if pool.try_reserve_connect(pool_size) {
             record_mesh_client_pool_miss();
-            let connection = mesh_quic_connect_and_insert(pool, peer_addr, job, pool_size).await?;
+            let connection =
+                mesh_quic_connect_and_insert(pool, breakers, peer_addr, job, pool_size).await?;
             return Ok((connection, false));
         }
         if let Some(connection) = pool.select_connection() {
@@ -1017,12 +1106,13 @@ async fn mesh_quic_acquire_connection(
 
 async fn mesh_quic_connect_and_insert(
     pool: &MeshQuicConnectionPool,
+    breakers: &MeshQuicCircuitBreakers,
     peer_addr: SocketAddr,
     job: &MeshQuicClientRequestJob,
     pool_size: usize,
 ) -> Result<MeshQuicSelectedConnection, TransportError> {
     let connect_result =
-        mesh_quic_connect(peer_addr, &job.tls, &job.server_name, &job.peer_ca_pems).await;
+        mesh_quic_connect(peer_addr, &job.tls, &job.server_name, &job.peer_ca_pems, breakers).await;
     pool.finish_connect_reservation();
     let cached = connect_result?;
     Ok(pool.insert_connection(cached, pool_size).await)
@@ -1037,13 +1127,45 @@ fn mesh_quic_client_pool_size() -> usize {
         .unwrap_or(MESH_QUIC_CLIENT_POOL_SIZE_DEFAULT)
 }
 
+fn mesh_quic_connect_timeout() -> Duration {
+    duration_from_millis_env(MESH_QUIC_CONNECT_TIMEOUT_MS_ENV, MESH_QUIC_CONNECT_TIMEOUT_DEFAULT)
+}
+
+fn mesh_quic_connect_breaker_cooldown() -> Duration {
+    duration_from_millis_env(
+        MESH_QUIC_CONNECT_BREAKER_COOLDOWN_MS_ENV,
+        MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT,
+    )
+}
+
+fn duration_from_millis_env(name: &str, default: Duration) -> Duration {
+    duration_from_millis_value(std::env::var(name).ok().as_deref(), default)
+}
+
+fn duration_from_millis_value(value: Option<&str>, default: Duration) -> Duration {
+    let Some(value) = value else {
+        return default;
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with("${") {
+        return default;
+    }
+    match trimmed.parse::<u64>() {
+        Ok(millis) if millis > 0 => Duration::from_millis(millis),
+        Ok(_) | Err(_) => default,
+    }
+}
+
 async fn mesh_quic_connect(
     peer_addr: SocketAddr,
     tls: &MeshTlsConfig,
     server_name: &str,
     peer_ca_pems: &[String],
+    breakers: &MeshQuicCircuitBreakers,
 ) -> Result<MeshQuicCachedConnection, TransportError> {
     let connect_started = std::time::Instant::now();
+    let connect_timeout = mesh_quic_connect_timeout();
+    let breaker_cooldown = mesh_quic_connect_breaker_cooldown();
     let bind_addr = if peer_addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
     let mut endpoint = quinn::Endpoint::client(
         bind_addr
@@ -1051,28 +1173,41 @@ async fn mesh_quic_connect(
             .map_err(|error| TransportError::Quic(format!("bad QUIC bind addr: {error}")))?,
     )?;
     endpoint.set_default_client_config(mesh_quic_client_config_with_pem_roots(tls, peer_ca_pems)?);
-    let connecting = endpoint
-        .connect(peer_addr, server_name)
-        .map_err(|error| TransportError::Quic(error.to_string()))?;
+    let probe = breakers.before_connect(peer_addr, server_name, Instant::now())?;
+    let connecting = endpoint.connect(peer_addr, server_name).map_err(|error| {
+        let error = TransportError::Quic(error.to_string());
+        breakers.record_connect_failure(&probe, Instant::now(), breaker_cooldown);
+        error
+    })?;
     tracing::info!(
         peer_addr = %peer_addr,
         server_name,
-        timeout_ms = MESH_QUIC_CONNECT_TIMEOUT.as_millis(),
+        timeout_ms = connect_timeout.as_millis(),
         "mesh QUIC client connecting"
     );
-    let connection = tokio::time::timeout(MESH_QUIC_CONNECT_TIMEOUT, connecting)
+    let connection_result = tokio::time::timeout(connect_timeout, connecting)
         .await
         .map_err(|error| {
             tracing::error!(peer_addr = %peer_addr, server_name, %error, "mesh QUIC client connect timed out");
             TransportError::Quic(format!(
                 "mesh QUIC connect to {peer_addr} timed out after {}ms: {error}",
-                MESH_QUIC_CONNECT_TIMEOUT.as_millis()
+                connect_timeout.as_millis()
             ))
         })?
         .map_err(|error| {
             tracing::error!(peer_addr = %peer_addr, server_name, %error, "mesh QUIC client handshake failed");
             TransportError::Quic(format!("mesh QUIC connect to {peer_addr} failed: {error}"))
-        })?;
+        });
+    let connection = match connection_result {
+        Ok(connection) => {
+            breakers.record_connect_success(&probe);
+            connection
+        }
+        Err(error) => {
+            breakers.record_connect_failure(&probe, Instant::now(), breaker_cooldown);
+            return Err(error);
+        }
+    };
     record_mesh_client_connect(connect_started.elapsed());
     record_mesh_client_tls_handshake();
     tracing::info!(peer_addr = %peer_addr, server_name, "mesh QUIC client connected");
@@ -1193,15 +1328,17 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{
-        Arc,
+        Arc, Barrier,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     };
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        GatewayQuicRequest, MeshQuicConnectionPool, MeshQuicPoolKey, MeshQuicPoolRegistry,
-        MeshQuicServer, MeshTlsConfig, mesh_quic_get_json_with_peer_ca_pems, resolve_endpoint,
+        GatewayQuicRequest, MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT,
+        MESH_QUIC_CONNECT_TIMEOUT_DEFAULT, MeshQuicCircuitBreakers, MeshQuicConnectionPool,
+        MeshQuicPoolKey, MeshQuicPoolRegistry, MeshQuicServer, MeshTlsConfig,
+        duration_from_millis_value, mesh_quic_get_json_with_peer_ca_pems, resolve_endpoint,
     };
     use crate::TransportError;
 
@@ -1231,6 +1368,154 @@ mod tests {
             pool.finish_connect_reservation();
         }
         assert_eq!(pool.connecting.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_quic_connect_timeout_defaults_to_fail_fast_and_accepts_env_override() {
+        assert_eq!(
+            duration_from_millis_value(None, MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            duration_from_millis_value(Some("2500"), MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            Duration::from_millis(2500)
+        );
+        assert_eq!(
+            duration_from_millis_value(
+                Some("${RAMFLUX_MESH_QUIC_CONNECT_TIMEOUT_MS:-3000}"),
+                MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
+            ),
+            MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
+        );
+        assert_eq!(
+            duration_from_millis_value(Some("not-a-duration"), MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
+        );
+        assert_eq!(
+            duration_from_millis_value(Some("0"), MESH_QUIC_CONNECT_TIMEOUT_DEFAULT),
+            MESH_QUIC_CONNECT_TIMEOUT_DEFAULT
+        );
+    }
+
+    #[test]
+    fn mesh_quic_breaker_cooldown_defaults_to_five_seconds_and_accepts_env_override() {
+        assert_eq!(
+            duration_from_millis_value(None, MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            duration_from_millis_value(Some("7500"), MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT),
+            Duration::from_millis(7500)
+        );
+        assert_eq!(
+            duration_from_millis_value(
+                Some("${RAMFLUX_MESH_QUIC_CONNECT_BREAKER_COOLDOWN_MS:-5000}"),
+                MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
+            ),
+            MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
+        );
+        assert_eq!(
+            duration_from_millis_value(Some("bad"), MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT),
+            MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT
+        );
+    }
+
+    #[test]
+    fn mesh_quic_circuit_breaker_opens_half_opens_and_closes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let breakers = MeshQuicCircuitBreakers::default();
+        let peer_addr = test_peer_addr();
+        let server_name = "ramflux-router";
+        let cooldown = Duration::from_secs(5);
+        let started = Instant::now();
+
+        let probe = breakers.before_connect(peer_addr, server_name, started)?;
+        breakers.record_connect_failure(&probe, started, cooldown);
+
+        assert_quic_result_contains(
+            breakers.before_connect(peer_addr, server_name, started + Duration::from_secs(1)),
+            "circuit breaker open",
+        )?;
+
+        let half_open_probe =
+            breakers.before_connect(peer_addr, server_name, started + cooldown)?;
+        assert_quic_result_contains(
+            breakers.before_connect(peer_addr, server_name, started + cooldown),
+            "half-open probe already in flight",
+        )?;
+
+        breakers.record_connect_success(&half_open_probe);
+        let _closed_probe = breakers.before_connect(peer_addr, server_name, started + cooldown)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_quic_circuit_breaker_reopens_after_half_open_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let breakers = MeshQuicCircuitBreakers::default();
+        let peer_addr = test_peer_addr();
+        let server_name = "ramflux-retention";
+        let cooldown = Duration::from_secs(5);
+        let started = Instant::now();
+
+        let probe = breakers.before_connect(peer_addr, server_name, started)?;
+        breakers.record_connect_failure(&probe, started, cooldown);
+        let half_open_probe =
+            breakers.before_connect(peer_addr, server_name, started + cooldown)?;
+        breakers.record_connect_failure(&half_open_probe, started + cooldown, cooldown);
+
+        assert_quic_result_contains(
+            breakers.before_connect(
+                peer_addr,
+                server_name,
+                started + cooldown + Duration::from_secs(1),
+            ),
+            "circuit breaker open",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_quic_circuit_breaker_allows_one_concurrent_half_open_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let breakers = Arc::new(MeshQuicCircuitBreakers::default());
+        let peer_addr = test_peer_addr();
+        let server_name = "ramflux-notify";
+        let cooldown = Duration::from_secs(5);
+        let started = Instant::now();
+        let probe = breakers.before_connect(peer_addr, server_name, started)?;
+        breakers.record_connect_failure(&probe, started, cooldown);
+
+        let ready = Arc::new(Barrier::new(17));
+        let allowed = Arc::new(AtomicUsize::new(0));
+        let skipped = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _index in 0..16 {
+            let breakers = Arc::clone(&breakers);
+            let ready = Arc::clone(&ready);
+            let allowed = Arc::clone(&allowed);
+            let skipped = Arc::clone(&skipped);
+            handles.push(std::thread::spawn(move || {
+                ready.wait();
+                match breakers.before_connect(peer_addr, server_name, started + cooldown) {
+                    Ok(_probe) => {
+                        allowed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(TransportError::Quic(_message)) => {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_other) => {}
+                }
+            }));
+        }
+        ready.wait();
+        for handle in handles {
+            handle.join().map_err(|_| std::io::Error::other("breaker thread panicked"))?;
+        }
+
+        assert_eq!(allowed.load(Ordering::Relaxed), 1);
+        assert_eq!(skipped.load(Ordering::Relaxed), 15);
         Ok(())
     }
 
@@ -1333,6 +1618,27 @@ mod tests {
             server_name: "ramflux-router".to_owned(),
             peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 7443)),
             peer_ca_pems: vec!["ca".to_owned()],
+        }
+    }
+
+    fn test_peer_addr() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], 17444))
+    }
+
+    fn assert_quic_result_contains(
+        result: Result<super::MeshQuicCircuitProbe, TransportError>,
+        expected: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match result {
+            Err(TransportError::Quic(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "expected QUIC error containing {expected:?}, got {message:?}"
+                );
+                Ok(())
+            }
+            Err(other) => Err(format!("expected TransportError::Quic, got {other}").into()),
+            Ok(_probe) => Err("expected circuit breaker to skip connect".into()),
         }
     }
 
