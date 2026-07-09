@@ -486,7 +486,7 @@ pub(crate) async fn dispatch_local_bus_request(
             Box::pin(dispatch_group_bus_request(request, state)).await
         }
         method if method.starts_with("object.") => {
-            dispatch_object_bus_request(request, state).await
+            Box::pin(dispatch_object_bus_request(request, state)).await
         }
         method if method.starts_with("call.") => dispatch_call_bus_request(request, state),
         method if method.starts_with("bot.") => dispatch_bot_bus_request(request, state),

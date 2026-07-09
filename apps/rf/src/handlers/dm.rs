@@ -102,7 +102,7 @@ async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), Rf
                 "limit": 100,
                 "conversation_id": request.conversation_id,
                 "auto_fetch_attachments": true,
-                "relay_service_key_base64": read.relay_service_key,
+                "relay_service_key_base64": null,
             }),
         )
         .await?;
@@ -134,7 +134,7 @@ fn rf_dm_attachments(send: &DmSend) -> Result<Vec<LocalBusMessageAttachmentInput
                 plaintext_base64: ramflux_protocol::encode_base64url(&bytes),
                 chunk_size: send.attachment_chunk_size,
                 relay_endpoint: relay_endpoint.clone(),
-                relay_service_key_base64: send.relay_service_key.clone(),
+                relay_service_key_base64: None,
             })
         })
         .collect()
@@ -268,5 +268,50 @@ pub(crate) fn rf_federation_route(
         _ => Err(RfError::Message(
             "federated dm send requires --federation-url, --source-node, --target-node, and optional --recipient-prekey-url only with that route".to_owned(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rf_dm_attachment_does_not_forward_relay_service_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "ramflux-rf-attachment-{}-{}.bin",
+            std::process::id(),
+            rf_now_unix_timestamp()
+        ));
+        std::fs::write(&path, b"attachment")?;
+        let send = DmSend {
+            account: "alice".to_owned(),
+            conversation: "conv".to_owned(),
+            message: "msg".to_owned(),
+            envelope: "env".to_owned(),
+            source_principal: "principal_alice".to_owned(),
+            sender: "alice_device".to_owned(),
+            recipient_device: Some("bob_device".to_owned()),
+            recipient_principal_commitment: Some("principal_bob".to_owned()),
+            target: "target_bob".to_owned(),
+            body: "body".to_owned(),
+            attach: vec![path.clone()],
+            relay_url: Some("http://127.0.0.1:18084".to_owned()),
+            relay_service_key: Some("ramflux-relay-itest-service-key".to_owned()),
+            attachment_chunk_size: 1024,
+            federation_url: None,
+            source_node: None,
+            target_node: None,
+            federation_admin_token: None,
+            recipient_prekey_url: None,
+            federation_capability: "opaque_delivery".to_owned(),
+            ttl: 300,
+        };
+
+        let attachments = rf_dm_attachments(&send)?;
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].relay_service_key_base64, None);
+        let _ = std::fs::remove_file(path);
+        Ok(())
     }
 }

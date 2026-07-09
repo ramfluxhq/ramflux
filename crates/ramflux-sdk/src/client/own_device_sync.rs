@@ -50,8 +50,9 @@ impl RamfluxClient {
             None,
         )?
         .ok_or_else(|| SdkError::LocalBus("own-device sync relay endpoint missing".to_owned()))?;
-        let transfer =
-            self.upload_object_to_relay(&object.object_id, chunk_size, &relay_options)?;
+        let transfer = self
+            .upload_object_to_relay_inner_via_gateway(engine, &object, chunk_size, &relay_options)
+            .await?;
         let object_key = self.object_store.object_key(&object.object_id)?;
         let slot_conversation_id =
             own_device_sync_slot_conversation_id(&snapshot_id, &object.object_id, target_device_id);
@@ -130,15 +131,24 @@ impl RamfluxClient {
 
     pub(crate) async fn import_own_device_sync(
         &mut self,
-        gateway: &GatewaySessionConfig,
+        engine: &mut GatewaySessionEngine,
         expected_principal_commitment: &str,
         envelope: &SdkOwnDeviceSyncEnvelope,
         relay_service_key_base64: Option<String>,
     ) -> Result<SdkOwnDeviceSyncImportResponse, SdkError> {
-        self.verify_own_device_sync_envelope(gateway, expected_principal_commitment, envelope)
+        self.verify_own_device_sync_envelope(
+            &engine.config,
+            expected_principal_commitment,
+            envelope,
+        )
+        .await?;
+        let import = self
+            .import_dm_attachment_from_relay_via_gateway(
+                engine,
+                &envelope.history_ref,
+                relay_service_key_base64,
+            )
             .await?;
-        let import =
-            self.import_dm_attachment_from_relay(&envelope.history_ref, relay_service_key_base64)?;
         let plaintext = ramflux_protocol::decode_base64url(&import.plaintext_base64)
             .map_err(|error| SdkError::LocalBus(format!("invalid sync bundle body: {error}")))?;
         let bundle: SdkOwnDeviceHistoryBundle = serde_json::from_slice(&plaintext)?;

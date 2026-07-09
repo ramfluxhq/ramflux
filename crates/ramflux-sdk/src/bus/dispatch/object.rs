@@ -31,11 +31,26 @@ pub(crate) async fn dispatch_object_bus_request(
             let object = account.client.put_encrypted_object(&body.object_id, &plaintext)?;
             let chunks = object_chunks(&object, body.chunk_size);
             let transfer = if let Some(options) = relay_options.as_ref() {
-                Some(account.client.upload_object_to_relay(
-                    &object.object_id,
-                    body.chunk_size,
-                    options,
-                )?)
+                if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
+                    Some(account.client.upload_object_to_relay(
+                        &object.object_id,
+                        body.chunk_size,
+                        options,
+                    )?)
+                } else {
+                    let mut engine = account.take_live_engine().await?;
+                    let result = account
+                        .client
+                        .upload_object_to_relay_via_gateway(
+                            &mut engine,
+                            &object.object_id,
+                            body.chunk_size,
+                            options,
+                        )
+                        .await;
+                    account.put_engine(engine);
+                    Some(result?)
+                }
             } else {
                 None
             };
@@ -55,11 +70,26 @@ pub(crate) async fn dispatch_object_bus_request(
                 body.relay_interrupt_after_chunks,
             )?;
             let plaintext = if let Some(options) = relay_options.as_ref() {
-                account.client.download_object_from_relay(
-                    &body.object_id,
-                    options,
-                    body.relay_ack,
-                )?
+                if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
+                    account.client.download_object_from_relay(
+                        &body.object_id,
+                        options,
+                        body.relay_ack,
+                    )?
+                } else {
+                    let mut engine = account.take_live_engine().await?;
+                    let result = account
+                        .client
+                        .download_object_from_relay_via_gateway(
+                            &mut engine,
+                            &body.object_id,
+                            options,
+                            body.relay_ack,
+                        )
+                        .await;
+                    account.put_engine(engine);
+                    result?
+                }
             } else {
                 account.client.decrypt_object(&body.object_id)?
             };
@@ -94,18 +124,50 @@ pub(crate) async fn dispatch_object_bus_request(
                         .account_db()?
                         .object_transfer(&body.object_id, Some(OBJECT_TRANSFER_UPLOAD))?
                         .ok_or_else(|| SdkError::LocalBus("missing upload transfer".to_owned()))?;
-                    account.client.upload_object_to_relay(
-                        &body.object_id,
-                        usize::try_from(existing.chunk_size.max(1)).unwrap_or(64 * 1024),
-                        &relay_options,
-                    )?
+                    if matches!(relay_options.token_provider, RelayTokenProvider::LocalMint { .. })
+                    {
+                        account.client.upload_object_to_relay(
+                            &body.object_id,
+                            usize::try_from(existing.chunk_size.max(1)).unwrap_or(64 * 1024),
+                            &relay_options,
+                        )?
+                    } else {
+                        let mut engine = account.take_live_engine().await?;
+                        let result = account
+                            .client
+                            .upload_object_to_relay_via_gateway(
+                                &mut engine,
+                                &body.object_id,
+                                usize::try_from(existing.chunk_size.max(1)).unwrap_or(64 * 1024),
+                                &relay_options,
+                            )
+                            .await;
+                        account.put_engine(engine);
+                        result?
+                    }
                 }
                 OBJECT_TRANSFER_DOWNLOAD => {
-                    let _plaintext = account.client.download_object_from_relay(
-                        &body.object_id,
-                        &relay_options,
-                        false,
-                    )?;
+                    if matches!(relay_options.token_provider, RelayTokenProvider::LocalMint { .. })
+                    {
+                        let _plaintext = account.client.download_object_from_relay(
+                            &body.object_id,
+                            &relay_options,
+                            false,
+                        )?;
+                    } else {
+                        let mut engine = account.take_live_engine().await?;
+                        let result = account
+                            .client
+                            .download_object_from_relay_via_gateway(
+                                &mut engine,
+                                &body.object_id,
+                                &relay_options,
+                                false,
+                            )
+                            .await;
+                        account.put_engine(engine);
+                        let _plaintext = result?;
+                    }
                     account
                         .client
                         .object_transfer_status(&body.object_id, Some(OBJECT_TRANSFER_DOWNLOAD))?

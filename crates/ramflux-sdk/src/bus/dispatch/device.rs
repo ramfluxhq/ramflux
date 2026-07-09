@@ -196,17 +196,18 @@ async fn dispatch_device_sync_import(
     let manifest = read_local_bus_account_manifest(&manifest_path)?;
     let account = local_bus_account_mut(state, &account_id)?;
     let envelope: SdkOwnDeviceSyncEnvelope = serde_json::from_value(body.envelope)?;
-    let gateway = account.gateway_config.clone();
+    let mut engine = account.take_live_engine().await?;
     let response = account
         .client
         .import_own_device_sync(
-            &gateway,
+            &mut engine,
             &manifest.principal_commitment,
             &envelope,
             body.relay_service_key_base64,
         )
-        .await?;
-    Ok(local_bus_ok(serde_json::to_value(response)?))
+        .await;
+    account.put_engine(engine);
+    Ok(local_bus_ok(serde_json::to_value(response?)?))
 }
 
 fn append_device_branch_authorized_event(
