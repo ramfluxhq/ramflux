@@ -265,6 +265,7 @@ impl RamfluxClient {
         Ok(object_key)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn import_dm_attachment_from_relay(
         &mut self,
         attachment: &SdkDmAttachmentRef,
@@ -393,6 +394,7 @@ impl RamfluxClient {
         })
     }
 
+    #[allow(dead_code)]
     fn download_dm_attachment_ciphertext(
         &self,
         attachment: &SdkDmAttachmentRef,
@@ -600,6 +602,22 @@ impl RamfluxClient {
         self.upload_object_to_relay_inner(&object, chunk_size, options)
     }
 
+    pub(crate) async fn upload_object_to_relay_via_gateway(
+        &self,
+        engine: &mut GatewaySessionEngine,
+        object_id: &str,
+        chunk_size: usize,
+        options: &RelayTransferOptions,
+    ) -> Result<SdkObjectTransferStatus, SdkError> {
+        let object = self
+            .object_store
+            .objects()
+            .into_iter()
+            .find(|object| object.object_id == object_id)
+            .ok_or(SyncError::ObjectNotFound)?;
+        self.upload_object_to_relay_inner_via_gateway(engine, &object, chunk_size, options).await
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(crate) fn download_object_from_relay(
         &mut self,
@@ -786,7 +804,205 @@ impl RamfluxClient {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn upload_object_to_relay_inner_via_gateway(
+    pub(crate) async fn download_object_from_relay_via_gateway(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        object_id: &str,
+        options: &RelayTransferOptions,
+        ack: bool,
+    ) -> Result<Vec<u8>, SdkError> {
+        let branch = self
+            .device_branch
+            .as_ref()
+            .ok_or_else(|| SdkError::LocalBus("object relay requires a device branch".to_owned()))?
+            .clone();
+        let object = self
+            .object_store
+            .objects()
+            .into_iter()
+            .find(|object| object.object_id == object_id)
+            .ok_or(SyncError::ObjectNotFound)?;
+        let object_key = self.object_store.object_key(object_id)?;
+        let chunk_size = self
+            .account_db()?
+            .object_transfer(object_id, Some(OBJECT_TRANSFER_UPLOAD))?
+            .map_or(64 * 1024, |record| usize::try_from(record.chunk_size).unwrap_or(64 * 1024))
+            .max(1);
+        let manifest =
+            chunk_manifest_for_object(&object.object_id, &object.ciphertext, chunk_size, None);
+        let transfer_id =
+            object_transfer_id(&object.object_id, &object.manifest_hash, OBJECT_TRANSFER_DOWNLOAD);
+        let mut completed = self
+            .account_db()?
+            .object_transfer(&object.object_id, Some(OBJECT_TRANSFER_DOWNLOAD))?
+            .map_or_else(Vec::new, |record| record.completed_chunks);
+        let mut chunks: Vec<Option<Vec<u8>>> =
+            vec![None; usize::try_from(manifest.total_chunks).unwrap_or(0)];
+        let mut done_bytes = 0_u64;
+        for chunk_index in completed.iter().copied() {
+            if let Some(slice) = ciphertext_slice(&object.ciphertext, chunk_size, chunk_index) {
+                done_bytes = done_bytes.saturating_add(u64::try_from(slice.len()).unwrap_or(0));
+            }
+        }
+        let expires_at = relay_expires_at();
+        let mut transferred = 0_u32;
+        for chunk_index in 0..manifest.total_chunks {
+            if completed.contains(&chunk_index) {
+                if let Some(slice) = ciphertext_slice(&object.ciphertext, chunk_size, chunk_index) {
+                    let slot = usize::try_from(chunk_index).unwrap_or(0);
+                    if let Some(entry) = chunks.get_mut(slot) {
+                        *entry = Some(slice.to_vec());
+                    }
+                }
+                continue;
+            }
+            if options.interrupt_after_chunks.is_some_and(|limit| transferred >= limit) {
+                self.persist_object_transfer(ObjectTransferPersist {
+                    transfer_id: &transfer_id,
+                    object: &object,
+                    direction: OBJECT_TRANSFER_DOWNLOAD,
+                    relay_endpoint: Some(&options.relay_endpoint),
+                    chunk_size,
+                    total_chunks: manifest.total_chunks,
+                    completed: &completed,
+                    done_bytes,
+                    state: "paused",
+                    last_error: None,
+                    resume_token: None,
+                    expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
+                })?;
+                return Err(SdkError::LocalBus("object relay download interrupted".to_owned()));
+            }
+            let permission = object_permission_for_chunk(
+                &branch,
+                &object,
+                chunk_index,
+                SdkObjectRelayCapability::Get,
+                expires_at,
+            )?;
+            let token = issue_or_mint_relay_token(
+                engine,
+                &RelayTokenIssueContext {
+                    options,
+                    branch: &branch,
+                    object: &object,
+                    chunk_index,
+                    capability: SdkObjectRelayCapability::Get,
+                    expires_at,
+                    permission: &permission,
+                },
+            )
+            .await?;
+            let response: SdkObjectRelayGetResponse = relay_post_json(
+                &options.relay_endpoint,
+                "/relay/v1/object/get_chunk",
+                &SdkObjectRelayGetRequest {
+                    chunk_id: token.chunk_id.clone(),
+                    relay_token: token,
+                    object_permission_envelope: permission,
+                },
+            )?;
+            let expected_hash = object_relay_chunk_cipher_hash(
+                &object.manifest_hash,
+                chunk_index,
+                &response.chunk.encrypted_chunk,
+            );
+            if response.chunk.chunk_cipher_hash != expected_hash {
+                return Err(SdkError::LocalBus("object relay chunk hash mismatch".to_owned()));
+            }
+            let payload: ChunkPayload = serde_json::from_slice(&response.chunk.encrypted_chunk)?;
+            let plaintext_chunk = decrypt_chunk_payload(&object_key, &manifest, &payload)?;
+            let slot = usize::try_from(chunk_index).unwrap_or(0);
+            if let Some(entry) = chunks.get_mut(slot) {
+                *entry = Some(plaintext_chunk.clone());
+            }
+            done_bytes =
+                done_bytes.saturating_add(u64::try_from(plaintext_chunk.len()).unwrap_or(0));
+            completed.push(chunk_index);
+            completed.sort_unstable();
+            completed.dedup();
+            transferred = transferred.saturating_add(1);
+            self.persist_object_transfer(ObjectTransferPersist {
+                transfer_id: &transfer_id,
+                object: &object,
+                direction: OBJECT_TRANSFER_DOWNLOAD,
+                relay_endpoint: Some(&options.relay_endpoint),
+                chunk_size,
+                total_chunks: manifest.total_chunks,
+                completed: &completed,
+                done_bytes,
+                state: "running",
+                last_error: None,
+                resume_token: None,
+                expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
+            })?;
+            if ack {
+                let ack_permission = object_permission_for_chunk(
+                    &branch,
+                    &object,
+                    chunk_index,
+                    SdkObjectRelayCapability::Ack,
+                    expires_at,
+                )?;
+                let ack_token = issue_or_mint_relay_token(
+                    engine,
+                    &RelayTokenIssueContext {
+                        options,
+                        branch: &branch,
+                        object: &object,
+                        chunk_index,
+                        capability: SdkObjectRelayCapability::Ack,
+                        expires_at,
+                        permission: &ack_permission,
+                    },
+                )
+                .await?;
+                let ack = SdkObjectRelayAck {
+                    object_id: object.object_id.clone(),
+                    manifest_hash: object.manifest_hash.clone(),
+                    chunk_id: ack_token.chunk_id.clone(),
+                    recipient_device_hash: ack_token.recipient_device_hash.clone(),
+                    relay_token: ack_token,
+                    object_permission_envelope: ack_permission,
+                    acked_at: u64::try_from(now_unix_timestamp()).unwrap_or(0),
+                };
+                let _response: SdkObjectRelayAckResponse =
+                    relay_post_json(&options.relay_endpoint, "/relay/v1/object/ack", &ack)?;
+            }
+        }
+        let assembled = chunks
+            .into_iter()
+            .map(|chunk| {
+                chunk.ok_or_else(|| {
+                    SdkError::LocalBus("object relay download incomplete".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .concat();
+        if assembled != object.ciphertext {
+            return Err(SdkError::LocalBus(
+                "object relay assembled ciphertext mismatch".to_owned(),
+            ));
+        }
+        self.persist_object_transfer(ObjectTransferPersist {
+            transfer_id: &transfer_id,
+            object: &object,
+            direction: OBJECT_TRANSFER_DOWNLOAD,
+            relay_endpoint: Some(&options.relay_endpoint),
+            chunk_size,
+            total_chunks: manifest.total_chunks,
+            completed: &completed,
+            done_bytes: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
+            state: "complete",
+            last_error: None,
+            resume_token: None,
+            expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
+        })?;
+        self.decrypt_object(object_id)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn upload_object_to_relay_inner_via_gateway(
         &self,
         engine: &mut GatewaySessionEngine,
         object: &EncryptedObject,
@@ -1160,6 +1376,7 @@ struct RelayTokenIssueContext<'a> {
     permission: &'a SdkObjectPermissionEnvelope,
 }
 
+#[allow(dead_code)]
 fn fetch_dm_attachment_chunk(
     ctx: &DmAttachmentFetch<'_>,
     chunk_index: u32,

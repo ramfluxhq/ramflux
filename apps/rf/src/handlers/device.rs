@@ -42,7 +42,7 @@ async fn handle_device_sync(
             let request = ramflux_sdk::LocalBusDeviceSyncExportRequest {
                 target_device_id: export.target_device,
                 relay_endpoint: export.relay_endpoint,
-                relay_service_key_base64: export.relay_service_key_base64,
+                relay_service_key_base64: None,
                 chunk_size: export.chunk_size,
             };
             print_json(
@@ -63,7 +63,7 @@ async fn handle_device_sync(
             };
             let request = ramflux_sdk::LocalBusDeviceSyncImportRequest {
                 envelope,
-                relay_service_key_base64: import.relay_service_key_base64,
+                relay_service_key_base64: None,
             };
             print_json(
                 &bus.request(Some(import.account), "device", "device.sync.import", &request)

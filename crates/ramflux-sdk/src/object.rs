@@ -273,10 +273,10 @@ pub(crate) fn parse_relay_transfer_options(
             RelayTokenProvider::LocalMint { relay_service_key }
         }
         Some(_key) => {
-            return Err(SdkError::LocalBus(
-                "object relay local token mint requires RAMFLUX_SDK_OBJECT_RELAY_LOCAL_MINT=1"
-                    .to_owned(),
-            ));
+            tracing::warn!(
+                "object relay service key was provided but local mint is disabled; requesting gateway-issued relay token"
+            );
+            RelayTokenProvider::GatewayIssued
         }
         None => RelayTokenProvider::GatewayIssued,
     };
@@ -411,6 +411,18 @@ mod tests {
         let options =
             parse_relay_transfer_options(Some("http://127.0.0.1:18084".to_owned()), None, None)?
                 .ok_or_else(|| SdkError::LocalBus("missing relay options".to_owned()))?;
+        assert!(matches!(options.token_provider, RelayTokenProvider::GatewayIssued));
+        Ok(())
+    }
+
+    #[test]
+    fn relay_transfer_options_ignore_service_key_without_local_mint_gate() -> Result<(), SdkError> {
+        let options = parse_relay_transfer_options(
+            Some("http://127.0.0.1:18084".to_owned()),
+            Some("ramflux-relay-itest-service-key".to_owned()),
+            None,
+        )?
+        .ok_or_else(|| SdkError::LocalBus("missing relay options".to_owned()))?;
         assert!(matches!(options.token_provider, RelayTokenProvider::GatewayIssued));
         Ok(())
     }
