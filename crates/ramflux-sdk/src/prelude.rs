@@ -71,18 +71,19 @@ pub(crate) use crate::client::contact::{
 };
 pub(crate) use crate::dm::*;
 pub(crate) use crate::gateway::{
+    GatewayRelayTokenIssueBody, GatewayRelayTokenIssueRequest, GatewayRelayTokenIssueResponse,
     gateway_auth_frame, gateway_fresh_open_frame, gateway_heartbeat_now, gateway_session_state,
     gateway_session_timeout, gateway_stream_nonce, sdk_device_signed_fields, sdk_signed_fields,
 };
 pub(crate) use crate::group::*;
 pub(crate) use crate::object::{
-    OBJECT_TRANSFER_DOWNLOAD, OBJECT_TRANSFER_UPLOAD, RelayTransferOptions, SdkObjectChunkFrame,
-    SdkObjectPermissionEnvelope, SdkObjectRelayAck, SdkObjectRelayAckResponse,
+    OBJECT_TRANSFER_DOWNLOAD, OBJECT_TRANSFER_UPLOAD, RelayTokenProvider, RelayTransferOptions,
+    SdkObjectChunkFrame, SdkObjectPermissionEnvelope, SdkObjectRelayAck, SdkObjectRelayAckResponse,
     SdkObjectRelayCapability, SdkObjectRelayGetRequest, SdkObjectRelayGetResponse,
     SdkObjectRelayPutResponse, SdkObjectTransferStatus, SdkRelayChunkStatus, SdkRelayToken,
     object_chunks, object_key_slot_associated_data, object_permission_for_chunk,
-    object_relay_chunk_cipher_hash, object_transfer_id, object_transfer_status,
-    parse_relay_transfer_options, relay_post_json, relay_token_for_chunk,
+    object_relay_chunk_cipher_hash, object_relay_chunk_id, object_transfer_id,
+    object_transfer_status, parse_relay_transfer_options, relay_post_json, relay_token_for_chunk,
 };
 pub(crate) use crate::own_device_sync::{
     SdkOwnDeviceDmSessionSnapshot, SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,

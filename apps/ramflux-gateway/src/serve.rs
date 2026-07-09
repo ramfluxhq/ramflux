@@ -21,6 +21,7 @@ pub(crate) struct GatewayListenerContext {
     pub(crate) peers: GatewayPeerDirectory,
     pub(crate) router: RouterMeshClient,
     pub(crate) notify: NotifyHttpClient,
+    pub(crate) relay_service_key: Vec<u8>,
     pub(crate) state: Arc<Mutex<ramflux_node_core::GatewayState>>,
     pub(crate) store: Arc<ramflux_node_core::GatewayRedbStore>,
     pub(crate) hub: Arc<GatewaySessionHub>,
@@ -46,12 +47,14 @@ pub(crate) fn serve_gateway_quic(
     let tcp_server_config = ramflux_transport::tcp_gateway_server_config(&tls)?;
     let gateway_id = gateway_instance_id_from_env();
     let peers = gateway_peer_directory_from_env(config, &gateway_id)?;
+    let relay_service_key = gateway_relay_service_key(config)?;
     let context = GatewayListenerContext {
         node_id: config.node_id.clone(),
         gateway_id,
         peers,
         router,
         notify,
+        relay_service_key,
         state,
         store,
         hub: Arc::new(GatewaySessionHub::default()),
@@ -247,6 +250,7 @@ async fn run_gateway_tcp_tls(
                 peers: context.peers,
                 router: context.router,
                 notify: context.notify,
+                relay_service_key: context.relay_service_key,
                 state: context.state,
                 store: context.store,
                 hub: context.hub,
@@ -258,6 +262,31 @@ async fn run_gateway_tcp_tls(
             }
         });
     }
+}
+
+fn gateway_relay_service_key(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> anyhow::Result<Vec<u8>> {
+    let Some(secret_ref) = std::env::var("RAMFLUX_RELAY_SERVICE_KEY_REF")
+        .ok()
+        .or_else(|| config.relay.as_ref().and_then(|relay| relay.service_key_ref.clone()))
+    else {
+        anyhow::bail!("missing relay service_key_ref")
+    };
+    read_gateway_secret_ref(&secret_ref)
+}
+
+fn read_gateway_secret_ref(secret_ref: &str) -> anyhow::Result<Vec<u8>> {
+    let value = if let Some(literal) = secret_ref.strip_prefix("literal:") {
+        literal.to_owned()
+    } else if let Some(name) = secret_ref.strip_prefix("env:") {
+        std::env::var(name)?
+    } else if let Some(path) = secret_ref.strip_prefix("file:") {
+        std::fs::read_to_string(path)?
+    } else {
+        anyhow::bail!("unsupported gateway relay secret ref scheme")
+    };
+    Ok(value.into_bytes())
 }
 
 fn gateway_forward_listen_addr(

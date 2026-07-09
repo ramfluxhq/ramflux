@@ -393,6 +393,35 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// # Errors
+    /// Returns an error when the gateway rejects relay token issuance.
+    pub(crate) async fn issue_relay_token(
+        &mut self,
+        body: GatewayRelayTokenIssueBody,
+    ) -> Result<SdkRelayToken, SdkError> {
+        let request = GatewayRelayTokenIssueRequest {
+            signed_request: self.signed_request(
+                "POST",
+                "/relay/v1/token/issue",
+                "already_authed",
+                &body,
+            )?,
+            body,
+        };
+        write_gateway_client_frame(
+            &mut *self.stream,
+            &GatewayClientFrame::RelayTokenIssue { request },
+        )
+        .await?;
+        match self.read_non_deliver_frame().await? {
+            GatewayServerFrame::RelayTokenIssued { response } => Ok(response.relay_token),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected relay_token_issued frame, got {other:?}"
+            ))),
+        }
+    }
+
     async fn read_non_deliver_frame(&mut self) -> Result<GatewayServerFrame, SdkError> {
         loop {
             match self.read_gateway_frame("gateway frame").await? {

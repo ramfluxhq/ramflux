@@ -290,10 +290,14 @@ impl RamfluxClient {
             let mut attachments = Vec::new();
             if auto_fetch_attachments {
                 for attachment in &attachment_refs {
-                    attachments.push(self.import_dm_attachment_from_relay(
-                        attachment,
-                        relay_service_key_base64.clone(),
-                    )?);
+                    attachments.push(
+                        self.import_dm_attachment_from_relay_via_gateway(
+                            engine,
+                            attachment,
+                            relay_service_key_base64.clone(),
+                        )
+                        .await?,
+                    );
                 }
             }
             self.append_plaintext_projection_once(

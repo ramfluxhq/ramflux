@@ -265,6 +265,32 @@ pub struct GatewayResumeFrame {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayRelayTokenIssueBody {
+    pub(crate) object_id: String,
+    pub(crate) manifest_hash: String,
+    pub(crate) chunk_id: String,
+    pub(crate) recipient_device_hash: String,
+    pub(crate) owner_signing_key_id: String,
+    pub(crate) owner_public_key: String,
+    pub(crate) capability: SdkObjectRelayCapability,
+    pub(crate) delete_after_ack: bool,
+    pub(crate) issued_at: u64,
+    pub(crate) expires_at: u64,
+    pub(crate) object_permission_envelope: SdkObjectPermissionEnvelope,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayRelayTokenIssueRequest {
+    pub(crate) signed_request: ramflux_protocol::SignedRequest,
+    pub(crate) body: GatewayRelayTokenIssueBody,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayRelayTokenIssueResponse {
+    pub(crate) relay_token: SdkRelayToken,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct GatewaySessionEstablishedFrame {
     pub session_id: String,
     pub gateway_id: String,
@@ -283,6 +309,7 @@ pub enum GatewayClientFrame {
     IdentityRegister { request: SdkIdentityRegisterRequest },
     PrekeyPublish { request: SdkPrekeyPublishRequest },
     PrekeyFetch { device_id: String },
+    RelayTokenIssue { request: GatewayRelayTokenIssueRequest },
     Ack { ack: ramflux_protocol::Ack },
     Cursor { target_delivery_id: String },
     Resume { resume: GatewayResumeFrame },
@@ -300,6 +327,7 @@ pub enum GatewayServerFrame {
     IdentityRegistered { response: SdkIdentityRegistrationResponse },
     PrekeyPublished { response: SdkPrekeyResponse },
     Prekey { response: SdkPrekeyResponse },
+    RelayTokenIssued { response: GatewayRelayTokenIssueResponse },
     Ack { cursor: GatewayCursor },
     Cursor { cursor: Option<GatewayCursor> },
     Resume { entries: Vec<GatewayInboxEntry> },

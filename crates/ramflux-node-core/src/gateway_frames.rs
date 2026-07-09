@@ -6,6 +6,7 @@
 use crate::{
     IdentityRegisterRequest, IdentityRegistrationResponse, InboxCursorResponse, InboxEntry,
     ItestMvp10OwnDeviceFanoutResponse, PrekeyPublishRequest, PrekeyResponse,
+    RelayTokenIssueRequest, RelayTokenIssueResponse,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -175,6 +176,7 @@ pub enum GatewayClientFrame {
     IdentityRegister { request: IdentityRegisterRequest },
     PrekeyPublish { request: PrekeyPublishRequest },
     PrekeyFetch { device_id: String },
+    RelayTokenIssue { request: RelayTokenIssueRequest },
     Ack { ack: ramflux_protocol::Ack },
     Cursor { target_delivery_id: String },
     Resume { resume: GatewayResumeFrame },
@@ -192,6 +194,7 @@ pub enum GatewayServerFrame {
     IdentityRegistered { response: IdentityRegistrationResponse },
     PrekeyPublished { response: PrekeyResponse },
     Prekey { response: PrekeyResponse },
+    RelayTokenIssued { response: RelayTokenIssueResponse },
     Ack { cursor: InboxCursorResponse },
     Cursor { cursor: Option<InboxCursorResponse> },
     Resume { entries: Vec<InboxEntry> },

@@ -32,6 +32,7 @@ pub(crate) async fn handle_gateway_quic_connection(
                     peers: listener.peers.clone(),
                     router,
                     notify,
+                    relay_service_key: listener.relay_service_key.clone(),
                     state,
                     store,
                     hub: Arc::clone(&listener.hub),
@@ -304,6 +305,7 @@ pub(crate) async fn establish_gateway_session(
         principal_id: registered_auth_key.principal_id,
         device_id: open.device_id.clone(),
         target_delivery_id: open.target_delivery_id.clone(),
+        branch_public_key: registered_auth_key.branch_public_key,
     })
 }
 
@@ -404,6 +406,9 @@ pub(crate) async fn run_gateway_session_loop(
                 )
                 .await?;
             }
+            ramflux_node_core::GatewayClientFrame::RelayTokenIssue { request } => {
+                handle_gateway_relay_token_issue(&send, &context, &runtime, &request).await?;
+            }
             ramflux_node_core::GatewayClientFrame::Ack { ack } => {
                 handle_gateway_ack(&send, &context, &runtime, &ack).await?;
             }
@@ -444,6 +449,141 @@ pub(crate) async fn run_gateway_session_loop(
             }
         }
     }
+}
+
+async fn handle_gateway_relay_token_issue(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    request: &ramflux_node_core::RelayTokenIssueRequest,
+) -> anyhow::Result<()> {
+    match issue_relay_token_for_authenticated_session(context, runtime, request) {
+        Ok(relay_token) => {
+            write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::RelayTokenIssued {
+                    response: ramflux_node_core::RelayTokenIssueResponse { relay_token },
+                },
+            )
+            .await
+        }
+        Err(error) => {
+            write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: format!("relay token issue rejected: {error}"),
+                },
+            )
+            .await
+        }
+    }
+}
+
+fn issue_relay_token_for_authenticated_session(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    request: &ramflux_node_core::RelayTokenIssueRequest,
+) -> anyhow::Result<ramflux_node_core::RelayToken> {
+    validate_gateway_session_signed_request(
+        context,
+        runtime,
+        &request.signed_request,
+        "POST",
+        "/relay/v1/token/issue",
+        &request.body,
+    )?;
+    validate_relay_token_issue_session_binding(runtime, &request.body)?;
+    let now = ramflux_node_core::now_unix_seconds();
+    Ok(ramflux_node_core::issue_gateway_relay_token(
+        &context.relay_service_key,
+        &request.body,
+        now,
+    )?)
+}
+
+fn validate_gateway_session_signed_request<T: serde::Serialize>(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    signed_request: &ramflux_protocol::SignedRequest,
+    method: &str,
+    path: &str,
+    body: &T,
+) -> anyhow::Result<()> {
+    if signed_request.source_device_id != runtime.device_id {
+        anyhow::bail!("signed request source device does not match authenticated session");
+    }
+    if signed_request.path != path {
+        anyhow::bail!("signed request path mismatch");
+    }
+    if signed_request.method != gateway_http_method(method)? {
+        anyhow::bail!("signed request method mismatch");
+    }
+    if signed_request.device_proof_hash != "already_authed" {
+        anyhow::bail!("signed request must bind to authenticated gateway session");
+    }
+    let now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    if signed_request.expires_at <= now {
+        anyhow::bail!("signed request expired");
+    }
+    let body_bytes = ramflux_protocol::canonical_json_bytes(body)?;
+    let body_hash =
+        ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, &body_bytes);
+    if signed_request.body_hash != body_hash {
+        anyhow::bail!("signed request body hash mismatch");
+    }
+    {
+        let mut gateway = gateway_state(&context.state)?;
+        gateway.replay_guard_state_mut().check_signed_request(signed_request, now)?;
+        context.store.save_state(&gateway)?;
+    }
+    let signed_request_bytes = ramflux_protocol::signed_bytes(signed_request)?;
+    ramflux_crypto::verify_canonical_signature(
+        &signed_request_bytes,
+        &signed_request.signed.signature,
+        &runtime.branch_public_key,
+    )?;
+    Ok(())
+}
+
+fn gateway_http_method(method: &str) -> anyhow::Result<ramflux_protocol::HttpMethod> {
+    match method {
+        "POST" => Ok(ramflux_protocol::HttpMethod::POST),
+        "GET" => Ok(ramflux_protocol::HttpMethod::GET),
+        "PUT" => Ok(ramflux_protocol::HttpMethod::PUT),
+        "DELETE" => Ok(ramflux_protocol::HttpMethod::DELETE),
+        other => anyhow::bail!("unsupported method {other}"),
+    }
+}
+
+fn validate_relay_token_issue_session_binding(
+    runtime: &GatewaySessionRuntime,
+    body: &ramflux_node_core::RelayTokenIssueBody,
+) -> anyhow::Result<()> {
+    match body.capability {
+        ramflux_node_core::ObjectRelayCapability::Put
+        | ramflux_node_core::ObjectRelayCapability::Tombstone => {
+            if body.owner_signing_key_id != runtime.device_id
+                || body.owner_public_key != runtime.branch_public_key
+            {
+                anyhow::bail!("put/tombstone relay token requires owner device session");
+            }
+        }
+        ramflux_node_core::ObjectRelayCapability::Get
+        | ramflux_node_core::ObjectRelayCapability::Ack => {
+            let session_device_hash = relay_device_hash(&runtime.device_id);
+            if body.recipient_device_hash != session_device_hash {
+                anyhow::bail!("get/ack relay token requires grantee device session");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn relay_device_hash(device_id: &str) -> String {
+    ramflux_crypto::blake3_256_base64url(
+        "ramflux.object_relay.recipient_device.v1",
+        device_id.as_bytes(),
+    )
 }
 
 pub(crate) async fn handle_gateway_submit(
@@ -1004,8 +1144,11 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_franking_node_tag, fresh_gateway_session_id, own_device_fanout_session_rejection,
+        attach_franking_node_tag, fresh_gateway_session_id,
+        issue_relay_token_for_authenticated_session, own_device_fanout_session_rejection,
+        relay_device_hash, validate_relay_token_issue_session_binding,
     };
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn fresh_gateway_session_id_has_session_level_entropy() -> anyhow::Result<()> {
@@ -1082,6 +1225,7 @@ mod tests {
             principal_id: "principal_a".to_owned(),
             device_id: "device_a".to_owned(),
             target_delivery_id: "target_a".to_owned(),
+            branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
         };
         let mut fanout = ramflux_node_core::GatewayOwnDeviceFanoutFrame {
             signed_request: test_signed_request("device_a"),
@@ -1102,6 +1246,62 @@ mod tests {
             own_device_fanout_session_rejection(&runtime, &fanout),
             Some("own-device fanout principal does not match authenticated session")
         );
+    }
+
+    #[test]
+    fn relay_token_issue_session_binding_requires_owner_or_grantee_device() -> anyhow::Result<()> {
+        let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
+        let runtime = test_runtime(&branch);
+        let mut body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
+        validate_relay_token_issue_session_binding(&runtime, &body)?;
+
+        body.owner_signing_key_id = "device_b".to_owned();
+        assert!(validate_relay_token_issue_session_binding(&runtime, &body).is_err());
+
+        let mut get_body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Get)?;
+        validate_relay_token_issue_session_binding(&runtime, &get_body)?;
+        get_body.recipient_device_hash = relay_device_hash("device_b");
+        assert!(validate_relay_token_issue_session_binding(&runtime, &get_body).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn relay_token_issue_rejects_signed_request_from_wrong_device_key() -> anyhow::Result<()> {
+        let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
+        let wrong_branch =
+            ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
+        let runtime = test_runtime(&branch);
+        let context = test_gateway_context()?;
+        let body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
+        let request = ramflux_node_core::RelayTokenIssueRequest {
+            signed_request: signed_relay_token_issue_request(&wrong_branch, &body)?,
+            body,
+        };
+
+        let rejected = issue_relay_token_for_authenticated_session(&context, &runtime, &request);
+        assert!(rejected.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn relay_token_issue_accepts_authenticated_owner_put() -> anyhow::Result<()> {
+        let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
+        let runtime = test_runtime(&branch);
+        let context = test_gateway_context()?;
+        let body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
+        let request = ramflux_node_core::RelayTokenIssueRequest {
+            signed_request: signed_relay_token_issue_request(&branch, &body)?,
+            body,
+        };
+
+        let token = issue_relay_token_for_authenticated_session(&context, &runtime, &request)?;
+        assert_eq!(token.issuer_service, ramflux_node_core::OBJECT_RELAY_TOKEN_ISSUER_GATEWAY);
+        assert_eq!(token.audience_service, ramflux_node_core::OBJECT_RELAY_TOKEN_AUDIENCE_RELAY);
+        Ok(())
     }
 
     fn test_envelope_with_franking(sender_device_id_hash: [u8; 32]) -> ramflux_protocol::Envelope {
@@ -1167,5 +1367,144 @@ mod tests {
             created_at: 1,
             expires_at: 2,
         }
+    }
+
+    fn test_runtime(branch: &ramflux_crypto::DeviceBranch) -> crate::GatewaySessionRuntime {
+        crate::GatewaySessionRuntime {
+            session_id: "session_test".to_owned(),
+            resume_token: "resume_test".to_owned(),
+            principal_id: branch.principal_id.clone(),
+            device_id: branch.device_id.clone(),
+            target_delivery_id: "target_a".to_owned(),
+            branch_public_key: ramflux_protocol::encode_base64url(
+                branch.signing_key.verifying_key().to_bytes(),
+            ),
+        }
+    }
+
+    fn test_relay_token_issue_body(
+        branch: &ramflux_crypto::DeviceBranch,
+        capability: ramflux_node_core::ObjectRelayCapability,
+    ) -> anyhow::Result<ramflux_node_core::RelayTokenIssueBody> {
+        let owner_public_key =
+            ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
+        let now = ramflux_node_core::now_unix_seconds();
+        let mut permission = ramflux_node_core::ObjectPermissionEnvelope {
+            object_id: "object_issue".to_owned(),
+            manifest_hash: "manifest_issue".to_owned(),
+            grantee_device_hash: relay_device_hash(&branch.device_id),
+            capability,
+            issued_at: now,
+            expires_at: now.saturating_add(300),
+            owner_signing_key_id: branch.device_id.clone(),
+            owner_public_key: owner_public_key.clone(),
+            owner_signature: String::new(),
+        };
+        permission.owner_signature = ramflux_crypto::sign_with_device_branch(branch, &permission)?;
+        Ok(ramflux_node_core::RelayTokenIssueBody {
+            object_id: permission.object_id.clone(),
+            manifest_hash: permission.manifest_hash.clone(),
+            chunk_id: "chunk_issue".to_owned(),
+            recipient_device_hash: permission.grantee_device_hash.clone(),
+            owner_signing_key_id: branch.device_id.clone(),
+            owner_public_key,
+            capability,
+            delete_after_ack: false,
+            issued_at: now,
+            expires_at: now.saturating_add(300),
+            object_permission_envelope: permission,
+        })
+    }
+
+    fn signed_relay_token_issue_request(
+        branch: &ramflux_crypto::DeviceBranch,
+        body: &ramflux_node_core::RelayTokenIssueBody,
+    ) -> anyhow::Result<ramflux_protocol::SignedRequest> {
+        let body_bytes = ramflux_protocol::canonical_json_bytes(body)?;
+        let now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+        let mut request = ramflux_protocol::SignedRequest {
+            schema: "ramflux.signed_request.v1".to_owned(),
+            version: 1,
+            domain: "ramflux.signed_request.v1".to_owned(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: format!("device:{}", branch.device_id),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: String::new(),
+            },
+            source_device_id: branch.device_id.clone(),
+            request_id: format!("req_issue_{}", body.chunk_id),
+            method: ramflux_protocol::HttpMethod::POST,
+            path: "/relay/v1/token/issue".to_owned(),
+            device_proof_hash: "already_authed".to_owned(),
+            body_hash: ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                &body_bytes,
+            ),
+            nonce: format!("nonce_issue_{}", body.chunk_id),
+            created_at: now,
+            expires_at: now.saturating_add(300),
+        };
+        request.signed.signature =
+            ramflux_crypto::sign_protocol_object_with_device_branch(branch, &request)?;
+        Ok(request)
+    }
+
+    fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
+        let store_path = std::env::temp_dir().join(format!(
+            "ramflux-gateway-relay-token-{}-{}.redb",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(store_path)?);
+        let state = ramflux_node_core::GatewayState::new();
+        store.save_state(&state)?;
+        let config = ramflux_node_core::NodeServiceConfig {
+            node_id: "node-gateway-test".to_owned(),
+            service_id: "ramflux-gateway".to_owned(),
+            redb_path: "gateway.redb".to_owned(),
+            node_service_signing_seed_b64url: None,
+            mesh: ramflux_node_core::MeshConfig {
+                listen_addr: "127.0.0.1:0".to_owned(),
+                ca_cert: "ca.pem".to_owned(),
+                service_cert: "gateway.pem".to_owned(),
+                service_key: "gateway-key.pem".to_owned(),
+                allowed_service_ids: ["ramflux-gateway".to_owned()].into_iter().collect(),
+                endpoints: [("ramflux-router".to_owned(), "127.0.0.1:7443".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            gateway: Some(ramflux_node_core::GatewayConfig {
+                public_listen_addr: "127.0.0.1:0".to_owned(),
+            }),
+            signaling: None,
+            relay: None,
+        };
+        Ok(crate::GatewayQuicContext {
+            node_id: "node-gateway-test".to_owned(),
+            gateway_id: "ramflux-gateway".to_owned(),
+            peers: crate::GatewayPeerDirectory::empty(&config),
+            router: crate::RouterMeshClient {
+                endpoint: "127.0.0.1:7443".to_owned(),
+                server_name: "ramflux-router".to_owned(),
+                tls: ramflux_transport::MeshTlsConfig {
+                    ca_cert: "ca.pem".into(),
+                    service_cert: "gateway.pem".into(),
+                    service_key: "gateway-key.pem".into(),
+                },
+                client: ramflux_transport::MeshHttpClient::new(),
+                async_mesh: None,
+            },
+            notify: crate::NotifyHttpClient {
+                endpoint: "http://127.0.0.1:18085".to_owned(),
+                signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x42; 32]),
+                mesh: None,
+            },
+            relay_service_key: b"relay-service-key-test".to_vec(),
+            state: Arc::new(Mutex::new(state)),
+            store,
+            hub: Arc::new(crate::GatewaySessionHub::default()),
+            remote_addr: "127.0.0.1:50000".parse()?,
+        })
     }
 }

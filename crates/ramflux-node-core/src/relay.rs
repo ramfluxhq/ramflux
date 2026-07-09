@@ -25,6 +25,10 @@ pub const OBJECT_RELAY_CHUNK_MAX_TTL_ENV: &str = "RAMFLUX_RELAY_OBJECT_MAX_TTL_S
 pub const OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 pub const OBJECT_RELAY_CLOCK_SKEW_LEEWAY_SECONDS: u64 = 60;
+pub const OBJECT_RELAY_TOKEN_VERSION: u32 = 2;
+pub const OBJECT_RELAY_TOKEN_ISSUER_GATEWAY: &str = "ramflux-gateway";
+pub const OBJECT_RELAY_TOKEN_AUDIENCE_RELAY: &str = "ramflux-relay";
+pub const OBJECT_RELAY_TOKEN_MAX_TTL_SECONDS: u64 = 300;
 const RELAY_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_RELAY_COMMIT_BATCH_MAX";
 const RELAY_COMMIT_BATCH_MAX_DEFAULT: usize = 256;
 const RELAY_COMMIT_WINDOW_US_ENV: &str = "RAMFLUX_RELAY_COMMIT_WINDOW_US";
@@ -51,6 +55,8 @@ pub enum ObjectRelayCapability {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RelayToken {
+    #[serde(default = "relay_token_default_version")]
+    pub token_version: u32,
     pub token_id: String,
     pub object_id: String,
     pub manifest_hash: String,
@@ -59,12 +65,40 @@ pub struct RelayToken {
     pub owner_signing_key_id: String,
     pub owner_public_key: String,
     pub issuer_service: String,
+    #[serde(default)]
+    pub audience_service: String,
     pub capabilities: Vec<ObjectRelayCapability>,
     pub delete_after_ack: bool,
     pub issued_at: u64,
     pub expires_at: u64,
     pub nonce: String,
     pub mac: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelayTokenIssueBody {
+    pub object_id: String,
+    pub manifest_hash: String,
+    pub chunk_id: String,
+    pub recipient_device_hash: String,
+    pub owner_signing_key_id: String,
+    pub owner_public_key: String,
+    pub capability: ObjectRelayCapability,
+    pub delete_after_ack: bool,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub object_permission_envelope: ObjectPermissionEnvelope,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelayTokenIssueRequest {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub body: RelayTokenIssueBody,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelayTokenIssueResponse {
+    pub relay_token: RelayToken,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -450,6 +484,10 @@ impl RelayCacheState {
     }
 }
 
+fn relay_token_default_version() -> u32 {
+    1
+}
+
 /// # Errors
 /// Returns an error when the canonical token encoding cannot be serialized.
 pub fn relay_token_canonical_bytes(token: &RelayToken) -> Result<Vec<u8>, NodeCoreError> {
@@ -469,6 +507,65 @@ pub fn relay_token_mac(service_key: &[u8], token: &RelayToken) -> Result<String,
 }
 
 /// # Errors
+/// Returns an error when the issuance body is invalid or token signing fails.
+pub fn issue_gateway_relay_token(
+    service_key: &[u8],
+    body: &RelayTokenIssueBody,
+    now: u64,
+) -> Result<RelayToken, NodeCoreError> {
+    validate_relay_token_issue_body(body, now)?;
+    let mut token = RelayToken {
+        token_version: OBJECT_RELAY_TOKEN_VERSION,
+        token_id: format!("token:{}:{}:{:?}", body.chunk_id, body.expires_at, body.capability),
+        object_id: body.object_id.clone(),
+        manifest_hash: body.manifest_hash.clone(),
+        chunk_id: body.chunk_id.clone(),
+        recipient_device_hash: body.recipient_device_hash.clone(),
+        owner_signing_key_id: body.owner_signing_key_id.clone(),
+        owner_public_key: body.owner_public_key.clone(),
+        issuer_service: OBJECT_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
+        audience_service: OBJECT_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
+        capabilities: vec![body.capability],
+        delete_after_ack: body.delete_after_ack,
+        issued_at: body.issued_at,
+        expires_at: body.expires_at,
+        nonce: ramflux_protocol::encode_base64url(
+            ramflux_crypto::random_32()
+                .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?,
+        ),
+        mac: String::new(),
+    };
+    token.mac = relay_token_mac(service_key, &token)?;
+    Ok(token)
+}
+
+/// # Errors
+/// Returns an error when the body TTL, capability, or permission binding is invalid.
+pub fn validate_relay_token_issue_body(
+    body: &RelayTokenIssueBody,
+    now: u64,
+) -> Result<(), NodeCoreError> {
+    if body.issued_at > now.saturating_add(OBJECT_RELAY_CLOCK_SKEW_LEEWAY_SECONDS)
+        || body.expires_at <= now
+        || body.expires_at > now.saturating_add(OBJECT_RELAY_TOKEN_MAX_TTL_SECONDS)
+    {
+        return Err(NodeCoreError::TtlExpired { envelope_id: body.chunk_id.clone() });
+    }
+    validate_object_permission(&body.object_permission_envelope, body.capability, now)?;
+    if body.object_permission_envelope.object_id != body.object_id
+        || body.object_permission_envelope.manifest_hash != body.manifest_hash
+        || body.object_permission_envelope.grantee_device_hash != body.recipient_device_hash
+        || body.object_permission_envelope.owner_signing_key_id != body.owner_signing_key_id
+        || body.object_permission_envelope.owner_public_key != body.owner_public_key
+    {
+        return Err(NodeCoreError::ItestHttp(
+            "object relay token issue binding mismatch".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// # Errors
 /// Returns an error when the token MAC, capability, issuer or TTL is invalid.
 pub fn validate_relay_token(
     token: &RelayToken,
@@ -476,10 +573,16 @@ pub fn validate_relay_token(
     capability: ObjectRelayCapability,
     now: u64,
 ) -> Result<(), NodeCoreError> {
-    if token.issuer_service != "router" {
+    if token.token_version != OBJECT_RELAY_TOKEN_VERSION {
+        return Err(NodeCoreError::ItestHttp("object relay token version rejected".to_owned()));
+    }
+    if token.issuer_service != OBJECT_RELAY_TOKEN_ISSUER_GATEWAY {
         return Err(NodeCoreError::ItestHttp("object relay token issuer rejected".to_owned()));
     }
-    if !token.capabilities.contains(&capability) {
+    if token.audience_service != OBJECT_RELAY_TOKEN_AUDIENCE_RELAY {
+        return Err(NodeCoreError::ItestHttp("object relay token audience rejected".to_owned()));
+    }
+    if token.capabilities.len() != 1 || !token.capabilities.contains(&capability) {
         return Err(NodeCoreError::ItestHttp("object relay token capability rejected".to_owned()));
     }
     if token.issued_at > now.saturating_add(OBJECT_RELAY_CLOCK_SKEW_LEEWAY_SECONDS)
@@ -1220,6 +1323,88 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn relay_token_v2_rejects_wrong_issuer_audience_and_capability() -> Result<(), String> {
+        let service_key = b"relay-token-v2-key";
+        let now = 1_000;
+        let token = test_relay_token(service_key, ObjectRelayCapability::Get, now, now + 300)?;
+
+        let mut wrong_issuer = token.clone();
+        wrong_issuer.issuer_service = "router".to_owned();
+        wrong_issuer.mac =
+            relay_token_mac(service_key, &wrong_issuer).map_err(|source| source.to_string())?;
+        assert!(
+            validate_relay_token(&wrong_issuer, service_key, ObjectRelayCapability::Get, now)
+                .is_err()
+        );
+
+        let mut wrong_audience = token.clone();
+        wrong_audience.audience_service = "ramflux-router".to_owned();
+        wrong_audience.mac =
+            relay_token_mac(service_key, &wrong_audience).map_err(|source| source.to_string())?;
+        assert!(
+            validate_relay_token(&wrong_audience, service_key, ObjectRelayCapability::Get, now)
+                .is_err()
+        );
+
+        let mut multi_capability = token;
+        multi_capability.capabilities.push(ObjectRelayCapability::Ack);
+        multi_capability.mac =
+            relay_token_mac(service_key, &multi_capability).map_err(|source| source.to_string())?;
+        assert!(
+            validate_relay_token(&multi_capability, service_key, ObjectRelayCapability::Get, now)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn relay_token_v2_rejects_forged_and_expired_tokens() -> Result<(), String> {
+        let service_key = b"relay-token-v2-key";
+        let now = 1_000;
+        let mut forged = test_relay_token(service_key, ObjectRelayCapability::Get, now, now + 300)?;
+        forged.object_id = "forged-object".to_owned();
+        assert!(
+            validate_relay_token(&forged, service_key, ObjectRelayCapability::Get, now).is_err()
+        );
+
+        let expired =
+            test_relay_token(service_key, ObjectRelayCapability::Get, now - 600, now - 1)?;
+        assert!(
+            validate_relay_token(&expired, service_key, ObjectRelayCapability::Get, now).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn relay_token_issue_body_enforces_ttl_and_permission_binding() -> Result<(), String> {
+        let now = 1_000;
+        let permission = test_object_permission(ObjectRelayCapability::Get, now, now + 300)?;
+        let body = RelayTokenIssueBody {
+            object_id: permission.object_id.clone(),
+            manifest_hash: permission.manifest_hash.clone(),
+            chunk_id: "chunk_relay_clock_skew".to_owned(),
+            recipient_device_hash: permission.grantee_device_hash.clone(),
+            owner_signing_key_id: permission.owner_signing_key_id.clone(),
+            owner_public_key: permission.owner_public_key.clone(),
+            capability: ObjectRelayCapability::Get,
+            delete_after_ack: false,
+            issued_at: now,
+            expires_at: now + OBJECT_RELAY_TOKEN_MAX_TTL_SECONDS,
+            object_permission_envelope: permission.clone(),
+        };
+        validate_relay_token_issue_body(&body, now).map_err(|source| source.to_string())?;
+
+        let mut long_ttl = body.clone();
+        long_ttl.expires_at = now + OBJECT_RELAY_TOKEN_MAX_TTL_SECONDS + 1;
+        assert!(validate_relay_token_issue_body(&long_ttl, now).is_err());
+
+        let mut mismatched = body;
+        mismatched.recipient_device_hash = "other_recipient".to_owned();
+        assert!(validate_relay_token_issue_body(&mismatched, now).is_err());
+        Ok(())
+    }
+
     fn test_relay_token(
         service_key: &[u8],
         capability: ObjectRelayCapability,
@@ -1227,6 +1412,7 @@ mod tests {
         expires_at: u64,
     ) -> Result<RelayToken, String> {
         let mut token = RelayToken {
+            token_version: OBJECT_RELAY_TOKEN_VERSION,
             token_id: format!("token_clock_skew_{capability:?}_{issued_at}"),
             object_id: "object_relay_clock_skew".to_owned(),
             manifest_hash: "manifest_relay_clock_skew".to_owned(),
@@ -1234,7 +1420,8 @@ mod tests {
             recipient_device_hash: "recipient_clock_skew".to_owned(),
             owner_signing_key_id: "owner_fixture_key".to_owned(),
             owner_public_key: ramflux_crypto::fixture_public_key_base64url(),
-            issuer_service: "router".to_owned(),
+            issuer_service: OBJECT_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
+            audience_service: OBJECT_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
             capabilities: vec![capability],
             delete_after_ack: false,
             issued_at,
