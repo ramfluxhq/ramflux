@@ -50,6 +50,8 @@ pub(crate) enum SdkRelayChunkStatus {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SdkRelayToken {
+    #[serde(default = "sdk_relay_token_default_version")]
+    pub token_version: u32,
     pub token_id: String,
     pub object_id: String,
     pub manifest_hash: String,
@@ -58,6 +60,8 @@ pub(crate) struct SdkRelayToken {
     pub owner_signing_key_id: String,
     pub owner_public_key: String,
     pub issuer_service: String,
+    #[serde(default)]
+    pub audience_service: String,
     pub capabilities: Vec<SdkObjectRelayCapability>,
     pub delete_after_ack: bool,
     pub issued_at: u64,
@@ -169,12 +173,22 @@ pub(crate) struct SdkObjectTransferStatus {
 #[derive(Clone, Debug)]
 pub(crate) struct RelayTransferOptions {
     pub relay_endpoint: String,
-    pub relay_service_key: Vec<u8>,
+    pub token_provider: RelayTokenProvider,
     pub interrupt_after_chunks: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RelayTokenProvider {
+    GatewayIssued,
+    LocalMint { relay_service_key: Vec<u8> },
 }
 
 pub(crate) const OBJECT_TRANSFER_UPLOAD: &str = "upload";
 pub(crate) const OBJECT_TRANSFER_DOWNLOAD: &str = "download";
+pub(crate) const SDK_RELAY_TOKEN_VERSION: u32 = 2;
+pub(crate) const SDK_RELAY_TOKEN_ISSUER_GATEWAY: &str = "ramflux-gateway";
+pub(crate) const SDK_RELAY_TOKEN_AUDIENCE_RELAY: &str = "ramflux-relay";
+pub(crate) const SDK_RELAY_LOCAL_MINT_ENV: &str = "RAMFLUX_SDK_OBJECT_RELAY_LOCAL_MINT";
 
 pub(crate) fn object_key_slot_associated_data(
     object_id: &str,
@@ -247,15 +261,40 @@ pub(crate) fn parse_relay_transfer_options(
     let Some(relay_endpoint) = relay_endpoint else {
         return Ok(None);
     };
-    let key = relay_service_key_base64
+    let token_provider = match relay_service_key_base64
         .or_else(|| std::env::var("RAMFLUX_SDK_OBJECT_RELAY_SERVICE_KEY_BASE64").ok())
-        .ok_or_else(|| SdkError::LocalBus("object relay service key is required".to_owned()))?;
-    let relay_service_key = ramflux_protocol::decode_base64url(&key)
-        .or_else(|_| Ok::<Vec<u8>, ramflux_protocol::ProtocolError>(key.into_bytes()))
-        .map_err(|error| {
-            SdkError::LocalBus(format!("invalid object relay service key: {error}"))
-        })?;
-    Ok(Some(RelayTransferOptions { relay_endpoint, relay_service_key, interrupt_after_chunks }))
+    {
+        Some(key) if sdk_relay_local_mint_enabled() => {
+            let relay_service_key = ramflux_protocol::decode_base64url(&key)
+                .or_else(|_| Ok::<Vec<u8>, ramflux_protocol::ProtocolError>(key.into_bytes()))
+                .map_err(|error| {
+                    SdkError::LocalBus(format!("invalid object relay service key: {error}"))
+                })?;
+            RelayTokenProvider::LocalMint { relay_service_key }
+        }
+        Some(_key) => {
+            return Err(SdkError::LocalBus(
+                "object relay local token mint requires RAMFLUX_SDK_OBJECT_RELAY_LOCAL_MINT=1"
+                    .to_owned(),
+            ));
+        }
+        None => RelayTokenProvider::GatewayIssued,
+    };
+    Ok(Some(RelayTransferOptions { relay_endpoint, token_provider, interrupt_after_chunks }))
+}
+
+fn sdk_relay_token_default_version() -> u32 {
+    1
+}
+
+fn sdk_relay_local_mint_enabled() -> bool {
+    sdk_relay_local_mint_enabled_from_value(std::env::var(SDK_RELAY_LOCAL_MINT_ENV).ok().as_deref())
+}
+
+fn sdk_relay_local_mint_enabled_from_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes")
+    })
 }
 
 pub(crate) fn object_relay_chunk_cipher_hash(
@@ -310,7 +349,9 @@ pub(crate) fn relay_token_for_chunk(
         ),
         owner_signing_key_id: branch.device_id.clone(),
         owner_public_key,
-        issuer_service: "router".to_owned(),
+        token_version: SDK_RELAY_TOKEN_VERSION,
+        issuer_service: SDK_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
+        audience_service: SDK_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
         capabilities: vec![capability],
         delete_after_ack: false,
         issued_at: now,
@@ -359,4 +400,27 @@ where
     R: serde::de::DeserializeOwned,
 {
     sdk_http_post_json(relay_endpoint, path, value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_transfer_options_default_to_gateway_issued_tokens() -> Result<(), SdkError> {
+        let options =
+            parse_relay_transfer_options(Some("http://127.0.0.1:18084".to_owned()), None, None)?
+                .ok_or_else(|| SdkError::LocalBus("missing relay options".to_owned()))?;
+        assert!(matches!(options.token_provider, RelayTokenProvider::GatewayIssued));
+        Ok(())
+    }
+
+    #[test]
+    fn relay_local_mint_gate_parses_explicit_values() {
+        assert!(sdk_relay_local_mint_enabled_from_value(Some("1")));
+        assert!(sdk_relay_local_mint_enabled_from_value(Some("true")));
+        assert!(sdk_relay_local_mint_enabled_from_value(Some("on")));
+        assert!(!sdk_relay_local_mint_enabled_from_value(Some("0")));
+        assert!(!sdk_relay_local_mint_enabled_from_value(None));
+    }
 }

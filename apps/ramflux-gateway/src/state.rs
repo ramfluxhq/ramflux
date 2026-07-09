@@ -52,6 +52,7 @@ pub(crate) struct GatewayQuicContext {
     pub(crate) peers: GatewayPeerDirectory,
     pub(crate) router: RouterMeshClient,
     pub(crate) notify: NotifyHttpClient,
+    pub(crate) relay_service_key: Vec<u8>,
     pub(crate) state: Arc<Mutex<ramflux_node_core::GatewayState>>,
     pub(crate) store: Arc<ramflux_node_core::GatewayRedbStore>,
     pub(crate) hub: Arc<GatewaySessionHub>,
@@ -64,6 +65,7 @@ pub(crate) struct GatewaySessionRuntime {
     pub(crate) principal_id: String,
     pub(crate) device_id: String,
     pub(crate) target_delivery_id: String,
+    pub(crate) branch_public_key: String,
 }
 
 #[derive(Clone)]

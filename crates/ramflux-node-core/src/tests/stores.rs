@@ -1177,6 +1177,7 @@ fn relay_token_for_chunk(
     delete_after_ack: bool,
 ) -> Result<RelayToken, Box<dyn std::error::Error>> {
     let mut token = RelayToken {
+        token_version: OBJECT_RELAY_TOKEN_VERSION,
         token_id: format!("token_{chunk_id}_{capability:?}"),
         object_id: "object_relay_1".to_owned(),
         manifest_hash: "manifest_relay_1".to_owned(),
@@ -1184,7 +1185,8 @@ fn relay_token_for_chunk(
         recipient_device_hash: "recipient_device_hash_1".to_owned(),
         owner_signing_key_id: "owner_fixture_key".to_owned(),
         owner_public_key: ramflux_crypto::fixture_public_key_base64url(),
-        issuer_service: "router".to_owned(),
+        issuer_service: OBJECT_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
+        audience_service: OBJECT_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
         capabilities: vec![capability],
         delete_after_ack,
         issued_at: now,
