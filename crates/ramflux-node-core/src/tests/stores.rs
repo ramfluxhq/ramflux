@@ -874,14 +874,20 @@ fn relay_redb_store_restores_encrypted_chunk_cache() -> Result<(), Box<dyn std::
     store.put_chunk(&relay_chunk("chunk_1", 1_760_000_000, 60))?;
     drop(store);
 
+    // Startup loads metadata only; the ciphertext stays in redb and is read through on demand.
     let reopened = RelayRedbStore::open(&path)?;
     let mut state = reopened
-        .load_state()?
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_cache".to_owned()))?;
-    let chunk = state
+    let meta = state
         .get_available_chunk("chunk_1", 1_760_000_010)
         .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_1".to_owned()))?;
-    assert_eq!(chunk.encrypted_chunk, b"encrypted chunk bytes");
+    assert_eq!(meta.chunk_cipher_hash, "chunk_cipher_hash");
+    // Payload is servable via the redb point read, not resident in memory.
+    let payload = reopened
+        .relay_chunk_entry("chunk_1")?
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_1".to_owned()))?;
+    assert_eq!(payload.encrypted_chunk, b"encrypted chunk bytes");
     assert_eq!(state.available_count(1_760_000_010), 1);
     assert_eq!(state.expire_chunks(1_760_000_061), 1);
     assert_eq!(state.available_count(1_760_000_061), 0);
@@ -896,8 +902,9 @@ fn relay_redb_incremental_tombstone_survives_restart() -> Result<(), Box<dyn std
     let store = RelayRedbStore::open(&path)?;
     let mut state = RelayCacheState::new();
     let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
-    let entry = state.put_object_chunk_frame(frame.clone(), service_key, now)?;
+    let entry = RelayCacheState::build_put_entry_from_frame(frame.clone(), service_key, now)?;
     store.record_relay_chunk_entry(&entry)?;
+    state.put_chunk(entry)?;
     let tombstone = ObjectRelayTombstone {
         object_id: frame.object_id.clone(),
         manifest_hash: Some(frame.manifest_hash.clone()),
@@ -917,14 +924,18 @@ fn relay_redb_incremental_tombstone_survives_restart() -> Result<(), Box<dyn std
 
     let reopened = RelayRedbStore::open(&path)?;
     let restored = reopened
-        .load_state()?
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_incremental_tombstone".to_owned()))?;
     assert!(restored.tombstone("object_relay_1").is_some());
-    let chunk = restored
+    let meta = restored
         .chunk_entry("chunk_relay_1")
         .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
-    assert_eq!(chunk.status, RelayChunkStatus::Tombstoned);
-    assert!(chunk.encrypted_chunk.is_empty());
+    assert_eq!(meta.status, RelayChunkStatus::Tombstoned);
+    // The tombstone cleared the ciphertext: the redb payload row is empty after restart.
+    let payload = reopened
+        .relay_chunk_entry("chunk_relay_1")?
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
+    assert!(payload.encrypted_chunk.is_empty());
     Ok(())
 }
 
@@ -933,19 +944,26 @@ fn relay_redb_legacy_snapshot_loads_without_incremental_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("relay_redb_legacy_snapshot_loads_without_incremental_rows")?;
     let store = RelayRedbStore::open(&path)?;
-    let mut state = RelayCacheState::new();
-    state.put_chunk(relay_chunk("chunk_legacy", 1_760_000_000, 120));
-    store.save_legacy_state_only(&state)?;
+    // Craft a genuine pre-incremental snapshot whose chunk row embeds full ciphertext (old format).
+    let legacy_entry = relay_chunk("chunk_legacy", 1_760_000_000, 120);
+    let snapshot = serde_json::json!({
+        "chunks_by_id": { "chunk_legacy": legacy_entry },
+        "tombstones_by_object_id": {},
+    });
+    store.save_legacy_snapshot_bytes(&serde_json::to_vec(&snapshot)?)?;
     drop(store);
 
+    // Startup loads the metadata and backfills the ciphertext into the incremental table so a GET can
+    // read through to the recovered payload.
     let reopened = RelayRedbStore::open(&path)?;
     let restored = reopened
-        .load_state()?
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_legacy".to_owned()))?;
-    let chunk = restored
-        .get_available_chunk("chunk_legacy", 1_760_000_010)
+    assert!(restored.get_available_chunk("chunk_legacy", 1_760_000_010).is_some());
+    let payload = reopened
+        .relay_chunk_entry("chunk_legacy")?
         .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_legacy".to_owned()))?;
-    assert_eq!(chunk.encrypted_chunk, b"encrypted chunk bytes");
+    assert_eq!(payload.encrypted_chunk, b"encrypted chunk bytes");
     Ok(())
 }
 
@@ -955,7 +973,7 @@ fn relay_redb_expiry_removes_incremental_chunk_key() -> Result<(), Box<dyn std::
     let store = RelayRedbStore::open(&path)?;
     store.put_chunk(&relay_chunk("chunk_expire_incremental", 1_760_000_000, 60))?;
     let mut state = store
-        .load_state()?
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_expire".to_owned()))?;
     let mutation = state.expire_chunks_mutation(1_760_000_061);
     assert_eq!(mutation.expired_chunk_ids, vec!["chunk_expire_incremental".to_owned()]);
@@ -963,7 +981,7 @@ fn relay_redb_expiry_removes_incremental_chunk_key() -> Result<(), Box<dyn std::
     drop(store);
 
     let reopened = RelayRedbStore::open(&path)?;
-    assert!(reopened.load_state()?.is_none());
+    assert!(reopened.load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?.is_none());
     Ok(())
 }
 
@@ -978,8 +996,12 @@ fn object_relay_requires_token_permission_and_hash() -> Result<(), Box<dyn std::
     assert!(state.put_object_chunk_frame(tampered, service_key, now).is_err());
 
     let stored = state.put_object_chunk_frame(frame, service_key, now)?;
-    assert_eq!(stored.encrypted_chunk, b"opaque encrypted relay chunk");
-    assert!(!stored.encrypted_chunk.windows(9).any(|window| window == b"plaintext"));
+    assert_eq!(
+        stored.chunk_cipher_hash,
+        object_relay_chunk_cipher_hash("manifest_relay_1", 0, b"opaque encrypted relay chunk",)
+    );
+    // Resident metadata carries no ciphertext at all.
+    assert!(!format!("{stored:?}").contains("encrypted_chunk"));
 
     let get_token = relay_token(service_key, ObjectRelayCapability::Get, now, false)?;
     let get_permission = object_permission(ObjectRelayCapability::Get, now)?;
@@ -1025,7 +1047,6 @@ fn object_relay_ack_deletes_before_ttl_and_tombstone_wins() -> Result<(), Box<dy
     };
     let acked = state.ack_object_chunk(ack, service_key, now + 1)?;
     assert_eq!(acked.status, RelayChunkStatus::AckedDeleted);
-    assert!(acked.encrypted_chunk.is_empty());
     assert!(state.get_available_chunk("chunk_relay_1", now + 2).is_none());
 
     let next_frame = relay_object_frame_with_chunk(
@@ -1086,10 +1107,11 @@ fn object_relay_caps_long_chunk_ttl_and_expires() -> Result<(), Box<dyn std::err
     let requested_expires_at = now + OBJECT_RELAY_CHUNK_MAX_TTL_SECONDS + 3_600;
     set_relay_frame_expires_at(&mut frame, service_key, requested_expires_at)?;
 
-    let entry = state.put_object_chunk_frame(frame, service_key, now)?;
+    let entry = RelayCacheState::build_put_entry_from_frame(frame, service_key, now)?;
     let capped_expires_at = now + OBJECT_RELAY_CHUNK_MAX_TTL_SECONDS;
     assert_eq!(entry.expires_at, capped_expires_at);
     assert_eq!(object_relay_retention_record(&entry, now).expires_at, capped_expires_at);
+    state.put_chunk(entry)?;
     assert!(state.get_available_chunk("chunk_relay_1", capped_expires_at - 1).is_some());
 
     assert_eq!(state.expire_chunks(capped_expires_at), 1);
@@ -1188,11 +1210,14 @@ fn object_relay_put_rejects_cross_owner_and_content_overwrite()
         "content overwrite should be rejected, got {content_overwrite:?}"
     );
 
-    // The original ciphertext is intact after the rejected writes.
+    // The original metadata (owner binding + cipher hash) is intact after the rejected writes.
     let stored = state
         .chunk_entry("chunk_relay_1")
         .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
-    assert_eq!(stored.encrypted_chunk, b"opaque encrypted relay chunk");
+    assert_eq!(
+        stored.chunk_cipher_hash,
+        object_relay_chunk_cipher_hash("manifest_relay_1", 0, b"opaque encrypted relay chunk")
+    );
     assert_eq!(stored.owner_signing_key_id, "owner_fixture_key");
     Ok(())
 }
@@ -1215,7 +1240,7 @@ fn object_relay_legacy_unbound_chunk_rejects_overwrite() -> Result<(), Box<dyn s
     object.remove("owner_public_key");
     let legacy: RelayChunkEntry = serde_json::from_value(value)?;
     assert!(!legacy.has_owner_binding());
-    state.put_chunk(legacy);
+    state.put_chunk(legacy)?;
 
     // A well-formed put for the same chunk id cannot overwrite the unbound legacy record.
     let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
@@ -1250,8 +1275,8 @@ fn object_relay_ack_ignores_token_delete_after_ack_elevation()
         acked_at: now + 1,
     };
     let acked = state.ack_object_chunk(elevating_ack, service_key, now + 1)?;
+    // The owner stored delete_after_ack = false, so the chunk stays Available (never consumed).
     assert_eq!(acked.status, RelayChunkStatus::Available);
-    assert_eq!(acked.encrypted_chunk, b"opaque encrypted relay chunk");
     Ok(())
 }
 
@@ -1295,13 +1320,12 @@ fn object_relay_tombstone_rejects_cross_owner() -> Result<(), Box<dyn std::error
         matches!(result, Err(NodeCoreError::Unauthorized(_))),
         "cross-owner tombstone should be rejected, got {result:?}"
     );
-    // No tombstone recorded and ciphertext untouched.
+    // No tombstone recorded and the chunk metadata left untouched (still Available).
     assert!(state.tombstone("object_relay_1").is_none());
     let chunk = state
         .chunk_entry("chunk_relay_1")
         .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
     assert_eq!(chunk.status, RelayChunkStatus::Available);
-    assert_eq!(chunk.encrypted_chunk, b"opaque encrypted relay chunk");
     Ok(())
 }
 
@@ -1444,12 +1468,13 @@ fn object_relay_tombstone_redb_replay_no_rewrite() -> Result<(), Box<dyn std::er
 
     let store = RelayRedbStore::open(&path)?;
     let mut state = RelayCacheState::new();
-    let entry = state.put_object_chunk_frame(
+    let entry = RelayCacheState::build_put_entry_from_frame(
         relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
         service_key,
         now,
     )?;
     store.record_relay_chunk_entry(&entry)?;
+    state.put_chunk(entry)?;
     let first = state.apply_object_tombstone_mutation(
         fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?,
         service_key,
@@ -1460,13 +1485,13 @@ fn object_relay_tombstone_redb_replay_no_rewrite() -> Result<(), Box<dyn std::er
     drop(store);
 
     let baseline = RelayRedbStore::open(&path)?
-        .load_state()?
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_tombstone_baseline".to_owned()))?;
 
     // Replay stable tombstone -> changed=false -> record must not rewrite redb.
     let store2 = RelayRedbStore::open(&path)?;
     let mut state2 = store2
-        .load_state()?
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_tombstone_reload".to_owned()))?;
     let replay = state2.apply_object_tombstone_mutation(
         fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?,
@@ -1478,7 +1503,7 @@ fn object_relay_tombstone_redb_replay_no_rewrite() -> Result<(), Box<dyn std::er
     drop(store2);
 
     let after = RelayRedbStore::open(&path)?
-        .load_state()?
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_tombstone_after".to_owned()))?;
     assert_eq!(after.tombstone("object_relay_1"), baseline.tombstone("object_relay_1"));
     assert_eq!(after.chunk_entry("chunk_relay_1"), baseline.chunk_entry("chunk_relay_1"));
@@ -1513,7 +1538,6 @@ fn object_relay_tombstone_ttl_is_fail_closed() -> Result<(), Box<dyn std::error:
             .chunk_entry("chunk_relay_1")
             .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
         assert_eq!(chunk.status, RelayChunkStatus::Available);
-        assert_eq!(chunk.encrypted_chunk, b"opaque encrypted relay chunk");
     }
 
     // expires_at > now + MAX: rejected, no mutation.
@@ -1600,6 +1624,756 @@ fn object_relay_tombstone_ttl_is_fail_closed() -> Result<(), Box<dyn std::error:
             Some(short_expiry)
         );
     }
+    Ok(())
+}
+
+// RELAY-MEM-01-A1: the resident budget env override is fail-closed. Unset => 64 MiB default; a
+// positive value overrides; `0` or a non-numeric value is a hard failure (never a silent default).
+#[test]
+fn relay_metadata_budget_config_is_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    // Unset => 64 MiB default; a positive value overrides; `0` or non-numeric is a hard failure.
+    assert_eq!(parse_relay_metadata_max_bytes(None)?, RELAY_METADATA_MAX_BYTES_DEFAULT);
+    assert_eq!(RELAY_METADATA_MAX_BYTES_DEFAULT, 64 * 1024 * 1024);
+    assert_eq!(parse_relay_metadata_max_bytes(Some("1048576"))?, 1_048_576);
+    assert!(parse_relay_metadata_max_bytes(Some("0")).is_err(), "zero budget must fail");
+    assert!(parse_relay_metadata_max_bytes(Some("not-a-number")).is_err(), "invalid must fail");
+    assert!(parse_relay_metadata_max_bytes(Some("")).is_err(), "empty must fail");
+    // The env-backed resolver agrees with the pure parser when the var is unset in this process.
+    if std::env::var("RAMFLUX_RELAY_METADATA_MAX_BYTES").is_err() {
+        assert_eq!(relay_metadata_max_bytes_from_env()?, RELAY_METADATA_MAX_BYTES_DEFAULT);
+    }
+    Ok(())
+}
+
+fn budget_meta(chunk_id: &str) -> RelayChunkMeta {
+    RelayChunkMeta::from(&relay_chunk(chunk_id, 1_760_000_000, 60))
+}
+
+// Byte-aware HARD-BOUND admission: cap-1 rejects, cap fits, cap+1 is rejected with zero mutation, a
+// reservation counts toward the budget (reserved_bytes), expiry releases the charge, and cancel (the
+// persist-failure rollback path) releases the reserved headroom leaving nothing published.
+#[test]
+fn relay_resident_budget_admission_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+    let one = budget_meta("chunk_budget_1");
+    let charge = one
+        .resident_charge_for_test()
+        .ok_or_else(|| NodeCoreError::ItestHttp("charge overflow".to_owned()))?;
+
+    // cap == exactly one charge: admits one, rejects a second distinct chunk.
+    let mut state = RelayCacheState::with_max_bytes(charge);
+    let id = state.reserve_put(one.clone())?;
+    // A live reservation counts toward the budget as reserved headroom (not yet resident).
+    assert_eq!(state.reserved_bytes(), charge);
+    assert_eq!(state.resident_bytes(), 0);
+    state.publish(id);
+    assert_eq!(state.resident_bytes(), charge);
+    assert_eq!(state.reserved_bytes(), 0);
+    let two = budget_meta("chunk_budget_2");
+    assert!(state.reserve_put(two).is_err(), "cap+1 distinct chunk must be rejected");
+    assert_eq!(state.resident_bytes(), charge, "rejected reservation must not charge");
+    assert!(state.chunk_entry("chunk_budget_2").is_none(), "rejected reservation must not publish");
+
+    // cap-1: does not fit at all, zero mutation.
+    let mut tight = RelayCacheState::with_max_bytes(charge - 1);
+    assert!(tight.reserve_put(one.clone()).is_err(), "cap-1 must reject the only chunk");
+    assert_eq!(tight.resident_bytes(), 0);
+    assert_eq!(tight.reserved_bytes(), 0);
+
+    // cap+1 headroom: fits, and expiry releases the charge.
+    let mut roomy = RelayCacheState::with_max_bytes(charge + 1);
+    let id = roomy.reserve_put(one.clone())?;
+    roomy.publish(id);
+    assert_eq!(roomy.expire_chunks(u64::MAX), 1);
+    assert_eq!(roomy.resident_bytes(), 0, "expiry must release the charge");
+
+    // Cancel releases the reservation charge (persist-failure rollback path); nothing is published.
+    let mut cancelable = RelayCacheState::with_max_bytes(charge);
+    let id = cancelable.reserve_put(one.clone())?;
+    assert_eq!(cancelable.reserved_bytes(), charge);
+    cancelable.cancel_reservation(id);
+    assert_eq!(cancelable.reserved_bytes(), 0, "cancel must release the reservation charge");
+    assert_eq!(cancelable.resident_bytes(), 0);
+    assert!(cancelable.chunk_entry(&one.chunk_id).is_none());
+    Ok(())
+}
+
+// A store-backed PUT persists the ciphertext to redb before publishing metadata, and a GET reads the
+// payload back through redb. An exact-bytes replay is idempotent; a same-hash-different-bytes claim is
+// rejected by the store byte comparison; a cross-owner overwrite is rejected.
+#[test]
+fn relay_store_put_read_through_and_idempotency() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("relay_store_put_read_through_and_idempotency")?;
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let store = RelayRedbStore::open(&path)?;
+    let state = std::sync::Mutex::new(RelayCacheState::new());
+
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    let (stored, inserted) = relay_store_put_frame(&store, &state, frame, service_key, now)
+        .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    assert!(inserted);
+    assert_eq!(stored.encrypted_chunk, b"opaque encrypted relay chunk");
+
+    // Read-through GET returns the payload from redb.
+    let expected = {
+        let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .available_meta("chunk_relay_1", now)
+            .cloned()
+            .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?
+    };
+    let read = relay_store_read_through(&store, &state, &expected, now)
+        .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    assert_eq!(read.encrypted_chunk, b"opaque encrypted relay chunk");
+
+    // Exact-bytes replay is idempotent (no new insert).
+    let replay_frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    let (_, inserted_again) = relay_store_put_frame(&store, &state, replay_frame, service_key, now)
+        .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    assert!(!inserted_again, "byte-identical replay must be idempotent");
+
+    // Same chunk id + same claimed cipher hash but different bytes: rejected by the store byte compare.
+    let mut forged = relay_chunk("chunk_relay_1", now, OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS);
+    forged.object_id = "object_relay_1".to_owned();
+    forged.manifest_hash = "manifest_relay_1".to_owned();
+    forged.chunk_cipher_hash =
+        object_relay_chunk_cipher_hash("manifest_relay_1", 0, b"opaque encrypted relay chunk");
+    forged.owner_signing_key_id = "owner_fixture_key".to_owned();
+    forged.owner_public_key = ramflux_crypto::fixture_public_key_base64url();
+    forged.encrypted_chunk = b"a completely different ciphertext body".to_vec();
+    let forged_result = relay_store_put_candidate(&store, &state, forged, now);
+    assert!(forged_result.is_err(), "same-hash different-bytes must be rejected");
+
+    Ok(())
+}
+
+// GET read-through never serves a tombstoned or expired payload even if a caller holds a stale meta
+// snapshot: the post-read recheck fails closed.
+#[test]
+fn relay_store_read_through_rejects_stale() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("relay_store_read_through_rejects_stale")?;
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let store = RelayRedbStore::open(&path)?;
+    let state = std::sync::Mutex::new(RelayCacheState::new());
+
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    relay_store_put_frame(&store, &state, frame, service_key, now)
+        .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    let stale_meta = {
+        let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .available_meta("chunk_relay_1", now)
+            .cloned()
+            .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?
+    };
+
+    // Tombstone the object (persist-before-publish), then read through with the stale snapshot.
+    let tombstone = fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, now + 100)?;
+    relay_store_tombstone(&store, &state, move |guard| {
+        guard.plan_object_tombstone_mutation(tombstone, service_key, now + 1).map_err(Into::into)
+    })
+    .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    let after_tombstone = relay_store_read_through(&store, &state, &stale_meta, now + 2);
+    assert!(after_tombstone.is_err(), "tombstoned payload must never be served");
+    Ok(())
+}
+
+// Point read: existing full-entry row returns the payload, a missing id returns None, and a corrupt
+// row fails closed (never an empty payload).
+#[test]
+fn relay_point_read_existing_missing_corrupt() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("relay_point_read_existing_missing_corrupt")?;
+    let store = RelayRedbStore::open(&path)?;
+    store.put_chunk(&relay_chunk("chunk_exists", 1_760_000_000, 60))?;
+    assert_eq!(
+        store.relay_chunk_entry("chunk_exists")?.map(|entry| entry.encrypted_chunk),
+        Some(b"encrypted chunk bytes".to_vec())
+    );
+    assert!(store.relay_chunk_entry("chunk_missing")?.is_none());
+    store.write_raw_chunk_row("chunk_corrupt", b"{not valid json")?;
+    assert!(store.relay_chunk_entry("chunk_corrupt").is_err(), "corrupt row must fail closed");
+    Ok(())
+}
+
+// Startup hydration is fail-closed: if the resident metadata charge of the stored rows exceeds the
+// configured budget, load_state fails (no partial load).
+#[test]
+fn relay_startup_over_cap_fails() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("relay_startup_over_cap_fails")?;
+    let store = RelayRedbStore::open(&path)?;
+    for index in 0..8 {
+        store.put_chunk(&relay_chunk(&format!("chunk_over_{index}"), 1_760_000_000, 600))?;
+    }
+    // A tiny budget cannot hold 8 chunk-metas (>= 512 bytes each): startup must fail closed.
+    assert!(store.load_state(1_024).is_err(), "over-cap hydration must fail");
+    // A generous budget hydrates all rows.
+    let loaded = store
+        .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("relay_over_cap".to_owned()))?;
+    assert_eq!(loaded.available_count(1_760_000_100), 8);
+    Ok(())
+}
+
+// Structural memory guarantee: the resident metadata contains no ciphertext marker, and the resident
+// charge after storing many 64 KiB chunks grows only with metadata, never with payload bytes.
+#[test]
+fn relay_resident_charge_excludes_payload_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("relay_resident_charge_excludes_payload_bytes")?;
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let store = RelayRedbStore::open(&path)?;
+    let state = std::sync::Mutex::new(RelayCacheState::new());
+
+    let chunk_count = 16u32;
+    let payload_size = 64 * 1024usize;
+    for index in 0..chunk_count {
+        let chunk_id = format!("chunk_big_{index}");
+        let encrypted_chunk = vec![0xABu8; payload_size];
+        let cipher_hash =
+            object_relay_chunk_cipher_hash("manifest_relay_1", index, &encrypted_chunk);
+        let mut frame = relay_object_frame_with_chunk(
+            service_key,
+            ObjectRelayCapability::Put,
+            now,
+            &chunk_id,
+            false,
+        )?;
+        frame.chunk_index = index;
+        frame.chunk_cipher_hash = cipher_hash;
+        frame.cipher_size = payload_size as u64;
+        frame.encrypted_chunk = encrypted_chunk;
+        // Re-mint the token/permission binding is unchanged (chunk_index/cipher not covered by MAC).
+        relay_store_put_frame(&store, &state, frame, service_key, now)
+            .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    }
+
+    let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let resident = guard.resident_bytes();
+    let total_payload = u64::from(chunk_count) * payload_size as u64; // 1 MiB of ciphertext
+    assert!(
+        resident < total_payload / 8,
+        "resident charge {resident} must be far below the {total_payload} payload bytes"
+    );
+    // Debug of the resident state must not carry any ciphertext field.
+    let debug = format!("{:?}", *guard);
+    assert!(!debug.contains("encrypted_chunk"), "resident meta must not contain ciphertext");
+    Ok(())
+}
+
+// ===== RELAY-MEM-01-A1a: reservation concurrency + hard-bound budget =====
+
+fn a1a_seeded_state(
+    service_key: &[u8],
+    now: u64,
+) -> Result<RelayCacheState, Box<dyn std::error::Error>> {
+    let mut state = RelayCacheState::new();
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    state.put_object_chunk_frame(frame, service_key, now)?;
+    Ok(state)
+}
+
+fn a1a_ack(now: u64, service_key: &[u8]) -> Result<ObjectRelayAck, Box<dyn std::error::Error>> {
+    Ok(ObjectRelayAck {
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: "manifest_relay_1".to_owned(),
+        chunk_id: "chunk_relay_1".to_owned(),
+        recipient_device_hash: "recipient_device_hash_1".to_owned(),
+        relay_token: relay_token(service_key, ObjectRelayCapability::Ack, now, false)?,
+        object_permission_envelope: object_permission(ObjectRelayCapability::Ack, now)?,
+        acked_at: now + 1,
+    })
+}
+
+// P0-2: while a PUT for a new chunk on an object is reserved (in flight), a tombstone on that object
+// is REJECTED (Conflict); after the PUT publishes, a FRESH tombstone plan covers the newly-published
+// chunk and marks it Tombstoned — a PUT can never slip a chunk past the tombstone.
+#[test]
+fn a1a_put_reservation_blocks_tombstone_until_published() -> Result<(), Box<dyn std::error::Error>>
+{
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let mut state = a1a_seeded_state(service_key, now)?; // publishes chunk_relay_1 on object_relay_1
+
+    // Reserve a PUT for a second chunk on the SAME object (in flight, not yet published).
+    let frame2 = relay_object_frame_with_chunk(
+        service_key,
+        ObjectRelayCapability::Put,
+        now,
+        "chunk_relay_2",
+        false,
+    )?;
+    let candidate2 = RelayCacheState::build_put_entry_from_frame(frame2, service_key, now)?;
+    let put_id = state.reserve_put(RelayChunkMeta::from(&candidate2))?;
+
+    // A tombstone planned over the (currently published) chunk cannot be reserved: the object is
+    // share-locked by the in-flight PUT.
+    let mutation = state.plan_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 1,
+    )?;
+    assert!(
+        matches!(state.reserve_tombstone(mutation), Err(RelayStoreOpError::Conflict(_))),
+        "a tombstone must be rejected while a PUT is in flight on the object"
+    );
+
+    // Publish the PUT, then a FRESH plan covers BOTH chunks and marks them Tombstoned.
+    state.publish(put_id);
+    let covering = state.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 2,
+    )?;
+    assert_eq!(covering.affected_chunks.len(), 2, "tombstone must cover the newly-published chunk");
+    for chunk_id in ["chunk_relay_1", "chunk_relay_2"] {
+        assert_eq!(
+            state.chunk_entry(chunk_id).map(|meta| meta.status),
+            Some(RelayChunkStatus::Tombstoned)
+        );
+    }
+    Ok(())
+}
+
+// While a tombstone is reserved (in flight), a concurrent PUT and ACK on the object are REJECTED
+// (Conflict); after it publishes, a new PUT is tombstone-rejected.
+#[test]
+fn a1a_tombstone_reservation_blocks_put_and_ack() -> Result<(), Box<dyn std::error::Error>> {
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let mut state = a1a_seeded_state(service_key, now)?;
+
+    let mutation = state.plan_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 1,
+    )?;
+    let ts_id = state.reserve_tombstone(mutation)?;
+
+    // A PUT for a new chunk on the object is rejected (object exclusively locked).
+    let frame2 = relay_object_frame_with_chunk(
+        service_key,
+        ObjectRelayCapability::Put,
+        now,
+        "chunk_relay_2",
+        false,
+    )?;
+    let candidate2 = RelayCacheState::build_put_entry_from_frame(frame2, service_key, now)?;
+    assert!(
+        matches!(
+            state.reserve_put(RelayChunkMeta::from(&candidate2)),
+            Err(RelayStoreOpError::Conflict(_))
+        ),
+        "a PUT must be rejected while a tombstone is in flight on the object"
+    );
+
+    // An ACK of the affected chunk is rejected (chunk exclusively locked by the tombstone).
+    let updated = state.plan_ack(&a1a_ack(now, service_key)?, service_key, now + 1)?;
+    assert!(
+        matches!(state.reserve_ack(updated), Err(RelayStoreOpError::Conflict(_))),
+        "an ACK must be rejected while a tombstone is in flight on the chunk"
+    );
+
+    // Publish the tombstone; a subsequent PUT for a new chunk is tombstone-rejected.
+    state.publish(ts_id);
+    let blocked = state.put_object_chunk_frame(
+        relay_object_frame_with_chunk(
+            service_key,
+            ObjectRelayCapability::Put,
+            now + 2,
+            "chunk_relay_3",
+            false,
+        )?,
+        service_key,
+        now + 2,
+    );
+    assert!(blocked.is_err(), "a put after the tombstone must be rejected");
+    Ok(())
+}
+
+// While an ACK is reserved (in flight), a tombstone on the object is REJECTED; after publish the
+// acked_by update is intact (no lost update).
+#[test]
+fn a1a_ack_reservation_conflicts_with_tombstone() -> Result<(), Box<dyn std::error::Error>> {
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let mut state = a1a_seeded_state(service_key, now)?;
+
+    let updated = state.plan_ack(&a1a_ack(now, service_key)?, service_key, now + 1)?;
+    let ack_id = state.reserve_ack(updated)?;
+
+    let mutation = state.plan_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 1,
+    )?;
+    assert!(
+        matches!(state.reserve_tombstone(mutation), Err(RelayStoreOpError::Conflict(_))),
+        "a tombstone must be rejected while an ACK is in flight on the object"
+    );
+
+    state.publish(ack_id);
+    assert!(
+        state
+            .chunk_entry("chunk_relay_1")
+            .is_some_and(|meta| meta.acked_by.contains("recipient_device_hash_1")),
+        "the ACK must not be lost"
+    );
+    Ok(())
+}
+
+// Persist-failure/unwind rollback: cancelling a reservation releases its locks + reserved budget, and
+// a later op on the same chunk succeeds.
+#[test]
+fn a1a_cancel_releases_reservation_and_allows_retry() -> Result<(), Box<dyn std::error::Error>> {
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let mut state = RelayCacheState::new();
+    let candidate = RelayCacheState::build_put_entry_from_frame(
+        relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+        service_key,
+        now,
+    )?;
+    let meta = RelayChunkMeta::from(&candidate);
+    let id = state.reserve_put(meta.clone())?;
+    assert!(state.reserved_bytes() > 0);
+    // Simulate a persist failure: cancel the reservation.
+    state.cancel_reservation(id);
+    assert_eq!(state.reserved_bytes(), 0, "cancel releases the reserved headroom");
+    assert_eq!(state.resident_bytes(), 0, "nothing was published");
+    assert!(state.chunk_entry(&meta.chunk_id).is_none());
+    // A retry of the same chunk now succeeds (lock released).
+    let retry_id = state.reserve_put(meta.clone())?;
+    state.publish(retry_id);
+    assert!(state.chunk_entry(&meta.chunk_id).is_some());
+    Ok(())
+}
+
+// ACK is a HARD budget bound: an update whose positive meta delta would exceed the cap is rejected
+// BEFORE any persist, and the resident charge + published meta stay in the prior state.
+#[test]
+fn a1a_ack_admission_is_hard_bound() -> Result<(), Box<dyn std::error::Error>> {
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let mut state = a1a_seeded_state(service_key, now)?;
+    let base_resident = state.resident_bytes();
+    let base_meta = state
+        .chunk_entry("chunk_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?
+        .clone();
+
+    // Tighten the cap to leave only tiny headroom, then present an ACK meta that grows acked_by well
+    // past it.
+    state.set_max_bytes_for_test(base_resident + 8);
+    let mut oversized = base_meta.clone();
+    for index in 0..64 {
+        oversized.acked_by.insert(format!("device-hash-padding-{index:08}"));
+    }
+    assert!(
+        matches!(state.reserve_ack(oversized), Err(RelayStoreOpError::Capacity(_))),
+        "an ACK exceeding the cap must be rejected before persist"
+    );
+    assert_eq!(state.resident_bytes(), base_resident, "rejected ACK must not charge");
+    assert_eq!(state.reserved_bytes(), 0, "rejected ACK must not reserve");
+    assert_eq!(
+        state.chunk_entry("chunk_relay_1"),
+        Some(&base_meta),
+        "rejected ACK must not mutate"
+    );
+    Ok(())
+}
+
+// Tombstone budget boundary: cap fits, cap-1 is rejected with ZERO mutation (no tombstone, no meta
+// change, resident unchanged).
+#[test]
+fn a1a_tombstone_admission_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+
+    // Discover the exact positive delta the tombstone needs.
+    let mut probe = a1a_seeded_state(service_key, now)?;
+    let resident = probe.resident_bytes();
+    let mutation = probe.plan_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 1,
+    )?;
+    let probe_id = probe.reserve_tombstone(mutation)?;
+    let delta = probe.reserved_bytes();
+    assert!(delta > 0);
+    probe.cancel_reservation(probe_id);
+
+    // cap == resident + delta: fits.
+    let mut ok_state = a1a_seeded_state(service_key, now)?;
+    ok_state.set_max_bytes_for_test(resident + delta);
+    ok_state.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 1,
+    )?;
+    assert!(ok_state.tombstone("object_relay_1").is_some(), "cap must fit the tombstone");
+
+    // cap == resident + delta - 1: rejected, zero mutation.
+    let mut tight = a1a_seeded_state(service_key, now)?;
+    tight.set_max_bytes_for_test(resident + delta - 1);
+    let rejected = tight.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 1,
+    );
+    assert!(rejected.is_err(), "cap-1 tombstone must be rejected");
+    assert!(tight.tombstone("object_relay_1").is_none(), "rejected tombstone records nothing");
+    assert_eq!(tight.resident_bytes(), resident, "rejected tombstone must not charge");
+    assert_eq!(
+        tight.chunk_entry("chunk_relay_1").map(|meta| meta.status),
+        Some(RelayChunkStatus::Available),
+        "rejected tombstone must not consume the chunk"
+    );
+    Ok(())
+}
+
+// The resident charge tracks metadata exactly through increase / decrease / idempotent-repeat /
+// expiry-release-then-readmit, and always equals the recomputed sum and stays within the cap.
+#[test]
+fn a1a_resident_charge_tracks_meta_exactly() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = RelayCacheState::new();
+    let small = relay_chunk("chunk_track", 1_760_000_000, 60);
+    let mut big = small.clone();
+    for index in 0..8 {
+        big.acked_by.insert(format!("device-{index}"));
+    }
+    let charge = |entry: &RelayChunkEntry| {
+        RelayChunkMeta::from(entry).resident_charge_for_test().unwrap_or(u64::MAX)
+    };
+
+    state.put_chunk(small.clone())?;
+    assert_eq!(state.resident_bytes(), charge(&small));
+    // Increase.
+    state.put_chunk(big.clone())?;
+    assert_eq!(state.resident_bytes(), charge(&big));
+    // Idempotent repeat: no change.
+    state.put_chunk(big.clone())?;
+    assert_eq!(state.resident_bytes(), charge(&big));
+    // Decrease.
+    state.put_chunk(small.clone())?;
+    assert_eq!(state.resident_bytes(), charge(&small));
+    // resident == recompute of the single published meta.
+    let recompute = state
+        .chunk_entry("chunk_track")
+        .and_then(RelayChunkMeta::resident_charge_for_test)
+        .unwrap_or(0);
+    assert_eq!(state.resident_bytes(), recompute);
+    // Expiry releases, then re-admit succeeds.
+    assert_eq!(state.expire_chunks(u64::MAX), 1);
+    assert_eq!(state.resident_bytes(), 0);
+    state.put_chunk(small)?;
+    assert_eq!(state.resident_bytes(), charge_of_track(&state));
+    assert!(state.resident_bytes() <= state.max_bytes());
+    Ok(())
+}
+
+fn charge_of_track(state: &RelayCacheState) -> u64 {
+    state.chunk_entry("chunk_track").and_then(RelayChunkMeta::resident_charge_for_test).unwrap_or(0)
+}
+
+// rehydrate_budget is fail-closed: a budget smaller than the already-resident charge is rejected.
+#[test]
+fn a1a_rehydrate_budget_fails_closed_over_cap() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = RelayCacheState::new();
+    for index in 0..4 {
+        state.put_chunk(relay_chunk(&format!("chunk_rh_{index}"), 1_760_000_000, 60))?;
+    }
+    let resident = state.resident_bytes();
+    assert!(state.rehydrate_budget(resident / 2).is_err(), "over-cap rehydrate must fail closed");
+    // A generous budget rehydrates and preserves the resident charge.
+    state.rehydrate_budget(RELAY_METADATA_MAX_BYTES_DEFAULT)?;
+    assert_eq!(state.resident_bytes(), resident);
+    Ok(())
+}
+
+// A genuine multi-thread race (Barrier-synchronized, no sleep): N threads each PUT a DISTINCT chunk
+// through the persist-before-publish store orchestration under a cap that fits only K. Exactly K
+// succeed and the resident charge never exceeds the cap.
+#[test]
+fn a1a_concurrent_puts_respect_hard_cap() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{Arc, Barrier};
+    let service_key: &'static [u8] = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let path = temp_store_path("a1a_concurrent_puts_respect_hard_cap")?;
+    let store = Arc::new(RelayRedbStore::open(&path)?);
+
+    // One chunk's charge, to size the cap to exactly K = 3 admissions.
+    let sample =
+        relay_object_frame_with_chunk(service_key, ObjectRelayCapability::Put, now, "cc_0", false)?;
+    let sample_charge = RelayChunkMeta::from(&RelayCacheState::build_put_entry_from_frame(
+        sample,
+        service_key,
+        now,
+    )?)
+    .resident_charge_for_test()
+    .unwrap_or(u64::MAX);
+    let cap = sample_charge * 3 + sample_charge / 2; // fits exactly 3
+    let state = Arc::new(std::sync::Mutex::new(RelayCacheState::with_max_bytes(cap)));
+
+    let thread_count = 8usize;
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let successes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut handles = Vec::new();
+    for index in 0..thread_count {
+        let store = Arc::clone(&store);
+        let state = Arc::clone(&state);
+        let barrier = Arc::clone(&barrier);
+        let successes = Arc::clone(&successes);
+        handles.push(std::thread::spawn(move || -> Result<(), String> {
+            let frame = relay_object_frame_with_chunk(
+                service_key,
+                ObjectRelayCapability::Put,
+                now,
+                &format!("cc_{index}"),
+                false,
+            )
+            .map_err(|error| error.to_string())?;
+            barrier.wait();
+            match relay_store_put_frame(&store, &state, frame, service_key, now) {
+                Ok((_entry, true)) => {
+                    successes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok((_entry, false)) => {}
+                Err(RelayStoreOpError::Capacity(_)) => {}
+                Err(other) => return Err(format!("unexpected put error: {other}")),
+            }
+            Ok(())
+        }));
+    }
+    for handle in handles {
+        handle.join().map_err(|_| "put worker panicked".to_owned())??;
+    }
+    assert_eq!(successes.load(std::sync::atomic::Ordering::SeqCst), 3, "exactly K puts admitted");
+    let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(guard.resident_bytes() <= cap, "resident charge must never exceed the cap");
+    assert_eq!(guard.reserved_bytes(), 0, "no reservation left dangling");
+    Ok(())
+}
+
+// ===== RELAY-MEM-01-A1a-closure (CTRL-083): checked + fail-stop accounting =====
+
+// POST-persist missing-token invariant: the fallible core returns Err (no silent skip), and the
+// `publish` wrapper fail-stops (panic) rather than leaving redb committed but live unpublished.
+#[test]
+fn a1a_closure_publish_missing_token_returns_err() {
+    let mut state = RelayCacheState::new();
+    assert!(state.try_publish(9_999).is_err(), "publish on a missing token must fail (not skip)");
+}
+
+#[test]
+#[should_panic(expected = "invariant violated after redb commit")]
+fn a1a_closure_publish_missing_token_fail_stops() {
+    let mut state = RelayCacheState::new();
+    state.publish(9_999);
+}
+
+// POST-persist resident-arithmetic invariant: a corrupted resident charge that would underflow the
+// checked publish subtraction returns Err (fail-stop), never silently keeping the old value.
+#[test]
+fn a1a_closure_publish_arithmetic_underflow_fail_stops() -> Result<(), Box<dyn std::error::Error>> {
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let mut state = a1a_seeded_state(service_key, now)?; // chunk_relay_1 published (resident > 0)
+    let updated = state.plan_ack(&a1a_ack(now, service_key)?, service_key, now + 1)?;
+    let id = state.reserve_ack(updated)?; // reservation.resident_sub = the existing meta charge
+    // Corrupt the resident charge below `resident_sub` so the checked subtraction must fail.
+    state.set_resident_bytes_for_test(0);
+    assert!(state.try_publish(id).is_err(), "a resident underflow at publish must fail-stop");
+    Ok(())
+}
+
+// ID exhaustion is CHECKED: the fallible allocator returns Err at u64::MAX, and the reserve path
+// fail-stops rather than wrapping into a live token.
+#[test]
+fn a1a_closure_id_exhaustion_returns_err() {
+    let mut state = RelayCacheState::new();
+    state.set_next_reservation_id_for_test(u64::MAX);
+    assert!(state.try_alloc_reservation_id().is_err(), "id-space exhaustion must fail (no wrap)");
+}
+
+#[test]
+#[should_panic(expected = "reservation id allocation invariant")]
+fn a1a_closure_id_exhaustion_fail_stops() {
+    let mut state = RelayCacheState::new();
+    state.set_next_reservation_id_for_test(u64::MAX);
+    let _ = state.reserve_put(budget_meta("chunk_exhaust"));
+}
+
+// Exact conservation: at EVERY step `resident_bytes == recompute` and `resident + reserved <= max`,
+// across PUT / idempotent-replay / ACK / a live reservation / tombstone / expiry-release-then-readmit.
+#[test]
+fn a1a_closure_exact_conservation() -> Result<(), Box<dyn std::error::Error>> {
+    fn invariant(state: &RelayCacheState) {
+        assert_eq!(
+            state.resident_bytes(),
+            state.recompute_resident_for_test(),
+            "resident_bytes must equal the recomputed published charge"
+        );
+        assert!(
+            state.resident_bytes().saturating_add(state.reserved_bytes()) <= state.max_bytes(),
+            "resident + reserved must stay within the cap"
+        );
+    }
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let mut state = RelayCacheState::new();
+    invariant(&state);
+
+    // PUT.
+    state.put_object_chunk_frame(
+        relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+        service_key,
+        now,
+    )?;
+    invariant(&state);
+    // Idempotent PUT replay: zero delta.
+    let before = state.resident_bytes();
+    state.put_object_chunk_frame(
+        relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+        service_key,
+        now,
+    )?;
+    assert_eq!(state.resident_bytes(), before, "idempotent replay must not change the charge");
+    invariant(&state);
+    // ACK.
+    state.ack_object_chunk(a1a_ack(now, service_key)?, service_key, now + 1)?;
+    invariant(&state);
+    // A live reservation counts toward the budget (reserved_bytes > 0), then publishes.
+    let frame2 = relay_object_frame_with_chunk(
+        service_key,
+        ObjectRelayCapability::Put,
+        now,
+        "chunk_relay_2",
+        false,
+    )?;
+    let candidate2 = RelayCacheState::build_put_entry_from_frame(frame2, service_key, now)?;
+    let rid = state.reserve_put(RelayChunkMeta::from(&candidate2))?;
+    assert!(state.reserved_bytes() > 0, "a live reservation must hold headroom");
+    invariant(&state);
+    state.publish(rid);
+    invariant(&state);
+    // Tombstone (covers both chunks + records the object tombstone).
+    state.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "h", "e", now + 1, now + 100)?,
+        service_key,
+        now + 2,
+    )?;
+    invariant(&state);
+    // Expiry release, then re-admit.
+    state.expire_chunks(u64::MAX);
+    invariant(&state);
+    assert_eq!(state.resident_bytes(), 0, "expiry must release everything");
+    state.put_object_chunk_frame(
+        relay_object_frame(service_key, ObjectRelayCapability::Put, now + 10, false)?,
+        service_key,
+        now + 10,
+    )?;
+    invariant(&state);
     Ok(())
 }
 

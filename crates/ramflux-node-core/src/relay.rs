@@ -36,6 +36,61 @@ const RELAY_COMMIT_WINDOW_US_DEFAULT: u64 = 1_000;
 const RELAY_COMMIT_QUEUE_CAPACITY_ENV: &str = "RAMFLUX_RELAY_COMMIT_QUEUE_CAPACITY";
 const RELAY_COMMIT_QUEUE_CAPACITY_DEFAULT: usize = 4_096;
 
+/// Single env override for the relay resident metadata budget (RELAY-MEM-01-A1). The value is the
+/// maximum number of bytes the in-memory chunk-meta + tombstone index (including in-flight
+/// reservations) may charge. Unset uses [`RELAY_METADATA_MAX_BYTES_DEFAULT`]; `0` or a
+/// non-parseable value is a hard startup failure (never a silent default).
+pub const RELAY_METADATA_MAX_BYTES_ENV: &str = "RAMFLUX_RELAY_METADATA_MAX_BYTES";
+/// Default resident metadata budget: 64 MiB. Only the metadata index is resident; chunk ciphertext
+/// lives in redb and is read through on demand, so this bounds RAM independent of stored object size.
+pub const RELAY_METADATA_MAX_BYTES_DEFAULT: u64 = 64 * 1024 * 1024;
+/// Conservative fixed per-chunk-meta overhead added to the serialized metadata length. This is a
+/// deliberately safe over-estimate covering `BTreeMap` node/key allocation, the `String`/`BTreeSet`
+/// heap headers, and reservation bookkeeping so the resident charge can never under-count RAM.
+const RELAY_CHUNK_META_CHARGE_OVERHEAD: u64 = 512;
+/// Conservative fixed per-tombstone overhead added to the serialized tombstone length. Same safe
+/// over-estimate rationale as [`RELAY_CHUNK_META_CHARGE_OVERHEAD`].
+const RELAY_TOMBSTONE_CHARGE_OVERHEAD: u64 = 256;
+
+#[must_use]
+fn relay_default_max_bytes() -> u64 {
+    RELAY_METADATA_MAX_BYTES_DEFAULT
+}
+
+/// Resolves the resident metadata budget from the environment (fail-closed).
+///
+/// # Errors
+/// Returns [`NodeCoreError::ItestHttp`] when `RAMFLUX_RELAY_METADATA_MAX_BYTES` is set to `0` or to a
+/// value that does not parse as a positive `u64`. An unset variable is not an error: it yields the
+/// 64 MiB default.
+pub fn relay_metadata_max_bytes_from_env() -> Result<u64, NodeCoreError> {
+    match env::var(RELAY_METADATA_MAX_BYTES_ENV) {
+        Err(env::VarError::NotPresent) => parse_relay_metadata_max_bytes(None),
+        Err(env::VarError::NotUnicode(_)) => Err(NodeCoreError::ItestHttp(format!(
+            "{RELAY_METADATA_MAX_BYTES_ENV} is not valid unicode"
+        ))),
+        Ok(raw) => parse_relay_metadata_max_bytes(Some(&raw)),
+    }
+}
+
+/// Pure resident-budget resolver: `None` (unset) yields the 64 MiB default; a positive integer
+/// overrides; `0` or a non-parseable value is a hard failure (never a silent default).
+///
+/// # Errors
+/// Returns [`NodeCoreError::ItestHttp`] when the value is present but not a positive integer.
+pub fn parse_relay_metadata_max_bytes(raw: Option<&str>) -> Result<u64, NodeCoreError> {
+    match raw {
+        None => Ok(RELAY_METADATA_MAX_BYTES_DEFAULT),
+        Some(value) => {
+            value.trim().parse::<u64>().ok().filter(|parsed| *parsed > 0).ok_or_else(|| {
+                NodeCoreError::ItestHttp(format!(
+                    "{RELAY_METADATA_MAX_BYTES_ENV} must be a positive integer, got {value:?}"
+                ))
+            })
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum RelayChunkStatus {
     Available,
@@ -244,29 +299,329 @@ impl RelayChunkEntry {
     pub fn has_owner_binding(&self) -> bool {
         !self.owner_signing_key_id.is_empty() && !self.owner_public_key.is_empty()
     }
+}
+
+/// The resident, payload-free view of a stored relay chunk (RELAY-MEM-01-A1). Every field of
+/// [`RelayChunkEntry`] EXCEPT `encrypted_chunk` lives here. This is what the in-memory index holds;
+/// the ciphertext stays in redb and is read through on demand for a GET. The explicit
+/// `From<&RelayChunkEntry>` conversion is the only way meta is derived, so the payload can never leak
+/// back into the resident state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelayChunkMeta {
+    pub chunk_id: String,
+    pub object_id: String,
+    pub manifest_hash: String,
+    pub chunk_index: u32,
+    pub chunk_cipher_hash: String,
+    #[serde(default)]
+    pub owner_signing_key_id: String,
+    #[serde(default)]
+    pub owner_public_key: String,
+    pub stored_at: u64,
+    pub expires_at: u64,
+    pub delete_after_ack: bool,
+    pub acked_by: BTreeSet<String>,
+    pub status: RelayChunkStatus,
+}
+
+impl From<&RelayChunkEntry> for RelayChunkMeta {
+    fn from(entry: &RelayChunkEntry) -> Self {
+        // Deliberately field-by-field (never `..entry`) so `encrypted_chunk` is dropped, not carried.
+        Self {
+            chunk_id: entry.chunk_id.clone(),
+            object_id: entry.object_id.clone(),
+            manifest_hash: entry.manifest_hash.clone(),
+            chunk_index: entry.chunk_index,
+            chunk_cipher_hash: entry.chunk_cipher_hash.clone(),
+            owner_signing_key_id: entry.owner_signing_key_id.clone(),
+            owner_public_key: entry.owner_public_key.clone(),
+            stored_at: entry.stored_at,
+            expires_at: entry.expires_at,
+            delete_after_ack: entry.delete_after_ack,
+            acked_by: entry.acked_by.clone(),
+            status: entry.status,
+        }
+    }
+}
+
+impl RelayChunkMeta {
+    /// Returns `true` only when the chunk carries a non-empty immutable owner binding.
+    #[must_use]
+    pub fn has_owner_binding(&self) -> bool {
+        !self.owner_signing_key_id.is_empty() && !self.owner_public_key.is_empty()
+    }
 
     /// Returns `true` when the chunk's persisted original owner matches the token's owner. A chunk
-    /// missing its owner binding (legacy record) never matches. This is currently consulted only by
-    /// put-overwrite and tombstone, which therefore fail closed on a legacy or foreign owner;
-    /// get/ack do not yet call this (their owner enforcement is deferred).
+    /// missing its owner binding (legacy record) never matches.
     #[must_use]
     fn owner_matches_token(&self, token: &RelayToken) -> bool {
         self.has_owner_binding()
             && self.owner_signing_key_id == token.owner_signing_key_id
             && self.owner_public_key == token.owner_public_key
     }
+
+    /// Rebuilds a full [`RelayChunkEntry`] carrying this metadata and the supplied payload. Used by
+    /// the store read-through path to reconstruct the wire GET response after a redb point-read, and
+    /// by the store commit path when persisting a payload-cleared (tombstoned/acked-deleted) row.
+    #[must_use]
+    fn to_entry(&self, encrypted_chunk: Vec<u8>) -> RelayChunkEntry {
+        RelayChunkEntry {
+            chunk_id: self.chunk_id.clone(),
+            object_id: self.object_id.clone(),
+            manifest_hash: self.manifest_hash.clone(),
+            chunk_index: self.chunk_index,
+            chunk_cipher_hash: self.chunk_cipher_hash.clone(),
+            owner_signing_key_id: self.owner_signing_key_id.clone(),
+            owner_public_key: self.owner_public_key.clone(),
+            encrypted_chunk,
+            stored_at: self.stored_at,
+            expires_at: self.expires_at,
+            delete_after_ack: self.delete_after_ack,
+            acked_by: self.acked_by.clone(),
+            status: self.status,
+        }
+    }
+
+    /// Byte-aware resident charge for this metadata: the serialized JSON length plus a conservative
+    /// fixed overhead. Uses checked arithmetic; `None` on the (practically impossible) overflow.
+    #[must_use]
+    fn resident_charge(&self) -> Option<u64> {
+        let body = serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len());
+        u64::try_from(body).ok()?.checked_add(RELAY_CHUNK_META_CHARGE_OVERHEAD)
+    }
+
+    /// Test accessor for the resident charge.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn resident_charge_for_test(&self) -> Option<u64> {
+        self.resident_charge()
+    }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+/// The concrete mutation an in-flight reservation will publish once its redb commit succeeds. Stored
+/// on the reservation so `publish(id)` is an infallible, self-contained consume of an exact token.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RelayPendingMutation {
+    /// A brand-new chunk meta (PUT).
+    Put(RelayChunkMeta),
+    /// An in-place chunk meta update (ACK).
+    Ack(RelayChunkMeta),
+    /// A tombstone plus its affected (payload-cleared) chunk metas.
+    Tombstone(Box<ObjectRelayTombstoneMutation>),
+    /// An expiry removal set (the exact ids being deleted this round).
+    Expiry(RelayExpiryMutation),
+}
+
+/// An in-flight, persist-before-publish mutation reservation. It holds exclusive chunk-id locks and a
+/// shared (PUT/ACK) or exclusive (Tombstone/Expiry) object lock, and pre-charges the positive
+/// resident-budget delta into `reserved_bytes` so the budget stays a HARD bound across the redb
+/// commit. `resident_add`/`resident_sub` are the exact deltas applied to `resident_bytes` at publish.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RelayReservation {
+    chunk_ids: Vec<String>,
+    shared_objects: Vec<String>,
+    exclusive_objects: Vec<String>,
+    reserved_charge: u64,
+    resident_add: u64,
+    resident_sub: u64,
+    pending: RelayPendingMutation,
+}
+
+/// An internal reservation-accounting invariant violation. PRE-persist (reserve) these are surfaced as
+/// a fail-closed [`RelayStoreOpError::Capacity`]; POST-persist (publish) they are a fail-stop, because
+/// redb is already committed and silently continuing would split redb from the live index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RelayInternalInvariant(&'static str);
+
+impl std::fmt::Display for RelayInternalInvariant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "relay internal invariant violated: {}", self.0)
+    }
+}
+
+impl std::error::Error for RelayInternalInvariant {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RelayCacheState {
-    chunks_by_id: BTreeMap<String, RelayChunkEntry>,
+    /// Resident, payload-free chunk index. Ciphertext is never held here; it lives in redb.
+    chunks_by_id: BTreeMap<String, RelayChunkMeta>,
     tombstones_by_object_id: BTreeMap<String, ObjectRelayTombstone>,
+    /// In-flight persist-before-publish reservations, keyed by a monotonic reservation id.
+    #[serde(skip)]
+    reservations: BTreeMap<u64, RelayReservation>,
+    /// Exclusive chunk-id locks: `chunk_id` -> owning reservation id. A locked chunk cannot be
+    /// concurrently PUT/ACK/tombstoned/expired.
+    #[serde(skip)]
+    locked_chunk_ids: BTreeMap<String, u64>,
+    /// Shared object references held by in-flight PUT/ACK reservations: `object_id` -> reservation ids.
+    #[serde(skip)]
+    object_shared_locks: BTreeMap<String, BTreeSet<u64>>,
+    /// Exclusive object locks held by in-flight Tombstone/Expiry reservations: `object_id` -> id.
+    #[serde(skip)]
+    object_exclusive_locks: BTreeMap<String, u64>,
+    #[serde(skip)]
+    next_reservation_id: u64,
+    /// True resident charge of the PUBLISHED index (chunk-meta + tombstone). Recomputed on hydrate.
+    #[serde(skip)]
+    resident_bytes: u64,
+    /// Sum of the positive headroom held by in-flight reservations. `resident_bytes + reserved_bytes`
+    /// is the hard bound checked against `max_bytes` at every admission.
+    #[serde(skip)]
+    reserved_bytes: u64,
+    /// Resident metadata budget ceiling. Not serialized; set explicitly on construction/hydrate and
+    /// defaults to 64 MiB so a deserialized legacy snapshot is never left with a zero (fail-open) cap.
+    #[serde(skip, default = "relay_default_max_bytes")]
+    max_bytes: u64,
+}
+
+impl Default for RelayCacheState {
+    fn default() -> Self {
+        Self {
+            chunks_by_id: BTreeMap::new(),
+            tombstones_by_object_id: BTreeMap::new(),
+            reservations: BTreeMap::new(),
+            locked_chunk_ids: BTreeMap::new(),
+            object_shared_locks: BTreeMap::new(),
+            object_exclusive_locks: BTreeMap::new(),
+            next_reservation_id: 0,
+            resident_bytes: 0,
+            reserved_bytes: 0,
+            max_bytes: RELAY_METADATA_MAX_BYTES_DEFAULT,
+        }
+    }
+}
+
+/// Explicit capacity/backpressure signal: admitting a new chunk-meta or tombstone would push the
+/// resident charge past the configured budget. The relay maps this to a `503` with zero redb and
+/// zero memory mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayResidentBudgetExceeded {
+    pub requested_charge: u64,
+    pub resident_bytes: u64,
+    pub max_bytes: u64,
+}
+
+impl std::fmt::Display for RelayResidentBudgetExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "relay resident metadata budget exceeded: requested {} + resident {} > max {}",
+            self.requested_charge, self.resident_bytes, self.max_bytes
+        )
+    }
+}
+
+impl std::error::Error for RelayResidentBudgetExceeded {}
+
+#[must_use]
+fn tombstone_resident_charge(tombstone: &ObjectRelayTombstone) -> Option<u64> {
+    let body = serde_json::to_vec(tombstone).map_or(usize::MAX, |bytes| bytes.len());
+    u64::try_from(body).ok()?.checked_add(RELAY_TOMBSTONE_CHARGE_OVERHEAD)
+}
+
+/// Typed outcome of a store-backed relay operation (read-through / persist-before-publish). The relay
+/// HTTP/QUIC layer maps each variant to a status code; the v2 path folds it back into a
+/// [`NodeCoreError`] to preserve the existing coarse mesh error taxonomy.
+#[derive(Debug)]
+pub enum RelayStoreOpError {
+    /// Chunk not present / not available (`404`).
+    NotAvailable,
+    /// Object is tombstoned: `410` on get, `409` on put.
+    Tombstoned,
+    /// Owner / object / content / authorization rejection (`403`).
+    Unauthorized(String),
+    /// A conflicting mutation is in flight on the same chunk/object — retryable (`409`). Zero
+    /// mutation: nothing was reserved, persisted, or published.
+    Conflict(String),
+    /// Resident metadata budget exceeded — backpressure (`503`).
+    Capacity(String),
+    /// redb persistence failed (`500`); nothing was published.
+    Persist(String),
+    /// The redb payload was missing/corrupt/mismatched on a read-through (`500`, fail-closed).
+    PayloadUnavailable(String),
+    /// Validation or internal error carried from [`NodeCoreError`].
+    Validation(Box<NodeCoreError>),
+}
+
+impl From<NodeCoreError> for RelayStoreOpError {
+    fn from(error: NodeCoreError) -> Self {
+        // Preserve the status taxonomy when a validation/plan error crosses into the store layer:
+        // owner/authorization and TTL rejections are `403`, a missing chunk is `404`; anything else
+        // is an opaque internal (`500`) `Validation`.
+        match error {
+            NodeCoreError::Unauthorized(reason) => Self::Unauthorized(reason),
+            NodeCoreError::EnvelopeNotFound(_) => Self::NotAvailable,
+            NodeCoreError::TtlExpired { envelope_id } => {
+                Self::Unauthorized(format!("object relay ttl rejected: {envelope_id}"))
+            }
+            other => Self::Validation(Box::new(other)),
+        }
+    }
+}
+
+impl From<RelayResidentBudgetExceeded> for RelayStoreOpError {
+    fn from(error: RelayResidentBudgetExceeded) -> Self {
+        Self::Capacity(error.to_string())
+    }
+}
+
+impl std::fmt::Display for RelayStoreOpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAvailable => write!(formatter, "relay chunk not available"),
+            Self::Tombstoned => write!(formatter, "relay object tombstoned"),
+            Self::Unauthorized(reason) => write!(formatter, "relay unauthorized: {reason}"),
+            Self::Conflict(reason) => write!(formatter, "relay conflict: {reason}"),
+            Self::Capacity(reason) => write!(formatter, "relay capacity: {reason}"),
+            Self::Persist(reason) => write!(formatter, "relay persist failed: {reason}"),
+            Self::PayloadUnavailable(reason) => {
+                write!(formatter, "relay payload unavailable: {reason}")
+            }
+            Self::Validation(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for RelayStoreOpError {}
+
+impl RelayStoreOpError {
+    /// Folds the typed store error back into a [`NodeCoreError`] for the v2 mesh path and the pure
+    /// state methods, preserving the pre-existing error taxonomy (tombstone/get-miss → `ItestHttp`
+    /// / `EnvelopeNotFound`, owner rejections → `Unauthorized`).
+    #[must_use]
+    pub fn into_node_core(self) -> NodeCoreError {
+        match self {
+            Self::NotAvailable => NodeCoreError::EnvelopeNotFound("relay chunk".to_owned()),
+            Self::Tombstoned => {
+                NodeCoreError::ItestHttp("object relay tombstone blocks chunk".to_owned())
+            }
+            Self::Unauthorized(reason) => NodeCoreError::Unauthorized(reason),
+            Self::Conflict(reason) | Self::Capacity(reason) => NodeCoreError::ItestHttp(reason),
+            Self::Persist(reason) | Self::PayloadUnavailable(reason) => NodeCoreError::Redb(reason),
+            Self::Validation(error) => *error,
+        }
+    }
+
+    /// The HTTP/QUIC status code the relay returns for this outcome.
+    #[must_use]
+    pub fn status_code(&self) -> u16 {
+        match self {
+            Self::NotAvailable => 404,
+            Self::Tombstoned => 410,
+            Self::Unauthorized(_) => 403,
+            Self::Conflict(_) => 409,
+            Self::Capacity(_) => 503,
+            Self::Persist(_) | Self::PayloadUnavailable(_) | Self::Validation(_) => 500,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectRelayTombstoneMutation {
     pub tombstone: ObjectRelayTombstone,
-    pub affected_chunks: Vec<RelayChunkEntry>,
+    /// The metadata of every chunk the tombstone marked. Payload-free by construction: the tombstone
+    /// clears ciphertext, so the store persists these as payload-empty redb rows.
+    pub affected_chunks: Vec<RelayChunkMeta>,
     /// `true` only when this mutation applied a durable change (the first tombstone for the object).
     /// A stable idempotent replay sets this to `false`, so `record_relay_tombstone_mutation` is a
     /// complete no-op and never rewrites the redb tombstone/chunk rows.
@@ -307,33 +662,573 @@ impl RelayExpiryMutation {
     }
 }
 
+/// Internal plan of a PUT against the resident meta index (no mutation, no persist).
+enum RelayPutPlan {
+    /// Chunk id already present and all metadata-level checks passed. The caller must still
+    /// byte-verify the candidate against the stored ciphertext (via a redb point-read) before
+    /// treating it as an idempotent replay.
+    Existing { existing: RelayChunkMeta, candidate: RelayChunkEntry },
+    /// A fresh chunk id whose owner/tombstone checks passed; the candidate must be persisted.
+    New(RelayChunkEntry),
+}
+
 impl RelayCacheState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn put_chunk(&mut self, entry: RelayChunkEntry) {
-        self.chunks_by_id.insert(entry.chunk_id.clone(), entry);
+    /// Constructs an empty state with an explicit resident metadata budget.
+    #[must_use]
+    pub fn with_max_bytes(max_bytes: u64) -> Self {
+        Self { max_bytes, ..Self::default() }
     }
 
+    /// The configured resident metadata budget ceiling in bytes.
+    #[must_use]
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// Test helper: lowers/raises the cap in place (does not re-check the current resident charge).
+    #[cfg(test)]
+    pub(crate) fn set_max_bytes_for_test(&mut self, max_bytes: u64) {
+        self.max_bytes = max_bytes;
+    }
+
+    /// Test helper: forces the resident charge (to drive a publish arithmetic-underflow fail-stop).
+    #[cfg(test)]
+    pub(crate) fn set_resident_bytes_for_test(&mut self, resident_bytes: u64) {
+        self.resident_bytes = resident_bytes;
+    }
+
+    /// Test helper: forces the next reservation id (to drive the id-exhaustion fail-stop).
+    #[cfg(test)]
+    pub(crate) fn set_next_reservation_id_for_test(&mut self, next: u64) {
+        self.next_reservation_id = next;
+    }
+
+    /// Test helper: independently recomputes the resident charge from the PUBLISHED chunk metas and
+    /// tombstones, used to assert exact conservation of `resident_bytes`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn recompute_resident_for_test(&self) -> u64 {
+        let mut total: u64 = 0;
+        for meta in self.chunks_by_id.values() {
+            total = total.saturating_add(meta.resident_charge().unwrap_or(0));
+        }
+        for tombstone in self.tombstones_by_object_id.values() {
+            total = total.saturating_add(tombstone_resident_charge(tombstone).unwrap_or(0));
+        }
+        total
+    }
+
+    /// The current resident metadata charge (chunk-meta + tombstone + in-flight reservations).
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
+    }
+
+    /// Sum of the positive headroom currently held by in-flight reservations.
+    #[must_use]
+    pub fn reserved_bytes(&self) -> u64 {
+        self.reserved_bytes
+    }
+
+    /// Sets the resident metadata budget and recomputes the true published charge from the current
+    /// maps (used after a legacy-snapshot deserialize whose skipped budget fields defaulted). All
+    /// accounting is CHECKED; an overflow or an over-cap total fails closed.
+    ///
     /// # Errors
-    /// Returns an error when token, object permission, TTL, tombstone, size or ciphertext hash
-    /// validation fails.
-    pub fn put_object_chunk_frame(
+    /// Returns [`RelayResidentBudgetExceeded`] on overflow or when the resident charge exceeds
+    /// `max_bytes`.
+    pub fn rehydrate_budget(&mut self, max_bytes: u64) -> Result<(), RelayResidentBudgetExceeded> {
+        self.max_bytes = max_bytes;
+        self.reservations.clear();
+        self.locked_chunk_ids.clear();
+        self.object_shared_locks.clear();
+        self.object_exclusive_locks.clear();
+        self.reserved_bytes = 0;
+        let mut resident: u64 = 0;
+        for meta in self.chunks_by_id.values() {
+            let charge = meta.resident_charge().ok_or_else(|| self.overflow_error())?;
+            resident = resident.checked_add(charge).ok_or_else(|| self.overflow_error())?;
+        }
+        for tombstone in self.tombstones_by_object_id.values() {
+            let charge =
+                tombstone_resident_charge(tombstone).ok_or_else(|| self.overflow_error())?;
+            resident = resident.checked_add(charge).ok_or_else(|| self.overflow_error())?;
+        }
+        if resident > max_bytes {
+            return Err(RelayResidentBudgetExceeded {
+                requested_charge: 0,
+                resident_bytes: resident,
+                max_bytes,
+            });
+        }
+        self.resident_bytes = resident;
+        Ok(())
+    }
+
+    #[must_use]
+    fn overflow_error(&self) -> RelayResidentBudgetExceeded {
+        RelayResidentBudgetExceeded {
+            requested_charge: u64::MAX,
+            resident_bytes: self.resident_bytes,
+            max_bytes: self.max_bytes,
+        }
+    }
+
+    #[must_use]
+    fn budget_exceeded(&self, charge: u64) -> RelayResidentBudgetExceeded {
+        RelayResidentBudgetExceeded {
+            requested_charge: charge,
+            resident_bytes: self.resident_bytes,
+            max_bytes: self.max_bytes,
+        }
+    }
+
+    /// Hard-bound admission of a positive `charge` into `reserved_bytes`: CHECKED arithmetic, and
+    /// `resident_bytes + reserved_bytes + charge` must stay within `max_bytes`. Nothing is charged on
+    /// failure.
+    ///
+    /// # Errors
+    /// Returns [`RelayResidentBudgetExceeded`] on overflow or over-cap.
+    fn admit_reserved(&mut self, charge: u64) -> Result<(), RelayResidentBudgetExceeded> {
+        let projected = self
+            .resident_bytes
+            .checked_add(self.reserved_bytes)
+            .and_then(|used| used.checked_add(charge))
+            .ok_or_else(|| self.budget_exceeded(charge))?;
+        if projected > self.max_bytes {
+            return Err(self.budget_exceeded(charge));
+        }
+        self.reserved_bytes =
+            self.reserved_bytes.checked_add(charge).ok_or_else(|| self.budget_exceeded(charge))?;
+        Ok(())
+    }
+
+    /// The resident charge of an already-published chunk meta. Absent chunk → `0` (correct: nothing to
+    /// replace). A present-but-uncomputable charge is an invariant violation for a RESIDENT meta and
+    /// fails closed (it was admitted, so it must always be computable).
+    ///
+    /// # Errors
+    /// Returns [`RelayResidentBudgetExceeded`] when a present meta's charge cannot be computed.
+    fn existing_meta_charge(&self, chunk_id: &str) -> Result<u64, RelayResidentBudgetExceeded> {
+        match self.chunks_by_id.get(chunk_id) {
+            None => Ok(0),
+            Some(meta) => meta.resident_charge().ok_or_else(|| self.overflow_error()),
+        }
+    }
+
+    /// Allocates a fresh reservation id (CHECKED). Fails closed on the (impossible) `u64` exhaustion or
+    /// on a collision with a still-live token — both are internal invariant violations.
+    pub(crate) fn try_alloc_reservation_id(&mut self) -> Result<u64, RelayInternalInvariant> {
+        let id = self.next_reservation_id;
+        let next = id
+            .checked_add(1)
+            .ok_or(RelayInternalInvariant("relay reservation id space exhausted"))?;
+        if self.reservations.contains_key(&id) {
+            return Err(RelayInternalInvariant("relay reservation id collided with a live token"));
+        }
+        self.next_reservation_id = next;
+        Ok(id)
+    }
+
+    /// Fail-stop wrapper for [`Self::try_alloc_reservation_id`] used on the reserve path. Exhaustion /
+    /// collision are impossible; a hard stop is the correct response to the invariant violation.
+    #[allow(clippy::expect_used)] // fail-stop on an impossible internal invariant
+    fn alloc_reservation_id(&mut self) -> u64 {
+        self.try_alloc_reservation_id().expect("relay reservation id allocation invariant violated")
+    }
+
+    #[must_use]
+    fn chunk_is_locked(&self, chunk_id: &str) -> bool {
+        self.locked_chunk_ids.contains_key(chunk_id)
+    }
+
+    #[must_use]
+    fn object_has_exclusive(&self, object_id: &str) -> bool {
+        self.object_exclusive_locks.contains_key(object_id)
+    }
+
+    #[must_use]
+    fn object_has_any_lock(&self, object_id: &str) -> bool {
+        self.object_exclusive_locks.contains_key(object_id)
+            || self.object_shared_locks.get(object_id).is_some_and(|ids| !ids.is_empty())
+    }
+
+    /// `true` when the chunk id is present in the resident index or exclusively locked in flight.
+    #[must_use]
+    pub fn contains_chunk(&self, chunk_id: &str) -> bool {
+        self.chunks_by_id.contains_key(chunk_id) || self.locked_chunk_ids.contains_key(chunk_id)
+    }
+
+    /// Reserves a new PUT: exclusive chunk lock + shared object ref + full-meta charge admission.
+    ///
+    /// # Errors
+    /// [`RelayStoreOpError::Conflict`] when the chunk id is locked or the object has an exclusive
+    /// (tombstone/expiry) lock; [`RelayStoreOpError::Capacity`] when the budget would be exceeded.
+    pub(crate) fn reserve_put(&mut self, meta: RelayChunkMeta) -> Result<u64, RelayStoreOpError> {
+        if self.chunk_is_locked(&meta.chunk_id) || self.object_has_exclusive(&meta.object_id) {
+            return Err(RelayStoreOpError::Conflict(
+                "object relay put conflicts with an in-flight relay mutation".to_owned(),
+            ));
+        }
+        let charge = meta.resident_charge().ok_or_else(|| {
+            RelayStoreOpError::Capacity("object relay chunk meta charge overflow".to_owned())
+        })?;
+        self.admit_reserved(charge)?;
+        let id = self.alloc_reservation_id();
+        self.locked_chunk_ids.insert(meta.chunk_id.clone(), id);
+        self.object_shared_locks.entry(meta.object_id.clone()).or_default().insert(id);
+        self.reservations.insert(
+            id,
+            RelayReservation {
+                chunk_ids: vec![meta.chunk_id.clone()],
+                shared_objects: vec![meta.object_id.clone()],
+                exclusive_objects: Vec::new(),
+                reserved_charge: charge,
+                resident_add: charge,
+                resident_sub: 0,
+                pending: RelayPendingMutation::Put(meta),
+            },
+        );
+        Ok(id)
+    }
+
+    /// Reserves an ACK: exclusive chunk lock + shared object ref; admits the POSITIVE meta delta only
+    /// (a negative delta is released after publish). The chunk must currently exist (no resurrection).
+    ///
+    /// # Errors
+    /// [`RelayStoreOpError::NotAvailable`] when the chunk is gone; [`RelayStoreOpError::Conflict`] on
+    /// an in-flight conflicting mutation; [`RelayStoreOpError::Capacity`] on budget overflow.
+    pub(crate) fn reserve_ack(
         &mut self,
+        updated: RelayChunkMeta,
+    ) -> Result<u64, RelayStoreOpError> {
+        let Some(existing) = self.chunks_by_id.get(&updated.chunk_id) else {
+            return Err(RelayStoreOpError::NotAvailable);
+        };
+        if self.chunk_is_locked(&updated.chunk_id) || self.object_has_exclusive(&updated.object_id)
+        {
+            return Err(RelayStoreOpError::Conflict(
+                "object relay ack conflicts with an in-flight relay mutation".to_owned(),
+            ));
+        }
+        let old_charge = existing.resident_charge().ok_or_else(|| {
+            RelayStoreOpError::Capacity("object relay chunk meta charge overflow".to_owned())
+        })?;
+        let new_charge = updated.resident_charge().ok_or_else(|| {
+            RelayStoreOpError::Capacity("object relay chunk meta charge overflow".to_owned())
+        })?;
+        let positive_delta = new_charge.saturating_sub(old_charge);
+        self.admit_reserved(positive_delta)?;
+        let id = self.alloc_reservation_id();
+        self.locked_chunk_ids.insert(updated.chunk_id.clone(), id);
+        self.object_shared_locks.entry(updated.object_id.clone()).or_default().insert(id);
+        self.reservations.insert(
+            id,
+            RelayReservation {
+                chunk_ids: vec![updated.chunk_id.clone()],
+                shared_objects: vec![updated.object_id.clone()],
+                exclusive_objects: Vec::new(),
+                reserved_charge: positive_delta,
+                resident_add: new_charge,
+                resident_sub: old_charge,
+                pending: RelayPendingMutation::Ack(updated),
+            },
+        );
+        Ok(id)
+    }
+
+    /// Reserves a TOMBSTONE: EXCLUSIVE object lock + exclusive locks on every affected chunk id.
+    /// Requires the object to have NO pending PUT/ACK/tombstone and no affected chunk to be locked, so
+    /// a concurrent PUT can never slip a chunk past the tombstone. Admits the tombstone charge plus the
+    /// positive Σ(new-old) affected-meta delta in ONE checked admission (before any redb write).
+    ///
+    /// # Errors
+    /// [`RelayStoreOpError::Conflict`] / [`RelayStoreOpError::Capacity`].
+    pub(crate) fn reserve_tombstone(
+        &mut self,
+        mutation: ObjectRelayTombstoneMutation,
+    ) -> Result<u64, RelayStoreOpError> {
+        let object_id = mutation.tombstone.object_id.clone();
+        if self.object_has_any_lock(&object_id) {
+            return Err(RelayStoreOpError::Conflict(
+                "object relay tombstone conflicts with an in-flight relay mutation".to_owned(),
+            ));
+        }
+        for meta in &mutation.affected_chunks {
+            if self.chunk_is_locked(&meta.chunk_id) {
+                return Err(RelayStoreOpError::Conflict(
+                    "object relay tombstone conflicts with an in-flight chunk mutation".to_owned(),
+                ));
+            }
+        }
+        let tombstone_charge = tombstone_resident_charge(&mutation.tombstone).ok_or_else(|| {
+            RelayStoreOpError::Capacity("object relay tombstone charge overflow".to_owned())
+        })?;
+        let mut resident_add = tombstone_charge;
+        let mut resident_sub: u64 = 0;
+        for meta in &mutation.affected_chunks {
+            let new_charge = meta.resident_charge().ok_or_else(|| {
+                RelayStoreOpError::Capacity("object relay chunk meta charge overflow".to_owned())
+            })?;
+            // Absent chunk → 0; present-but-uncomputable → fail-closed Capacity (invariant violation).
+            let old_charge = self.existing_meta_charge(&meta.chunk_id)?;
+            resident_add = resident_add.checked_add(new_charge).ok_or_else(|| {
+                RelayStoreOpError::Capacity("object relay tombstone charge overflow".to_owned())
+            })?;
+            resident_sub = resident_sub.checked_add(old_charge).ok_or_else(|| {
+                RelayStoreOpError::Capacity("object relay tombstone charge overflow".to_owned())
+            })?;
+        }
+        let positive_delta = resident_add.saturating_sub(resident_sub);
+        self.admit_reserved(positive_delta)?;
+        let id = self.alloc_reservation_id();
+        self.object_exclusive_locks.insert(object_id.clone(), id);
+        let mut chunk_ids = Vec::with_capacity(mutation.affected_chunks.len());
+        for meta in &mutation.affected_chunks {
+            self.locked_chunk_ids.insert(meta.chunk_id.clone(), id);
+            chunk_ids.push(meta.chunk_id.clone());
+        }
+        self.reservations.insert(
+            id,
+            RelayReservation {
+                chunk_ids,
+                shared_objects: Vec::new(),
+                exclusive_objects: vec![object_id],
+                reserved_charge: positive_delta,
+                resident_add,
+                resident_sub,
+                pending: RelayPendingMutation::Tombstone(Box::new(mutation)),
+            },
+        );
+        Ok(id)
+    }
+
+    /// Reserves an EXPIRY: atomically locks (exclusive) every to-delete chunk id / tombstone object
+    /// that is not already locked, SKIPPING any locked id (deferred to the next round) so a row being
+    /// PUT/ACK/tombstoned is never deleted. Returns the reservation id and the filtered mutation of
+    /// what is actually being deleted, or `None` when nothing is deletable.
+    ///
+    /// # Errors
+    /// PRE-persist fail-closed: a RESIDENT meta/tombstone whose charge is uncomputable (it was
+    /// admitted, so it must always compute) or whose release sum overflows is an invariant violation →
+    /// [`RelayStoreOpError::Capacity`], zero mutation (nothing locked/reserved).
+    pub(crate) fn reserve_expiry(
+        &mut self,
+        mutation: RelayExpiryMutation,
+    ) -> Result<Option<(u64, RelayExpiryMutation)>, RelayStoreOpError> {
+        let mut chunk_ids = Vec::new();
+        let mut resident_sub: u64 = 0;
+        for chunk_id in mutation.expired_chunk_ids {
+            if self.chunk_is_locked(&chunk_id) {
+                continue;
+            }
+            if let Some(meta) = self.chunks_by_id.get(&chunk_id) {
+                // A RESIDENT meta's charge must be computable; the release sum is CHECKED. Both are
+                // invariant violations if they fail → fail-closed Capacity (zero mutation).
+                let charge = meta.resident_charge().ok_or_else(|| {
+                    RelayStoreOpError::Capacity(
+                        "resident chunk meta charge uncomputable".to_owned(),
+                    )
+                })?;
+                resident_sub = resident_sub.checked_add(charge).ok_or_else(|| {
+                    RelayStoreOpError::Capacity("relay expiry release sum overflow".to_owned())
+                })?;
+                chunk_ids.push(chunk_id);
+            }
+        }
+        let mut object_ids = Vec::new();
+        for object_id in mutation.expired_tombstone_object_ids {
+            if self.object_has_any_lock(&object_id) {
+                continue;
+            }
+            if let Some(tombstone) = self.tombstones_by_object_id.get(&object_id) {
+                let charge = tombstone_resident_charge(tombstone).ok_or_else(|| {
+                    RelayStoreOpError::Capacity("resident tombstone charge uncomputable".to_owned())
+                })?;
+                resident_sub = resident_sub.checked_add(charge).ok_or_else(|| {
+                    RelayStoreOpError::Capacity("relay expiry release sum overflow".to_owned())
+                })?;
+                object_ids.push(object_id);
+            }
+        }
+        if chunk_ids.is_empty() && object_ids.is_empty() {
+            return Ok(None);
+        }
+        let id = self.alloc_reservation_id();
+        for chunk_id in &chunk_ids {
+            self.locked_chunk_ids.insert(chunk_id.clone(), id);
+        }
+        for object_id in &object_ids {
+            self.object_exclusive_locks.insert(object_id.clone(), id);
+        }
+        let filtered = RelayExpiryMutation {
+            expired_chunk_ids: chunk_ids.clone(),
+            expired_tombstone_object_ids: object_ids.clone(),
+        };
+        self.reservations.insert(
+            id,
+            RelayReservation {
+                chunk_ids,
+                shared_objects: Vec::new(),
+                exclusive_objects: object_ids,
+                reserved_charge: 0,
+                resident_add: 0,
+                resident_sub,
+                pending: RelayPendingMutation::Expiry(filtered.clone()),
+            },
+        );
+        Ok(Some((id, filtered)))
+    }
+
+    fn release_reservation_locks(&mut self, id: u64, reservation: &RelayReservation) {
+        for chunk_id in &reservation.chunk_ids {
+            if self.locked_chunk_ids.get(chunk_id) == Some(&id) {
+                self.locked_chunk_ids.remove(chunk_id);
+            }
+        }
+        for object_id in &reservation.shared_objects {
+            if let Some(ids) = self.object_shared_locks.get_mut(object_id) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    self.object_shared_locks.remove(object_id);
+                }
+            }
+        }
+        for object_id in &reservation.exclusive_objects {
+            if self.object_exclusive_locks.get(object_id) == Some(&id) {
+                self.object_exclusive_locks.remove(object_id);
+            }
+        }
+    }
+
+    /// Consumes an EXACT reservation token after its redb commit succeeded. This is POST-persist, so
+    /// every branch is FAIL-STOP: a missing token, a `reserved_bytes` underflow, or a `resident_bytes`
+    /// arithmetic failure are all impossible invariants (the RAII guard cancels only on the un-consumed
+    /// paths, and every delta was admitted), and silently continuing after redb committed would split
+    /// redb from the live index. The fallible core is [`Self::try_publish`]; a violation aborts.
+    #[allow(clippy::expect_used)] // fail-stop: redb is already committed, no silent divergence
+    pub(crate) fn publish(&mut self, id: u64) {
+        self.try_publish(id).expect("relay publish invariant violated after redb commit");
+    }
+
+    /// Fallible core of [`Self::publish`]. All accounting is CHECKED; the new values are computed and
+    /// validated BEFORE any state mutation, so a violation returns `Err` with the live index and budget
+    /// untouched. Exposed for tests that assert the fail-stop paths without aborting the process.
+    ///
+    /// # Errors
+    /// Returns [`RelayInternalInvariant`] on a missing token, `reserved_bytes` underflow, or
+    /// `resident_bytes` arithmetic failure — all internal invariant violations that cannot occur on a
+    /// live publish.
+    pub(crate) fn try_publish(&mut self, id: u64) -> Result<(), RelayInternalInvariant> {
+        let reservation = self
+            .reservations
+            .get(&id)
+            .ok_or(RelayInternalInvariant("publish on a missing reservation token"))?;
+        // `reserved_charge` was added by `admit_reserved`, so this can never underflow.
+        let new_reserved = self
+            .reserved_bytes
+            .checked_sub(reservation.reserved_charge)
+            .ok_or(RelayInternalInvariant("reserved_bytes underflow at publish"))?;
+        // `resident_sub` is the exact old published charge (bounded by `resident_bytes`); adding
+        // `resident_add` stays within the admitted budget.
+        let new_resident = self
+            .resident_bytes
+            .checked_sub(reservation.resident_sub)
+            .and_then(|resident| resident.checked_add(reservation.resident_add))
+            .ok_or(RelayInternalInvariant("resident_bytes arithmetic failure at publish"))?;
+        // All checks passed; now commit atomically (no partial state on the impossible error paths).
+        let reservation = self
+            .reservations
+            .remove(&id)
+            .ok_or(RelayInternalInvariant("publish on a missing reservation token"))?;
+        self.release_reservation_locks(id, &reservation);
+        self.reserved_bytes = new_reserved;
+        self.resident_bytes = new_resident;
+        match reservation.pending {
+            RelayPendingMutation::Put(meta) | RelayPendingMutation::Ack(meta) => {
+                self.chunks_by_id.insert(meta.chunk_id.clone(), meta);
+            }
+            RelayPendingMutation::Tombstone(mutation) => {
+                for meta in &mutation.affected_chunks {
+                    self.chunks_by_id.insert(meta.chunk_id.clone(), meta.clone());
+                }
+                self.tombstones_by_object_id
+                    .insert(mutation.tombstone.object_id.clone(), mutation.tombstone.clone());
+            }
+            RelayPendingMutation::Expiry(mutation) => {
+                for chunk_id in &mutation.expired_chunk_ids {
+                    self.chunks_by_id.remove(chunk_id);
+                }
+                for object_id in &mutation.expired_tombstone_object_ids {
+                    self.tombstones_by_object_id.remove(object_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cancels a reservation (RAII rollback on persist failure/abort/unwind): releases the locks and
+    /// the reserved headroom. Nothing was published, so `resident_bytes` is untouched. This is
+    /// PRE-publish, but the `reserved_charge` was added by `admit_reserved`, so the checked subtraction
+    /// can never underflow — an underflow would be an internal invariant violation → fail-stop.
+    #[allow(clippy::expect_used)] // fail-stop on an impossible reserved_bytes underflow
+    pub(crate) fn cancel_reservation(&mut self, id: u64) {
+        if let Some(reservation) = self.reservations.remove(&id) {
+            self.release_reservation_locks(id, &reservation);
+            self.reserved_bytes = self
+                .reserved_bytes
+                .checked_sub(reservation.reserved_charge)
+                .expect("relay reserved_bytes underflow at cancel");
+        }
+    }
+
+    /// Test/seed helper: installs a chunk's metadata directly (dropping any payload) with a CHECKED,
+    /// hard-bound budget admission. Fails closed if it would exceed `max_bytes`; there is no
+    /// best-effort over-cap entry point.
+    ///
+    /// # Errors
+    /// Returns [`RelayResidentBudgetExceeded`] when admitting the chunk would exceed the budget.
+    #[allow(clippy::needless_pass_by_value)] // ergonomic owned-entry seed API
+    pub fn put_chunk(&mut self, entry: RelayChunkEntry) -> Result<(), RelayResidentBudgetExceeded> {
+        let meta = RelayChunkMeta::from(&entry);
+        let new_charge = meta.resident_charge().ok_or_else(|| self.overflow_error())?;
+        // Absent → 0; present-but-uncomputable → fail-closed (invariant violation).
+        let previous = self.existing_meta_charge(&meta.chunk_id)?;
+        let positive_delta = new_charge.saturating_sub(previous);
+        let projected = self
+            .resident_bytes
+            .checked_add(self.reserved_bytes)
+            .and_then(|used| used.checked_add(positive_delta))
+            .ok_or_else(|| self.budget_exceeded(positive_delta))?;
+        if projected > self.max_bytes {
+            return Err(self.budget_exceeded(positive_delta));
+        }
+        self.resident_bytes = self
+            .resident_bytes
+            .checked_sub(previous)
+            .and_then(|resident| resident.checked_add(new_charge))
+            .ok_or_else(|| self.overflow_error())?;
+        self.chunks_by_id.insert(meta.chunk_id.clone(), meta);
+        Ok(())
+    }
+
+    /// Validates a v2 PUT frame and builds the candidate [`RelayChunkEntry`] (with clamped expiry).
+    /// No state access. Shared by the pure state method and the persist-before-publish orchestration.
+    ///
+    /// # Errors
+    /// Returns an error when token/permission/TTL/size/ciphertext-hash validation fails or the owner
+    /// binding is missing.
+    pub fn build_put_entry_from_frame(
         frame: ObjectChunkFrame,
         relay_service_key: &[u8],
         now: u64,
     ) -> Result<RelayChunkEntry, NodeCoreError> {
         validate_object_chunk_frame(&frame, relay_service_key, ObjectRelayCapability::Put, now)?;
-        if self.tombstones_by_object_id.contains_key(&frame.object_id) {
-            return Err(NodeCoreError::ItestHttp(
-                "object relay tombstone blocks chunk put".to_owned(),
-            ));
-        }
-        // The token owner equals the permission owner (verified in `validate_object_chunk_frame`).
-        // This immutable identity becomes the chunk's original owner binding.
         let owner_signing_key_id = frame.relay_token.owner_signing_key_id.clone();
         let owner_public_key = frame.relay_token.owner_public_key.clone();
         if owner_signing_key_id.is_empty() || owner_public_key.is_empty() {
@@ -341,40 +1236,8 @@ impl RelayCacheState {
                 "object relay put missing owner binding".to_owned(),
             ));
         }
-        // A chunk id can be re-put only by its original owner with byte-identical content
-        // (idempotent replay for resume/retry). Cross-owner writes, content overwrites, and
-        // resurrection of an already-consumed chunk are rejected without mutating state.
-        if let Some(existing) = self.chunks_by_id.get(&frame.chunk_id) {
-            if !existing.has_owner_binding()
-                || existing.owner_signing_key_id != owner_signing_key_id
-                || existing.owner_public_key != owner_public_key
-            {
-                return Err(NodeCoreError::Unauthorized(
-                    "object relay put rejects cross-owner chunk overwrite".to_owned(),
-                ));
-            }
-            if existing.object_id != frame.object_id
-                || existing.manifest_hash != frame.manifest_hash
-                || existing.chunk_index != frame.chunk_index
-                || existing.chunk_cipher_hash != frame.chunk_cipher_hash
-                || existing.encrypted_chunk != frame.encrypted_chunk
-            {
-                return Err(NodeCoreError::Unauthorized(
-                    "object relay put rejects chunk content overwrite".to_owned(),
-                ));
-            }
-            if existing.status != RelayChunkStatus::Available {
-                return Err(NodeCoreError::Unauthorized(
-                    "object relay put cannot resurrect a consumed chunk".to_owned(),
-                ));
-            }
-            // Exact same-owner, same-content replay is idempotent: return the stored entry
-            // unchanged so acked_by, stored_at, expires_at, delete policy and status are preserved
-            // (never reset). Zero mutation.
-            return Ok(existing.clone());
-        }
         let expires_at = clamp_relay_chunk_expires_at(now, frame.expires_at);
-        let entry = RelayChunkEntry {
+        Ok(RelayChunkEntry {
             chunk_id: frame.chunk_id,
             object_id: frame.object_id,
             manifest_hash: frame.manifest_hash,
@@ -388,14 +1251,80 @@ impl RelayCacheState {
             delete_after_ack: frame.delete_after_ack,
             acked_by: BTreeSet::new(),
             status: RelayChunkStatus::Available,
-        };
-        self.put_chunk(entry.clone());
-        Ok(entry)
+        })
+    }
+
+    /// Metadata-level PUT plan: tombstone-block, owner-binding, cross-owner, content (via
+    /// `chunk_cipher_hash`), and resurrect checks against the resident index. No mutation.
+    fn plan_put(&self, candidate: RelayChunkEntry) -> Result<RelayPutPlan, RelayStoreOpError> {
+        if self.tombstones_by_object_id.contains_key(&candidate.object_id) {
+            return Err(RelayStoreOpError::Tombstoned);
+        }
+        if candidate.owner_signing_key_id.is_empty() || candidate.owner_public_key.is_empty() {
+            return Err(RelayStoreOpError::Unauthorized(
+                "object relay put missing owner binding".to_owned(),
+            ));
+        }
+        if let Some(existing) = self.chunks_by_id.get(&candidate.chunk_id) {
+            if !existing.has_owner_binding()
+                || existing.owner_signing_key_id != candidate.owner_signing_key_id
+                || existing.owner_public_key != candidate.owner_public_key
+            {
+                return Err(RelayStoreOpError::Unauthorized(
+                    "object relay put rejects cross-owner chunk overwrite".to_owned(),
+                ));
+            }
+            if existing.object_id != candidate.object_id
+                || existing.manifest_hash != candidate.manifest_hash
+                || existing.chunk_index != candidate.chunk_index
+                || existing.chunk_cipher_hash != candidate.chunk_cipher_hash
+            {
+                return Err(RelayStoreOpError::Unauthorized(
+                    "object relay put rejects chunk content overwrite".to_owned(),
+                ));
+            }
+            if existing.status != RelayChunkStatus::Available {
+                return Err(RelayStoreOpError::Unauthorized(
+                    "object relay put cannot resurrect a consumed chunk".to_owned(),
+                ));
+            }
+            return Ok(RelayPutPlan::Existing { existing: existing.clone(), candidate });
+        }
+        Ok(RelayPutPlan::New(candidate))
+    }
+
+    /// # Errors
+    /// Returns an error when token, object permission, TTL, tombstone, size or ciphertext hash
+    /// validation fails, or the resident metadata budget is exceeded.
+    ///
+    /// Pure (store-free) PUT used by tests and as the validation authority. It publishes metadata
+    /// only (no ciphertext is retained). Content-overwrite is compared by `chunk_cipher_hash`; the
+    /// exact byte-identity check is enforced by the store read-through orchestration.
+    pub fn put_object_chunk_frame(
+        &mut self,
+        frame: ObjectChunkFrame,
+        relay_service_key: &[u8],
+        now: u64,
+    ) -> Result<RelayChunkMeta, NodeCoreError> {
+        let candidate = Self::build_put_entry_from_frame(frame, relay_service_key, now)?;
+        match self.plan_put(candidate).map_err(RelayStoreOpError::into_node_core)? {
+            RelayPutPlan::Existing { existing, .. } => Ok(existing),
+            RelayPutPlan::New(candidate) => {
+                let meta = RelayChunkMeta::from(&candidate);
+                let id =
+                    self.reserve_put(meta.clone()).map_err(RelayStoreOpError::into_node_core)?;
+                self.publish(id);
+                Ok(meta)
+            }
+        }
     }
 
     /// # Errors
     /// Returns an error when token or permission validation fails, the chunk is missing, or it is
     /// expired/tombstoned.
+    ///
+    /// Validates a v2 GET and returns the resident metadata snapshot (payload-free). The ciphertext
+    /// must be obtained through the store read-through path.
     pub fn get_object_chunk(
         &self,
         chunk_id: &str,
@@ -403,7 +1332,7 @@ impl RelayCacheState {
         permission: &ObjectPermissionEnvelope,
         relay_service_key: &[u8],
         now: u64,
-    ) -> Result<RelayChunkEntry, NodeCoreError> {
+    ) -> Result<RelayChunkMeta, NodeCoreError> {
         validate_relay_token(token, relay_service_key, ObjectRelayCapability::Get, now)?;
         validate_object_permission(permission, ObjectRelayCapability::Get, now)?;
         if token.chunk_id != chunk_id
@@ -414,30 +1343,30 @@ impl RelayCacheState {
         {
             return Err(NodeCoreError::ItestHttp("object relay get binding mismatch".to_owned()));
         }
-        let chunk = self
-            .get_available_chunk(chunk_id, now)
+        let meta = self
+            .available_meta(chunk_id, now)
             .ok_or_else(|| NodeCoreError::EnvelopeNotFound(chunk_id.to_owned()))?;
         // NOTE (RQ-03 follow-up / finding "C"): binding the retrieved chunk's original owner to the
-        // requester requires an uploader-signed Get/Ack grant. The current SDK self-signs the
-        // downloader device as owner==grantee, so an owner-equality check here would reject the
-        // legitimate own-device-sync (A uploads, B downloads) and DM-attachment flows. Owner
-        // binding on get is intentionally deferred until the owner-signed grant model lands.
-        if self.tombstones_by_object_id.contains_key(&chunk.object_id) {
+        // requester requires an uploader-signed Get/Ack grant, deferred until that grant model lands.
+        if self.tombstones_by_object_id.contains_key(&meta.object_id) {
             return Err(NodeCoreError::ItestHttp(
                 "object relay tombstone blocks chunk get".to_owned(),
             ));
         }
-        Ok(chunk.clone())
+        Ok(meta.clone())
     }
 
+    /// Validates a v2 ACK and computes the updated metadata (payload handling is the store layer's
+    /// job). No mutation.
+    ///
     /// # Errors
     /// Returns an error when token/permission validation fails or the chunk is missing.
-    pub fn ack_object_chunk(
-        &mut self,
-        ack: ObjectRelayAck,
+    pub fn plan_ack(
+        &self,
+        ack: &ObjectRelayAck,
         relay_service_key: &[u8],
         now: u64,
-    ) -> Result<RelayChunkEntry, NodeCoreError> {
+    ) -> Result<RelayChunkMeta, NodeCoreError> {
         validate_relay_token(&ack.relay_token, relay_service_key, ObjectRelayCapability::Ack, now)?;
         validate_object_permission(
             &ack.object_permission_envelope,
@@ -455,25 +1384,38 @@ impl RelayCacheState {
         {
             return Err(NodeCoreError::ItestHttp("object relay ack binding mismatch".to_owned()));
         }
-        let chunk = self
+        let existing = self
             .chunks_by_id
-            .get_mut(&ack.chunk_id)
+            .get(&ack.chunk_id)
             .ok_or_else(|| NodeCoreError::EnvelopeNotFound(ack.chunk_id.clone()))?;
-        if chunk.object_id != ack.object_id || chunk.manifest_hash != ack.manifest_hash {
+        if existing.object_id != ack.object_id || existing.manifest_hash != ack.manifest_hash {
             return Err(NodeCoreError::ItestHttp("object relay ack binding mismatch".to_owned()));
         }
-        // NOTE (RQ-03 follow-up / finding "C"): matching the ack to the chunk's original owner
-        // depends on the same uploader-signed grant model as get and is deferred; the current SDK
-        // self-signs the acking device as owner. The delete-policy hardening below is independent
-        // of that model and is enforced now.
-        chunk.acked_by.insert(ack.recipient_device_hash);
-        // Deletion on ack is governed solely by the delete policy the owner stored at put time.
-        // A requester cannot self-elevate deletion by flipping `delete_after_ack` in the token.
-        if chunk.delete_after_ack {
-            chunk.status = RelayChunkStatus::AckedDeleted;
-            chunk.encrypted_chunk.clear();
+        let mut updated = existing.clone();
+        updated.acked_by.insert(ack.recipient_device_hash.clone());
+        // Deletion on ack is governed solely by the owner's stored delete policy, never the token.
+        if updated.delete_after_ack {
+            updated.status = RelayChunkStatus::AckedDeleted;
         }
-        Ok(chunk.clone())
+        Ok(updated)
+    }
+
+    /// # Errors
+    /// Returns an error when token/permission validation fails or the chunk is missing.
+    ///
+    /// Pure (store-free) ACK used by tests: reserve the positive meta delta (checked, hard bound),
+    /// then publish. Returns the updated metadata (payload-free).
+    #[allow(clippy::needless_pass_by_value)] // mirrors the wire ACK ownership for test ergonomics
+    pub fn ack_object_chunk(
+        &mut self,
+        ack: ObjectRelayAck,
+        relay_service_key: &[u8],
+        now: u64,
+    ) -> Result<RelayChunkMeta, NodeCoreError> {
+        let updated = self.plan_ack(&ack, relay_service_key, now)?;
+        let id = self.reserve_ack(updated.clone()).map_err(RelayStoreOpError::into_node_core)?;
+        self.publish(id);
+        Ok(updated)
     }
 
     /// # Errors
@@ -489,8 +1431,33 @@ impl RelayCacheState {
 
     /// # Errors
     /// Returns an error when token/permission validation fails.
+    ///
+    /// Pure (store-free) v2 tombstone used by tests: plan, then reserve (exclusive object + affected
+    /// chunk locks, one checked admission) and publish.
     pub fn apply_object_tombstone_mutation(
         &mut self,
+        tombstone: ObjectRelayTombstone,
+        relay_service_key: &[u8],
+        now: u64,
+    ) -> Result<ObjectRelayTombstoneMutation, NodeCoreError> {
+        let mutation = self.plan_object_tombstone_mutation(tombstone, relay_service_key, now)?;
+        if mutation.changed {
+            let id = self
+                .reserve_tombstone(mutation.clone())
+                .map_err(RelayStoreOpError::into_node_core)?;
+            self.publish(id);
+        }
+        Ok(mutation)
+    }
+
+    /// Validates and computes a v2 tombstone mutation WITHOUT mutating state (persist-before-publish
+    /// plan phase). The affected chunk metas are returned already marked `Tombstoned` (payload
+    /// cleared by construction).
+    ///
+    /// # Errors
+    /// Returns an error when token/permission validation fails or the shared core rejects it.
+    pub fn plan_object_tombstone_mutation(
+        &self,
         tombstone: ObjectRelayTombstone,
         relay_service_key: &[u8],
         now: u64,
@@ -524,34 +1491,23 @@ impl RelayCacheState {
                 "object relay tombstone binding mismatch".to_owned(),
             ));
         }
-        self.apply_object_tombstone_record(tombstone, now)
+        self.plan_object_tombstone_record(tombstone, now)
     }
 
-    /// Post-validation tombstone core shared by the v2 (`apply_object_tombstone_mutation`) and the v3
-    /// owner-session (`apply_owner_session_tombstone`) paths. `retained` must already carry the
-    /// verified owner identity in `relay_token.owner_signing_key_id`/`owner_public_key`. The
+    /// Post-validation tombstone plan core shared by the v2 and v3 owner-session paths. `retained`
+    /// must already carry the verified owner identity. Computes (but does not apply) the mutation:
     /// fail-closed TTL, idempotent-replay (zero mutation), cross-owner scope, empty-scope, and
-    /// tombstone-wins (chunk cleared) semantics are unchanged from the original v2 implementation.
-    fn apply_object_tombstone_record(
-        &mut self,
+    /// tombstone-wins (affected chunk metas marked `Tombstoned`).
+    fn plan_object_tombstone_record(
+        &self,
         retained: ObjectRelayTombstone,
         now: u64,
     ) -> Result<ObjectRelayTombstoneMutation, NodeCoreError> {
-        // Retention TTL is fail-closed for both first application and replay: the signed
-        // tombstone's own expiry must still be a bounded future value. It is never clamped down to
-        // MAX nor silently promoted from a past value to now+DEFAULT (which would be an implicit
-        // privilege extension). Keeping the stored value equal to the request value also makes a
-        // byte-identical in-window replay match after a lost response.
         if retained.expires_at <= now
             || retained.expires_at > now.saturating_add(OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS)
         {
             return Err(NodeCoreError::TtlExpired { envelope_id: retained.object_id.clone() });
         }
-        // Idempotent replay guard, before any expiry recompute or chunk mutation. A tombstone for an
-        // object id is recorded exactly once: a byte-for-byte semantically identical replay (same
-        // owner, manifest scope, tombstone_hash, source_event_id, signed_at and the retention
-        // expiry stored on first apply) returns the stored record unchanged — expiry is never
-        // recomputed or extended, chunk state is not rewritten. Any deviation is rejected.
         if let Some(existing) = self.tombstones_by_object_id.get(&retained.object_id) {
             if existing_tombstone_matches_replay(existing, &retained) {
                 return Ok(ObjectRelayTombstoneMutation {
@@ -564,11 +1520,7 @@ impl RelayCacheState {
                 "object relay tombstone conflicts with existing record".to_owned(),
             ));
         }
-        // Verify ownership across every chunk this tombstone would touch before mutating anything.
-        // A tombstone may only delete chunks uploaded by its own owner; a chunk owned by a
-        // different device (or an unbound legacy record) makes the whole request fail closed so no
-        // partial deletion is persisted.
-        let matches_scope = |chunk: &RelayChunkEntry| {
+        let matches_scope = |chunk: &RelayChunkMeta| {
             chunk.object_id == retained.object_id
                 && retained
                     .manifest_hash
@@ -584,16 +1536,12 @@ impl RelayCacheState {
                 "object relay tombstone owner binding mismatch".to_owned(),
             ));
         }
-        // Fail closed on an empty scope: with no object-owner registry, a tombstone that matches
-        // zero currently stored chunks cannot prove the requester owns the object id, so it must be
-        // rejected without recording an object-level tombstone. Otherwise any authenticated device
-        // could pre-place a tombstone on an object id and block the real owner's future puts.
         let mut affected_chunks = Vec::new();
-        for chunk in self.chunks_by_id.values_mut() {
+        for chunk in self.chunks_by_id.values() {
             if matches_scope(chunk) {
-                chunk.status = RelayChunkStatus::Tombstoned;
-                chunk.encrypted_chunk.clear();
-                affected_chunks.push(chunk.clone());
+                let mut marked = chunk.clone();
+                marked.status = RelayChunkStatus::Tombstoned;
+                affected_chunks.push(marked);
             }
         }
         if affected_chunks.is_empty() {
@@ -601,21 +1549,34 @@ impl RelayCacheState {
                 "object relay tombstone matches no owned chunk".to_owned(),
             ));
         }
-        self.tombstones_by_object_id.insert(retained.object_id.clone(), retained.clone());
         Ok(ObjectRelayTombstoneMutation { tombstone: retained, affected_chunks, changed: true })
     }
 
-    /// Applies an owner-session (v3) tombstone whose invocation the caller has already verified
-    /// (owner authorization proof + requester `PoP`). It takes the verified owner identity and the
-    /// tombstone metadata directly — it does NOT re-run v2 token/permission MAC validation — and
-    /// delegates to the shared post-validation core, so the empty-scope, cross-owner, replay
-    /// zero-mutation, and tombstone-wins semantics are identical to the v2 path.
-    ///
     /// # Errors
-    /// Returns an error when the owner binding is missing, or when the shared core rejects the
-    /// tombstone (bad TTL, replay conflict, cross-owner scope, or an empty scope).
+    /// Returns an error when the owner binding is missing, or when the shared core rejects it.
+    ///
+    /// Pure (store-free) v3 owner-session tombstone used by tests: plan, then reserve and publish.
     pub fn apply_owner_session_tombstone(
         &mut self,
+        request: OwnerSessionTombstoneRequest,
+        now: u64,
+    ) -> Result<ObjectRelayTombstoneMutation, NodeCoreError> {
+        let mutation = self.plan_owner_session_tombstone(request, now)?;
+        if mutation.changed {
+            let id = self
+                .reserve_tombstone(mutation.clone())
+                .map_err(RelayStoreOpError::into_node_core)?;
+            self.publish(id);
+        }
+        Ok(mutation)
+    }
+
+    /// Validates and computes a v3 owner-session tombstone mutation WITHOUT mutating state.
+    ///
+    /// # Errors
+    /// Returns an error when the owner binding is missing, or when the shared core rejects it.
+    pub fn plan_owner_session_tombstone(
+        &self,
         request: OwnerSessionTombstoneRequest,
         now: u64,
     ) -> Result<ObjectRelayTombstoneMutation, NodeCoreError> {
@@ -624,9 +1585,6 @@ impl RelayCacheState {
                 "owner-session tombstone missing owner binding".to_owned(),
             ));
         }
-        // The stored record is an `ObjectRelayTombstone`; the shared core (and the replay guard) only
-        // consult the owner identity on `relay_token`, so the verified owner identity is carried
-        // there and the v2-only MAC/nonce/permission fields are left inert.
         let relay_token = RelayToken {
             token_version: OBJECT_RELAY_TOKEN_VERSION,
             token_id: String::new(),
@@ -666,18 +1624,32 @@ impl RelayCacheState {
             relay_token,
             object_permission_envelope,
         };
-        self.apply_object_tombstone_record(retained, now)
+        self.plan_object_tombstone_record(retained, now)
     }
 
+    /// Returns the resident metadata of an available (not expired, `Available` status) chunk.
     #[must_use]
-    pub fn get_available_chunk(&self, chunk_id: &str, now: u64) -> Option<&RelayChunkEntry> {
+    pub fn available_meta(&self, chunk_id: &str, now: u64) -> Option<&RelayChunkMeta> {
         self.chunks_by_id
             .get(chunk_id)
-            .filter(|entry| entry.status == RelayChunkStatus::Available && entry.expires_at > now)
+            .filter(|meta| meta.status == RelayChunkStatus::Available && meta.expires_at > now)
     }
 
+    /// Compatibility accessor: the resident metadata of an available chunk (payload-free).
     #[must_use]
-    pub fn chunk_entry(&self, chunk_id: &str) -> Option<&RelayChunkEntry> {
+    pub fn get_available_chunk(&self, chunk_id: &str, now: u64) -> Option<&RelayChunkMeta> {
+        self.available_meta(chunk_id, now)
+    }
+
+    /// Returns the resident metadata for a chunk id regardless of status (payload-free).
+    #[must_use]
+    pub fn chunk_meta(&self, chunk_id: &str) -> Option<&RelayChunkMeta> {
+        self.chunks_by_id.get(chunk_id)
+    }
+
+    /// Compatibility accessor for [`Self::chunk_meta`].
+    #[must_use]
+    pub fn chunk_entry(&self, chunk_id: &str) -> Option<&RelayChunkMeta> {
         self.chunks_by_id.get(chunk_id)
     }
 
@@ -685,26 +1657,36 @@ impl RelayCacheState {
         self.expire_chunks_mutation(now).expired_count()
     }
 
-    #[must_use]
+    /// Compatibility helper: plans expiry, reserves (locking the to-delete ids, skipping any locked),
+    /// and publishes the removal (pure, store-free). Returns the mutation actually applied.
     pub fn expire_chunks_mutation(&mut self, now: u64) -> RelayExpiryMutation {
-        let mut expired_chunk_ids = Vec::new();
-        self.chunks_by_id.retain(|chunk_id, entry| {
-            if entry.expires_at <= now {
-                expired_chunk_ids.push(chunk_id.clone());
-                false
-            } else {
-                true
+        let planned = self.plan_expiry(now);
+        // Fail-closed: an uncomputable resident charge (invariant violation) defers deletion this
+        // round rather than mutating; nothing is expired.
+        match self.reserve_expiry(planned) {
+            Ok(Some((id, applied))) => {
+                self.publish(id);
+                applied
             }
-        });
-        let mut expired_tombstone_object_ids = Vec::new();
-        self.tombstones_by_object_id.retain(|object_id, tombstone| {
-            if tombstone.expires_at <= now {
-                expired_tombstone_object_ids.push(object_id.clone());
-                false
-            } else {
-                true
-            }
-        });
+            Ok(None) | Err(_) => RelayExpiryMutation::default(),
+        }
+    }
+
+    /// Computes (without applying) the set of chunk ids and tombstone object ids that have expired.
+    #[must_use]
+    pub fn plan_expiry(&self, now: u64) -> RelayExpiryMutation {
+        let expired_chunk_ids = self
+            .chunks_by_id
+            .iter()
+            .filter(|(_id, meta)| meta.expires_at <= now)
+            .map(|(id, _meta)| id.clone())
+            .collect();
+        let expired_tombstone_object_ids = self
+            .tombstones_by_object_id
+            .iter()
+            .filter(|(_id, tombstone)| tombstone.expires_at <= now)
+            .map(|(id, _tombstone)| id.clone())
+            .collect();
         RelayExpiryMutation { expired_chunk_ids, expired_tombstone_object_ids }
     }
 
@@ -712,7 +1694,7 @@ impl RelayCacheState {
     pub fn available_count(&self, now: u64) -> usize {
         self.chunks_by_id
             .values()
-            .filter(|entry| entry.status == RelayChunkStatus::Available && entry.expires_at > now)
+            .filter(|meta| meta.status == RelayChunkStatus::Available && meta.expires_at > now)
             .count()
     }
 
@@ -3293,8 +4275,11 @@ fn record_relay_tombstone_mutation_in_txn(
     let mut chunk_table = write_txn
         .open_table(RELAY_CHUNK_ENTRY_TABLE)
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    for entry in &mutation.affected_chunks {
-        let entry_bytes = serialize_relay_value(entry)?;
+    for meta in &mutation.affected_chunks {
+        // A tombstone clears the ciphertext, so persist a payload-empty full-entry row. The schema
+        // is unchanged: this is a `RelayChunkEntry` with an empty `encrypted_chunk`.
+        let entry = meta.to_entry(Vec::new());
+        let entry_bytes = serialize_relay_value(&entry)?;
         chunk_table
             .insert(entry.chunk_id.as_str(), entry_bytes.as_slice())
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
@@ -3377,22 +4362,15 @@ impl RelayRedbStore {
     }
 
     /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
+    /// Returns an error when serialization or storage fails.
+    ///
+    /// Writes a metadata-only snapshot of the resident state to the legacy `RELAY_CACHE_KEY` and
+    /// clears the incremental tables. Ciphertext is NEVER persisted here (it is written through
+    /// [`Self::record_relay_chunk_entry`]); `save_state` therefore only snapshots metadata and is
+    /// used by tests, not the production write path.
     pub fn save_state(&self, state: &RelayCacheState) -> Result<(), NodeCoreError> {
         let snapshot = serde_json::to_vec(state)
             .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-        let chunk_entries = state
-            .chunks_by_id
-            .values()
-            .map(|entry| serialize_relay_value(entry).map(|bytes| (entry.chunk_id.clone(), bytes)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let tombstone_entries = state
-            .tombstones_by_object_id
-            .values()
-            .map(|tombstone| {
-                serialize_relay_value(tombstone).map(|bytes| (tombstone.object_id.clone(), bytes))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -3402,33 +4380,116 @@ impl RelayRedbStore {
             table
                 .insert(RELAY_CACHE_KEY, snapshot.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            replace_relay_table_values(&write_txn, RELAY_CHUNK_ENTRY_TABLE, &chunk_entries)?;
-            replace_relay_table_values(&write_txn, RELAY_TOMBSTONE_TABLE, &tombstone_entries)?;
+            replace_relay_table_values(&write_txn, RELAY_CHUNK_ENTRY_TABLE, &[])?;
+            replace_relay_table_values(&write_txn, RELAY_TOMBSTONE_TABLE, &[])?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         Ok(())
     }
 
+    /// Reads the full stored [`RelayChunkEntry`] (including ciphertext) for a single chunk id from
+    /// the existing `RELAY_CHUNK_ENTRY_TABLE` full-entry JSON rows. This is the read-through point
+    /// read that serves a GET payload without holding the resident state lock.
+    ///
     /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
-    pub fn load_state(&self) -> Result<Option<RelayCacheState>, NodeCoreError> {
-        let (incremental, has_incremental_rows) = self.load_incremental_state()?;
-        if has_incremental_rows {
-            return Ok(Some(incremental));
-        }
+    /// Returns [`NodeCoreError::Redb`] on a redb read failure and
+    /// [`NodeCoreError::SnapshotSerialization`] on a corrupt row (fail-closed; never yields an empty
+    /// payload for a corrupt row).
+    pub fn relay_chunk_entry(
+        &self,
+        chunk_id: &str,
+    ) -> Result<Option<RelayChunkEntry>, NodeCoreError> {
         let read_txn =
             self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let table = read_txn
-            .open_table(RELAY_CACHE_TABLE)
+            .open_table(RELAY_CHUNK_ENTRY_TABLE)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let Some(snapshot) =
-            table.get(RELAY_CACHE_KEY).map_err(|source| NodeCoreError::Redb(source.to_string()))?
+        let Some(value) =
+            table.get(chunk_id).map_err(|source| NodeCoreError::Redb(source.to_string()))?
         else {
             return Ok(None);
         };
-        let state = serde_json::from_slice(snapshot.value())
+        let entry: RelayChunkEntry = serde_json::from_slice(value.value())
             .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+        Ok(Some(entry))
+    }
+
+    /// # Errors
+    /// Returns an error when hydration exceeds the resident metadata budget, or on redb/serde
+    /// failure.
+    ///
+    /// Loads a metadata-only state (payload dropped) with the resident budget set to `max_bytes`.
+    /// Hydration accumulates the resident charge and fails closed (no partial load) if it would
+    /// exceed the budget.
+    pub fn load_state(&self, max_bytes: u64) -> Result<Option<RelayCacheState>, NodeCoreError> {
+        let (mut incremental, has_incremental_rows) = self.load_incremental_state()?;
+        if has_incremental_rows {
+            hydrate_relay_budget(&mut incremental, max_bytes)?;
+            return Ok(Some(incremental));
+        }
+        let snapshot_bytes = {
+            let read_txn =
+                self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let table = read_txn
+                .open_table(RELAY_CACHE_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let Some(snapshot) = table
+                .get(RELAY_CACHE_KEY)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?
+            else {
+                return Ok(None);
+            };
+            snapshot.value().to_vec()
+        };
+        // A pre-incremental snapshot may embed full ciphertext (old format) or only metadata (the
+        // current `save_state` format). Deserialize with defaulted payload so both parse, backfill
+        // any recovered entries into the incremental table (reusing the existing schema) so a GET can
+        // read through, and drop the legacy snapshot key.
+        let compat: RelayCacheSnapshotCompat = serde_json::from_slice(&snapshot_bytes)
+            .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+        self.migrate_snapshot_to_incremental(&compat)?;
+        let mut state = RelayCacheState::default();
+        for (chunk_id, chunk) in compat.chunks_by_id {
+            state.chunks_by_id.insert(chunk_id, RelayChunkMeta::from(&chunk.into_entry()));
+        }
+        state.tombstones_by_object_id = compat.tombstones_by_object_id;
+        hydrate_relay_budget(&mut state, max_bytes)?;
         Ok(Some(state))
+    }
+
+    /// One-time migration: writes the recovered full entries / tombstones into the incremental tables
+    /// and removes the legacy snapshot key, so subsequent loads take the incremental path and GETs
+    /// read through to the payload.
+    fn migrate_snapshot_to_incremental(
+        &self,
+        compat: &RelayCacheSnapshotCompat,
+    ) -> Result<(), NodeCoreError> {
+        let write_txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        {
+            let mut chunk_table = write_txn
+                .open_table(RELAY_CHUNK_ENTRY_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            for chunk in compat.chunks_by_id.values() {
+                let entry = chunk.clone().into_entry();
+                let entry_bytes = serialize_relay_value(&entry)?;
+                chunk_table
+                    .insert(entry.chunk_id.as_str(), entry_bytes.as_slice())
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            }
+            let mut tombstone_table = write_txn
+                .open_table(RELAY_TOMBSTONE_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            for tombstone in compat.tombstones_by_object_id.values() {
+                let bytes = serialize_relay_value(tombstone)?;
+                tombstone_table
+                    .insert(tombstone.object_id.as_str(), bytes.as_slice())
+                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            }
+            remove_relay_legacy_snapshot(&write_txn)?;
+        }
+        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        Ok(())
     }
 
     /// # Errors
@@ -3437,13 +4498,36 @@ impl RelayRedbStore {
         self.record_relay_chunk_entry(entry)
     }
 
+    /// Test-only: writes raw bytes into `RELAY_CHUNK_ENTRY_TABLE` so a test can inject a corrupt
+    /// full-entry row and exercise the fail-closed read-through error path.
     #[cfg(test)]
-    pub(crate) fn save_legacy_state_only(
+    pub(crate) fn write_raw_chunk_row(
         &self,
-        state: &RelayCacheState,
+        chunk_id: &str,
+        bytes: &[u8],
     ) -> Result<(), NodeCoreError> {
-        let snapshot = serde_json::to_vec(state)
-            .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+        let write_txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        {
+            let mut table = write_txn
+                .open_table(RELAY_CHUNK_ENTRY_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            table
+                .insert(chunk_id, bytes)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        }
+        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        Ok(())
+    }
+
+    /// Test-only: writes raw legacy-snapshot bytes to `RELAY_CACHE_KEY` and clears the incremental
+    /// tables, so tests can craft a pre-incremental (full-entry, payload-bearing) snapshot and verify
+    /// the load-time backfill/read-through compatibility.
+    #[cfg(test)]
+    pub(crate) fn save_legacy_snapshot_bytes(
+        &self,
+        snapshot_bytes: &[u8],
+    ) -> Result<(), NodeCoreError> {
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -3451,7 +4535,7 @@ impl RelayRedbStore {
                 .open_table(RELAY_CACHE_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             legacy_table
-                .insert(RELAY_CACHE_KEY, snapshot.as_slice())
+                .insert(RELAY_CACHE_KEY, snapshot_bytes)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             replace_relay_table_values(&write_txn, RELAY_CHUNK_ENTRY_TABLE, &[])?;
             replace_relay_table_values(&write_txn, RELAY_TOMBSTONE_TABLE, &[])?;
@@ -3507,9 +4591,11 @@ impl RelayRedbStore {
                 has_rows = true;
                 let (_key, value) =
                     entry.map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                // Read the existing full-entry JSON row and immediately drop the payload: only the
+                // metadata becomes resident; the ciphertext stays in redb for read-through.
                 let chunk: RelayChunkEntry = serde_json::from_slice(value.value())
                     .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-                state.chunks_by_id.insert(chunk.chunk_id.clone(), chunk);
+                state.chunks_by_id.insert(chunk.chunk_id.clone(), RelayChunkMeta::from(&chunk));
             }
         }
         {
@@ -3532,6 +4618,339 @@ impl RelayRedbStore {
 fn serialize_relay_value<T: Serialize>(value: &T) -> Result<Vec<u8>, NodeCoreError> {
     serde_json::to_vec(value)
         .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
+}
+
+/// Sets the resident budget on a freshly loaded state and recomputes the resident charge, failing
+/// closed (no partial load) when hydration would exceed the budget.
+fn hydrate_relay_budget(state: &mut RelayCacheState, max_bytes: u64) -> Result<(), NodeCoreError> {
+    state.rehydrate_budget(max_bytes).map_err(|error| NodeCoreError::ItestHttp(error.to_string()))
+}
+
+/// Deserialization-compat view of a pre-incremental `RELAY_CACHE_KEY` snapshot. Both the old
+/// full-entry format and the current metadata-only format parse (ciphertext defaults to empty).
+#[derive(Deserialize)]
+struct RelayCacheSnapshotCompat {
+    #[serde(default)]
+    chunks_by_id: BTreeMap<String, RelayChunkEntryCompat>,
+    #[serde(default)]
+    tombstones_by_object_id: BTreeMap<String, ObjectRelayTombstone>,
+}
+
+#[derive(Clone, Deserialize)]
+struct RelayChunkEntryCompat {
+    chunk_id: String,
+    object_id: String,
+    manifest_hash: String,
+    chunk_index: u32,
+    chunk_cipher_hash: String,
+    #[serde(default)]
+    owner_signing_key_id: String,
+    #[serde(default)]
+    owner_public_key: String,
+    #[serde(default)]
+    encrypted_chunk: Vec<u8>,
+    stored_at: u64,
+    expires_at: u64,
+    delete_after_ack: bool,
+    acked_by: BTreeSet<String>,
+    status: RelayChunkStatus,
+}
+
+impl RelayChunkEntryCompat {
+    fn into_entry(self) -> RelayChunkEntry {
+        RelayChunkEntry {
+            chunk_id: self.chunk_id,
+            object_id: self.object_id,
+            manifest_hash: self.manifest_hash,
+            chunk_index: self.chunk_index,
+            chunk_cipher_hash: self.chunk_cipher_hash,
+            owner_signing_key_id: self.owner_signing_key_id,
+            owner_public_key: self.owner_public_key,
+            encrypted_chunk: self.encrypted_chunk,
+            stored_at: self.stored_at,
+            expires_at: self.expires_at,
+            delete_after_ack: self.delete_after_ack,
+            acked_by: self.acked_by,
+            status: self.status,
+        }
+    }
+}
+
+type RelayStateMutex = std::sync::Mutex<RelayCacheState>;
+
+fn lock_relay_state(state: &RelayStateMutex) -> std::sync::MutexGuard<'_, RelayCacheState> {
+    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// RAII rollback for an in-flight reservation. Any early return, store error, or unwind between
+/// `reserve_*` and a successful `publish` drops this guard, which re-locks the state and cancels the
+/// reservation (releasing its locks + reserved budget). `into_id` marks it consumed so the successful
+/// path suppresses the cancel and hands the EXACT token to `publish`.
+struct RelayReservationGuard<'a> {
+    state: &'a RelayStateMutex,
+    id: u64,
+    consumed: bool,
+}
+
+impl Drop for RelayReservationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.consumed {
+            lock_relay_state(self.state).cancel_reservation(self.id);
+        }
+    }
+}
+
+impl RelayReservationGuard<'_> {
+    fn into_id(mut self) -> u64 {
+        self.consumed = true;
+        self.id
+    }
+}
+
+/// Persist-before-publish PUT of a pre-built candidate entry (shared by v2 after frame validation and
+/// by the pre-verified v3 owner-session path). Never holds the state lock across the redb commit.
+///
+/// Ordering:
+/// 1. Plan AND reserve under ONE lock (atomic): tombstone-block/owner/content(meta)/resurrect checks;
+///    on a fresh id take an exclusive chunk lock + shared object ref and admit the full meta charge.
+///    A concurrent same-chunk or object-exclusive (pending tombstone) mutation returns `Conflict`.
+/// 2. Existing id: point-read the stored ciphertext and require an EXACT byte match (not just the
+///    cipher hash) for an idempotent replay; otherwise reject.
+/// 3. New id: commit the payload to redb (fsync) FIRST, then infallibly publish the exact reservation
+///    token. A persist failure/unwind drops the RAII guard, which cancels the reservation.
+///
+/// Returns the stored entry and whether it was newly inserted.
+///
+/// # Errors
+/// Returns a [`RelayStoreOpError`] mapped by the caller to a status code.
+pub fn relay_store_put_candidate(
+    store: &RelayRedbStore,
+    state: &RelayStateMutex,
+    candidate: RelayChunkEntry,
+    _now: u64,
+) -> Result<(RelayChunkEntry, bool), RelayStoreOpError> {
+    enum PutPhase {
+        Existing(RelayChunkEntry),
+        New(RelayChunkEntry, u64),
+    }
+    let meta = RelayChunkMeta::from(&candidate);
+    let phase = {
+        let mut guard = lock_relay_state(state);
+        match guard.plan_put(candidate)? {
+            RelayPutPlan::Existing { candidate, .. } => PutPhase::Existing(candidate),
+            RelayPutPlan::New(candidate) => {
+                let id = guard.reserve_put(meta)?;
+                PutPhase::New(candidate, id)
+            }
+        }
+    };
+    match phase {
+        PutPhase::Existing(candidate) => {
+            // Exact byte-identity idempotency: read the stored ciphertext and compare bytes.
+            let stored = store
+                .relay_chunk_entry(&candidate.chunk_id)
+                .map_err(|error| RelayStoreOpError::PayloadUnavailable(error.to_string()))?
+                .ok_or(RelayStoreOpError::NotAvailable)?;
+            if stored.encrypted_chunk != candidate.encrypted_chunk {
+                return Err(RelayStoreOpError::Unauthorized(
+                    "object relay put rejects chunk content overwrite".to_owned(),
+                ));
+            }
+            Ok((stored, false))
+        }
+        PutPhase::New(candidate, id) => {
+            let guard = RelayReservationGuard { state, id, consumed: false };
+            // Persist FIRST (post-fsync). On failure the guard drops -> cancel (nothing published).
+            store
+                .record_relay_chunk_entry(&candidate)
+                .map_err(|error| RelayStoreOpError::Persist(error.to_string()))?;
+            let id = guard.into_id();
+            lock_relay_state(state).publish(id);
+            Ok((candidate, true))
+        }
+    }
+}
+
+/// Persist-before-publish v2 PUT: validates the frame, builds the candidate, then applies
+/// [`relay_store_put_candidate`].
+///
+/// # Errors
+/// Returns a [`RelayStoreOpError`].
+pub fn relay_store_put_frame(
+    store: &RelayRedbStore,
+    state: &RelayStateMutex,
+    frame: ObjectChunkFrame,
+    relay_service_key: &[u8],
+    now: u64,
+) -> Result<(RelayChunkEntry, bool), RelayStoreOpError> {
+    let candidate = RelayCacheState::build_put_entry_from_frame(frame, relay_service_key, now)?;
+    relay_store_put_candidate(store, state, candidate, now)
+}
+
+/// Read-through GET: given a validated resident meta snapshot, point-read the ciphertext from redb
+/// WITHOUT holding the state lock, verify the payload hash/owner/id, then re-acquire the lock and
+/// recheck status/tombstone/expiry/hash before returning. Any TOCTOU change fails closed (a
+/// tombstoned/expired payload is never served).
+///
+/// # Errors
+/// Returns a [`RelayStoreOpError`].
+pub fn relay_store_read_through(
+    store: &RelayRedbStore,
+    state: &RelayStateMutex,
+    expected: &RelayChunkMeta,
+    now: u64,
+) -> Result<RelayChunkEntry, RelayStoreOpError> {
+    let entry = store
+        .relay_chunk_entry(&expected.chunk_id)
+        .map_err(|error| RelayStoreOpError::PayloadUnavailable(error.to_string()))?
+        .ok_or(RelayStoreOpError::NotAvailable)?;
+    // Verify the read payload against the expected metadata: identity and integrity, fail-closed.
+    if entry.chunk_id != expected.chunk_id
+        || entry.chunk_cipher_hash != expected.chunk_cipher_hash
+        || entry.owner_signing_key_id != expected.owner_signing_key_id
+        || entry.owner_public_key != expected.owner_public_key
+    {
+        return Err(RelayStoreOpError::PayloadUnavailable(
+            "stored chunk does not match resident metadata".to_owned(),
+        ));
+    }
+    let recomputed = object_relay_chunk_cipher_hash(
+        &entry.manifest_hash,
+        entry.chunk_index,
+        &entry.encrypted_chunk,
+    );
+    if recomputed != expected.chunk_cipher_hash {
+        return Err(RelayStoreOpError::PayloadUnavailable(
+            "stored chunk ciphertext hash mismatch".to_owned(),
+        ));
+    }
+    // Re-acquire the lock and recheck the chunk is still serveable and unchanged.
+    let guard = lock_relay_state(state);
+    // A published tombstone on the object is terminal.
+    if guard.tombstone(&expected.object_id).is_some() {
+        return Err(RelayStoreOpError::Tombstoned);
+    }
+    // An in-flight mutation on this exact chunk (tombstone/expiry/ack-with-delete) may be mid-way
+    // through clearing the redb payload; fail closed (retryable) rather than serve a stale/half-
+    // deleted payload. This also covers a pending tombstone that locked the chunk but hasn't
+    // published its object tombstone yet.
+    if guard.chunk_is_locked(&expected.chunk_id) {
+        return Err(RelayStoreOpError::NotAvailable);
+    }
+    let current =
+        guard.available_meta(&expected.chunk_id, now).ok_or(RelayStoreOpError::NotAvailable)?;
+    if current.chunk_cipher_hash != expected.chunk_cipher_hash {
+        return Err(RelayStoreOpError::NotAvailable);
+    }
+    drop(guard);
+    Ok(entry)
+}
+
+/// Persist-before-publish ACK. The `plan` closure runs under the SAME lock as the reservation, so the
+/// updated-meta computation and the exclusive chunk reservation are atomic (no PUT/tombstone can slip
+/// in between). Then: point-read the full entry to keep/clear the payload (delete-on-ack leaves an
+/// empty redb payload), persist FIRST, then infallibly publish the exact token. A persist failure
+/// drops the RAII guard, which cancels the reservation.
+///
+/// # Errors
+/// Returns a [`RelayStoreOpError`].
+pub fn relay_store_ack<F>(
+    store: &RelayRedbStore,
+    state: &RelayStateMutex,
+    plan: F,
+) -> Result<RelayChunkMeta, RelayStoreOpError>
+where
+    F: FnOnce(&RelayCacheState) -> Result<RelayChunkMeta, RelayStoreOpError>,
+{
+    let (updated, id) = {
+        let mut guard = lock_relay_state(state);
+        let updated = plan(&guard)?;
+        let id = guard.reserve_ack(updated.clone())?;
+        (updated, id)
+    };
+    let reservation = RelayReservationGuard { state, id, consumed: false };
+    let stored = store
+        .relay_chunk_entry(&updated.chunk_id)
+        .map_err(|error| RelayStoreOpError::PayloadUnavailable(error.to_string()))?
+        .ok_or(RelayStoreOpError::NotAvailable)?;
+    // Keep the ciphertext unless the ack consumed the chunk (delete-on-ack / any non-Available end
+    // state), in which case the redb payload is cleared.
+    let payload = if updated.status == RelayChunkStatus::Available {
+        stored.encrypted_chunk
+    } else {
+        Vec::new()
+    };
+    let entry = updated.to_entry(payload);
+    store
+        .record_relay_chunk_entry(&entry)
+        .map_err(|error| RelayStoreOpError::Persist(error.to_string()))?;
+    let id = reservation.into_id();
+    lock_relay_state(state).publish(id);
+    Ok(updated)
+}
+
+/// Persist-before-publish TOMBSTONE. The `plan` closure runs under the SAME lock as the reservation,
+/// so the affected-chunk set reflects the current published state atomically and no concurrent PUT can
+/// land an uncovered chunk (`reserve_tombstone` also rejects an object with a pending PUT/ACK). Then
+/// commit the batch to redb FIRST and infallibly publish. An idempotent replay (`changed == false`)
+/// neither reserves, persists, nor publishes.
+///
+/// # Errors
+/// Returns a [`RelayStoreOpError`].
+pub fn relay_store_tombstone<F>(
+    store: &RelayRedbStore,
+    state: &RelayStateMutex,
+    plan: F,
+) -> Result<ObjectRelayTombstoneMutation, RelayStoreOpError>
+where
+    F: FnOnce(&RelayCacheState) -> Result<ObjectRelayTombstoneMutation, RelayStoreOpError>,
+{
+    let (mutation, id) = {
+        let mut guard = lock_relay_state(state);
+        let mutation = plan(&guard)?;
+        if !mutation.changed {
+            return Ok(mutation);
+        }
+        let id = guard.reserve_tombstone(mutation.clone())?;
+        (mutation, id)
+    };
+    let reservation = RelayReservationGuard { state, id, consumed: false };
+    store
+        .record_relay_tombstone_mutation(&mutation)
+        .map_err(|error| RelayStoreOpError::Persist(error.to_string()))?;
+    let id = reservation.into_id();
+    lock_relay_state(state).publish(id);
+    Ok(mutation)
+}
+
+/// Persist-before-publish EXPIRY: plan + atomically reserve (locking the to-delete ids, skipping any
+/// locked by an in-flight PUT/ACK/tombstone), batch-delete from redb FIRST, then infallibly publish
+/// the removal. On a persist failure the RAII guard cancels the reservation, so the resident entries
+/// stay put — reads still reject them by `expires_at`, and a restart cannot resurrect a servable
+/// payload (the redb rows were never deleted).
+///
+/// # Errors
+/// Returns a [`RelayStoreOpError`].
+pub fn relay_store_expire(
+    store: &RelayRedbStore,
+    state: &RelayStateMutex,
+    now: u64,
+) -> Result<RelayExpiryMutation, RelayStoreOpError> {
+    let (id, applied) = {
+        let mut guard = lock_relay_state(state);
+        let planned = guard.plan_expiry(now);
+        match guard.reserve_expiry(planned)? {
+            Some(pair) => pair,
+            None => return Ok(RelayExpiryMutation::default()),
+        }
+    };
+    let reservation = RelayReservationGuard { state, id, consumed: false };
+    store
+        .record_relay_expiry_mutation(&applied)
+        .map_err(|error| RelayStoreOpError::Persist(error.to_string()))?;
+    let id = reservation.into_id();
+    lock_relay_state(state).publish(id);
+    Ok(applied)
 }
 
 fn replace_relay_table_values(
@@ -3603,24 +5022,27 @@ mod tests {
             let state = Arc::clone(&state);
             workers.push(thread::spawn(move || -> Result<(), String> {
                 let mut state = state.lock().map_err(|source| source.to_string())?;
-                state.put_chunk(RelayChunkEntry {
-                    chunk_id: format!("chunk-{index}"),
-                    object_id: "object-shared-store".to_owned(),
-                    manifest_hash: "manifest-shared-store".to_owned(),
-                    chunk_index: index,
-                    chunk_cipher_hash: format!("cipher-hash-{index}"),
-                    owner_signing_key_id: "owner-shared-store".to_owned(),
-                    owner_public_key: "owner-public-shared-store".to_owned(),
-                    encrypted_chunk: vec![
-                        u8::try_from(index).map_err(|source| source.to_string())?;
-                        8
-                    ],
-                    stored_at: 0,
-                    expires_at: 1,
-                    delete_after_ack: false,
-                    acked_by: BTreeSet::new(),
-                    status: RelayChunkStatus::Available,
-                });
+                state
+                    .put_chunk(RelayChunkEntry {
+                        chunk_id: format!("chunk-{index}"),
+                        object_id: "object-shared-store".to_owned(),
+                        manifest_hash: "manifest-shared-store".to_owned(),
+                        chunk_index: index,
+                        chunk_cipher_hash: format!("cipher-hash-{index}"),
+                        owner_signing_key_id: "owner-shared-store".to_owned(),
+                        owner_public_key: "owner-public-shared-store".to_owned(),
+                        encrypted_chunk: vec![
+                            u8::try_from(index)
+                                .map_err(|source| source.to_string())?;
+                            8
+                        ],
+                        stored_at: 0,
+                        expires_at: 1,
+                        delete_after_ack: false,
+                        acked_by: BTreeSet::new(),
+                        status: RelayChunkStatus::Available,
+                    })
+                    .map_err(|source| source.to_string())?;
                 store.save_state(&state).map_err(|source| source.to_string())
             }));
         }
@@ -3635,7 +5057,7 @@ mod tests {
             store.save_state(&state).map_err(|source| source.to_string())?;
         }
         let loaded = store
-            .load_state()
+            .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)
             .map_err(|source| source.to_string())?
             .ok_or_else(|| "relay state should exist".to_owned())?;
         assert_eq!(loaded.available_count(u64::MAX), 0);
@@ -6250,7 +7672,7 @@ mod tests {
     fn owner_session_tombstone_applies_and_replay_is_zero_mutation() -> Result<(), String> {
         let now = 1_000_000;
         let mut state = RelayCacheState::new();
-        state.put_chunk(t14d_tombstone_chunk(v3_pk(V3_OWNER_SEED)));
+        state.put_chunk(t14d_tombstone_chunk(v3_pk(V3_OWNER_SEED))).map_err(|e| e.to_string())?;
 
         // A missing owner binding fails closed.
         let mut missing = t14d_tombstone_request();
@@ -6290,7 +7712,7 @@ mod tests {
         // Cross-owner: a chunk in scope owned by a different device fails the whole request closed,
         // leaving that chunk untouched.
         let mut cross = RelayCacheState::new();
-        cross.put_chunk(t14d_tombstone_chunk(v3_pk(V3_REQUESTER_SEED)));
+        assert!(cross.put_chunk(t14d_tombstone_chunk(v3_pk(V3_REQUESTER_SEED))).is_ok());
         assert!(cross.apply_owner_session_tombstone(t14d_tombstone_request(), now).is_err());
         assert_eq!(
             cross.chunk_entry(V3_CHUNK).map(|chunk| chunk.status),
