@@ -867,6 +867,38 @@ fn notify_wal_store_drops_bad_raw_wake_without_repeating() -> Result<(), Box<dyn
     Ok(())
 }
 
+// RELAY-MEM-03 (CTRL-096): the production relay opens redb with a fixed 16 MiB page-cache cap.
+#[test]
+fn relay_redb_store_opens_with_production_cache_cap() -> Result<(), Box<dyn std::error::Error>> {
+    // The default/production build caps the redb page cache at 16 MiB (no env, no override path);
+    // opening must succeed and round-trip a chunk exactly as before.
+    let path = temp_store_path("relay_redb_store_opens_with_production_cache_cap")?;
+    let store = RelayRedbStore::open(&path)?;
+    store.put_chunk(&relay_chunk("chunk_cap", 1_760_000_000, 60))?;
+    drop(store);
+    let _reopened = RelayRedbStore::open(&path)?;
+    Ok(())
+}
+
+// RELAY-MEM-03 (CTRL-096): the probe-only cache override resolves the missing/override/invalid cases.
+// A missing env falls back to the 16 MiB production default (NOT redb's 1 GiB); a valid value
+// overrides; a zero or non-numeric value fails closed.
+#[cfg(feature = "itest-redb-cache-probe")]
+#[test]
+fn relay_redb_probe_cache_resolution() -> Result<(), Box<dyn std::error::Error>> {
+    // Missing env -> production 16 MiB default (never redb's 1 GiB).
+    assert_eq!(RelayRedbStore::resolve_probe_cache_bytes(None)?, 16 * 1024 * 1024);
+    // Valid override.
+    assert_eq!(RelayRedbStore::resolve_probe_cache_bytes(Some("33554432"))?, 33_554_432);
+    // Fail-closed on zero and on non-numeric.
+    assert!(RelayRedbStore::resolve_probe_cache_bytes(Some("0")).is_err(), "zero must fail closed");
+    assert!(
+        RelayRedbStore::resolve_probe_cache_bytes(Some("not-a-number")).is_err(),
+        "non-numeric must fail closed"
+    );
+    Ok(())
+}
+
 #[test]
 fn relay_redb_store_restores_encrypted_chunk_cache() -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("relay_redb_store_restores_encrypted_chunk_cache")?;
