@@ -149,6 +149,21 @@ if [ "${RAMFLUX_RELAY_ALLOC_PROF:-0}" = "1" ]; then
   RELAY_LOCKED=""
   printf '>> host pre-build: RAMFLUX_RELAY_ALLOC_PROF=1 → relay built with itest-alloc-prof (dhat heap profiler; DIAGNOSTIC)\n'
 fi
+# CTRL-093 RELAY-MEM-03-A0b DIAGNOSTIC/probe-only passthrough (default-off). When
+# RAMFLUX_RELAY_REDB_CACHE_PROBE=1, compile the relay with the default-off itest-redb-cache-probe
+# feature (redb cache_metrics + a fixed page-cache cap honored from RAMFLUX_RELAY_REDB_CACHE_BYTES +
+# a cache_stats accessor). This enables redb/cache_metrics (absent from Cargo.lock feature set), so
+# --locked is dropped for the probe build ONLY. Never set for a normal acceptance run → the relay
+# keeps redb's 1 GiB default and reads no cache env (marker=0). Mutually exclusive with ALLOC_PROF.
+if [ "${RAMFLUX_RELAY_REDB_CACHE_PROBE:-0}" = "1" ]; then
+  if [ "${RAMFLUX_RELAY_ALLOC_PROF:-0}" = "1" ]; then
+    echo "ERROR: RAMFLUX_RELAY_REDB_CACHE_PROBE and RAMFLUX_RELAY_ALLOC_PROF are mutually exclusive" >&2
+    exit 2
+  fi
+  RELAY_FEATURES="$RELAY_FEATURES,itest-redb-cache-probe"
+  RELAY_LOCKED=""
+  printf '>> host pre-build: RAMFLUX_RELAY_REDB_CACHE_PROBE=1 → relay built with itest-redb-cache-probe (redb page-cache cap; DIAGNOSTIC)\n'
+fi
 printf '>> host pre-build: compiling ramflux-relay with features %s\n' "$RELAY_FEATURES"
 ( cd "$WORKSPACE" && build_rust $RELAY_LOCKED $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
     --features "$RELAY_FEATURES" --bin ramflux-relay )

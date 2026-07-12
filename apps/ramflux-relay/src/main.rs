@@ -307,6 +307,29 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             )?;
         }
         start_expire_scheduler(Arc::clone(&store), Arc::clone(&state));
+        // RELAY-MEM-03-A0b (CTRL-093) DIAGNOSTIC/probe-only: periodically log redb page-cache metrics
+        // (used_bytes/evictions/read+write hit+miss) at INFO so the control(1 GiB)-vs-candidate(32 MiB)
+        // experiment can observe the cache high-water and eviction behaviour. Absent from the default
+        // build (no cache_stats accessor, no thread) — no production control-surface expansion.
+        #[cfg(feature = "itest-redb-cache-probe")]
+        {
+            let probe_redb = Arc::clone(&store);
+            let _ = std::thread::Builder::new().name("relay-redb-cache-probe".to_owned()).spawn(
+                move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let cache = probe_redb.cache_stats();
+                    tracing::info!(
+                        used_bytes = cache.used_bytes(),
+                        evictions = cache.evictions(),
+                        read_hits = cache.read_hits(),
+                        read_misses = cache.read_misses(),
+                        write_hits = cache.write_hits(),
+                        write_misses = cache.write_misses(),
+                        "redb cache probe stats"
+                    );
+                },
+            );
+        }
         // Legacy v2 shared-HMAC object relay over mesh mTLS: itest-only, no production caller.
         #[cfg(feature = "itest-object-v2")]
         serve_relay_mesh_mtls(

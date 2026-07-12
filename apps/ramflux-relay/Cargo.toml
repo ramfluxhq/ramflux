@@ -56,6 +56,11 @@ itest-quic-fault = []
 # deploy/scripts/run-realnet.sh (RAMFLUX_RELAY_ALLOC_PROF=1); must NOT be pulled in via any other
 # feature. Changes no business/wire/schema/cache semantics — measurement only.
 itest-alloc-prof = ["dep:dhat", "dep:libc"]
+# RELAY-MEM-03-A0b (CTRL-093) DIAGNOSTIC/probe-only (default-off): forwards node-core's redb
+# page-cache probe (fixed cache cap via RAMFLUX_RELAY_REDB_CACHE_BYTES + cache_stats). The
+# default/production relay reads no env and keeps redb's 1 GiB default (marker=0). Enabled explicitly
+# for a probe run via deploy/scripts/run-realnet.sh (RAMFLUX_RELAY_REDB_CACHE_PROBE=1).
+itest-redb-cache-probe = ["ramflux-node-core/itest-redb-cache-probe"]
 
 [dependencies]
 # itest-alloc-prof only (default-off). Absent from the default/production dependency graph.
