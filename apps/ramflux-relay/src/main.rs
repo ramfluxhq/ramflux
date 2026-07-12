@@ -51,9 +51,12 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     {
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let store = Arc::new(ramflux_node_core::RelayRedbStore::open(&redb_path)?);
-        let state = match store.load_state()? {
+        // Resident metadata budget (RELAY-MEM-01-A1): fail closed on a `0`/invalid override so an
+        // operator misconfiguration never silently falls back to the default or an unbounded cache.
+        let metadata_max_bytes = ramflux_node_core::relay_metadata_max_bytes_from_env()?;
+        let state = match store.load_state(metadata_max_bytes)? {
             Some(state) => state,
-            None => ramflux_node_core::RelayCacheState::new(),
+            None => ramflux_node_core::RelayCacheState::with_max_bytes(metadata_max_bytes),
         };
         let state = Arc::new(Mutex::new(state));
         // The object relay HMAC service key is a legacy v2-only credential. The
@@ -639,11 +642,16 @@ fn handle_object_relay_request(
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
             let now = now_unix_seconds();
-            let entry = {
-                let mut state = lock_relay_state(context.state)?;
-                state.put_object_chunk_frame(frame, context.service_key, now)?
-            };
-            context.store.record_relay_chunk_entry(&entry)?;
+            // Persist-before-publish: the ciphertext is committed to redb (post-fsync) before the
+            // metadata is published to the resident index.
+            let (entry, _inserted) = ramflux_node_core::relay_store_put_frame(
+                context.store,
+                context.state,
+                frame,
+                context.service_key,
+                now,
+            )
+            .map_err(ramflux_node_core::RelayStoreOpError::into_node_core)?;
             register_object_relay_ttl(context.config, context.retention_client, &entry, now)?;
             serde_json::to_value(ramflux_node_core::ObjectRelayPutResponse::from(entry))
                 .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))
@@ -653,14 +661,26 @@ fn handle_object_relay_request(
                 .map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
-            let state = lock_relay_state(context.state)?;
-            let chunk = state.get_object_chunk(
-                &request.chunk_id,
-                &request.relay_token,
-                &request.object_permission_envelope,
-                context.service_key,
-                now_unix_seconds(),
-            )?;
+            let now = now_unix_seconds();
+            // Validate + snapshot the resident metadata under the lock, then read the ciphertext
+            // through redb (lock released) with a TOCTOU recheck.
+            let meta = {
+                let state = lock_relay_state(context.state)?;
+                state.get_object_chunk(
+                    &request.chunk_id,
+                    &request.relay_token,
+                    &request.object_permission_envelope,
+                    context.service_key,
+                    now,
+                )?
+            };
+            let chunk = ramflux_node_core::relay_store_read_through(
+                context.store,
+                context.state,
+                &meta,
+                now,
+            )
+            .map_err(ramflux_node_core::RelayStoreOpError::into_node_core)?;
             serde_json::to_value(ramflux_node_core::ObjectRelayGetResponse { chunk })
                 .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))
         }
@@ -669,15 +689,18 @@ fn handle_object_relay_request(
                 serde_json::from_slice(body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
-            let chunk = {
-                let mut state = lock_relay_state(context.state)?;
-                state.ack_object_chunk(ack, context.service_key, now_unix_seconds())?
-            };
-            context.store.record_relay_chunk_entry(&chunk)?;
+            let now = now_unix_seconds();
+            // Plan + reserve are atomic under one lock inside `relay_store_ack`; then persist-before-
+            // publish (the updated, payload kept/cleared, row is committed first).
+            let service_key = context.service_key;
+            let meta = ramflux_node_core::relay_store_ack(context.store, context.state, |state| {
+                state.plan_ack(&ack, service_key, now).map_err(Into::into)
+            })
+            .map_err(ramflux_node_core::RelayStoreOpError::into_node_core)?;
             serde_json::to_value(ramflux_node_core::ObjectRelayAckResponse {
-                chunk_id: chunk.chunk_id,
-                status: chunk.status,
-                acked_by_count: chunk.acked_by.len(),
+                chunk_id: meta.chunk_id,
+                status: meta.status,
+                acked_by_count: meta.acked_by.len(),
             })
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))
         }
@@ -686,15 +709,20 @@ fn handle_object_relay_request(
                 .map_err(|source| {
                 ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
             })?;
-            let mutation = {
-                let mut state = lock_relay_state(context.state)?;
-                state.apply_object_tombstone_mutation(
-                    tombstone,
-                    context.service_key,
-                    now_unix_seconds(),
-                )?
-            };
-            context.store.record_relay_tombstone_mutation(&mutation)?;
+            let now = now_unix_seconds();
+            // Plan + reserve are atomic under one lock inside `relay_store_tombstone`; then persist-
+            // before-publish (commit the batch, then publish the meta + tombstone).
+            let service_key = context.service_key;
+            let mutation = ramflux_node_core::relay_store_tombstone(
+                context.store,
+                context.state,
+                move |state| {
+                    state
+                        .plan_object_tombstone_mutation(tombstone, service_key, now)
+                        .map_err(Into::into)
+                },
+            )
+            .map_err(ramflux_node_core::RelayStoreOpError::into_node_core)?;
             let retained = mutation.tombstone;
             serde_json::to_value(ramflux_node_core::ObjectRelayTombstoneResponse {
                 object_id: retained.object_id,
@@ -709,6 +737,7 @@ fn handle_object_relay_request(
     }
 }
 
+#[cfg(feature = "itest-object-v2")]
 fn lock_relay_state(
     state: &Mutex<ramflux_node_core::RelayCacheState>,
 ) -> Result<
@@ -784,15 +813,15 @@ fn expire_relay_chunks_once(
     store: &ramflux_node_core::RelayRedbStore,
     state: &Mutex<ramflux_node_core::RelayCacheState>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let mutation = {
-        let mut state = lock_relay_state(state)?;
-        state.expire_chunks_mutation(now_unix_seconds())
-    };
-    let expired = mutation.expired_count();
-    if !mutation.is_empty() {
-        store.record_relay_expiry_mutation(&mutation)?;
-    }
-    tracing::info!(expired, "relay background object chunk expiry completed");
+    // Persist-before-publish: redb rows are batch-deleted before the resident metadata is removed and
+    // its charge released. On persist failure the resident entries stay put but reads reject them by
+    // expires_at, so a restart cannot resurrect a servable payload.
+    let mutation = ramflux_node_core::relay_store_expire(store, state, now_unix_seconds())
+        .map_err(ramflux_node_core::RelayStoreOpError::into_node_core)?;
+    tracing::info!(
+        expired = mutation.expired_count(),
+        "relay background object chunk expiry completed"
+    );
     Ok(())
 }
 
@@ -1191,7 +1220,7 @@ fn relay_client_quic_verify_invocation(
 /// this ties that authorization to the chunk actually in the store, closing the "any self-signed
 /// grant reads any chunk" gap. A legacy chunk with no owner binding fails closed.
 fn relay_chunk_matches_owner_binding(
-    chunk: &ramflux_node_core::RelayChunkEntry,
+    chunk: &ramflux_node_core::RelayChunkMeta,
     token: &ramflux_node_core::RelayTokenV3,
 ) -> bool {
     chunk.has_owner_binding()
@@ -1208,6 +1237,7 @@ fn relay_chunk_matches_owner_binding(
 fn relay_client_quic_object_get(
     request: &ramflux_transport::GatewayQuicRequest,
     trust_cache: &ramflux_node_core::RelayTrustSnapshotCache,
+    store: &Arc<ramflux_node_core::RelayRedbStore>,
     state: &Arc<Mutex<ramflux_node_core::RelayCacheState>>,
     expected_node_id: &str,
     now: u64,
@@ -1223,27 +1253,41 @@ fn relay_client_quic_object_get(
         Err(response) => return response,
     };
 
-    let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(chunk) = guard.get_available_chunk(&envelope.token.chunk_id, now) else {
-        return relay_client_quic_response(
-            404,
-            serde_json::json!({ "error": "relay chunk not available" }),
-        );
+    // Snapshot the resident metadata under the lock (availability + owner-binding + tombstone), then
+    // read the ciphertext through redb with a TOCTOU recheck (never serves a stale/tombstoned payload).
+    let expected = {
+        let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(meta) = guard.available_meta(&envelope.token.chunk_id, now) else {
+            return relay_client_quic_response(
+                404,
+                serde_json::json!({ "error": "relay chunk not available" }),
+            );
+        };
+        if !relay_chunk_matches_owner_binding(meta, &envelope.token) {
+            return relay_client_quic_response(
+                403,
+                serde_json::json!({ "error": "relay chunk owner/object binding mismatch" }),
+            );
+        }
+        if guard.tombstone(&meta.object_id).is_some() {
+            return relay_client_quic_response(
+                410,
+                serde_json::json!({ "error": "relay object tombstoned" }),
+            );
+        }
+        meta.clone()
     };
-    if !relay_chunk_matches_owner_binding(chunk, &envelope.token) {
-        return relay_client_quic_response(
-            403,
-            serde_json::json!({ "error": "relay chunk owner/object binding mismatch" }),
-        );
-    }
-    if guard.tombstone(&chunk.object_id).is_some() {
-        return relay_client_quic_response(
-            410,
-            serde_json::json!({ "error": "relay object tombstoned" }),
-        );
-    }
-    let get_response = ramflux_node_core::ObjectRelayGetResponse { chunk: chunk.clone() };
-    drop(guard);
+    let chunk = match ramflux_node_core::relay_store_read_through(store, state, &expected, now) {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            let status = error.status_code();
+            return relay_client_quic_response(
+                status,
+                serde_json::json!({ "error": format!("relay get read-through failed: {error}") }),
+            );
+        }
+    };
+    let get_response = ramflux_node_core::ObjectRelayGetResponse { chunk };
     match serde_json::to_value(get_response) {
         Ok(body) => relay_client_quic_response(200, body),
         Err(error) => relay_client_quic_response(
@@ -1314,38 +1358,36 @@ fn relay_client_quic_object_ack(
         Err(response) => return response,
     };
 
-    let updated = {
-        let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(existing) = guard.chunk_entry(&envelope.token.chunk_id) else {
-            return relay_client_quic_response(
-                404,
-                serde_json::json!({ "error": "relay chunk not found" }),
-            );
-        };
-        if !relay_chunk_matches_owner_binding(existing, &envelope.token) {
-            return relay_client_quic_response(
-                403,
-                serde_json::json!({ "error": "relay chunk owner/object binding mismatch" }),
-            );
+    // Plan (owner-binding + acked_by + owner delete policy) + reserve are atomic under one lock inside
+    // `relay_store_ack`; then persist-before-publish (payload kept unless the ack consumed the chunk).
+    let token = &envelope.token;
+    let updated = match ramflux_node_core::relay_store_ack(store, state, |guard| {
+        let existing = guard
+            .chunk_meta(&token.chunk_id)
+            .ok_or(ramflux_node_core::RelayStoreOpError::NotAvailable)?;
+        if !relay_chunk_matches_owner_binding(existing, token) {
+            return Err(ramflux_node_core::RelayStoreOpError::Unauthorized(
+                "relay chunk owner/object binding mismatch".to_owned(),
+            ));
         }
         let mut updated = existing.clone();
-        updated.acked_by.insert(envelope.token.requester_device_hash.clone());
+        updated.acked_by.insert(token.requester_device_hash.clone());
         // Deletion is governed solely by the owner's stored policy, never the token, and a consumed
         // chunk is never brought back to `Available`.
         if updated.delete_after_ack {
             updated.status = ramflux_node_core::RelayChunkStatus::AckedDeleted;
-            updated.encrypted_chunk.clear();
         }
-        guard.put_chunk(updated.clone());
-        updated
+        Ok(updated)
+    }) {
+        Ok(meta) => meta,
+        Err(error) => {
+            let status = error.status_code();
+            return relay_client_quic_response(
+                status,
+                serde_json::json!({ "error": format!("relay ack failed: {error}") }),
+            );
+        }
     };
-
-    if let Err(error) = store.record_relay_chunk_entry(&updated) {
-        return relay_client_quic_response(
-            500,
-            serde_json::json!({ "error": format!("relay ack persist failed: {error}") }),
-        );
-    }
     let ack_response = ramflux_node_core::ObjectRelayAckResponse {
         chunk_id: updated.chunk_id.clone(),
         status: updated.status,
@@ -1358,78 +1400,6 @@ fn relay_client_quic_object_ack(
             serde_json::json!({ "error": format!("relay ack serialization failed: {error}") }),
         ),
     }
-}
-
-/// Applies an already-verified Put to the in-memory state, enforcing the node-core original-owner
-/// store invariants: a tombstone blocks the put (`409`); a cross-owner (or legacy unbound) overwrite
-/// is rejected (`403`); the same owner cannot overwrite different content or resurrect a consumed
-/// chunk; and a same-owner byte-identical replay returns the stored entry unchanged (`inserted =
-/// false`, zero mutation). Returns the resulting entry and whether it was newly inserted.
-fn relay_client_quic_put_into_state(
-    state: &Arc<Mutex<ramflux_node_core::RelayCacheState>>,
-    token: &ramflux_node_core::RelayTokenV3,
-    payload: &RelayClientQuicPutPayload,
-    capped_expires_at: u64,
-    now: u64,
-) -> Result<(ramflux_node_core::RelayChunkEntry, bool), ramflux_transport::GatewayQuicResponse> {
-    let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if guard.tombstone(&token.object_id).is_some() {
-        return Err(relay_client_quic_response(
-            409,
-            serde_json::json!({ "error": "relay tombstone blocks chunk put" }),
-        ));
-    }
-    if let Some(existing) = guard.chunk_entry(&token.chunk_id) {
-        // Cross-owner (or legacy unbound) overwrite is rejected.
-        if !existing.has_owner_binding()
-            || existing.owner_signing_key_id != token.owner_signing_key_id
-            || existing.owner_public_key != token.owner_public_key
-        {
-            return Err(relay_client_quic_response(
-                403,
-                serde_json::json!({ "error": "relay put rejects cross-owner chunk overwrite" }),
-            ));
-        }
-        // Same owner, different content is rejected.
-        if existing.object_id != token.object_id
-            || existing.manifest_hash != token.manifest_hash
-            || existing.chunk_index != payload.chunk_index
-            || existing.chunk_cipher_hash != payload.chunk_cipher_hash
-            || existing.encrypted_chunk != payload.encrypted_chunk
-        {
-            return Err(relay_client_quic_response(
-                403,
-                serde_json::json!({ "error": "relay put rejects chunk content overwrite" }),
-            ));
-        }
-        // A consumed chunk cannot be resurrected.
-        if existing.status != ramflux_node_core::RelayChunkStatus::Available {
-            return Err(relay_client_quic_response(
-                403,
-                serde_json::json!({ "error": "relay put cannot resurrect a consumed chunk" }),
-            ));
-        }
-        // Same-owner, byte-identical replay: idempotent, zero mutation (stored_at/expires_at/
-        // acked_by/status are preserved).
-        return Ok((existing.clone(), false));
-    }
-    let entry = ramflux_node_core::RelayChunkEntry {
-        chunk_id: token.chunk_id.clone(),
-        object_id: token.object_id.clone(),
-        manifest_hash: token.manifest_hash.clone(),
-        chunk_index: payload.chunk_index,
-        chunk_cipher_hash: payload.chunk_cipher_hash.clone(),
-        owner_signing_key_id: token.owner_signing_key_id.clone(),
-        owner_public_key: token.owner_public_key.clone(),
-        encrypted_chunk: payload.encrypted_chunk.clone(),
-        stored_at: now,
-        expires_at: capped_expires_at,
-        delete_after_ack: payload.delete_after_ack,
-        acked_by: std::collections::BTreeSet::new(),
-        status: ramflux_node_core::RelayChunkStatus::Available,
-    };
-    guard.put_chunk(entry.clone());
-    Ok((entry, true))
 }
 
 /// Verified owner-session Put data plane: after full v3 verification (owner proof required; requester
@@ -1503,18 +1473,34 @@ fn relay_client_quic_object_put(
         );
     }
 
-    let (stored, inserted) =
-        match relay_client_quic_put_into_state(state, token, &payload, capped_expires_at, now) {
+    // Build the candidate entry from the verified token + payload, then apply the persist-before-
+    // publish store orchestration (ciphertext committed to redb before the meta is published).
+    let candidate = ramflux_node_core::RelayChunkEntry {
+        chunk_id: token.chunk_id.clone(),
+        object_id: token.object_id.clone(),
+        manifest_hash: token.manifest_hash.clone(),
+        chunk_index: payload.chunk_index,
+        chunk_cipher_hash: payload.chunk_cipher_hash.clone(),
+        owner_signing_key_id: token.owner_signing_key_id.clone(),
+        owner_public_key: token.owner_public_key.clone(),
+        encrypted_chunk: payload.encrypted_chunk.clone(),
+        stored_at: now,
+        expires_at: capped_expires_at,
+        delete_after_ack: payload.delete_after_ack,
+        acked_by: std::collections::BTreeSet::new(),
+        status: ramflux_node_core::RelayChunkStatus::Available,
+    };
+    let (stored, _inserted) =
+        match ramflux_node_core::relay_store_put_candidate(store, state, candidate, now) {
             Ok(outcome) => outcome,
-            Err(response) => return response,
+            Err(error) => {
+                let status = error.status_code();
+                return relay_client_quic_response(
+                    status,
+                    serde_json::json!({ "error": format!("relay put failed: {error}") }),
+                );
+            }
         };
-
-    if inserted && let Err(error) = store.record_relay_chunk_entry(&stored) {
-        return relay_client_quic_response(
-            500,
-            serde_json::json!({ "error": format!("relay put persist failed: {error}") }),
-        );
-    }
     let put_response = ramflux_node_core::ObjectRelayPutResponse {
         chunk_id: stored.chunk_id.clone(),
         object_id: stored.object_id.clone(),
@@ -1588,25 +1574,20 @@ fn relay_client_quic_object_tombstone(
         owner_public_key: token.owner_public_key.clone(),
     };
 
-    let mutation = {
-        let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.apply_owner_session_tombstone(tombstone_request, now) {
-            Ok(mutation) => mutation,
-            Err(error) => {
-                return relay_client_quic_response(
-                    403,
-                    serde_json::json!({ "error": format!("relay tombstone rejected: {error}") }),
-                );
-            }
+    // Plan + reserve are atomic under one lock inside `relay_store_tombstone` (so no concurrent PUT
+    // can slip an uncovered chunk past the tombstone); then persist-before-publish.
+    let mutation = match ramflux_node_core::relay_store_tombstone(store, state, move |guard| {
+        guard.plan_owner_session_tombstone(tombstone_request, now).map_err(Into::into)
+    }) {
+        Ok(mutation) => mutation,
+        Err(error) => {
+            let status = error.status_code();
+            return relay_client_quic_response(
+                status,
+                serde_json::json!({ "error": format!("relay tombstone failed: {error}") }),
+            );
         }
     };
-
-    if let Err(error) = store.record_relay_tombstone_mutation(&mutation) {
-        return relay_client_quic_response(
-            500,
-            serde_json::json!({ "error": format!("relay tombstone persist failed: {error}") }),
-        );
-    }
     let tombstone_response = ramflux_node_core::ObjectRelayTombstoneResponse {
         object_id: mutation.tombstone.object_id.clone(),
         tombstone_hash: mutation.tombstone.tombstone_hash.clone(),
@@ -1638,7 +1619,7 @@ fn relay_client_quic_route(
             serde_json::json!({ "service": "ramflux-relay", "status": "ok" }),
         ),
         ("POST", "/relay/v1/object/get_chunk") => {
-            relay_client_quic_object_get(request, trust_cache, state, expected_node_id, now)
+            relay_client_quic_object_get(request, trust_cache, store, state, expected_node_id, now)
         }
         ("POST", "/relay/v1/object/ack") => {
             relay_client_quic_object_ack(request, trust_cache, store, state, expected_node_id, now)
@@ -3299,7 +3280,13 @@ mod tests {
             object_id: V3_OBJECT.to_owned(),
             manifest_hash: V3_MANIFEST.to_owned(),
             chunk_index: 0,
-            chunk_cipher_hash: "cipher_hash_v3".to_owned(),
+            // Real canonical cipher hash of the stored ciphertext so the GET read-through integrity
+            // check (recompute == stored hash) passes.
+            chunk_cipher_hash: ramflux_node_core::object_relay_chunk_cipher_hash(
+                V3_MANIFEST,
+                0,
+                b"ciphertext-v3",
+            ),
             owner_signing_key_id: V3_OWNER_ID.to_owned(),
             owner_public_key,
             encrypted_chunk: b"ciphertext-v3".to_vec(),
@@ -3311,12 +3298,16 @@ mod tests {
         }
     }
 
+    // Seeds a chunk into BOTH the resident meta index and the redb payload table, keeping the
+    // metadata-only-in-memory invariant (ciphertext lives in redb, read through on demand).
     fn v3_state_with(
+        store: &ramflux_node_core::RelayRedbStore,
         chunk: ramflux_node_core::RelayChunkEntry,
-    ) -> Arc<Mutex<ramflux_node_core::RelayCacheState>> {
+    ) -> Result<Arc<Mutex<ramflux_node_core::RelayCacheState>>, String> {
+        store.record_relay_chunk_entry(&chunk).map_err(|error| error.to_string())?;
         let mut state = ramflux_node_core::RelayCacheState::new();
-        state.put_chunk(chunk);
-        Arc::new(Mutex::new(state))
+        state.put_chunk(chunk).map_err(|error| error.to_string())?;
+        Ok(Arc::new(Mutex::new(state)))
     }
 
     /// A fresh on-disk relay store at a process-unique temp path (avoids redb "already open" flakes).
@@ -3455,7 +3446,7 @@ mod tests {
 
     fn v3_chunk_snapshot(
         state: &Arc<Mutex<ramflux_node_core::RelayCacheState>>,
-    ) -> Option<ramflux_node_core::RelayChunkEntry> {
+    ) -> Option<ramflux_node_core::RelayChunkMeta> {
         let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.chunk_entry(V3_CHUNK).cloned()
     }
@@ -3522,7 +3513,7 @@ mod tests {
     fn relay_client_quic_get_reads_stored_chunk() -> Result<(), String> {
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let state = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
         let response = relay_client_quic_route(
             &client_quic_object_request(v3_envelope_body(Get, |_| {})?),
             &cache,
@@ -3543,7 +3534,7 @@ mod tests {
     fn relay_client_quic_get_rejects_v2_missing_snapshot_and_wrong_owner() -> Result<(), String> {
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let matching = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let matching = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
 
         // A v2/HMAC wire shape never parses as a v3 envelope: 401, and the store is never read.
         let v2 = client_quic_object_request(serde_json::json!({
@@ -3594,7 +3585,7 @@ mod tests {
 
         // Pinned cache + valid envelope, but the stored chunk was uploaded by a DIFFERENT original
         // owner -> 403. This is the RQ-03 original-owner binding.
-        let foreign = v3_state_with(v3_stored_chunk(v3_pk(V3_REQUESTER_SEED), false));
+        let foreign = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_REQUESTER_SEED), false))?;
         assert_eq!(
             relay_client_quic_route(
                 &client_quic_object_request(v3_envelope_body(Get, |_| {})?),
@@ -3636,7 +3627,7 @@ mod tests {
     fn relay_client_quic_invalid_ack_leaves_store_untouched() -> Result<(), String> {
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let state = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), true));
+        let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), true))?;
         // A tampered ack token fails verification BEFORE any store access, so nothing is mutated.
         let tampered = v3_envelope_body(Ack, |body| {
             if let Some(token) = body.get_mut("token").and_then(serde_json::Value::as_object_mut) {
@@ -3676,7 +3667,7 @@ mod tests {
         // (1) Non-delete chunk: two acks by the same grantee keep `acked_by_count` at 1 and leave the
         // chunk Available.
         let keep_store = v3_temp_store()?;
-        let keep = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let keep = v3_state_with(&keep_store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
         let first = relay_client_quic_route(
             &ack_request()?,
             &cache,
@@ -3704,7 +3695,7 @@ mod tests {
 
         // (2) Delete-on-ack chunk: the first ack consumes it; a second ack does not resurrect it.
         let del_store = v3_temp_store()?;
-        let consume = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), true));
+        let consume = v3_state_with(&del_store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), true))?;
         let consumed = relay_client_quic_route(
             &ack_request()?,
             &cache,
@@ -3740,7 +3731,7 @@ mod tests {
     fn relay_client_quic_object_routes_reject_mismatch_and_malformed() -> Result<(), String> {
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let state = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
         for path in ["/relay/v1/object/put_chunk", "/relay/v1/object/tombstone"] {
             // A Get-capability envelope on a put/tombstone route is a capability mismatch: 403.
             let mismatch = relay_client_quic_route(
@@ -3792,7 +3783,12 @@ mod tests {
         let stored = v3_chunk_snapshot(&state).ok_or("chunk not stored")?;
         assert_eq!(stored.owner_signing_key_id, V3_OWNER_ID);
         assert_eq!(stored.owner_public_key, v3_pk(V3_OWNER_SEED));
-        assert_eq!(stored.encrypted_chunk, v3_put_ciphertext());
+        // The ciphertext is in redb (read through), not resident in the metadata index.
+        let payload = store
+            .relay_chunk_entry(V3_CHUNK)
+            .map_err(|error| error.to_string())?
+            .ok_or("payload")?;
+        assert_eq!(payload.encrypted_chunk, v3_put_ciphertext());
 
         // End-to-end: the owner-uploaded chunk is now readable by an authorized grantee via GET.
         let get = relay_client_quic_route(
@@ -3813,7 +3809,7 @@ mod tests {
         let cache = v3_pinned_cache()?;
 
         // (1) The chunk id is already owned by a DIFFERENT original owner -> 403, unchanged.
-        let foreign = v3_state_with(v3_stored_chunk(v3_pk(V3_REQUESTER_SEED), false));
+        let foreign = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_REQUESTER_SEED), false))?;
         let cross = relay_client_quic_route(
             &client_quic_object_request_to(
                 "/relay/v1/object/put_chunk",
@@ -3828,10 +3824,14 @@ mod tests {
         assert_eq!(cross.status, 403, "cross-owner overwrite must be rejected");
         let after = v3_chunk_snapshot(&foreign).ok_or("foreign chunk gone")?;
         assert_eq!(after.owner_public_key, v3_pk(V3_REQUESTER_SEED));
-        assert_eq!(after.encrypted_chunk, b"ciphertext-v3");
+        let after_payload = store
+            .relay_chunk_entry(V3_CHUNK)
+            .map_err(|error| error.to_string())?
+            .ok_or("payload")?;
+        assert_eq!(after_payload.encrypted_chunk, b"ciphertext-v3");
 
         // (2) Same owner, but the stored content differs from the request -> 403.
-        let same_owner = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let same_owner = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
         let content = relay_client_quic_route(
             &client_quic_object_request_to(
                 "/relay/v1/object/put_chunk",
@@ -3935,7 +3935,7 @@ mod tests {
     fn relay_client_quic_tombstone_applies_and_blocks_get() -> Result<(), String> {
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let state = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
         let response = relay_client_quic_route(
             &client_quic_object_request_to(
                 "/relay/v1/object/tombstone",
@@ -3987,7 +3987,7 @@ mod tests {
         assert_eq!(empty_response.status, 403, "an empty-scope tombstone must fail closed");
 
         // Cross-owner: a chunk in scope owned by a different original owner -> 403, chunk untouched.
-        let foreign = v3_state_with(v3_stored_chunk(v3_pk(V3_REQUESTER_SEED), false));
+        let foreign = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_REQUESTER_SEED), false))?;
         let cross = relay_client_quic_route(
             &client_quic_object_request_to(
                 "/relay/v1/object/tombstone",
@@ -4012,7 +4012,7 @@ mod tests {
     fn relay_client_quic_invalid_tombstone_leaves_store_unchanged() -> Result<(), String> {
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let state = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
         // A tampered owner-session token fails verification before any store access: 403, unchanged.
         let tampered = v3_tombstone_request_body(|body| {
             if let Some(token) = body.get_mut("token").and_then(serde_json::Value::as_object_mut) {
@@ -4040,7 +4040,7 @@ mod tests {
     fn relay_client_quic_route_serves_health_and_unknown() -> Result<(), String> {
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let state = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
         // Health probe is served.
         assert_eq!(
             relay_client_quic_route(
@@ -4109,7 +4109,7 @@ mod tests {
         let metrics = RelayClientQuicMetrics::default();
         let store = v3_temp_store()?;
         let cache = v3_pinned_cache()?;
-        let state = v3_state_with(v3_stored_chunk(v3_pk(V3_OWNER_SEED), false));
+        let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
 
         // Health: served (200), counts as ingress, not an object rejection.
         assert_eq!(
