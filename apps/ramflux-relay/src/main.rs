@@ -1977,13 +1977,26 @@ mod itest_quic_fault {
         capture_to(std::path::Path::new(&path), &line)
     }
 
+    // Serializes the process-wide capture writer. Multiple client-QUIC connections run on independent
+    // tasks/threads; each `capture_to` call must land as ONE indivisible appended line. Formatting to
+    // a stream (`writeln!`) could split into several `write` calls that interleave under concurrency
+    // and corrupt/lose lines (observed: a whole daemon's connection dropping from the log under K-way
+    // fan-out). This lock + a pre-serialized single-`write_all` guarantees atomic, race-free append.
+    static CAPTURE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn capture_to(path: &std::path::Path, line: &serde_json::Value) -> Result<(), ()> {
+        // Serialize the ENTIRE line (JSON + newline) into one owned buffer BEFORE taking the lock or
+        // touching the file, so the guarded critical section is a single atomic append.
+        let mut buffer = serde_json::to_vec(line).map_err(|_error| ())?;
+        buffer.push(b'\n');
+        let _guard = CAPTURE_WRITE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .map_err(|_error| ())?;
-        writeln!(file, "{line}").map_err(|_error| ())
+        // One write_all of the fully-formed line; still fail-closed on any I/O error.
+        file.write_all(&buffer).map_err(|_error| ())
     }
 
     /// Writes the between-attempt restart barrier marker (also the cross-process hold claim, see
@@ -2160,6 +2173,79 @@ mod itest_quic_fault {
             assert!(
                 capture_to(&bad_path, &line).is_err(),
                 "an unwritable capture path must fail closed"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn capture_writes_are_atomic_under_concurrency() -> Result<(), String> {
+            // CTRL-074: 16 concurrent writers x 100 lines each must produce exactly 1600 lines, every
+            // one independently parseable, with unique request_seq (no interleaved/lost line). Proves
+            // the pre-serialize + single-writer-lock + one write_all append is atomic under K-way
+            // fan-out (the failure mode that dropped a whole daemon's connection from the log).
+            use std::collections::BTreeSet;
+            use std::sync::{Arc, Barrier};
+            const THREADS: usize = 16;
+            const LINES_PER_THREAD: usize = 100;
+
+            let path = std::env::temp_dir()
+                .join(format!("ramflux-capture-concurrency-{}.jsonl", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let handles: Vec<_> = (0..THREADS)
+                .map(|thread_index| {
+                    let barrier = Arc::clone(&barrier);
+                    let path = path.clone();
+                    std::thread::spawn(move || -> Result<(), ()> {
+                        barrier.wait();
+                        for i in 0..LINES_PER_THREAD {
+                            let seq = (thread_index * LINES_PER_THREAD + i) as u64;
+                            let line = capture_line(
+                                &request("/relay/v1/object/put_chunk"),
+                                200,
+                                thread_index as u64,
+                                seq,
+                                "write",
+                            );
+                            capture_to(&path, &line)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_error| "capture writer thread panicked".to_owned())?
+                    .map_err(|()| "capture_to failed under concurrency".to_owned())?;
+            }
+            let contents = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            let _ = std::fs::remove_file(&path);
+            let mut seqs: BTreeSet<u64> = BTreeSet::new();
+            let mut line_count = 0usize;
+            for raw in contents.lines() {
+                line_count += 1;
+                let value: serde_json::Value = serde_json::from_str(raw)
+                    .map_err(|error| format!("unparseable capture line {raw:?}: {error}"))?;
+                let seq = value
+                    .get("request_seq")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| format!("capture line missing request_seq: {raw}"))?;
+                if !seqs.insert(seq) {
+                    return Err(format!(
+                        "duplicate request_seq {seq} — interleaved/corrupted write"
+                    ));
+                }
+            }
+            assert_eq!(
+                line_count,
+                THREADS * LINES_PER_THREAD,
+                "all 1600 concurrent lines must be present and independently parseable"
+            );
+            assert_eq!(
+                seqs.len(),
+                THREADS * LINES_PER_THREAD,
+                "every request_seq must survive uniquely (no lost or merged line)"
             );
             Ok(())
         }
