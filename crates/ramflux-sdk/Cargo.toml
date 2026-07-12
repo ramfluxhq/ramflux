@@ -33,7 +33,7 @@ ramflux-storage = { workspace = true }
 ramflux-transport = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-sync = { workspace = true }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 blake3 = "1.5"
 # Only used by the itest-local-mint v2 HMAC relay-token minting path; optional so production
 # SDK/rf binaries do not link the HMAC implementation.

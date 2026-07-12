@@ -35,7 +35,7 @@ ramflux-sync = { version = "0.1.0", path = "crates/ramflux-sync" }
 ramflux-sdk = { version = "0.1.0", path = "crates/ramflux-sdk" }
 ramflux-node-core = { version = "0.1.0", path = "crates/ramflux-node-core" }
 anyhow = "1.0"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 arc-swap = "1.8.2"
 argon2 = "0.5.3"
 base64 = "0.22"
