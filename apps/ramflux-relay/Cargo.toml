@@ -47,8 +47,20 @@ itest-provider-single-key = ["ramflux-node-core/itest-provider-single-key"]
 # for realnet by deploy/scripts/run-realnet.sh; must NOT be pulled in via itest-http
 # / itest-object-v2 / itest-media-udp.
 itest-quic-fault = []
+# CTRL-089 RELAY-MEM-02-A1 DIAGNOSTIC/profiler-only (default-off): installs dhat as the global
+# allocator and starts a `dhat::Profiler` for the process lifetime so a PUT-only / GET-only wave can
+# be attributed to allocation STACKS (total-allocated + at-t-end retained), distinguishing a bounded
+# high-water from a per-op retained leak. NEVER in the default/production relay: the global allocator,
+# the dhat/libc deps, the signal-driven graceful-dump path and the `dhat` marker string are all absent
+# unless this feature is explicitly compiled. Enabled solely for a profile run via
+# deploy/scripts/run-realnet.sh (RAMFLUX_RELAY_ALLOC_PROF=1); must NOT be pulled in via any other
+# feature. Changes no business/wire/schema/cache semantics — measurement only.
+itest-alloc-prof = ["dep:dhat", "dep:libc"]
 
 [dependencies]
+# itest-alloc-prof only (default-off). Absent from the default/production dependency graph.
+dhat = { version = "0.3", optional = true }
+libc = { version = "0.2", optional = true }
 anyhow = { workspace = true }
 quinn = { workspace = true }
 ramflux-node-core = { workspace = true }

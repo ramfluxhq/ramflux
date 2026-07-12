@@ -48,8 +48,18 @@ services:
       # keeps failing closed on a genuinely unwritable/missing path — the default is not best-effort.
       RAMFLUX_RELAY_ITEST_CAPTURE_FILE: "${RAMFLUX_RELAY_ITEST_CAPTURE_FILE:-/var/lib/ramflux/relay/itest-object-v3-capture.jsonl}"
       RAMFLUX_RELAY_ITEST_HOLD_MARKER: "${RAMFLUX_RELAY_ITEST_HOLD_MARKER:-}"
+      # CTRL-089 RELAY-MEM-02-A1 DIAGNOSTIC/profiler-only (default empty → inert). Only meaningful when
+      # the relay is compiled with the default-off `itest-alloc-prof` feature (via run-realnet.sh
+      # RAMFLUX_RELAY_ALLOC_PROF=1). Points the dhat heap-profile json at the HOST BIND MOUNT below (not
+      # a named volume) so it survives `compose down -v` teardown. Empty for every normal test → the env
+      # is ignored (and the feature is not even compiled), so no other realnet test is affected.
+      RAMFLUX_RELAY_ALLOC_PROF_FILE: "${RAMFLUX_RELAY_ALLOC_PROF_FILE:-}"
     volumes:
       # The relay reads the offline-root-signed provider keyring from the same federation materials dir.
       - ${RAMFLUX_V3_MATERIALS_DIR:-./.itest-v3-materials}/federation:/etc/ramflux/federation:ro
+      # CTRL-089 DIAGNOSTIC/profiler-only host bind mount: the dhat heap json is written on SIGTERM (the
+      # relay's graceful-dump path) into this HOST dir, which — unlike the relay-redb named volume — is
+      # NOT deleted by `compose down -v`, so the profile survives teardown and lands on the host.
+      - ${RAMFLUX_RELAY_ALLOC_PROF_HOST_DIR:-./.itest-alloc-prof}:/var/lib/ramflux/alloc-prof
     ports:
       - "${RAMFLUX_ITEST_RELAY_CLIENT_QUIC_PORT:-17447}:17447/udp"
