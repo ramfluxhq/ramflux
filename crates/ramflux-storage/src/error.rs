@@ -61,6 +61,8 @@ pub enum StorageError {
     MessageNotFound(String),
     #[error("message id conflict: {0}")]
     MessageIdConflict(String),
+    #[error("event id conflict: {0}")]
+    EventIdConflict(String),
     #[error("identity lifecycle blocks operation: {0}")]
     IdentityLifecycleBlocked(String),
     #[error("pending recovery {recovery_id} is not in expected state: {expected}")]

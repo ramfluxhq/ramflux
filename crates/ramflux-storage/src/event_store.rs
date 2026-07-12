@@ -83,6 +83,33 @@ impl EventStore for AccountDb {
             self.device_signer().map_or("principal", |device| device.principal_id.as_str());
         let actor_device_id =
             self.device_signer().map_or("device", |device| device.device_id.as_str());
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT event_type, actor_principal_id, actor_device_id, event_body
+                   FROM local_event_log
+                  WHERE event_id = ?1",
+                params![event_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((stored_type, stored_principal, stored_device, stored_body)) = existing {
+            if stored_type == event_type
+                && stored_principal == actor_principal_id
+                && stored_device == actor_device_id
+                && stored_body == body
+            {
+                return Ok(());
+            }
+            return Err(StorageError::EventIdConflict(event_id.to_owned()));
+        }
         let next_device_counter = self.connection.query_row(
             "SELECT COALESCE(MAX(device_counter), 0) + 1
                    FROM local_event_log

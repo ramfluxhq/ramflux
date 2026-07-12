@@ -271,3 +271,110 @@ impl RamfluxClient {
         Ok(serde_json::from_slice(&bytes)?)
     }
 }
+
+#[cfg(test)]
+mod t24b1_client_db_reopen_tests {
+    use super::*;
+
+    fn temp_root(test_name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        std::env::temp_dir()
+            .join(format!("ramflux-sdk-t24b1-{test_name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn open_client(root: &std::path::Path, create: bool) -> Result<RamfluxClient, SdkError> {
+        let mut client = RamfluxClient::new();
+        client.open_account_index(root)?;
+        if create {
+            client.create_account("acct", "principal")?;
+        }
+        client.unlock_account("acct", b"t24b1-reopen-secret")?;
+        Ok(client)
+    }
+
+    #[test]
+    fn dm_snapshots_checkpoints_and_cursor_survive_client_db_reopen() -> Result<(), SdkError> {
+        let root = temp_root("snapshot-checkpoint-cursor");
+        let client = open_client(&root, true)?;
+        let mut send =
+            ramflux_crypto::DmSession::initiator([0x11; 32], [0x12; 32], [0x13; 32], [0x14; 32])?;
+        let _ciphertext = send.encrypt(b"advance-send", b"conv-reopen")?;
+        let send_snapshot = send.snapshot();
+        client.persist_dm_session("conv-reopen", "env-send-1", "send", &send)?;
+
+        let recv =
+            ramflux_crypto::DmSession::recipient([0x21; 32], [0x22; 32], [0x23; 32], [0x24; 32])?;
+        let recv_snapshot = recv.snapshot();
+        client.persist_dm_session("conv-reopen", "env-recv-1", "recv", &recv)?;
+        client.persist_gateway_receive_cursor("delivery-reopen", 41)?;
+        drop(client);
+
+        let reopened = open_client(&root, false)?;
+        let loaded_send = reopened.load_dm_session("conv-reopen", "send")?.snapshot();
+        let loaded_recv = reopened.load_dm_session("conv-reopen", "recv")?.snapshot();
+        assert!(
+            serde_json::to_vec(&loaded_send)? == serde_json::to_vec(&send_snapshot)?,
+            "send ratchet snapshot must survive a real DB reopen"
+        );
+        assert!(
+            serde_json::to_vec(&loaded_recv)? == serde_json::to_vec(&recv_snapshot)?,
+            "recv ratchet snapshot must survive a real DB reopen"
+        );
+        assert!(reopened.recv_session_checkpoint_at("conv-reopen", "env-recv-1")?);
+        assert_eq!(reopened.gateway_receive_cursor("delivery-reopen")?, 41);
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn orphan_session_event_replay_commits_checkpoint_after_reopen() -> Result<(), SdkError> {
+        let root = temp_root("orphan-session-event");
+        let client = open_client(&root, true)?;
+        let session =
+            ramflux_crypto::DmSession::recipient([0x31; 32], [0x32; 32], [0x33; 32], [0x34; 32])?;
+        let snapshot = session.snapshot();
+        let event_id = dm_session_event_id("conv-orphan", "recv", "env-orphan-1");
+        client.append_event(&event_id, "dm.ratchet_session", &serde_json::to_vec(&snapshot)?)?;
+        assert_eq!(
+            client.projection_checkpoint(&dm_session_checkpoint_name("conv-orphan", "recv"))?,
+            None
+        );
+        drop(client);
+
+        let reopened = open_client(&root, false)?;
+        reopened.persist_dm_session_snapshot("conv-orphan", "env-orphan-1", "recv", &snapshot)?;
+        assert!(reopened.recv_session_checkpoint_at("conv-orphan", "env-orphan-1")?);
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn unpersisted_send_advance_is_lost_on_reopen() -> Result<(), SdkError> {
+        let root = temp_root("send-window");
+        let client = open_client(&root, true)?;
+        let baseline =
+            ramflux_crypto::DmSession::initiator([0x41; 32], [0x42; 32], [0x43; 32], [0x44; 32])?;
+        client.persist_dm_session("conv-send-window", "env-baseline", "send", &baseline)?;
+        let baseline_snapshot = baseline.snapshot();
+        let mut accepted_but_unpersisted = baseline;
+        let _ciphertext =
+            accepted_but_unpersisted.encrypt(b"remote-accepted", b"conv-send-window")?;
+        drop(client);
+
+        let reopened = open_client(&root, false)?;
+        let loaded = reopened.load_dm_session("conv-send-window", "send")?.snapshot();
+        assert!(
+            serde_json::to_vec(&loaded)? == serde_json::to_vec(&baseline_snapshot)?,
+            "a remote-accepted send advance is lost when the process dies before persistence"
+        );
+        assert!(
+            serde_json::to_vec(&loaded)?
+                != serde_json::to_vec(&accepted_but_unpersisted.snapshot())?,
+            "the reopened sender reuses the pre-send ratchet state"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+}
