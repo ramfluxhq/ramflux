@@ -455,6 +455,8 @@ impl RamfluxClient {
         if plaintext_hash != attachment.plaintext_hash {
             return Err(SdkError::LocalBus("DM attachment plaintext hash mismatch".to_owned()));
         }
+        #[cfg(feature = "itest-rfd-fault")]
+        crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::GranteeImport).await?;
         // T21-A2: the encrypted object + key + transfer state are now durably persisted and the
         // plaintext hash verified. Only now — and only when a durable account store actually holds
         // the object — do we ACK each chunk, so a crash can never leave a relay chunk acked while
@@ -1348,6 +1350,8 @@ impl RamfluxClient {
                 resume_token: None,
                 expires_at: Some(i64::try_from(expires_at).unwrap_or(i64::MAX)),
             })?;
+            #[cfg(feature = "itest-rfd-fault")]
+            crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::OwnerPut).await?;
         }
         self.persist_object_transfer(ObjectTransferPersist {
             transfer_id: &transfer_id,

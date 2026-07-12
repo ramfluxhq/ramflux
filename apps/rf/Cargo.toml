@@ -15,6 +15,8 @@ default = []
 # T22-A1 / RQ-04: itest LocalMint compatibility. Propagates the SDK compile gate and re-admits the
 # `--relay-service-key` object CLI flags. Never enabled by production rf binaries.
 itest-local-mint = ["ramflux-sdk/itest-local-mint"]
+# T24-B2: propagate the SDK rfd mid-flight crash-resume barrier gate. Never enabled by production rf.
+itest-rfd-fault = ["ramflux-sdk/itest-rfd-fault"]
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist

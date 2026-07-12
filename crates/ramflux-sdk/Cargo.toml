@@ -21,6 +21,11 @@ itest-fingerprint = []
 # Never enabled by production binaries — default SDK/rf carry no HMAC mint code, service-key env, or
 # LocalMint env. The v3 GatewayIssued path is unaffected.
 itest-local-mint = ["dep:hmac", "dep:sha2"]
+# T24-B2: rfd mid-flight crash-resume itest. Compile-time gate for a post-local-commit /
+# pre-remote barrier seam used only by mvp_s63 to SIGKILL `rf daemon start` at a durable-commit
+# boundary. Never enabled by production binaries — default SDK/rf carry no fault mode/marker env
+# strings, symbols, or park code. Still requires the runtime opt-in env to arm (double gate).
+itest-rfd-fault = []
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
