@@ -40,7 +40,13 @@ services:
       # realnet test leaves the seam inert. Mounted quic-fault dir lets the test host read the capture
       # + hold marker the relay writes.
       RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT: "${RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT:-}"
-      RAMFLUX_RELAY_ITEST_CAPTURE_FILE: "${RAMFLUX_RELAY_ITEST_CAPTURE_FILE:-}"
+      # PERF-D1-R0: the relay is always compiled with itest-quic-fault, whose per-client-QUIC-request
+      # capture is fail-closed (CTRL-058). An empty CAPTURE_FILE makes the relay close EVERY client
+      # QUIC connection (regressing every object-v3 test that does not set its own path, e.g. s55).
+      # Default to a writable, per-project-isolated path inside the relay-redb volume so the seam is
+      # exercised harmlessly; an explicit RAMFLUX_RELAY_ITEST_CAPTURE_FILE still overrides. The relay
+      # keeps failing closed on a genuinely unwritable/missing path — the default is not best-effort.
+      RAMFLUX_RELAY_ITEST_CAPTURE_FILE: "${RAMFLUX_RELAY_ITEST_CAPTURE_FILE:-/var/lib/ramflux/relay/itest-object-v3-capture.jsonl}"
       RAMFLUX_RELAY_ITEST_HOLD_MARKER: "${RAMFLUX_RELAY_ITEST_HOLD_MARKER:-}"
     volumes:
       # The relay reads the offline-root-signed provider keyring from the same federation materials dir.
