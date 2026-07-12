@@ -121,6 +121,8 @@ impl RamfluxClient {
         // same message key for a later message. If submit fails, skipping one send key is safe;
         // reusing it is not.
         self.persist_dm_session(&conversation_id, &envelope.envelope_id, "send", &session)?;
+        #[cfg(feature = "itest-rfd-fault")]
+        crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmSend).await?;
         let entry = engine.submit_envelope(envelope).await?;
         Ok(entry)
     }
@@ -360,6 +362,8 @@ impl RamfluxClient {
                 "recv",
                 &session,
             )?;
+            #[cfg(feature = "itest-rfd-fault")]
+            crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmRecv).await?;
             self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
             plaintext.push(GatewayPlaintextDelivery {
                 conversation_id: conversation_id.to_owned(),

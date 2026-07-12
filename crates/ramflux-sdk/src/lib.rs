@@ -13,6 +13,8 @@ mod error;
 mod federation;
 mod gateway;
 mod group;
+#[cfg(feature = "itest-rfd-fault")]
+mod itest_rfd_fault;
 mod object;
 mod own_device_sync;
 mod prekey;
