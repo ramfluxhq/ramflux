@@ -4340,7 +4340,7 @@ impl RelayRedbStore {
             })?;
         }
         let db = std::sync::Arc::new(
-            redb::Database::create(path)
+            Self::create_database(path)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
         );
         let write_txn =
@@ -4359,6 +4359,42 @@ impl RelayRedbStore {
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let commit_writer = RelayCommitWriter::start(std::sync::Arc::clone(&db))?;
         Ok(Self { db, commit_writer })
+    }
+
+    /// Opens the redb database. RELAY-MEM-03-A0b (CTRL-093): redb 4.1 defaults to a 1 GiB in-heap
+    /// page cache which the A0 differential identified as the high-confidence driver of relay
+    /// `RssAnon` growth under sustained unique-object writes. The default/production build reads no
+    /// env and overrides nothing — it keeps redb's 1 GiB behavior (marker=0, no new production
+    /// control surface). Only the default-off `itest-redb-cache-probe` feature honors a fixed cache
+    /// cap for the control-vs-candidate experiment.
+    #[cfg(not(feature = "itest-redb-cache-probe"))]
+    fn create_database(path: &Path) -> Result<redb::Database, redb::DatabaseError> {
+        redb::Database::create(path)
+    }
+
+    #[cfg(feature = "itest-redb-cache-probe")]
+    fn create_database(path: &Path) -> Result<redb::Database, redb::DatabaseError> {
+        match std::env::var("RAMFLUX_RELAY_REDB_CACHE_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&bytes| bytes > 0)
+        {
+            Some(cache_bytes) => {
+                let mut builder = redb::Database::builder();
+                builder.set_cache_size(cache_bytes);
+                builder.create(path)
+            }
+            None => redb::Database::create(path),
+        }
+    }
+
+    /// RELAY-MEM-03-A0b probe-only redb page-cache metrics (requires the `cache_metrics`-enabled
+    /// probe feature). Absent from the production build — no production control-surface expansion.
+    #[cfg(feature = "itest-redb-cache-probe")]
+    #[must_use]
+    pub fn cache_stats(&self) -> redb::CacheStats {
+        use redb::ReadableDatabase as _;
+        self.db.cache_stats()
     }
 
     /// # Errors

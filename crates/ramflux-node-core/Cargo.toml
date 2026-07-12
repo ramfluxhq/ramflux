@@ -17,6 +17,12 @@ itest-http = []
 # update_from_signed). Default-off: the production/default build uses the offline-root-signed
 # provider-keyring path only. Enabled explicitly for the legacy compatibility itests.
 itest-provider-single-key = []
+# RELAY-MEM-03-A0b (CTRL-093) DIAGNOSTIC/probe-only (default-off): enables redb's `cache_metrics`
+# and unlocks a fixed redb page-cache cap (via `RAMFLUX_RELAY_REDB_CACHE_BYTES`) + a `cache_stats`
+# accessor for the 1 GiB-control-vs-32 MiB-candidate experiment. NEVER in the default/production
+# build: without it `RelayRedbStore::open` reads no env, overrides nothing (redb's 1 GiB default),
+# and exposes no cache-stats surface. Enabled explicitly for a probe run via run-realnet.sh.
+itest-redb-cache-probe = ["redb/cache_metrics"]
 
 [dependencies]
 arc-swap = { workspace = true }

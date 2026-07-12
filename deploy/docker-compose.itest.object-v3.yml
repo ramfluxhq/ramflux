@@ -54,6 +54,14 @@ services:
       # a named volume) so it survives `compose down -v` teardown. Empty for every normal test → the env
       # is ignored (and the feature is not even compiled), so no other realnet test is affected.
       RAMFLUX_RELAY_ALLOC_PROF_FILE: "${RAMFLUX_RELAY_ALLOC_PROF_FILE:-}"
+      # RELAY-MEM-03-A0b (CTRL-093) DIAGNOSTIC/probe-only (default empty → inert). Only meaningful when
+      # the relay is compiled with the default-off `itest-redb-cache-probe` feature (via run-realnet.sh
+      # RAMFLUX_RELAY_REDB_CACHE_PROBE=1). Sets a fixed redb page-cache cap (bytes) for the control-vs-
+      # candidate cache experiment; empty/unset → redb keeps its 1 GiB default. Empty for every normal
+      # test → the env is ignored (and the feature is not even compiled), so no other realnet test is
+      # affected. This is the container passthrough for the host env; without it the in-container relay
+      # never sees the cap and always uses redb's default.
+      RAMFLUX_RELAY_REDB_CACHE_BYTES: "${RAMFLUX_RELAY_REDB_CACHE_BYTES:-}"
     volumes:
       # The relay reads the offline-root-signed provider keyring from the same federation materials dir.
       - ${RAMFLUX_V3_MATERIALS_DIR:-./.itest-v3-materials}/federation:/etc/ramflux/federation:ro
