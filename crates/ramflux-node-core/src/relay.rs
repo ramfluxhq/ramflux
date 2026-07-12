@@ -4339,10 +4339,7 @@ impl RelayRedbStore {
                 source,
             })?;
         }
-        let db = std::sync::Arc::new(
-            Self::create_database(path)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
-        );
+        let db = std::sync::Arc::new(Self::create_database(path)?);
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -4361,31 +4358,51 @@ impl RelayRedbStore {
         Ok(Self { db, commit_writer })
     }
 
-    /// Opens the redb database. RELAY-MEM-03-A0b (CTRL-093): redb 4.1 defaults to a 1 GiB in-heap
-    /// page cache which the A0 differential identified as the high-confidence driver of relay
-    /// `RssAnon` growth under sustained unique-object writes. The default/production build reads no
-    /// env and overrides nothing — it keeps redb's 1 GiB behavior (marker=0, no new production
-    /// control surface). Only the default-off `itest-redb-cache-probe` feature honors a fixed cache
-    /// cap for the control-vs-candidate experiment.
+    /// Opens the redb database with the production page-cache cap. RELAY-MEM-03 (CTRL-096): redb 4.1
+    /// defaults to a 1 GiB in-heap page cache, which the A0 differential + A0b/A0c cache probes proved
+    /// is the sole owner of the relay's unbounded `RssAnon` growth under sustained unique-object
+    /// writes (the 1 GiB cache never evicts, so anon climbs with the working set). Capping it to
+    /// 16 MiB fully bounds the growth — K4 30-round median 0.92 / peak <=1.14 (vs 1 GiB's 2.96/3.00),
+    /// `used_bytes` <=16 MiB with active eviction, durable across restart, and zero measured
+    /// latency/throughput cost. 16 MiB is the production default (a named constant, not an env).
+    const RELAY_REDB_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
     #[cfg(not(feature = "itest-redb-cache-probe"))]
-    fn create_database(path: &Path) -> Result<redb::Database, redb::DatabaseError> {
-        redb::Database::create(path)
+    fn create_database(path: &Path) -> Result<redb::Database, NodeCoreError> {
+        let mut builder = redb::Database::builder();
+        builder.set_cache_size(Self::RELAY_REDB_CACHE_BYTES);
+        builder.create(path).map_err(|source| NodeCoreError::Redb(source.to_string()))
+    }
+
+    /// Probe build only: `RAMFLUX_RELAY_REDB_CACHE_BYTES` may override the 16 MiB production cap for a
+    /// control-vs-candidate experiment. A missing env falls back to the SAME production 16 MiB default
+    /// (never redb's 1 GiB); a present-but-invalid or zero value fails closed. The env is read ONLY
+    /// under this feature — the default/production binary contains no such env and no override path.
+    /// Resolves the probe cache cap from the (optional) env value. A missing env → the production
+    /// 16 MiB default (never redb's 1 GiB); a present-but-invalid or zero value fails closed. Pure so
+    /// the default/override/invalid behavior is unit-testable without process-global env mutation.
+    #[cfg(feature = "itest-redb-cache-probe")]
+    pub(crate) fn resolve_probe_cache_bytes(
+        env_value: Option<&str>,
+    ) -> Result<usize, NodeCoreError> {
+        match env_value {
+            Some(raw) => raw.parse::<usize>().ok().filter(|&bytes| bytes > 0).ok_or_else(|| {
+                NodeCoreError::Redb(format!(
+                    "RAMFLUX_RELAY_REDB_CACHE_BYTES must be a positive integer, got {raw:?}"
+                ))
+            }),
+            None => Ok(Self::RELAY_REDB_CACHE_BYTES),
+        }
     }
 
     #[cfg(feature = "itest-redb-cache-probe")]
-    fn create_database(path: &Path) -> Result<redb::Database, redb::DatabaseError> {
-        match std::env::var("RAMFLUX_RELAY_REDB_CACHE_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|&bytes| bytes > 0)
-        {
-            Some(cache_bytes) => {
-                let mut builder = redb::Database::builder();
-                builder.set_cache_size(cache_bytes);
-                builder.create(path)
-            }
-            None => redb::Database::create(path),
-        }
+    fn create_database(path: &Path) -> Result<redb::Database, NodeCoreError> {
+        let cache_bytes = Self::resolve_probe_cache_bytes(
+            std::env::var("RAMFLUX_RELAY_REDB_CACHE_BYTES").ok().as_deref(),
+        )?;
+        let mut builder = redb::Database::builder();
+        builder.set_cache_size(cache_bytes);
+        builder.create(path).map_err(|source| NodeCoreError::Redb(source.to_string()))
     }
 
     /// RELAY-MEM-03-A0b probe-only redb page-cache metrics (requires the `cache_metrics`-enabled
