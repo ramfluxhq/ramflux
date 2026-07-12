@@ -395,6 +395,8 @@ impl GatewaySessionEngine {
 
     /// # Errors
     /// Returns an error when the gateway rejects relay token issuance.
+    // T22-A1 / RQ-04: legacy v2 gateway-issued relay token; compiled only under itest-local-mint.
+    #[cfg(feature = "itest-local-mint")]
     pub(crate) async fn issue_relay_token(
         &mut self,
         body: GatewayRelayTokenIssueBody,
@@ -418,6 +420,37 @@ impl GatewaySessionEngine {
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected relay_token_issued frame, got {other:?}"
+            ))),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error when the gateway rejects v3 relay-token issuance or the response frame is
+    /// not the expected v3 token frame.
+    #[allow(dead_code)]
+    pub(crate) async fn issue_relay_token_v3(
+        &mut self,
+        body: SdkRelayTokenV3IssueBody,
+    ) -> Result<ramflux_protocol::RelayTokenV3, SdkError> {
+        let request = GatewayRelayTokenV3IssueRequest {
+            signed_request: self.signed_request(
+                "POST",
+                "/relay/v1/token/v3/issue",
+                "already_authed",
+                &body,
+            )?,
+            body,
+        };
+        write_gateway_client_frame(
+            &mut *self.stream,
+            &GatewayClientFrame::RelayTokenV3Issue { request: Box::new(request) },
+        )
+        .await?;
+        match self.read_non_deliver_frame().await? {
+            GatewayServerFrame::RelayTokenV3Issued { response } => Ok(response.relay_token),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected relay_token_v3_issued frame, got {other:?}"
             ))),
         }
     }

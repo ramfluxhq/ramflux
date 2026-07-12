@@ -1,0 +1,49 @@
+services:
+  ramflux-gateway:
+    environment:
+      RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RAMFLUX_GATEWAY_A_V3_ISSUER_SEED:-}"
+      RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "/etc/ramflux/gateway-v3/issuer-cert.json"
+    volumes:
+      - ${RAMFLUX_V3_MATERIALS_DIR:-./.itest-v3-materials}/gateway-a:/etc/ramflux/gateway-v3:ro
+
+  ramflux-gateway-b:
+    environment:
+      RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RAMFLUX_GATEWAY_B_V3_ISSUER_SEED:-}"
+      RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "/etc/ramflux/gateway-v3/issuer-cert.json"
+      RAMFLUX_NODE_ID: "${RAMFLUX_GATEWAY_B_NODE_ID:-node_b.realnet}"
+    volumes:
+      - ${RAMFLUX_V3_MATERIALS_DIR:-./.itest-v3-materials}/gateway-b:/etc/ramflux/gateway-v3:ro
+
+  ramflux-federation:
+    environment:
+      RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE: "/etc/ramflux/federation/trust-snapshot.json"
+    volumes:
+      - ${RAMFLUX_V3_MATERIALS_DIR:-./.itest-v3-materials}/federation:/etc/ramflux/federation:ro
+
+  ramflux-relay:
+    environment:
+      RAMFLUX_RELAY_CLIENT_QUIC_ADDR: "0.0.0.0:17447"
+      RAMFLUX_FEDERATION_TRUST_ENDPOINT: "${RAMFLUX_V3_FEDERATION_TRUST_ENDPOINT:-ramflux-federation:7443}"
+      # T23-A2b2b: the default/production relay verifies the keyring-era v4 envelope. It pins the
+      # offline-root public key + the served keyring file path (both out of band); the legacy single
+      # provider pin (RAMFLUX_FEDERATION_PROVIDER_PUBLIC_KEY) is gone from the keyring path.
+      RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY: "${RAMFLUX_V3_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY:-}"
+      RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE: "${RAMFLUX_V3_FEDERATION_PROVIDER_KEYRING_FILE:-/etc/ramflux/federation/provider-keyring.json}"
+      RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID: "${RAMFLUX_V3_FEDERATION_TRUST_ISSUER_NODE_ID:-node_b.realnet}"
+      RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE: "/var/lib/ramflux/relay/trust-snapshot.json"
+      RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS: "${RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS:-10}"
+      # itest-only (compiled only under itest-http): activate the fail-first v3 ACK seam so a test
+      # can exercise the SDK persist-then-ACK retry path. Defaults empty so other tests are unaffected.
+      RAMFLUX_RELAY_ITEST_FAIL_FIRST_V3_ACK: "${RAMFLUX_RELAY_ITEST_FAIL_FIRST_V3_ACK:-}"
+      # T24-A3 itest-only (compiled only under itest-quic-fault): the post-commit QUIC fault seam +
+      # non-sensitive request-fingerprint capture for mvp_s62. All default empty so every other
+      # realnet test leaves the seam inert. Mounted quic-fault dir lets the test host read the capture
+      # + hold marker the relay writes.
+      RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT: "${RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT:-}"
+      RAMFLUX_RELAY_ITEST_CAPTURE_FILE: "${RAMFLUX_RELAY_ITEST_CAPTURE_FILE:-}"
+      RAMFLUX_RELAY_ITEST_HOLD_MARKER: "${RAMFLUX_RELAY_ITEST_HOLD_MARKER:-}"
+    volumes:
+      # The relay reads the offline-root-signed provider keyring from the same federation materials dir.
+      - ${RAMFLUX_V3_MATERIALS_DIR:-./.itest-v3-materials}/federation:/etc/ramflux/federation:ro
+    ports:
+      - "${RAMFLUX_ITEST_RELAY_CLIENT_QUIC_PORT:-17447}:17447/udp"

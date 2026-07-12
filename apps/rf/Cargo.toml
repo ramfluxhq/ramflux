@@ -10,6 +10,12 @@ repository = "https://github.com/ramflux/ramflux-rf"
 name = "rf"
 path = "src/main.rs"
 
+[features]
+default = []
+# T22-A1 / RQ-04: itest LocalMint compatibility. Propagates the SDK compile gate and re-admits the
+# `--relay-service-key` object CLI flags. Never enabled by production rf binaries.
+itest-local-mint = ["ramflux-sdk/itest-local-mint"]
+
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }

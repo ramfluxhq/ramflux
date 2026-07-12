@@ -32,6 +32,3 @@ public_listen_addr = "0.0.0.0:443"
 [signaling]
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"
-
-[relay]
-service_key_ref = "literal:ramflux-relay-itest-service-key"

@@ -35,6 +35,7 @@ pub(crate) struct ObjectPut {
     pub(crate) chunk_size: usize,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
+    #[cfg(feature = "itest-local-mint")]
     #[arg(long)]
     pub(crate) relay_service_key: Option<String>,
     #[arg(long)]
@@ -50,6 +51,7 @@ pub(crate) struct ObjectGet {
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
+    #[cfg(feature = "itest-local-mint")]
     #[arg(long)]
     pub(crate) relay_service_key: Option<String>,
     #[arg(long)]
@@ -79,6 +81,7 @@ pub(crate) struct ObjectResume {
     pub(crate) direction: String,
     #[arg(long)]
     pub(crate) relay_url: String,
+    #[cfg(feature = "itest-local-mint")]
     #[arg(long)]
     pub(crate) relay_service_key: Option<String>,
     #[arg(long)]
@@ -111,6 +114,11 @@ pub(crate) struct ObjectDelete {
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) object: String,
+    #[arg(long)]
+    pub(crate) relay_url: Option<String>,
+    #[cfg(feature = "itest-local-mint")]
+    #[arg(long)]
+    pub(crate) relay_service_key: Option<String>,
 }
 
 #[derive(Args)]

@@ -14,6 +14,8 @@ use crate::{
 };
 
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
+const GATEWAY_V3_ISSUER_SEED_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_SEED";
+const GATEWAY_V3_ISSUER_CERT_FILE_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE";
 
 pub(crate) async fn handle_gateway_quic_connection(
     connection: quinn::Connection,
@@ -32,6 +34,7 @@ pub(crate) async fn handle_gateway_quic_connection(
                     peers: listener.peers.clone(),
                     router,
                     notify,
+                    #[cfg(feature = "itest-local-mint")]
                     relay_service_key: listener.relay_service_key.clone(),
                     state,
                     store,
@@ -351,6 +354,7 @@ fn fresh_gateway_session_id(device_id: &str) -> anyhow::Result<String> {
     Ok(format!("s1_{}_{}_{}", device_id, ramflux_node_core::now_unix_seconds(), nonce))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_gateway_session_loop(
     send: GatewaySendHandle,
     mut recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
@@ -407,7 +411,25 @@ pub(crate) async fn run_gateway_session_loop(
                 .await?;
             }
             ramflux_node_core::GatewayClientFrame::RelayTokenIssue { request } => {
+                // T22-A1 / RQ-04: the legacy v2 shared-HMAC relay-token issuance path is compiled
+                // only under `itest-local-mint`. Production gateways reject the frame outright and
+                // hold no relay service key.
+                #[cfg(feature = "itest-local-mint")]
                 handle_gateway_relay_token_issue(&send, &context, &runtime, &request).await?;
+                #[cfg(not(feature = "itest-local-mint"))]
+                {
+                    let _ = &request;
+                    write_gateway_handle(
+                        &send,
+                        &ramflux_node_core::GatewayServerFrame::Nack {
+                            reason: "v2 relay token issuance is not supported".to_owned(),
+                        },
+                    )
+                    .await?;
+                }
+            }
+            ramflux_node_core::GatewayClientFrame::RelayTokenV3Issue { request } => {
+                handle_gateway_relay_token_v3_issue(&send, &context, &runtime, &request).await?;
             }
             ramflux_node_core::GatewayClientFrame::Ack { ack } => {
                 handle_gateway_ack(&send, &context, &runtime, &ack).await?;
@@ -451,6 +473,7 @@ pub(crate) async fn run_gateway_session_loop(
     }
 }
 
+#[cfg(feature = "itest-local-mint")]
 async fn handle_gateway_relay_token_issue(
     send: &GatewaySendHandle,
     context: &GatewayQuicContext,
@@ -479,6 +502,98 @@ async fn handle_gateway_relay_token_issue(
     }
 }
 
+async fn handle_gateway_relay_token_v3_issue(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    request: &ramflux_node_core::GatewayRelayTokenV3IssueRequest,
+) -> anyhow::Result<()> {
+    match issue_relay_token_v3_for_authenticated_session(context, runtime, request) {
+        Ok(relay_token) => {
+            write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::RelayTokenV3Issued {
+                    response: Box::new(ramflux_node_core::GatewayRelayTokenV3IssueResponse {
+                        relay_token,
+                    }),
+                },
+            )
+            .await
+        }
+        Err(error) => {
+            write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: format!("relay v3 token issue rejected: {error}"),
+                },
+            )
+            .await
+        }
+    }
+}
+
+fn issue_relay_token_v3_for_authenticated_session(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    request: &ramflux_node_core::GatewayRelayTokenV3IssueRequest,
+) -> anyhow::Result<ramflux_node_core::RelayTokenV3> {
+    validate_gateway_session_signed_request(
+        context,
+        runtime,
+        &request.signed_request,
+        "POST",
+        "/relay/v1/token/v3/issue",
+        &request.body,
+    )?;
+    if request.body.requester_device_id != runtime.device_id {
+        anyhow::bail!("v3 relay token requester does not match authenticated session");
+    }
+    let capability = request
+        .body
+        .capabilities
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("v3 relay token capability is missing"))?;
+    let owner_session = matches!(
+        capability,
+        ramflux_node_core::ObjectRelayCapability::Put
+            | ramflux_node_core::ObjectRelayCapability::Tombstone
+    );
+    if owner_session
+        != (request.body.authorization_kind
+            == ramflux_node_core::RelayAuthorizationKind::OwnerSession)
+    {
+        anyhow::bail!("v3 relay token authorization kind does not match capability");
+    }
+    let (attestation_seed, certificate) = load_gateway_v3_issuer_material()?;
+    let issuer = crate::object_issue::GatewayV3IssuerConfig { attestation_seed, certificate };
+    crate::object_issue::issue_object_relay_token_v3(
+        Some(&issuer),
+        request.body.clone(),
+        ramflux_node_core::now_unix_seconds(),
+    )
+}
+
+fn load_gateway_v3_issuer_material()
+-> anyhow::Result<([u8; 32], ramflux_node_core::GatewayIssuerCertificate)> {
+    let encoded_seed = std::env::var(GATEWAY_V3_ISSUER_SEED_ENV)
+        .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_SEED_ENV} is required"))?;
+    let seed_bytes = ramflux_protocol::decode_base64url(&encoded_seed)
+        .map_err(|error| anyhow::anyhow!("invalid {GATEWAY_V3_ISSUER_SEED_ENV}: {error}"))?;
+    let seed: [u8; 32] = seed_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_SEED_ENV} must decode to 32 bytes"))?;
+    let cert_file = std::env::var(GATEWAY_V3_ISSUER_CERT_FILE_ENV)
+        .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_CERT_FILE_ENV} is required"))?;
+    let cert: ramflux_node_core::GatewayIssuerCertificate =
+        serde_json::from_slice(&std::fs::read(cert_file)?)?;
+    let expected_attestation_key = ramflux_crypto::public_key_base64url_from_seed(seed);
+    if cert.attestation_public_key != expected_attestation_key {
+        anyhow::bail!("v3 issuer seed does not match configured certificate");
+    }
+    Ok((seed, cert))
+}
+
+#[cfg(feature = "itest-local-mint")]
 fn issue_relay_token_for_authenticated_session(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
@@ -531,17 +646,17 @@ fn validate_gateway_session_signed_request<T: serde::Serialize>(
     if signed_request.body_hash != body_hash {
         anyhow::bail!("signed request body hash mismatch");
     }
-    {
-        let mut gateway = gateway_state(&context.state)?;
-        gateway.replay_guard_state_mut().check_signed_request(signed_request, now)?;
-        context.store.save_state(&gateway)?;
-    }
     let signed_request_bytes = ramflux_protocol::signed_bytes(signed_request)?;
     ramflux_crypto::verify_canonical_signature(
         &signed_request_bytes,
         &signed_request.signed.signature,
         &runtime.branch_public_key,
     )?;
+    {
+        let mut gateway = gateway_state(&context.state)?;
+        gateway.replay_guard_state_mut().check_signed_request(signed_request, now)?;
+        context.store.save_state(&gateway)?;
+    }
     Ok(())
 }
 
@@ -555,6 +670,7 @@ fn gateway_http_method(method: &str) -> anyhow::Result<ramflux_protocol::HttpMet
     }
 }
 
+#[cfg(feature = "itest-local-mint")]
 fn validate_relay_token_issue_session_binding(
     runtime: &GatewaySessionRuntime,
     body: &ramflux_node_core::RelayTokenIssueBody,
@@ -576,9 +692,16 @@ fn validate_relay_token_issue_session_binding(
             }
         }
     }
+    // Destructive capability gate: only an owner's put token may carry a delete-on-ack policy.
+    // This prevents a get/ack/tombstone requester from minting a token that self-elevates to
+    // delete the owner's stored ciphertext.
+    if body.delete_after_ack && body.capability != ramflux_node_core::ObjectRelayCapability::Put {
+        anyhow::bail!("delete_after_ack relay token requires put capability");
+    }
     Ok(())
 }
 
+#[cfg(feature = "itest-local-mint")]
 fn relay_device_hash(device_id: &str) -> String {
     ramflux_crypto::blake3_256_base64url(
         "ramflux.object_relay.recipient_device.v1",
@@ -1144,10 +1267,15 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_franking_node_tag, fresh_gateway_session_id,
-        issue_relay_token_for_authenticated_session, own_device_fanout_session_rejection,
-        relay_device_hash, validate_relay_token_issue_session_binding,
+        attach_franking_node_tag, fresh_gateway_session_id, own_device_fanout_session_rejection,
     };
+    // T22-A1 / RQ-04: v2 relay-token issuance test helpers, compiled only under itest-local-mint.
+    #[cfg(feature = "itest-local-mint")]
+    use super::{
+        issue_relay_token_for_authenticated_session, relay_device_hash,
+        validate_relay_token_issue_session_binding,
+    };
+    #[cfg(feature = "itest-local-mint")]
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -1249,6 +1377,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_session_binding_requires_owner_or_grantee_device() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch);
@@ -1268,6 +1397,35 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "itest-local-mint")]
+    fn relay_token_issue_gates_delete_after_ack_to_put_capability() -> anyhow::Result<()> {
+        let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
+        let runtime = test_runtime(&branch);
+
+        // Owner put tokens may carry the delete-on-ack policy.
+        let mut put_body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
+        put_body.delete_after_ack = true;
+        validate_relay_token_issue_session_binding(&runtime, &put_body)?;
+
+        // Get/Ack tokens must not be able to self-elevate to a destructive delete.
+        for capability in [
+            ramflux_node_core::ObjectRelayCapability::Get,
+            ramflux_node_core::ObjectRelayCapability::Ack,
+            ramflux_node_core::ObjectRelayCapability::Tombstone,
+        ] {
+            let mut body = test_relay_token_issue_body(&branch, capability)?;
+            body.delete_after_ack = true;
+            assert!(
+                validate_relay_token_issue_session_binding(&runtime, &body).is_err(),
+                "delete_after_ack must be rejected for capability {capability:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_rejects_signed_request_from_wrong_device_key() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let wrong_branch =
@@ -1287,6 +1445,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_accepts_authenticated_owner_put() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch);
@@ -1301,6 +1460,102 @@ mod tests {
         let token = issue_relay_token_for_authenticated_session(&context, &runtime, &request)?;
         assert_eq!(token.issuer_service, ramflux_node_core::OBJECT_RELAY_TOKEN_ISSUER_GATEWAY);
         assert_eq!(token.audience_service, ramflux_node_core::OBJECT_RELAY_TOKEN_AUDIENCE_RELAY);
+        Ok(())
+    }
+
+    #[cfg(feature = "itest-local-mint")]
+    fn replay_guard_is_empty(context: &crate::GatewayQuicContext) -> anyhow::Result<bool> {
+        let mut gateway = crate::gateway_state(&context.state)?;
+        Ok(gateway.replay_guard_state_mut().is_empty())
+    }
+
+    // RQ-06: a request whose Ed25519 signature fails verification must not persist a replay tuple,
+    // so a later legitimate request reusing the same nonce/request_id still succeeds.
+    #[test]
+    #[cfg(feature = "itest-local-mint")]
+    fn relay_token_issue_bad_signature_does_not_poison_replay() -> anyhow::Result<()> {
+        let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
+        let wrong_branch =
+            ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
+        let runtime = test_runtime(&branch);
+        let context = test_gateway_context()?;
+        let body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
+
+        // Correctly bound request, but signed by the wrong key.
+        let bad = ramflux_node_core::RelayTokenIssueRequest {
+            signed_request: signed_relay_token_issue_request(&wrong_branch, &body)?,
+            body: body.clone(),
+        };
+        assert!(issue_relay_token_for_authenticated_session(&context, &runtime, &bad).is_err());
+        assert!(
+            replay_guard_is_empty(&context)?,
+            "failed signature verification must not persist a replay tuple"
+        );
+
+        // A legitimate request reusing the same nonce/request_id now succeeds.
+        let good = ramflux_node_core::RelayTokenIssueRequest {
+            signed_request: signed_relay_token_issue_request(&branch, &body)?,
+            body,
+        };
+        issue_relay_token_for_authenticated_session(&context, &runtime, &good)?;
+        Ok(())
+    }
+
+    // RQ-06: a request that fails a binding check (here, path mismatch) must not persist a replay
+    // tuple.
+    #[test]
+    #[cfg(feature = "itest-local-mint")]
+    fn relay_token_issue_binding_failure_does_not_poison_replay() -> anyhow::Result<()> {
+        let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
+        let runtime = test_runtime(&branch);
+        let context = test_gateway_context()?;
+        let body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
+
+        let mut signed_request = signed_relay_token_issue_request(&branch, &body)?;
+        signed_request.path = "/relay/v1/token/wrong".to_owned();
+        let bad = ramflux_node_core::RelayTokenIssueRequest { signed_request, body: body.clone() };
+        assert!(issue_relay_token_for_authenticated_session(&context, &runtime, &bad).is_err());
+        assert!(
+            replay_guard_is_empty(&context)?,
+            "binding failure must not persist a replay tuple"
+        );
+
+        let good = ramflux_node_core::RelayTokenIssueRequest {
+            signed_request: signed_relay_token_issue_request(&branch, &body)?,
+            body,
+        };
+        issue_relay_token_for_authenticated_session(&context, &runtime, &good)?;
+        Ok(())
+    }
+
+    // RQ-06: an expired request must not persist a replay tuple.
+    #[test]
+    #[cfg(feature = "itest-local-mint")]
+    fn relay_token_issue_expired_does_not_poison_replay() -> anyhow::Result<()> {
+        let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
+        let runtime = test_runtime(&branch);
+        let context = test_gateway_context()?;
+        let body =
+            test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
+
+        let mut signed_request = signed_relay_token_issue_request(&branch, &body)?;
+        signed_request.expires_at =
+            i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX) - 10;
+        let expired =
+            ramflux_node_core::RelayTokenIssueRequest { signed_request, body: body.clone() };
+        assert!(issue_relay_token_for_authenticated_session(&context, &runtime, &expired).is_err());
+        assert!(
+            replay_guard_is_empty(&context)?,
+            "expired request must not persist a replay tuple"
+        );
+
+        let good = ramflux_node_core::RelayTokenIssueRequest {
+            signed_request: signed_relay_token_issue_request(&branch, &body)?,
+            body,
+        };
+        issue_relay_token_for_authenticated_session(&context, &runtime, &good)?;
         Ok(())
     }
 
@@ -1369,6 +1624,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "itest-local-mint")]
     fn test_runtime(branch: &ramflux_crypto::DeviceBranch) -> crate::GatewaySessionRuntime {
         crate::GatewaySessionRuntime {
             session_id: "session_test".to_owned(),
@@ -1382,6 +1638,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "itest-local-mint")]
     fn test_relay_token_issue_body(
         branch: &ramflux_crypto::DeviceBranch,
         capability: ramflux_node_core::ObjectRelayCapability,
@@ -1416,6 +1673,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "itest-local-mint")]
     fn signed_relay_token_issue_request(
         branch: &ramflux_crypto::DeviceBranch,
         body: &ramflux_node_core::RelayTokenIssueBody,
@@ -1450,11 +1708,16 @@ mod tests {
         Ok(request)
     }
 
+    #[cfg(feature = "itest-local-mint")]
     fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
+        // A process-wide counter guarantees a unique redb path per context even when parallel tests
+        // create contexts within the same clock tick (redb rejects opening the same file twice).
+        static NEXT_DB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let store_path = std::env::temp_dir().join(format!(
-            "ramflux-gateway-relay-token-{}-{}.redb",
+            "ramflux-gateway-relay-token-{}-{}-{}.redb",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
+            NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(store_path)?);
         let state = ramflux_node_core::GatewayState::new();

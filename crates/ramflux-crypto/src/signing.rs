@@ -45,6 +45,11 @@ pub fn sign_canonical_bytes_with_seed(bytes: &[u8], seed: [u8; 32]) -> String {
     encode_base64url(signature.to_bytes())
 }
 
+#[must_use]
+pub fn sign_canonical_bytes_with_device_branch(bytes: &[u8], branch: &DeviceBranch) -> String {
+    encode_base64url(branch.signing_key.sign(bytes).to_bytes())
+}
+
 /// # Errors
 /// Returns an error when validation, serialization, storage, or state checks fail.
 pub fn sign_protocol_object<T: Serialize>(value: &T) -> Result<String, CryptoError> {

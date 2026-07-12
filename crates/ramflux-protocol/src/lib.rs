@@ -12,6 +12,7 @@ mod events;
 mod fixtures;
 mod header;
 mod home_node_migration;
+pub mod object_relay_v3;
 mod protocol_object;
 mod replay;
 mod signature;
@@ -44,6 +45,15 @@ pub use header::{
     HeaderField, HeaderFieldValue, HeaderKind, canonical_header_bytes, header_hash_base64url,
 };
 pub use home_node_migration::{home_node_migration_proof_signed_bytes, migration_proof_hash};
+pub use object_relay_v3::{
+    GATEWAY_ISSUER_CERTIFICATE_SCHEMA, GatewayIssuerCertificate, OBJECT_ACCESS_GRANT_SCHEMA,
+    OBJECT_RELAY_V3_PROOF_VERSION, OWNER_AUTHORIZATION_PROOF_SCHEMA, ObjectAccessGrant,
+    ObjectRelayCapability, OwnerAuthorizationProof, RELAY_TOKEN_V3_AUDIENCE_RELAY,
+    REQUESTER_POP_SCHEMA, RelayAuthorizationKind, RelayTokenV3, RequesterProofOfPossession,
+    gateway_issuer_certificate_signing_bytes, object_access_grant_signing_bytes,
+    owner_authorization_proof_signing_bytes, relay_token_v3_signing_bytes,
+    requester_pop_signing_bytes,
+};
 pub use protocol_object::ProtocolObject;
 pub use ramflux_core::{ClientEventEnvelope as CoreClientEventEnvelope, DomainTag};
 pub use replay::{

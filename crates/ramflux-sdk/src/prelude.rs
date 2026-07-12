@@ -72,18 +72,29 @@ pub(crate) use crate::client::contact::{
 pub(crate) use crate::dm::*;
 pub(crate) use crate::gateway::{
     GatewayRelayTokenIssueBody, GatewayRelayTokenIssueRequest, GatewayRelayTokenIssueResponse,
+    GatewayRelayTokenV3IssueRequest, GatewayRelayTokenV3IssueResponse, SdkRelayTokenV3IssueBody,
     gateway_auth_frame, gateway_fresh_open_frame, gateway_heartbeat_now, gateway_session_state,
     gateway_session_timeout, gateway_stream_nonce, sdk_device_signed_fields, sdk_signed_fields,
 };
 pub(crate) use crate::group::*;
 pub(crate) use crate::object::{
     OBJECT_TRANSFER_DOWNLOAD, OBJECT_TRANSFER_UPLOAD, RelayTokenProvider, RelayTransferOptions,
-    SdkObjectChunkFrame, SdkObjectPermissionEnvelope, SdkObjectRelayAck, SdkObjectRelayAckResponse,
-    SdkObjectRelayCapability, SdkObjectRelayGetRequest, SdkObjectRelayGetResponse,
-    SdkObjectRelayPutResponse, SdkObjectTransferStatus, SdkRelayChunkStatus, SdkRelayToken,
-    object_chunks, object_key_slot_associated_data, object_permission_for_chunk,
-    object_relay_chunk_cipher_hash, object_relay_chunk_id, object_transfer_id,
-    object_transfer_status, parse_relay_transfer_options, relay_post_json, relay_token_for_chunk,
+    SdkObjectPermissionEnvelope, SdkObjectRelayAckResponse, SdkObjectRelayCapability,
+    SdkObjectRelayGetResponse, SdkObjectRelayPutResponse, SdkObjectTransferStatus,
+    SdkRelayChunkStatus, SdkRelayToken, build_signed_object_access_grant,
+    build_signed_owner_authorization_proof, build_signed_requester_pop,
+    build_v3_ack_token_issue_body, build_v3_get_token_issue_body, build_v3_grant_token_issue_body,
+    build_v3_owner_session_token_issue_body, effective_attachment_lineage, object_chunks,
+    object_key_slot_associated_data, object_relay_chunk_cipher_hash, object_relay_chunk_id,
+    object_transfer_id, object_transfer_status, parse_relay_transfer_options,
+    recipient_device_hash, relay_quic_config, verify_recipient_object_access_grant,
+};
+// T22-A1 / RQ-04: v2 relay-token minting and the legacy object relay HTTP frame types are compiled
+// only under the itest-local-mint feature.
+#[cfg(feature = "itest-local-mint")]
+pub(crate) use crate::object::{
+    SdkObjectChunkFrame, SdkObjectRelayAck, SdkObjectRelayGetRequest, object_permission_for_chunk,
+    relay_post_json, relay_token_for_chunk,
 };
 pub(crate) use crate::own_device_sync::{
     SdkOwnDeviceDmSessionSnapshot, SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,

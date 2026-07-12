@@ -5,6 +5,7 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
@@ -15,7 +16,10 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 plaintext_base64: ramflux_protocol::encode_base64url(&bytes),
                 chunk_size: put.chunk_size,
                 relay_endpoint: put.relay_url,
+                #[cfg(feature = "itest-local-mint")]
                 relay_service_key_base64: put.relay_service_key,
+                #[cfg(not(feature = "itest-local-mint"))]
+                relay_service_key_base64: None,
                 relay_interrupt_after_chunks: put.relay_interrupt_after_chunks,
             };
             print_json(&bus.request(Some(put.account), "object", "object.put", &request).await?)
@@ -24,7 +28,10 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
             let request = LocalBusObjectGetRequest {
                 object_id: get.object,
                 relay_endpoint: get.relay_url,
+                #[cfg(feature = "itest-local-mint")]
                 relay_service_key_base64: get.relay_service_key,
+                #[cfg(not(feature = "itest-local-mint"))]
+                relay_service_key_base64: None,
                 relay_ack: get.relay_ack,
                 relay_interrupt_after_chunks: get.relay_interrupt_after_chunks,
             };
@@ -55,7 +62,10 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 object_id: resume.object,
                 direction: resume.direction,
                 relay_endpoint: Some(resume.relay_url),
+                #[cfg(feature = "itest-local-mint")]
                 relay_service_key_base64: resume.relay_service_key,
+                #[cfg(not(feature = "itest-local-mint"))]
+                relay_service_key_base64: None,
                 relay_interrupt_after_chunks: resume.relay_interrupt_after_chunks,
             };
             print_json(
@@ -94,7 +104,14 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
             print_json(&response)
         }
         ObjectAction::Delete(delete) => {
-            let request = LocalBusObjectDeleteRequest { object_id: delete.object };
+            let request = LocalBusObjectDeleteRequest {
+                object_id: delete.object,
+                relay_endpoint: delete.relay_url,
+                #[cfg(feature = "itest-local-mint")]
+                relay_service_key_base64: delete.relay_service_key,
+                #[cfg(not(feature = "itest-local-mint"))]
+                relay_service_key_base64: None,
+            };
             print_json(
                 &bus.request(Some(delete.account), "object", "object.delete", &request).await?,
             )

@@ -13,6 +13,10 @@ commercial-license = true
 default = []
 compio-gateway = ["dep:compio", "ramflux-transport/compio-gateway"]
 itest-http = ["ramflux-node-core/itest-http"]
+# T22-A1 / RQ-04: legacy v2 shared-HMAC relay-token issuance (RelayTokenIssue frame + service-key
+# loader). Never enabled by production gateway binaries — default gateway loads no object relay HMAC
+# key, rejects the v2 frame, and issues no v2 token. The v3 GatewayIssued path is unaffected.
+itest-local-mint = []
 
 [dependencies]
 anyhow = { workspace = true }

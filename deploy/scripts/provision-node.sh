@@ -54,10 +54,10 @@ public_listen_addr = "0.0.0.0:443"
 [signaling]
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"
-
-[relay]
-service_key_ref = "literal:ramflux-relay-itest-service-key"
 EOF
 done
+# No [relay] service_key block: v3 (Ed25519 issuer trust) is the only production
+# object data plane; the default/production relay loads no object HMAC key
+# (T22-A3). The legacy v2 shared-HMAC surface exists only in itest builds.
 
 printf 'provision-node complete: %s/config\n' "${deploy_dir}"

@@ -301,6 +301,53 @@ fn gateway_quic_transport_config() -> Arc<quinn::TransportConfig> {
     Arc::new(transport)
 }
 
+/// Builds a QUIC client config for a pooled relay connection. Unlike
+/// [`quic_gateway_client_config`], this sets an explicit `max_idle_timeout` and
+/// `keep_alive_interval` so a pooled connection kept alive across reuses does not silently hit
+/// quinn's 30s default idle timeout with no keep-alive (the s60 idle-timeout failure mode). The
+/// stream/window limits still honor the same `RAMFLUX_GATEWAY_QUIC_*` env overrides as the gateway
+/// client. Idle/keepalive durations are validated by the caller (nonzero, keepalive &lt; idle).
+///
+/// # Errors
+/// Returns an error when the CA bundle cannot be loaded/validated or the idle timeout exceeds the
+/// QUIC-representable maximum.
+pub fn relay_quic_pool_client_config(
+    ca_cert: &Path,
+    max_idle_timeout: std::time::Duration,
+    keep_alive_interval: std::time::Duration,
+) -> Result<quinn::ClientConfig, TransportError> {
+    ensure_ring_crypto_provider_installed();
+    let mut config =
+        quinn::ClientConfig::with_root_certificates(Arc::new(mesh_root_store(ca_cert)?))
+            .map_err(|error| TransportError::Tls(error.to_string()))?;
+    config
+        .transport_config(relay_quic_pool_transport_config(max_idle_timeout, keep_alive_interval)?);
+    Ok(config)
+}
+
+fn relay_quic_pool_transport_config(
+    max_idle_timeout: std::time::Duration,
+    keep_alive_interval: std::time::Duration,
+) -> Result<Arc<quinn::TransportConfig>, TransportError> {
+    let mut transport = quinn::TransportConfig::default();
+    apply_quic_transport_limits(
+        &mut transport,
+        QuicTransportLimitEnv {
+            max_concurrent_bidi_streams: GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV,
+            receive_window: GATEWAY_QUIC_RECEIVE_WINDOW_ENV,
+            stream_receive_window: GATEWAY_QUIC_STREAM_RECEIVE_WINDOW_ENV,
+            send_window: GATEWAY_QUIC_SEND_WINDOW_ENV,
+        },
+        GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT,
+    );
+    let idle_timeout = quinn::IdleTimeout::try_from(max_idle_timeout).map_err(|error| {
+        TransportError::Quic(format!("invalid relay QUIC pool idle timeout: {error}"))
+    })?;
+    transport.max_idle_timeout(Some(idle_timeout));
+    transport.keep_alive_interval(Some(keep_alive_interval));
+    Ok(Arc::new(transport))
+}
+
 #[derive(Clone, Copy)]
 struct QuicTransportLimitEnv {
     max_concurrent_bidi_streams: &'static str,

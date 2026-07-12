@@ -27,7 +27,7 @@ pub(crate) async fn dispatch_device_bus_request(
         "device.sync.import" => {
             let body: LocalBusDeviceSyncImportRequest =
                 serde_json::from_value(request.body.clone())?;
-            dispatch_device_sync_import(request, state, body).await
+            Box::pin(dispatch_device_sync_import(request, state, body)).await
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
@@ -171,10 +171,12 @@ async fn dispatch_device_sync_export(
     let manifest = read_local_bus_account_manifest(&manifest_path)?;
     let account = local_bus_account_mut(state, &account_id)?;
     let mut engine = account.take_live_engine().await?;
+    let pool = account.relay_quic_pool()?;
     let response = account
         .client
         .export_own_device_sync(
             &mut engine,
+            &pool,
             &manifest.principal_commitment,
             &body.target_device_id,
             &body.relay_endpoint,
@@ -197,10 +199,12 @@ async fn dispatch_device_sync_import(
     let account = local_bus_account_mut(state, &account_id)?;
     let envelope: SdkOwnDeviceSyncEnvelope = serde_json::from_value(body.envelope)?;
     let mut engine = account.take_live_engine().await?;
+    let pool = account.relay_quic_pool()?;
     let response = account
         .client
         .import_own_device_sync(
             &mut engine,
+            &pool,
             &manifest.principal_commitment,
             &envelope,
             body.relay_service_key_base64,

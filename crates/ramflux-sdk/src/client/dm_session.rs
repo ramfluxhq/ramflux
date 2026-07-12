@@ -5,6 +5,19 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+/// Read-only recv-commit evidence returned by [`RamfluxClient::recv_commit_fingerprint`]. Gated
+/// behind the `itest-fingerprint` feature (realnet integration tests only; T21-A2a / CTRL-028).
+#[cfg(feature = "itest-fingerprint")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecvCommitFingerprint {
+    /// Checkpoint event id of the main-conversation recv session, or `None` if none is committed.
+    pub main_recv_checkpoint: Option<String>,
+    /// Checkpoint event id of the attachment key-slot recv session, or `None` if none is committed.
+    pub slot_recv_checkpoint: Option<String>,
+    /// The durable gateway receive cursor for this device's inbox.
+    pub receive_cursor: u64,
+}
+
 impl RamfluxClient {
     pub(crate) fn load_dm_session(
         &self,
@@ -194,12 +207,54 @@ impl RamfluxClient {
         direction: &str,
         snapshot: &ramflux_crypto::DmSessionSnapshot,
     ) -> Result<(), SdkError> {
-        let event_id = format!("dm.session:{conversation_id}:{direction}:{envelope_id}");
+        let event_id = dm_session_event_id(conversation_id, direction, envelope_id);
         self.append_event(&event_id, "dm.ratchet_session", &serde_json::to_vec(snapshot)?)?;
         self.set_projection_checkpoint(
             &dm_session_checkpoint_name(conversation_id, direction),
             &event_id,
         )
+    }
+
+    /// Read-only introspection for realnet integration tests (T21-A2a / CTRL-028), gated behind the
+    /// `itest-fingerprint` feature so it is never compiled into production binaries. Returns the
+    /// main-conversation recv session checkpoint, the attachment key-slot recv session checkpoint,
+    /// and the gateway receive cursor, so a test can assert that a failed attachment import advances
+    /// none of them and a successful retry advances all of them. It exposes no control or mutation
+    /// surface — every field is derived from existing read-only projection/cursor lookups.
+    #[cfg(feature = "itest-fingerprint")]
+    pub fn recv_commit_fingerprint(
+        &self,
+        conversation_id: &str,
+        object_id: &str,
+        recipient_device_id: &str,
+        target_delivery_id: &str,
+    ) -> Result<RecvCommitFingerprint, SdkError> {
+        let slot_conversation_id =
+            dm_attachment_slot_conversation_id(conversation_id, object_id, recipient_device_id);
+        Ok(RecvCommitFingerprint {
+            main_recv_checkpoint: self
+                .projection_checkpoint(&dm_session_checkpoint_name(conversation_id, "recv"))?,
+            slot_recv_checkpoint: self.projection_checkpoint(&dm_session_checkpoint_name(
+                &slot_conversation_id,
+                "recv",
+            ))?,
+            receive_cursor: self.gateway_receive_cursor(target_delivery_id)?,
+        })
+    }
+
+    /// T21-A2a / CTRL-028: reports whether the persisted recv session checkpoint already covers
+    /// `envelope_id`. When true, the entry's ratchet advanced and every side effect committed, so a
+    /// receive cursor that lagged behind can be safely caught up without re-decrypting. When false,
+    /// the recv session was not committed for this envelope (fresh entry, or a crash after a partial
+    /// side-effect write) and the ciphertext must be re-decrypted.
+    pub(crate) fn recv_session_checkpoint_at(
+        &self,
+        conversation_id: &str,
+        envelope_id: &str,
+    ) -> Result<bool, SdkError> {
+        let expected = dm_session_event_id(conversation_id, "recv", envelope_id);
+        Ok(self.projection_checkpoint(&dm_session_checkpoint_name(conversation_id, "recv"))?
+            == Some(expected))
     }
 
     pub(crate) fn load_x3dh_private_state(

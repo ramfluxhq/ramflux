@@ -12,6 +12,11 @@ commercial-license = true
 [features]
 default = []
 itest-http = []
+# T23-A2b2b: the legacy single-pinned-provider-key trust envelope path
+# (SignedFederatedIssuerTrustSnapshot v3 + verify_signed_federated_issuer_trust_snapshot +
+# update_from_signed). Default-off: the production/default build uses the offline-root-signed
+# provider-keyring path only. Enabled explicitly for the legacy compatibility itests.
+itest-provider-single-key = []
 
 [dependencies]
 arc-swap = { workspace = true }

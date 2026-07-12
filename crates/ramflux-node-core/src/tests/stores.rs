@@ -1104,6 +1104,525 @@ fn object_relay_chunk_ttl_cap_helper_honors_configured_max() {
     assert_eq!(clamp_relay_chunk_expires_at_with_max_ttl(now, requested_expires_at, 60), now + 60);
 }
 
+const DEVICE_B_OWNER_SEED: [u8; 32] = [0x42; 32];
+const DEVICE_B_OWNER_KEY_ID: &str = "device_b_owner";
+
+// RQ-03 fix A: an exact same-owner, same-content re-put must be idempotent and return the stored
+// entry unchanged. Fields that accrue after the first put (acked_by, stored_at, expires_at, delete
+// policy, status) must never be reset by a replay.
+#[test]
+fn object_relay_put_replay_is_idempotent_and_preserves_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    state.put_object_chunk_frame(frame.clone(), service_key, now)?;
+
+    // Advance the stored entry's state (records an ack) so a reset would be observable.
+    let ack = ObjectRelayAck {
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: "manifest_relay_1".to_owned(),
+        chunk_id: "chunk_relay_1".to_owned(),
+        recipient_device_hash: "recipient_device_hash_1".to_owned(),
+        relay_token: relay_token(service_key, ObjectRelayCapability::Ack, now, false)?,
+        object_permission_envelope: object_permission(ObjectRelayCapability::Ack, now)?,
+        acked_at: now + 1,
+    };
+    state.ack_object_chunk(ack, service_key, now + 1)?;
+    let before = state
+        .chunk_entry("chunk_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?
+        .clone();
+    assert!(before.acked_by.contains("recipient_device_hash_1"));
+    assert_eq!(before.stored_at, now);
+
+    // Replay the identical frame later (still within the token TTL): it must return the stored
+    // entry verbatim and mutate nothing (stored_at not bumped to now + 100, acked_by not cleared).
+    let replay = state.put_object_chunk_frame(frame, service_key, now + 100)?;
+    assert_eq!(replay, before, "idempotent replay must return the stored entry unchanged");
+    let after = state
+        .chunk_entry("chunk_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
+    assert_eq!(after, &before, "idempotent replay must not mutate the stored entry");
+    Ok(())
+}
+
+// A foreign owner cannot overwrite an existing chunk id, and even the original owner cannot silently
+// replace the stored ciphertext with different content under the same chunk id.
+#[test]
+fn object_relay_put_rejects_cross_owner_and_content_overwrite()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    state.put_object_chunk_frame(frame, service_key, now)?;
+
+    // Device B cannot overwrite A's chunk id.
+    let foreign_frame = relay_object_frame_for_owner(
+        service_key,
+        now + 2,
+        "chunk_relay_1",
+        DEVICE_B_OWNER_KEY_ID,
+        DEVICE_B_OWNER_SEED,
+    )?;
+    let cross_owner = state.put_object_chunk_frame(foreign_frame, service_key, now + 2);
+    assert!(
+        matches!(cross_owner, Err(NodeCoreError::Unauthorized(_))),
+        "cross-owner overwrite should be rejected, got {cross_owner:?}"
+    );
+
+    // Even the original owner cannot silently replace the ciphertext with different content under
+    // the same chunk id.
+    let mut overwrite =
+        relay_object_frame(service_key, ObjectRelayCapability::Put, now + 3, false)?;
+    let tampered_chunk = b"different opaque ciphertext!!".to_vec();
+    overwrite.chunk_cipher_hash =
+        object_relay_chunk_cipher_hash("manifest_relay_1", 0, &tampered_chunk);
+    overwrite.cipher_size = tampered_chunk.len() as u64;
+    overwrite.encrypted_chunk = tampered_chunk;
+    let content_overwrite = state.put_object_chunk_frame(overwrite, service_key, now + 3);
+    assert!(
+        matches!(content_overwrite, Err(NodeCoreError::Unauthorized(_))),
+        "content overwrite should be rejected, got {content_overwrite:?}"
+    );
+
+    // The original ciphertext is intact after the rejected writes.
+    let stored = state
+        .chunk_entry("chunk_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
+    assert_eq!(stored.encrypted_chunk, b"opaque encrypted relay chunk");
+    assert_eq!(stored.owner_signing_key_id, "owner_fixture_key");
+    Ok(())
+}
+
+// A record persisted before owner binding existed (no owner fields) deserializes with an empty
+// binding and must be immutable: no one can overwrite it, fail closed.
+#[test]
+fn object_relay_legacy_unbound_chunk_rejects_overwrite() -> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+
+    // Build a legacy record by stripping the owner-binding fields from a modern chunk.
+    let bound = relay_chunk("chunk_relay_1", now, OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS);
+    let mut value = serde_json::to_value(&bound)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| NodeCoreError::ItestJson("relay chunk is not a json object".to_owned()))?;
+    object.remove("owner_signing_key_id");
+    object.remove("owner_public_key");
+    let legacy: RelayChunkEntry = serde_json::from_value(value)?;
+    assert!(!legacy.has_owner_binding());
+    state.put_chunk(legacy);
+
+    // A well-formed put for the same chunk id cannot overwrite the unbound legacy record.
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    let overwrite = state.put_object_chunk_frame(frame, service_key, now);
+    assert!(
+        matches!(overwrite, Err(NodeCoreError::Unauthorized(_))),
+        "legacy unbound chunk must not be overwritable, got {overwrite:?}"
+    );
+    Ok(())
+}
+
+// RQ-03 invariant 4: deletion on ack is governed only by the delete policy the owner stored at put
+// time; an ack token flipping delete_after_ack cannot self-elevate to delete the chunk.
+#[test]
+fn object_relay_ack_ignores_token_delete_after_ack_elevation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+    // Owner stored the chunk with delete_after_ack = false.
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    state.put_object_chunk_frame(frame, service_key, now)?;
+
+    // An ack whose token sets delete_after_ack = true must NOT delete the chunk.
+    let elevating_ack = ObjectRelayAck {
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: "manifest_relay_1".to_owned(),
+        chunk_id: "chunk_relay_1".to_owned(),
+        recipient_device_hash: "recipient_device_hash_1".to_owned(),
+        relay_token: relay_token(service_key, ObjectRelayCapability::Ack, now, true)?,
+        object_permission_envelope: object_permission(ObjectRelayCapability::Ack, now)?,
+        acked_at: now + 1,
+    };
+    let acked = state.ack_object_chunk(elevating_ack, service_key, now + 1)?;
+    assert_eq!(acked.status, RelayChunkStatus::Available);
+    assert_eq!(acked.encrypted_chunk, b"opaque encrypted relay chunk");
+    Ok(())
+}
+
+// A foreign owner cannot tombstone (delete) A's chunk; the rejected request leaves no tombstone
+// and does not clear the ciphertext.
+#[test]
+fn object_relay_tombstone_rejects_cross_owner() -> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    state.put_object_chunk_frame(frame, service_key, now)?;
+
+    let tombstone = ObjectRelayTombstone {
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: Some("manifest_relay_1".to_owned()),
+        tombstone_hash: ramflux_crypto::blake3_256_base64url(
+            "ramflux.object_relay_tombstone.test.v1",
+            b"foreign-tombstone",
+        ),
+        source_event_id: "event_tombstone_foreign".to_owned(),
+        signed_at: now + 1,
+        expires_at: now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS,
+        relay_token: relay_token_with_owner(
+            service_key,
+            ObjectRelayCapability::Tombstone,
+            now + 1,
+            "chunk_relay_1",
+            DEVICE_B_OWNER_KEY_ID,
+            DEVICE_B_OWNER_SEED,
+        )?,
+        object_permission_envelope: object_permission_with_seed(
+            ObjectRelayCapability::Tombstone,
+            now + 1,
+            DEVICE_B_OWNER_SEED,
+            DEVICE_B_OWNER_KEY_ID,
+        )?,
+    };
+    let result = state.apply_object_tombstone_mutation(tombstone, service_key, now + 1);
+    assert!(
+        matches!(result, Err(NodeCoreError::Unauthorized(_))),
+        "cross-owner tombstone should be rejected, got {result:?}"
+    );
+    // No tombstone recorded and ciphertext untouched.
+    assert!(state.tombstone("object_relay_1").is_none());
+    let chunk = state
+        .chunk_entry("chunk_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
+    assert_eq!(chunk.status, RelayChunkStatus::Available);
+    assert_eq!(chunk.encrypted_chunk, b"opaque encrypted relay chunk");
+    Ok(())
+}
+
+// RQ-03 fix B: with no object-owner registry, a tombstone that matches zero stored chunks cannot
+// prove object ownership and must fail closed without recording an object-level tombstone. This
+// blocks any device from pre-placing a tombstone to deny a future legitimate owner's puts.
+#[test]
+fn object_relay_tombstone_rejects_empty_scope() -> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+
+    // No chunk was ever put for object_relay_1.
+    let tombstone = ObjectRelayTombstone {
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: Some("manifest_relay_1".to_owned()),
+        tombstone_hash: ramflux_crypto::blake3_256_base64url(
+            "ramflux.object_relay_tombstone.test.v1",
+            b"empty-scope-tombstone",
+        ),
+        source_event_id: "event_tombstone_empty".to_owned(),
+        signed_at: now + 1,
+        expires_at: now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS,
+        relay_token: relay_token(service_key, ObjectRelayCapability::Tombstone, now + 1, false)?,
+        object_permission_envelope: object_permission(ObjectRelayCapability::Tombstone, now + 1)?,
+    };
+    let result = state.apply_object_tombstone_mutation(tombstone, service_key, now + 1);
+    assert!(
+        matches!(result, Err(NodeCoreError::Unauthorized(_))),
+        "empty-scope tombstone should be rejected, got {result:?}"
+    );
+    assert!(state.tombstone("object_relay_1").is_none());
+    Ok(())
+}
+
+// RQ-03-AB2 fix: a semantically identical tombstone replay returns the stored record with zero
+// mutation — every field equal, retention expiry never recomputed/extended, affected chunks empty,
+// changed=false.
+#[test]
+fn object_relay_tombstone_replay_is_idempotent_zero_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    state.put_object_chunk_frame(frame, service_key, now)?;
+
+    let expires_at = now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS;
+    let first = state.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?,
+        service_key,
+        now + 1,
+    )?;
+    assert!(first.changed, "first tombstone must be a durable change");
+    assert_eq!(first.affected_chunks.len(), 1);
+
+    let stored_tombstone = state
+        .tombstone("object_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("object_relay_1".to_owned()))?
+        .clone();
+    let stored_chunk = state
+        .chunk_entry("chunk_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?
+        .clone();
+
+    // Replay the identical tombstone much later (still within token TTL): zero-mutation no-op.
+    let replay = state.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?,
+        service_key,
+        now + 300,
+    )?;
+    assert!(!replay.changed, "stable replay must report changed=false");
+    assert!(replay.affected_chunks.is_empty(), "stable replay must not touch chunks");
+    assert_eq!(replay.tombstone, stored_tombstone, "replay returns the stored record verbatim");
+    assert_eq!(replay.tombstone.expires_at, expires_at, "expiry must not be recomputed/extended");
+    assert_eq!(state.tombstone("object_relay_1"), Some(&stored_tombstone));
+    assert_eq!(state.chunk_entry("chunk_relay_1"), Some(&stored_chunk));
+    Ok(())
+}
+
+// Any field/owner/scope/expiry change on a repeat tombstone for the same object id is rejected and
+// leaves the stored record untouched.
+#[test]
+fn object_relay_tombstone_rejects_changed_replay() -> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+    let mut state = RelayCacheState::new();
+    let frame = relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?;
+    state.put_object_chunk_frame(frame, service_key, now)?;
+
+    let expires_at = now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS;
+    state.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?,
+        service_key,
+        now + 1,
+    )?;
+    let stored = state
+        .tombstone("object_relay_1")
+        .ok_or_else(|| NodeCoreError::EnvelopeNotFound("object_relay_1".to_owned()))?
+        .clone();
+
+    // Different tombstone_hash / source_event_id / signed_at / expiry(extension) / scope: all reject.
+    let diff_hash = fixture_tombstone(service_key, now, "hash-b", "event-a", now + 1, expires_at)?;
+    let diff_source =
+        fixture_tombstone(service_key, now, "hash-a", "event-b", now + 1, expires_at)?;
+    let diff_signed =
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 2, expires_at)?;
+    let diff_expiry =
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at + 100)?;
+    let mut diff_scope =
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?;
+    diff_scope.manifest_hash = None;
+
+    for (label, request) in [
+        ("hash", diff_hash),
+        ("source", diff_source),
+        ("signed_at", diff_signed),
+        ("expiry", diff_expiry),
+        ("scope", diff_scope),
+    ] {
+        let result = state.apply_object_tombstone_mutation(request, service_key, now + 2);
+        assert!(
+            matches!(result, Err(NodeCoreError::Unauthorized(_))),
+            "changed tombstone replay ({label}) should be rejected, got {result:?}"
+        );
+    }
+    // Stored record untouched (expiry not extended).
+    assert_eq!(state.tombstone("object_relay_1"), Some(&stored));
+    Ok(())
+}
+
+// A stable replay must make record_relay_tombstone_mutation a complete no-op: after the first
+// durable write, replaying and re-recording leaves the persisted redb rows byte-identical.
+#[test]
+fn object_relay_tombstone_redb_replay_no_rewrite() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("object_relay_tombstone_redb_replay_no_rewrite")?;
+    let service_key = b"relay service key for object chunks";
+    let now = 1_760_000_000;
+    let expires_at = now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS;
+
+    let store = RelayRedbStore::open(&path)?;
+    let mut state = RelayCacheState::new();
+    let entry = state.put_object_chunk_frame(
+        relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+        service_key,
+        now,
+    )?;
+    store.record_relay_chunk_entry(&entry)?;
+    let first = state.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?,
+        service_key,
+        now + 1,
+    )?;
+    assert!(first.changed);
+    store.record_relay_tombstone_mutation(&first)?;
+    drop(store);
+
+    let baseline = RelayRedbStore::open(&path)?
+        .load_state()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("relay_tombstone_baseline".to_owned()))?;
+
+    // Replay stable tombstone -> changed=false -> record must not rewrite redb.
+    let store2 = RelayRedbStore::open(&path)?;
+    let mut state2 = store2
+        .load_state()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("relay_tombstone_reload".to_owned()))?;
+    let replay = state2.apply_object_tombstone_mutation(
+        fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, expires_at)?,
+        service_key,
+        now + 300,
+    )?;
+    assert!(!replay.changed);
+    store2.record_relay_tombstone_mutation(&replay)?;
+    drop(store2);
+
+    let after = RelayRedbStore::open(&path)?
+        .load_state()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("relay_tombstone_after".to_owned()))?;
+    assert_eq!(after.tombstone("object_relay_1"), baseline.tombstone("object_relay_1"));
+    assert_eq!(after.chunk_entry("chunk_relay_1"), baseline.chunk_entry("chunk_relay_1"));
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+// RQ-03-AB2: tombstone retention TTL is fail-closed (no clamp/default). An expired or over-max
+// expiry is rejected before any mutation, and the accepted boundary value is stored unchanged so an
+// identical replay matches.
+#[test]
+fn object_relay_tombstone_ttl_is_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_760_000_000;
+    let service_key = b"relay service key for object chunks";
+
+    // expires_at <= now: rejected, no mutation.
+    {
+        let mut state = RelayCacheState::new();
+        state.put_object_chunk_frame(
+            relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+            service_key,
+            now,
+        )?;
+        let expired = fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, now)?;
+        let result = state.apply_object_tombstone_mutation(expired, service_key, now);
+        assert!(
+            matches!(result, Err(NodeCoreError::TtlExpired { .. })),
+            "expired tombstone expiry should be rejected, got {result:?}"
+        );
+        assert!(state.tombstone("object_relay_1").is_none());
+        let chunk = state
+            .chunk_entry("chunk_relay_1")
+            .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
+        assert_eq!(chunk.status, RelayChunkStatus::Available);
+        assert_eq!(chunk.encrypted_chunk, b"opaque encrypted relay chunk");
+    }
+
+    // expires_at > now + MAX: rejected, no mutation.
+    {
+        let mut state = RelayCacheState::new();
+        state.put_object_chunk_frame(
+            relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+            service_key,
+            now,
+        )?;
+        let over_max = fixture_tombstone(
+            service_key,
+            now,
+            "hash-a",
+            "event-a",
+            now + 1,
+            now + OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS + 1,
+        )?;
+        let result = state.apply_object_tombstone_mutation(over_max, service_key, now);
+        assert!(
+            matches!(result, Err(NodeCoreError::TtlExpired { .. })),
+            "over-max tombstone expiry should be rejected, got {result:?}"
+        );
+        assert!(state.tombstone("object_relay_1").is_none());
+        let chunk = state
+            .chunk_entry("chunk_relay_1")
+            .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
+        assert_eq!(chunk.status, RelayChunkStatus::Available);
+    }
+
+    // expires_at == now + MAX (boundary): accepted and stored unchanged; identical replay is a
+    // zero-mutation no-op with the same expiry.
+    {
+        let mut state = RelayCacheState::new();
+        state.put_object_chunk_frame(
+            relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+            service_key,
+            now,
+        )?;
+        let max_expiry = now + OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS;
+        let first = state.apply_object_tombstone_mutation(
+            fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, max_expiry)?,
+            service_key,
+            now,
+        )?;
+        assert!(first.changed);
+        assert_eq!(first.tombstone.expires_at, max_expiry, "boundary expiry stored unchanged");
+
+        let replay = state.apply_object_tombstone_mutation(
+            fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, max_expiry)?,
+            service_key,
+            now + 300,
+        )?;
+        assert!(!replay.changed, "identical replay of a boundary tombstone must be a no-op");
+        assert_eq!(replay.tombstone.expires_at, max_expiry, "expiry must not change on replay");
+    }
+
+    // A stored short-lived tombstone cannot be replayed successfully after its retention expiry,
+    // even while the operation token and permission are still valid.
+    {
+        let mut state = RelayCacheState::new();
+        state.put_object_chunk_frame(
+            relay_object_frame(service_key, ObjectRelayCapability::Put, now, false)?,
+            service_key,
+            now,
+        )?;
+        let short_expiry = now + 10;
+        state.apply_object_tombstone_mutation(
+            fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, short_expiry)?,
+            service_key,
+            now + 1,
+        )?;
+        let replay = state.apply_object_tombstone_mutation(
+            fixture_tombstone(service_key, now, "hash-a", "event-a", now + 1, short_expiry)?,
+            service_key,
+            now + 11,
+        );
+        assert!(
+            matches!(replay, Err(NodeCoreError::TtlExpired { .. })),
+            "expired stored tombstone replay should be rejected, got {replay:?}"
+        );
+        assert_eq!(
+            state.tombstone("object_relay_1").map(|item| item.expires_at),
+            Some(short_expiry)
+        );
+    }
+    Ok(())
+}
+
+fn fixture_tombstone(
+    service_key: &[u8],
+    now: u64,
+    tombstone_hash: &str,
+    source_event_id: &str,
+    signed_at: u64,
+    expires_at: u64,
+) -> Result<ObjectRelayTombstone, Box<dyn std::error::Error>> {
+    Ok(ObjectRelayTombstone {
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: Some("manifest_relay_1".to_owned()),
+        tombstone_hash: tombstone_hash.to_owned(),
+        source_event_id: source_event_id.to_owned(),
+        signed_at,
+        expires_at,
+        relay_token: relay_token(service_key, ObjectRelayCapability::Tombstone, now, false)?,
+        object_permission_envelope: object_permission(ObjectRelayCapability::Tombstone, now)?,
+    })
+}
+
 fn relay_object_frame(
     service_key: &[u8],
     capability: ObjectRelayCapability,
@@ -1111,6 +1630,72 @@ fn relay_object_frame(
     delete_after_ack: bool,
 ) -> Result<ObjectChunkFrame, Box<dyn std::error::Error>> {
     relay_object_frame_with_chunk(service_key, capability, now, "chunk_relay_1", delete_after_ack)
+}
+
+fn relay_object_frame_for_owner(
+    service_key: &[u8],
+    now: u64,
+    chunk_id: &str,
+    owner_signing_key_id: &str,
+    owner_seed: [u8; 32],
+) -> Result<ObjectChunkFrame, Box<dyn std::error::Error>> {
+    let encrypted_chunk = b"opaque encrypted relay chunk".to_vec();
+    Ok(ObjectChunkFrame {
+        schema: "ramflux.object_chunk_frame.v1".to_owned(),
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: "manifest_relay_1".to_owned(),
+        chunk_index: 0,
+        chunk_id: chunk_id.to_owned(),
+        chunk_cipher_hash: object_relay_chunk_cipher_hash("manifest_relay_1", 0, &encrypted_chunk),
+        cipher_size: encrypted_chunk.len() as u64,
+        encrypted_chunk,
+        relay_token: relay_token_with_owner(
+            service_key,
+            ObjectRelayCapability::Put,
+            now,
+            chunk_id,
+            owner_signing_key_id,
+            owner_seed,
+        )?,
+        object_permission_envelope: object_permission_with_seed(
+            ObjectRelayCapability::Put,
+            now,
+            owner_seed,
+            owner_signing_key_id,
+        )?,
+        expires_at: now + OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS,
+        delete_after_ack: false,
+    })
+}
+
+fn relay_token_with_owner(
+    service_key: &[u8],
+    capability: ObjectRelayCapability,
+    now: u64,
+    chunk_id: &str,
+    owner_signing_key_id: &str,
+    owner_seed: [u8; 32],
+) -> Result<RelayToken, Box<dyn std::error::Error>> {
+    let mut token = RelayToken {
+        token_version: OBJECT_RELAY_TOKEN_VERSION,
+        token_id: format!("token_{chunk_id}_{capability:?}_{owner_signing_key_id}"),
+        object_id: "object_relay_1".to_owned(),
+        manifest_hash: "manifest_relay_1".to_owned(),
+        chunk_id: chunk_id.to_owned(),
+        recipient_device_hash: "recipient_device_hash_1".to_owned(),
+        owner_signing_key_id: owner_signing_key_id.to_owned(),
+        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(owner_seed),
+        issuer_service: OBJECT_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
+        audience_service: OBJECT_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
+        capabilities: vec![capability],
+        delete_after_ack: false,
+        issued_at: now,
+        expires_at: now + OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS,
+        nonce: format!("nonce_{owner_signing_key_id}"),
+        mac: String::new(),
+    };
+    token.mac = relay_token_mac(service_key, &token)?;
+    Ok(token)
 }
 
 fn relay_object_frame_with_chunk(

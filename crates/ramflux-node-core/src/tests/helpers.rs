@@ -475,6 +475,8 @@ pub(super) fn relay_chunk(chunk_id: &str, stored_at: u64, ttl: u64) -> RelayChun
         manifest_hash: "manifest_hash".to_owned(),
         chunk_index: 0,
         chunk_cipher_hash: "chunk_cipher_hash".to_owned(),
+        owner_signing_key_id: "owner_fixture_key".to_owned(),
+        owner_public_key: ramflux_crypto::fixture_public_key_base64url(),
         encrypted_chunk: b"encrypted chunk bytes".to_vec(),
         stored_at,
         expires_at: stored_at.saturating_add(ttl),

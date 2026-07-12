@@ -12,16 +12,56 @@ commercial-license = true
 [features]
 default = []
 itest-http = ["ramflux-node-core/itest-http"]
+# itest-only: opaque media (TURN) UDP relay listener. Never enabled in the
+# default/production relay binary — there is no production TurnMediaRelayToken
+# issuer, and the listener otherwise shares the object relay HMAC service key.
+# Enabled explicitly for realnet by deploy/scripts/run-realnet.sh so mvp_s52 /
+# mvp45 media tests exercise it; must not be pulled in via itest-http.
+itest-media-udp = []
+# itest-only: legacy v2 shared-HMAC object relay acceptance surface (mesh mTLS
+# object listener + shared object handler + HMAC service-key loader + the itest
+# HTTP object routes). Never in the default/production relay: v3 (Ed25519 issuer
+# trust) is the only production object data plane. Enabled explicitly for realnet
+# LocalMint/v2 compatibility by deploy/scripts/run-realnet.sh; must NOT be pulled
+# in via itest-http (itest-http alone serves only health/capture, no object/key).
+itest-object-v2 = []
+# T23-A2b2b: the offline-root-signed provider-keyring trust path (versioned
+# provider_epoch envelope) is now the DEFAULT/production relay trust path. The
+# legacy single-pinned-key path (SignedFederatedIssuerTrustSnapshot v3 +
+# RAMFLUX_FEDERATION_PROVIDER_PUBLIC_KEY loader) is gated behind this default-off
+# compatibility feature. The two startup wirings are mutually exclusive at compile
+# time — keyring under `not(feature = "itest-provider-single-key")`, single-key under
+# `feature = "itest-provider-single-key")` — so one running instance never enables
+# both, and the default/production binary contains zero single-key markers.
+itest-provider-single-key = ["ramflux-node-core/itest-provider-single-key"]
+# T24-A3 itest-only: a post-commit QUIC fault seam in the client-facing QUIC
+# connection loop. AFTER a client object request's business commit succeeds and
+# BEFORE the app response is written, it can (fail-once per process, keyed by
+# RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT=put|ack|tombstone|put-restart-hold) close
+# the connection without responding (or hold pre-write for a between-attempt relay
+# restart), so mvp_s62 can exercise ambiguous-commit retry + idempotent recovery.
+# Also enables a non-sensitive request fingerprint capture (path/method, blake3 of
+# the canonical body, connection id, request seq, action, status) for reuse/stale
+# proofs. Never in the default/production relay: the env string, capture field
+# names, drop/hold branches and dedicated markers are all absent. Enabled explicitly
+# for realnet by deploy/scripts/run-realnet.sh; must NOT be pulled in via itest-http
+# / itest-object-v2 / itest-media-udp.
+itest-quic-fault = []
 
 [dependencies]
 anyhow = { workspace = true }
+quinn = { workspace = true }
 ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+ramflux-crypto = { workspace = true }
 
 [lints]
 workspace = true
