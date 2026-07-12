@@ -8,6 +8,9 @@ repository = "https://github.com/ramflux/ramflux-transport"
 
 [features]
 default = []
+# PERF-D1-1: default-off transport QUIC capacity microbench. Gates the relay_quic_bench example
+# only; never enters the default/release dependency graph or any normal artifact (marker=0).
+perf-bench = []
 compio-gateway = [
     "dep:compio",
     "dep:compio-buf",
@@ -76,3 +79,7 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[[example]]
+name = "relay_quic_bench"
+required-features = ["perf-bench"]
