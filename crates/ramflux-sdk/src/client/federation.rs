@@ -72,8 +72,8 @@ impl RamfluxClient {
             route_decision = "remote_federation_forward",
             "submitting federated direct message to source node federation surface"
         );
+        self.persist_dm_session(&conversation_id, &envelope.envelope_id, "send", &session)?;
         let response = post_federated_envelope_forward(federation, envelope)?;
-        self.persist_dm_session(&conversation_id, &message.envelope_id, "send", &session)?;
         Ok(response)
     }
 

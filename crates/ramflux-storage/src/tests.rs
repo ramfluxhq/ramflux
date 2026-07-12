@@ -786,6 +786,49 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
 }
 
 #[test]
+fn client_db_reopen_preserves_full_delete_journal_durability() -> Result<(), StorageError> {
+    let (root, db) = test_db("client-db-durability-pragmas")?;
+    let journal_mode: String =
+        db.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    let synchronous: i64 = db.connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+    assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
+    assert_eq!(synchronous, 2, "SQLite FULL synchronous must guard fsync-before-ACK");
+    drop(db);
+
+    let index = AccountIndex::open(&root)?;
+    let key = AccountDbKey::derive("acct", b"storage-test-secret");
+    let reopened = AccountDb::open(&index, "acct", &key)?;
+    let reopened_journal: String =
+        reopened.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    let reopened_synchronous: i64 =
+        reopened.connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+    assert_eq!(reopened_journal.to_ascii_lowercase(), "delete");
+    assert_eq!(reopened_synchronous, 2);
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
+fn deterministic_event_replay_is_idempotent_but_rejects_changed_body() -> Result<(), StorageError> {
+    let (root, db) = test_db("deterministic-event-replay")?;
+    db.append_event("event_fixed", "dm.ratchet_session", b"snapshot-a")?;
+    drop(db);
+
+    let index = AccountIndex::open(&root)?;
+    let key = AccountDbKey::derive("acct", b"storage-test-secret");
+    let reopened = AccountDb::open(&index, "acct", &key)?;
+    reopened.append_event("event_fixed", "dm.ratchet_session", b"snapshot-a")?;
+    assert_eq!(reopened.event_body("event_fixed")?, Some(b"snapshot-a".to_vec()));
+    assert!(matches!(
+        reopened.append_event("event_fixed", "dm.ratchet_session", b"snapshot-b"),
+        Err(StorageError::EventIdConflict(event_id)) if event_id == "event_fixed"
+    ));
+    assert_eq!(reopened.event_body("event_fixed")?, Some(b"snapshot-a".to_vec()));
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
 fn group_pending_undecrypted_is_bounded_per_group() -> Result<(), StorageError> {
     let (root, db) = test_db("pending-bounded")?;
     let inserted =

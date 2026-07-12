@@ -116,8 +116,12 @@ impl RamfluxClient {
         )?;
         let envelope =
             gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
+        // Persist the advanced send ratchet before the remote submit. A process death after the
+        // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
+        // same message key for a later message. If submit fails, skipping one send key is safe;
+        // reusing it is not.
+        self.persist_dm_session(&conversation_id, &envelope.envelope_id, "send", &session)?;
         let entry = engine.submit_envelope(envelope).await?;
-        self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "send", &session)?;
         Ok(entry)
     }
 
@@ -204,8 +208,9 @@ impl RamfluxClient {
             x3dh,
             ciphertext,
         })?;
-        let entry = self.submit_direct_message_via_gateway(engine, message).await?;
-        self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "send", &session)?;
+        let gateway_envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
+        self.persist_dm_session(&conversation_id, &gateway_envelope.envelope_id, "send", &session)?;
+        let entry = engine.submit_envelope(gateway_envelope).await?;
         Ok(entry)
     }
 
@@ -715,6 +720,148 @@ mod tests {
         assert_eq!(evidence.plaintext_excerpt, "selected report text");
         assert_eq!(evidence.franking_tag, "node-tag");
         assert_eq!(evidence.franking_timestamp, 1_760_001_234_567);
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    // ---- T24-B1a: client DB crash-resume invariants (evidence-first) ----
+
+    fn reopen_client(root: &std::path::Path) -> Result<RamfluxClient, SdkError> {
+        let mut client = RamfluxClient::new();
+        client.open_account_index(root)?;
+        client.unlock_account("acct", b"test-secret")?;
+        Ok(client)
+    }
+
+    fn seed_session(tag: u8) -> Result<ramflux_crypto::DmSession, SdkError> {
+        Ok(ramflux_crypto::DmSession::initiator([tag; 32], [2; 32], [3; 32], [4; 32])?)
+    }
+
+    // B1b conflict proof: replaying the same deterministic event id with a DIFFERENT ratchet
+    // snapshot must fail closed and preserve the original event. Byte-identical replay is covered
+    // by the storage-level idempotency regression.
+    #[test]
+    fn dm_session_reappend_with_changed_snapshot_is_rejected_fail_closed() -> Result<(), SdkError> {
+        let (root, client) = test_client("b1a-event-replay")?;
+        let first = seed_session(1)?;
+        client.persist_dm_session("conv_x", "env_1", "recv", &first)?;
+        assert!(client.recv_session_checkpoint_at("conv_x", "env_1")?);
+
+        // Resume re-persists the same coordinates (a different in-memory session value, same id).
+        let replay = seed_session(9)?;
+        let redo = client.persist_dm_session("conv_x", "env_1", "recv", &replay);
+        assert!(
+            matches!(
+                redo,
+                Err(SdkError::Storage(ramflux_storage::StorageError::EventIdConflict(ref event_id)))
+                    if event_id == &dm_session_event_id("conv_x", "recv", "env_1")
+            ),
+            "same event id with a changed snapshot must fail closed; got {redo:?}"
+        );
+
+        // The originally-committed row must be unchanged (checkpoint still points at env_1).
+        assert!(client.recv_session_checkpoint_at("conv_x", "env_1")?);
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    // B1a DM-reopen proof: a persisted recv session snapshot + gateway receive cursor survive a
+    // full client drop/reopen keyed by the same account secret, and the recovery decision honors
+    // the recv-session checkpoint (not projection presence).
+    #[test]
+    fn dm_recv_session_and_cursor_survive_client_reopen() -> Result<(), SdkError> {
+        let (root, client) = test_client("b1a-dm-reopen")?;
+        let mut session = seed_session(1)?;
+        // advance the receive ratchet a few steps so a non-zero counter must round-trip
+        session.receive_counter = 7;
+        client.persist_dm_session("conv_r", "env_r", "recv", &session)?;
+        client.persist_gateway_receive_cursor("target_r", 42)?;
+        drop(client);
+
+        let restored = reopen_client(&root)?;
+        let loaded = restored.load_dm_session("conv_r", "recv")?;
+        assert_eq!(loaded.receive_counter, 7, "recv ratchet counter must persist across reopen");
+        assert_eq!(loaded.session_id, session.session_id, "session identity must persist");
+        assert_eq!(
+            restored.gateway_receive_cursor("target_r")?,
+            42,
+            "gateway receive cursor must persist across reopen"
+        );
+
+        // Recovery-decision boundary against the durable checkpoint.
+        assert!(restored.recv_session_checkpoint_at("conv_r", "env_r")?);
+        assert!(!restored.recv_session_checkpoint_at("conv_r", "env_other")?);
+        assert_eq!(
+            crate::dm::receive_terminal_recovery(true, true),
+            crate::dm::ReceiveTerminalDecision::CursorCatchUp
+        );
+        assert_eq!(
+            crate::dm::receive_terminal_recovery(true, false),
+            crate::dm::ReceiveTerminalDecision::Decrypt,
+            "projection present but checkpoint not current must still re-decrypt"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    // B1a send-window mechanism: a client reopen reloads the PERSISTED send counter, not an
+    // in-flight advance that was never persisted. Production send paths now persist the advance
+    // before remote submit; this test keeps the underlying crash invariant pinned.
+    #[test]
+    fn send_session_reopen_reloads_persisted_counter_not_inflight_advance() -> Result<(), SdkError>
+    {
+        let (root, client) = test_client("b1a-send-window")?;
+        let mut session = seed_session(1)?;
+        let _ = session.encrypt(b"m0", b"ad")?; // send_counter 0 -> 1
+        let persisted_counter = session.send_counter;
+        client.persist_dm_session("conv_s", "env_s0", "send", &session)?;
+        // "submitted but not persisted" next message advances the in-memory counter only.
+        let _ = session.encrypt(b"m1", b"ad")?; // -> 2, never persisted
+        assert_eq!(session.send_counter, persisted_counter + 1);
+        drop(client);
+
+        let restored = reopen_client(&root)?;
+        let reloaded = restored.load_dm_session("conv_s", "send")?;
+        assert_eq!(
+            reloaded.send_counter, persisted_counter,
+            "reopen must reload the persisted counter, not the un-persisted in-flight advance"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    // B1a send-window mechanism (crypto layer): encryption at a given counter is deterministic
+    // — the nonce is counter-derived, not fresh-random. Therefore reloading an old counter (part 1)
+    // and re-encrypting a DIFFERENT plaintext reuses the SAME nonce, an AEAD key/nonce-reuse hazard.
+    // This is the mechanism; the production send path cannot be driven end-to-end without a live
+    // gateway (see report §Stop / B1b seam recommendation).
+    #[test]
+    fn dm_encrypt_at_reloaded_counter_reuses_nonce_across_different_plaintext()
+    -> Result<(), SdkError> {
+        let (root, client) = test_client("b1a-nonce-reuse")?;
+        let session = seed_session(1)?; // send_counter 0
+        client.persist_dm_session("conv_n", "env_n0", "send", &session)?;
+        drop(client);
+
+        // Two independent reloads of the SAME persisted counter re-encrypt different plaintexts.
+        let restored = reopen_client(&root)?;
+        let mut a = restored.load_dm_session("conv_n", "send")?;
+        let mut b = restored.load_dm_session("conv_n", "send")?;
+        assert_eq!(a.send_counter, b.send_counter, "both reloads start at the same counter");
+        let ca = a.encrypt(b"first-plaintext", b"ad")?;
+        let cb = b.encrypt(b"second-DIFFERENT-plaintext", b"ad")?;
+
+        assert_eq!(ca.counter, cb.counter, "both encrypt at the reloaded counter");
+        assert_eq!(
+            ca.nonce, cb.nonce,
+            "nonce is counter-derived, so an unpersisted/reloaded counter would reuse \
+             the nonce across different plaintext (AEAD catastrophe)"
+        );
+        assert_ne!(ca.ciphertext, cb.ciphertext, "different plaintext under the reused nonce");
 
         let _ = std::fs::remove_dir_all(root);
         Ok(())
