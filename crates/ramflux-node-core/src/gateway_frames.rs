@@ -4,7 +4,8 @@
 #![allow(unused_imports)]
 
 use crate::{
-    IdentityRegisterRequest, IdentityRegistrationResponse, InboxCursorResponse, InboxEntry,
+    GatewayRelayTokenV3IssueRequest, GatewayRelayTokenV3IssueResponse, IdentityRegisterRequest,
+    IdentityRegistrationResponse, InboxCursorResponse, InboxEntry,
     ItestMvp10OwnDeviceFanoutResponse, PrekeyPublishRequest, PrekeyResponse,
     RelayTokenIssueRequest, RelayTokenIssueResponse,
 };
@@ -177,6 +178,7 @@ pub enum GatewayClientFrame {
     PrekeyPublish { request: PrekeyPublishRequest },
     PrekeyFetch { device_id: String },
     RelayTokenIssue { request: RelayTokenIssueRequest },
+    RelayTokenV3Issue { request: Box<GatewayRelayTokenV3IssueRequest> },
     Ack { ack: ramflux_protocol::Ack },
     Cursor { target_delivery_id: String },
     Resume { resume: GatewayResumeFrame },
@@ -195,6 +197,7 @@ pub enum GatewayServerFrame {
     PrekeyPublished { response: PrekeyResponse },
     Prekey { response: PrekeyResponse },
     RelayTokenIssued { response: RelayTokenIssueResponse },
+    RelayTokenV3Issued { response: Box<GatewayRelayTokenV3IssueResponse> },
     Ack { cursor: InboxCursorResponse },
     Cursor { cursor: Option<InboxCursorResponse> },
     Resume { entries: Vec<InboxEntry> },

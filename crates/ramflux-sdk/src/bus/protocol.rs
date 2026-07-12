@@ -237,6 +237,10 @@ pub struct LocalBusMessageAttachmentInput {
     pub plaintext_base64: String,
     pub chunk_size: usize,
     pub relay_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_home_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_audience_node_id: Option<String>,
     #[serde(default)]
     pub relay_service_key_base64: Option<String>,
 }
@@ -597,6 +601,10 @@ pub struct LocalBusObjectShareRequest {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusObjectDeleteRequest {
     pub object_id: String,
+    #[serde(default)]
+    pub relay_endpoint: Option<String>,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

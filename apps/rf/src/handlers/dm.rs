@@ -134,6 +134,8 @@ fn rf_dm_attachments(send: &DmSend) -> Result<Vec<LocalBusMessageAttachmentInput
                 plaintext_base64: ramflux_protocol::encode_base64url(&bytes),
                 chunk_size: send.attachment_chunk_size,
                 relay_endpoint: relay_endpoint.clone(),
+                owner_home_node_id: None,
+                relay_audience_node_id: None,
                 relay_service_key_base64: None,
             })
         })

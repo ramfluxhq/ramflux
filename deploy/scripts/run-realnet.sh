@@ -66,46 +66,82 @@ fi
 WORKSPACE="$WORKSPACE_DIR"
 BUILD_PROFILE_FLAG=""
 BUILD_TARGET_DIR="debug"
+BUILD_TARGET_FLAG=""
+BUILD_WITH_ZIG=0
 BUILD_PROFILE_LABEL="debug"
 if [ "${RAMFLUX_PERF_RELEASE:-0}" = "1" ]; then
   BUILD_PROFILE_FLAG="--release"
   BUILD_TARGET_DIR="release"
   BUILD_PROFILE_LABEL="release"
 fi
+HOST_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+case "$HOST_TRIPLE" in
+  *-unknown-linux-*) ;;
+  *)
+    if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+      echo "ERROR: host target $HOST_TRIPLE cannot stage Linux containers; install cargo-zigbuild" >&2
+      exit 2
+    fi
+    if [ "$(uname -m)" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then
+      LINUX_TARGET="aarch64-unknown-linux-gnu"
+    else
+      LINUX_TARGET="x86_64-unknown-linux-gnu"
+    fi
+    BUILD_WITH_ZIG=1
+    BUILD_TARGET_FLAG="--target $LINUX_TARGET"
+    BUILD_TARGET_DIR="$LINUX_TARGET/$BUILD_TARGET_DIR"
+    printf '>> host pre-build: cross-compiling Linux binaries with cargo-zigbuild target=%s\n' "$LINUX_TARGET"
+    ;;
+esac
+build_rust() {
+  if [ "$BUILD_WITH_ZIG" -eq 1 ]; then
+    cargo $TC zigbuild "$@"
+  else
+    cargo $TC build "$@"
+  fi
+}
 printf '>> host pre-build: compiling 7 node binaries (%s; incremental host cargo cache)\n' "$BUILD_PROFILE_LABEL"
 
 DEFAULT_BIN_ARGS=""
 if [ "${RAMFLUX_GATEWAY_COMPIO:-0}" = "1" ]; then
   printf '>> host pre-build: compiling ramflux-gateway with compio-gateway feature\n'
-  ( cd "$WORKSPACE" && cargo $TC build --locked $BUILD_PROFILE_FLAG \
+  ( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
       --features itest-http,compio-gateway --bin ramflux-gateway )
 else
   DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-gateway"
 fi
 if [ "${RAMFLUX_ROUTER_COMPIO:-0}" = "1" ]; then
   printf '>> host pre-build: compiling ramflux-router with compio-mesh feature\n'
-  ( cd "$WORKSPACE" && cargo $TC build --locked $BUILD_PROFILE_FLAG \
+  ( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
       --features itest-http,compio-mesh --bin ramflux-router )
 else
   DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-router"
 fi
 if [ "${RAMFLUX_FEDERATION_COMPIO:-0}" = "1" ]; then
   printf '>> host pre-build: compiling ramflux-federation with compio-mesh feature\n'
-  ( cd "$WORKSPACE" && cargo $TC build --locked $BUILD_PROFILE_FLAG \
+  ( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
       --features itest-http,compio-mesh --bin ramflux-federation )
 else
   DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-federation"
 fi
 if [ "${RAMFLUX_NOTIFY_COMPIO:-0}" = "1" ]; then
   printf '>> host pre-build: compiling ramflux-notify with compio-notify feature\n'
-  ( cd "$WORKSPACE" && cargo $TC build --locked $BUILD_PROFILE_FLAG \
+  ( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
       --features itest-http,compio-notify --bin ramflux-notify )
 else
   DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-notify"
 fi
-DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-relay --bin ramflux-signaling --bin ramflux-retention"
+# relay is built on its own so the itest-only surfaces can be enabled explicitly
+# (itest-media-udp / itest-object-v2 / itest-quic-fault are all default-off and must
+# not be pulled via itest-http). The T24-A3 post-commit QUIC fault seam
+# (itest-quic-fault) stays inert unless a test sets RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT,
+# so enabling it here does not affect any other realnet test.
+printf '>> host pre-build: compiling ramflux-relay with itest media + v2-object + quic-fault features\n'
+( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
+    --features itest-http,itest-media-udp,itest-object-v2,itest-quic-fault --bin ramflux-relay )
+DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-signaling --bin ramflux-retention"
 if [ -n "$DEFAULT_BIN_ARGS" ]; then
-  ( cd "$WORKSPACE" && cargo $TC build --locked $BUILD_PROFILE_FLAG --features itest-http \
+  ( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG --features itest-http \
       $DEFAULT_BIN_ARGS )
 fi
 mkdir -p "$DEPLOY_DIR/itest-bin"
@@ -143,7 +179,32 @@ $RT image prune -f >/dev/null 2>&1 || true
 REALNET_TIMEOUT="${RAMFLUX_REALNET_TIMEOUT:-600}"
 printf '>> realnet itest: filter=%s  (timeout=%ss; builds images, runs, tears down)\n' "$FILTER" "$REALNET_TIMEOUT"
 cd "$ITEST_DIR"
-if RAMFLUX_ITEST_REALNET=1 timeout "$REALNET_TIMEOUT" cargo $TC test --features realnet "$FILTER" -- --nocapture --test-threads=1; then
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$REALNET_TIMEOUT" "$@"
+    return $?
+  fi
+  # macOS does not ship GNU coreutils timeout. Keep the same bounded behavior without
+  # adding a host package prerequisite; the child receives TERM before the hard kill.
+  "$@" &
+  child_pid=$!
+  (
+    sleep "$REALNET_TIMEOUT"
+    kill -TERM "$child_pid" 2>/dev/null || exit 0
+    sleep 5
+    kill -KILL "$child_pid" 2>/dev/null || true
+  ) &
+  timer_pid=$!
+  if wait "$child_pid"; then
+    child_rc=0
+  else
+    child_rc=$?
+  fi
+  kill "$timer_pid" 2>/dev/null || true
+  wait "$timer_pid" 2>/dev/null || true
+  return "$child_rc"
+}
+if RAMFLUX_ITEST_REALNET=1 run_with_timeout cargo $TC test --features realnet "$FILTER" -- --nocapture --test-threads=1; then
   printf '>> realnet itest PASSED (filter=%s)\n' "$FILTER"
 else
   rc=$?

@@ -126,12 +126,14 @@ impl RamfluxClient {
     pub async fn send_plaintext_direct_message_with_attachments_via_gateway(
         &mut self,
         engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
         message: GatewayDirectMessage,
         plaintext: &[u8],
         attachments: &[LocalBusMessageAttachmentInput],
     ) -> Result<GatewayInboxEntry, SdkError> {
         self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
             engine,
+            pool,
             message,
             plaintext,
             attachments,
@@ -140,9 +142,11 @@ impl RamfluxClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_plaintext_direct_message_with_attachments_via_gateway_inner(
         &mut self,
         engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
         message: GatewayDirectMessage,
         plaintext: &[u8],
         attachments: &[LocalBusMessageAttachmentInput],
@@ -157,6 +161,7 @@ impl RamfluxClient {
             refs.push(
                 self.dm_attachment_ref_for_recipient(
                     engine,
+                    pool,
                     &message,
                     attachment,
                     &attachment_plaintext,
@@ -222,9 +227,12 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when resume fails, the opaque delivery cannot be appended locally, or SDK
     /// DM decryption fails.
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn receive_gateway_plaintext_deliveries(
         &mut self,
         engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
         limit: usize,
         conversation_id: &str,
         auto_fetch_attachments: bool,
@@ -237,9 +245,26 @@ impl RamfluxClient {
         let mut plaintext = Vec::new();
         for entry in entries {
             self.append_gateway_delivery(&entry)?;
-            if self.plaintext_projection_delivery(conversation_id, &entry)?.is_some() {
-                self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-                continue;
+            // T21-A2a / CTRL-028: the recv session checkpoint — not the plaintext projection — is
+            // the authoritative "this entry is committed" signal. Only when the persisted recv
+            // session already covers this envelope do we know the ratchet advanced and every side
+            // effect ran; then a cursor that lagged (crash between session commit and cursor commit)
+            // is safely caught up. A present projection with an uncommitted recv session (crash
+            // between projection write and session commit) must be re-decrypted so the ratchet
+            // actually advances; the idempotent side effects below converge on that retry.
+            let projection_present =
+                self.plaintext_projection_delivery(conversation_id, &entry)?.is_some();
+            let session_checkpoint_current =
+                self.recv_session_checkpoint_at(conversation_id, &entry.envelope.envelope_id)?;
+            match receive_terminal_recovery(projection_present, session_checkpoint_current) {
+                ReceiveTerminalDecision::CursorCatchUp => {
+                    self.persist_gateway_receive_cursor(
+                        engine.target_delivery_id(),
+                        entry.inbox_seq,
+                    )?;
+                    continue;
+                }
+                ReceiveTerminalDecision::Decrypt => {}
             }
             let ciphertext_bytes = ramflux_protocol::decode_base64url(
                 &entry.envelope.encrypted_payload,
@@ -253,17 +278,23 @@ impl RamfluxClient {
                 dm_associated_data(conversation_id),
             )?;
             let body = decrypted.plaintext.clone();
-            self.persist_dm_session(
-                conversation_id,
-                &entry.envelope.envelope_id,
-                "recv",
-                &session,
-            )?;
+            // T21-A2a: the advanced recv session (ratchet) is NOT persisted here. It is committed
+            // only once this inbox entry reaches its success terminal state, immediately before the
+            // receive cursor advances. If any downstream step fails, the local `session` is dropped
+            // so the persisted ratchet snapshot and cursor stay unchanged and the same ciphertext
+            // can be re-decrypted on a later `dm read`.
             self.apply_contact_event_plaintext(&body)?;
             if self
                 .apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id)?
                 .is_some()
             {
+                // Receipt applied: commit the advanced recv ratchet, then the cursor.
+                self.persist_dm_session(
+                    conversation_id,
+                    &entry.envelope.envelope_id,
+                    "recv",
+                    &session,
+                )?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
             }
@@ -276,6 +307,13 @@ impl RamfluxClient {
                     &entry.envelope.source_principal_id,
                     &reason,
                     now_unix_timestamp(),
+                )?;
+                // Rejection recorded: commit the advanced recv ratchet, then the cursor.
+                self.persist_dm_session(
+                    conversation_id,
+                    &entry.envelope.envelope_id,
+                    "recv",
+                    &session,
                 )?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
@@ -293,6 +331,7 @@ impl RamfluxClient {
                     attachments.push(
                         self.import_dm_attachment_from_relay_via_gateway(
                             engine,
+                            pool,
                             attachment,
                             relay_service_key_base64.clone(),
                         )
@@ -305,6 +344,16 @@ impl RamfluxClient {
                 &entry,
                 &projection_body,
                 metadata.as_ref(),
+            )?;
+            // Every attachment was imported, ACKed, and projected: only now do we commit the
+            // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above
+            // returns before this point, leaving the persisted ratchet snapshot and cursor intact so
+            // the same ciphertext can be re-decrypted and re-ACKed by a later `dm read`.
+            self.persist_dm_session(
+                conversation_id,
+                &entry.envelope.envelope_id,
+                "recv",
+                &session,
             )?;
             self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
             plaintext.push(GatewayPlaintextDelivery {

@@ -55,6 +55,8 @@ pub use bus::{
 pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
+#[cfg(feature = "itest-fingerprint")]
+pub use client::dm_session::RecvCommitFingerprint;
 pub use client::recovery::{
     SdkFinalizedRecovery, SdkGuardianAcceptMessage, SdkGuardianInviteMessage,
     SdkGuardianRecoveryShare, SdkPendingRecoveryState, SdkPendingRecoveryStatus,

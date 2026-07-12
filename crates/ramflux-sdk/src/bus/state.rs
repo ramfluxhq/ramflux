@@ -22,6 +22,14 @@ pub(crate) struct LocalBusSubscriber {
 pub(crate) struct LocalBusAccountState {
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
+    /// Per-account relay QUIC connection pool (T24-A2), shared via `Arc`. Lazily built on first
+    /// relay transfer and then owned by the account for its whole lifetime; each relay request
+    /// takes only an `Arc::clone` (never moving the instance out), so a cancelled or failing
+    /// request cannot leave the account without its pool. It persists across engine take/return and
+    /// gateway reconnect, is a distinct instance per account (no process-global pool, and it is
+    /// deliberately not stored inside the `GatewaySessionEngine`). `None` until first use; an rfd
+    /// restart cold-rebuilds it.
+    pub(crate) relay_quic_pool: Option<std::sync::Arc<ramflux_transport::RelayQuicPool>>,
     pub(crate) gateway_config: GatewaySessionConfig,
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
@@ -48,6 +56,7 @@ impl LocalBusAccountState {
         Self {
             client,
             engine: Some(engine),
+            relay_quic_pool: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
@@ -73,6 +82,7 @@ impl LocalBusAccountState {
         Self {
             client,
             engine: None,
+            relay_quic_pool: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
@@ -157,6 +167,31 @@ impl LocalBusAccountState {
         engine.target_delivery_id().clone_into(&mut self.target_delivery_id);
         self.engine = Some(engine);
     }
+
+    /// Returns a shared handle to the account's relay QUIC pool, installing it (with the current
+    /// safe functional defaults) on first use. The pool **instance lives on the account** for the
+    /// account's whole lifetime; callers hold only an `Arc::clone` for the duration of their
+    /// request, so a cancelled or failing request drops only the clone and can never leave the
+    /// account without its pool. This is genuine persistent per-account ownership — an `Arc`, not a
+    /// process-global, and it needs no lock across `.await`. Different accounts lazily build
+    /// distinct `Arc`s. On config-creation failure the account is left unchanged and a clear error
+    /// is returned.
+    pub(crate) fn relay_quic_pool(
+        &mut self,
+    ) -> Result<std::sync::Arc<ramflux_transport::RelayQuicPool>, SdkError> {
+        if let Some(pool) = self.relay_quic_pool.as_ref() {
+            return Ok(std::sync::Arc::clone(pool));
+        }
+        let config =
+            ramflux_transport::RelayQuicPoolConfig::functional_default().map_err(|error| {
+                SdkError::Transport(ramflux_transport::TransportError::Quic(format!(
+                    "relay QUIC pool config: {error}"
+                )))
+            })?;
+        let pool = std::sync::Arc::new(ramflux_transport::RelayQuicPool::new(config));
+        self.relay_quic_pool = Some(std::sync::Arc::clone(&pool));
+        Ok(pool)
+    }
 }
 pub(crate) struct LocalBusConnectionState {
     pub(crate) connection_id: u64,
@@ -230,5 +265,127 @@ impl LocalBusDaemonState {
         for connection_id in stale_connections {
             self.subscribers.remove(&connection_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod t24a2_pool_ownership_tests {
+    //! T24-A2 pool ownership: each account owns its own `RelayQuicPool` via `Arc` for its whole
+    //! lifetime (never a process-global). Requests hold only an `Arc::clone`, so a cancelled or
+    //! failing request drops only the clone and never the account's pool. The
+    //! engine-reconnect-keeps-pool property is structural — `take_live_engine`/`put_engine` only
+    //! touch `self.engine`, a distinct field from `self.relay_quic_pool` — and is additionally
+    //! exercised end-to-end by the s55/s56 realnet regression.
+    use super::LocalBusAccountState;
+    use crate::gateway::{GatewayQuicEndpointConfig, GatewaySessionConfig};
+    use crate::prelude::RamfluxClient;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn test_account() -> LocalBusAccountState {
+        let gateway = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+            bind_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            gateway_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            server_name: "ramflux-gateway".to_owned(),
+            ca_cert: PathBuf::from("ca.pem"),
+            principal_id: "principal_pool_test".to_owned(),
+            device_id: "device_pool_test".to_owned(),
+            target_delivery_id: "target_pool_test".to_owned(),
+            prekey_http_url: None,
+        });
+        LocalBusAccountState::disconnected(
+            RamfluxClient::new(),
+            gateway,
+            "principal_pool_test".to_owned(),
+        )
+    }
+
+    #[test]
+    fn accessor_installs_once_and_returns_the_same_arc_per_account() -> Result<(), crate::SdkError>
+    {
+        let mut account = test_account();
+        assert!(account.relay_quic_pool.is_none(), "no pool until first relay transfer");
+        let first = account.relay_quic_pool()?;
+        assert!(
+            account.relay_quic_pool.is_some(),
+            "pool is installed on the account, not moved out"
+        );
+        let second = account.relay_quic_pool()?;
+        assert!(Arc::ptr_eq(&first, &second), "same account returns the same pool instance");
+        Ok(())
+    }
+
+    #[test]
+    fn different_accounts_get_distinct_pool_instances() -> Result<(), crate::SdkError> {
+        let mut account_a = test_account();
+        let mut account_b = test_account();
+        let pool_a = account_a.relay_quic_pool()?;
+        let pool_b = account_b.relay_quic_pool()?;
+        assert!(!Arc::ptr_eq(&pool_a, &pool_b), "each account owns a distinct pool (no global)");
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_a_request_clone_leaves_the_account_pool_intact() -> Result<(), crate::SdkError> {
+        // Models a request (or an aborted future) that acquired the pool clone and then ended: the
+        // clone is dropped, but the account's own Arc must remain, so a later request sees the very
+        // same instance rather than a silent cold rebuild.
+        let mut account = test_account();
+        let original = account.relay_quic_pool()?;
+        {
+            let request_clone = account.relay_quic_pool()?;
+            // ... future cancelled / dropped here ...
+            drop(request_clone);
+        }
+        assert!(
+            account.relay_quic_pool.is_some(),
+            "account keeps its pool after a clone is dropped"
+        );
+        let after = account.relay_quic_pool()?;
+        assert!(Arc::ptr_eq(&original, &after), "no cold rebuild after a dropped request clone");
+        Ok(())
+    }
+
+    #[test]
+    fn account_retains_pool_across_simulated_pre_business_and_relay_errors()
+    -> Result<(), crate::SdkError> {
+        let mut account = test_account();
+        let original = account.relay_quic_pool()?;
+        // A pre-business validation error path: acquire the clone, then bail with an error before
+        // the relay send. The `?`-propagated early return drops only the clone.
+        let pre_business: Result<(), crate::SdkError> = (|| {
+            let _clone = account.relay_quic_pool()?;
+            Err(crate::SdkError::LocalBus("simulated pre-business rejection".to_owned()))
+        })();
+        assert!(pre_business.is_err());
+        // A relay error path: acquire the clone, then the relay attempt fails.
+        let relay_failure: Result<(), crate::SdkError> = (|| {
+            let _clone = account.relay_quic_pool()?;
+            Err(crate::SdkError::Transport(ramflux_transport::TransportError::Quic(
+                "simulated relay failure".to_owned(),
+            )))
+        })();
+        assert!(relay_failure.is_err());
+        // After both error paths the account still owns the original pool instance.
+        let after = account.relay_quic_pool()?;
+        assert!(
+            Arc::ptr_eq(&original, &after),
+            "pool survives pre-business and relay error paths (persistent ownership)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pool_is_dropped_with_its_account_no_global_leak() -> Result<(), crate::SdkError> {
+        for _index in 0..8 {
+            let mut account = test_account();
+            assert!(account.relay_quic_pool.is_none());
+            let _pool = account.relay_quic_pool()?;
+            assert!(account.relay_quic_pool.is_some());
+            drop(account);
+        }
+        assert!(test_account().relay_quic_pool.is_none(), "no global pool leaks across accounts");
+        Ok(())
     }
 }

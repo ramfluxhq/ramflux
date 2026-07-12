@@ -480,7 +480,7 @@ pub(crate) async fn dispatch_local_bus_request(
             dispatch_contact_bus_request(request, state).await
         }
         method if method.starts_with("device.") => {
-            dispatch_device_bus_request(request, state).await
+            Box::pin(dispatch_device_bus_request(request, state)).await
         }
         method if method.starts_with("group.") => {
             Box::pin(dispatch_group_bus_request(request, state)).await

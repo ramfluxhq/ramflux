@@ -291,6 +291,45 @@ pub struct GatewayRelayTokenIssueResponse {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayRelayTokenV3IssueRequest {
+    pub(crate) signed_request: ramflux_protocol::SignedRequest,
+    pub(crate) body: SdkRelayTokenV3IssueBody,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct SdkRelayTokenV3IssueBody {
+    pub(crate) requester_device_id: String,
+    pub(crate) requester_device_hash: String,
+    pub(crate) requester_public_key: String,
+    pub(crate) requester_device_epoch: u64,
+    pub(crate) owner_signing_key_id: String,
+    pub(crate) owner_public_key: String,
+    pub(crate) owner_home_node_id: String,
+    pub(crate) owner_principal_id: String,
+    pub(crate) owner_device_epoch: u64,
+    pub(crate) issuer_node_id: String,
+    pub(crate) gateway_instance_id: String,
+    pub(crate) audience_node_id: String,
+    pub(crate) relay_instance_id: Option<String>,
+    pub(crate) object_id: String,
+    pub(crate) manifest_hash: String,
+    pub(crate) chunk_id: String,
+    pub(crate) capabilities: Vec<ramflux_protocol::ObjectRelayCapability>,
+    pub(crate) authorization_kind: ramflux_protocol::RelayAuthorizationKind,
+    pub(crate) authorization_binding_hash: String,
+    pub(crate) delete_after_ack: bool,
+    pub(crate) issued_at: u64,
+    pub(crate) expires_at: u64,
+    pub(crate) nonce: String,
+    pub(crate) issuer_certificate: ramflux_protocol::GatewayIssuerCertificate,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayRelayTokenV3IssueResponse {
+    pub(crate) relay_token: ramflux_protocol::RelayTokenV3,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct GatewaySessionEstablishedFrame {
     pub session_id: String,
     pub gateway_id: String,
@@ -310,6 +349,7 @@ pub enum GatewayClientFrame {
     PrekeyPublish { request: SdkPrekeyPublishRequest },
     PrekeyFetch { device_id: String },
     RelayTokenIssue { request: GatewayRelayTokenIssueRequest },
+    RelayTokenV3Issue { request: Box<GatewayRelayTokenV3IssueRequest> },
     Ack { ack: ramflux_protocol::Ack },
     Cursor { target_delivery_id: String },
     Resume { resume: GatewayResumeFrame },
@@ -328,6 +368,7 @@ pub enum GatewayServerFrame {
     PrekeyPublished { response: SdkPrekeyResponse },
     Prekey { response: SdkPrekeyResponse },
     RelayTokenIssued { response: GatewayRelayTokenIssueResponse },
+    RelayTokenV3Issued { response: Box<GatewayRelayTokenV3IssueResponse> },
     Ack { cursor: GatewayCursor },
     Cursor { cursor: Option<GatewayCursor> },
     Resume { entries: Vec<GatewayInboxEntry> },

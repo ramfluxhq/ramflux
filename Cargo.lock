@@ -2447,9 +2447,12 @@ name = "ramflux-relay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "quinn",
+ "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
  "ramflux-transport",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -2572,6 +2575,7 @@ name = "ramflux-transport"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "blake3",
  "bytes",
  "compio",
  "compio-buf",
@@ -2585,6 +2589,7 @@ dependencies = [
  "quinn",
  "ramflux-core",
  "ramflux-protocol",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-pemfile",

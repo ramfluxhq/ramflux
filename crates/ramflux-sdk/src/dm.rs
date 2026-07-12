@@ -95,6 +95,16 @@ pub(crate) struct SdkDmAttachmentRef {
     pub(crate) chunk_size: usize,
     pub(crate) total_chunks: u32,
     pub(crate) relay_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_home_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) relay_audience_node_id: Option<String>,
+    #[serde(default)]
+    pub(crate) owner_principal_id: String,
+    #[serde(default)]
+    pub(crate) owner_device_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) access_grant: Option<ramflux_protocol::ObjectAccessGrant>,
     pub(crate) key_slot: SdkObjectKeySlot,
 }
 
@@ -153,6 +163,21 @@ pub(crate) enum SdkReceiptEventBody {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn receive_terminal_recovery_gates_on_session_checkpoint_not_projection() {
+        use ReceiveTerminalDecision::{CursorCatchUp, Decrypt};
+        // Session checkpoint NOT current -> decrypt, regardless of projection presence. The
+        // (projection present, session absent) case is the exact CTRL-028 torn-state window: a
+        // projection written before a crashed session commit must be re-decrypted, never skipped.
+        assert_eq!(receive_terminal_recovery(false, false), Decrypt);
+        assert_eq!(receive_terminal_recovery(true, false), Decrypt);
+        // Session checkpoint current -> cursor catch-up, regardless of projection presence.
+        // (projection absent, session current) is a committed receipt/rejection entry with no
+        // projection; both still catch the cursor up without re-decrypting.
+        assert_eq!(receive_terminal_recovery(false, true), CursorCatchUp);
+        assert_eq!(receive_terminal_recovery(true, true), CursorCatchUp);
+    }
 
     #[test]
     fn receipt_event_body_uses_explicit_private_read_variant() -> Result<(), serde_json::Error> {
@@ -296,6 +321,49 @@ pub(crate) fn gateway_receive_cursor_checkpoint_name(target_delivery_id: &str) -
 
 pub(crate) fn dm_session_checkpoint_name(conversation_id: &str, direction: &str) -> String {
     format!("dm_session:{conversation_id}:{direction}")
+}
+
+/// Durable event id that a persisted DM session snapshot lands on. The recv-direction checkpoint
+/// points at this id once the session has been committed for `envelope_id`, which is the
+/// authoritative "this inbox entry is committed" signal used by terminal recovery.
+pub(crate) fn dm_session_event_id(
+    conversation_id: &str,
+    direction: &str,
+    envelope_id: &str,
+) -> String {
+    format!("dm.session:{conversation_id}:{direction}:{envelope_id}")
+}
+
+/// Terminal-recovery decision for a gateway inbox entry whose receive cursor has not yet advanced.
+/// T21-A2a / CTRL-028: the authoritative "this entry is committed" signal is the recv session
+/// checkpoint, never the plaintext projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiveTerminalDecision {
+    /// The recv session snapshot already covers this envelope, so the ratchet advanced and every
+    /// side effect ran; a cursor that lagged (crash between session commit and cursor commit) is
+    /// simply caught up without re-decrypting.
+    CursorCatchUp,
+    /// The recv session has not been committed for this envelope, so the entry must be
+    /// (re-)decrypted. Idempotent side effects (`append_plaintext_projection_once`, receipt,
+    /// rejection, contact) converge if a partial projection was already written before a crash.
+    Decrypt,
+}
+
+/// Pure terminal-recovery rule. The decision depends solely on whether the recv session checkpoint
+/// already covers the current envelope. A present projection is deliberately *not* a gate:
+/// receipt/rejection entries commit a session with no projection, and a projection written before a
+/// crashed session commit must be re-decrypted — not treated as complete — so the ratchet actually
+/// advances. Treating projection presence as "done" was the CTRL-028 torn-state window this fixes.
+pub(crate) fn receive_terminal_recovery(
+    projection_present: bool,
+    session_checkpoint_current: bool,
+) -> ReceiveTerminalDecision {
+    let _ = projection_present;
+    if session_checkpoint_current {
+        ReceiveTerminalDecision::CursorCatchUp
+    } else {
+        ReceiveTerminalDecision::Decrypt
+    }
 }
 
 pub(crate) fn dm_attachment_slot_conversation_id(

@@ -122,11 +122,15 @@ async fn dispatch_message_submit_request(
             )
             .await?;
             require_message_submit_friend_link_accepted(account, &recipient)?;
+            // Acquire the pool clone only after the (pool-independent) recipient/friend pre-checks
+            // pass; the account keeps its own Arc regardless of how this request ends.
+            let pool = account.relay_quic_pool()?;
             let message = body.clone().into_gateway_message_with_body(Vec::new());
             let result = account
                 .client
                 .send_plaintext_direct_message_with_attachments_via_gateway(
                     &mut engine,
+                    &pool,
                     message,
                     &plaintext,
                     &body.attachments,
@@ -551,12 +555,14 @@ pub(crate) async fn dispatch_message_receive_request(
     let body: LocalBusMessageReceiveRequest = serde_json::from_value(request.body.clone())?;
     let account = local_bus_account_mut(state, account_id)?;
     let mut engine = account.take_live_engine().await?;
+    let pool = account.relay_quic_pool()?;
     let receive_result = async {
         let plaintext = if let Some(conversation_id) = body.conversation_id.as_deref() {
             account
                 .client
                 .receive_gateway_plaintext_deliveries(
                     &mut engine,
+                    &pool,
                     body.limit,
                     conversation_id,
                     body.auto_fetch_attachments,

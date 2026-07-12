@@ -31,26 +31,15 @@ pub(crate) async fn dispatch_object_bus_request(
             let object = account.client.put_encrypted_object(&body.object_id, &plaintext)?;
             let chunks = object_chunks(&object, body.chunk_size);
             let transfer = if let Some(options) = relay_options.as_ref() {
-                if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
-                    Some(account.client.upload_object_to_relay(
+                Some(
+                    dispatch_object_upload_to_relay(
+                        account,
                         &object.object_id,
                         body.chunk_size,
                         options,
-                    )?)
-                } else {
-                    let mut engine = account.take_live_engine().await?;
-                    let result = account
-                        .client
-                        .upload_object_to_relay_via_gateway(
-                            &mut engine,
-                            &object.object_id,
-                            body.chunk_size,
-                            options,
-                        )
-                        .await;
-                    account.put_engine(engine);
-                    Some(result?)
-                }
+                    )
+                    .await?,
+                )
             } else {
                 None
             };
@@ -70,26 +59,13 @@ pub(crate) async fn dispatch_object_bus_request(
                 body.relay_interrupt_after_chunks,
             )?;
             let plaintext = if let Some(options) = relay_options.as_ref() {
-                if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
-                    account.client.download_object_from_relay(
-                        &body.object_id,
-                        options,
-                        body.relay_ack,
-                    )?
-                } else {
-                    let mut engine = account.take_live_engine().await?;
-                    let result = account
-                        .client
-                        .download_object_from_relay_via_gateway(
-                            &mut engine,
-                            &body.object_id,
-                            options,
-                            body.relay_ack,
-                        )
-                        .await;
-                    account.put_engine(engine);
-                    result?
-                }
+                dispatch_object_download_from_relay(
+                    account,
+                    &body.object_id,
+                    options,
+                    body.relay_ack,
+                )
+                .await?
             } else {
                 account.client.decrypt_object(&body.object_id)?
             };
@@ -124,50 +100,22 @@ pub(crate) async fn dispatch_object_bus_request(
                         .account_db()?
                         .object_transfer(&body.object_id, Some(OBJECT_TRANSFER_UPLOAD))?
                         .ok_or_else(|| SdkError::LocalBus("missing upload transfer".to_owned()))?;
-                    if matches!(relay_options.token_provider, RelayTokenProvider::LocalMint { .. })
-                    {
-                        account.client.upload_object_to_relay(
-                            &body.object_id,
-                            usize::try_from(existing.chunk_size.max(1)).unwrap_or(64 * 1024),
-                            &relay_options,
-                        )?
-                    } else {
-                        let mut engine = account.take_live_engine().await?;
-                        let result = account
-                            .client
-                            .upload_object_to_relay_via_gateway(
-                                &mut engine,
-                                &body.object_id,
-                                usize::try_from(existing.chunk_size.max(1)).unwrap_or(64 * 1024),
-                                &relay_options,
-                            )
-                            .await;
-                        account.put_engine(engine);
-                        result?
-                    }
+                    dispatch_object_upload_to_relay(
+                        account,
+                        &body.object_id,
+                        usize::try_from(existing.chunk_size.max(1)).unwrap_or(64 * 1024),
+                        &relay_options,
+                    )
+                    .await?
                 }
                 OBJECT_TRANSFER_DOWNLOAD => {
-                    if matches!(relay_options.token_provider, RelayTokenProvider::LocalMint { .. })
-                    {
-                        let _plaintext = account.client.download_object_from_relay(
-                            &body.object_id,
-                            &relay_options,
-                            false,
-                        )?;
-                    } else {
-                        let mut engine = account.take_live_engine().await?;
-                        let result = account
-                            .client
-                            .download_object_from_relay_via_gateway(
-                                &mut engine,
-                                &body.object_id,
-                                &relay_options,
-                                false,
-                            )
-                            .await;
-                        account.put_engine(engine);
-                        let _plaintext = result?;
-                    }
+                    let _plaintext = dispatch_object_download_from_relay(
+                        account,
+                        &body.object_id,
+                        &relay_options,
+                        false,
+                    )
+                    .await?;
                     account
                         .client
                         .object_transfer_status(&body.object_id, Some(OBJECT_TRANSFER_DOWNLOAD))?
@@ -248,7 +196,28 @@ pub(crate) async fn dispatch_object_bus_request(
         }
         "object.delete" => {
             let body: LocalBusObjectDeleteRequest = serde_json::from_value(request.body.clone())?;
-            account.client.tombstone_object(&body.object_id)?;
+            let relay_options = parse_relay_transfer_options(
+                body.relay_endpoint,
+                body.relay_service_key_base64,
+                None,
+            )?;
+            if let Some(options) = relay_options.as_ref() {
+                let mut engine = account.take_live_engine().await?;
+                let pool = account.relay_quic_pool()?;
+                let result = account
+                    .client
+                    .tombstone_object_to_relay_via_gateway(
+                        &mut engine,
+                        &pool,
+                        &body.object_id,
+                        options,
+                    )
+                    .await;
+                account.put_engine(engine);
+                result?;
+            } else {
+                account.client.tombstone_object(&body.object_id)?;
+            }
             Ok(local_bus_ok(serde_json::json!({
                 "object_id": body.object_id,
                 "tombstoned": true,
@@ -256,4 +225,81 @@ pub(crate) async fn dispatch_object_bus_request(
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
+}
+
+// T22-A1 / RQ-04: object upload/download relay dispatch. Production builds always use the async v3
+// GatewayIssued path; the synchronous LocalMint (v2 shared-HMAC) branch is compiled only under the
+// `itest-local-mint` feature so the default binary contains no v2 mint code.
+#[cfg(not(feature = "itest-local-mint"))]
+async fn dispatch_object_upload_to_relay(
+    account: &mut LocalBusAccountState,
+    object_id: &str,
+    chunk_size: usize,
+    options: &RelayTransferOptions,
+) -> Result<SdkObjectTransferStatus, SdkError> {
+    let mut engine = account.take_live_engine().await?;
+    let pool = account.relay_quic_pool()?;
+    let result = account
+        .client
+        .upload_object_to_relay_via_gateway(&mut engine, &pool, object_id, chunk_size, options)
+        .await;
+    account.put_engine(engine);
+    result
+}
+
+#[cfg(feature = "itest-local-mint")]
+async fn dispatch_object_upload_to_relay(
+    account: &mut LocalBusAccountState,
+    object_id: &str,
+    chunk_size: usize,
+    options: &RelayTransferOptions,
+) -> Result<SdkObjectTransferStatus, SdkError> {
+    if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
+        return account.client.upload_object_to_relay(object_id, chunk_size, options);
+    }
+    let mut engine = account.take_live_engine().await?;
+    let pool = account.relay_quic_pool()?;
+    let result = account
+        .client
+        .upload_object_to_relay_via_gateway(&mut engine, &pool, object_id, chunk_size, options)
+        .await;
+    account.put_engine(engine);
+    result
+}
+
+#[cfg(not(feature = "itest-local-mint"))]
+async fn dispatch_object_download_from_relay(
+    account: &mut LocalBusAccountState,
+    object_id: &str,
+    options: &RelayTransferOptions,
+    ack: bool,
+) -> Result<Vec<u8>, SdkError> {
+    let mut engine = account.take_live_engine().await?;
+    let pool = account.relay_quic_pool()?;
+    let result = account
+        .client
+        .download_object_from_relay_via_gateway(&mut engine, &pool, object_id, options, ack)
+        .await;
+    account.put_engine(engine);
+    result
+}
+
+#[cfg(feature = "itest-local-mint")]
+async fn dispatch_object_download_from_relay(
+    account: &mut LocalBusAccountState,
+    object_id: &str,
+    options: &RelayTransferOptions,
+    ack: bool,
+) -> Result<Vec<u8>, SdkError> {
+    if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
+        return account.client.download_object_from_relay(object_id, options, ack);
+    }
+    let mut engine = account.take_live_engine().await?;
+    let pool = account.relay_quic_pool()?;
+    let result = account
+        .client
+        .download_object_from_relay_via_gateway(&mut engine, &pool, object_id, options, ack)
+        .await;
+    account.put_engine(engine);
+    result
 }

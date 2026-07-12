@@ -52,6 +52,9 @@ pub(crate) struct GatewayQuicContext {
     pub(crate) peers: GatewayPeerDirectory,
     pub(crate) router: RouterMeshClient,
     pub(crate) notify: NotifyHttpClient,
+    // T22-A1 / RQ-04: the legacy v2 shared-HMAC relay service key is compiled only under
+    // `itest-local-mint`; production gateways never load or hold it.
+    #[cfg(feature = "itest-local-mint")]
     pub(crate) relay_service_key: Vec<u8>,
     pub(crate) state: Arc<Mutex<ramflux_node_core::GatewayState>>,
     pub(crate) store: Arc<ramflux_node_core::GatewayRedbStore>,

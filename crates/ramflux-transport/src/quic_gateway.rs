@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 use std::{future::Future, io};
@@ -43,6 +43,44 @@ pub struct QuicGatewayClient {
     timeout: Duration,
 }
 
+/// Structured outcome of a pooled connect attempt (see [`QuicGatewayClient::connect_pooled`]). A
+/// handshake timeout is distinguished from a handshake failure at the source, not by string
+/// matching. quinn does not expose a stable, machine-readable "peer authentication failed" reason
+/// separate from other transport-layer handshake failures, so a non-timeout handshake failure is
+/// reported uniformly as [`QuicConnectPhase::HandshakeFailed`] rather than guessed from text.
+#[derive(Debug)]
+pub enum QuicConnectPhase {
+    /// Endpoint bind or client-config setup failed before any handshake began.
+    Setup(String),
+    /// The handshake did not complete within the configured deadline.
+    HandshakeTimeout,
+    /// The handshake failed (peer unreachable, TLS/cert rejection, transport error).
+    HandshakeFailed(String),
+}
+
+/// Structured outcome of a pooled request (see [`QuicGatewayClient::request_pooled`]).
+#[derive(Debug)]
+pub enum QuicRequestPhase {
+    /// The request did not receive a complete application response within the deadline.
+    RequestTimeout,
+    /// The stream/connection failed with no complete application response received.
+    ConnectionLost(String),
+    /// A complete frame was received but could not be decoded — not a business response.
+    Protocol(String),
+}
+
+fn quic_request_phase_from_transport(error: TransportError) -> QuicRequestPhase {
+    match error {
+        TransportError::Codec(codec) => {
+            QuicRequestPhase::Protocol(format!("response decode: {codec}"))
+        }
+        TransportError::FrameTooLarge { len } => {
+            QuicRequestPhase::Protocol(format!("response frame too large: {len} bytes"))
+        }
+        other => QuicRequestPhase::ConnectionLost(other.to_string()),
+    }
+}
+
 pub struct QuicGatewayBidiStream {
     send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -80,8 +118,98 @@ impl QuicGatewayClient {
         Ok(Self { _endpoint: endpoint, connection, timeout })
     }
 
+    /// Connects with an explicit, pre-built quinn client config and separate handshake/request
+    /// timeouts, returning a **structured** [`QuicConnectPhase`] on failure instead of a stringly
+    /// `TransportError`. A handshake deadline is reported as [`QuicConnectPhase::HandshakeTimeout`]
+    /// directly from the `tokio::time::timeout` `Elapsed` (never inferred from an error message).
+    /// Used by the relay QUIC connection pool, which supplies a config that sets
+    /// `max_idle_timeout`/`keep_alive_interval` so a pooled connection does not silently idle out
+    /// between reuses.
+    ///
+    /// # Errors
+    /// Returns a typed [`QuicConnectPhase`] distinguishing setup (bind/config), handshake timeout,
+    /// and handshake failure.
+    pub async fn connect_pooled(
+        bind_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        server_name: &str,
+        client_config: quinn::ClientConfig,
+        handshake_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, QuicConnectPhase> {
+        let mut endpoint = quinn::Endpoint::client(bind_addr)
+            .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
+        endpoint.set_default_client_config(client_config);
+        let connecting = endpoint
+            .connect(peer_addr, server_name)
+            .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
+        match tokio::time::timeout(handshake_timeout, connecting).await {
+            Err(_elapsed) => Err(QuicConnectPhase::HandshakeTimeout),
+            Ok(Err(error)) => Err(QuicConnectPhase::HandshakeFailed(error.to_string())),
+            Ok(Ok(connection)) => {
+                Ok(Self { _endpoint: endpoint, connection, timeout: request_timeout })
+            }
+        }
+    }
+
+    /// Sends a single request, returning a **structured** [`QuicRequestPhase`] on failure. A
+    /// request deadline is [`QuicRequestPhase::RequestTimeout`] taken directly from the timeout
+    /// `Elapsed` (no string parsing); a decode failure is [`QuicRequestPhase::Protocol`] (a
+    /// complete-but-invalid frame, never a business response); any other stream/connection error
+    /// is [`QuicRequestPhase::ConnectionLost`] (no complete application response). Used by the pool
+    /// so its typed error contract does not depend on quinn's error wording.
+    ///
+    /// # Errors
+    /// Returns a typed [`QuicRequestPhase`].
+    pub async fn request_pooled(
+        &self,
+        request: &GatewayQuicRequest,
+    ) -> Result<GatewayQuicResponse, QuicRequestPhase> {
+        match tokio::time::timeout(self.timeout, async {
+            let (mut send, mut recv) = self
+                .connection
+                .open_bi()
+                .await
+                .map_err(|error| QuicRequestPhase::ConnectionLost(error.to_string()))?;
+            write_quic_json_frame(&mut send, request)
+                .await
+                .map_err(quic_request_phase_from_transport)?;
+            read_quic_json_frame(&mut recv).await.map_err(quic_request_phase_from_transport)
+        })
+        .await
+        {
+            Ok(inner) => inner,
+            Err(_elapsed) => Err(QuicRequestPhase::RequestTimeout),
+        }
+    }
+
     pub fn set_session_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    /// Returns `true` while the underlying QUIC connection has not been closed (locally or by the
+    /// peer / idle timeout). The relay pool checks this before reusing a cached connection.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.connection.close_reason().is_none()
+    }
+
+    /// The quinn stable connection id, for observability (never carries token/grant material).
+    #[must_use]
+    pub fn stable_id(&self) -> usize {
+        self.connection.stable_id()
+    }
+
+    /// The peer socket address of the underlying QUIC connection.
+    #[must_use]
+    pub fn remote_address(&self) -> SocketAddr {
+        self.connection.remote_address()
+    }
+
+    /// Actively closes the underlying QUIC connection. The relay pool calls this when it evicts a
+    /// connection after a transport failure so the old connection cannot be reused.
+    pub fn close(&self) {
+        self.connection.close(quinn::VarInt::from_u32(0), b"relay pool evict");
     }
 
     /// # Errors
@@ -145,6 +273,86 @@ impl QuicGatewayClient {
             .await?;
         decode_quic_gateway_response(response)
     }
+}
+
+/// Validated connection parameters for a client reaching a relay client-facing QUIC surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayClientQuicConfig {
+    pub peer_addr: SocketAddr,
+    pub server_name: String,
+    pub ca_cert: PathBuf,
+}
+
+impl RelayClientQuicConfig {
+    /// Validates the relay client QUIC connection parameters, failing closed on a malformed peer
+    /// address, an empty server name, or a missing CA certificate file. Full CA parsing happens at
+    /// connect time (also fail-closed).
+    ///
+    /// # Errors
+    /// Returns an error when the peer address is malformed, the server name is empty, or the CA
+    /// certificate file does not exist.
+    pub fn new(
+        peer_addr: &str,
+        server_name: &str,
+        ca_cert: impl Into<PathBuf>,
+    ) -> Result<Self, TransportError> {
+        let parsed = peer_addr.trim().parse::<SocketAddr>().map_err(|error| {
+            TransportError::Quic(format!(
+                "invalid relay client QUIC peer address {peer_addr:?}: {error}"
+            ))
+        })?;
+        let server_name = server_name.trim();
+        if server_name.is_empty() {
+            return Err(TransportError::Quic(
+                "relay client QUIC server name must not be empty".to_owned(),
+            ));
+        }
+        let ca_cert = ca_cert.into();
+        if !ca_cert.is_file() {
+            return Err(TransportError::Quic(format!(
+                "relay client QUIC CA certificate not found: {}",
+                ca_cert.display()
+            )));
+        }
+        Ok(Self { peer_addr: parsed, server_name: server_name.to_owned(), ca_cert })
+    }
+}
+
+pub(crate) fn relay_client_quic_bind_addr(peer_addr: SocketAddr) -> SocketAddr {
+    if peer_addr.is_ipv6() {
+        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
+    }
+}
+
+/// Performs a health probe against a relay client-facing QUIC surface, reusing the gateway QUIC
+/// client primitives (`quic_gateway_client_config` + server-auth connect + JSON request frames).
+/// This is a control-plane probe only: it carries no object data and no relay token, and it never
+/// falls back to plaintext HTTP.
+///
+/// # Errors
+/// Returns an error when the connection, TLS handshake, or health request/response fails.
+pub async fn relay_client_quic_health(
+    config: &RelayClientQuicConfig,
+    timeout: Duration,
+) -> Result<GatewayQuicResponse, TransportError> {
+    let bind_addr = relay_client_quic_bind_addr(config.peer_addr);
+    let client = QuicGatewayClient::connect(
+        bind_addr,
+        config.peer_addr,
+        &config.server_name,
+        &config.ca_cert,
+        timeout,
+    )
+    .await?;
+    client
+        .request(&GatewayQuicRequest {
+            method: "GET".to_owned(),
+            path: "/healthz".to_owned(),
+            body: serde_json::Value::Null,
+        })
+        .await
 }
 
 impl TcpTlsGatewayClient {
@@ -434,5 +642,63 @@ where
             "gateway QUIC status {}: {}",
             response.status, response.body
         )))
+    }
+}
+
+#[cfg(test)]
+mod relay_client_quic_config_tests {
+    use super::RelayClientQuicConfig;
+    use std::io::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn temp_ca_file() -> Result<std::path::PathBuf, std::io::Error> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir()
+            .join(format!("ramflux-relay-client-ca-{}-{nanos}.pem", std::process::id()));
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n")?;
+        Ok(path)
+    }
+
+    #[test]
+    fn accepts_valid_parameters() -> TestResult {
+        let ca = temp_ca_file()?;
+        let config = RelayClientQuicConfig::new("127.0.0.1:17447", " ramflux-relay ", &ca)?;
+        assert_eq!(config.peer_addr.port(), 17447);
+        assert_eq!(config.server_name, "ramflux-relay");
+        assert_eq!(config.ca_cert, ca);
+        let _ = std::fs::remove_file(ca);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_malformed_peer_address() -> TestResult {
+        let ca = temp_ca_file()?;
+        assert!(RelayClientQuicConfig::new("not-an-address", "ramflux-relay", &ca).is_err());
+        assert!(RelayClientQuicConfig::new("", "ramflux-relay", &ca).is_err());
+        let _ = std::fs::remove_file(ca);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_empty_server_name() -> TestResult {
+        let ca = temp_ca_file()?;
+        assert!(RelayClientQuicConfig::new("127.0.0.1:17447", "   ", &ca).is_err());
+        let _ = std::fs::remove_file(ca);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_ca_certificate() {
+        assert!(
+            RelayClientQuicConfig::new(
+                "127.0.0.1:17447",
+                "ramflux-relay",
+                "/nonexistent/relay-client-ca.pem",
+            )
+            .is_err()
+        );
     }
 }

@@ -16,6 +16,7 @@ mod mesh_tls;
 mod perf_metrics;
 mod policy;
 mod quic_gateway;
+mod relay_quic_pool;
 mod tls_config;
 mod types;
 
@@ -55,9 +56,14 @@ pub use policy::{
 };
 pub use quic_gateway::{
     GatewaySessionFrameSink, GatewaySessionFrameSource, GatewaySessionTransport,
-    GatewayTcpTlsStream, QuicGatewayBidiStream, QuicGatewayClient, TcpTlsGatewayBidiStream,
-    TcpTlsGatewayClient, read_gateway_session_json, read_quic_json_frame,
+    GatewayTcpTlsStream, QuicConnectPhase, QuicGatewayBidiStream, QuicGatewayClient,
+    QuicRequestPhase, RelayClientQuicConfig, TcpTlsGatewayBidiStream, TcpTlsGatewayClient,
+    read_gateway_session_json, read_quic_json_frame, relay_client_quic_health,
     write_gateway_session_json, write_quic_json_frame, write_quic_json_message,
+};
+pub use relay_quic_pool::{
+    RelayQuicBindFamily, RelayQuicCapacity, RelayQuicPool, RelayQuicPoolConfig, RelayQuicPoolKey,
+    RelayQuicPoolMetricsSnapshot, RelayQuicRequestError, RelayQuicTimeouts,
 };
 pub use tls_config::{
     mesh_server_config, quic_gateway_client_config, quic_gateway_server_config,

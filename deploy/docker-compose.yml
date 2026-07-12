@@ -14,10 +14,14 @@ services:
     tmpfs: ["/tmp"]
     environment:
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
+      # v3 issuance material is operator-provided; the gateway fails closed when absent.
+      RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RAMFLUX_GATEWAY_V3_ISSUER_SEED:-}"
+      RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "${RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE:-/etc/ramflux/gateway-v3/issuer-cert.json}"
     volumes:
       - gateway-redb:/var/lib/ramflux/gateway
       - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
       - ./certs/gateway:/etc/ramflux/mesh:ro
+      - ./secrets/gateway-v3:/etc/ramflux/gateway-v3:ro
     ports:
       - "${RAMFLUX_GATEWAY_TCP_PORT:-443}:443/tcp"
       - "${RAMFLUX_GATEWAY_QUIC_PORT:-443}:443/udp"
@@ -96,12 +100,16 @@ services:
       RAMFLUX_FEDERATION_NODE_ID: "${RAMFLUX_FEDERATION_NODE_ID:-localhost}"
       RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RAMFLUX_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
       RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL: "${RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL:-}"
+      # T23-A2b2b: the pre-signed trust-snapshot envelope is served from the read-only federation
+      # secrets mount at a fixed container path (operators place the offline-signed file there).
+      RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE: "${RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE:-/etc/ramflux/federation/trust-snapshot.json}"
       RAMFLUX_FEDERATION_FORCE_TCP_MESH: "${RAMFLUX_FEDERATION_FORCE_TCP_MESH:-0}"
       RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "${RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK:-0}"
     volumes:
       - federation-redb:/var/lib/ramflux/federation
       - ./config/federation.toml:/etc/ramflux/config/federation.toml:ro
       - ./certs/federation:/etc/ramflux/mesh:ro
+      - ./secrets/federation:/etc/ramflux/federation:ro
     ports:
       - "${RAMFLUX_FEDERATION_ADMIN_PORT:-18082}:18082"
       - "${RAMFLUX_FEDERATION_MESH_PORT:-7443}:7443/tcp"
@@ -124,10 +132,37 @@ services:
     cap_drop: ["ALL"]
     read_only: true
     tmpfs: ["/tmp"]
+    environment:
+      # No relay object HMAC key: v3 (Ed25519 issuer trust) is the only production
+      # object data plane; the default/production relay loads no HMAC key (T22-A3).
+      RAMFLUX_RELAY_CLIENT_QUIC_ADDR: "0.0.0.0:17447"
+      # T23-A2b2b: the production relay serves the object-relay QUIC surface only against a fully
+      # configured, offline-root-verified provider KEYRING (the legacy single pinned provider public
+      # key is gone; that path exists only in the default-off itest-provider-single-key build). The
+      # federation endpoint, the pinned offline-root PUBLIC key, and the issuer node id are REQUIRED
+      # (`:?`) so `compose config` FAILS when a key material is absent (never renders an empty value);
+      # the relay process itself also fails to start — and its `--health-check` fails — when any of
+      # these, the keyring file, or the cache path are missing, or the keyring does not load/verify
+      # against the pinned offline root. The relay never authorizes objects on a silently-disabled
+      # provider.
+      RAMFLUX_FEDERATION_TRUST_ENDPOINT: "${RAMFLUX_FEDERATION_TRUST_ENDPOINT:?federation trust endpoint is required for the keyring-era relay}"
+      RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY: "${RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY:?pinned offline-root public key is required for the keyring-era relay}"
+      RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID: "${RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID:?federation issuer node id is required for the keyring-era relay}"
+      # Keyring file (read-only ./secrets/federation mount) and cache file (relay-redb volume) use fixed
+      # container paths; the corresponding mount/volume below must exist.
+      RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE: "${RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE:-/etc/ramflux/federation/provider-keyring.json}"
+      RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE: "${RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE:-/var/lib/ramflux/relay/trust-snapshot.json}"
+      RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS: "${RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS:-30}"
     volumes:
       - relay-redb:/var/lib/ramflux/relay
       - ./config/relay.toml:/etc/ramflux/config/relay.toml:ro
       - ./certs/relay:/etc/ramflux/mesh:ro
+      # The offline-root-signed provider keyring is delivered read-only, out of band, from the same
+      # federation secrets dir (operators sign it offline; NO provider/offline-root private key is
+      # ever mounted into the relay).
+      - ./secrets/federation:/etc/ramflux/federation:ro
+    ports:
+      - "${RAMFLUX_RELAY_CLIENT_QUIC_PORT:-17447}:17447/udp"
     healthcheck:
       test: ["CMD", "/usr/local/bin/ramflux-relay", "--health-check"]
       interval: 10s

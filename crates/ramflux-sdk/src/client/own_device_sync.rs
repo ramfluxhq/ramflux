@@ -10,6 +10,7 @@ impl RamfluxClient {
     pub(crate) async fn export_own_device_sync(
         &mut self,
         engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
         principal_commitment: &str,
         target_device_id: &str,
         relay_endpoint: &str,
@@ -51,7 +52,13 @@ impl RamfluxClient {
         )?
         .ok_or_else(|| SdkError::LocalBus("own-device sync relay endpoint missing".to_owned()))?;
         let transfer = self
-            .upload_object_to_relay_inner_via_gateway(engine, &object, chunk_size, &relay_options)
+            .upload_object_to_relay_inner_via_gateway(
+                engine,
+                pool,
+                &object,
+                chunk_size,
+                &relay_options,
+            )
             .await?;
         let object_key = self.object_store.object_key(&object.object_id)?;
         let slot_conversation_id =
@@ -95,26 +102,18 @@ impl RamfluxClient {
             created_at: now_unix_timestamp(),
             expires_at: now_unix_timestamp().saturating_add(3_600),
             nonce: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
-            history_ref: SdkDmAttachmentRef {
-                schema: "ramflux.sdk.dm_attachment_ref.v1".to_owned(),
-                version: 1,
-                object_id: object.object_id.clone(),
-                manifest_hash: object.manifest_hash.clone(),
-                plaintext_hash: object.plaintext_hash.clone(),
-                cipher_size: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-                chunk_size: manifest.chunk_size,
-                total_chunks: manifest.total_chunks,
-                relay_endpoint: relay_endpoint.to_owned(),
-                key_slot: SdkObjectKeySlot {
-                    schema: "ramflux.sdk.object_key_slot.dm.v1".to_owned(),
-                    version: 1,
-                    object_id: object.object_id.clone(),
-                    conversation_id: slot_conversation_id,
-                    recipient_device_id: target_device_id.to_owned(),
-                    x3dh,
-                    ciphertext,
-                },
-            },
+            history_ref: own_device_history_ref(
+                &object,
+                &manifest,
+                relay_endpoint,
+                &relay_options,
+                &source_branch,
+                target_device_id,
+                slot_conversation_id,
+                x3dh,
+                ciphertext,
+                u64::try_from(now_unix_timestamp()).unwrap_or(0),
+            )?,
             signed: sdk_device_signed_fields(&source_device_id, ""),
         };
         envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
@@ -132,6 +131,7 @@ impl RamfluxClient {
     pub(crate) async fn import_own_device_sync(
         &mut self,
         engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
         expected_principal_commitment: &str,
         envelope: &SdkOwnDeviceSyncEnvelope,
         relay_service_key_base64: Option<String>,
@@ -145,6 +145,7 @@ impl RamfluxClient {
         let import = self
             .import_dm_attachment_from_relay_via_gateway(
                 engine,
+                pool,
                 &envelope.history_ref,
                 relay_service_key_base64,
             )
@@ -482,9 +483,145 @@ impl RamfluxClient {
     }
 }
 
+/// Builds the own-device-sync `history_ref` attachment, binding the owner lineage to the effective
+/// relay options this snapshot was actually uploaded with.
+///
+/// T21-A2: the target device's v3 grantee GET/ACK reads `owner_home_node_id` / `relay_audience_node_id`
+/// from this ref. Populating them from the same `relay_options` used for the upload keeps a stale
+/// export from silently breaking the target's v3 download. The grant is signed by the source device
+/// with Get+Ack for the target device only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn own_device_history_ref(
+    object: &EncryptedObject,
+    manifest: &ChunkManifest,
+    relay_endpoint: &str,
+    relay_options: &RelayTransferOptions,
+    source_branch: &DeviceBranch,
+    target_device_id: &str,
+    slot_conversation_id: String,
+    x3dh: Option<SdkDmX3dhHeader>,
+    ciphertext: ramflux_crypto::DmCiphertext,
+    now: u64,
+) -> Result<SdkDmAttachmentRef, SdkError> {
+    Ok(SdkDmAttachmentRef {
+        schema: "ramflux.sdk.dm_attachment_ref.v1".to_owned(),
+        version: 1,
+        object_id: object.object_id.clone(),
+        manifest_hash: object.manifest_hash.clone(),
+        plaintext_hash: object.plaintext_hash.clone(),
+        cipher_size: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
+        chunk_size: manifest.chunk_size,
+        total_chunks: manifest.total_chunks,
+        relay_endpoint: relay_endpoint.to_owned(),
+        owner_home_node_id: relay_options.relay_owner_home_node_id.clone(),
+        relay_audience_node_id: relay_options.relay_audience_node_id.clone(),
+        owner_principal_id: source_branch.principal_id.clone(),
+        owner_device_epoch: source_branch.device_epoch,
+        access_grant: Some(build_signed_object_access_grant(
+            source_branch,
+            object.object_id.clone(),
+            object.manifest_hash.clone(),
+            ramflux_crypto::blake3_256_base64url(
+                "ramflux.object_relay.recipient_device.v1",
+                target_device_id.as_bytes(),
+            ),
+            vec![
+                ramflux_protocol::ObjectRelayCapability::Get,
+                ramflux_protocol::ObjectRelayCapability::Ack,
+            ],
+            now,
+            now.saturating_add(3_600),
+        )?),
+        key_slot: SdkObjectKeySlot {
+            schema: "ramflux.sdk.object_key_slot.dm.v1".to_owned(),
+            version: 1,
+            object_id: object.object_id.clone(),
+            conversation_id: slot_conversation_id,
+            recipient_device_id: target_device_id.to_owned(),
+            x3dh,
+            ciphertext,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_device_history_ref_binds_effective_upload_lineage() -> Result<(), SdkError> {
+        let source =
+            ramflux_crypto::create_device_branch("own_principal", "own_device", 3, [5u8; 32]);
+        let object = EncryptedObject {
+            object_id: "own_object".to_owned(),
+            manifest_hash: "own_manifest".to_owned(),
+            nonce: "own_nonce".to_owned(),
+            ciphertext: vec![0u8; 16],
+            plaintext_hash: "own_plaintext".to_owned(),
+            tombstoned: false,
+            backup_excluded: false,
+        };
+        let manifest = ChunkManifest {
+            object_id: "own_object".to_owned(),
+            manifest_hash: "own_manifest".to_owned(),
+            chunk_size: 1024,
+            total_chunks: 1,
+            object_created_group_key_epoch: None,
+        };
+        // The effective relay options this snapshot was uploaded with carry a concrete lineage.
+        let relay_options = RelayTransferOptions {
+            relay_endpoint: "http://127.0.0.1:2".to_owned(),
+            token_provider: RelayTokenProvider::GatewayIssued,
+            interrupt_after_chunks: None,
+            relay_quic_peer_addr: None,
+            relay_quic_server_name: None,
+            relay_quic_ca_cert: None,
+            relay_owner_home_node_id: Some("node_own_effective".to_owned()),
+            relay_owner_principal_id: Some("own_principal_effective".to_owned()),
+            relay_audience_node_id: Some("aud_own_effective".to_owned()),
+        };
+        let ciphertext: ramflux_crypto::DmCiphertext = serde_json::from_value(serde_json::json!({
+            "session_id": "s", "counter": 0, "nonce": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "ciphertext": []
+        }))?;
+        let history_ref = own_device_history_ref(
+            &object,
+            &manifest,
+            "http://127.0.0.1:2",
+            &relay_options,
+            &source,
+            "target_own_device",
+            "slot_own".to_owned(),
+            None,
+            ciphertext,
+            1_000_000,
+        )?;
+        // The constructed ref binds the exact lineage the upload used, not a null owner home node.
+        assert_eq!(history_ref.owner_home_node_id.as_deref(), Some("node_own_effective"));
+        assert_eq!(history_ref.relay_audience_node_id.as_deref(), Some("aud_own_effective"));
+        assert_eq!(history_ref.owner_principal_id, "own_principal");
+        assert_eq!(history_ref.owner_device_epoch, 3);
+        // The grant authorizes exactly Get+Ack for the named target device.
+        let grant = history_ref
+            .access_grant
+            .as_ref()
+            .ok_or_else(|| SdkError::LocalBus("history ref missing grant".to_owned()))?;
+        assert_eq!(
+            grant.capabilities,
+            vec![
+                ramflux_protocol::ObjectRelayCapability::Get,
+                ramflux_protocol::ObjectRelayCapability::Ack,
+            ]
+        );
+        assert_eq!(
+            grant.grantee_device_hash,
+            ramflux_crypto::blake3_256_base64url(
+                "ramflux.object_relay.recipient_device.v1",
+                "target_own_device".as_bytes(),
+            )
+        );
+        Ok(())
+    }
 
     fn temp_root(test_name: &str) -> PathBuf {
         let nanos =
@@ -529,6 +666,11 @@ mod tests {
                 chunk_size: 1024,
                 total_chunks: 1,
                 relay_endpoint: "http://127.0.0.1:1".to_owned(),
+                owner_home_node_id: None,
+                relay_audience_node_id: None,
+                owner_principal_id: String::new(),
+                owner_device_epoch: 0,
+                access_grant: None,
                 key_slot: SdkObjectKeySlot {
                     schema: "ramflux.sdk.object_key_slot.dm.v1".to_owned(),
                     version: 1,

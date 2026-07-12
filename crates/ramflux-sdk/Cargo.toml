@@ -13,6 +13,14 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = []
 c-abi = []
+# Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
+# production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
+itest-fingerprint = []
+# T22-A1 / RQ-04: legacy v2 shared-HMAC relay-token local minting. Compile-time gate for the itest
+# LocalMint compatibility path; still requires the runtime opt-in env to activate (double gate).
+# Never enabled by production binaries — default SDK/rf carry no HMAC mint code, service-key env, or
+# LocalMint env. The v3 GatewayIssued path is unaffected.
+itest-local-mint = ["dep:hmac", "dep:sha2"]
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
@@ -27,10 +35,13 @@ ramflux-transport = { workspace = true }
 ramflux-sync = { workspace = true }
 aes-gcm = "0.10"
 blake3 = "1.5"
-hmac = "0.12"
+# Only used by the itest-local-mint v2 HMAC relay-token minting path; optional so production
+# SDK/rf binaries do not link the HMAC implementation.
+hmac = { version = "0.12", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
+# Only used (via hmac) by the itest-local-mint v2 relay-token minting path.
+sha2 = { version = "0.10", optional = true }
 thiserror = "2.0"
 tokio = { version = "1.42", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"

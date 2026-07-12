@@ -11,6 +11,45 @@ use crate::{
 
 const FEDERATION_MESH_RUNTIME_ENV: &str = "RAMFLUX_FEDERATION_MESH_RUNTIME";
 const RETENTION_GC_SWEEP_PATH: &str = "/internal/retention/gc_sweep";
+const FEDERATION_TRUST_SNAPSHOT_FILE_ENV: &str = "RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE";
+const FEDERATION_TRUST_SNAPSHOT_PATH: &str = "/mvp9/federation/trust-snapshot";
+
+/// Loads the pre-signed federated issuer trust snapshot envelope from `path` as opaque JSON. Fails
+/// (rather than synthesizing a default) when the file cannot be read or is not valid JSON.
+///
+/// T23-A2b2b: federation is an out-of-band file server — it holds NO signing key and never signs. It
+/// round-trips whatever offline-signed envelope the operator places on disk (legacy single-key v3 or
+/// the keyring-era v4 `ProviderSignedTrustSnapshot`), so it is deliberately envelope-format-agnostic:
+/// the relay is the sole verifier of the envelope's schema/signature.
+fn load_signed_trust_snapshot_from_file(
+    path: &std::path::Path,
+) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
+    let text = std::fs::read_to_string(path).map_err(|source| {
+        ramflux_node_core::NodeCoreError::ItestJson(format!(
+            "failed to read trust snapshot file {}: {source}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&text).map_err(|source| {
+        ramflux_node_core::NodeCoreError::ItestJson(format!(
+            "invalid trust snapshot envelope JSON in {}: {source}",
+            path.display()
+        ))
+    })
+}
+
+/// Reads the configured pre-signed trust snapshot envelope (opaque JSON) from the file named by
+/// `RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE`. Fails closed when the variable is unset or the file is
+/// missing/invalid — it never returns a default snapshot.
+fn federation_trust_snapshot_envelope()
+-> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
+    let path = std::env::var(FEDERATION_TRUST_SNAPSHOT_FILE_ENV).map_err(|_error| {
+        ramflux_node_core::NodeCoreError::ItestJson(format!(
+            "{FEDERATION_TRUST_SNAPSHOT_FILE_ENV} is not set"
+        ))
+    })?;
+    load_signed_trust_snapshot_from_file(std::path::Path::new(&path))
+}
 
 #[derive(Clone)]
 pub(crate) struct MeshServerContext {
@@ -268,6 +307,11 @@ pub(crate) fn handle_mesh_request(
                 }),
             )
             .map_err(|error| mesh_transport_error(&error))?;
+        }
+        ("GET", FEDERATION_TRUST_SNAPSHOT_PATH) => {
+            let envelope = federation_trust_snapshot_envelope()?;
+            ramflux_transport::write_mesh_json_response(stream, "200 OK", &envelope)
+                .map_err(|error| mesh_transport_error(&error))?;
         }
         ("POST", "/s8/federation/envelope") => {
             context.observability.record_inbound_s8_envelope(MeshInboundTransport::Tcp);
@@ -532,6 +576,12 @@ fn handle_federation_mesh_quic_request(
                 "service": "ramflux-federation",
                 "status": "ok"
             }),
+        }),
+        ("GET", FEDERATION_TRUST_SNAPSHOT_PATH) => Ok(ramflux_transport::GatewayQuicResponse {
+            status: 200,
+            body: serde_json::to_value(federation_trust_snapshot_envelope()?).map_err(
+                |source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()),
+            )?,
         }),
         ("POST", "/s8/federation/envelope") => {
             if peer_service_id == Some("ramflux-retention") {
