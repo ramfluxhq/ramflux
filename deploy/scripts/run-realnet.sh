@@ -136,9 +136,22 @@ fi
 # not be pulled via itest-http). The T24-A3 post-commit QUIC fault seam
 # (itest-quic-fault) stays inert unless a test sets RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT,
 # so enabling it here does not affect any other realnet test.
-printf '>> host pre-build: compiling ramflux-relay with itest media + v2-object + quic-fault features\n'
-( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
-    --features itest-http,itest-media-udp,itest-object-v2,itest-quic-fault --bin ramflux-relay )
+RELAY_FEATURES="itest-http,itest-media-udp,itest-object-v2,itest-quic-fault"
+RELAY_LOCKED="--locked"
+# CTRL-089 RELAY-MEM-02-A1 DIAGNOSTIC/profiler-only passthrough (default-off). When
+# RAMFLUX_RELAY_ALLOC_PROF=1, additionally compile the relay with the default-off itest-alloc-prof
+# feature (dhat global allocator + process-lifetime heap profiler with a SIGTERM graceful dump). This
+# adds the dhat/libc deps which are absent from Cargo.lock, so --locked is dropped for the profile
+# build ONLY. Never set for a normal acceptance run → the relay is built exactly as before and the
+# production default allocator is untouched.
+if [ "${RAMFLUX_RELAY_ALLOC_PROF:-0}" = "1" ]; then
+  RELAY_FEATURES="$RELAY_FEATURES,itest-alloc-prof"
+  RELAY_LOCKED=""
+  printf '>> host pre-build: RAMFLUX_RELAY_ALLOC_PROF=1 → relay built with itest-alloc-prof (dhat heap profiler; DIAGNOSTIC)\n'
+fi
+printf '>> host pre-build: compiling ramflux-relay with features %s\n' "$RELAY_FEATURES"
+( cd "$WORKSPACE" && build_rust $RELAY_LOCKED $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG \
+    --features "$RELAY_FEATURES" --bin ramflux-relay )
 DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-signaling --bin ramflux-retention"
 if [ -n "$DEFAULT_BIN_ARGS" ]; then
   ( cd "$WORKSPACE" && build_rust --locked $BUILD_PROFILE_FLAG $BUILD_TARGET_FLAG --features itest-http \
@@ -147,6 +160,12 @@ fi
 mkdir -p "$DEPLOY_DIR/itest-bin"
 for b in gateway router notify federation relay signaling retention; do
   cp -f "$WORKSPACE/target/$BUILD_TARGET_DIR/ramflux-$b" "$DEPLOY_DIR/itest-bin/ramflux-$b"
+  # CTRL-089 DIAGNOSTIC: keep the relay UNSTRIPPED under the dhat profiler so dhat can resolve
+  # backtraces to function/type names at dump time (stripping would leave raw-address stacks).
+  if [ "$b" = "relay" ] && [ "${RAMFLUX_RELAY_ALLOC_PROF:-0}" = "1" ]; then
+    printf '>> host pre-build: keeping ramflux-relay UNSTRIPPED (dhat symbolization)\n'
+    continue
+  fi
   # strip debug symbols so the build context stays small.
   strip "$DEPLOY_DIR/itest-bin/ramflux-$b" 2>/dev/null || true
 done

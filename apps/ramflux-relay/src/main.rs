@@ -24,7 +24,92 @@ const RELAY_CLIENT_QUIC_ADDR_ENV: &str = "RAMFLUX_RELAY_CLIENT_QUIC_ADDR";
 const RELAY_TRUST_SNAPSHOT_CACHE_FILE_ENV: &str = "RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE";
 const RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_ENV: &str =
     "RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS";
+// CTRL-089 RELAY-MEM-02-A1 DIAGNOSTIC/profiler-only (feature `itest-alloc-prof`, default-off). Installs
+// dhat as the global allocator so EVERY allocation is instrumented and attributed to a stack. Absent
+// entirely from the default/production relay: without the feature there is no `#[global_allocator]`, no
+// dhat dep, and no `dhat` marker string in the binary.
+#[cfg(feature = "itest-alloc-prof")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+// The graceful-dump seam. dhat writes its `dhat-heap.json` on `Profiler` DROP, but compose teardown
+// SIGKILLs after a short grace, so the process must drop the Profiler cleanly ON SIGTERM/SIGINT for the
+// profile to flush. The serving relay's main thread blocks forever in an accept loop (the itest-http
+// surface / QUIC listener), so it cannot poll a flag — instead a dedicated OWNER thread holds the
+// Profiler, polls the flag, and on SIGTERM drops the Profiler (flushing the json to the host bind
+// mount) and `process::exit`s. Compiled only under the diagnostic feature.
+#[cfg(feature = "itest-alloc-prof")]
+mod alloc_prof {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+    // Default output lands on the host bind mount (survives `compose down -v`) so the profile persists.
+    const DEFAULT_FILE: &str = "/var/lib/ramflux/alloc-prof/dhat-heap.json";
+    const FILE_ENV: &str = "RAMFLUX_RELAY_ALLOC_PROF_FILE";
+
+    extern "C" fn on_signal(_sig: libc::c_int) {
+        // Only an atomic store — async-signal-safe. The Profiler drop (IO/alloc) runs on the owner thread.
+        SHUTDOWN.store(true, Ordering::SeqCst);
+    }
+
+    // DIAGNOSTIC-only: the workspace denies `unsafe_code`; the single `libc::signal` FFI call to
+    // register a trivial async-signal-safe handler is the only exception, compiled solely under the
+    // default-off profiler feature and never in the production relay.
+    #[allow(unsafe_code)]
+    fn install_signal_handlers() {
+        // SAFETY: registering a trivial async-signal-safe handler (atomic store) at startup.
+        let handler = on_signal as *const () as libc::sighandler_t;
+        unsafe {
+            libc::signal(libc::SIGTERM, handler);
+            libc::signal(libc::SIGINT, handler);
+        }
+    }
+
+    /// Starts the profiler ONLY for the long-lived serving invocation. The short-lived
+    /// `--health-check` (compose healthcheck exec) and `--once` init runs exit cleanly and would
+    /// otherwise OVERWRITE the serving process's dump at the same path with a near-empty profile.
+    ///
+    /// The Profiler lives on a dedicated owner thread that polls the SIGTERM flag and, on shutdown,
+    /// drops the Profiler (writing the heap json) and exits the process — so the dump lands regardless
+    /// of where the main thread is blocked. Returns after a short delay so the global profiler is armed
+    /// before the workload begins.
+    pub fn maybe_start() {
+        let serving = !std::env::args().any(|arg| arg == "--health-check" || arg == "--once");
+        if !serving {
+            return;
+        }
+        install_signal_handlers();
+        let file = std::env::var(FILE_ENV)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_FILE.to_owned());
+        eprintln!("ramflux-relay: itest-alloc-prof active; dhat heap profile -> {file}");
+        let _ = std::thread::Builder::new().name("dhat-profiler-owner".to_owned()).spawn(move || {
+            // The Profiler is created and dropped entirely on this thread (never crosses a thread
+            // boundary), so no `Send` bound is required. The global dhat allocator records every
+            // thread's allocations for the Profiler's lifetime.
+            let profiler =
+                dhat::Profiler::builder().file_name(std::path::PathBuf::from(&file)).build();
+            while !SHUTDOWN.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            eprintln!(
+                "ramflux-relay: itest-alloc-prof shutdown signal received; flushing dhat heap profile -> {file}"
+            );
+            drop(profiler); // writes the heap json
+            std::process::exit(0);
+        });
+        // Give the owner thread a moment to arm the global profiler before the workload starts.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 fn main() {
+    // DIAGNOSTIC-only: arm the dhat profiler on a dedicated owner thread that flushes the heap json on
+    // SIGTERM. No-op / not compiled in the default/production build.
+    #[cfg(feature = "itest-alloc-prof")]
+    alloc_prof::maybe_start();
     if let Err(error) = run_service("ramflux-relay") {
         eprintln!("ramflux-relay: {error}");
         std::process::exit(2);
@@ -243,6 +328,8 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
+    // The dhat profiler (itest-alloc-prof) flushes on SIGTERM from its own owner thread, so the main
+    // thread parks as normal here regardless of feature.
     std::thread::park();
     Ok(())
 }
