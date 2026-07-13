@@ -24,9 +24,16 @@ pub(crate) struct LocalBusSubscriber {
 /// and opens the private (0600, `create_new`) spool file; each `object.put.chunk` appends bounded
 /// plaintext at the verified `written` offset; `object.put.finish` reads the whole (<= 16 MiB)
 /// plaintext back, verifies hash + len, then reuses the A2 durable commit. Any failure — and every
-/// finish — removes the spool file. It is in-memory only (no crash-resume journal: that is A5), so
-/// an rfd restart drops it and the orphan file is swept on the next startup.
+/// finish — removes the spool file AND its journal.
+///
+/// T25-A5 (OBJ-IPC-01): a durable crash-resume journal is now maintained alongside the spool. Each
+/// chunk records `written` + `prefix_hash` (the BLAKE3 of the durably-written spool prefix) into a
+/// fsync'd sidecar AFTER the spool bytes are fsync'd, so a mid-upload rfd `SIGKILL`/abort resumes
+/// from the durable offset on restart instead of re-uploading from zero. `prefix_hasher` is the
+/// incremental hasher whose current finalize is recorded into the journal each chunk.
 pub(crate) struct ObjectPutSpoolSession {
+    pub(crate) account_id: String,
+    pub(crate) operation_id: String,
     pub(crate) object_id: String,
     pub(crate) total_len: usize,
     pub(crate) plaintext_hash: String,
@@ -35,8 +42,10 @@ pub(crate) struct ObjectPutSpoolSession {
     pub(crate) relay_service_key_base64: Option<String>,
     pub(crate) relay_interrupt_after_chunks: Option<u32>,
     pub(crate) path: PathBuf,
+    pub(crate) journal_path: PathBuf,
     pub(crate) file: std::fs::File,
     pub(crate) written: usize,
+    pub(crate) prefix_hasher: ramflux_crypto::Blake3DomainHasher,
 }
 
 /// T25-A4 (CTRL-104 / OBJ-IPC-01): an in-flight bounded DOWNLOAD spool for one large `object.get`,

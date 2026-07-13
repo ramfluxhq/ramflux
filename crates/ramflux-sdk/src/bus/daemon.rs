@@ -43,11 +43,12 @@ async fn serve_local_bus_until_local(
 ) -> Result<(), SdkError> {
     std::fs::create_dir_all(&config.data_root)?;
     set_owner_only_dir_permissions(&config.data_root)?;
-    // T25-A3 (OBJ-IPC-01): UPLOAD spools are in-memory only (no crash-resume journal — that is A5),
-    // so on startup no session is live and any leftover spool file is an orphan from a prior crash.
-    // Sweep the whole spool dir to keep disk usage O(in-flight uploads), not O(all past crashes).
-    let _ = std::fs::remove_dir_all(object_put_spool_dir(&config.data_root));
-    // T25-A4 (OBJ-IPC-01): DOWNLOAD spools are likewise in-memory only; sweep any orphan on startup.
+    // T25-A5 (OBJ-IPC-01): UPLOAD spools now carry a durable crash-resume journal, so the blanket
+    // startup sweep is REPLACED by per-account rehydration (see `rehydrate_object_put_spools`, invoked
+    // per account in `restore_local_bus_account_impl`): a mid-upload crash RESUMES from the durable
+    // offset instead of re-uploading from zero. Abandoned pairs are TTL-swept during rehydration.
+    // T25-A4 (OBJ-IPC-01): DOWNLOAD spools remain in-memory only (crash-safe by verify-hash-then-rename
+    // on the client), so any leftover download spool is an orphan — sweep the whole dir on startup.
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
     if let Some(parent) = config.socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -282,6 +283,10 @@ async fn restore_local_bus_account_impl(
     hydrate_local_bot_records(&mut account)?;
     hydrate_local_mcp_state(&mut account)?;
     hydrate_local_object_state(&mut account)?;
+    // T25-A5 (OBJ-IPC-01): rehydrate durable-journaled in-flight UPLOAD spools so a mid-upload rfd
+    // crash resumes from the durable offset instead of re-uploading from zero (replaces the blanket
+    // startup sweep). Fail-closed per pair; never re-commits an object A2 already owns.
+    rehydrate_object_put_spools(&mut account, &state.config.data_root, &manifest.local_account_id)?;
     state.accounts.insert(manifest.local_account_id.clone(), account);
     Ok(response)
 }

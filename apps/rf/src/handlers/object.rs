@@ -332,7 +332,30 @@ async fn handle_object_put(
     if total_len <= MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES {
         handle_object_put_one_shot(bus, socket, put).await
     } else {
-        handle_object_put_spooled(bus, socket, put, total_len).await
+        handle_object_put_spooled(socket, put, total_len).await
+    }
+}
+
+/// T25-A5 (OBJ-IPC-01): the number of full stream/resume attempts a spooled UPLOAD makes. A dropped
+/// local-bus chunk/finish response (a transport failure, NOT a structured daemon rejection) triggers
+/// a reconnect + `object.put.status` reconcile that resumes chunks from the durable `resume_offset`
+/// (or short-circuits to reconciled success when the operation already committed).
+const OBJECT_PUT_MAX_ATTEMPTS: usize = 4;
+
+/// A spooled-UPLOAD attempt outcome: a structured daemon rejection (a permanently failed operation, a
+/// protocol desync) is `Fatal` (surfaced immediately); a transport failure (a dropped local-bus
+/// response / a daemon that went away) is `Retryable` (reconnect + status-reconcile + resume).
+enum PutStreamError {
+    Fatal(RfError),
+    Retryable(RfError),
+}
+
+/// A dropped local-bus response closes the connection, surfacing as an I/O error — the ONLY retryable
+/// (reconnect + resume) class. A structured daemon rejection is fatal and surfaced immediately.
+fn classify_put_error(error: ramflux_sdk::SdkError) -> PutStreamError {
+    match error {
+        ramflux_sdk::SdkError::Io(_) => PutStreamError::Retryable(error.into()),
+        other => PutStreamError::Fatal(other.into()),
     }
 }
 
@@ -384,7 +407,6 @@ async fn handle_object_put_one_shot(
 /// `operation_id`, then `object.put.begin`, then read+send the file in bounded (<= 512 KiB raw)
 /// chunks, then `object.put.finish` (which reuses the A2 durable commit under the same id).
 async fn handle_object_put_spooled(
-    bus: &mut LocalBusClient,
     socket: &std::path::Path,
     put: ObjectPut,
     total_len: usize,
@@ -392,18 +414,20 @@ async fn handle_object_put_spooled(
     // 1. stream-hash the plaintext WITHOUT resident base64 to derive plaintext_hash + operation_id.
     let mut hasher = ramflux_crypto::Blake3DomainHasher::new(ramflux_protocol::domain::OBJECT);
     let mut buffer = vec![0_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES];
-    let mut file = std::fs::File::open(&put.file)?;
-    let mut hashed_len = 0_usize;
-    loop {
-        let read = std::io::Read::read(&mut file, &mut buffer)?;
-        if read == 0 {
-            break;
+    {
+        let mut file = std::fs::File::open(&put.file)?;
+        let mut hashed_len = 0_usize;
+        loop {
+            let read = std::io::Read::read(&mut file, &mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            hashed_len += read;
         }
-        hasher.update(&buffer[..read]);
-        hashed_len += read;
-    }
-    if hashed_len != total_len {
-        return Err(RfError::Message("object file changed size during upload".to_owned()));
+        if hashed_len != total_len {
+            return Err(RfError::Message("object file changed size during upload".to_owned()));
+        }
     }
     let plaintext_hash = hasher.finalize_base64url();
     let operation_id = logical_object_put_operation_id_from_hash(
@@ -414,7 +438,7 @@ async fn handle_object_put_spooled(
     );
     let account = put.account.clone();
 
-    // 2. begin: bind the whole content-and-intent up front (carries no plaintext).
+    // 2. begin binds the whole content-and-intent up front (carries no plaintext).
     let begin = LocalBusObjectPutBeginRequest {
         object_id: put.object.clone(),
         operation_id: operation_id.clone(),
@@ -429,77 +453,160 @@ async fn handle_object_put_spooled(
         relay_service_key_base64: None,
         relay_interrupt_after_chunks: put.relay_interrupt_after_chunks,
     };
-    bus.request(Some(account.clone()), "object", "object.put.begin", &begin).await?;
 
-    // 3. stream the file in bounded chunks; each frame is < 1 MiB by construction.
-    let mut file = std::fs::File::open(&put.file)?;
-    let mut offset = 0_usize;
-    loop {
-        let read = std::io::Read::read(&mut file, &mut buffer)?;
-        if read == 0 {
-            break;
+    // 3. bounded resume retry: begin/chunk/finish over the SAME deterministic operation_id. On a
+    //    mid-stream transport failure (a daemon crash/restart), reconnect + object.put.status and
+    //    resume chunks from the durable resume_offset — never re-sending already-acked bytes.
+    let mut last_error: Option<RfError> = None;
+    // A5 test-visible diagnostic (CTRL-108): the FIRST attempt's observed object.put.status
+    // {state, resume_offset}. It proves the resume honored the durable offset (never re-uploaded the
+    // acked prefix) in a way immune to how many transport-flake retries the loop makes. Diagnostic
+    // only — it carries no plaintext/secret, does not change the daemon protocol, and does not affect
+    // the committed/reconciled result.
+    let mut first_observed: Option<(String, Option<usize>)> = None;
+    for _attempt in 0..OBJECT_PUT_MAX_ATTEMPTS {
+        match object_put_stream_attempt(
+            socket,
+            &account,
+            &put,
+            total_len,
+            &operation_id,
+            &begin,
+            &mut buffer,
+            &mut first_observed,
+        )
+        .await
+        {
+            Ok(mut response) => {
+                if let (Some((state, resume_offset)), Some(map)) =
+                    (first_observed.as_ref(), response.as_object_mut())
+                {
+                    map.insert(
+                        "observed_state".to_owned(),
+                        serde_json::Value::String(state.clone()),
+                    );
+                    if let Some(offset) = resume_offset {
+                        map.insert("observed_resume_offset".to_owned(), serde_json::json!(offset));
+                    }
+                }
+                return print_json(&response);
+            }
+            Err(PutStreamError::Fatal(error)) => return Err(error),
+            Err(PutStreamError::Retryable(error)) => last_error = Some(error),
         }
-        let chunk = LocalBusObjectPutChunkRequest {
-            operation_id: operation_id.clone(),
-            offset,
-            data_base64: ramflux_protocol::encode_base64url(&buffer[..read]),
-        };
-        bus.request(Some(account.clone()), "object", "object.put.chunk", &chunk).await?;
-        offset += read;
     }
-    if offset != total_len {
-        return Err(RfError::Message("object file changed size during upload".to_owned()));
-    }
-
-    // 4. finish: reuse the A2 durable commit. A lost finish response reconciles via
-    //    object.put.status under the SAME operation_id (no new ambiguous-success window).
-    let finish = LocalBusObjectPutFinishRequest {
-        object_id: put.object.clone(),
-        operation_id: operation_id.clone(),
-    };
-    match bus.request(Some(account.clone()), "object", "object.put.finish", &finish).await {
-        Ok(response) => print_json(&response),
-        Err(error) => {
-            reconcile_object_put_finish(socket, &account, &put.object, &operation_id, error).await
-        }
-    }
+    Err(last_error.unwrap_or_else(|| {
+        RfError::Message("object.put upload exhausted resume attempts".to_owned())
+    }))
 }
 
-/// Reconciles a lost `object.put.finish` response. A finish-response drop happens AFTER the
-/// operation is durably `Committed`, so `object.put.status` returns `committed` and we print the
-/// stored compact terminal with `reconciled=true` (the relay committed exactly once). `unknown`
-/// surfaces the original error (nothing persisted); any other state means the durable object exists
-/// but the commit/relay is incomplete and resumable — surfaced clearly (the spool is one-shot).
-async fn reconcile_object_put_finish(
+/// One spooled-UPLOAD attempt: connect, `object.put.status` reconcile (committed short-circuits to
+/// reconciled success; resumable resumes from the durable offset; unknown opens a fresh spool via
+/// begin), stream bounded chunks from the resume point, then finish (reusing the A2 durable commit). A
+/// transport failure at any point is `Retryable`; a structured daemon rejection is `Fatal`.
+#[allow(clippy::too_many_arguments)]
+async fn object_put_stream_attempt(
     socket: &std::path::Path,
     account: &str,
-    object_id: &str,
+    put: &ObjectPut,
+    total_len: usize,
     operation_id: &str,
-    original_error: ramflux_sdk::SdkError,
-) -> Result<(), RfError> {
-    let mut bus = LocalBusClient::connect(socket).await?;
+    begin: &LocalBusObjectPutBeginRequest,
+    buffer: &mut [u8],
+    first_observed: &mut Option<(String, Option<usize>)>,
+) -> Result<serde_json::Value, PutStreamError> {
+    let mut bus = LocalBusClient::connect(socket)
+        .await
+        .map_err(|error| PutStreamError::Retryable(error.into()))?;
+
     let status_request = LocalBusObjectPutStatusRequest {
-        object_id: object_id.to_owned(),
+        object_id: put.object.clone(),
         operation_id: operation_id.to_owned(),
     };
     let status = bus
         .request(Some(account.to_owned()), "object", "object.put.status", &status_request)
-        .await?;
+        .await
+        .map_err(classify_put_error)?;
     let state = status.get("state").and_then(serde_json::Value::as_str).unwrap_or("unknown");
-    match state {
+    let resume_offset = status
+        .get("resume_offset")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    // Record only the FIRST attempt's observed status for the A5 diagnostic (CTRL-108).
+    if first_observed.is_none() {
+        *first_observed = Some((state.to_owned(), resume_offset));
+    }
+
+    let start = match state {
         "committed" => {
+            // Idempotent: the durable object exists exactly once — print the stored terminal.
             let mut terminal =
                 status.get("terminal").cloned().unwrap_or_else(|| serde_json::json!({}));
             if let Some(map) = terminal.as_object_mut() {
                 map.insert("reconciled".to_owned(), serde_json::Value::Bool(true));
             }
-            print_json(&terminal)
+            return Ok(terminal);
         }
-        "unknown" => Err(original_error.into()),
-        other => Err(RfError::Message(format!(
-            "object.put finish reconcile: state={other}; the object is durably staged but its commit is incomplete (resume it); original error: {original_error}"
-        ))),
+        "failed" => {
+            return Err(PutStreamError::Fatal(RfError::Message(format!(
+                "object.put operation previously failed for object {}",
+                put.object
+            ))));
+        }
+        // A live/rehydrated chunk-phase spool: resume from its durable frontier (skip begin so the
+        // durable prefix is preserved — a re-begin would discard it).
+        "resumable" => resume_offset.unwrap_or(0),
+        "unknown" => {
+            // Nothing durable yet: open the spool (begin binds identity), then stream from zero.
+            bus.request(Some(account.to_owned()), "object", "object.put.begin", begin)
+                .await
+                .map_err(classify_put_error)?;
+            0
+        }
+        // pending / local_committed: the chunk phase already completed; only the finish/commit remains.
+        _ => total_len,
+    };
+
+    let mut file = std::fs::File::open(&put.file)
+        .map_err(|error| PutStreamError::Fatal(RfError::Io(error)))?;
+    if start > 0 {
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start as u64))
+            .map_err(|error| PutStreamError::Fatal(RfError::Io(error)))?;
     }
+    let mut offset = start;
+    loop {
+        let read = std::io::Read::read(&mut file, buffer)
+            .map_err(|error| PutStreamError::Fatal(RfError::Io(error)))?;
+        if read == 0 {
+            break;
+        }
+        let chunk = LocalBusObjectPutChunkRequest {
+            operation_id: operation_id.to_owned(),
+            offset,
+            data_base64: ramflux_protocol::encode_base64url(&buffer[..read]),
+        };
+        bus.request(Some(account.to_owned()), "object", "object.put.chunk", &chunk)
+            .await
+            .map_err(classify_put_error)?;
+        offset += read;
+    }
+    if offset != total_len {
+        return Err(PutStreamError::Fatal(RfError::Message(
+            "object file changed size during upload".to_owned(),
+        )));
+    }
+
+    // Finish reuses the A2 durable commit. A dropped finish response is Retryable — the next attempt's
+    // status returns committed and short-circuits to reconciled success (the relay committed once).
+    let finish = LocalBusObjectPutFinishRequest {
+        object_id: put.object.clone(),
+        operation_id: operation_id.to_owned(),
+    };
+    let response = bus
+        .request(Some(account.to_owned()), "object", "object.put.finish", &finish)
+        .await
+        .map_err(classify_put_error)?;
+    Ok(response)
 }
 
 /// T25-A2 (OBJ-IPC-01): a stable `operation_id` for a logical `object.put`, bound to `object_id` +

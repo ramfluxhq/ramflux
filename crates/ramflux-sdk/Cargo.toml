@@ -31,6 +31,11 @@ itest-rfd-fault = []
 # object.put.status. Never enabled by production binaries; requires the runtime opt-in env (double
 # gate); marker=0 in production.
 itest-bus-fault = []
+# T25-A5 (OBJ-IPC-01): default-off object-IPC crash seam used only by mvp_s69 to abort() rfd at the
+# upload chunk d->e boundary (durable spool + journal fsync'd, before the ack) and the download
+# after-spool-write boundary. Never enabled by production binaries; requires the runtime opt-in env
+# (double gate); marker=0 in production.
+object-ipc-crash-seam = []
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist

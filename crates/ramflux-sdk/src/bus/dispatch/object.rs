@@ -26,6 +26,176 @@ pub(crate) fn hydrate_local_object_state(
     account.client.hydrate_object_store_from_account_db()
 }
 
+/// T25-A5 (OBJ-IPC-01): rehydrate durable-journaled in-flight UPLOAD spools for one account on daemon
+/// startup (this REPLACES the old blanket sweep of the upload spool dir). For each `(spool, journal)`
+/// pair under the account's subdir it decides — fail-closed on any doubt — whether to RESUME the
+/// chunk-phase upload or delete both files:
+///   * unreadable/corrupt journal, TTL-expired (> 24h), or an identity mismatch -> delete both.
+///   * the A2 record for `operation_id` is terminal (`committed`/`local_committed`) or `pending`
+///     -> the object is already durably owned by A2 (never resume/re-commit) -> delete both.
+///   * the A2 record is ABSENT (crash was in the chunk phase) -> a resume candidate: verify the spool
+///     exists, `spool_size >= journal.written`, and the CONTENT `BLAKE3(spool[0..written])` equals
+///     `journal.prefix_hash` (rfcc HARD CONSTRAINT — content, not just length); on success truncate
+///     the spool to `written`, reopen an append handle, rebuild the incremental hasher, and reinstall
+///     the session. Any verification failure deletes both files (fail closed).
+pub(crate) fn rehydrate_object_put_spools(
+    account: &mut LocalBusAccountState,
+    data_root: &Path,
+    account_id: &str,
+) -> Result<(), SdkError> {
+    let account_dir = object_put_account_dir(data_root, account_id);
+    let entries = match std::fs::read_dir(&account_dir) {
+        Ok(entries) => entries,
+        // No per-account spool dir -> nothing durable to rehydrate.
+        Err(_error) => return Ok(()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let journal_path = entry.path();
+        if journal_path.extension().and_then(std::ffi::OsStr::to_str) != Some("journal") {
+            continue;
+        }
+        let spool_path = journal_path.with_extension("spool");
+        rehydrate_one_object_put_spool(account, account_id, &spool_path, &journal_path);
+    }
+    Ok(())
+}
+
+/// Deletes a spool + journal pair (fail-closed cleanup used throughout rehydrate).
+fn discard_object_put_files(spool_path: &Path, journal_path: &Path) {
+    let _ = std::fs::remove_file(spool_path);
+    let _ = std::fs::remove_file(journal_path);
+}
+
+/// Returns true when either file's mtime is older than the abandoned-spool TTL (bounded disk).
+fn object_put_pair_expired(spool_path: &Path, journal_path: &Path) -> bool {
+    let older_than_ttl = |path: &Path| -> bool {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|elapsed| elapsed.as_secs() > OBJECT_PUT_JOURNAL_TTL_SECONDS)
+    };
+    older_than_ttl(journal_path) || older_than_ttl(spool_path)
+}
+
+/// Streams the persisted spool prefix `spool[0..written]` through a fresh prefix hasher, returning the
+/// rebuilt hasher (to continue the incremental chain) and its finalize (for content verification).
+fn rebuild_object_put_prefix_hasher(
+    spool_path: &Path,
+    written: usize,
+) -> Result<(ramflux_crypto::Blake3DomainHasher, String), SdkError> {
+    let mut file = std::fs::File::open(spool_path)?;
+    let mut hasher = ramflux_crypto::Blake3DomainHasher::new(OBJECT_PUT_JOURNAL_PREFIX_DOMAIN);
+    let mut remaining = written;
+    let mut buffer = vec![0_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES];
+    while remaining > 0 {
+        let take = remaining.min(buffer.len());
+        std::io::Read::read_exact(&mut file, &mut buffer[..take])?;
+        hasher.update(&buffer[..take]);
+        remaining -= take;
+    }
+    let digest = hasher.finalize_base64url();
+    Ok((hasher, digest))
+}
+
+/// Truncates the spool to the durable `written` length and returns a fresh append handle so resumed
+/// chunks land exactly at the verified frontier.
+fn reopen_object_put_append_handle(
+    spool_path: &Path,
+    written: usize,
+) -> Result<std::fs::File, SdkError> {
+    let truncator = std::fs::OpenOptions::new().write(true).open(spool_path)?;
+    truncator.set_len(written as u64)?;
+    truncator.sync_all()?;
+    drop(truncator);
+    let append = std::fs::OpenOptions::new().append(true).open(spool_path)?;
+    Ok(append)
+}
+
+/// Rehydrates (or fail-closed deletes) a single spool/journal pair. Errors are treated as fail-closed:
+/// the pair is deleted and no session is installed.
+fn rehydrate_one_object_put_spool(
+    account: &mut LocalBusAccountState,
+    account_id: &str,
+    spool_path: &Path,
+    journal_path: &Path,
+) {
+    // Parse the journal; missing/corrupt -> fail closed.
+    let journal: ObjectPutJournal = match std::fs::read(journal_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(journal) => journal,
+        None => return discard_object_put_files(spool_path, journal_path),
+    };
+    // TTL: abandoned pair -> delete (bounded disk).
+    if object_put_pair_expired(spool_path, journal_path) {
+        return discard_object_put_files(spool_path, journal_path);
+    }
+    // Identity sanity.
+    if journal.account_id != account_id
+        || journal.operation_id.is_empty()
+        || journal.object_id.is_empty()
+        || journal.total_len > MAX_LOCAL_BUS_OBJECT_BYTES
+        || journal.written > journal.total_len
+    {
+        return discard_object_put_files(spool_path, journal_path);
+    }
+    // No-double-commit interlock: consult the A2 record FIRST. A terminal (committed/local_committed)
+    // or pending record means A2 already owns the object — never resume, never re-commit.
+    match account.client.object_operation(&journal.object_id) {
+        Ok(Some(record)) if record.operation_id == journal.operation_id => {
+            // committed | local_committed | pending | failed | anything -> A2 owns it, drop the spool.
+            return discard_object_put_files(spool_path, journal_path);
+        }
+        Ok(_) => {}
+        // DB error: fail closed (do not resume against an unknown durable state).
+        Err(_error) => return discard_object_put_files(spool_path, journal_path),
+    }
+    // Resume candidate: verify the spool exists and is at least as long as the durable offset.
+    let spool_size = match std::fs::metadata(spool_path) {
+        Ok(meta) => usize::try_from(meta.len()).unwrap_or(usize::MAX),
+        Err(_error) => return discard_object_put_files(spool_path, journal_path),
+    };
+    if spool_size < journal.written {
+        return discard_object_put_files(spool_path, journal_path);
+    }
+    // CONTENT verification (rfcc HARD CONSTRAINT): BLAKE3(spool[0..written]) must equal prefix_hash.
+    let (prefix_hasher, digest) =
+        match rebuild_object_put_prefix_hasher(spool_path, journal.written) {
+            Ok(pair) => pair,
+            Err(_error) => return discard_object_put_files(spool_path, journal_path),
+        };
+    if digest != journal.prefix_hash {
+        return discard_object_put_files(spool_path, journal_path);
+    }
+    // Truncate to the verified frontier and reopen an append handle.
+    let file = match reopen_object_put_append_handle(spool_path, journal.written) {
+        Ok(file) => file,
+        Err(_error) => return discard_object_put_files(spool_path, journal_path),
+    };
+    account.object_put_spools.insert(
+        journal.operation_id.clone(),
+        ObjectPutSpoolSession {
+            account_id: account_id.to_owned(),
+            operation_id: journal.operation_id,
+            object_id: journal.object_id,
+            total_len: journal.total_len,
+            plaintext_hash: journal.plaintext_hash,
+            chunk_size: journal.chunk_size,
+            relay_endpoint: journal.relay_endpoint,
+            relay_service_key_base64: journal.relay_service_key_base64,
+            relay_interrupt_after_chunks: journal.relay_interrupt_after_chunks,
+            path: spool_path.to_path_buf(),
+            journal_path: journal_path.to_path_buf(),
+            file,
+            written: journal.written,
+            prefix_hasher,
+        },
+    );
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn dispatch_object_bus_request(
     request: &LocalBusFrame,
@@ -39,7 +209,9 @@ pub(crate) async fn dispatch_object_bus_request(
     match request.method.as_str() {
         "object.put.begin" => object_put_begin(&data_root, account_id, account, request),
         "object.put.chunk" => object_put_chunk(account, request),
-        "object.put.finish" => object_put_finish(account, request).await,
+        // T25-A5: the spool session now carries an incremental hasher, so its finish future is boxed
+        // to keep the dispatch future small.
+        "object.put.finish" => Box::pin(object_put_finish(account, request)).await,
         "object.get.begin" => object_get_begin(&data_root, account_id, account, request).await,
         "object.get.read" => object_get_read(account, request),
         "object.get.finish" => {
@@ -54,26 +226,44 @@ pub(crate) async fn dispatch_object_bus_request(
         "object.get.status" => object_get_status(account, request),
         "object.put.status" => {
             // T25-A2 (OBJ-IPC-01): read-only reconciliation status for a logical PUT.
+            // T25-A5 (OBJ-IPC-01): ALSO reports a chunk-phase `resumable` state + `resume_offset` (the
+            // live/rehydrated spool session's durable `written`), so a CLI whose mid-upload transport
+            // failed can resume from the durable offset instead of re-uploading from zero.
             let body: LocalBusObjectPutStatusRequest =
                 serde_json::from_value(request.body.clone())?;
             let record = account.client.object_operation(&body.object_id)?;
-            let (state, terminal) = match record {
+            let session_written =
+                account.object_put_spools.get(&body.operation_id).map(|session| session.written);
+            let (state, terminal, resume_offset) = match record {
                 Some(record) if record.operation_id == body.operation_id => {
-                    let terminal = if record.state == OBJECT_OPERATION_COMMITTED {
-                        record.terminal_result.clone()
-                    } else {
-                        None
-                    };
-                    (record.state, terminal)
+                    match record.state.as_str() {
+                        OBJECT_OPERATION_COMMITTED => {
+                            (OBJECT_OPERATION_COMMITTED.to_owned(), record.terminal_result, None)
+                        }
+                        OBJECT_OPERATION_FAILED => (OBJECT_OPERATION_FAILED.to_owned(), None, None),
+                        // pending / local_committed: the finish/commit phase. Keep the raw state so the
+                        // A2 finish reconcile is unchanged; expose an offset only if a session survives.
+                        _ => (record.state, None, session_written),
+                    }
                 }
-                _ => (OBJECT_OPERATION_UNKNOWN.to_owned(), None),
+                // No matching durable record: a live/rehydrated chunk-phase spool is `resumable`.
+                _ => match session_written {
+                    Some(written) => (OBJECT_PUT_STATE_RESUMABLE.to_owned(), None, Some(written)),
+                    None => (OBJECT_OPERATION_UNKNOWN.to_owned(), None, None),
+                },
             };
-            Ok(local_bus_ok(serde_json::json!({
+            let mut response = serde_json::json!({
                 "object_id": body.object_id,
                 "operation_id": body.operation_id,
                 "state": state,
                 "terminal": terminal,
-            })))
+            });
+            if let Some(offset) = resume_offset
+                && let Some(map) = response.as_object_mut()
+            {
+                map.insert("resume_offset".to_owned(), serde_json::json!(offset));
+            }
+            Ok(local_bus_ok(response))
         }
         "object.put" => {
             let body: LocalBusObjectPutRequest = serde_json::from_value(request.body.clone())?;
@@ -556,29 +746,114 @@ async fn dispatch_object_put_reconciled_core(
 // ---- T25-A3 (CTRL-102 / OBJ-IPC-01): bounded local-bus UPLOAD spool (begin / chunk / finish) ----
 
 /// The private, account-scoped, owner-only (0700) directory that holds in-flight UPLOAD spool files
-/// under the daemon `data_root`. Swept on daemon startup (orphans from a prior crash).
+/// under the daemon `data_root`. T25-A5: rehydrated per-account on startup (no longer blanket-swept).
 pub(crate) fn object_put_spool_dir(data_root: &Path) -> PathBuf {
     local_bus_accounts_dir(data_root).join("object_put_spool")
 }
 
-/// The deterministic, filename-safe spool path for one `(account_id, operation_id)`. base64url is
-/// filename-safe (no `/`), and the hash avoids leaking the object/account ids into the filename.
-fn object_put_spool_path(data_root: &Path, account_id: &str, operation_id: &str) -> PathBuf {
-    let name = ramflux_crypto::blake3_256_base64url(
-        "ramflux.object_put_spool.v1",
-        format!("{account_id}\u{0}{operation_id}").as_bytes(),
-    );
-    object_put_spool_dir(data_root).join(format!("{name}.spool"))
+/// T25-A5 (OBJ-IPC-01): `object.put.status` state for a live/rehydrated chunk-phase spool that has no
+/// durable A2 record yet — the CLI resumes chunks from the reported `resume_offset`.
+const OBJECT_PUT_STATE_RESUMABLE: &str = "resumable";
+/// T25-A5 (OBJ-IPC-01): the BLAKE3 domain framing the durable-prefix journal hash. Distinct from the
+/// object plaintext hash domain so the two never collide.
+const OBJECT_PUT_JOURNAL_PREFIX_DOMAIN: &str = "ramflux.object_put_journal.prefix.v1";
+/// T25-A5: abandoned (orphaned) spool/journal pairs older than this are swept on startup so disk stays
+/// bounded even if a resume never arrives.
+const OBJECT_PUT_JOURNAL_TTL_SECONDS: u64 = 24 * 60 * 60;
+
+/// T25-A5 (OBJ-IPC-01): the standalone durable crash-resume journal sidecar for one in-flight upload.
+/// Written atomically (temp + fsync + rename + parent-dir fsync) AFTER the spool bytes are fsync'd, so
+/// `written` never exceeds the durable spool length. On restart the daemon verifies the persisted
+/// prefix content (BLAKE3) matches `prefix_hash` before resuming.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct ObjectPutJournal {
+    account_id: String,
+    operation_id: String,
+    object_id: String,
+    total_len: usize,
+    plaintext_hash: String,
+    chunk_size: usize,
+    relay_endpoint: Option<String>,
+    relay_service_key_base64: Option<String>,
+    relay_interrupt_after_chunks: Option<u32>,
+    written: usize,
+    prefix_hash: String,
 }
 
-/// Removes an in-flight spool session (dropping its file handle) AND its on-disk file. Idempotent —
-/// a no-op for an unknown `operation_id`. This is the single fail-closed cleanup used on begin
-/// re-entry, any chunk error, and every finish (success or failure).
+/// The per-account subdirectory that routes an account's upload spools without a cross-account scan.
+/// `account_hash` = base64url BLAKE3 of a stable domain + `account_id` (filename-safe, no leak).
+fn object_put_account_dir(data_root: &Path, account_id: &str) -> PathBuf {
+    let account_hash = ramflux_crypto::blake3_256_base64url(
+        "ramflux.object_put_spool.account.v1",
+        account_id.as_bytes(),
+    );
+    object_put_spool_dir(data_root).join(account_hash)
+}
+
+/// The deterministic, filename-safe `<op_hash>` for one `(account_id, operation_id)`. base64url is
+/// filename-safe (no `/`), and the hash avoids leaking the object/account ids into the filename.
+fn object_put_op_hash(account_id: &str, operation_id: &str) -> String {
+    ramflux_crypto::blake3_256_base64url(
+        "ramflux.object_put_spool.v1",
+        format!("{account_id}\u{0}{operation_id}").as_bytes(),
+    )
+}
+
+/// The spool file path `object_put_spool/<account_hash>/<op_hash>.spool`.
+fn object_put_spool_path(data_root: &Path, account_id: &str, operation_id: &str) -> PathBuf {
+    object_put_account_dir(data_root, account_id)
+        .join(format!("{}.spool", object_put_op_hash(account_id, operation_id)))
+}
+
+/// The journal sidecar path `object_put_spool/<account_hash>/<op_hash>.journal`.
+fn object_put_journal_path(data_root: &Path, account_id: &str, operation_id: &str) -> PathBuf {
+    object_put_account_dir(data_root, account_id)
+        .join(format!("{}.journal", object_put_op_hash(account_id, operation_id)))
+}
+
+/// T25-A5 (OBJ-IPC-01) rfcc HARD CONSTRAINT: every journal write is temp + `sync_all` + rename +
+/// parent-dir `sync_all`, NEVER an in-place rewrite. This makes the durable-offset record atomic and
+/// crash-safe: a torn write leaves the prior journal intact, and the rename itself is durable.
+fn write_object_put_journal_atomic(
+    journal_path: &Path,
+    journal: &ObjectPutJournal,
+) -> Result<(), SdkError> {
+    let parent = journal_path
+        .parent()
+        .ok_or_else(|| SdkError::LocalBus("object put journal path has no parent".to_owned()))?;
+    std::fs::create_dir_all(parent)?;
+    set_owner_only_dir_permissions(parent)?;
+    let tmp_path = journal_path.with_extension("journal.tmp");
+    let bytes = serde_json::to_vec(journal)?;
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut tmp = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        tmp.write_all(&bytes)?;
+        tmp.sync_all()?;
+    }
+    set_owner_only_file_permissions(&tmp_path)?;
+    std::fs::rename(&tmp_path, journal_path)?;
+    // fsync the PARENT DIR so the rename that publishes the new journal is itself durable.
+    let dir = std::fs::File::open(parent)?;
+    dir.sync_all()?;
+    Ok(())
+}
+
+/// Removes an in-flight spool session (dropping its file handle) AND both its on-disk files (spool +
+/// journal). Idempotent — a no-op for an unknown `operation_id`. This is the single fail-closed
+/// cleanup used on begin re-entry, any chunk error, and every finish (success or failure).
 fn object_put_spool_discard(account: &mut LocalBusAccountState, operation_id: &str) {
     if let Some(session) = account.object_put_spools.remove(operation_id) {
         let path = session.path.clone();
+        let journal_path = session.journal_path.clone();
         drop(session);
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&journal_path);
     }
 }
 
@@ -608,18 +883,45 @@ fn object_put_begin(
     // file so we always start from a clean, empty spool.
     object_put_spool_discard(account, &body.operation_id);
     let path = object_put_spool_path(data_root, account_id, &body.operation_id);
+    let journal_path = object_put_journal_path(data_root, account_id, &body.operation_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         set_owner_only_dir_permissions(parent)?;
     }
-    // Sweep any cross-restart orphan at this deterministic path, then create_new (O_EXCL): never
+    // Sweep any cross-restart orphan at these deterministic paths, then create_new (O_EXCL): never
     // reuse a pre-existing file and never follow a symlink into an attacker-chosen target.
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&journal_path);
     let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
     set_owner_only_file_permissions(&path)?;
+    // T25-A5 (OBJ-IPC-01): the incremental prefix hasher over the durably-written spool bytes. Its
+    // finalize (of the empty prefix) is bound into the initial journal so a resumed session's
+    // identity is durably established BEFORE the first chunk is accepted.
+    let prefix_hasher = ramflux_crypto::Blake3DomainHasher::new(OBJECT_PUT_JOURNAL_PREFIX_DOMAIN);
+    let initial_journal = ObjectPutJournal {
+        account_id: account_id.to_owned(),
+        operation_id: body.operation_id.clone(),
+        object_id: body.object_id.clone(),
+        total_len: body.total_len,
+        plaintext_hash: body.plaintext_hash.clone(),
+        chunk_size: body.chunk_size,
+        relay_endpoint: body.relay_endpoint.clone(),
+        relay_service_key_base64: body.relay_service_key_base64.clone(),
+        relay_interrupt_after_chunks: body.relay_interrupt_after_chunks,
+        written: 0,
+        prefix_hash: prefix_hasher.finalize_base64url(),
+    };
+    if let Err(error) = write_object_put_journal_atomic(&journal_path, &initial_journal) {
+        // Fail closed: the initial journal must be durable before any chunk is accepted.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&journal_path);
+        return Err(error);
+    }
     account.object_put_spools.insert(
         body.operation_id.clone(),
         ObjectPutSpoolSession {
+            account_id: account_id.to_owned(),
+            operation_id: body.operation_id.clone(),
             object_id: body.object_id,
             total_len: body.total_len,
             plaintext_hash: body.plaintext_hash,
@@ -628,8 +930,10 @@ fn object_put_begin(
             relay_service_key_base64: body.relay_service_key_base64,
             relay_interrupt_after_chunks: body.relay_interrupt_after_chunks,
             path,
+            journal_path,
             file,
             written: 0,
+            prefix_hasher,
         },
     );
     Ok(local_bus_ok(serde_json::json!({
@@ -704,11 +1008,37 @@ fn object_put_chunk_apply(
             "object.put.chunk exceeds the {MAX_LOCAL_BUS_OBJECT_BYTES}-byte object limit: {end}"
         )));
     }
+    // T25-A5 (OBJ-IPC-01) rfcc HARD CONSTRAINT — the crash-safe ack ordering:
+    //   a) write the chunk bytes
     session.file.write_all(data)?;
-    // T25-A3 (CTRL-102): durably fsync the appended chunk (data + size) BEFORE the chunk is acked, so
-    // a crash after the ack cannot lose spooled bytes. A sync failure propagates as Err, and the
-    // caller (`object_put_chunk`) destroys the spool and fails closed — the upload never commits.
+    //   b) durably fsync the spool bytes (data + size) — durable spool BEFORE the durable offset.
     session.file.sync_data()?;
+    //   c) advance the incremental prefix hasher and finalize the new durable-prefix hash.
+    session.prefix_hasher.update(data);
+    let prefix_hash = session.prefix_hasher.finalize_base64url();
+    //   d) atomically persist the durable offset {written=end, prefix_hash} AFTER the spool fsync, so
+    //      the INVARIANT journal.written <= durable spool bytes holds by construction. Any error here
+    //      propagates as Err and the caller (`object_put_chunk`) destroys the spool + journal.
+    let journal = ObjectPutJournal {
+        account_id: session.account_id.clone(),
+        operation_id: session.operation_id.clone(),
+        object_id: session.object_id.clone(),
+        total_len: session.total_len,
+        plaintext_hash: session.plaintext_hash.clone(),
+        chunk_size: session.chunk_size,
+        relay_endpoint: session.relay_endpoint.clone(),
+        relay_service_key_base64: session.relay_service_key_base64.clone(),
+        relay_interrupt_after_chunks: session.relay_interrupt_after_chunks,
+        written: end,
+        prefix_hash,
+    };
+    write_object_put_journal_atomic(&session.journal_path, &journal)?;
+    // T25-A5 test-only seam: crash HERE — after the durable spool fsync + durable journal fsync but
+    // BEFORE the ack (the d->e boundary). Compiled only under `object-ipc-crash-seam`; marker=0 in
+    // production. A restart then resumes from the durable journal offset.
+    #[cfg(feature = "object-ipc-crash-seam")]
+    crate::itest_crash_seam::maybe_abort_upload_before_ack(end);
+    //   e) only now advance the in-memory frontier and return the ack.
     session.written = end;
     Ok(end)
 }
@@ -728,9 +1058,11 @@ async fn object_put_finish(
         ))
     })?;
     let path = session.path.clone();
+    let journal_path = session.journal_path.clone();
     let result = object_put_finish_inner(account, &body, &mut session).await;
-    drop(session); // close the file handle before removing the file
+    drop(session); // close the file handle before removing the files
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&journal_path);
     result
 }
 
@@ -877,6 +1209,13 @@ async fn object_get_begin(
             return Err(error);
         }
     };
+
+    // T25-A5 test-only seam: crash HERE — after the download spool is written + fsynced but BEFORE any
+    // read is served (so the streaming client can never verify-then-rename a partial into place).
+    // Compiled only under `object-ipc-crash-seam`; marker=0 in production. A restart re-begins the
+    // download from offset 0.
+    #[cfg(feature = "object-ipc-crash-seam")]
+    crate::itest_crash_seam::maybe_abort_download_after_write();
 
     account.object_get_spools.insert(
         body.operation_id.clone(),
@@ -1472,6 +1811,78 @@ mod spool_tests {
             .expect_err("oversize chunk must fail");
         assert!(error.to_string().contains("exceeds the"), "{error}");
         assert!(!spool_path(&state).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- T25-A5 (OBJ-IPC-01): durable upload journal crash-resume rehydration ----
+
+    #[tokio::test]
+    async fn rehydrate_resumes_a_chunk_phase_spool_after_restart() {
+        let root = temp_data_root("rehydrate_resume");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0xB3_u8; 4096];
+        let hash = plaintext_hash(&plaintext);
+        dispatch(&mut state, "object.put.begin", begin_body(plaintext.len(), &hash))
+            .await
+            .expect("begin");
+        // Stream only the first half, then simulate an rfd crash mid-upload.
+        dispatch(&mut state, "object.put.chunk", chunk_body(0, &plaintext[..2048]))
+            .await
+            .expect("chunk 0");
+        // "Crash": drop the in-memory session but keep the durable spool + journal on disk.
+        state.accounts.get_mut(ACCOUNT).expect("account").object_put_spools.clear();
+        // Restart: rehydrate from the durable journal; the resume offset is journal.written.
+        {
+            let data_root = state.config.data_root.clone();
+            let account = state.accounts.get_mut(ACCOUNT).expect("account");
+            rehydrate_object_put_spools(account, &data_root, ACCOUNT).expect("rehydrate");
+            let session = account.object_put_spools.get(OPERATION).expect("rehydrated session");
+            assert_eq!(session.written, 2048, "resume offset = durable journal.written");
+        }
+        // Resume the remaining half from the durable offset, then finish -> commits byte-identical.
+        dispatch(&mut state, "object.put.chunk", chunk_body(2048, &plaintext[2048..]))
+            .await
+            .expect("resume chunk");
+        let terminal =
+            dispatch(&mut state, "object.put.finish", finish_body()).await.expect("finish");
+        assert_eq!(terminal["committed"], true, "resumed upload commits: {terminal}");
+        assert_eq!(terminal["plaintext_hash"], serde_json::Value::String(hash));
+        assert!(!spool_path(&state).exists(), "finish removes the spool");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn rehydrate_fails_closed_on_prefix_hash_mismatch() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let root = temp_data_root("rehydrate_mismatch");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0xC4_u8; 4096];
+        let hash = plaintext_hash(&plaintext);
+        dispatch(&mut state, "object.put.begin", begin_body(plaintext.len(), &hash))
+            .await
+            .expect("begin");
+        dispatch(&mut state, "object.put.chunk", chunk_body(0, &plaintext[..2048]))
+            .await
+            .expect("chunk 0");
+        let spool = spool_path(&state);
+        let journal = object_put_journal_path(&state.config.data_root, ACCOUNT, OPERATION);
+        state.accounts.get_mut(ACCOUNT).expect("account").object_put_spools.clear();
+        // Tamper the durable spool prefix so BLAKE3(spool[0..written]) != journal.prefix_hash.
+        {
+            let mut file =
+                std::fs::OpenOptions::new().write(true).open(&spool).expect("open spool");
+            file.seek(SeekFrom::Start(0)).expect("seek");
+            file.write_all(&[0x00_u8; 16]).expect("tamper");
+            file.sync_all().expect("sync");
+        }
+        {
+            let data_root = state.config.data_root.clone();
+            let account = state.accounts.get_mut(ACCOUNT).expect("account");
+            rehydrate_object_put_spools(account, &data_root, ACCOUNT).expect("rehydrate");
+            assert!(account.object_put_spools.is_empty(), "a tampered prefix must not resume");
+        }
+        assert!(!spool.exists(), "fail-closed deletes the tampered spool");
+        assert!(!journal.exists(), "fail-closed deletes the journal");
         std::fs::remove_dir_all(&root).ok();
     }
 

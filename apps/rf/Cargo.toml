@@ -20,6 +20,9 @@ itest-rfd-fault = ["ramflux-sdk/itest-rfd-fault"]
 # T25-A2 (OBJ-IPC-01): propagate the SDK local-bus response-loss seam gate. Never enabled by
 # production rf.
 itest-bus-fault = ["ramflux-sdk/itest-bus-fault"]
+# T25-A5 (OBJ-IPC-01): propagate the SDK object-IPC crash-abort seam gate. Never enabled by
+# production rf.
+object-ipc-crash-seam = ["ramflux-sdk/object-ipc-crash-seam"]
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist
