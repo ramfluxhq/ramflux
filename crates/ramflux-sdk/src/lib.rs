@@ -13,6 +13,8 @@ mod error;
 mod federation;
 mod gateway;
 mod group;
+#[cfg(feature = "itest-bus-fault")]
+mod itest_bus_fault;
 #[cfg(feature = "itest-rfd-fault")]
 mod itest_rfd_fault;
 mod object;
@@ -50,9 +52,10 @@ pub use bus::{
     LocalBusMessageFrankingEvidenceRequest, LocalBusMessageReceiptDeliveredRequest,
     LocalBusMessageReceiptReadRequest, LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest,
     LocalBusObjectDeleteRequest, LocalBusObjectGetRequest, LocalBusObjectImportRequest,
-    LocalBusObjectPutRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
-    LocalBusObjectTransferStatusRequest, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
-    LocalMcpStandingApprovalSigningBody, serve_local_bus, serve_local_bus_until,
+    LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest, LocalBusObjectShareRequest,
+    LocalBusObjectTransferResumeRequest, LocalBusObjectTransferStatusRequest,
+    LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody, LocalMcpStandingApprovalSigningBody,
+    serve_local_bus, serve_local_bus_until,
 };
 pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;

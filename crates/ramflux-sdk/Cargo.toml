@@ -26,6 +26,11 @@ itest-local-mint = ["dep:hmac", "dep:sha2"]
 # boundary. Never enabled by production binaries — default SDK/rf carry no fault mode/marker env
 # strings, symbols, or park code. Still requires the runtime opt-in env to arm (double gate).
 itest-rfd-fault = []
+# T25-A2 (OBJ-IPC-01) P0-2: local-bus response-loss seam used only by mvp_s66 to drop the
+# object.put response AFTER the operation is durably Committed, forcing the CLI to reconcile via
+# object.put.status. Never enabled by production binaries; requires the runtime opt-in env (double
+# gate); marker=0 in production.
+itest-bus-fault = []
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist

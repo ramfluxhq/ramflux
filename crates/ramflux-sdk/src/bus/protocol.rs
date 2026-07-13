@@ -572,6 +572,21 @@ pub struct LocalBusObjectPutRequest {
     pub relay_service_key_base64: Option<String>,
     #[serde(default)]
     pub relay_interrupt_after_chunks: Option<u32>,
+    /// T25-A2 (OBJ-IPC-01): opt-in durable reconciliation. When present, the daemon runs the
+    /// `Pending → LocalCommitted → Committed` state machine, is idempotent on retry with the same
+    /// id, and can be reconciled via `object.put.status`. When absent, the A1 straight-line path
+    /// runs (no reconciliation guarantee) — the capability is explicit and version-gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+/// T25-A2 (OBJ-IPC-01): read-only reconciliation status for a logical `object.put`. Returns the
+/// operation `state` (`pending`/`local_committed`/`committed`/`failed`/`unknown`) and, when
+/// terminal, the compact terminal result. `unknown` when no record or the `operation_id` mismatches.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectPutStatusRequest {
+    pub object_id: String,
+    pub operation_id: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

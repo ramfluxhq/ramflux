@@ -27,6 +27,39 @@ pub struct EncryptedObject {
     pub backup_excluded: bool,
 }
 
+/// T25-A2 (OBJ-IPC-01) P0-1: a whole-object encryption that has been *prepared* (fresh object key
+/// derived + AEAD sealed) but NOT yet published to the in-memory [`ObjectStore`]. Holding the
+/// prepared material separately lets the caller run ONE durable `SQLCipher` transaction
+/// ({object row + key} + operation record → `LocalCommitted`) and only then [`install`] it, so a
+/// crash before that commit leaves no stored object and no half-published in-memory state.
+///
+/// Security gate: this value carries the NEW object key. It deliberately derives neither `Debug`,
+/// `Serialize`, nor `Clone` — the key must never be logged or copied — and the key is wrapped in
+/// [`zeroize::Zeroizing`] so any early return before [`ObjectStore::install_prepared_object`] drops
+/// it zeroized. Ownership transfers one-way into the store on install (the value is consumed).
+///
+/// [`install`]: ObjectStore::install_prepared_object
+pub struct PreparedEncryptedObject {
+    object: EncryptedObject,
+    object_key: zeroize::Zeroizing<[u8; 32]>,
+}
+
+impl PreparedEncryptedObject {
+    /// The public (non-secret) encrypted-object descriptor: id, manifest/plaintext hashes,
+    /// nonce, ciphertext. Never contains the key.
+    #[must_use]
+    pub fn object(&self) -> &EncryptedObject {
+        &self.object
+    }
+
+    /// The freshly derived object key. Borrow only to hand it to the durable account-DB write;
+    /// never log it or copy it into a response/terminal result.
+    #[must_use]
+    pub fn object_key(&self) -> &[u8; 32] {
+        &self.object_key
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ObjectStore {
     objects: BTreeMap<String, EncryptedObject>,
@@ -39,13 +72,23 @@ impl ObjectStore {
         Self::default()
     }
 
+    /// T25-A2 (OBJ-IPC-01) P0-1: derive a fresh object key and AEAD-seal `plaintext` WITHOUT
+    /// publishing anything to the in-memory store. The returned [`PreparedEncryptedObject`] holds
+    /// the (zeroize-on-drop) key; the caller durably commits {object row + key} + the operation
+    /// record in one `SQLCipher` transaction, then [`install_prepared_object`] to publish it.
+    ///
+    /// The crypto here is byte-for-byte identical to the previous `put_encrypted_object` body — no
+    /// AEAD / nonce / manifest-hash / `EncryptedObject` layout change.
+    ///
     /// # Errors
     /// Returns an error when the operating system CSPRNG cannot generate an object key.
-    pub fn put_encrypted_object(
-        &mut self,
+    ///
+    /// [`install_prepared_object`]: ObjectStore::install_prepared_object
+    pub fn prepare_encrypted_object(
+        &self,
         object_id: &str,
         plaintext: &[u8],
-    ) -> Result<EncryptedObject, SyncError> {
+    ) -> Result<PreparedEncryptedObject, SyncError> {
         let object_id = ObjectId::new(object_id)?;
         let object_key = ramflux_crypto::random_32()?;
         let nonce = object_nonce(object_id.as_str());
@@ -57,18 +100,43 @@ impl ObjectStore {
             ramflux_protocol::domain::OBJECT_MANIFEST,
             &ciphertext,
         );
-        let object = EncryptedObject {
-            object_id,
-            manifest_hash,
-            nonce: encode_base64url(nonce),
-            ciphertext,
-            plaintext_hash,
-            tombstoned: false,
-            backup_excluded: false,
-        };
+        Ok(PreparedEncryptedObject {
+            object: EncryptedObject {
+                object_id,
+                manifest_hash,
+                nonce: encode_base64url(nonce),
+                ciphertext,
+                plaintext_hash,
+                tombstoned: false,
+                backup_excluded: false,
+            },
+            object_key: zeroize::Zeroizing::new(object_key),
+        })
+    }
+
+    /// Publish a [`PreparedEncryptedObject`] into the in-memory store, consuming it (one-way
+    /// ownership transfer). Returns the installed [`EncryptedObject`]. The wrapped key is copied
+    /// into the key map and the (zeroizing) prepared wrapper is dropped zeroized.
+    #[must_use]
+    pub fn install_prepared_object(
+        &mut self,
+        prepared: PreparedEncryptedObject,
+    ) -> EncryptedObject {
+        let PreparedEncryptedObject { object, object_key } = prepared;
         self.objects.insert(object.object_id.clone(), object.clone());
-        self.object_keys.insert(object.object_id.clone(), object_key);
-        Ok(object)
+        self.object_keys.insert(object.object_id.clone(), *object_key);
+        object
+    }
+
+    /// # Errors
+    /// Returns an error when the operating system CSPRNG cannot generate an object key.
+    pub fn put_encrypted_object(
+        &mut self,
+        object_id: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptedObject, SyncError> {
+        let prepared = self.prepare_encrypted_object(object_id, plaintext)?;
+        Ok(self.install_prepared_object(prepared))
     }
 
     /// # Errors
@@ -1290,6 +1358,29 @@ mod tests {
 
     fn device_branch(device_id: &str, epoch: u64, seed: [u8; 32]) -> ramflux_crypto::DeviceBranch {
         ramflux_crypto::create_device_branch("principal_a", device_id, epoch, seed)
+    }
+
+    #[test]
+    fn prepare_does_not_publish_until_install_and_roundtrips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = ObjectStore::new();
+        let prepared = store.prepare_encrypted_object("object_prepare", b"prepare-plaintext")?;
+        // Prepared but not installed: the in-memory store must not yet see the object or key.
+        assert!(store.objects().is_empty(), "prepare must not publish to the in-memory store");
+        assert!(matches!(store.decrypt_object("object_prepare"), Err(SyncError::ObjectNotFound)));
+        let manifest_hash = prepared.object().manifest_hash.clone();
+        let plaintext_hash = prepared.object().plaintext_hash.clone();
+        let installed = store.install_prepared_object(prepared);
+        assert_eq!(installed.manifest_hash, manifest_hash);
+        assert_eq!(installed.plaintext_hash, plaintext_hash);
+        // After install the object decrypts to the original plaintext with its adopted key.
+        assert_eq!(store.decrypt_object("object_prepare")?, b"prepare-plaintext");
+        // put_encrypted_object routes through prepare+install and stays byte-compatible.
+        let mut store2 = ObjectStore::new();
+        let put = store2.put_encrypted_object("object_prepare", b"prepare-plaintext")?;
+        assert_eq!(put.plaintext_hash, plaintext_hash, "plaintext hash is key-independent");
+        assert_eq!(store2.decrypt_object("object_prepare")?, b"prepare-plaintext");
+        Ok(())
     }
 
     #[test]

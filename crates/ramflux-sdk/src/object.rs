@@ -203,6 +203,15 @@ pub(crate) enum RelayTokenProvider {
 
 pub(crate) const OBJECT_TRANSFER_UPLOAD: &str = "upload";
 pub(crate) const OBJECT_TRANSFER_DOWNLOAD: &str = "download";
+
+// T25-A2 (OBJ-IPC-01): durable object.put reconciliation states + request-hash domain/version.
+pub(crate) const OBJECT_OPERATION_PENDING: &str = "pending";
+pub(crate) const OBJECT_OPERATION_LOCAL_COMMITTED: &str = "local_committed";
+pub(crate) const OBJECT_OPERATION_COMMITTED: &str = "committed";
+pub(crate) const OBJECT_OPERATION_FAILED: &str = "failed";
+pub(crate) const OBJECT_OPERATION_UNKNOWN: &str = "unknown";
+pub(crate) const OBJECT_PUT_REQUEST_HASH_DOMAIN: &str = "ramflux.object_put.request.v1";
+pub(crate) const OBJECT_PUT_PROTOCOL_VERSION: u32 = 1;
 // T22-A1 / RQ-04: v2 relay-token constants and the LocalMint runtime-opt-in env are compiled only
 // under the `itest-local-mint` feature, so production SDK/rf binaries carry no v2 mint metadata or
 // LocalMint env string.

@@ -81,3 +81,35 @@ pub struct ObjectShareGrantWrite<'a> {
     pub conversation_id: Option<&'a str>,
     pub shared_at: i64,
 }
+
+/// T25-A2 (OBJ-IPC-01): the durable per-`object_id` `object.put` reconciliation record. One row per
+/// object (the latest logical PUT); state advances `pending` → `local_committed` → `committed`, or
+/// `failed` on a permanent conflict. `terminal_result` is a compact JSON blob (identifiers/hashes/
+/// transfer only — never ciphertext or key). `request_hash` binds `object_id` + `plaintext_hash` +
+/// `chunk_size` + normalized relay endpoint + `operation_id` + protocol version (no secret).
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ObjectOperationRecord {
+    pub object_id: String,
+    pub operation_id: String,
+    pub state: String,
+    pub request_hash: String,
+    pub manifest_hash: Option<String>,
+    pub plaintext_hash: Option<String>,
+    pub terminal_result: Option<serde_json::Value>,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct ObjectOperationWrite<'a> {
+    pub object_id: &'a str,
+    pub operation_id: &'a str,
+    pub state: &'a str,
+    pub request_hash: &'a str,
+    pub manifest_hash: Option<&'a str>,
+    pub plaintext_hash: Option<&'a str>,
+    pub terminal_result: Option<&'a [u8]>,
+    pub last_error: Option<&'a str>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}

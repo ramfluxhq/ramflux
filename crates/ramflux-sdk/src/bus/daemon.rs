@@ -288,6 +288,7 @@ pub(crate) fn verify_local_bus_peer(
     if peer.uid() == expected_uid { Ok(()) } else { Err(SdkError::LocalBusPermissionDenied) }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_local_bus_connection(
     stream: UnixStream,
     state: Rc<Mutex<LocalBusDaemonState>>,
@@ -341,6 +342,18 @@ pub(crate) async fn handle_local_bus_connection(
                 }
             }
         };
+        // T25-A2 (OBJ-IPC-01) P0-2: default-off local-bus response-loss seam. After a successful
+        // (durably Committed) object.put dispatch has returned, but BEFORE the response frame is
+        // written, drop the response and close this connection so the CLI must reconcile via
+        // object.put.status. Feature-gated out of production; marker=0.
+        #[cfg(feature = "itest-bus-fault")]
+        if response.ok == Some(true) {
+            match crate::itest_bus_fault::should_drop_response(&request.method) {
+                Ok(true) => break Ok(()),
+                Ok(false) => {}
+                Err(error) => break Err(error),
+            }
+        }
         local_bus_trace_request("BUS-RESP-SEND-IN", connection.connection_id, &request);
         outbound.send(response).await.map_err(|_error| {
             SdkError::LocalBus("local bus outbound response channel closed".to_owned())

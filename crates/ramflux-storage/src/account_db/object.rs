@@ -294,4 +294,95 @@ impl AccountDb {
             Ok(statement.query_row(params![object_id], mapper).optional()?)
         }
     }
+
+    /// T25-A2 (OBJ-IPC-01): upsert the per-`object_id` reconciliation record. Single-statement,
+    /// autocommitted + fsync-durable (`SQLite` FULL synchronous). `created_at` is preserved across
+    /// updates (only set on first insert); every other column is overwritten from `write`.
+    pub fn upsert_object_operation(
+        &self,
+        write: &ObjectOperationWrite<'_>,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO object_operation (
+                object_id, operation_id, state, request_hash, manifest_hash, plaintext_hash,
+                terminal_result, last_error, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(object_id) DO UPDATE SET
+                operation_id = excluded.operation_id,
+                state = excluded.state,
+                request_hash = excluded.request_hash,
+                manifest_hash = excluded.manifest_hash,
+                plaintext_hash = excluded.plaintext_hash,
+                terminal_result = excluded.terminal_result,
+                last_error = excluded.last_error,
+                updated_at = excluded.updated_at",
+            params![
+                write.object_id,
+                write.operation_id,
+                write.state,
+                write.request_hash.as_bytes(),
+                write.manifest_hash,
+                write.plaintext_hash,
+                write.terminal_result,
+                write.last_error,
+                write.created_at,
+                write.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Reads the reconciliation record for `object_id`, if any.
+    pub fn object_operation(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ObjectOperationRecord>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT object_id, operation_id, state, request_hash, manifest_hash,
+                        plaintext_hash, terminal_result, last_error, created_at, updated_at
+                   FROM object_operation
+                  WHERE object_id = ?1",
+                params![object_id],
+                |row| {
+                    let request_hash: Vec<u8> = row.get(3)?;
+                    let terminal_result: Option<Vec<u8>> = row.get(6)?;
+                    Ok(ObjectOperationRecord {
+                        object_id: row.get(0)?,
+                        operation_id: row.get(1)?,
+                        state: row.get(2)?,
+                        request_hash: String::from_utf8_lossy(&request_hash).into_owned(),
+                        manifest_hash: row.get(4)?,
+                        plaintext_hash: row.get(5)?,
+                        terminal_result: terminal_result
+                            .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
+                        last_error: row.get(7)?,
+                        created_at: row.get(8)?,
+                        updated_at: row.get(9)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// T25-A2 (OBJ-IPC-01) P0-1: atomically commit the local object AND advance the operation
+    /// record in ONE `SQLCipher` transaction. `unchecked_transaction` opens a `BEGIN` on this
+    /// connection; both single-statement writes run inside it and `commit()` issues one
+    /// fsync-durable `COMMIT`. A crash between "no object" and "object durable" cannot happen — the
+    /// object row and the `LocalCommitted` operation state become durable together or not at all.
+    pub fn commit_object_local<T>(
+        &self,
+        object: &ObjectWrite<'_, T>,
+        operation: &ObjectOperationWrite<'_>,
+    ) -> Result<(), StorageError>
+    where
+        T: Serialize,
+    {
+        let transaction = self.connection.unchecked_transaction()?;
+        self.upsert_object(object)?;
+        self.upsert_object_operation(operation)?;
+        transaction.commit()?;
+        Ok(())
+    }
 }

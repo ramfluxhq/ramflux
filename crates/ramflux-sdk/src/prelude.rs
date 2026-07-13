@@ -19,17 +19,17 @@ pub(crate) use ramflux_storage::{
     GuardianRecoveryShareRecord, GuardianRecoveryShareWrite, HistoryBundle,
     IdentityLifecycleRecord, IdentityLifecycleTiming, McpAuditWrite, McpGrantWrite,
     McpStandingApprovalWrite, McpToolWrite, MessageMetadata, MessageReceiptState,
-    MessageTombstoneRecord, ObjectShareGrantRecord, ObjectShareGrantWrite, ObjectTransferRecord,
-    ObjectTransferWrite, ObjectWrite, PendingRecoveryApprovalWrite, PendingRecoveryRecord,
-    PendingRecoveryWrite, ProjectionStore, ReceiptEventWrite, StorageError, StoredBotInstallRecord,
-    TypingStateRecord, VaultSecretSource, WrappedAccountDbKey, unwrap_with_vault_secret,
-    wrap_with_vault_secret,
+    MessageTombstoneRecord, ObjectOperationRecord, ObjectOperationWrite, ObjectShareGrantRecord,
+    ObjectShareGrantWrite, ObjectTransferRecord, ObjectTransferWrite, ObjectWrite,
+    PendingRecoveryApprovalWrite, PendingRecoveryRecord, PendingRecoveryWrite, ProjectionStore,
+    ReceiptEventWrite, StorageError, StoredBotInstallRecord, TypingStateRecord, VaultSecretSource,
+    WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub(crate) use ramflux_sync::{
     A2iControlEvent, A2uiAction, A2uiSurface, ChunkManifest, ChunkPayload, EncryptedObject,
     FederationMesh, FederationMessage, HomeNodeMigration, McpCapability, McpGrantState,
     McpRegistry, McpToolManifest, ObjectStore, ObjectSyncSession, OpaqueCallSignal,
-    RenderedSurface, ResumeToken, RiskLevel, SignalingRelay, SyncError,
+    PreparedEncryptedObject, RenderedSurface, ResumeToken, RiskLevel, SignalingRelay, SyncError,
     bot_install_grant_signing_body, bot_manifest_hash, bot_manifest_signing_body,
     chunk_manifest_for_object, decrypt_chunk_payload, grant_matches_manifest,
     mcp_capability_wire_name, parse_mcp_capability, risk_requires_explicit_approval,
@@ -78,16 +78,19 @@ pub(crate) use crate::gateway::{
 };
 pub(crate) use crate::group::*;
 pub(crate) use crate::object::{
-    OBJECT_TRANSFER_DOWNLOAD, OBJECT_TRANSFER_UPLOAD, RelayTokenProvider, RelayTransferOptions,
-    SdkObjectPermissionEnvelope, SdkObjectRelayAckResponse, SdkObjectRelayCapability,
-    SdkObjectRelayGetResponse, SdkObjectRelayPutResponse, SdkObjectTransferStatus,
-    SdkRelayChunkStatus, SdkRelayToken, build_signed_object_access_grant,
-    build_signed_owner_authorization_proof, build_signed_requester_pop,
-    build_v3_ack_token_issue_body, build_v3_get_token_issue_body, build_v3_grant_token_issue_body,
-    build_v3_owner_session_token_issue_body, effective_attachment_lineage,
-    object_key_slot_associated_data, object_relay_chunk_cipher_hash, object_relay_chunk_id,
-    object_transfer_id, object_transfer_status, parse_relay_transfer_options,
-    recipient_device_hash, relay_quic_config, verify_recipient_object_access_grant,
+    OBJECT_OPERATION_COMMITTED, OBJECT_OPERATION_FAILED, OBJECT_OPERATION_LOCAL_COMMITTED,
+    OBJECT_OPERATION_PENDING, OBJECT_OPERATION_UNKNOWN, OBJECT_PUT_PROTOCOL_VERSION,
+    OBJECT_PUT_REQUEST_HASH_DOMAIN, OBJECT_TRANSFER_DOWNLOAD, OBJECT_TRANSFER_UPLOAD,
+    RelayTokenProvider, RelayTransferOptions, SdkObjectPermissionEnvelope,
+    SdkObjectRelayAckResponse, SdkObjectRelayCapability, SdkObjectRelayGetResponse,
+    SdkObjectRelayPutResponse, SdkObjectTransferStatus, SdkRelayChunkStatus, SdkRelayToken,
+    build_signed_object_access_grant, build_signed_owner_authorization_proof,
+    build_signed_requester_pop, build_v3_ack_token_issue_body, build_v3_get_token_issue_body,
+    build_v3_grant_token_issue_body, build_v3_owner_session_token_issue_body,
+    effective_attachment_lineage, object_key_slot_associated_data, object_relay_chunk_cipher_hash,
+    object_relay_chunk_id, object_transfer_id, object_transfer_status,
+    parse_relay_transfer_options, recipient_device_hash, relay_quic_config,
+    verify_recipient_object_access_grant,
 };
 // T22-A1 / RQ-04: v2 relay-token minting and the legacy object relay HTTP frame types are compiled
 // only under the itest-local-mint feature.

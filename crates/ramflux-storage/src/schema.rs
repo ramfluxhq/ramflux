@@ -751,6 +751,28 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             );
         ",
     },
+    AccountMigration {
+        schema_version: 7,
+        app_version: "v1-t25a2",
+        checksum: "2026-07-13-object-operation-reconcile-v1",
+        notes: "durable object.put reconciliation state machine (OBJ-IPC-01 / CTRL-101)",
+        sql: r"
+            CREATE TABLE IF NOT EXISTS object_operation (
+                object_id       TEXT PRIMARY KEY,
+                operation_id    TEXT NOT NULL,
+                state           TEXT NOT NULL,
+                request_hash    BLOB NOT NULL,
+                manifest_hash   TEXT,
+                plaintext_hash  TEXT,
+                terminal_result BLOB,
+                last_error      TEXT,
+                created_at      INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_object_operation_operation
+                ON object_operation(operation_id);
+        ",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {
