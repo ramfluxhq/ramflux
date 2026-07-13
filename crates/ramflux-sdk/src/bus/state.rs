@@ -39,6 +39,22 @@ pub(crate) struct ObjectPutSpoolSession {
     pub(crate) written: usize,
 }
 
+/// T25-A4 (CTRL-104 / OBJ-IPC-01): an in-flight bounded DOWNLOAD spool for one large `object.get`,
+/// keyed by `operation_id` on the owning account. `object.get.begin` decrypts the whole (<= 16 MiB)
+/// plaintext, spools it to a private (0600, `create_new`) temp file, and records `total_len` +
+/// `plaintext_hash`; each `object.get.read` serves a bounded slice at the verified sequential
+/// `read_offset`; `object.get.finish` (or a begin re-entry / the daemon-startup sweep) removes it. It
+/// is in-memory only (no crash-resume journal: that is A5) so an rfd restart drops it and the orphan
+/// file is swept on the next startup. Never echoes ciphertext.
+pub(crate) struct ObjectGetSpoolSession {
+    pub(crate) object_id: String,
+    pub(crate) total_len: usize,
+    pub(crate) plaintext_hash: String,
+    pub(crate) path: PathBuf,
+    pub(crate) file: std::fs::File,
+    pub(crate) read_offset: usize,
+}
+
 pub(crate) struct LocalBusAccountState {
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
@@ -65,6 +81,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) mcp_audit_log: Vec<LocalMcpAuditRecord>,
     /// T25-A3 (OBJ-IPC-01): in-flight bounded UPLOAD spools, keyed by `operation_id`.
     pub(crate) object_put_spools: BTreeMap<String, ObjectPutSpoolSession>,
+    /// T25-A4 (OBJ-IPC-01): in-flight bounded DOWNLOAD spools, keyed by `operation_id`.
+    pub(crate) object_get_spools: BTreeMap<String, ObjectGetSpoolSession>,
 }
 
 impl LocalBusAccountState {
@@ -93,6 +111,7 @@ impl LocalBusAccountState {
             mcp_pending_approvals: BTreeMap::new(),
             mcp_audit_log: Vec::new(),
             object_put_spools: BTreeMap::new(),
+            object_get_spools: BTreeMap::new(),
         }
     }
 
@@ -120,6 +139,7 @@ impl LocalBusAccountState {
             mcp_pending_approvals: BTreeMap::new(),
             mcp_audit_log: Vec::new(),
             object_put_spools: BTreeMap::new(),
+            object_get_spools: BTreeMap::new(),
         }
     }
 

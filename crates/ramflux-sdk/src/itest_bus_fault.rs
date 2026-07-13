@@ -30,12 +30,16 @@ pub(crate) enum Mode {
     Off,
     /// Drop the `object.put` response after the operation is durably `Committed`.
     ObjectPutResponse,
+    /// T25-A4 (`mvp_s68`): drop the first `object.get.read` response after the daemon has served the
+    /// slice, so the streaming client must RESTART the download via a fresh `object.get.begin`.
+    ObjectGetReadResponse,
 }
 
 /// Pure mapping from the raw env value to a [`Mode`]; any unknown/absent value is [`Mode::Off`].
 pub(crate) fn parse_mode(raw: Option<&str>) -> Mode {
     match raw {
         Some("object-put-response") => Mode::ObjectPutResponse,
+        Some("object-get-read-response") => Mode::ObjectGetReadResponse,
         _ => Mode::Off,
     }
 }
@@ -66,9 +70,13 @@ fn write_marker() -> Result<(), crate::error::SdkError> {
 pub(crate) fn should_drop_response(method: &str) -> Result<bool, crate::error::SdkError> {
     // T25-A3: the spool upload's terminal is `object.put.finish` — its response-loss must reconcile
     // exactly like the one-shot `object.put` terminal (both land the durable Committed record).
-    if mode() != Mode::ObjectPutResponse
-        || (method != "object.put" && method != "object.put.finish")
-    {
+    // T25-A4: the DOWNLOAD spool's `object.get.read` response-loss must reconcile by restarting.
+    let matched = match mode() {
+        Mode::ObjectPutResponse => method == "object.put" || method == "object.put.finish",
+        Mode::ObjectGetReadResponse => method == "object.get.read",
+        Mode::Off => false,
+    };
+    if !matched {
         return Ok(false);
     }
     if FAULT_CLAIMED.swap(true, Ordering::SeqCst) {
@@ -85,6 +93,7 @@ mod tests {
     #[test]
     fn parse_mode_maps_known_values_and_defaults_off() {
         assert_eq!(parse_mode(Some("object-put-response")), Mode::ObjectPutResponse);
+        assert_eq!(parse_mode(Some("object-get-read-response")), Mode::ObjectGetReadResponse);
         assert_eq!(parse_mode(Some("unknown")), Mode::Off);
         assert_eq!(parse_mode(None), Mode::Off);
     }

@@ -640,6 +640,53 @@ pub struct LocalBusObjectGetRequest {
     pub relay_interrupt_after_chunks: Option<u32>,
 }
 
+/// T25-A4 (CTRL-104 / OBJ-IPC-01): open a bounded DOWNLOAD spool for a large `object.get`. The
+/// daemon decrypts the whole object (relay download when a relay endpoint is present, else a local
+/// `decrypt_object`), verifies size <= 16 MiB, spools the plaintext to a private (0600, `create_new`)
+/// temp file, and returns a COMPACT response (`operation_id`, `object_id`, `total_len`,
+/// `plaintext_hash`) — never the plaintext. Symmetric to `object.put.begin`. Carries NO ciphertext.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectGetBeginRequest {
+    pub object_id: String,
+    pub operation_id: String,
+    pub protocol_version: u32,
+    #[serde(default)]
+    pub relay_endpoint: Option<String>,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
+    #[serde(default)]
+    pub relay_ack: bool,
+    #[serde(default)]
+    pub relay_interrupt_after_chunks: Option<u32>,
+}
+
+/// T25-A4: read one bounded slice `[offset, offset + len)` of the spooled plaintext as base64. The
+/// daemon fails closed on a forward gap (offset past the served frontier), an out-of-range end
+/// (`offset + len > total_len`), or an oversize `len` (> `MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES`). The
+/// response frame stays < 1 MiB by the same compile-time proof as `object.put.chunk`.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectGetReadRequest {
+    pub operation_id: String,
+    pub offset: usize,
+    pub len: usize,
+}
+
+/// T25-A4: finalize a DOWNLOAD spool — remove the private spool file and drop the in-memory session.
+/// Idempotent; safe to call after the client has streamed and hash-verified the whole object. A lost
+/// finish response is harmless (the client already holds the verified bytes).
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectGetFinishRequest {
+    pub operation_id: String,
+}
+
+/// T25-A4: read-only reconciliation status for a DOWNLOAD spool. Reports the session `state`
+/// (`reading`/`complete`/`unknown`), plus `total_len`, `read_offset`, and `plaintext_hash` when a
+/// session exists, so a dropped read/finish response can be reconciled without re-decrypting.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectGetStatusRequest {
+    pub operation_id: String,
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusObjectShareRequest {
     pub object_id: String,

@@ -9,11 +9,16 @@ use crate::prelude::*;
 use std::io::Write as _;
 
 use crate::bus::daemon::local_bus_accounts_dir;
-use crate::bus::io::{MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES, MAX_LOCAL_BUS_OBJECT_BYTES};
-use crate::bus::protocol::{
-    LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest, LocalBusObjectPutFinishRequest,
+use crate::bus::io::{
+    MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES, MAX_LOCAL_BUS_OBJECT_BYTES,
+    MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES,
 };
-use crate::bus::state::ObjectPutSpoolSession;
+use crate::bus::protocol::{
+    LocalBusObjectGetBeginRequest, LocalBusObjectGetFinishRequest, LocalBusObjectGetReadRequest,
+    LocalBusObjectGetStatusRequest, LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest,
+    LocalBusObjectPutFinishRequest,
+};
+use crate::bus::state::{ObjectGetSpoolSession, ObjectPutSpoolSession};
 
 pub(crate) fn hydrate_local_object_state(
     account: &mut LocalBusAccountState,
@@ -35,6 +40,18 @@ pub(crate) async fn dispatch_object_bus_request(
         "object.put.begin" => object_put_begin(&data_root, account_id, account, request),
         "object.put.chunk" => object_put_chunk(account, request),
         "object.put.finish" => object_put_finish(account, request).await,
+        "object.get.begin" => object_get_begin(&data_root, account_id, account, request).await,
+        "object.get.read" => object_get_read(account, request),
+        "object.get.finish" => {
+            let body: LocalBusObjectGetFinishRequest =
+                serde_json::from_value(request.body.clone())?;
+            let removed = object_get_spool_discard(account, &body.operation_id);
+            Ok(local_bus_ok(serde_json::json!({
+                "operation_id": body.operation_id,
+                "removed": removed,
+            })))
+        }
+        "object.get.status" => object_get_status(account, request),
         "object.put.status" => {
             // T25-A2 (OBJ-IPC-01): read-only reconciliation status for a logical PUT.
             let body: LocalBusObjectPutStatusRequest =
@@ -119,6 +136,19 @@ pub(crate) async fn dispatch_object_bus_request(
             } else {
                 account.client.decrypt_object(&body.object_id)?
             };
+            // T25-A4 (OBJ-IPC-01): the one-shot GET carries the whole plaintext in ONE response
+            // frame, so it is only valid for a small object. Fail closed above the one-shot bound
+            // BEFORE building an oversized (>1 MiB) response — an oversized frame would otherwise be
+            // rejected on the write path AFTER this read-only decrypt, closing the connection with an
+            // opaque transport error. The public `rf object get` never hits this: it always routes
+            // through the bounded DOWNLOAD spool (begin/read/finish). This arm stays for small SDK
+            // callers and is the one-shot path the pure tests exercise.
+            if plaintext.len() > MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES {
+                return Err(SdkError::LocalBus(format!(
+                    "object too large for one-shot object.get: {} > {MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES}; use object.get.begin",
+                    plaintext.len()
+                )));
+            }
             Ok(local_bus_ok(serde_json::json!({
                 "object_id": body.object_id,
                 "plaintext_base64": ramflux_protocol::encode_base64url(&plaintext),
@@ -760,6 +790,216 @@ async fn object_put_finish_inner(
     dispatch_object_put_reconciled_core(account, &put, plaintext, body.operation_id.clone()).await
 }
 
+// ---- T25-A4 (CTRL-104 / OBJ-IPC-01): bounded local-bus DOWNLOAD spool (begin / read / finish) ----
+
+/// The private, account-scoped, owner-only (0700) directory that holds in-flight DOWNLOAD spool
+/// files under the daemon `data_root`. Swept on daemon startup (orphans from a prior crash).
+pub(crate) fn object_get_spool_dir(data_root: &Path) -> PathBuf {
+    local_bus_accounts_dir(data_root).join("object_get_spool")
+}
+
+/// The deterministic, filename-safe spool path for one `(account_id, operation_id)`. Mirrors the
+/// UPLOAD spool: base64url is filename-safe and the hash avoids leaking the object/account ids.
+fn object_get_spool_path(data_root: &Path, account_id: &str, operation_id: &str) -> PathBuf {
+    let name = ramflux_crypto::blake3_256_base64url(
+        "ramflux.object_get_spool.v1",
+        format!("{account_id}\u{0}{operation_id}").as_bytes(),
+    );
+    object_get_spool_dir(data_root).join(format!("{name}.spool"))
+}
+
+/// Removes an in-flight DOWNLOAD spool session (dropping its file handle) AND its on-disk file.
+/// Idempotent — returns `false` for an unknown `operation_id`. This is the single fail-closed cleanup
+/// used on begin re-entry, any begin error, and every finish.
+fn object_get_spool_discard(account: &mut LocalBusAccountState, operation_id: &str) -> bool {
+    if let Some(session) = account.object_get_spools.remove(operation_id) {
+        let path = session.path.clone();
+        drop(session);
+        let _ = std::fs::remove_file(&path);
+        true
+    } else {
+        false
+    }
+}
+
+/// `object.get.begin`: decrypt the whole object (relay download when a relay endpoint is present,
+/// else a local `decrypt_object`), verify size <= 16 MiB, spool the plaintext to a private
+/// (`create_new`, 0600) file, and return a COMPACT response — never the plaintext. Any failure
+/// removes the (possibly partial) spool so no partial download is ever presented.
+async fn object_get_begin(
+    data_root: &Path,
+    account_id: &str,
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusObjectGetBeginRequest = serde_json::from_value(request.body.clone())?;
+    if body.protocol_version != OBJECT_PUT_PROTOCOL_VERSION {
+        return Err(SdkError::LocalBus(format!(
+            "object.get.begin unsupported protocol_version {} (expected {OBJECT_PUT_PROTOCOL_VERSION})",
+            body.protocol_version
+        )));
+    }
+    // Idempotent re-begin (a retry/restart with the same operation_id): drop any prior in-flight
+    // session + file so we always start from a clean, freshly decrypted spool.
+    object_get_spool_discard(account, &body.operation_id);
+
+    let relay_options = parse_relay_transfer_options(
+        body.relay_endpoint.clone(),
+        body.relay_service_key_base64.clone(),
+        body.relay_interrupt_after_chunks,
+    )?;
+    // A4 accepts an O(16 MiB) resident plaintext at the decrypt boundary (A5 will optimize); the
+    // whole-object AEAD / relay wire is UNCHANGED — this is the same decrypt the one-shot GET used.
+    let plaintext = if let Some(options) = relay_options.as_ref() {
+        dispatch_object_download_from_relay(account, &body.object_id, options, body.relay_ack)
+            .await?
+    } else {
+        account.client.decrypt_object(&body.object_id)?
+    };
+    if plaintext.len() > MAX_LOCAL_BUS_OBJECT_BYTES {
+        return Err(SdkError::LocalBus(format!(
+            "object too large for local-bus download: {} > {MAX_LOCAL_BUS_OBJECT_BYTES}",
+            plaintext.len()
+        )));
+    }
+    let total_len = plaintext.len();
+    let plaintext_hash =
+        ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, &plaintext);
+
+    let path = object_get_spool_path(data_root, account_id, &body.operation_id);
+    let result = object_get_spool_write(&path, &plaintext);
+    // Zeroize-friendly: drop the resident plaintext as soon as it is spooled (never echoed).
+    drop(plaintext);
+    let file = match result {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+    };
+
+    account.object_get_spools.insert(
+        body.operation_id.clone(),
+        ObjectGetSpoolSession {
+            object_id: body.object_id.clone(),
+            total_len,
+            plaintext_hash: plaintext_hash.clone(),
+            path,
+            file,
+            read_offset: 0,
+        },
+    );
+    Ok(local_bus_ok(serde_json::json!({
+        "operation_id": body.operation_id,
+        "object_id": body.object_id,
+        "total_len": total_len,
+        "plaintext_hash": plaintext_hash,
+    })))
+}
+
+/// Writes the spooled plaintext to a fresh private file (`create_new`/`O_EXCL`, 0600), fsync'd, and
+/// returns a read handle positioned at the start. Sweeps any cross-restart orphan first and never
+/// follows a symlink into an attacker-chosen target.
+fn object_get_spool_write(path: &Path, plaintext: &[u8]) -> Result<std::fs::File, SdkError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        set_owner_only_dir_permissions(parent)?;
+    }
+    let _ = std::fs::remove_file(path);
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    set_owner_only_file_permissions(path)?;
+    file.write_all(plaintext)?;
+    file.flush()?;
+    // Durably fsync the whole spooled plaintext before any read is served (a crash cannot present a
+    // truncated download as complete — the streamed hash is verified client-side regardless).
+    file.sync_all()?;
+    drop(file);
+    // Reopen read-only, positioned at the start, for the sequential read path.
+    let read = std::fs::OpenOptions::new().read(true).open(path)?;
+    Ok(read)
+}
+
+/// `object.get.read`: serve one bounded slice `[offset, offset + len)` of the spooled plaintext as
+/// base64. Fails closed on an oversize `len`, a forward gap / overlap / duplicate offset, or an
+/// out-of-range end. The response frame stays < 1 MiB (same compile-time proof as `object.put.chunk`).
+fn object_get_read(
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusObjectGetReadRequest = serde_json::from_value(request.body.clone())?;
+    let session = account.object_get_spools.get_mut(&body.operation_id).ok_or_else(|| {
+        SdkError::LocalBus(format!(
+            "object.get.read: unknown or closed download session {}",
+            body.operation_id
+        ))
+    })?;
+    if body.len > MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES {
+        return Err(SdkError::LocalBus(format!(
+            "object.get.read len {} exceeds the {MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES}-byte bound",
+            body.len
+        )));
+    }
+    if body.offset != session.read_offset {
+        // The only accepted offset is exactly the sequential frontier: a forward gap, an overlap, or
+        // a duplicate all fail closed (a dropped-read reconcile RESTARTS via object.get.begin).
+        return Err(SdkError::LocalBus(format!(
+            "object.get.read offset {} != expected {} (gap/overlap/duplicate)",
+            body.offset, session.read_offset
+        )));
+    }
+    let end = body
+        .offset
+        .checked_add(body.len)
+        .ok_or_else(|| SdkError::LocalBus("object.get.read offset overflow".to_owned()))?;
+    if end > session.total_len {
+        return Err(SdkError::LocalBus(format!(
+            "object.get.read exceeds total_len: {end} > {}",
+            session.total_len
+        )));
+    }
+    let mut buffer = vec![0_u8; body.len];
+    std::io::Seek::seek(&mut session.file, std::io::SeekFrom::Start(body.offset as u64))?;
+    std::io::Read::read_exact(&mut session.file, &mut buffer)?;
+    session.read_offset = end;
+    let eof = end == session.total_len;
+    let response = serde_json::json!({
+        "operation_id": body.operation_id,
+        "offset": body.offset,
+        "len": body.len,
+        "eof": eof,
+        "data_base64": ramflux_protocol::encode_base64url(&buffer),
+    });
+    Ok(local_bus_ok(response))
+}
+
+/// `object.get.status`: read-only reconciliation for a DOWNLOAD spool. Reports `reading` / `complete`
+/// / `unknown` plus `total_len`, `read_offset`, and `plaintext_hash` when a session exists.
+fn object_get_status(
+    account: &LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusObjectGetStatusRequest = serde_json::from_value(request.body.clone())?;
+    let response = match account.object_get_spools.get(&body.operation_id) {
+        Some(session) => {
+            let state =
+                if session.read_offset == session.total_len { "complete" } else { "reading" };
+            serde_json::json!({
+                "operation_id": body.operation_id,
+                "object_id": session.object_id,
+                "state": state,
+                "total_len": session.total_len,
+                "read_offset": session.read_offset,
+                "plaintext_hash": session.plaintext_hash,
+            })
+        }
+        None => serde_json::json!({
+            "operation_id": body.operation_id,
+            "state": OBJECT_OPERATION_UNKNOWN,
+        }),
+    };
+    Ok(local_bus_ok(response))
+}
+
 /// Persists a `Failed` terminal for a permanent conflict and returns a fail-closed error. Only used
 /// for same-operation request-hash changes and adoption hash mismatches (never to clobber a
 /// legitimate different in-flight operation).
@@ -1232,6 +1472,271 @@ mod spool_tests {
             .expect_err("oversize chunk must fail");
         assert!(error.to_string().contains("exceeds the"), "{error}");
         assert!(!spool_path(&state).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- T25-A4 (CTRL-104 / OBJ-IPC-01): bounded DOWNLOAD spool (begin/read/finish) ----
+
+    const GET_OPERATION: &str = "op-get-1";
+    const GET_OBJECT_ID: &str = "object_get_1";
+
+    fn get_spool_path(state: &LocalBusDaemonState) -> PathBuf {
+        object_get_spool_path(&state.config.data_root, ACCOUNT, GET_OPERATION)
+    }
+
+    fn get_begin_body(object_id: &str) -> serde_json::Value {
+        serde_json::to_value(LocalBusObjectGetBeginRequest {
+            object_id: object_id.to_owned(),
+            operation_id: GET_OPERATION.to_owned(),
+            protocol_version: OBJECT_PUT_PROTOCOL_VERSION,
+            relay_endpoint: None,
+            relay_service_key_base64: None,
+            relay_ack: false,
+            relay_interrupt_after_chunks: None,
+        })
+        .expect("get begin body")
+    }
+
+    fn get_read_body(offset: usize, len: usize) -> serde_json::Value {
+        serde_json::to_value(LocalBusObjectGetReadRequest {
+            operation_id: GET_OPERATION.to_owned(),
+            offset,
+            len,
+        })
+        .expect("get read body")
+    }
+
+    /// Commits a local object (no relay) so a subsequent GET can decrypt it.
+    async fn put_local_object(state: &mut LocalBusDaemonState, object_id: &str, plaintext: &[u8]) {
+        dispatch(
+            state,
+            "object.put",
+            serde_json::json!({
+                "object_id": object_id,
+                "plaintext_base64": ramflux_protocol::encode_base64url(plaintext),
+                "chunk_size": 65_536,
+            }),
+        )
+        .await
+        .expect("put local object");
+    }
+
+    #[tokio::test]
+    async fn get_begin_read_finish_streams_bounded_and_cleans_up() {
+        let root = temp_data_root("get_happy");
+        let mut state = make_state(root.clone());
+        // 3 * 512 KiB + a partial tail: forces multiple bounded reads and a final short read.
+        let plaintext = vec![0xC7_u8; 3 * MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 4096];
+        let hash = plaintext_hash(&plaintext);
+        put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
+
+        let begin = dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
+            .await
+            .expect("get begin");
+        // Compact begin response — NO plaintext echo.
+        assert_eq!(begin["operation_id"], GET_OPERATION);
+        assert_eq!(begin["object_id"], GET_OBJECT_ID);
+        assert_eq!(begin["total_len"], plaintext.len());
+        assert_eq!(begin["plaintext_hash"], serde_json::Value::String(hash.clone()));
+        assert!(begin.get("plaintext_base64").is_none(), "begin must not echo plaintext");
+        assert!(begin.get("data_base64").is_none(), "begin must not echo data");
+        assert!(get_spool_path(&state).exists(), "begin must create the spool file");
+
+        // Stream bounded reads until eof; reassemble and compare.
+        let mut reassembled = Vec::new();
+        let mut offset = 0;
+        loop {
+            let len = (plaintext.len() - offset).min(MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES);
+            let read = dispatch(&mut state, "object.get.read", get_read_body(offset, len))
+                .await
+                .expect("get read");
+            assert_eq!(read["offset"], offset);
+            assert_eq!(read["len"], len);
+            let data = ramflux_protocol::decode_base64url(
+                read["data_base64"].as_str().expect("data_base64"),
+            )
+            .expect("decode");
+            assert_eq!(data.len(), len);
+            reassembled.extend_from_slice(&data);
+            offset += len;
+            if read["eof"].as_bool().unwrap_or(false) {
+                assert_eq!(offset, plaintext.len(), "eof only at total_len");
+                break;
+            }
+        }
+        assert_eq!(reassembled, plaintext, "streamed plaintext must match byte-for-byte");
+        assert_eq!(plaintext_hash(&reassembled), hash, "streamed hash must match begin");
+
+        // Status reports complete before finish.
+        let status = dispatch(
+            &mut state,
+            "object.get.status",
+            serde_json::json!({ "operation_id": GET_OPERATION }),
+        )
+        .await
+        .expect("status");
+        assert_eq!(status["state"], "complete");
+        assert_eq!(status["read_offset"], plaintext.len());
+
+        // Finish removes the spool.
+        let finish = dispatch(
+            &mut state,
+            "object.get.finish",
+            serde_json::json!({ "operation_id": GET_OPERATION }),
+        )
+        .await
+        .expect("finish");
+        assert_eq!(finish["removed"], true);
+        assert!(!get_spool_path(&state).exists(), "finish must remove the spool file");
+        // Status after finish is unknown.
+        let status = dispatch(
+            &mut state,
+            "object.get.status",
+            serde_json::json!({ "operation_id": GET_OPERATION }),
+        )
+        .await
+        .expect("status");
+        assert_eq!(status["state"], "unknown");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn get_read_frame_stays_below_cap_for_a_maximal_read() {
+        let root = temp_data_root("get_framecap");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x5A_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES];
+        put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
+        dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
+            .await
+            .expect("begin");
+        // A maximal read (512 KiB raw). Serialize the full response frame and prove it is < 1 MiB.
+        let read = dispatch(
+            &mut state,
+            "object.get.read",
+            get_read_body(0, MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES),
+        )
+        .await
+        .expect("read");
+        let frame = crate::bus::protocol::LocalBusFrame::request(
+            "req",
+            Some(ACCOUNT.to_owned()),
+            "object",
+            "object.get.read",
+            read,
+        );
+        let bytes = ramflux_protocol::canonical_json_bytes(&frame).expect("frame bytes");
+        assert!(
+            bytes.len() < crate::bus::io::MAX_LOCAL_BUS_FRAME_BYTES,
+            "a maximal object.get.read frame {} must stay below the 1 MiB cap",
+            bytes.len()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn get_read_gap_overlap_and_out_of_range_fail_closed() {
+        let root = temp_data_root("get_faults");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x33_u8; 4096];
+        put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
+        dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
+            .await
+            .expect("begin");
+        // Forward gap: offset 1 with nothing served yet (expected 0).
+        let gap = dispatch(&mut state, "object.get.read", get_read_body(1, 1024))
+            .await
+            .expect_err("gap must fail");
+        assert!(gap.to_string().contains("gap/overlap/duplicate"), "{gap}");
+        // Serve the first slice, then re-read offset 0 (overlap/duplicate) — expected is now 1024.
+        dispatch(&mut state, "object.get.read", get_read_body(0, 1024)).await.expect("first read");
+        let dup = dispatch(&mut state, "object.get.read", get_read_body(0, 1024))
+            .await
+            .expect_err("duplicate must fail");
+        assert!(dup.to_string().contains("gap/overlap/duplicate"), "{dup}");
+        // Out of range: from the current frontier (1024), a read that runs past total_len.
+        let oor = dispatch(&mut state, "object.get.read", get_read_body(1024, 4096))
+            .await
+            .expect_err("out of range must fail");
+        assert!(oor.to_string().contains("exceeds total_len"), "{oor}");
+        // The session survives fail-closed reads (they do not corrupt the spool).
+        assert!(get_spool_path(&state).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn get_read_oversize_len_fails_closed() {
+        let root = temp_data_root("get_biglen");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x44_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 8192];
+        put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
+        dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
+            .await
+            .expect("begin");
+        let error = dispatch(
+            &mut state,
+            "object.get.read",
+            get_read_body(0, MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 1),
+        )
+        .await
+        .expect_err("oversize len must fail");
+        assert!(error.to_string().contains("exceeds the"), "{error}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn get_begin_of_unknown_object_fails_and_leaves_no_spool() {
+        let root = temp_data_root("get_missing");
+        let mut state = make_state(root.clone());
+        let error =
+            dispatch(&mut state, "object.get.begin", get_begin_body("object_does_not_exist"))
+                .await
+                .expect_err("begin of a missing object must fail");
+        assert!(!error.to_string().is_empty(), "{error}");
+        assert!(!get_spool_path(&state).exists(), "a failed begin must leave no spool file");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn get_begin_reentry_restarts_from_a_clean_spool() {
+        let root = temp_data_root("get_reentry");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x77_u8; 2048];
+        put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
+        dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
+            .await
+            .expect("begin");
+        // Advance the read frontier, then re-begin (a restart) — the session must reset to offset 0.
+        dispatch(&mut state, "object.get.read", get_read_body(0, 1024)).await.expect("read");
+        dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
+            .await
+            .expect("re-begin");
+        let status = dispatch(
+            &mut state,
+            "object.get.status",
+            serde_json::json!({ "operation_id": GET_OPERATION }),
+        )
+        .await
+        .expect("status");
+        assert_eq!(status["read_offset"], 0, "re-begin resets the read frontier");
+        assert_eq!(status["state"], "reading");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn small_one_shot_get_still_returns_plaintext() {
+        let root = temp_data_root("get_oneshot");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x9E_u8; 4096];
+        put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
+        let response =
+            dispatch(&mut state, "object.get", serde_json::json!({ "object_id": GET_OBJECT_ID }))
+                .await
+                .expect("one-shot get");
+        let decoded = ramflux_protocol::decode_base64url(
+            response["plaintext_base64"].as_str().expect("plaintext_base64"),
+        )
+        .expect("decode");
+        assert_eq!(decoded, plaintext, "one-shot get must round-trip the small object");
         std::fs::remove_dir_all(&root).ok();
     }
 }
