@@ -42,6 +42,7 @@ pub(crate) use ramflux_sdk::{
     LocalBusMcpToolCallRequest, LocalBusMessageAckRequest, LocalBusMessageAttachmentInput,
     LocalBusMessageDeleteRequest, LocalBusMessageReceiptDeliveredRequest,
     LocalBusMessageReceiptReadRequest, LocalBusMessageSubmitRequest, LocalBusObjectDeleteRequest,
+    LocalBusObjectGetBeginRequest, LocalBusObjectGetFinishRequest, LocalBusObjectGetReadRequest,
     LocalBusObjectGetRequest, LocalBusObjectImportRequest, LocalBusObjectPutBeginRequest,
     LocalBusObjectPutChunkRequest, LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest,
     LocalBusObjectPutStatusRequest, LocalBusObjectShareRequest,

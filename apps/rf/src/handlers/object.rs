@@ -10,29 +10,7 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
     let mut bus = LocalBusClient::connect(&socket).await?;
     match command.action {
         ObjectAction::Put(put) => handle_object_put(&mut bus, socket.as_path(), put).await,
-        ObjectAction::Get(get) => {
-            let request = LocalBusObjectGetRequest {
-                object_id: get.object,
-                relay_endpoint: get.relay_url,
-                #[cfg(feature = "itest-local-mint")]
-                relay_service_key_base64: get.relay_service_key,
-                #[cfg(not(feature = "itest-local-mint"))]
-                relay_service_key_base64: None,
-                relay_ack: get.relay_ack,
-                relay_interrupt_after_chunks: get.relay_interrupt_after_chunks,
-            };
-            let response = bus.request(Some(get.account), "object", "object.get", &request).await?;
-            let plaintext = response
-                .get("plaintext_base64")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| RfError::Message("object.get response missing plaintext".to_owned()))
-                .and_then(|value| {
-                    ramflux_protocol::decode_base64url(value)
-                        .map_err(|error| RfError::Message(format!("invalid object body: {error}")))
-                })?;
-            std::fs::write(&get.out, plaintext)?;
-            print_json(&response)
-        }
+        ObjectAction::Get(get) => handle_object_get(socket.as_path(), get).await,
         ObjectAction::Status(status) => {
             let request = LocalBusObjectTransferStatusRequest {
                 object_id: status.object,
@@ -103,6 +81,236 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
             )
         }
     }
+}
+
+/// T25-A4 (CTRL-104 / OBJ-IPC-01): the number of full restart attempts a streaming GET makes. A
+/// dropped local-bus read/finish response (a transport failure, NOT a structured daemon rejection)
+/// is reconciled by RESTARTING the whole download — `object.get.begin` re-decrypts into a fresh
+/// daemon spool and the client re-streams from offset 0. The temp output is only renamed into place
+/// after the whole streamed plaintext hash-matches begin's, so no partial file is ever presented.
+const OBJECT_GET_MAX_ATTEMPTS: usize = 3;
+
+/// A streaming-GET attempt outcome: a structured daemon rejection (missing/tombstoned object, hash
+/// mismatch) is `Fatal` (surfaced immediately, no restart); a transport failure (a dropped local-bus
+/// response) is `Retryable` (restart via a fresh `object.get.begin`).
+enum GetStreamError {
+    Fatal(RfError),
+    Retryable(RfError),
+}
+
+/// T25-A4 (CTRL-104 / OBJ-IPC-01): the streaming DOWNLOAD spool path. A public `rf object get` ALWAYS routes
+/// through the bounded `object.get.begin` -> `object.get.read`* -> `object.get.finish` protocol so a
+/// large (<= 16 MiB) object round-trips with every local-bus frame < 1 MiB and the 16 MiB plaintext
+/// is NEVER held resident as one base64 string — it is streamed incrementally to the output file. The
+/// user needs no flag: the daemon decrypts once, the client streams bounded reads. The one-shot
+/// `object.get` request stays for small SDK callers (and its size guard fails closed above the
+/// one-shot bound).
+async fn handle_object_get(socket: &std::path::Path, get: ObjectGet) -> Result<(), RfError> {
+    let operation_id = logical_object_get_operation_id(&get.object, get.relay_url.as_deref());
+    let mut last_error: Option<RfError> = None;
+    for _attempt in 0..OBJECT_GET_MAX_ATTEMPTS {
+        match object_get_stream_attempt(socket, &get, &operation_id).await {
+            Ok(response) => return print_json(&response),
+            Err(GetStreamError::Fatal(error)) => return Err(error),
+            Err(GetStreamError::Retryable(error)) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| RfError::Message("object.get exhausted restart attempts".to_owned())))
+}
+
+/// One streaming attempt: connect, `begin` (decrypt + spool), stream bounded reads into a sibling
+/// temp file while hashing, verify the streamed hash matches `begin`, `finish` (best-effort daemon
+/// cleanup), then atomically rename the temp into the output path. Any failure removes the temp so a
+/// partial download is never left in place. A transport failure is `Retryable`; a structured daemon
+/// error is `Fatal`.
+#[allow(clippy::too_many_lines)]
+async fn object_get_stream_attempt(
+    socket: &std::path::Path,
+    get: &ObjectGet,
+    operation_id: &str,
+) -> Result<serde_json::Value, GetStreamError> {
+    let mut bus = LocalBusClient::connect(socket)
+        .await
+        .map_err(|error| GetStreamError::Retryable(error.into()))?;
+    let account = get.account.clone();
+
+    let begin = LocalBusObjectGetBeginRequest {
+        object_id: get.object.clone(),
+        operation_id: operation_id.to_owned(),
+        protocol_version: OBJECT_PUT_PROTOCOL_VERSION,
+        relay_endpoint: get.relay_url.clone(),
+        #[cfg(feature = "itest-local-mint")]
+        relay_service_key_base64: get.relay_service_key.clone(),
+        #[cfg(not(feature = "itest-local-mint"))]
+        relay_service_key_base64: None,
+        relay_ack: get.relay_ack,
+        relay_interrupt_after_chunks: get.relay_interrupt_after_chunks,
+    };
+    let begin = bus
+        .request(Some(account.clone()), "object", "object.get.begin", &begin)
+        .await
+        .map_err(classify_get_error)?;
+    let total_len = begin
+        .get("total_len")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            GetStreamError::Fatal(RfError::Message("object.get.begin missing total_len".to_owned()))
+        })?;
+    let expected_hash = begin
+        .get("plaintext_hash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            GetStreamError::Fatal(RfError::Message(
+                "object.get.begin missing plaintext_hash".to_owned(),
+            ))
+        })?
+        .to_owned();
+
+    // Stream into a sibling temp file so the final rename is atomic and same-filesystem, and the
+    // output path only ever holds a complete, hash-verified object.
+    let temp_path = object_get_temp_path(&get.out);
+    let stream = object_get_stream_to_file(
+        &mut bus,
+        &account,
+        operation_id,
+        total_len,
+        &expected_hash,
+        &temp_path,
+    )
+    .await;
+    if let Err(error) = stream {
+        // Any streaming failure removes the temp so a partial download is never left in place.
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    // Best-effort daemon spool cleanup. A dropped finish response is harmless — the client already
+    // holds the whole hash-verified plaintext — so a finish failure does NOT fail the download.
+    let finish = LocalBusObjectGetFinishRequest { operation_id: operation_id.to_owned() };
+    let _ = bus.request(Some(account.clone()), "object", "object.get.finish", &finish).await;
+
+    // Atomically publish the complete, verified object.
+    std::fs::rename(&temp_path, &get.out).map_err(|error| {
+        let _ = std::fs::remove_file(&temp_path);
+        GetStreamError::Fatal(RfError::Message(format!("object.get output rename failed: {error}")))
+    })?;
+
+    Ok(serde_json::json!({
+        "object_id": get.object,
+        "out": get.out.display().to_string(),
+        "total_len": total_len,
+        "plaintext_hash": expected_hash,
+        "streamed": true,
+    }))
+}
+
+/// Streams bounded `object.get.read` slices into `temp_path`, hashing as it goes, and verifies the
+/// streamed plaintext hash matches `expected_hash` before returning. Fails closed on a hash mismatch.
+async fn object_get_stream_to_file(
+    bus: &mut LocalBusClient,
+    account: &str,
+    operation_id: &str,
+    total_len: usize,
+    expected_hash: &str,
+    temp_path: &std::path::Path,
+) -> Result<(), GetStreamError> {
+    let mut file = object_get_open_temp(temp_path)
+        .map_err(|error| GetStreamError::Fatal(RfError::Io(error)))?;
+    let mut hasher = ramflux_crypto::Blake3DomainHasher::new(ramflux_protocol::domain::OBJECT);
+    let mut offset = 0_usize;
+    while offset < total_len {
+        let len = (total_len - offset).min(MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES);
+        let read =
+            LocalBusObjectGetReadRequest { operation_id: operation_id.to_owned(), offset, len };
+        let response = bus
+            .request(Some(account.to_owned()), "object", "object.get.read", &read)
+            .await
+            .map_err(classify_get_error)?;
+        let data = response
+            .get("data_base64")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                GetStreamError::Fatal(RfError::Message("object.get.read missing data".to_owned()))
+            })
+            .and_then(|value| {
+                ramflux_protocol::decode_base64url(value).map_err(|error| {
+                    GetStreamError::Fatal(RfError::Message(format!(
+                        "invalid object slice: {error}"
+                    )))
+                })
+            })?;
+        if data.len() != len {
+            return Err(GetStreamError::Fatal(RfError::Message(format!(
+                "object.get.read returned {} bytes, expected {len}",
+                data.len()
+            ))));
+        }
+        std::io::Write::write_all(&mut file, &data)
+            .map_err(|error| GetStreamError::Fatal(RfError::Io(error)))?;
+        hasher.update(&data);
+        offset += len;
+    }
+    std::io::Write::flush(&mut file).map_err(|error| GetStreamError::Fatal(RfError::Io(error)))?;
+    file.sync_all().map_err(|error| GetStreamError::Fatal(RfError::Io(error)))?;
+    let streamed_hash = hasher.finalize_base64url();
+    if streamed_hash != expected_hash {
+        return Err(GetStreamError::Fatal(RfError::Message(format!(
+            "object.get streamed hash mismatch: expected {expected_hash} got {streamed_hash}"
+        ))));
+    }
+    Ok(())
+}
+
+/// A dropped local-bus response closes the connection, surfacing as an I/O error — that is the ONLY
+/// retryable (restart) class. A structured daemon rejection (missing/tombstoned object, protocol
+/// desync) is fatal and surfaced immediately.
+fn classify_get_error(error: ramflux_sdk::SdkError) -> GetStreamError {
+    match error {
+        ramflux_sdk::SdkError::Io(_) => GetStreamError::Retryable(error.into()),
+        other => GetStreamError::Fatal(other.into()),
+    }
+}
+
+/// A deterministic sibling temp path for the streamed download, so the final rename is atomic and on
+/// the same filesystem as the output. Includes the pid to avoid collisions between concurrent gets.
+fn object_get_temp_path(out: &std::path::Path) -> PathBuf {
+    let file_name = out
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("object"), std::ffi::OsStr::to_os_string);
+    let mut temp_name = file_name;
+    temp_name.push(format!(".rfget-{}.partial", std::process::id()));
+    match out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(temp_name),
+        _ => PathBuf::from(temp_name),
+    }
+}
+
+/// T25-A4 (CTRL-105): opens the client temp output with `O_EXCL` + 0600. Refuses a pre-existing path
+/// or a final symlink (`create_new`/`O_EXCL` never follows or truncates), so a symlink or clobber planted
+/// in the output directory cannot redirect or destroy the download. The caller fails closed and
+/// removes the temp on any error; the temp is renamed into place only after the streamed hash checks.
+fn object_get_open_temp(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+/// A stable `operation_id` for a logical `object.get`, bound to `object_id` + normalized relay
+/// endpoint (no secret). Deterministic so a restart of the same GET carries the SAME id — a re-begin
+/// then discards the prior daemon spool and re-decrypts into a clean one.
+fn logical_object_get_operation_id(object_id: &str, relay_endpoint: Option<&str>) -> String {
+    let relay = relay_endpoint.map(|value| value.trim().to_ascii_lowercase()).unwrap_or_default();
+    let descriptor = serde_json::json!({
+        "schema": "ramflux.object_get.operation_id.v1",
+        "object_id": object_id,
+        "relay_endpoint": relay,
+    });
+    let bytes = ramflux_protocol::canonical_json_bytes(&descriptor).unwrap_or_default();
+    format!(
+        "op-get-{}",
+        ramflux_crypto::blake3_256_base64url("ramflux.object_get.operation_id.v1", &bytes)
+    )
 }
 
 /// Routes a `rf object put` by file size: a file at/below the one-shot threshold keeps the small
@@ -378,5 +586,68 @@ async fn reconcile_object_put(
             Err(original_error.into())
         }
         other => Err(RfError::Message(format!("object.put reconcile failed: state={other}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::object_get_open_temp;
+
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rf-object-get-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    // T25-A4 (CTRL-105): a fresh temp is created 0600.
+    #[test]
+    fn open_temp_creates_fresh_0600() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = unique_dir("fresh");
+        let path = dir.join("out.partial");
+        drop(object_get_open_temp(&path)?);
+        let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "temp output must be created 0600");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    // A pre-existing regular file is refused and NOT truncated (create_new/O_EXCL).
+    #[test]
+    fn open_temp_refuses_existing_file_without_truncating() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = unique_dir("existing");
+        let path = dir.join("out.partial");
+        std::fs::write(&path, b"pre-existing")?;
+        assert!(object_get_open_temp(&path).is_err(), "must refuse a pre-existing temp path");
+        assert_eq!(
+            std::fs::read(&path)?,
+            b"pre-existing",
+            "a refused open must NOT truncate the existing file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    // A symlink at the temp path is refused and its target is NOT followed/clobbered.
+    #[test]
+    fn open_temp_refuses_symlink_without_following() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = unique_dir("symlink");
+        let target = dir.join("victim");
+        std::fs::write(&target, b"victim-content")?;
+        let link = dir.join("out.partial");
+        std::os::unix::fs::symlink(&target, &link)?;
+        assert!(
+            object_get_open_temp(&link).is_err(),
+            "must refuse a symlink (O_EXCL never follows the final component)"
+        );
+        assert_eq!(
+            std::fs::read(&target)?,
+            b"victim-content",
+            "the symlink target must be untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

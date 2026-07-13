@@ -47,6 +47,8 @@ async fn serve_local_bus_until_local(
     // so on startup no session is live and any leftover spool file is an orphan from a prior crash.
     // Sweep the whole spool dir to keep disk usage O(in-flight uploads), not O(all past crashes).
     let _ = std::fs::remove_dir_all(object_put_spool_dir(&config.data_root));
+    // T25-A4 (OBJ-IPC-01): DOWNLOAD spools are likewise in-memory only; sweep any orphan on startup.
+    let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
     if let Some(parent) = config.socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
