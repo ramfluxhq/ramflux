@@ -43,8 +43,8 @@ pub(crate) use ramflux_sdk::{
     LocalBusMessageDeleteRequest, LocalBusMessageReceiptDeliveredRequest,
     LocalBusMessageReceiptReadRequest, LocalBusMessageSubmitRequest, LocalBusObjectDeleteRequest,
     LocalBusObjectGetRequest, LocalBusObjectImportRequest, LocalBusObjectPutRequest,
-    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
-    LocalBusObjectTransferStatusRequest,
+    LocalBusObjectPutStatusRequest, LocalBusObjectShareRequest,
+    LocalBusObjectTransferResumeRequest, LocalBusObjectTransferStatusRequest,
 };
 pub(crate) use std::net::SocketAddr;
 pub(crate) use std::path::PathBuf;

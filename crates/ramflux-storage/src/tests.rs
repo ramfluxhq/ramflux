@@ -94,6 +94,7 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "object_transfer_state",
     "object_tombstone",
     "object_share_grant_projection",
+    "object_operation",
     "guardian_recovery_share_projection",
     "pending_recovery_projection",
     "pending_recovery_approval_projection",
@@ -201,7 +202,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 48);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 49);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -365,6 +366,103 @@ fn object_store_objects_keys_and_tombstones_roundtrip() -> Result<(), StorageErr
     let (objects, keys) = db.load_objects::<TestEncryptedObject>()?;
     assert!(objects[0].tombstoned);
     assert_eq!(keys.get("object_persist_1"), Some(&content_key));
+    Ok(())
+}
+
+#[test]
+fn object_operation_record_lifecycle_and_atomic_local_commit() -> Result<(), StorageError> {
+    let (_root, db) = test_db("object-operation-lifecycle")?;
+    // Pending: no object, no hashes yet.
+    db.upsert_object_operation(&ObjectOperationWrite {
+        object_id: "object_op_1",
+        operation_id: "op-abc",
+        state: "pending",
+        request_hash: "req-hash-1",
+        manifest_hash: None,
+        plaintext_hash: None,
+        terminal_result: None,
+        last_error: None,
+        created_at: 1_000,
+        updated_at: 1_000,
+    })?;
+    let record = db
+        .object_operation("object_op_1")?
+        .ok_or_else(|| StorageError::MessageNotFound("object_op_1 pending".to_owned()))?;
+    assert_eq!(record.state, "pending");
+    assert_eq!(record.request_hash, "req-hash-1");
+    assert_eq!(record.manifest_hash, None);
+    assert!(db.object_operation("missing")?.is_none());
+
+    // Atomic local commit: object row + key + operation=local_committed in one transaction.
+    let object = TestEncryptedObject {
+        object_id: "object_op_1".to_owned(),
+        manifest_hash: "manifest_op_1".to_owned(),
+        nonce: "nonce_op_1".to_owned(),
+        ciphertext: b"cipher_op".to_vec(),
+        plaintext_hash: "plain_op_1".to_owned(),
+        tombstoned: false,
+        backup_excluded: false,
+    };
+    let content_key = [0x7c; 32];
+    db.commit_object_local(
+        &ObjectWrite {
+            object_id: &object.object_id,
+            manifest_hash: &object.manifest_hash,
+            nonce: &object.nonce,
+            ciphertext: &object.ciphertext,
+            plaintext_hash: &object.plaintext_hash,
+            tombstoned: object.tombstoned,
+            backup_excluded: object.backup_excluded,
+            content_key: Some(&content_key),
+            object: &object,
+            updated_at: 2_000,
+        },
+        &ObjectOperationWrite {
+            object_id: "object_op_1",
+            operation_id: "op-abc",
+            state: "local_committed",
+            request_hash: "req-hash-1",
+            manifest_hash: Some(&object.manifest_hash),
+            plaintext_hash: Some(&object.plaintext_hash),
+            terminal_result: None,
+            last_error: None,
+            created_at: 1_000,
+            updated_at: 2_000,
+        },
+    )?;
+    // Both sides of the atomic commit are durable together.
+    let (objects, keys) = db.load_objects::<TestEncryptedObject>()?;
+    assert_eq!(objects, vec![object.clone()]);
+    assert_eq!(keys.get("object_op_1"), Some(&content_key));
+    let record = db
+        .object_operation("object_op_1")?
+        .ok_or_else(|| StorageError::MessageNotFound("object_op_1 local_committed".to_owned()))?;
+    assert_eq!(record.state, "local_committed");
+    assert_eq!(record.manifest_hash.as_deref(), Some("manifest_op_1"));
+    assert_eq!(record.created_at, 1_000, "created_at is preserved across updates");
+
+    // Committed terminal round-trips as JSON; created_at still preserved.
+    let terminal = serde_json::json!({ "object_id": "object_op_1", "committed": true });
+    let terminal_bytes = serde_json::to_vec(&terminal)?;
+    db.upsert_object_operation(&ObjectOperationWrite {
+        object_id: "object_op_1",
+        operation_id: "op-abc",
+        state: "committed",
+        request_hash: "req-hash-1",
+        manifest_hash: Some("manifest_op_1"),
+        plaintext_hash: Some("plain_op_1"),
+        terminal_result: Some(&terminal_bytes),
+        last_error: None,
+        created_at: 9_999,
+        updated_at: 3_000,
+    })?;
+    let record = db
+        .object_operation("object_op_1")?
+        .ok_or_else(|| StorageError::MessageNotFound("object_op_1 committed".to_owned()))?;
+    assert_eq!(record.state, "committed");
+    assert_eq!(record.terminal_result, Some(terminal));
+    assert_eq!(record.created_at, 1_000, "created_at unchanged on committed update");
+    assert_eq!(record.updated_at, 3_000);
     Ok(())
 }
 
@@ -780,7 +878,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7]);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

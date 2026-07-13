@@ -17,6 +17,9 @@ default = []
 itest-local-mint = ["ramflux-sdk/itest-local-mint"]
 # T24-B2: propagate the SDK rfd mid-flight crash-resume barrier gate. Never enabled by production rf.
 itest-rfd-fault = ["ramflux-sdk/itest-rfd-fault"]
+# T25-A2 (OBJ-IPC-01): propagate the SDK local-bus response-loss seam gate. Never enabled by
+# production rf.
+itest-bus-fault = ["ramflux-sdk/itest-bus-fault"]
 
 [dependencies]
 # path dep for local dev; switch to git tag dep when GitHub repos exist

@@ -696,6 +696,93 @@ impl RamfluxClient {
         Ok(object)
     }
 
+    /// T25-A2 (OBJ-IPC-01) P0-1: prepare the whole-object encryption (fresh key + AEAD seal)
+    /// WITHOUT publishing it to the in-memory store.
+    ///
+    /// # Errors
+    /// Returns an error when the OS CSPRNG cannot generate an object key.
+    pub(crate) fn prepare_encrypted_object(
+        &self,
+        object_id: &str,
+        plaintext: &[u8],
+    ) -> Result<PreparedEncryptedObject, SdkError> {
+        Ok(self.object_store.prepare_encrypted_object(object_id, plaintext)?)
+    }
+
+    /// T25-A2 (OBJ-IPC-01) P0-1: atomically persist {object row + key} and set the operation
+    /// record to `LocalCommitted` in ONE `SQLCipher` transaction, then install the prepared object
+    /// into the in-memory store. If the durable commit fails the prepared object — and its key —
+    /// is dropped zeroized and nothing is installed (fail closed, no half state).
+    ///
+    /// # Errors
+    /// Returns an error when the account DB is locked or the transaction fails.
+    pub(crate) fn commit_prepared_object_local(
+        &mut self,
+        prepared: PreparedEncryptedObject,
+        operation_id: &str,
+        request_hash: &str,
+        created_at: i64,
+        now: i64,
+    ) -> Result<EncryptedObject, SdkError> {
+        {
+            let object = prepared.object();
+            let object_write = ObjectWrite {
+                object_id: &object.object_id,
+                manifest_hash: &object.manifest_hash,
+                nonce: &object.nonce,
+                ciphertext: &object.ciphertext,
+                plaintext_hash: &object.plaintext_hash,
+                tombstoned: object.tombstoned,
+                backup_excluded: object.backup_excluded,
+                content_key: Some(prepared.object_key()),
+                object,
+                updated_at: now,
+            };
+            let operation = ObjectOperationWrite {
+                object_id: &object.object_id,
+                operation_id,
+                state: OBJECT_OPERATION_LOCAL_COMMITTED,
+                request_hash,
+                manifest_hash: Some(&object.manifest_hash),
+                plaintext_hash: Some(&object.plaintext_hash),
+                terminal_result: None,
+                last_error: None,
+                created_at,
+                updated_at: now,
+            };
+            self.account_db()?.commit_object_local(&object_write, &operation)?;
+        }
+        Ok(self.object_store.install_prepared_object(prepared))
+    }
+
+    /// Looks up an installed/adopted object by id from the in-memory store.
+    pub(crate) fn object_store_object(&self, object_id: &str) -> Option<EncryptedObject> {
+        self.object_store.objects().into_iter().find(|object| object.object_id == object_id)
+    }
+
+    /// Reads the durable reconciliation record for `object_id`, if any.
+    ///
+    /// # Errors
+    /// Returns an error when the account DB is locked.
+    pub(crate) fn object_operation(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ObjectOperationRecord>, SdkError> {
+        Ok(self.account_db()?.object_operation(object_id)?)
+    }
+
+    /// Upserts the reconciliation record for `object_id`.
+    ///
+    /// # Errors
+    /// Returns an error when the account DB is locked or the write fails.
+    pub(crate) fn upsert_object_operation(
+        &self,
+        write: &ObjectOperationWrite<'_>,
+    ) -> Result<(), SdkError> {
+        self.account_db()?.upsert_object_operation(write)?;
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SdkError> {

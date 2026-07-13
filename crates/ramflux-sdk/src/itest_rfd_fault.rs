@@ -36,6 +36,16 @@ pub(crate) enum Mode {
     GranteeImport,
     /// After the advanced recv ratchet snapshot + checkpoint are durable, before the cursor.
     DmRecv,
+    /// T25-A2 (OBJ-IPC-01) W1: after the `object.put` `Pending` record is durable, before the
+    /// atomic local commit. On crash: record = `pending`, NO object row → a clean re-run re-derives.
+    PutAfterPending,
+    /// T25-A2 (OBJ-IPC-01) W2: after the atomic {object+key, `LocalCommitted`} commit, before the
+    /// relay upload. On crash: object durable → recovery ADOPTS it, never re-encrypts.
+    PutAfterLocalCommitted,
+    /// T25-A2 (OBJ-IPC-01) W3: after the relay upload completes, before `Committed` is persisted.
+    PutBeforeCommitted,
+    /// T25-A2 (OBJ-IPC-01) W4: after `Committed` is persisted, before the local-bus response.
+    PutAfterCommitted,
 }
 
 /// Pure mapping from the raw env value to a [`Mode`]; any unknown/absent value is [`Mode::Off`].
@@ -45,6 +55,10 @@ pub(crate) fn parse_mode(raw: Option<&str>) -> Mode {
         Some("owner-put") => Mode::OwnerPut,
         Some("grantee-import") => Mode::GranteeImport,
         Some("dm-recv") => Mode::DmRecv,
+        Some("put-after-pending") => Mode::PutAfterPending,
+        Some("put-after-local-committed") => Mode::PutAfterLocalCommitted,
+        Some("put-before-committed") => Mode::PutBeforeCommitted,
+        Some("put-after-committed") => Mode::PutAfterCommitted,
         _ => Mode::Off,
     }
 }
@@ -96,6 +110,10 @@ mod tests {
         assert_eq!(parse_mode(Some("owner-put")), Mode::OwnerPut);
         assert_eq!(parse_mode(Some("grantee-import")), Mode::GranteeImport);
         assert_eq!(parse_mode(Some("dm-recv")), Mode::DmRecv);
+        assert_eq!(parse_mode(Some("put-after-pending")), Mode::PutAfterPending);
+        assert_eq!(parse_mode(Some("put-after-local-committed")), Mode::PutAfterLocalCommitted);
+        assert_eq!(parse_mode(Some("put-before-committed")), Mode::PutBeforeCommitted);
+        assert_eq!(parse_mode(Some("put-after-committed")), Mode::PutAfterCommitted);
         assert_eq!(parse_mode(Some("unknown")), Mode::Off);
         assert_eq!(parse_mode(None), Mode::Off);
     }

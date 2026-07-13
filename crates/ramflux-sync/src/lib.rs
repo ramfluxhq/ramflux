@@ -44,12 +44,13 @@ pub use object_store::{
     EncryptedObject, LanAnnounce, LanPairingRegistry, MissingChunkBitmap, ObjectAuth,
     ObjectChunkAck, ObjectChunkResponse, ObjectHello, ObjectManifestOffer, ObjectQuinnStreamLayout,
     ObjectStore, ObjectSyncControlMessage, ObjectSyncSession, ObjectTombstone,
-    ObjectTransferComplete, ObjectTransferError, PeerProof, PeerProofVerifier, RelayOpaqueBundle,
-    ResumeToken, SyncBatch, backup_manifest_device_signature, chunk_cipher_hash,
-    chunk_manifest_for_object, chunk_payload, client_sync_path, decrypt_chunk_payload,
-    encrypted_chunk_payload, object_tombstone_head, sign_lan_announce, sign_object_tombstone,
-    sign_peer_proof, sync_batch_v1, verify_backup_manifest, verify_lan_announce,
-    verify_object_tombstone, verify_peer_proof, verify_resume_token,
+    ObjectTransferComplete, ObjectTransferError, PeerProof, PeerProofVerifier,
+    PreparedEncryptedObject, RelayOpaqueBundle, ResumeToken, SyncBatch,
+    backup_manifest_device_signature, chunk_cipher_hash, chunk_manifest_for_object, chunk_payload,
+    client_sync_path, decrypt_chunk_payload, encrypted_chunk_payload, object_tombstone_head,
+    sign_lan_announce, sign_object_tombstone, sign_peer_proof, sync_batch_v1,
+    verify_backup_manifest, verify_lan_announce, verify_object_tombstone, verify_peer_proof,
+    verify_resume_token,
 };
 
 pub const CRATE_NAME: &str = "ramflux-sync";
