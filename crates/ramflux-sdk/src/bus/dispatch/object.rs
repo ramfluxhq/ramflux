@@ -29,7 +29,6 @@ pub(crate) async fn dispatch_object_bus_request(
             let plaintext = ramflux_protocol::decode_base64url(&body.plaintext_base64)
                 .map_err(|error| SdkError::LocalBus(format!("invalid object body: {error}")))?;
             let object = account.client.put_encrypted_object(&body.object_id, &plaintext)?;
-            let chunks = object_chunks(&object, body.chunk_size);
             let transfer = if let Some(options) = relay_options.as_ref() {
                 Some(
                     dispatch_object_upload_to_relay(
@@ -43,12 +42,18 @@ pub(crate) async fn dispatch_object_bus_request(
             } else {
                 None
             };
+            // T25-A1 (OBJ-IPC-01): compact response only. The old `object`/`chunks` echo re-serialised
+            // the whole ciphertext (Vec<u8> JSON number-array + base64 chunks, ~4.9x) and overflowed the
+            // 1 MiB frame AFTER the write committed = ambiguous success. Return identifiers/hashes/status
+            // only — never ciphertext — so the response stays far below the frame cap.
+            let transfer_id = transfer.as_ref().map(|status| status.transfer_id.clone());
             Ok(local_bus_ok(serde_json::json!({
-                "object": object,
-                "chunks": chunks,
+                "object_id": object.object_id,
+                "manifest_hash": object.manifest_hash,
+                "plaintext_hash": object.plaintext_hash,
+                "committed": true,
+                "transfer_id": transfer_id,
                 "transfer": transfer,
-                "node_visible_plaintext": false,
-                "node_visible_object_key": false,
             })))
         }
         "object.get" => {
