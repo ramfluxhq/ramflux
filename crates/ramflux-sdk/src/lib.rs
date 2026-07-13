@@ -24,6 +24,10 @@ mod prelude;
 mod records;
 mod time;
 
+pub use bus::io::{
+    MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES, MAX_LOCAL_BUS_OBJECT_BYTES,
+    MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES,
+};
 pub use bus::{
     LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest, LocalBusA2uiActionRequest,
     LocalBusA2uiRenderRequest, LocalBusAccountBackupExportRequest,
@@ -52,6 +56,7 @@ pub use bus::{
     LocalBusMessageFrankingEvidenceRequest, LocalBusMessageReceiptDeliveredRequest,
     LocalBusMessageReceiptReadRequest, LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest,
     LocalBusObjectDeleteRequest, LocalBusObjectGetRequest, LocalBusObjectImportRequest,
+    LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest, LocalBusObjectPutFinishRequest,
     LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest, LocalBusObjectShareRequest,
     LocalBusObjectTransferResumeRequest, LocalBusObjectTransferStatusRequest,
     LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody, LocalMcpStandingApprovalSigningBody,
@@ -87,7 +92,7 @@ pub use gateway::{
     GatewaySubmitFrame, GatewayTcpTlsEndpointConfig,
 };
 pub use group::SdkGroupSenderKeyDistribution;
-pub use object::{SdkObjectKeySlot, SdkObjectSharePackage};
+pub use object::{OBJECT_PUT_PROTOCOL_VERSION, SdkObjectKeySlot, SdkObjectSharePackage};
 pub use prekey::{
     SdkIdentityRegisterRequest, SdkIdentityRegistrationResponse, SdkPrekeyPublishRequest,
     SdkPrekeyResponse, identity_root_public_key_commitment,

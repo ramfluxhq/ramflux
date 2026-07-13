@@ -51,6 +51,35 @@ pub fn blake3_256_base64url(domain_tag: &str, bytes: &[u8]) -> String {
     })
 }
 
+/// Streaming BLAKE3 hasher with the SAME domain-tag framing as [`blake3_256_base64url`], for
+/// hashing large inputs (e.g. a file streamed in bounded chunks) without ever holding the whole
+/// input resident. Feed bytes with [`Blake3DomainHasher::update`], then
+/// [`Blake3DomainHasher::finalize_base64url`] — the result is byte-identical to
+/// `blake3_256_base64url(domain_tag, &whole_input)`.
+pub struct Blake3DomainHasher {
+    inner: blake3::Hasher,
+}
+
+impl Blake3DomainHasher {
+    #[must_use]
+    pub fn new(domain_tag: &str) -> Self {
+        let mut inner = blake3::Hasher::new();
+        with_core_domain_tag(domain_tag, |domain_tag| {
+            inner.update(domain_tag.as_bytes());
+        });
+        Self { inner }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.inner.update(bytes);
+    }
+
+    #[must_use]
+    pub fn finalize_base64url(&self) -> String {
+        ramflux_protocol::encode_base64url(self.inner.finalize().as_bytes())
+    }
+}
+
 #[must_use]
 pub fn blake3_keyed_derive(key: &[u8; 32], context: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_keyed(key);
@@ -176,6 +205,23 @@ mod tests {
     use super::*;
 
     const SALT: &[u8] = b"ramflux-recovery-test-salt";
+
+    #[test]
+    fn streaming_domain_hasher_matches_one_shot() {
+        // The streaming hasher fed in arbitrary chunk boundaries must equal the one-shot hash.
+        let input: Vec<u8> = (0..5000_u32).map(|index| (index % 251) as u8).collect();
+        let one_shot = blake3_256_base64url("ramflux.object.v1", &input);
+        let mut hasher = Blake3DomainHasher::new("ramflux.object.v1");
+        for chunk in input.chunks(97) {
+            hasher.update(chunk);
+        }
+        assert_eq!(hasher.finalize_base64url(), one_shot);
+        // Empty input parity too.
+        assert_eq!(
+            Blake3DomainHasher::new("ramflux.object.v1").finalize_base64url(),
+            blake3_256_base64url("ramflux.object.v1", &[])
+        );
+    }
 
     #[test]
     fn recovery_secret_rejects_less_than_128_bits() {

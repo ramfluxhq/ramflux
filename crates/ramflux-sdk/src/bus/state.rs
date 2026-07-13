@@ -19,6 +19,26 @@ pub(crate) struct LocalBusSubscriber {
     pub(crate) outbound: mpsc::Sender<LocalBusFrame>,
 }
 
+/// T25-A3 (CTRL-102 / OBJ-IPC-01): an in-flight bounded UPLOAD spool for one large `object.put`,
+/// keyed by `operation_id` on the owning account. `object.put.begin` binds the content-and-intent
+/// and opens the private (0600, `create_new`) spool file; each `object.put.chunk` appends bounded
+/// plaintext at the verified `written` offset; `object.put.finish` reads the whole (<= 16 MiB)
+/// plaintext back, verifies hash + len, then reuses the A2 durable commit. Any failure — and every
+/// finish — removes the spool file. It is in-memory only (no crash-resume journal: that is A5), so
+/// an rfd restart drops it and the orphan file is swept on the next startup.
+pub(crate) struct ObjectPutSpoolSession {
+    pub(crate) object_id: String,
+    pub(crate) total_len: usize,
+    pub(crate) plaintext_hash: String,
+    pub(crate) chunk_size: usize,
+    pub(crate) relay_endpoint: Option<String>,
+    pub(crate) relay_service_key_base64: Option<String>,
+    pub(crate) relay_interrupt_after_chunks: Option<u32>,
+    pub(crate) path: PathBuf,
+    pub(crate) file: std::fs::File,
+    pub(crate) written: usize,
+}
+
 pub(crate) struct LocalBusAccountState {
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
@@ -43,6 +63,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) mcp_standing_approvals: BTreeMap<String, LocalMcpStandingApprovalRecord>,
     pub(crate) mcp_pending_approvals: BTreeMap<String, LocalMcpApprovalRecord>,
     pub(crate) mcp_audit_log: Vec<LocalMcpAuditRecord>,
+    /// T25-A3 (OBJ-IPC-01): in-flight bounded UPLOAD spools, keyed by `operation_id`.
+    pub(crate) object_put_spools: BTreeMap<String, ObjectPutSpoolSession>,
 }
 
 impl LocalBusAccountState {
@@ -70,6 +92,7 @@ impl LocalBusAccountState {
             mcp_standing_approvals: BTreeMap::new(),
             mcp_pending_approvals: BTreeMap::new(),
             mcp_audit_log: Vec::new(),
+            object_put_spools: BTreeMap::new(),
         }
     }
 
@@ -96,6 +119,7 @@ impl LocalBusAccountState {
             mcp_standing_approvals: BTreeMap::new(),
             mcp_pending_approvals: BTreeMap::new(),
             mcp_audit_log: Vec::new(),
+            object_put_spools: BTreeMap::new(),
         }
     }
 

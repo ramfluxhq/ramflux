@@ -64,7 +64,11 @@ fn write_marker() -> Result<(), crate::error::SdkError> {
 /// test observes the drop deterministically; a marker-write failure returns `Err` (fail closed).
 /// Any non-matching method / unarmed process returns `Ok(false)`.
 pub(crate) fn should_drop_response(method: &str) -> Result<bool, crate::error::SdkError> {
-    if mode() != Mode::ObjectPutResponse || method != "object.put" {
+    // T25-A3: the spool upload's terminal is `object.put.finish` — its response-loss must reconcile
+    // exactly like the one-shot `object.put` terminal (both land the durable Committed record).
+    if mode() != Mode::ObjectPutResponse
+        || (method != "object.put" && method != "object.put.finish")
+    {
         return Ok(false);
     }
     if FAULT_CLAIMED.swap(true, Ordering::SeqCst) {

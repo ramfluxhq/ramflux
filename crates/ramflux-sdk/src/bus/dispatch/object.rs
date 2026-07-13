@@ -5,6 +5,16 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+// T25-A3 (CTRL-102 / OBJ-IPC-01): the bounded UPLOAD spool wiring.
+use std::io::Write as _;
+
+use crate::bus::daemon::local_bus_accounts_dir;
+use crate::bus::io::{MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES, MAX_LOCAL_BUS_OBJECT_BYTES};
+use crate::bus::protocol::{
+    LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest, LocalBusObjectPutFinishRequest,
+};
+use crate::bus::state::ObjectPutSpoolSession;
+
 pub(crate) fn hydrate_local_object_state(
     account: &mut LocalBusAccountState,
 ) -> Result<(), SdkError> {
@@ -17,8 +27,14 @@ pub(crate) async fn dispatch_object_bus_request(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
+    // T25-A3 (OBJ-IPC-01): the bounded UPLOAD spool lives under the daemon data_root; capture it
+    // before the mutable account borrow (data_root is an immutable read of the same state).
+    let data_root = state.config.data_root.clone();
     let account = local_bus_account_mut(state, account_id)?;
     match request.method.as_str() {
+        "object.put.begin" => object_put_begin(&data_root, account_id, account, request),
+        "object.put.chunk" => object_put_chunk(account, request),
+        "object.put.finish" => object_put_finish(account, request).await,
         "object.put.status" => {
             // T25-A2 (OBJ-IPC-01): read-only reconciliation status for a logical PUT.
             let body: LocalBusObjectPutStatusRequest =
@@ -275,10 +291,24 @@ enum ReconcilePlan {
     Adopt,
 }
 
-#[allow(clippy::too_many_lines)]
+/// Decodes the inline base64 plaintext (one-shot `object.put` path) then runs the shared durable
+/// reconciliation core. The T25-A3 spool `finish` path bypasses this and calls the core directly
+/// with the spool plaintext, so a 16 MiB object never becomes a resident base64 string.
 async fn dispatch_object_put_reconciled(
     account: &mut LocalBusAccountState,
     body: LocalBusObjectPutRequest,
+    operation_id: String,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let plaintext = ramflux_protocol::decode_base64url(&body.plaintext_base64)
+        .map_err(|error| SdkError::LocalBus(format!("invalid object body: {error}")))?;
+    dispatch_object_put_reconciled_core(account, &body, plaintext, operation_id).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn dispatch_object_put_reconciled_core(
+    account: &mut LocalBusAccountState,
+    body: &LocalBusObjectPutRequest,
+    plaintext: Vec<u8>,
     operation_id: String,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let relay_options = parse_relay_transfer_options(
@@ -286,11 +316,9 @@ async fn dispatch_object_put_reconciled(
         body.relay_service_key_base64.clone(),
         body.relay_interrupt_after_chunks,
     )?;
-    let plaintext = ramflux_protocol::decode_base64url(&body.plaintext_base64)
-        .map_err(|error| SdkError::LocalBus(format!("invalid object body: {error}")))?;
     let plaintext_hash =
         ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, &plaintext);
-    let request_hash = object_put_request_hash(&body, &operation_id, &plaintext_hash)?;
+    let request_hash = object_put_request_hash(body, &operation_id, &plaintext_hash)?;
     let now = now_unix_timestamp();
 
     let existing = account.client.object_operation(&body.object_id)?;
@@ -495,6 +523,243 @@ async fn dispatch_object_put_reconciled(
     Ok(local_bus_ok(with_reconciled(terminal, reconciled)))
 }
 
+// ---- T25-A3 (CTRL-102 / OBJ-IPC-01): bounded local-bus UPLOAD spool (begin / chunk / finish) ----
+
+/// The private, account-scoped, owner-only (0700) directory that holds in-flight UPLOAD spool files
+/// under the daemon `data_root`. Swept on daemon startup (orphans from a prior crash).
+pub(crate) fn object_put_spool_dir(data_root: &Path) -> PathBuf {
+    local_bus_accounts_dir(data_root).join("object_put_spool")
+}
+
+/// The deterministic, filename-safe spool path for one `(account_id, operation_id)`. base64url is
+/// filename-safe (no `/`), and the hash avoids leaking the object/account ids into the filename.
+fn object_put_spool_path(data_root: &Path, account_id: &str, operation_id: &str) -> PathBuf {
+    let name = ramflux_crypto::blake3_256_base64url(
+        "ramflux.object_put_spool.v1",
+        format!("{account_id}\u{0}{operation_id}").as_bytes(),
+    );
+    object_put_spool_dir(data_root).join(format!("{name}.spool"))
+}
+
+/// Removes an in-flight spool session (dropping its file handle) AND its on-disk file. Idempotent —
+/// a no-op for an unknown `operation_id`. This is the single fail-closed cleanup used on begin
+/// re-entry, any chunk error, and every finish (success or failure).
+fn object_put_spool_discard(account: &mut LocalBusAccountState, operation_id: &str) {
+    if let Some(session) = account.object_put_spools.remove(operation_id) {
+        let path = session.path.clone();
+        drop(session);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// `object.put.begin`: open a bounded UPLOAD spool. Fails closed BEFORE creating any file on a wrong
+/// protocol version or an oversize (> 16 MiB) declared length, so oversize never enters the pipeline.
+fn object_put_begin(
+    data_root: &Path,
+    account_id: &str,
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusObjectPutBeginRequest = serde_json::from_value(request.body.clone())?;
+    if body.protocol_version != OBJECT_PUT_PROTOCOL_VERSION {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.begin unsupported protocol_version {} (expected {OBJECT_PUT_PROTOCOL_VERSION})",
+            body.protocol_version
+        )));
+    }
+    if body.total_len > MAX_LOCAL_BUS_OBJECT_BYTES {
+        // Fail closed before touching disk: an oversize object never opens a spool or commits.
+        return Err(SdkError::LocalBus(format!(
+            "object too large for local-bus upload: {} > {MAX_LOCAL_BUS_OBJECT_BYTES}",
+            body.total_len
+        )));
+    }
+    // Idempotent re-begin (a retry with the same operation_id): drop any prior in-flight session +
+    // file so we always start from a clean, empty spool.
+    object_put_spool_discard(account, &body.operation_id);
+    let path = object_put_spool_path(data_root, account_id, &body.operation_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        set_owner_only_dir_permissions(parent)?;
+    }
+    // Sweep any cross-restart orphan at this deterministic path, then create_new (O_EXCL): never
+    // reuse a pre-existing file and never follow a symlink into an attacker-chosen target.
+    let _ = std::fs::remove_file(&path);
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+    set_owner_only_file_permissions(&path)?;
+    account.object_put_spools.insert(
+        body.operation_id.clone(),
+        ObjectPutSpoolSession {
+            object_id: body.object_id,
+            total_len: body.total_len,
+            plaintext_hash: body.plaintext_hash,
+            chunk_size: body.chunk_size,
+            relay_endpoint: body.relay_endpoint,
+            relay_service_key_base64: body.relay_service_key_base64,
+            relay_interrupt_after_chunks: body.relay_interrupt_after_chunks,
+            path,
+            file,
+            written: 0,
+        },
+    );
+    Ok(local_bus_ok(serde_json::json!({
+        "operation_id": body.operation_id,
+        "accepted": true,
+        "max_chunk_payload_bytes": MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES,
+    })))
+}
+
+/// `object.put.chunk`: append one bounded plaintext chunk at the verified offset, fsync'd before the
+/// ack. ANY validation failure (oversize chunk / offset gap / overlap / duplicate / exceeds declared
+/// or 16 MiB total) OR an fsync failure destroys the spool (fail closed) so a garbled or
+/// non-durable upload can never reach the object commit.
+fn object_put_chunk(
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusObjectPutChunkRequest = serde_json::from_value(request.body.clone())?;
+    let data = ramflux_protocol::decode_base64url(&body.data_base64)
+        .map_err(|error| SdkError::LocalBus(format!("object.put.chunk invalid data: {error}")))?;
+    match object_put_chunk_apply(account, &body, &data) {
+        Ok(written) => Ok(local_bus_ok(serde_json::json!({
+            "operation_id": body.operation_id,
+            "written": written,
+            "received": true,
+        }))),
+        Err(error) => {
+            object_put_spool_discard(account, &body.operation_id);
+            Err(error)
+        }
+    }
+}
+
+/// Pure append-with-validation core (no cleanup — the caller fails closed on `Err`). Returns the new
+/// total written length on success.
+fn object_put_chunk_apply(
+    account: &mut LocalBusAccountState,
+    body: &LocalBusObjectPutChunkRequest,
+    data: &[u8],
+) -> Result<usize, SdkError> {
+    let session = account.object_put_spools.get_mut(&body.operation_id).ok_or_else(|| {
+        SdkError::LocalBus(format!(
+            "object.put.chunk: unknown or closed upload session {}",
+            body.operation_id
+        ))
+    })?;
+    if data.len() > MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.chunk payload {} exceeds the {MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES}-byte bound",
+            data.len()
+        )));
+    }
+    if body.offset != session.written {
+        // Gap, overlap, OR duplicate: the only accepted offset is exactly the bytes written so far.
+        return Err(SdkError::LocalBus(format!(
+            "object.put.chunk offset {} != expected {} (gap/overlap/duplicate)",
+            body.offset, session.written
+        )));
+    }
+    let end = session
+        .written
+        .checked_add(data.len())
+        .ok_or_else(|| SdkError::LocalBus("object.put.chunk offset overflow".to_owned()))?;
+    if end > session.total_len {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.chunk exceeds declared total_len: {end} > {}",
+            session.total_len
+        )));
+    }
+    if end > MAX_LOCAL_BUS_OBJECT_BYTES {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.chunk exceeds the {MAX_LOCAL_BUS_OBJECT_BYTES}-byte object limit: {end}"
+        )));
+    }
+    session.file.write_all(data)?;
+    // T25-A3 (CTRL-102): durably fsync the appended chunk (data + size) BEFORE the chunk is acked, so
+    // a crash after the ack cannot lose spooled bytes. A sync failure propagates as Err, and the
+    // caller (`object_put_chunk`) destroys the spool and fails closed — the upload never commits.
+    session.file.sync_data()?;
+    session.written = end;
+    Ok(end)
+}
+
+/// `object.put.finish`: verify completeness + hash, then REUSE the A2 durable reconciliation core
+/// under the SAME `operation_id`. The spool file is removed on EVERY path (success and failure).
+async fn object_put_finish(
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusObjectPutFinishRequest = serde_json::from_value(request.body.clone())?;
+    // Take the session OUT so cleanup is guaranteed regardless of how the finish resolves.
+    let mut session = account.object_put_spools.remove(&body.operation_id).ok_or_else(|| {
+        SdkError::LocalBus(format!(
+            "object.put.finish: unknown or closed upload session {}",
+            body.operation_id
+        ))
+    })?;
+    let path = session.path.clone();
+    let result = object_put_finish_inner(account, &body, &mut session).await;
+    drop(session); // close the file handle before removing the file
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+async fn object_put_finish_inner(
+    account: &mut LocalBusAccountState,
+    body: &LocalBusObjectPutFinishRequest,
+    session: &mut ObjectPutSpoolSession,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    if body.object_id != session.object_id {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.finish object_id mismatch: begin={} finish={}",
+            session.object_id, body.object_id
+        )));
+    }
+    if session.written != session.total_len {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.finish incomplete: {} of {} bytes present",
+            session.written, session.total_len
+        )));
+    }
+    session.file.flush()?;
+    session.file.sync_all()?;
+    let plaintext = std::fs::read(&session.path)?;
+    if plaintext.len() != session.total_len {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.finish spool length mismatch: {} != {}",
+            plaintext.len(),
+            session.total_len
+        )));
+    }
+    if plaintext.len() > MAX_LOCAL_BUS_OBJECT_BYTES {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.finish spool exceeds the {MAX_LOCAL_BUS_OBJECT_BYTES}-byte object limit"
+        )));
+    }
+    // Fail closed on a plaintext hash mismatch: never commit tampered/garbled content.
+    let actual_hash =
+        ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, &plaintext);
+    if actual_hash != session.plaintext_hash {
+        return Err(SdkError::LocalBus(format!(
+            "object.put.finish plaintext hash mismatch: expected {} got {actual_hash}",
+            session.plaintext_hash
+        )));
+    }
+    // Reuse the A2 durable reconciliation with the SAME operation_id and IDENTICAL semantics as the
+    // one-shot path — so a lost finish response reconciles via object.put.status with no new
+    // ambiguous-success window. The plaintext is passed directly (no resident base64 round-trip).
+    let put = LocalBusObjectPutRequest {
+        object_id: session.object_id.clone(),
+        plaintext_base64: String::new(),
+        chunk_size: session.chunk_size,
+        relay_endpoint: session.relay_endpoint.clone(),
+        relay_service_key_base64: session.relay_service_key_base64.clone(),
+        relay_interrupt_after_chunks: session.relay_interrupt_after_chunks,
+        operation_id: Some(body.operation_id.clone()),
+    };
+    dispatch_object_put_reconciled_core(account, &put, plaintext, body.operation_id.clone()).await
+}
+
 /// Persists a `Failed` terminal for a permanent conflict and returns a fail-closed error. Only used
 /// for same-operation request-hash changes and adoption hash mismatches (never to clobber a
 /// legitimate different in-flight operation).
@@ -694,5 +959,279 @@ mod tests {
         assert_eq!(value["reconciled"], serde_json::Value::Bool(true));
         let value = with_reconciled(serde_json::json!({ "committed": true }), false);
         assert_eq!(value["reconciled"], serde_json::Value::Bool(false));
+    }
+}
+
+// T25-A3 (CTRL-102 / OBJ-IPC-01): pure tests for the bounded UPLOAD spool (begin/chunk/finish),
+// driven entirely in-process (relay_endpoint=None so no network) against a real unlocked account.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::large_futures)]
+mod spool_tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const ACCOUNT: &str = "acct";
+    const OPERATION: &str = "op-spool-1";
+    const OBJECT_ID: &str = "object_spool_1";
+
+    fn temp_data_root(test: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("ramflux-spool-{test}-{}-{nanos}", std::process::id()))
+    }
+
+    fn make_state(data_root: PathBuf) -> LocalBusDaemonState {
+        let mut client = RamfluxClient::new();
+        client.create_identity_root("principal_spool_test", [0x51; 32]);
+        client.create_device_branch("principal_spool_test", "device_spool_test", 1, [0x52; 32]);
+        client.open_account_index(&data_root).expect("open account index");
+        client.create_account(ACCOUNT, "principal_spool_test").expect("create account");
+        client.set_active_account(ACCOUNT).expect("set active account");
+        client.unlock_account(ACCOUNT, b"spool-test-secret").expect("unlock account");
+        let gateway = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+            bind_addr: "127.0.0.1:0".parse().expect("bind addr"),
+            gateway_addr: "127.0.0.1:1".parse().expect("gateway addr"),
+            server_name: "ramflux-gateway".to_owned(),
+            ca_cert: PathBuf::from("ca.pem"),
+            principal_id: "principal_spool_test".to_owned(),
+            device_id: "device_spool_test".to_owned(),
+            target_delivery_id: "target_spool_test".to_owned(),
+            prekey_http_url: None,
+        });
+        LocalBusDaemonState {
+            config: LocalBusConfig::new(data_root.join("bus.sock"), data_root),
+            accounts: BTreeMap::from([(
+                ACCOUNT.to_owned(),
+                LocalBusAccountState::disconnected(
+                    client,
+                    gateway,
+                    "principal_spool_test".to_owned(),
+                ),
+            )]),
+            active_account_id: Some(ACCOUNT.to_owned()),
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        }
+    }
+
+    async fn dispatch(
+        state: &mut LocalBusDaemonState,
+        method: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, SdkError> {
+        let frame = LocalBusFrame::request("req", Some(ACCOUNT.to_owned()), "object", method, body);
+        Ok(dispatch_object_bus_request(&frame, state).await?.response_body)
+    }
+
+    fn begin_body(total_len: usize, plaintext_hash: &str) -> serde_json::Value {
+        serde_json::to_value(LocalBusObjectPutBeginRequest {
+            object_id: OBJECT_ID.to_owned(),
+            operation_id: OPERATION.to_owned(),
+            total_len,
+            plaintext_hash: plaintext_hash.to_owned(),
+            chunk_size: 65_536,
+            protocol_version: OBJECT_PUT_PROTOCOL_VERSION,
+            relay_endpoint: None,
+            relay_service_key_base64: None,
+            relay_interrupt_after_chunks: None,
+        })
+        .expect("begin body")
+    }
+
+    fn chunk_body(offset: usize, data: &[u8]) -> serde_json::Value {
+        serde_json::to_value(LocalBusObjectPutChunkRequest {
+            operation_id: OPERATION.to_owned(),
+            offset,
+            data_base64: ramflux_protocol::encode_base64url(data),
+        })
+        .expect("chunk body")
+    }
+
+    fn finish_body() -> serde_json::Value {
+        serde_json::to_value(LocalBusObjectPutFinishRequest {
+            object_id: OBJECT_ID.to_owned(),
+            operation_id: OPERATION.to_owned(),
+        })
+        .expect("finish body")
+    }
+
+    fn plaintext_hash(bytes: &[u8]) -> String {
+        ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, bytes)
+    }
+
+    fn spool_path(state: &LocalBusDaemonState) -> PathBuf {
+        object_put_spool_path(&state.config.data_root, ACCOUNT, OPERATION)
+    }
+
+    #[tokio::test]
+    async fn begin_chunk_finish_commits_compact_terminal_and_cleans_up() {
+        let root = temp_data_root("happy");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0xA5_u8; 3 * 1024]; // three 1 KiB chunks
+        let hash = plaintext_hash(&plaintext);
+        dispatch(&mut state, "object.put.begin", begin_body(plaintext.len(), &hash))
+            .await
+            .expect("begin");
+        assert!(spool_path(&state).exists(), "begin must create the spool file");
+        let mut offset = 0;
+        for chunk in plaintext.chunks(1024) {
+            let response = dispatch(&mut state, "object.put.chunk", chunk_body(offset, chunk))
+                .await
+                .expect("chunk");
+            offset += chunk.len();
+            assert_eq!(response["written"], offset);
+        }
+        let terminal =
+            dispatch(&mut state, "object.put.finish", finish_body()).await.expect("finish");
+        // Compact terminal — NO ciphertext echo.
+        assert_eq!(terminal["object_id"], OBJECT_ID);
+        assert_eq!(terminal["committed"], true);
+        assert_eq!(terminal["plaintext_hash"], serde_json::Value::String(hash.clone()));
+        assert!(terminal.get("object").is_none(), "no object echo");
+        assert!(terminal.get("chunks").is_none(), "no chunks echo");
+        assert!(terminal.get("ciphertext").is_none(), "no ciphertext echo");
+        // Spool file removed on success.
+        assert!(!spool_path(&state).exists(), "finish must remove the spool file");
+        // A2 object.put.status must report committed on the spool path.
+        let status = dispatch(
+            &mut state,
+            "object.put.status",
+            serde_json::json!({ "object_id": OBJECT_ID, "operation_id": OPERATION }),
+        )
+        .await
+        .expect("status");
+        assert_eq!(status["state"], "committed");
+        assert!(status["terminal"]["committed"].as_bool().unwrap_or(false));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn oversize_begin_is_rejected_before_creating_a_file() {
+        let root = temp_data_root("oversize");
+        let mut state = make_state(root.clone());
+        let error = dispatch(
+            &mut state,
+            "object.put.begin",
+            begin_body(MAX_LOCAL_BUS_OBJECT_BYTES + 1, "hash"),
+        )
+        .await
+        .expect_err("oversize begin must fail closed");
+        assert!(error.to_string().contains("too large"), "{error}");
+        assert!(!spool_path(&state).exists(), "no spool file on an oversize reject");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn offset_gap_fails_closed_and_destroys_the_spool() {
+        let root = temp_data_root("gap");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x11_u8; 2048];
+        dispatch(
+            &mut state,
+            "object.put.begin",
+            begin_body(plaintext.len(), &plaintext_hash(&plaintext)),
+        )
+        .await
+        .expect("begin");
+        // A chunk at offset 1 (a gap — expected 0) must fail closed and delete the spool.
+        let error = dispatch(&mut state, "object.put.chunk", chunk_body(1, &plaintext[..1024]))
+            .await
+            .expect_err("gap chunk must fail");
+        assert!(error.to_string().contains("gap/overlap/duplicate"), "{error}");
+        assert!(!spool_path(&state).exists(), "a gap must destroy the spool (fail closed)");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn duplicate_offset_fails_closed() {
+        let root = temp_data_root("dup");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x22_u8; 2048];
+        dispatch(
+            &mut state,
+            "object.put.begin",
+            begin_body(plaintext.len(), &plaintext_hash(&plaintext)),
+        )
+        .await
+        .expect("begin");
+        dispatch(&mut state, "object.put.chunk", chunk_body(0, &plaintext[..1024]))
+            .await
+            .expect("first chunk");
+        // Re-sending offset 0 (duplicate) — expected is now 1024 — must fail closed.
+        let error = dispatch(&mut state, "object.put.chunk", chunk_body(0, &plaintext[..1024]))
+            .await
+            .expect_err("duplicate chunk must fail");
+        assert!(error.to_string().contains("gap/overlap/duplicate"), "{error}");
+        assert!(!spool_path(&state).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn chunk_beyond_total_len_fails_closed() {
+        let root = temp_data_root("overrun");
+        let mut state = make_state(root.clone());
+        dispatch(&mut state, "object.put.begin", begin_body(1024, &plaintext_hash(&[0x33; 1024])))
+            .await
+            .expect("begin");
+        // 2048 bytes at offset 0 exceeds the declared total_len of 1024.
+        let error = dispatch(&mut state, "object.put.chunk", chunk_body(0, &[0x33_u8; 2048]))
+            .await
+            .expect_err("overrun chunk must fail");
+        assert!(error.to_string().contains("exceeds declared total_len"), "{error}");
+        assert!(!spool_path(&state).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn hash_mismatch_at_finish_fails_closed_and_cleans_up() {
+        let root = temp_data_root("hashmismatch");
+        let mut state = make_state(root.clone());
+        let plaintext = vec![0x44_u8; 1024];
+        // Bind a hash that does NOT match the streamed bytes.
+        let wrong_hash = plaintext_hash(&[0x99_u8; 1024]);
+        dispatch(&mut state, "object.put.begin", begin_body(plaintext.len(), &wrong_hash))
+            .await
+            .expect("begin");
+        dispatch(&mut state, "object.put.chunk", chunk_body(0, &plaintext)).await.expect("chunk");
+        let error = dispatch(&mut state, "object.put.finish", finish_body())
+            .await
+            .expect_err("finish must fail");
+        assert!(error.to_string().contains("hash mismatch"), "{error}");
+        // Spool removed even on a failed finish.
+        assert!(!spool_path(&state).exists(), "failed finish must still remove the spool file");
+        // Nothing was committed — status is unknown (no durable object operation).
+        let status = dispatch(
+            &mut state,
+            "object.put.status",
+            serde_json::json!({ "object_id": OBJECT_ID, "operation_id": OPERATION }),
+        )
+        .await
+        .expect("status");
+        assert_eq!(status["state"], "unknown");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn oversize_chunk_payload_fails_closed() {
+        let root = temp_data_root("bigchunk");
+        let mut state = make_state(root.clone());
+        let total = MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 4096;
+        dispatch(
+            &mut state,
+            "object.put.begin",
+            begin_body(total, &plaintext_hash(&vec![0; total])),
+        )
+        .await
+        .expect("begin");
+        // A single chunk larger than the payload bound must fail closed (rf clamps; daemon defends).
+        let oversized = vec![0x55_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 1];
+        let error = dispatch(&mut state, "object.put.chunk", chunk_body(0, &oversized))
+            .await
+            .expect_err("oversize chunk must fail");
+        assert!(error.to_string().contains("exceeds the"), "{error}");
+        assert!(!spool_path(&state).exists());
+        std::fs::remove_dir_all(&root).ok();
     }
 }
