@@ -15,6 +15,8 @@ mod gateway;
 mod group;
 #[cfg(feature = "itest-bus-fault")]
 mod itest_bus_fault;
+#[cfg(feature = "object-ipc-crash-seam")]
+mod itest_crash_seam;
 #[cfg(feature = "itest-rfd-fault")]
 mod itest_rfd_fault;
 mod object;
