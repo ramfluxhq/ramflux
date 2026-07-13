@@ -102,6 +102,40 @@ pub(crate) fn local_bus_event(
 /// above it. 1 MiB.
 pub(crate) const MAX_LOCAL_BUS_FRAME_BYTES: usize = 1024 * 1024;
 
+/// T25-A3 (CTRL-102 / OBJ-IPC-01): the maximum whole-object plaintext accepted by the bounded
+/// UPLOAD spool. 16 MiB. `object.put.begin/chunk/finish` all fail closed above it — the object
+/// never enters the local commit. Public so the `rf` streaming client shares one authority.
+pub const MAX_LOCAL_BUS_OBJECT_BYTES: usize = 16 * 1024 * 1024;
+
+/// T25-A3: the maximum RAW plaintext bytes carried by a single `object.put.chunk` frame. 512 KiB.
+/// base64 inflates this ~4/3 to ~699 KiB; with the JSON local-bus envelope the whole frame stays
+/// far below [`MAX_LOCAL_BUS_FRAME_BYTES`] (proven by `_CHUNK_FRAME_BOUND_PROOF`). The `rf` writer
+/// clamps its per-chunk read to this; the daemon rejects any chunk whose decoded payload exceeds it.
+pub const MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES: usize = 512 * 1024;
+
+/// T25-A3: the auto-route threshold. A `rf object put` of a file at or below this size keeps the
+/// small one-shot `object.put` request path; a LARGER file auto-routes to the bounded spool
+/// (begin/chunk/finish) so the user never needs a flag to make a large PUT succeed. Chosen at 512
+/// KiB, well under the ~768 KiB one-shot request ceiling, so a one-shot request frame always fits.
+pub const MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES: usize = 512 * 1024;
+
+/// Reserved headroom (bytes) for the local-bus JSON envelope (`bus_protocol`, ids, method, offset,
+/// …) + base64 padding wrapped around a maximally sized chunk payload. Generous.
+const LOCAL_BUS_CHUNK_ENVELOPE_HEADROOM: usize = 64 * 1024;
+
+/// base64 (URL-safe, no pad) encodes `raw` bytes to `4*ceil(raw/3)` characters.
+const fn base64_len(raw: usize) -> usize {
+    4 * raw.div_ceil(3)
+}
+
+/// Compile-time proof that a maximally sized `object.put.chunk` frame cannot reach the 1 MiB cap:
+/// `base64(MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES) + envelope headroom < MAX_LOCAL_BUS_FRAME_BYTES`.
+const _: () = assert!(
+    base64_len(MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES) + LOCAL_BUS_CHUNK_ENVELOPE_HEADROOM
+        < MAX_LOCAL_BUS_FRAME_BYTES,
+    "a maximally sized object.put.chunk frame must stay below the 1 MiB local-bus frame cap"
+);
+
 pub(crate) async fn write_local_bus_frame<W>(
     writer: &mut W,
     frame: &LocalBusFrame,
@@ -183,6 +217,33 @@ mod tests {
         let mut reader: &[u8] = &out;
         let read = read_local_bus_frame(&mut reader).await?;
         assert_eq!(read, frame);
+        Ok(())
+    }
+
+    // T25-A3: a maximally sized object.put.chunk frame (512 KiB raw -> base64 + envelope) MUST
+    // serialize to a frame strictly below the 1 MiB cap, so the writer accepts it (no reject) and no
+    // chunk ever needs the cap raised. This is the runtime companion to `_CHUNK_FRAME_BOUND_PROOF`.
+    #[tokio::test]
+    async fn max_object_put_chunk_frame_stays_below_cap() -> Result<(), SdkError> {
+        let payload = vec![0xAB_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES];
+        let data_base64 = ramflux_protocol::encode_base64url(&payload);
+        // The largest plausible chunk envelope: long ids at the verified max offset.
+        let body = serde_json::json!({
+            "operation_id": "op-".to_owned() + &"z".repeat(64),
+            "offset": MAX_LOCAL_BUS_OBJECT_BYTES - MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES,
+            "data_base64": data_base64,
+        });
+        let mut frame = test_frame(body);
+        frame.method = "object.put.chunk".to_owned();
+        frame.request_id = "req_".to_owned() + &"9".repeat(48);
+        frame.account_id = Some("acct_".to_owned() + &"a".repeat(64));
+        let mut out: Vec<u8> = Vec::new();
+        write_local_bus_frame(&mut out, &frame).await?;
+        assert!(
+            out.len() < MAX_LOCAL_BUS_FRAME_BYTES,
+            "max chunk frame {} must stay below the 1 MiB cap {MAX_LOCAL_BUS_FRAME_BYTES}",
+            out.len()
+        );
         Ok(())
     }
 

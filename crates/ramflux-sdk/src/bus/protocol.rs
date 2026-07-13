@@ -580,6 +580,44 @@ pub struct LocalBusObjectPutRequest {
     pub operation_id: Option<String>,
 }
 
+/// T25-A3 (CTRL-102 / OBJ-IPC-01): open a bounded UPLOAD spool for a large `object.put`. Binds the
+/// whole content-and-intent up front (`object_id`, `operation_id`, `total_len`, `plaintext_hash`,
+/// relay `chunk_size`, normalized relay endpoint, protocol version); chunks then stream in bounded
+/// frames and `finish` verifies hash + len before reusing the A2 durable commit. Carries NO plaintext.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectPutBeginRequest {
+    pub object_id: String,
+    pub operation_id: String,
+    pub total_len: usize,
+    pub plaintext_hash: String,
+    pub chunk_size: usize,
+    pub protocol_version: u32,
+    #[serde(default)]
+    pub relay_endpoint: Option<String>,
+    #[serde(default)]
+    pub relay_service_key_base64: Option<String>,
+    #[serde(default)]
+    pub relay_interrupt_after_chunks: Option<u32>,
+}
+
+/// T25-A3: append one bounded plaintext chunk to an open UPLOAD spool at the verified offset. The
+/// daemon fails closed (and destroys the spool) on any gap / overlap / duplicate / oversize.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectPutChunkRequest {
+    pub operation_id: String,
+    pub offset: usize,
+    pub data_base64: String,
+}
+
+/// T25-A3: finalize an UPLOAD spool — verify `total_len` + `plaintext_hash` + offset completeness,
+/// then reuse the SAME A2 durable reconciliation (prepare -> atomic local commit -> relay ->
+/// Committed -> compact terminal) under the shared `operation_id`. Cleans up on success AND failure.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectPutFinishRequest {
+    pub object_id: String,
+    pub operation_id: String,
+}
+
 /// T25-A2 (OBJ-IPC-01): read-only reconciliation status for a logical `object.put`. Returns the
 /// operation `state` (`pending`/`local_committed`/`committed`/`failed`/`unknown`) and, when
 /// terminal, the compact terminal result. `unknown` when no record or the `operation_id` mismatches.

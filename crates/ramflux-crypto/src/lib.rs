@@ -38,9 +38,9 @@ pub use identity::{
     verifying_key_from_base64url,
 };
 pub use kdf::{
-    MIN_RECOVERY_SECRET_BYTES, RecoverySecret, blake3_256, blake3_256_base64url,
-    blake3_keyed_derive, derive_recovery_secret, derive_recovery_secret_secret, event_id,
-    random_32,
+    Blake3DomainHasher, MIN_RECOVERY_SECRET_BYTES, RecoverySecret, blake3_256,
+    blake3_256_base64url, blake3_keyed_derive, derive_recovery_secret,
+    derive_recovery_secret_secret, event_id, random_32,
 };
 pub(crate) use kdf::{hkdf_sha256, write_len_prefixed};
 pub use key_verification::{

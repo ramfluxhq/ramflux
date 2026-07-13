@@ -211,7 +211,7 @@ pub(crate) const OBJECT_OPERATION_COMMITTED: &str = "committed";
 pub(crate) const OBJECT_OPERATION_FAILED: &str = "failed";
 pub(crate) const OBJECT_OPERATION_UNKNOWN: &str = "unknown";
 pub(crate) const OBJECT_PUT_REQUEST_HASH_DOMAIN: &str = "ramflux.object_put.request.v1";
-pub(crate) const OBJECT_PUT_PROTOCOL_VERSION: u32 = 1;
+pub const OBJECT_PUT_PROTOCOL_VERSION: u32 = 1;
 // T22-A1 / RQ-04: v2 relay-token constants and the LocalMint runtime-opt-in env are compiled only
 // under the `itest-local-mint` feature, so production SDK/rf binaries carry no v2 mint metadata or
 // LocalMint env string.
