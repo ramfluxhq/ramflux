@@ -223,25 +223,6 @@ pub(crate) fn object_key_slot_associated_data(
     format!("ramflux.object_key_slot.v1|{object_id}|{conversation_id}|{recipient_device_id}")
         .into_bytes()
 }
-pub(crate) fn object_chunks(object: &EncryptedObject, chunk_size: usize) -> Vec<serde_json::Value> {
-    let chunk_size = chunk_size.max(1);
-    object
-        .ciphertext
-        .chunks(chunk_size)
-        .enumerate()
-        .map(|(index, chunk)| {
-            serde_json::json!({
-                "index": index,
-                "ciphertext_base64": ramflux_protocol::encode_base64url(chunk),
-                "chunk_cipher_hash": ramflux_crypto::blake3_256_base64url(
-                    ramflux_protocol::domain::OBJECT,
-                    chunk,
-                ),
-            })
-        })
-        .collect()
-}
-
 pub(crate) fn object_relay_chunk_id(
     object_id: &str,
     manifest_hash: &str,

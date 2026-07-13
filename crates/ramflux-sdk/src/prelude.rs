@@ -84,7 +84,7 @@ pub(crate) use crate::object::{
     SdkRelayChunkStatus, SdkRelayToken, build_signed_object_access_grant,
     build_signed_owner_authorization_proof, build_signed_requester_pop,
     build_v3_ack_token_issue_body, build_v3_get_token_issue_body, build_v3_grant_token_issue_body,
-    build_v3_owner_session_token_issue_body, effective_attachment_lineage, object_chunks,
+    build_v3_owner_session_token_issue_body, effective_attachment_lineage,
     object_key_slot_associated_data, object_relay_chunk_cipher_hash, object_relay_chunk_id,
     object_transfer_id, object_transfer_status, parse_relay_transfer_options,
     recipient_device_hash, relay_quic_config, verify_recipient_object_access_grant,
