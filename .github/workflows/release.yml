@@ -167,3 +167,62 @@ jobs:
             dist/ramflux-sbom.cdx.tar.gz.sig
             dist/ramflux-sbom.cdx.tar.gz.pem
             dist/ramflux-sbom.cdx.tar.gz.cosign.bundle
+
+  image-dry-run:
+    name: REL-O4-01 image dry-run ${{ matrix.bin }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bin: ramflux-gateway
+            image: ghcr.io/ramfluxhq/ramflux-gateway
+          - bin: ramflux-router
+            image: ghcr.io/ramfluxhq/ramflux-router
+          - bin: ramflux-notify
+            image: ghcr.io/ramfluxhq/ramflux-notify
+          - bin: ramflux-federation
+            image: ghcr.io/ramfluxhq/ramflux-federation
+          - bin: ramflux-relay
+            image: ghcr.io/ramfluxhq/ramflux-relay
+          - bin: ramflux-signaling
+            image: ghcr.io/ramfluxhq/ramflux-signaling
+          - bin: ramflux-retention
+            image: ghcr.io/ramfluxhq/ramflux-retention
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        with:
+          images: ${{ matrix.image }}
+          tags: |
+            type=raw,value=${{ inputs.tag || github.ref_name }}
+
+      # REL-O4-01 dry-run only: GHCR push, image signing, and package publication
+      # remain owner-gated until packages:write/tag/release approval is granted.
+      - name: Build image dry-run
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: source-runtime
+          build-args: |
+            BIN=${{ matrix.bin }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
