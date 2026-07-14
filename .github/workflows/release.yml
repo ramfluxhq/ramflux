@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
@@ -119,7 +119,7 @@ jobs:
       attestations: write
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
 
       - name: Install SBOM tooling
         run: cargo install cargo-cyclonedx --locked
@@ -194,7 +194,7 @@ jobs:
             image: ghcr.io/ramfluxhq/ramflux-retention
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
