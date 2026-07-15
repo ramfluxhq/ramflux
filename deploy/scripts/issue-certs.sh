@@ -20,6 +20,18 @@ fi
 services='gateway router notify federation relay signaling retention'
 node_id="${RAMFLUX_NODE_ID:-localhost}"
 
+normalize_service_key_permissions() {
+  for _service in ${services}; do
+    _key="${cert_dir}/${_service}/${_service}-key.pem"
+    if [ -f "${_key}" ]; then
+      # Local/dev mesh keys are mounted read-only into containers that drop all
+      # Linux capabilities. Without DAC_OVERRIDE, container root cannot read a
+      # host-owned 0600 bind mount.
+      chmod 644 "${_key}"
+    fi
+  done
+}
+
 # A service is complete only when its key/cert pair is internally consistent
 # (matching public keys) AND the cert verifies against the *current* CA. If the
 # CA was just regenerated, the old leaves fail verification and are reissued.
@@ -66,7 +78,7 @@ EOF
     -out "${_tmp_cert}" \
     -days 825 \
     -extfile "${_tmp_ext}"
-  chmod 600 "${_tmp_key}"
+  chmod 644 "${_tmp_key}"
   # Publish the matched key/cert pair atomically so a concurrent reader never
   # sees a key from one issuance with a cert from another.
   mv -f "${_tmp_key}" "${_key}"
@@ -77,11 +89,13 @@ EOF
 
 issue_certs_locked() {
   if service_is_complete; then
+    normalize_service_key_permissions
     return 0
   fi
   for _service in ${services}; do
     issue_one_service "${_service}"
   done
+  normalize_service_key_permissions
 }
 
 # Share the certs-dir lock with bootstrap-ca.sh so issuance can never run while
