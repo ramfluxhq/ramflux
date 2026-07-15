@@ -9,7 +9,7 @@ use rustls::{
     SignatureScheme, client::danger::HandshakeSignatureValid,
 };
 use std::fs::File;
-use std::io::{BufReader, Cursor};
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 use std::sync::{Arc, Once};
 
@@ -31,6 +31,7 @@ const GATEWAY_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT: u32 = 4096;
 const GATEWAY_QUIC_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RECEIVE_WINDOW";
 const GATEWAY_QUIC_STREAM_RECEIVE_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_STREAM_RECEIVE_WINDOW";
 const GATEWAY_QUIC_SEND_WINDOW_ENV: &str = "RAMFLUX_GATEWAY_QUIC_SEND_WINDOW";
+const MESH_TLS_FILE_PREFLIGHT_ENV: &str = "RAMFLUX_MESH_TLS_FILE_PREFLIGHT";
 const QUIC_RECEIVE_WINDOW_DEFAULT: u64 = 16 * 1024 * 1024;
 const QUIC_STREAM_RECEIVE_WINDOW_DEFAULT: u64 = 1024 * 1024;
 const QUIC_SEND_WINDOW_DEFAULT: u64 = 16 * 1024 * 1024;
@@ -58,6 +59,9 @@ pub(crate) fn mesh_server_config_with_dynamic_pem_roots(
     root_pems_provider: MeshRootPemProvider,
 ) -> Result<ServerConfig, TransportError> {
     ensure_ring_crypto_provider_installed();
+    mesh_tls_file_preflight("ca_cert", &tls.ca_cert);
+    mesh_tls_file_preflight("service_cert", &tls.service_cert);
+    mesh_tls_file_preflight("service_key", &tls.service_key);
     let verifier =
         Arc::new(DynamicMeshClientVerifier::new(tls.ca_cert.clone(), root_pems_provider)?);
     ServerConfig::builder()
@@ -139,6 +143,67 @@ fn mesh_quic_transport_config() -> Arc<quinn::TransportConfig> {
         MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_DEFAULT,
     );
     Arc::new(transport)
+}
+
+fn mesh_tls_file_preflight(label: &'static str, path: &Path) {
+    if std::env::var(MESH_TLS_FILE_PREFLIGHT_ENV).as_deref() != Ok("1") {
+        return;
+    }
+    let path_display = path.display().to_string();
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            tracing::info!(
+                label,
+                file_path = path_display.as_str(),
+                len = metadata.len(),
+                readonly = metadata.permissions().readonly(),
+                "mesh TLS file preflight: metadata OK"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                label,
+                file_path = path_display.as_str(),
+                os_error = ?error.raw_os_error(),
+                %error,
+                "mesh TLS file preflight: metadata FAILED"
+            );
+            return;
+        }
+    }
+    match File::open(path) {
+        Ok(mut file) => {
+            let mut buffer = [0_u8; 1];
+            match file.read(&mut buffer) {
+                Ok(bytes_read) => {
+                    tracing::info!(
+                        label,
+                        file_path = path_display.as_str(),
+                        bytes_read,
+                        "mesh TLS file preflight: read OK"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        label,
+                        file_path = path_display.as_str(),
+                        os_error = ?error.raw_os_error(),
+                        %error,
+                        "mesh TLS file preflight: read FAILED"
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                label,
+                file_path = path_display.as_str(),
+                os_error = ?error.raw_os_error(),
+                %error,
+                "mesh TLS file preflight: open FAILED"
+            );
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]

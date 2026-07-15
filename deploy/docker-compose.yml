@@ -79,6 +79,7 @@ services:
       # (capabilities NET_ADMIN/NET_RAW/both and an unconfined seccomp probe were ruled out). Inert
       # unless set; remove once the failing option is identified.
       RAMFLUX_QUIC_UDP_PREFLIGHT: "1"
+      RAMFLUX_MESH_TLS_FILE_PREFLIGHT: "1"
     volumes:
       - notify-redb:/var/lib/ramflux/notify
       - ./config/notify.toml:/etc/ramflux/config/notify.toml:ro
