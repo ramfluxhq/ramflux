@@ -384,6 +384,80 @@ impl MeshQuicConnectionPool {
     }
 }
 
+/// DIAGNOSTIC (CTRL-137): returns `true` when `RAMFLUX_QUIC_UDP_PREFLIGHT` is set to `1`/`true`/`on`
+/// (case-insensitive). When absent/unset the UDP preflight is a no-op and normal bind is unchanged.
+fn quic_udp_preflight_enabled() -> bool {
+    std::env::var("RAMFLUX_QUIC_UDP_PREFLIGHT").is_ok_and(|value| {
+        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on")
+    })
+}
+
+/// DIAGNOSTIC (CTRL-137): before the real `quinn::Endpoint::server` bind, optionally probe the IPv4
+/// UDP socket options quinn-udp sets during endpoint init, logging each option's exact result. This
+/// isolates which `setsockopt` trips `EPERM` under the hardened production container (capabilities and
+/// seccomp were ruled out). The probe socket is dropped before the real bind; the real bind is
+/// unaffected. No-op unless `RAMFLUX_QUIC_UDP_PREFLIGHT` is enabled.
+fn quic_udp_preflight(socket_addr: SocketAddr) {
+    if !quic_udp_preflight_enabled() {
+        return;
+    }
+    tracing::warn!(%socket_addr, "quic udp preflight: RAMFLUX_QUIC_UDP_PREFLIGHT enabled; running diagnostic IPv4 UDP socket-option probe");
+    if !socket_addr.is_ipv4() {
+        tracing::warn!(%socket_addr, "quic udp preflight: requested addr is not IPv4; preflight is IPv4-only, skipping");
+        return;
+    }
+    let socket = match std::net::UdpSocket::bind(socket_addr) {
+        Ok(socket) => {
+            tracing::info!(%socket_addr, "quic udp preflight: std UdpSocket::bind OK");
+            socket
+        }
+        Err(error) => {
+            tracing::error!(%socket_addr, os_error = ?error.raw_os_error(), %error, "quic udp preflight: std UdpSocket::bind FAILED");
+            return;
+        }
+    };
+    match socket.set_nonblocking(true) {
+        Ok(()) => tracing::info!("quic udp preflight: set_nonblocking(true) OK"),
+        Err(error) => {
+            tracing::error!(os_error = ?error.raw_os_error(), %error, "quic udp preflight: set_nonblocking(true) FAILED");
+        }
+    }
+    quic_udp_preflight_sockopts(&socket);
+    drop(socket);
+    tracing::info!("quic udp preflight: complete; probe socket dropped, continuing to quinn bind");
+}
+
+/// DIAGNOSTIC (CTRL-137): Linux `setsockopt` probes via safe `nix` wrappers (keeps `unsafe_code`
+/// denied). Options quinn-udp uses for which `nix` 0.29 has no safe wrapper are logged as not probed.
+#[cfg(target_os = "linux")]
+fn quic_udp_preflight_sockopts(socket: &std::net::UdpSocket) {
+    use nix::sys::socket::{setsockopt, sockopt};
+    let log = |name: &str, result: nix::Result<()>| match result {
+        Ok(()) => tracing::info!(sockopt = name, "quic udp preflight: setsockopt OK"),
+        Err(errno) => {
+            tracing::error!(sockopt = name, %errno, "quic udp preflight: setsockopt FAILED");
+        }
+    };
+    log("IP_PKTINFO", setsockopt(socket, sockopt::Ipv4PacketInfo, &true));
+    log("IP_RECVERR", setsockopt(socket, sockopt::Ipv4RecvErr, &true));
+    log("IP_TOS", setsockopt(socket, sockopt::IpTos, &0_i32));
+    tracing::warn!(
+        "quic udp preflight: IP_MTU_DISCOVER (IP_PMTUDISC_PROBE) not probed (no safe nix wrapper in this version)"
+    );
+    tracing::warn!(
+        "quic udp preflight: IP_RECVTOS not probed (no safe nix wrapper in this version)"
+    );
+}
+
+/// DIAGNOSTIC (CTRL-137): the probed IPv4 socket options are Linux-specific; on other targets the
+/// std bind + non-blocking checks above still run, and the option probes are reported as skipped.
+#[cfg(not(target_os = "linux"))]
+fn quic_udp_preflight_sockopts(_socket: &std::net::UdpSocket) {
+    tracing::warn!(
+        "quic udp preflight: IPv4 socket-option probes are Linux-only; skipped on this OS"
+    );
+}
+
 impl MeshQuicServer {
     /// # Errors
     /// Returns an error when the UDP socket cannot bind or TLS material cannot be loaded.
@@ -393,10 +467,13 @@ impl MeshQuicServer {
         root_pems_provider: MeshRootPemProvider,
     ) -> Result<Self, TransportError> {
         tracing::info!(addr, "binding mesh QUIC endpoint");
+        let socket_addr = addr
+            .parse::<SocketAddr>()
+            .map_err(|error| TransportError::Quic(format!("bad QUIC bind addr: {error}")))?;
+        quic_udp_preflight(socket_addr);
         let endpoint = quinn::Endpoint::server(
             mesh_quic_server_config_with_dynamic_pem_roots(tls, root_pems_provider)?,
-            addr.parse::<SocketAddr>()
-                .map_err(|error| TransportError::Quic(format!("bad QUIC bind addr: {error}")))?,
+            socket_addr,
         )?;
         tracing::info!(
             addr,

@@ -67,18 +67,18 @@ services:
       args:
         BIN: ramflux-notify
     command: ["--config", "/etc/ramflux/config/notify.toml"]
-    # DIAGNOSTIC (CTRL-136): seccomp=unconfined on notify ONLY, as an isolation probe to
-    # determine whether the quinn UDP endpoint `Permission denied` comes from the seccomp layer
-    # (capabilities NET_ADMIN/NET_RAW/both were all exhausted without effect). no-new-privileges
-    # and cap hardening are retained. This is NOT final production policy — revert or replace with
-    # a tailored profile once the cause is confirmed.
-    security_opt: ["no-new-privileges:true", "seccomp=unconfined"]
+    security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
     cap_add: ["NET_RAW", "NET_ADMIN"]
     read_only: true
     tmpfs: ["/tmp"]
     environment:
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
+      # DIAGNOSTIC (CTRL-137): notify-only UDP socket-option preflight before the quinn mesh bind,
+      # to identify exactly which Linux setsockopt the quinn UDP endpoint init trips EPERM on
+      # (capabilities NET_ADMIN/NET_RAW/both and an unconfined seccomp probe were ruled out). Inert
+      # unless set; remove once the failing option is identified.
+      RAMFLUX_QUIC_UDP_PREFLIGHT: "1"
     volumes:
       - notify-redb:/var/lib/ramflux/notify
       - ./config/notify.toml:/etc/ramflux/config/notify.toml:ro
