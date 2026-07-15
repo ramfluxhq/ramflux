@@ -425,6 +425,15 @@ fn quic_udp_preflight(socket_addr: SocketAddr) {
     quic_udp_preflight_sockopts(&socket);
     match tokio::net::UdpSocket::from_std(socket) {
         Ok(socket) => {
+            match socket.local_addr() {
+                Ok(addr) => tracing::info!(
+                    %addr,
+                    "quic udp preflight: tokio UdpSocket::local_addr OK"
+                ),
+                Err(error) => {
+                    tracing::error!(os_error = ?error.raw_os_error(), %error, "quic udp preflight: tokio UdpSocket::local_addr FAILED");
+                }
+            }
             drop(socket);
             tracing::info!(
                 "quic udp preflight: tokio UdpSocket::from_std OK; probe socket dropped, continuing to quinn bind"
