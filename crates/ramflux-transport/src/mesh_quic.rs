@@ -501,10 +501,46 @@ impl MeshQuicServer {
             .parse::<SocketAddr>()
             .map_err(|error| TransportError::Quic(format!("bad QUIC bind addr: {error}")))?;
         quic_udp_preflight(socket_addr);
-        let endpoint = quinn::Endpoint::server(
-            mesh_quic_server_config_with_dynamic_pem_roots(tls, root_pems_provider)?,
-            socket_addr,
-        )?;
+        let server_config =
+            mesh_quic_server_config_with_dynamic_pem_roots(tls, root_pems_provider)?;
+        let socket = match std::net::UdpSocket::bind(socket_addr) {
+            Ok(socket) => {
+                tracing::info!(addr, "mesh QUIC std UDP bind OK");
+                socket
+            }
+            Err(error) => {
+                tracing::error!(addr, os_error = ?error.raw_os_error(), %error, "mesh QUIC std UDP bind FAILED");
+                return Err(error.into());
+            }
+        };
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| std::io::Error::other("no async runtime found"))?;
+        tracing::info!(addr, "mesh QUIC default runtime resolved");
+        let async_socket = match runtime.wrap_udp_socket(socket) {
+            Ok(socket) => {
+                tracing::info!(addr, "mesh QUIC runtime.wrap_udp_socket OK");
+                socket
+            }
+            Err(error) => {
+                tracing::error!(addr, os_error = ?error.raw_os_error(), %error, "mesh QUIC runtime.wrap_udp_socket FAILED");
+                return Err(error.into());
+            }
+        };
+        let endpoint = match quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            async_socket,
+            runtime,
+        ) {
+            Ok(endpoint) => {
+                tracing::info!(addr, "mesh QUIC Endpoint::new_with_abstract_socket OK");
+                endpoint
+            }
+            Err(error) => {
+                tracing::error!(addr, os_error = ?error.raw_os_error(), %error, "mesh QUIC Endpoint::new_with_abstract_socket FAILED");
+                return Err(error.into());
+            }
+        };
         tracing::info!(
             addr,
             local_addr = %endpoint.local_addr()?,
