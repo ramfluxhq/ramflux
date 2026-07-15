@@ -423,8 +423,17 @@ fn quic_udp_preflight(socket_addr: SocketAddr) {
         }
     }
     quic_udp_preflight_sockopts(&socket);
-    drop(socket);
-    tracing::info!("quic udp preflight: complete; probe socket dropped, continuing to quinn bind");
+    match tokio::net::UdpSocket::from_std(socket) {
+        Ok(socket) => {
+            drop(socket);
+            tracing::info!(
+                "quic udp preflight: tokio UdpSocket::from_std OK; probe socket dropped, continuing to quinn bind"
+            );
+        }
+        Err(error) => {
+            tracing::error!(os_error = ?error.raw_os_error(), %error, "quic udp preflight: tokio UdpSocket::from_std FAILED");
+        }
+    }
 }
 
 /// DIAGNOSTIC (CTRL-137/140): Linux `setsockopt` probes via safe wrappers (keeps
