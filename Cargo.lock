@@ -2693,6 +2693,7 @@ dependencies = [
  "ramflux-protocol",
  "rcgen",
  "reqwest",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "serde",

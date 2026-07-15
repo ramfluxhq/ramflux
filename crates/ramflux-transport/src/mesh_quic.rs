@@ -427,26 +427,38 @@ fn quic_udp_preflight(socket_addr: SocketAddr) {
     tracing::info!("quic udp preflight: complete; probe socket dropped, continuing to quinn bind");
 }
 
-/// DIAGNOSTIC (CTRL-137): Linux `setsockopt` probes via safe `nix` wrappers (keeps `unsafe_code`
-/// denied). Options quinn-udp uses for which `nix` 0.29 has no safe wrapper are logged as not probed.
+/// DIAGNOSTIC (CTRL-137/140): Linux `setsockopt` probes via safe wrappers (keeps
+/// `unsafe_code` denied). `rustix` covers the quinn-udp PMTU option that is
+/// suspected to fail under the hardened production container.
 #[cfg(target_os = "linux")]
 fn quic_udp_preflight_sockopts(socket: &std::net::UdpSocket) {
     use nix::sys::socket::{setsockopt, sockopt};
+    use rustix::net::sockopt::{Ipv4PathMtuDiscovery, set_ip_mtu_discover, set_ip_recvtos};
     let log = |name: &str, result: nix::Result<()>| match result {
         Ok(()) => tracing::info!(sockopt = name, "quic udp preflight: setsockopt OK"),
         Err(errno) => {
             tracing::error!(sockopt = name, %errno, "quic udp preflight: setsockopt FAILED");
         }
     };
+    let log_rustix = |name: &str, result: rustix::io::Result<()>| match result {
+        Ok(()) => tracing::info!(sockopt = name, "quic udp preflight: setsockopt OK"),
+        Err(errno) => {
+            tracing::error!(
+                sockopt = name,
+                errno = errno.raw_os_error(),
+                %errno,
+                "quic udp preflight: setsockopt FAILED"
+            );
+        }
+    };
     log("IP_PKTINFO", setsockopt(socket, sockopt::Ipv4PacketInfo, &true));
     log("IP_RECVERR", setsockopt(socket, sockopt::Ipv4RecvErr, &true));
     log("IP_TOS", setsockopt(socket, sockopt::IpTos, &0_i32));
-    tracing::warn!(
-        "quic udp preflight: IP_MTU_DISCOVER (IP_PMTUDISC_PROBE) not probed (no safe nix wrapper in this version)"
+    log_rustix(
+        "IP_MTU_DISCOVER/IP_PMTUDISC_PROBE",
+        set_ip_mtu_discover(socket, Ipv4PathMtuDiscovery::PROBE),
     );
-    tracing::warn!(
-        "quic udp preflight: IP_RECVTOS not probed (no safe nix wrapper in this version)"
-    );
+    log_rustix("IP_RECVTOS", set_ip_recvtos(socket, true));
 }
 
 /// DIAGNOSTIC (CTRL-137): the probed IPv4 socket options are Linux-specific; on other targets the
