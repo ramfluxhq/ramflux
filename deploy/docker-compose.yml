@@ -67,7 +67,12 @@ services:
       args:
         BIN: ramflux-notify
     command: ["--config", "/etc/ramflux/config/notify.toml"]
-    security_opt: ["no-new-privileges:true"]
+    # DIAGNOSTIC (CTRL-136): seccomp=unconfined on notify ONLY, as an isolation probe to
+    # determine whether the quinn UDP endpoint `Permission denied` comes from the seccomp layer
+    # (capabilities NET_ADMIN/NET_RAW/both were all exhausted without effect). no-new-privileges
+    # and cap hardening are retained. This is NOT final production policy — revert or replace with
+    # a tailored profile once the cause is confirmed.
+    security_opt: ["no-new-privileges:true", "seccomp=unconfined"]
     cap_drop: ["ALL"]
     cap_add: ["NET_RAW", "NET_ADMIN"]
     read_only: true
