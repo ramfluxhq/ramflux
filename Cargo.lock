@@ -1938,15 +1938,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "merlin"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2005,21 +1996,8 @@ dependencies = [
  "bitflags 1.3.2",
  "cfg-if",
  "libc",
- "memoffset 0.7.1",
+ "memoffset",
  "pin-utils",
-]
-
-[[package]]
-name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.13.0",
- "cfg-if",
- "cfg_aliases",
- "libc",
- "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -2686,14 +2664,12 @@ dependencies = [
  "compio-tls",
  "h2",
  "http",
- "nix 0.29.0",
  "postcard",
  "quinn",
  "ramflux-core",
  "ramflux-protocol",
  "rcgen",
  "reqwest",
- "rustix",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -3995,7 +3971,7 @@ dependencies = [
  "ipnet",
  "lazy_static",
  "log",
- "nix 0.26.4",
+ "nix",
  "portable-atomic",
  "rand",
  "thiserror 1.0.69",
