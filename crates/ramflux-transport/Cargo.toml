@@ -28,6 +28,9 @@ compio-mesh = [
 ]
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# DIAGNOSTIC (CTRL-137): safe setsockopt wrappers for the RAMFLUX_QUIC_UDP_PREFLIGHT probe (Linux
+# only; the probed IP_* options do not exist on other targets). Keeps `unsafe_code = deny`.
+nix = { version = "0.29", features = ["net"] }
 compio = { version = "=0.19.1", optional = true }
 compio-buf = { version = "=0.8.3", optional = true }
 compio-io = { version = "=0.10.1", optional = true }
