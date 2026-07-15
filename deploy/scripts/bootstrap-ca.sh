@@ -40,6 +40,7 @@ generate_ca() {
     -days 3650 \
     -subj "/CN=Ramflux Local Mesh CA"
   chmod 600 "${_tmp_key}"
+  chmod 644 "${_tmp_cert}"
   # Stale serial belongs to the old CA; drop it so issue-certs starts fresh.
   rm -f "${cert_dir}/ca.srl"
   mv -f "${_tmp_key}" "${ca_key}"
@@ -82,4 +83,5 @@ else
 fi
 
 chmod 600 "${ca_key}"
+chmod 644 "${ca_cert}"
 printf 'bootstrap-ca complete: %s\n' "${ca_cert}"
