@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@12cd2235efa0937479335606d7c3ac9f6c0973b1
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@a16f4a497336b68eeff8ef72868ea4bab1c672bb
