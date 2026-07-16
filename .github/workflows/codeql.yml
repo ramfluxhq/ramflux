@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@a16f4a497336b68eeff8ef72868ea4bab1c672bb
+        uses: github/codeql-action/init@7c4a2585440bbc7499024911ad98cd011a05164f
         with:
           languages: rust
 
