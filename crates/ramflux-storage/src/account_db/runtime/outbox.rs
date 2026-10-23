@@ -13,7 +13,7 @@ impl AccountDb {
     /// Returns an error if the bounded unpublished outbox page cannot be read.
     pub fn pending_outbox(&self, limit: u32) -> Result<Vec<AccountOutboxEntry>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT sequence,table_name,change_kind,row_id FROM runtime_outbox WHERE published=0 ORDER BY sequence LIMIT ?1"
+            "SELECT sequence,table_name,change_kind,row_id,keys_json FROM runtime_outbox WHERE published=0 ORDER BY sequence LIMIT ?1"
         )?;
         Ok(statement
             .query_map(params![limit.min(256)], |row| {
@@ -22,6 +22,18 @@ impl AccountDb {
                     table_name: row.get(1)?,
                     change_kind: row.get(2)?,
                     row_id: row.get(3)?,
+                    keys: row
+                        .get::<_, Option<String>>(4)?
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?
+                        .unwrap_or(serde_json::Value::Null),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)

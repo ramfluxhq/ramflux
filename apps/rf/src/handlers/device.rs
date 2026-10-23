@@ -17,17 +17,29 @@ pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Re
                 device_epoch: activate.device_epoch,
             };
             print_json(
-                &bus.request(Some(activate.account), "device", "device.activate", &request).await?,
+                &bus.request(
+                    Some(activate.account),
+                    "device",
+                    "device.activate",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         DeviceAction::Revoke(revoke) => {
             let request = LocalBusDeviceRevokeRequest { device_id: revoke.device };
             print_json(
-                &bus.request(Some(revoke.account), "device", "device.revoke", &request).await?,
+                &bus.request(
+                    Some(revoke.account),
+                    "device",
+                    "device.revoke",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         DeviceAction::List(selector) => print_json(
-            &bus.request(Some(selector.account), "device", "device.list", &serde_json::json!({}))
+            &bus.request(Some(selector.account), "device", "device.list", serde_json::json!({}))
                 .await?,
         ),
         DeviceAction::Sync(sync) => handle_device_sync(&mut bus, sync).await,
@@ -47,8 +59,13 @@ async fn handle_device_sync(
                 chunk_size: export.chunk_size,
             };
             print_json(
-                &bus.request(Some(export.account), "device", "device.sync.export", &request)
-                    .await?,
+                &bus.request(
+                    Some(export.account),
+                    "device",
+                    "device.sync.export",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         DeviceSyncAction::Import(import) => {
@@ -67,8 +84,13 @@ async fn handle_device_sync(
                 relay_service_key_base64: None,
             };
             print_json(
-                &bus.request(Some(import.account), "device", "device.sync.import", &request)
-                    .await?,
+                &bus.request(
+                    Some(import.account),
+                    "device",
+                    "device.sync.import",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
     }

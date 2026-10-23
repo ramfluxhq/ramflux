@@ -9,29 +9,43 @@ pub(crate) async fn handle_grant(socket: PathBuf, command: GrantCommand) -> Resu
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         GrantAction::List(selector) => print_json(
-            &bus.request(Some(selector.account), "grant", "grant.list", &serde_json::json!({}))
+            &bus.request(Some(selector.account), "grant", "grant.list", serde_json::json!({}))
                 .await?,
         ),
         GrantAction::Show(selector) => {
             let value = bus
-                .request(Some(selector.account), "grant", "grant.list", &serde_json::json!({}))
+                .request(Some(selector.account), "grant", "grant.list", serde_json::json!({}))
                 .await?;
             print_json(&rf_select_record(&value, "grants", "grant_id", &selector.grant, "grant")?)
         }
         GrantAction::Audit(selector) => print_json(
-            &bus.request(Some(selector.account), "mcp", "mcp.audit.list", &serde_json::json!({}))
+            &bus.request(Some(selector.account), "mcp", "mcp.audit.list", serde_json::json!({}))
                 .await?,
         ),
         GrantAction::Approve(selector) => {
             rf_guard_local_approval(&mut bus, &selector.account, &selector.approval).await?;
             let request = LocalBusMcpApprovalDecisionRequest { approval_id: selector.approval };
             print_json(
-                &bus.request(Some(selector.account), "grant", "grant.approve", &request).await?,
+                &bus.request(
+                    Some(selector.account),
+                    "grant",
+                    "grant.approve",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         GrantAction::Deny(selector) => {
             let request = LocalBusMcpApprovalDecisionRequest { approval_id: selector.approval };
-            print_json(&bus.request(Some(selector.account), "grant", "grant.deny", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(selector.account),
+                    "grant",
+                    "grant.deny",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
         GrantAction::Request(request) => {
             let (capability, tool_scope) = match request.capability.as_deref() {
@@ -49,11 +63,27 @@ pub(crate) async fn handle_grant(socket: PathBuf, command: GrantCommand) -> Resu
                 tool_scope,
                 full_delegation: request.full_delegation,
             };
-            print_json(&bus.request(Some(request.account), "grant", "grant.request", &body).await?)
+            print_json(
+                &bus.request(
+                    Some(request.account),
+                    "grant",
+                    "grant.request",
+                    serde_json::to_value(body)?,
+                )
+                .await?,
+            )
         }
         GrantAction::Revoke(revoke) => {
             let body = LocalBusGrantRevokeRequest { grant_id: revoke.grant };
-            print_json(&bus.request(Some(revoke.account), "grant", "grant.revoke", &body).await?)
+            print_json(
+                &bus.request(
+                    Some(revoke.account),
+                    "grant",
+                    "grant.revoke",
+                    serde_json::to_value(body)?,
+                )
+                .await?,
+            )
         }
     }
 }
@@ -74,7 +104,7 @@ pub(crate) async fn rf_guard_local_approval(
     approval_id: &str,
 ) -> Result<(), RfError> {
     let value = bus
-        .request(Some(account.to_owned()), "mcp", "mcp.approval.list", &serde_json::json!({}))
+        .request(Some(account.to_owned()), "mcp", "mcp.approval.list", serde_json::json!({}))
         .await?;
     let approval = rf_select_record(&value, "approvals", "approval_id", approval_id, "approval")?;
     let confirmation_mode = approval

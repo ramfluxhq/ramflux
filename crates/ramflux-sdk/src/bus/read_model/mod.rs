@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 mod capture;
 mod rows;
 pub(super) use capture::{capture, capture_mcp_event, initialize};
+pub(crate) use rows::row;
 
 pub(super) fn handles(method: &str) -> bool {
     matches!(

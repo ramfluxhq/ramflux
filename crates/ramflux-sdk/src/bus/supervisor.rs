@@ -19,6 +19,7 @@ pub(super) struct Supervisor {
     events: mpsc::Sender<EventBatch>,
     event_receiver: RefCell<Option<mpsc::Receiver<EventBatch>>>,
     event_task: RefCell<Option<tokio::task::JoinHandle<()>>>,
+    streams: RefCell<BTreeMap<u64, tokio::task::JoinHandle<()>>>,
     attended: RefCell<BTreeMap<u64, String>>,
     stop_requested: watch::Sender<bool>,
     stop_response: watch::Sender<bool>,
@@ -52,6 +53,7 @@ impl Supervisor {
             node_actor,
             accounts: RefCell::new(BTreeMap::new()),
             subscribers: Rc::new(RefCell::new(BTreeMap::new())),
+            streams: RefCell::new(BTreeMap::new()),
             attended: RefCell::new(BTreeMap::new()),
         }))
     }
@@ -395,6 +397,29 @@ impl Supervisor {
         result
     }
 
+    pub(super) async fn subscribe_stream(
+        &self,
+        request: LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<(), SdkError> {
+        self.start_event_router();
+        if let Some(id) = &connection.attended_account_id {
+            self.attended.borrow_mut().insert(connection.connection_id, id.clone());
+        }
+        let id = request_account_id(&request)?;
+        let actor = self.accounts.borrow().get(id).cloned().ok_or_else(|| not_open(id))?;
+        if let Some(task) = self.streams.borrow_mut().remove(&connection.connection_id) {
+            task.abort();
+        }
+        if let Some(task) =
+            super::subscription::start(actor.reader_pool()?, request, connection.outbound.clone())
+                .await?
+        {
+            self.streams.borrow_mut().insert(connection.connection_id, task);
+        }
+        Ok(())
+    }
+
     pub(super) fn subscribe(&self, connection: &LocalBusConnectionState, account_id: String) {
         if let Some(id) = &connection.attended_account_id {
             self.attended.borrow_mut().insert(connection.connection_id, id.clone());
@@ -410,6 +435,9 @@ impl Supervisor {
     }
 
     pub(super) fn disconnect(&self, id: u64) {
+        if let Some(task) = self.streams.borrow_mut().remove(&id) {
+            task.abort();
+        }
         self.subscribers.borrow_mut().remove(&id);
         self.attended.borrow_mut().remove(&id);
     }
@@ -433,6 +461,9 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
+        for (_, task) in std::mem::take(self.streams.get_mut()) {
+            task.abort();
+        }
         if let Some(task) = self.event_task.get_mut().take() {
             task.abort();
         }

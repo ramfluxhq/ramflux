@@ -69,6 +69,9 @@ pub(super) async fn execute(
     if let Some(event) = result.event {
         events.push(event);
     }
+    if let Some(account) = state.accounts.get(account_id) {
+        super::journal::capture_events(&account.client, &events)?;
+    }
     Ok(ActorResponse {
         body: result.response_body,
         events,

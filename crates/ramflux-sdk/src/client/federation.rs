@@ -38,28 +38,23 @@ impl RamfluxClient {
         federation: &LocalBusFederationRoute,
         include_franking_ext: bool,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let conversation_id = message.conversation_id.clone();
         let prekey_url =
             federation.recipient_prekey_url.as_deref().or(engine.config.prekey_http_url.as_deref());
-        let (mut session, x3dh) = self.load_or_create_send_dm_session_with_prekey_url(
-            &message,
-            prekey_url,
-            &engine.config.device_id,
-        )?;
-        let ciphertext = session.encrypt(plaintext, dm_associated_data(&conversation_id))?;
-        let franking =
-            include_franking_ext.then(|| SdkDmFrankingMetadata::from_ciphertext(&ciphertext));
-        message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-            schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
-            version: 1,
-            x3dh,
-            ciphertext,
-        })?;
+        let sealed = self.seal_routed_federated(engine, &message, plaintext, prekey_url)?;
+        let franking = include_franking_ext
+            .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
+        message.encrypted_body = serde_json::to_vec(&sealed)?;
         self.send_direct_message(
             &message.conversation_id,
             &message.message_id,
             &message.sender_id,
             &message.encrypted_body,
+        )?;
+        let (content, _) = crate::client::dm::decode_dm_attachment_body(plaintext)?;
+        self.account_db()?.store_message_content(
+            &message.conversation_id,
+            &message.message_id,
+            &content,
         )?;
         let envelope =
             gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
@@ -72,7 +67,7 @@ impl RamfluxClient {
             route_decision = "remote_federation_forward",
             "submitting federated direct message to source node federation surface"
         );
-        self.persist_dm_session(&conversation_id, &envelope.envelope_id, "send", &session)?;
+
         let response = post_federated_envelope_forward(federation, envelope)?;
         Ok(response)
     }

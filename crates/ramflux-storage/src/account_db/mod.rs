@@ -25,6 +25,7 @@ pub mod group_pending;
 pub mod groups;
 pub mod history;
 pub mod identity_verification;
+pub mod journal;
 pub mod mcp;
 pub mod messages;
 pub mod object;

@@ -15,14 +15,30 @@ pub(crate) async fn handle_a2ui(socket: PathBuf, command: A2uiCommand) -> Result
                 supported_catalogs: render.supported_catalog,
                 granted_permissions: render.permission,
             };
-            print_json(&bus.request(Some(render.account), "a2ui", "a2ui.render", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(render.account),
+                    "a2ui",
+                    "a2ui.render",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
         A2uiAction::Action(action) => {
             let request = LocalBusA2uiActionRequest {
                 surface: serde_json::from_slice(&std::fs::read(action.surface)?)?,
                 action: serde_json::from_slice(&std::fs::read(action.action)?)?,
             };
-            print_json(&bus.request(Some(action.account), "a2ui", "a2ui.action", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(action.account),
+                    "a2ui",
+                    "a2ui.action",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
     }
 }

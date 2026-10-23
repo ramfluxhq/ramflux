@@ -18,58 +18,56 @@ pub(crate) async fn handle_contact(
                 requester_id: link.requester,
                 target_id: link.target,
             };
-            print_json(&bus.request(Some(account), "contact", "contact.add", &request).await?)
+            print_json(
+                &request_body(&mut bus, Some(account), "contact", "contact.add", request).await?,
+            )
         }
         ContactAction::Request(link) => {
             let account = link.link.account.clone();
             let request = rf_contact_federated_request(link.link, link.federated);
-            print_json(&bus.request(Some(account), "contact", "contact.request", &request).await?)
+            print_json(
+                &request_body(&mut bus, Some(account), "contact", "contact.request", request)
+                    .await?,
+            )
         }
-        ContactAction::Accept(accept) => {
-            let account = accept.link.account.clone();
-            if let Some(federated) = accept.federated {
-                let request = rf_contact_federated_request(accept.link, federated);
-                print_json(
-                    &bus.request(Some(account), "contact", "contact.accept", &request).await?,
-                )
-            } else {
-                let request = LocalBusContactAddRequest {
-                    link_id: accept.link.link,
-                    requester_id: accept.link.requester,
-                    target_id: accept.link.target,
-                };
-                print_json(
-                    &bus.request(Some(account), "contact", "contact.accept", &request).await?,
-                )
-            }
-        }
+        ContactAction::Accept(accept) => handle_contact_accept(&mut bus, accept).await,
         ContactAction::Remove(remove) => {
             let request =
                 LocalBusContactRemoveRequest { link_id: remove.link, scope: remove.scope };
             print_json(
-                &bus.request(Some(remove.account), "contact", "contact.remove", &request).await?,
+                &request_body(&mut bus, Some(remove.account), "contact", "contact.remove", request)
+                    .await?,
             )
         }
         ContactAction::Reject(reject) => {
             let request = LocalBusContactLinkRequest { link_id: reject.link };
             print_json(
-                &bus.request(Some(reject.account), "contact", "contact.reject", &request).await?,
+                &request_body(&mut bus, Some(reject.account), "contact", "contact.reject", request)
+                    .await?,
             )
         }
         ContactAction::Block(block) => {
             let request = LocalBusContactLinkRequest { link_id: block.link };
             print_json(
-                &bus.request(Some(block.account), "contact", "contact.block", &request).await?,
+                &request_body(&mut bus, Some(block.account), "contact", "contact.block", request)
+                    .await?,
             )
         }
         ContactAction::Unblock(unblock) => {
             let request = LocalBusContactLinkRequest { link_id: unblock.link };
             print_json(
-                &bus.request(Some(unblock.account), "contact", "contact.unblock", &request).await?,
+                &request_body(
+                    &mut bus,
+                    Some(unblock.account),
+                    "contact",
+                    "contact.unblock",
+                    request,
+                )
+                .await?,
             )
         }
         ContactAction::List(selector) => print_json(
-            &bus.request(Some(selector.account), "contact", "contact.list", &serde_json::json!({}))
+            &bus.request(Some(selector.account), "contact", "contact.list", serde_json::json!({}))
                 .await?,
         ),
         ContactAction::Verify(verify) => {
@@ -79,15 +77,27 @@ pub(crate) async fn handle_contact(
                 contact_identity_commitment: verify.selector.contact,
             };
             print_json(
-                &bus.request(Some(verify.selector.account), "contact", method, &request).await?,
+                &bus.request(
+                    Some(verify.selector.account),
+                    "contact",
+                    method,
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         ContactAction::SafetyNumber(selector) => {
             let request =
                 LocalBusContactSafetyRequest { contact_identity_commitment: selector.contact };
             print_json(
-                &bus.request(Some(selector.account), "contact", "contact.safety_number", &request)
-                    .await?,
+                &request_body(
+                    &mut bus,
+                    Some(selector.account),
+                    "contact",
+                    "contact.safety_number",
+                    request,
+                )
+                .await?,
             )
         }
         ContactAction::Verification(command) => {
@@ -105,11 +115,12 @@ async fn handle_contact_verification(
             let request =
                 LocalBusContactSafetyRequest { contact_identity_commitment: selector.contact };
             print_json(
-                &bus.request(
+                &request_body(
+                    bus,
                     Some(selector.account),
                     "contact",
                     "contact.verification.status",
-                    &request,
+                    request,
                 )
                 .await?,
             )
@@ -140,5 +151,23 @@ pub(crate) fn rf_contact_federated_request(
             admin_token: federated.federation_admin_token,
             recipient_prekey_url: federated.recipient_prekey_url,
         },
+    }
+}
+
+async fn handle_contact_accept(
+    bus: &mut LocalBusClient,
+    accept: ContactAccept,
+) -> Result<(), RfError> {
+    let account = accept.link.account.clone();
+    if let Some(federated) = accept.federated {
+        let request = rf_contact_federated_request(accept.link, federated);
+        print_json(&request_body(bus, Some(account), "contact", "contact.accept", request).await?)
+    } else {
+        let request = LocalBusContactAddRequest {
+            link_id: accept.link.link,
+            requester_id: accept.link.requester,
+            target_id: accept.link.target,
+        };
+        print_json(&request_body(bus, Some(account), "contact", "contact.accept", request).await?)
     }
 }

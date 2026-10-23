@@ -17,8 +17,13 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 direction: status.direction,
             };
             print_json(
-                &bus.request(Some(status.account), "object", "object.transfer.status", &request)
-                    .await?,
+                &bus.request(
+                    Some(status.account),
+                    "object",
+                    "object.transfer.status",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         ObjectAction::Resume(resume) => {
@@ -33,19 +38,30 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 relay_interrupt_after_chunks: resume.relay_interrupt_after_chunks,
             };
             print_json(
-                &bus.request(Some(resume.account), "object", "object.transfer.resume", &request)
-                    .await?,
+                &bus.request(
+                    Some(resume.account),
+                    "object",
+                    "object.transfer.resume",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         ObjectAction::Import(import) => {
             let package = serde_json::from_slice(&std::fs::read(&import.package)?)?;
             let request = LocalBusObjectImportRequest { package };
             print_json(
-                &bus.request(Some(import.account), "object", "object.import", &request).await?,
+                &bus.request(
+                    Some(import.account),
+                    "object",
+                    "object.import",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         ObjectAction::List(selector) => print_json(
-            &bus.request(Some(selector.account), "object", "object.list", &serde_json::json!({}))
+            &bus.request(Some(selector.account), "object", "object.list", serde_json::json!({}))
                 .await?,
         ),
         ObjectAction::Share(share) => {
@@ -57,8 +73,14 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 recipient_principal_commitment: share.recipient_principal_commitment,
                 target_delivery_id: share.target,
             };
-            let response =
-                bus.request(Some(share.account), "object", "object.share", &request).await?;
+            let response = bus
+                .request(
+                    Some(share.account),
+                    "object",
+                    "object.share",
+                    serde_json::to_value(request)?,
+                )
+                .await?;
             if let Some(out_package) = share.out_package {
                 let package = response
                     .get("package")
@@ -77,7 +99,13 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 relay_service_key_base64: None,
             };
             print_json(
-                &bus.request(Some(delete.account), "object", "object.delete", &request).await?,
+                &bus.request(
+                    Some(delete.account),
+                    "object",
+                    "object.delete",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
     }
@@ -93,6 +121,12 @@ const OBJECT_GET_MAX_ATTEMPTS: usize = 3;
 /// A streaming-GET attempt outcome: a structured daemon rejection (missing/tombstoned object, hash
 /// mismatch) is `Fatal` (surfaced immediately, no restart); a transport failure (a dropped local-bus
 /// response) is `Retryable` (restart via a fresh `object.get.begin`).
+impl From<serde_json::Error> for GetStreamError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Fatal(error.into())
+    }
+}
+
 enum GetStreamError {
     Fatal(RfError),
     Retryable(RfError),
@@ -148,7 +182,7 @@ async fn object_get_stream_attempt(
         relay_interrupt_after_chunks: get.relay_interrupt_after_chunks,
     };
     let begin = bus
-        .request(Some(account.clone()), "object", "object.get.begin", &begin)
+        .request(Some(account.clone()), "object", "object.get.begin", serde_json::to_value(begin)?)
         .await
         .map_err(classify_get_error)?;
     let total_len = begin
@@ -189,7 +223,14 @@ async fn object_get_stream_attempt(
     // Best-effort daemon spool cleanup. A dropped finish response is harmless — the client already
     // holds the whole hash-verified plaintext — so a finish failure does NOT fail the download.
     let finish = LocalBusObjectGetFinishRequest { operation_id: operation_id.to_owned() };
-    let _ = bus.request(Some(account.clone()), "object", "object.get.finish", &finish).await;
+    let _ = bus
+        .request(
+            Some(account.clone()),
+            "object",
+            "object.get.finish",
+            serde_json::to_value(finish)?,
+        )
+        .await;
 
     // Atomically publish the complete, verified object.
     std::fs::rename(&temp_path, &get.out).map_err(|error| {
@@ -225,7 +266,12 @@ async fn object_get_stream_to_file(
         let read =
             LocalBusObjectGetReadRequest { operation_id: operation_id.to_owned(), offset, len };
         let response = bus
-            .request(Some(account.to_owned()), "object", "object.get.read", &read)
+            .request(
+                Some(account.to_owned()),
+                "object",
+                "object.get.read",
+                serde_json::to_value(read)?,
+            )
             .await
             .map_err(classify_get_error)?;
         let data = response
@@ -345,6 +391,12 @@ const OBJECT_PUT_MAX_ATTEMPTS: usize = 4;
 /// A spooled-UPLOAD attempt outcome: a structured daemon rejection (a permanently failed operation, a
 /// protocol desync) is `Fatal` (surfaced immediately); a transport failure (a dropped local-bus
 /// response / a daemon that went away) is `Retryable` (reconnect + status-reconcile + resume).
+impl From<serde_json::Error> for PutStreamError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Fatal(error.into())
+    }
+}
+
 enum PutStreamError {
     Fatal(RfError),
     Retryable(RfError),
@@ -390,7 +442,10 @@ async fn handle_object_put_one_shot(
         operation_id: Some(operation_id.clone()),
     };
     let object_id = request.object_id.clone();
-    match bus.request(Some(account.clone()), "object", "object.put", &request).await {
+    match bus
+        .request(Some(account.clone()), "object", "object.put", serde_json::to_value(&request)?)
+        .await
+    {
         Ok(response) => print_json(&response),
         Err(error) => {
             // A transport/response-read failure MAY have followed a durable commit. Reconnect with
@@ -519,14 +574,7 @@ async fn object_put_stream_attempt(
         .await
         .map_err(|error| PutStreamError::Retryable(error.into()))?;
 
-    let status_request = LocalBusObjectPutStatusRequest {
-        object_id: put.object.clone(),
-        operation_id: operation_id.to_owned(),
-    };
-    let status = bus
-        .request(Some(account.to_owned()), "object", "object.put.status", &status_request)
-        .await
-        .map_err(classify_put_error)?;
+    let status = stream_upload_status(&mut bus, account, put, operation_id).await?;
     let state = status.get("state").and_then(serde_json::Value::as_str).unwrap_or("unknown");
     let resume_offset = status
         .get("resume_offset")
@@ -558,9 +606,14 @@ async fn object_put_stream_attempt(
         "resumable" => resume_offset.unwrap_or(0),
         "unknown" => {
             // Nothing durable yet: open the spool (begin binds identity), then stream from zero.
-            bus.request(Some(account.to_owned()), "object", "object.put.begin", begin)
-                .await
-                .map_err(classify_put_error)?;
+            bus.request(
+                Some(account.to_owned()),
+                "object",
+                "object.put.begin",
+                serde_json::to_value(begin)?,
+            )
+            .await
+            .map_err(classify_put_error)?;
             0
         }
         // pending / local_committed: the chunk phase already completed; only the finish/commit remains.
@@ -585,9 +638,14 @@ async fn object_put_stream_attempt(
             offset,
             data_base64: ramflux_protocol::encode_base64url(&buffer[..read]),
         };
-        bus.request(Some(account.to_owned()), "object", "object.put.chunk", &chunk)
-            .await
-            .map_err(classify_put_error)?;
+        bus.request(
+            Some(account.to_owned()),
+            "object",
+            "object.put.chunk",
+            serde_json::to_value(chunk)?,
+        )
+        .await
+        .map_err(classify_put_error)?;
         offset += read;
     }
     if offset != total_len {
@@ -603,7 +661,12 @@ async fn object_put_stream_attempt(
         operation_id: operation_id.to_owned(),
     };
     let response = bus
-        .request(Some(account.to_owned()), "object", "object.put.finish", &finish)
+        .request(
+            Some(account.to_owned()),
+            "object",
+            "object.put.finish",
+            serde_json::to_value(finish)?,
+        )
         .await
         .map_err(classify_put_error)?;
     Ok(response)
@@ -669,7 +732,12 @@ async fn reconcile_object_put(
         operation_id: operation_id.to_owned(),
     };
     let status = bus
-        .request(Some(account.to_owned()), "object", "object.put.status", &status_request)
+        .request(
+            Some(account.to_owned()),
+            "object",
+            "object.put.status",
+            serde_json::to_value(status_request)?,
+        )
         .await?;
     let state = status.get("state").and_then(serde_json::Value::as_str).unwrap_or("unknown");
     match state {
@@ -682,8 +750,14 @@ async fn reconcile_object_put(
             print_json(&terminal)
         }
         "pending" | "local_committed" => {
-            let response =
-                bus.request(Some(account.to_owned()), "object", "object.put", put_request).await?;
+            let response = bus
+                .request(
+                    Some(account.to_owned()),
+                    "object",
+                    "object.put",
+                    serde_json::to_value(put_request)?,
+                )
+                .await?;
             print_json(&response)
         }
         "unknown" => {
@@ -694,6 +768,26 @@ async fn reconcile_object_put(
         }
         other => Err(RfError::Message(format!("object.put reconcile failed: state={other}"))),
     }
+}
+
+async fn stream_upload_status(
+    bus: &mut LocalBusClient,
+    account: &str,
+    put: &ObjectPut,
+    operation_id: &str,
+) -> Result<serde_json::Value, PutStreamError> {
+    let request = LocalBusObjectPutStatusRequest {
+        object_id: put.object.clone(),
+        operation_id: operation_id.to_owned(),
+    };
+    bus.request(
+        Some(account.to_owned()),
+        "object",
+        "object.put.status",
+        serde_json::to_value(request)?,
+    )
+    .await
+    .map_err(classify_put_error)
 }
 
 #[cfg(test)]

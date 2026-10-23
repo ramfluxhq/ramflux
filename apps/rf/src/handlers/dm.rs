@@ -32,7 +32,13 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 federation,
             };
             print_json(
-                &bus.request(Some(send.account), "message", "message.submit", &request).await?,
+                &bus.request(
+                    Some(send.account),
+                    "message",
+                    "message.submit",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         DmAction::List(selector) => handle_dm_list(&mut bus, selector).await,
@@ -44,7 +50,15 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 receiver_device_id: ack.receiver_device,
                 received_at: ack.received_at.unwrap_or_else(rf_now_unix_timestamp),
             };
-            print_json(&bus.request(Some(ack.account), "message", "message.ack", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(ack.account),
+                    "message",
+                    "message.ack",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
         DmAction::Delete(delete) => {
             let request = LocalBusMessageDeleteRequest {
@@ -54,7 +68,13 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 tombstone_id: delete.tombstone,
             };
             print_json(
-                &bus.request(Some(delete.account), "message", "message.delete", &request).await?,
+                &bus.request(
+                    Some(delete.account),
+                    "message",
+                    "message.delete",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         DmAction::Receipt(command) => handle_dm_receipt(&mut bus, command).await,
@@ -73,15 +93,16 @@ async fn handle_dm_list(
             Some(selector.account.clone()),
             "message",
             "message.receive",
-            &serde_json::json!({
+            serde_json::json!({
                 "limit": 100,
                 "conversation_id": request.conversation_id,
                 "auto_fetch_attachments": false,
             }),
         )
         .await?;
-    let mut value =
-        bus.request(Some(selector.account), "message", "message.read", &request).await?;
+    let mut value = bus
+        .request(Some(selector.account), "message", "message.read", serde_json::to_value(request)?)
+        .await?;
     value["gateway_entries"] =
         received.get("entries").cloned().unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
     value["decrypted_messages"] = received
@@ -98,7 +119,7 @@ async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), Rf
             Some(read.account.clone()),
             "message",
             "message.receive",
-            &serde_json::json!({
+            serde_json::json!({
                 "limit": 100,
                 "conversation_id": request.conversation_id,
                 "auto_fetch_attachments": true,
@@ -106,7 +127,9 @@ async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), Rf
             }),
         )
         .await?;
-    let mut value = bus.request(Some(read.account), "message", "message.read", &request).await?;
+    let mut value = bus
+        .request(Some(read.account), "message", "message.read", serde_json::to_value(request)?)
+        .await?;
     value["gateway_entries"] =
         received.get("entries").cloned().unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
     value["decrypted_messages"] = received
@@ -162,7 +185,7 @@ async fn handle_dm_receipt(
                     Some(delivered.account),
                     "message",
                     "message.receipt.delivered",
-                    &request,
+                    serde_json::to_value(request)?,
                 )
                 .await?,
             )
@@ -177,8 +200,13 @@ async fn handle_dm_receipt(
                 read_at: read.read_at,
             };
             print_json(
-                &bus.request(Some(read.account), "message", "message.receipt.read", &request)
-                    .await?,
+                &bus.request(
+                    Some(read.account),
+                    "message",
+                    "message.receipt.read",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
     }
@@ -202,7 +230,7 @@ async fn handle_dm_disappearing(
                     Some(set.account),
                     "conversation",
                     "conversation.disappearing.set",
-                    &request,
+                    serde_json::to_value(request)?,
                 )
                 .await?,
             )
@@ -217,7 +245,7 @@ async fn handle_dm_disappearing(
                     Some(expire.account),
                     "conversation",
                     "conversation.disappearing.expire",
-                    &request,
+                    serde_json::to_value(request)?,
                 )
                 .await?,
             )
@@ -232,7 +260,13 @@ async fn handle_dm_mute(bus: &mut LocalBusClient, mute: DmMute) -> Result<(), Rf
         unmute: mute.unmute,
     };
     print_json(
-        &bus.request(Some(mute.account), "conversation", "conversation.mute", &request).await?,
+        &bus.request(
+            Some(mute.account),
+            "conversation",
+            "conversation.mute",
+            serde_json::to_value(request)?,
+        )
+        .await?,
     )
 }
 

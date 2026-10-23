@@ -21,7 +21,13 @@ pub(crate) async fn handle_mcp(socket: PathBuf, command: McpCommand) -> Result<(
                     manifest_version: 1,
                 };
                 print_json(
-                    &bus.request(Some(add.account), "mcp", "mcp.server.add", &request).await?,
+                    &bus.request(
+                        Some(add.account),
+                        "mcp",
+                        "mcp.server.add",
+                        serde_json::to_value(request)?,
+                    )
+                    .await?,
                 )
             }
             McpServerAction::List(selector) => print_json(
@@ -29,7 +35,7 @@ pub(crate) async fn handle_mcp(socket: PathBuf, command: McpCommand) -> Result<(
                     Some(selector.account),
                     "mcp",
                     "mcp.server.list",
-                    &serde_json::json!({}),
+                    serde_json::json!({}),
                 )
                 .await?,
             ),
@@ -38,20 +44,15 @@ pub(crate) async fn handle_mcp(socket: PathBuf, command: McpCommand) -> Result<(
                     Some(selector.account),
                     "mcp",
                     "mcp.server.refresh",
-                    &serde_json::json!({}),
+                    serde_json::json!({}),
                 )
                 .await?,
             ),
         },
         McpAction::Tool(tool) => match tool.action {
             McpToolAction::List(selector) => print_json(
-                &bus.request(
-                    Some(selector.account),
-                    "mcp",
-                    "mcp.tool.list",
-                    &serde_json::json!({}),
-                )
-                .await?,
+                &bus.request(Some(selector.account), "mcp", "mcp.tool.list", serde_json::json!({}))
+                    .await?,
             ),
             McpToolAction::Call(call) => {
                 let request = LocalBusMcpToolCallRequest {
@@ -61,7 +62,13 @@ pub(crate) async fn handle_mcp(socket: PathBuf, command: McpCommand) -> Result<(
                     operation_origin: Some("ai_mcp".to_owned()),
                 };
                 print_json(
-                    &bus.request(Some(call.account), "mcp", "mcp.tool.started", &request).await?,
+                    &bus.request(
+                        Some(call.account),
+                        "mcp",
+                        "mcp.tool.started",
+                        serde_json::to_value(request)?,
+                    )
+                    .await?,
                 )
             }
         },
@@ -75,17 +82,12 @@ async fn handle_mcp_approval(
 ) -> Result<(), RfError> {
     match approval.action {
         McpApprovalAction::List(selector) => print_json(
-            &bus.request(
-                Some(selector.account),
-                "mcp",
-                "mcp.approval.list",
-                &serde_json::json!({}),
-            )
-            .await?,
+            &bus.request(Some(selector.account), "mcp", "mcp.approval.list", serde_json::json!({}))
+                .await?,
         ),
         McpApprovalAction::Show(selector) => {
             let value = bus
-                .request(Some(selector.account), "mcp", "mcp.approval.list", &serde_json::json!({}))
+                .request(Some(selector.account), "mcp", "mcp.approval.list", serde_json::json!({}))
                 .await?;
             print_json(&crate::handlers::grant::rf_select_record(
                 &value,
@@ -104,12 +106,26 @@ async fn handle_mcp_approval(
             .await?;
             let request = LocalBusMcpApprovalDecisionRequest { approval_id: selector.approval };
             print_json(
-                &bus.request(Some(selector.account), "grant", "grant.approve", &request).await?,
+                &bus.request(
+                    Some(selector.account),
+                    "grant",
+                    "grant.approve",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         McpApprovalAction::Deny(selector) => {
             let request = LocalBusMcpApprovalDecisionRequest { approval_id: selector.approval };
-            print_json(&bus.request(Some(selector.account), "grant", "grant.deny", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(selector.account),
+                    "grant",
+                    "grant.deny",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
     }
 }

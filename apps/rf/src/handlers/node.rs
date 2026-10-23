@@ -30,5 +30,5 @@ pub(crate) async fn handle_node(socket: PathBuf, command: NodeCommand) -> Result
         }
     };
     let mut bus = LocalBusClient::connect(socket).await?;
-    print_json(&bus.request(None, "node", method, &body).await?)
+    print_json(&bus.request(None, "node", method, serde_json::to_value(body)?).await?)
 }

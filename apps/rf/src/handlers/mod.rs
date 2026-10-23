@@ -53,3 +53,14 @@ pub(crate) use ramflux_sdk::{
 };
 pub(crate) use std::net::SocketAddr;
 pub(crate) use std::path::PathBuf;
+
+/// Serializes CLI request structs into the owned SDK request boundary.
+async fn request_body<T: serde::Serialize>(
+    bus: &mut LocalBusClient,
+    account: Option<String>,
+    api: &str,
+    method: &str,
+    body: T,
+) -> Result<serde_json::Value, RfError> {
+    Ok(bus.request(account, api, method, serde_json::to_value(body)?).await?)
+}

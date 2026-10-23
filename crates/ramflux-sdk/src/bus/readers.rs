@@ -84,15 +84,16 @@ fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<serde_json::V
     if super::read_model::handles(&request.method) {
         return super::read_model::read(client, request);
     }
+    if request.method == "stream.read" {
+        return super::subscription::read(client.account_db()?, request);
+    }
     match request.method.as_str() {
         "conversation.list" => {
             Ok(serde_json::json!({"conversations": client.conversation_list()?}))
         }
         "message.list" | "message.read" => {
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
-            Ok(
-                serde_json::json!({"messages": client.direct_messages(&body.conversation_id)?, "rejected": client.rejected_inbox(&body.conversation_id)?}),
-            )
+            message_page(client, &body.conversation_id)
         }
         _ => Err(SdkError::LocalBus("unsupported reader request".to_owned())),
     }
@@ -100,4 +101,27 @@ fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<serde_json::V
 
 fn closed() -> SdkError {
     SdkError::LocalBus("account reader stopped".to_owned())
+}
+
+fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json::Value, SdkError> {
+    let db = client.account_db()?;
+    let mut messages = Vec::new();
+    for message in client.direct_messages(conversation)? {
+        let mut value = serde_json::to_value(&message)?;
+        if !message.deleted
+            && let Some(content) = db.message_content(&message.message_id)?
+        {
+            value["body_utf8"] = serde_json::json!(String::from_utf8_lossy(&content));
+            let mut attachments = Vec::new();
+            for object in db.client_message_object_ids(&message.message_id)? {
+                let mut row = super::read_model::row(client, "object", &object)?;
+                row["object_id"] = serde_json::json!(object);
+                row["imported"] = serde_json::json!(true);
+                attachments.push(row);
+            }
+            value["attachments"] = serde_json::json!(attachments);
+        }
+        messages.push(value);
+    }
+    Ok(serde_json::json!({"messages":messages,"rejected":client.rejected_inbox(conversation)?}))
 }

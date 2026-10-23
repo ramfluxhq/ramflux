@@ -55,6 +55,28 @@ impl RamfluxClient {
         entries.sort_by_key(|entry| entry.inbox_seq);
         let mut events = Vec::new();
         for entry in entries {
+            if crate::client::routed::decode(&entry.envelope).is_ok() {
+                let opened = self.open_routed(&entry, &engine.config.device_id)?;
+                if opened.routing.kind != crate::client::routed::Kind::Control {
+                    return Err(SdkError::LocalBus("not an A2I control delivery".to_owned()));
+                }
+                let event: A2iControlEvent = serde_json::from_slice(&opened.body)?;
+                self.persist_pair(
+                    &opened.local_device,
+                    &opened.remote_device,
+                    &opened.bundle_hash,
+                    &opened.session,
+                )?;
+                self.persist_dm_session(
+                    &opened.routing.conversation_id,
+                    &entry.envelope.envelope_id,
+                    "recv",
+                    &opened.session,
+                )?;
+                self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                events.push(event);
+                continue;
+            }
             self.append_gateway_delivery(&entry)?;
             let conversation_id = a2i_control_conversation_id(
                 &entry.envelope.source_device_id,

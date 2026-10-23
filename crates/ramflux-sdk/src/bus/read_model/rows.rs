@@ -6,7 +6,7 @@
 use crate::prelude::*;
 use serde_json::{Value, json};
 
-pub(super) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<Value, SdkError> {
+pub(crate) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<Value, SdkError> {
     let db = client.account_db()?;
     let own = db.client_record("self", "account")?.unwrap_or_else(|| json!({}));
     let mut saved = db.client_record(directory, id)?.unwrap_or_else(|| json!({}));

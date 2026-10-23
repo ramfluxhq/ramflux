@@ -4,6 +4,11 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+pub(crate) struct LegacyReceive<'a> {
+    pub conversation_id: &'a str,
+    pub auto_fetch_attachments: bool,
+    pub relay_service_key_base64: Option<String>,
+}
 
 impl RamfluxClient {
     pub fn send_direct_message(
@@ -97,22 +102,21 @@ impl RamfluxClient {
         plaintext: &[u8],
         include_franking_ext: bool,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let conversation_id = message.conversation_id.clone();
-        let (mut session, x3dh) = self.load_or_create_send_dm_session(engine, &message).await?;
-        let ciphertext = session.encrypt(plaintext, dm_associated_data(&conversation_id))?;
-        let franking =
-            include_franking_ext.then(|| SdkDmFrankingMetadata::from_ciphertext(&ciphertext));
-        message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-            schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
-            version: 1,
-            x3dh,
-            ciphertext,
-        })?;
+        let sealed = self.seal_routed(engine, &message, plaintext).await?;
+        let franking = include_franking_ext
+            .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
+        message.encrypted_body = serde_json::to_vec(&sealed)?;
         self.send_direct_message(
             &message.conversation_id,
             &message.message_id,
             &message.sender_id,
             &message.encrypted_body,
+        )?;
+        let (content, _) = crate::client::dm::decode_dm_attachment_body(plaintext)?;
+        self.account_db()?.store_message_content(
+            &message.conversation_id,
+            &message.message_id,
+            &content,
         )?;
         let envelope =
             gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
@@ -120,7 +124,7 @@ impl RamfluxClient {
         // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
         // same message key for a later message. If submit fails, skipping one send key is safe;
         // reusing it is not.
-        self.persist_dm_session(&conversation_id, &envelope.envelope_id, "send", &session)?;
+
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmSend).await?;
         let entry = engine.submit_envelope(envelope).await?;
@@ -200,18 +204,10 @@ impl RamfluxClient {
         mut message: GatewayDirectMessage,
         envelope: SdkReceiptEventEnvelope,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let conversation_id = message.conversation_id.clone();
-        let (mut session, x3dh) = self.load_or_create_send_dm_session(engine, &message).await?;
         let plaintext = serde_json::to_vec(&envelope)?;
-        let ciphertext = session.encrypt(&plaintext, dm_associated_data(&conversation_id))?;
-        message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-            schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
-            version: 1,
-            x3dh,
-            ciphertext,
-        })?;
+        let sealed = self.seal_routed(engine, &message, &plaintext).await?;
+        message.encrypted_body = serde_json::to_vec(&sealed)?;
         let gateway_envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
-        self.persist_dm_session(&conversation_id, &gateway_envelope.envelope_id, "send", &session)?;
         let entry = engine.submit_envelope(gateway_envelope).await?;
         Ok(entry)
     }
@@ -248,146 +244,193 @@ impl RamfluxClient {
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;
         let mut entries = engine.resume_after(after_inbox_seq, limit).await?;
         entries.retain(|entry| entry.inbox_seq > after_inbox_seq);
+        for bytes in self.account_db()?.unrouted_entries()? {
+            let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
+            if !entries.iter().any(|e| e.envelope.envelope_id == entry.envelope.envelope_id) {
+                entries.push(entry);
+            }
+        }
         entries.sort_by_key(|entry| entry.inbox_seq);
         let mut plaintext = Vec::new();
         for entry in entries {
-            self.append_gateway_delivery(&entry)?;
-            // T21-A2a / CTRL-028: the recv session checkpoint — not the plaintext projection — is
-            // the authoritative "this entry is committed" signal. Only when the persisted recv
-            // session already covers this envelope do we know the ratchet advanced and every side
-            // effect ran; then a cursor that lagged (crash between session commit and cursor commit)
-            // is safely caught up. A present projection with an uncommitted recv session (crash
-            // between projection write and session commit) must be re-decrypted so the ratchet
-            // actually advances; the idempotent side effects below converge on that retry.
-            let projection_present =
-                self.plaintext_projection_delivery(conversation_id, &entry)?.is_some();
-            let session_checkpoint_current =
-                self.recv_session_checkpoint_at(conversation_id, &entry.envelope.envelope_id)?;
-            match receive_terminal_recovery(projection_present, session_checkpoint_current) {
-                ReceiveTerminalDecision::CursorCatchUp => {
-                    self.persist_gateway_receive_cursor(
-                        engine.target_delivery_id(),
-                        entry.inbox_seq,
-                    )?;
-                    continue;
-                }
-                ReceiveTerminalDecision::Decrypt => {}
-            }
-            let ciphertext_bytes = ramflux_protocol::decode_base64url(
-                &entry.envelope.encrypted_payload,
-            )
-            .map_err(|error| SdkError::LocalBus(format!("invalid encrypted payload: {error}")))?;
-            let envelope: SdkDmEncryptedEnvelope = serde_json::from_slice(&ciphertext_bytes)?;
-            let mut session =
-                self.load_or_create_recv_dm_session(conversation_id, envelope.x3dh.as_ref())?;
-            let decrypted = session.decrypt_with_franking_keys(
-                &envelope.ciphertext,
-                dm_associated_data(conversation_id),
-            )?;
-            let body = decrypted.plaintext.clone();
-            // T21-A2a: the advanced recv session (ratchet) is NOT persisted here. It is committed
-            // only once this inbox entry reaches its success terminal state, immediately before the
-            // receive cursor advances. If any downstream step fails, the local `session` is dropped
-            // so the persisted ratchet snapshot and cursor stay unchanged and the same ciphertext
-            // can be re-decrypted on a later `dm read`.
-            self.apply_contact_event_plaintext(&body)?;
-            if self
-                .apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id)?
-                .is_some()
-            {
-                // Receipt applied: commit the advanced recv ratchet, then the cursor.
-                self.persist_dm_session(
-                    conversation_id,
-                    &entry.envelope.envelope_id,
-                    "recv",
-                    &session,
-                )?;
+            if crate::client::routed::decode(&entry.envelope).is_ok() {
+                let delivery: crate::client::routed::Delivery =
+                    self.apply_routed_entry(engine, pool, &entry, auto_fetch_attachments).await?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                if delivery.routing.conversation_id == conversation_id
+                    && let Some(message) = delivery.plaintext
+                {
+                    plaintext.push(message);
+                }
                 continue;
             }
-            if let Some(reason) =
-                self.friend_rejection_reason(&entry.envelope.source_principal_id)?
+            let legacy_id = entry.envelope.envelope_id.clone();
+            if let Some(delivery) = self
+                .receive_legacy_entry(
+                    engine,
+                    pool,
+                    entry,
+                    LegacyReceive {
+                        conversation_id,
+                        auto_fetch_attachments,
+                        relay_service_key_base64: relay_service_key_base64.clone(),
+                    },
+                )
+                .await?
             {
-                self.account_db()?.reject_inbox_message(
-                    conversation_id,
-                    &entry.envelope.envelope_id,
-                    &entry.envelope.source_principal_id,
-                    &reason,
-                    now_unix_timestamp(),
-                )?;
-                // Rejection recorded: commit the advanced recv ratchet, then the cursor.
-                self.persist_dm_session(
-                    conversation_id,
-                    &entry.envelope.envelope_id,
-                    "recv",
-                    &session,
-                )?;
+                plaintext.push(delivery);
+            }
+            self.account_db()?.remove_unrouted(&legacy_id)?;
+        }
+        Ok(plaintext)
+    }
+
+    pub(crate) async fn receive_legacy_entry(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        entry: GatewayInboxEntry,
+        options: LegacyReceive<'_>,
+    ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
+        let conversation_id = options.conversation_id;
+        self.append_gateway_delivery(&entry)?;
+        // T21-A2a / CTRL-028: the recv session checkpoint — not the plaintext projection — is
+        // the authoritative "this entry is committed" signal. Only when the persisted recv
+        // session already covers this envelope do we know the ratchet advanced and every side
+        // effect ran; then a cursor that lagged (crash between session commit and cursor commit)
+        // is safely caught up. A present projection with an uncommitted recv session (crash
+        // between projection write and session commit) must be re-decrypted so the ratchet
+        // actually advances; the idempotent side effects below converge on that retry.
+        let projection_present =
+            self.plaintext_projection_delivery(conversation_id, &entry)?.is_some();
+        let session_checkpoint_current =
+            self.recv_session_checkpoint_at(conversation_id, &entry.envelope.envelope_id)?;
+        match receive_terminal_recovery(projection_present, session_checkpoint_current) {
+            ReceiveTerminalDecision::CursorCatchUp => {
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-                continue;
+                return Ok(None);
             }
-            let (projection_body, attachment_refs) = decode_dm_attachment_body(&body)?;
-            let metadata = franking_report_metadata_for_delivery(
-                conversation_id,
-                &entry,
-                &envelope,
-                &decrypted,
-            )?;
-            let mut attachments = Vec::new();
-            if auto_fetch_attachments {
-                for attachment in &attachment_refs {
-                    attachments.push(
-                        self.import_dm_attachment_from_relay_via_gateway(
-                            engine,
-                            pool,
-                            attachment,
-                            relay_service_key_base64.clone(),
-                        )
-                        .await?,
-                    );
-                }
-            }
-            self.append_plaintext_projection_once(
-                conversation_id,
-                &entry,
-                &projection_body,
-                metadata.as_ref(),
-            )?;
-            if self.account_db()?.client_record("conversation", conversation_id)?.is_none() {
-                self.account_db()?.persist_client_record("conversation",conversation_id,&serde_json::json!({
-                    "kind":"direct","title":null,"group_id":null,"participants":[engine.config.principal_id,entry.envelope.source_principal_id],"direct_route":null
-                }))?;
-            }
-            for attachment in &attachment_refs {
-                self.persist_received_attachment_reference(
-                    attachment,
-                    &entry.envelope.source_principal_id,
-                    conversation_id,
-                    &entry.envelope.envelope_id,
-                )?;
-            }
-            // Every attachment was imported, ACKed, and projected: only now do we commit the
-            // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above
-            // returns before this point, leaving the persisted ratchet snapshot and cursor intact so
-            // the same ciphertext can be re-decrypted and re-ACKed by a later `dm read`.
+            ReceiveTerminalDecision::Decrypt => {}
+        }
+        let ciphertext_bytes = ramflux_protocol::decode_base64url(
+            &entry.envelope.encrypted_payload,
+        )
+        .map_err(|error| SdkError::LocalBus(format!("invalid encrypted payload: {error}")))?;
+        let envelope: SdkDmEncryptedEnvelope = serde_json::from_slice(&ciphertext_bytes)?;
+        let mut session =
+            self.load_or_create_recv_dm_session(conversation_id, envelope.x3dh.as_ref())?;
+        let decrypted = session.decrypt_with_franking_keys(
+            &envelope.ciphertext,
+            dm_associated_data(conversation_id),
+        )?;
+        let body = decrypted.plaintext.clone();
+        // T21-A2a: the advanced recv session (ratchet) is NOT persisted here. It is committed
+        // only once this inbox entry reaches its success terminal state, immediately before the
+        // receive cursor advances. If any downstream step fails, the local `session` is dropped
+        // so the persisted ratchet snapshot and cursor stay unchanged and the same ciphertext
+        // can be re-decrypted on a later `dm read`.
+        self.apply_contact_event_plaintext(&body)?;
+        if self.apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id)?.is_some() {
+            // Receipt applied: commit the advanced recv ratchet, then the cursor.
             self.persist_dm_session(
                 conversation_id,
                 &entry.envelope.envelope_id,
                 "recv",
                 &session,
             )?;
-            #[cfg(feature = "itest-rfd-fault")]
-            crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmRecv).await?;
             self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-            plaintext.push(GatewayPlaintextDelivery {
-                conversation_id: conversation_id.to_owned(),
-                message_id: entry.envelope.envelope_id.clone(),
-                sender_id: entry.envelope.source_principal_id.clone(),
-                plaintext_body_base64: ramflux_protocol::encode_base64url(&projection_body),
-                attachments,
-                entry,
-            });
+            return Ok(None);
         }
-        Ok(plaintext)
+        if let Some(reason) = self.friend_rejection_reason(&entry.envelope.source_principal_id)? {
+            self.account_db()?.reject_inbox_message(
+                conversation_id,
+                &entry.envelope.envelope_id,
+                &entry.envelope.source_principal_id,
+                &reason,
+                now_unix_timestamp(),
+            )?;
+            // Rejection recorded: commit the advanced recv ratchet, then the cursor.
+            self.persist_dm_session(
+                conversation_id,
+                &entry.envelope.envelope_id,
+                "recv",
+                &session,
+            )?;
+            self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+            return Ok(None);
+        }
+        let (projection_body, attachment_refs) = decode_dm_attachment_body(&body)?;
+        let metadata = franking_report_metadata_for_delivery(
+            conversation_id,
+            &entry,
+            &envelope,
+            &decrypted,
+            None,
+        )?;
+        let attachments = self
+            .import_legacy_attachments(
+                engine,
+                pool,
+                &attachment_refs,
+                options.auto_fetch_attachments,
+                options.relay_service_key_base64,
+            )
+            .await?;
+        self.append_plaintext_projection_once(
+            conversation_id,
+            &entry,
+            &projection_body,
+            metadata.as_ref(),
+        )?;
+        if self.account_db()?.client_record("conversation", conversation_id)?.is_none() {
+            self.account_db()?.persist_client_record("conversation",conversation_id,&serde_json::json!({
+                    "kind":"direct","title":null,"group_id":null,"participants":[engine.config.principal_id,entry.envelope.source_principal_id],"direct_route":null
+                }))?;
+        }
+        for attachment in &attachment_refs {
+            self.persist_received_attachment_reference(attachment,&entry.envelope.source_principal_id,conversation_id,&entry.envelope.envelope_id)?;
+        }
+        // Every attachment was imported, ACKed, and projected: only now do we commit the
+        // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above
+        // returns before this point, leaving the persisted ratchet snapshot and cursor intact so
+        // the same ciphertext can be re-decrypted and re-ACKed by a later `dm read`.
+        self.persist_dm_session(conversation_id, &entry.envelope.envelope_id, "recv", &session)?;
+        #[cfg(feature = "itest-rfd-fault")]
+        crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmRecv).await?;
+        self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+        Ok(Some(GatewayPlaintextDelivery {
+            conversation_id: conversation_id.to_owned(),
+            message_id: entry.envelope.envelope_id.clone(),
+            sender_id: entry.envelope.source_principal_id.clone(),
+            plaintext_body_base64: ramflux_protocol::encode_base64url(&projection_body),
+            attachments,
+            entry,
+        }))
+    }
+
+    async fn import_legacy_attachments(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        attachment_refs: &[SdkDmAttachmentRef],
+        auto_fetch_attachments: bool,
+        relay_service_key_base64: Option<String>,
+    ) -> Result<Vec<SdkDmAttachmentImportResult>, SdkError> {
+        let mut attachments = Vec::new();
+        if auto_fetch_attachments {
+            for attachment in attachment_refs {
+                attachments.push(
+                    self.import_dm_attachment_from_relay_via_gateway(
+                        engine,
+                        pool,
+                        attachment,
+                        relay_service_key_base64.clone(),
+                    )
+                    .await?,
+                );
+            }
+        }
+        Ok(attachments)
     }
 
     /// # Errors
@@ -441,7 +484,7 @@ impl RamfluxClient {
 
     /// # Errors
     /// Returns an error when the gateway resume fails or an A2I control envelope cannot be
-    fn plaintext_projection_delivery(
+    pub(crate) fn plaintext_projection_delivery(
         &self,
         conversation_id: &str,
         entry: &GatewayInboxEntry,
@@ -480,7 +523,7 @@ impl RamfluxClient {
     }
 
     /// # Errors
-    fn append_plaintext_projection_once(
+    pub(crate) fn append_plaintext_projection_once(
         &self,
         conversation_id: &str,
         entry: &GatewayInboxEntry,
@@ -488,6 +531,7 @@ impl RamfluxClient {
         metadata: Option<&MessageMetadata>,
     ) -> Result<(), SdkError> {
         let message_id = &entry.envelope.envelope_id;
+        self.account_db()?.store_message_content(conversation_id, message_id, plaintext)?;
         if self
             .direct_messages(conversation_id)?
             .iter()
@@ -513,7 +557,7 @@ impl RamfluxClient {
         }
     }
 
-    fn apply_receipt_event_plaintext(
+    pub(crate) fn apply_receipt_event_plaintext(
         &self,
         body: &[u8],
         authenticated_source_device_id: &str,
@@ -599,11 +643,12 @@ impl RamfluxClient {
     }
 }
 
-fn franking_report_metadata_for_delivery(
+pub(crate) fn franking_report_metadata_for_delivery(
     conversation_id: &str,
     entry: &GatewayInboxEntry,
     envelope: &SdkDmEncryptedEnvelope,
     decrypted: &ramflux_crypto::DmDecryptionOutput,
+    aad_override: Option<&[u8]>,
 ) -> Result<Option<MessageMetadata>, SdkError> {
     let Some(franking_value) = entry.envelope.ext.ext.get("franking") else {
         return Ok(None);
@@ -625,13 +670,14 @@ fn franking_report_metadata_for_delivery(
             "received franking metadata does not match DM ciphertext".to_owned(),
         ));
     }
+    let aad = aad_override.unwrap_or_else(|| dm_associated_data(conversation_id));
     let commitment =
         ramflux_crypto::franking_commitment(&ramflux_crypto::FrankingCommitmentInput {
             plaintext: &decrypted.plaintext,
             sender_device_id_hash: &envelope.ciphertext.sender_device_id_hash,
             message_event_id: &envelope.ciphertext.message_event_id,
             canonical_header_bytes: &envelope.ciphertext.canonical_header_bytes,
-            associated_data: dm_associated_data(conversation_id),
+            associated_data: aad,
             ciphertext: &envelope.ciphertext.ciphertext,
             opening_key: &decrypted.opening_key,
             commitment_key: &decrypted.commitment_key,
@@ -648,9 +694,7 @@ fn franking_report_metadata_for_delivery(
             canonical_header_bytes: ramflux_protocol::encode_base64url(
                 &envelope.ciphertext.canonical_header_bytes,
             ),
-            associated_data: ramflux_protocol::encode_base64url(dm_associated_data(
-                conversation_id,
-            )),
+            associated_data: ramflux_protocol::encode_base64url(aad),
             ciphertext: ramflux_protocol::encode_base64url(&envelope.ciphertext.ciphertext),
             header_hash: commitment.header_hash,
             associated_data_hash: commitment.associated_data_hash,
@@ -664,7 +708,9 @@ fn franking_report_metadata_for_delivery(
     }))
 }
 
-fn decode_dm_attachment_body(body: &[u8]) -> Result<(Vec<u8>, Vec<SdkDmAttachmentRef>), SdkError> {
+pub(crate) fn decode_dm_attachment_body(
+    body: &[u8],
+) -> Result<(Vec<u8>, Vec<SdkDmAttachmentRef>), SdkError> {
     let Ok(envelope) = serde_json::from_slice::<SdkDmAttachmentEnvelope>(body) else {
         return Ok((body.to_vec(), Vec::new()));
     };

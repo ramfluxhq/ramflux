@@ -137,21 +137,10 @@ pub(super) async fn handle(
                     outbound.send(local_bus_error(&request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
-                if request.method == "subscription.open" {
-                    let body: LocalBusSubscriptionOpenRequest = match serde_json::from_value(request.body.clone()) {
-                        Ok(body) => body,
-                        Err(error) => {
-                            outbound.send(local_bus_error(&request,&SdkError::from(error))).await.map_err(|_| closed())?;
-                            inflight.remove(&request.request_id);
-                            continue;
-                        }
-                    };
-                    connection.topics.extend(body.topics);
-                    if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
-                        connection.attended_account_id.clone_from(&request.account_id);
+                if matches!(request.method.as_str(),"bus.subscribe"|"subscription.open") {
+                    if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
+                        outbound.send(local_bus_error(&request,&error)).await.map_err(|_|closed())?;
                     }
-                    if let Some(account_id) = request.account_id.clone() { supervisor.subscribe(&connection, account_id); }
-                    outbound.send(local_bus_response(&request, serde_json::json!({"subscribed":true}))).await.map_err(|_| closed())?;
                     inflight.remove(&request.request_id);
                     continue;
                 }
@@ -177,6 +166,30 @@ pub(super) async fn handle(
     writer_task.abort();
     let _ = writer_task.await;
     result
+}
+
+async fn configure_subscription(
+    supervisor: &Supervisor,
+    connection: &mut LocalBusConnectionState,
+    request: &LocalBusFrame,
+) -> Result<(), SdkError> {
+    if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        connection.attended_account_id.clone_from(&request.account_id);
+    }
+    if request.method == "bus.subscribe" {
+        return supervisor.subscribe_stream(request.clone(), connection).await;
+    }
+    let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
+    connection.topics.extend(body.topics);
+    if let Some(account) = request.account_id.clone() {
+        supervisor.subscribe(connection, account);
+    }
+    connection
+        .outbound
+        .send(local_bus_response(request, serde_json::json!({"subscribed":true})))
+        .await
+        .map_err(|_| closed())?;
+    Ok(())
 }
 
 fn closed() -> SdkError {

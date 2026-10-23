@@ -61,41 +61,29 @@ impl RamfluxClient {
         )
     }
 
-    pub(crate) fn load_or_create_send_dm_session_with_prekey_url(
-        &self,
-        message: &GatewayDirectMessage,
-        prekey_url: Option<&str>,
-        own_device_id: &str,
-    ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
-        if let Ok(session) = self.load_dm_session(&message.conversation_id, "send") {
-            return Ok((session, None));
-        }
-        let recipient_device_id = message.recipient_device_id.as_deref().ok_or_else(|| {
-            SdkError::LocalBus(
-                "recipient_device_id is required to bootstrap a new X3DH DM session".to_owned(),
-            )
-        })?;
-        let prekey_url = prekey_url.ok_or_else(|| {
-            SdkError::LocalBus("prekey_http_url is required to fetch recipient prekeys".to_owned())
-        })?;
-        let recipient_bundle =
-            sdk_fetch_prekey_bundle(prekey_url, recipient_device_id)?.bundle.ok_or_else(|| {
-                SdkError::LocalBus(format!("missing prekey bundle for {recipient_device_id}"))
-            })?;
-        self.create_send_dm_session_from_bundle(
-            message,
-            recipient_device_id,
-            recipient_bundle,
-            own_device_id,
-        )
-    }
-
     pub(crate) fn create_send_dm_session_from_bundle(
         &self,
         message: &GatewayDirectMessage,
         recipient_device_id: &str,
         recipient_bundle: ramflux_crypto::PrekeyBundle,
         own_device_id: &str,
+    ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
+        self.create_send_dm_session_with_aad(
+            message,
+            recipient_device_id,
+            recipient_bundle,
+            own_device_id,
+            None,
+        )
+    }
+
+    pub(crate) fn create_send_dm_session_with_aad(
+        &self,
+        message: &GatewayDirectMessage,
+        recipient_device_id: &str,
+        recipient_bundle: ramflux_crypto::PrekeyBundle,
+        own_device_id: &str,
+        aad: Option<&[u8]>,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
         let own_state = self.load_x3dh_private_state(own_device_id)?;
         let own_identity = X25519KeyPair::from_seed(own_state.identity_seed);
@@ -109,7 +97,7 @@ impl RamfluxClient {
             initiator_device_id_hash,
             recipient_device_id_hash,
             recipient_bundle: &recipient_bundle,
-            associated_data: dm_associated_data(&message.conversation_id),
+            associated_data: aad.unwrap_or_else(|| dm_associated_data(&message.conversation_id)),
             prekey_bundle_hash: &bundle_hash,
             initial_ratchet_public: ephemeral.public,
         })?;
@@ -149,6 +137,14 @@ impl RamfluxClient {
                 "missing X3DH header for new inbound DM session {conversation_id}"
             ))
         })?;
+        self.create_recv_dm_session_with_aad(header, dm_associated_data(conversation_id))
+    }
+
+    pub(crate) fn create_recv_dm_session_with_aad(
+        &self,
+        header: &SdkDmX3dhHeader,
+        aad: &[u8],
+    ) -> Result<ramflux_crypto::DmSession, SdkError> {
         let own_state = self.load_x3dh_private_state(&header.recipient_device_id)?;
         if own_state.signed_prekey_id != header.recipient_signed_prekey_id {
             return Err(SdkError::LocalBus(format!(
@@ -168,7 +164,7 @@ impl RamfluxClient {
             recipient_device_id_hash: header.recipient_device_id_hash,
             recipient_signed_prekey_id: &header.recipient_signed_prekey_id,
             recipient_one_time_prekey_id: header.recipient_one_time_prekey_id.as_deref(),
-            associated_data: dm_associated_data(conversation_id),
+            associated_data: aad,
             prekey_bundle_hash: &header.prekey_bundle_hash,
             initial_ratchet_public: header.initiator_ephemeral_public,
         })?;

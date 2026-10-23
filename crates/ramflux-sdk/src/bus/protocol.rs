@@ -32,6 +32,10 @@ pub struct LocalBusFrame {
     pub method: String,
     pub body: serde_json::Value,
     pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
     /// Absolute Unix deadline in milliseconds, checked before applying a request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
@@ -996,6 +1000,8 @@ impl LocalBusFrame {
             method: method.into(),
             body,
             trace_id: None,
+            seq: None,
+            at: None,
             deadline_ms: None,
             operation_id: None,
             ok: None,

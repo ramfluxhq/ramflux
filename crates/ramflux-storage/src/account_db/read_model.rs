@@ -80,7 +80,11 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL errors.
     pub fn client_object_transfer(&self, id: &str) -> Result<Option<Value>, StorageError> {
-        Ok(self.connection.query_row("SELECT transfer_id,state,peer_device_id,updated_at FROM object_transfer_state WHERE object_id=?1 ORDER BY updated_at DESC,transfer_id LIMIT 1",params![id],|row| Ok(json!({"id":row.get::<_,String>(0)?,"state":row.get::<_,String>(1)?,"peer_device_id":row.get::<_,String>(2)?,"updated_at":row.get::<_,i64>(3)?}))).optional()?)
+        Ok(self.connection.query_row("SELECT transfer_id,state,peer_device_id,updated_at,direction,total_bytes,done_bytes FROM object_transfer_state WHERE object_id=?1 ORDER BY updated_at DESC,transfer_id LIMIT 1",params![id],|row| {
+            let total:u64=row.get(5)?;let done:u64=row.get(6)?;
+            let percent=if total==0 {0} else {done.saturating_mul(100).checked_div(total).unwrap_or(0).min(100)};
+            Ok(json!({"id":row.get::<_,String>(0)?,"object_id":id,"state":row.get::<_,String>(1)?,"peer_device_id":row.get::<_,String>(2)?,"updated_at":row.get::<_,i64>(3)?,"direction":row.get::<_,String>(4)?,"total_bytes":total,"done_bytes":done,"percent":percent}))
+        }).optional()?)
     }
 
     /// Reads participants' device identifiers without message payloads.
@@ -110,5 +114,42 @@ impl AccountDb {
         Ok(
             json!({"id":id,"archived":state.archived,"hidden":state.hidden_at.is_some(),"last_activity":activity,"unread_count":unread,"is_unread":projection.is_unread,"muted":state.mute_until.is_some_and(|until|until>self.now_unix()),"mute_until":state.mute_until,"disappearing":self.disappearing_policy(id)?.map(|policy|json!({"timer_seconds":policy.timer_seconds,"countdown_mode":policy.countdown_mode,"scope":policy.scope}))}),
         )
+    }
+}
+
+impl AccountDb {
+    /// Reads message list-row metadata without loading its approved plaintext content.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn client_message_metadata(&self, id: &str) -> Result<Option<Value>, StorageError> {
+        Ok(self.connection.query_row("SELECT message_id,conversation_id,sender_id,deleted,created_at FROM direct_message_projection WHERE message_id=?1",params![id],|row|Ok(json!({"id":row.get::<_,String>(0)?,"message_id":row.get::<_,String>(0)?,"conversation_id":row.get::<_,String>(1)?,"sender_id":row.get::<_,String>(2)?,"deleted":row.get::<_,i64>(3)?!=0,"created_at":row.get::<_,i64>(4)?}))).optional()?)
+    }
+    /// Reads an existing audit record for explicit metadata-field projection.
+    ///
+    /// # Errors
+    /// Returns SQL/JSON errors.
+    pub fn client_audit_metadata(&self, row_id: i64) -> Result<Option<Value>, StorageError> {
+        let body: Option<Vec<u8>> = self
+            .connection
+            .query_row("SELECT audit_body FROM audit_log WHERE rowid=?1", params![row_id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .flatten();
+        body.map(|bytes| serde_json::from_slice(&bytes).map_err(StorageError::from)).transpose()
+    }
+}
+
+impl AccountDb {
+    /// Returns bounded attachment metadata associated with an approved message read.
+    ///
+    /// # Errors
+    /// Returns SQL/JSON decoding errors.
+    pub fn client_message_object_ids(&self, message: &str) -> Result<Vec<String>, StorageError> {
+        let mut statement=self.connection.prepare("SELECT substr(state_kind,18) FROM runtime_actor_state WHERE state_kind GLOB 'directory/object/*' AND json_extract(CAST(state_json AS TEXT),'$.message_id')=?1 ORDER BY state_kind LIMIT 128")?;
+        Ok(statement
+            .query_map(params![message], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }

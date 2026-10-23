@@ -84,9 +84,14 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
                 creator_signing_public_key: create.creator_signing_public_key,
                 creator_target_delivery_id: create.creator_target_delivery,
             };
-            let mut value = bus
-                .request(Some(create.account.clone()), "group", "group.create", &request)
-                .await?;
+            let mut value = request_body(
+                &mut bus,
+                Some(create.account.clone()),
+                "group",
+                "group.create",
+                request,
+            )
+            .await?;
             for member in create.member {
                 let add = LocalBusGroupMemberAddRequest {
                     group_id: create.group.clone(),
@@ -97,9 +102,14 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
                     target_delivery_id: create.member_target_delivery.clone(),
                     federation: federation.clone(),
                 };
-                value = bus
-                    .request(Some(create.account.clone()), "group", "group.member.add", &add)
-                    .await?;
+                value = request_body(
+                    &mut bus,
+                    Some(create.account.clone()),
+                    "group",
+                    "group.member.add",
+                    add,
+                )
+                .await?;
             }
             print_json(&value)
         }
@@ -120,7 +130,9 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
                 federation,
                 ttl: Some(send.ttl),
             };
-            print_json(&bus.request(Some(send.account), "group", "group.send", &request).await?)
+            print_json(
+                &request_body(&mut bus, Some(send.account), "group", "group.send", request).await?,
+            )
         }
         GroupAction::Read(read) => {
             let request = LocalBusGroupReceiveRequest {
@@ -129,17 +141,18 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
                 limit: 100,
             };
             print_json(&with_message_plaintext(
-                bus.request(Some(read.account), "group", "group.read", &request).await?,
+                request_body(&mut bus, Some(read.account), "group", "group.read", request).await?,
             ))
         }
         GroupAction::List(selector) => print_json(
-            &bus.request(Some(selector.account), "group", "group.list", &serde_json::json!({}))
+            &bus.request(Some(selector.account), "group", "group.list", serde_json::json!({}))
                 .await?,
         ),
         GroupAction::Members(members) => {
             let request = LocalBusGroupRequest { group_id: members.group };
             print_json(
-                &bus.request(Some(members.account), "group", "group.members", &request).await?,
+                &request_body(&mut bus, Some(members.account), "group", "group.members", request)
+                    .await?,
             )
         }
         GroupAction::Disappearing(command) => handle_group_disappearing(&mut bus, command).await,
@@ -168,7 +181,7 @@ async fn handle_group_member(
                 federation,
             };
             print_json(
-                &bus.request(Some(add.account), "group", "group.member.add", &request).await?,
+                &request_body(bus, Some(add.account), "group", "group.member.add", request).await?,
             )
         }
         GroupMemberAction::Remove(remove) => {
@@ -178,7 +191,7 @@ async fn handle_group_member(
                 member_id: remove.member_device,
             };
             print_json(
-                &bus.request(Some(remove.account), "group", "group.member.remove", &request)
+                &request_body(bus, Some(remove.account), "group", "group.member.remove", request)
                     .await?,
             )
         }
@@ -190,7 +203,8 @@ async fn handle_group_member(
                 reason: kick.reason,
             };
             print_json(
-                &bus.request(Some(kick.account), "group", "group.member.kick", &request).await?,
+                &request_body(bus, Some(kick.account), "group", "group.member.kick", request)
+                    .await?,
             )
         }
         GroupMemberAction::Ban(ban) => {
@@ -201,13 +215,14 @@ async fn handle_group_member(
                 reason: ban.reason,
             };
             print_json(
-                &bus.request(Some(ban.account), "group", "group.member.ban", &request).await?,
+                &request_body(bus, Some(ban.account), "group", "group.member.ban", request).await?,
             )
         }
         GroupMemberAction::List(members) => {
             let request = LocalBusGroupRequest { group_id: members.group };
             print_json(
-                &bus.request(Some(members.account), "group", "group.members", &request).await?,
+                &request_body(bus, Some(members.account), "group", "group.members", request)
+                    .await?,
             )
         }
     }
@@ -227,7 +242,7 @@ async fn handle_group_message(
                 reason: delete.reason,
             };
             print_json(
-                &bus.request(Some(delete.account), "group", "group.message.delete", &request)
+                &request_body(bus, Some(delete.account), "group", "group.message.delete", request)
                     .await?,
             )
         }
@@ -253,7 +268,7 @@ async fn handle_group_invite(
                 federation: None,
             };
             print_json(
-                &bus.request(Some(create.account), "group", "group.invite.create", &request)
+                &request_body(bus, Some(create.account), "group", "group.invite.create", request)
                     .await?,
             )
         }
@@ -267,7 +282,7 @@ async fn handle_group_invite(
                 federation: None,
             };
             print_json(
-                &bus.request(Some(accept.account), "group", "group.invite.accept", &request)
+                &request_body(bus, Some(accept.account), "group", "group.invite.accept", request)
                     .await?,
             )
         }
@@ -286,7 +301,9 @@ async fn handle_group_role(
                 member_id: set.member_device,
                 role: set.role,
             };
-            print_json(&bus.request(Some(set.account), "group", "group.role.set", &request).await?)
+            print_json(
+                &request_body(bus, Some(set.account), "group", "group.role.set", request).await?,
+            )
         }
     }
 }
@@ -305,11 +322,12 @@ async fn handle_group_disappearing(
                 updated_at: Some(rf_now_unix_timestamp()),
             };
             print_json(
-                &bus.request(
+                &request_body(
+                    bus,
                     Some(set.account),
                     "conversation",
                     "conversation.disappearing.set",
-                    &request,
+                    request,
                 )
                 .await?,
             )
@@ -320,11 +338,12 @@ async fn handle_group_disappearing(
                 now: expire.now,
             };
             print_json(
-                &bus.request(
+                &request_body(
+                    bus,
                     Some(expire.account),
                     "conversation",
                     "conversation.disappearing.expire",
-                    &request,
+                    request,
                 )
                 .await?,
             )
@@ -339,6 +358,7 @@ async fn handle_group_mute(bus: &mut LocalBusClient, mute: GroupMute) -> Result<
         unmute: mute.unmute,
     };
     print_json(
-        &bus.request(Some(mute.account), "conversation", "conversation.mute", &request).await?,
+        &request_body(bus, Some(mute.account), "conversation", "conversation.mute", request)
+            .await?,
     )
 }

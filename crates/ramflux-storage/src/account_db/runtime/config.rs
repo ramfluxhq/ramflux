@@ -26,6 +26,7 @@ impl AccountDb {
         if journal != "wal" || sync != 2 {
             return Err(StorageError::AuthorizationRejected);
         }
+        self.install_journal_schema()?;
         self.install_runtime_schema()
     }
 
@@ -63,5 +64,21 @@ impl AccountDb {
         let result = read()?;
         transaction.commit().map_err(StorageError::from)?;
         Ok(result)
+    }
+}
+
+impl AccountDb {
+    /// Runs a synchronous writer phase atomically; the closure must not perform network I/O.
+    ///
+    /// # Errors
+    /// Returns callback, BEGIN or COMMIT errors; failed callbacks roll back.
+    pub fn write_transaction<T, E>(&self, write: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        let transaction = self.connection.unchecked_transaction().map_err(StorageError::from)?;
+        let value = write()?;
+        transaction.commit().map_err(StorageError::from)?;
+        Ok(value)
     }
 }

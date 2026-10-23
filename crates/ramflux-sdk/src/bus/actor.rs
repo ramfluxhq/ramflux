@@ -92,6 +92,10 @@ impl AccountActor {
         Ok(Self { sender, readers, shutdown_signal: lifetime, done })
     }
 
+    pub(super) fn reader_pool(&self) -> Result<AccountReaders, SdkError> {
+        self.readers.lock().map_err(|_| stopped())?.clone().ok_or_else(stopped)
+    }
+
     pub(super) fn is_open(&self) -> bool {
         self.readers.lock().is_ok_and(|readers| readers.is_some())
     }

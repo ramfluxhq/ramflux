@@ -17,6 +17,7 @@ pub mod mcp_a2ui;
 pub mod object;
 pub mod own_device_sync;
 pub mod recovery;
+pub(crate) mod routed;
 pub mod storage;
 
 use crate::prelude::*;

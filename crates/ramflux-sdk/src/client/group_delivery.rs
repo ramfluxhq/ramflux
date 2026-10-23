@@ -152,15 +152,34 @@ impl RamfluxClient {
             .map(GroupGatewayDeliveryResult::SenderKeyDistribution)
     }
 
-    async fn apply_sender_key_membership_bootstrap(
+    pub(crate) async fn apply_sender_key_membership_bootstrap(
         &self,
         gateway: &GatewaySessionConfig,
         entry: &GatewayInboxEntry,
         recipient_device_id: &str,
         wrapper: &SdkGroupSenderKeyDistributionEnvelope,
     ) -> Result<(), SdkError> {
+        if let Some((event, key)) = self
+            .verify_sender_key_membership_bootstrap(gateway, recipient_device_id, wrapper)
+            .await?
+        {
+            self.apply_bootstrap_group_member_join_event(
+                &event,
+                &entry.envelope.source_device_id,
+                &key,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn verify_sender_key_membership_bootstrap(
+        &self,
+        gateway: &GatewaySessionConfig,
+        recipient_device_id: &str,
+        wrapper: &SdkGroupSenderKeyDistributionEnvelope,
+    ) -> Result<Option<(ramflux_protocol::GroupEvent, String)>, SdkError> {
         let Some(event_base64) = wrapper.membership_event_base64.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let event_bytes = ramflux_protocol::decode_base64url(event_base64).map_err(|error| {
             SdkError::LocalBus(format!("invalid group membership event: {error}"))
@@ -205,12 +224,7 @@ impl RamfluxClient {
                 "group membership event actor key does not match verified manifest".to_owned(),
             ));
         }
-        self.apply_bootstrap_group_member_join_event(
-            &event,
-            &entry.envelope.source_device_id,
-            &actor_device.branch_public_key,
-        )?;
-        Ok(())
+        Ok(Some((event, actor_device.branch_public_key)))
     }
 
     pub(crate) fn append_or_pending_group_message(
@@ -245,6 +259,11 @@ impl RamfluxClient {
                     &envelope.sender_id,
                     encrypted_body,
                 )?;
+                self.account_db()?.store_message_content(
+                    conversation_id,
+                    message_id,
+                    &plaintext,
+                )?;
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
                 Ok(plaintext)
             }
@@ -267,7 +286,7 @@ impl RamfluxClient {
         }
     }
 
-    fn apply_group_control_plaintext(
+    pub(crate) fn apply_group_control_plaintext(
         &self,
         plaintext: &[u8],
     ) -> Result<Option<GroupState>, SdkError> {

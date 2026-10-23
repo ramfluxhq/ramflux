@@ -220,6 +220,11 @@ impl RamfluxClient {
                         &envelope.sender_id,
                         &encrypted_body,
                     )?;
+                    self.account_db()?.store_message_content(
+                        &record.conversation_id,
+                        &record.message_id,
+                        &plaintext,
+                    )?;
                     self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
                     decrypted.push(SdkGroupPendingPlaintext {
                         group_id: record.group_id,

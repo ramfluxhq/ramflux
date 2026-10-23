@@ -17,7 +17,7 @@ pub struct LocalBusClient {
 }
 struct OutboundFrame {
     frame: LocalBusFrame,
-    encoded: Vec<u8>,
+    encoded: zeroize::Zeroizing<Vec<u8>>,
 }
 
 struct ClientConnection {
@@ -68,27 +68,7 @@ impl LocalBusClient {
                         frame.kind, frame.method, frame.request_id
                     ),
                 );
-                if !matches!(
-                    frame.kind,
-                    LocalBusFrameKind::Response
-                        | LocalBusFrameKind::Error
-                        | LocalBusFrameKind::Event
-                ) {
-                    reader_connected.store(false, Ordering::Release);
-                    fail_pending(&reader_pending, "unexpected local bus frame kind");
-                    break;
-                }
-                if frame.kind == LocalBusFrameKind::Event {
-                    if events.try_send(frame).is_err() {
-                        reader_connected.store(false, Ordering::Release);
-                        fail_pending(&reader_pending, "local bus event queue overflow");
-                        break;
-                    }
-                } else if let Ok(mut pending) = reader_pending.lock() {
-                    if let Some(reply) = pending.remove(&frame.request_id) {
-                        let _ = reply.send(Ok(frame));
-                    }
-                } else {
+                if !route_received(frame, &events, &reader_pending, &reader_connected) {
                     break;
                 }
             }
@@ -140,35 +120,53 @@ impl LocalBusClient {
 
     /// # Errors
     /// Returns an error on transport failure, backpressure, or a daemon rejection.
-    pub async fn request<T: serde::Serialize>(
+    pub fn request(
         &mut self,
         account_id: Option<String>,
         sdk_api: &str,
         method: &str,
-        body: &T,
-    ) -> Result<serde_json::Value, SdkError> {
+        body: serde_json::Value,
+    ) -> impl Future<Output = Result<serde_json::Value, SdkError>> + '_ {
         let id = self
             .inner
             .next
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| SdkError::LocalBus("request id exhausted".to_owned()))?;
-        self.request_frame(LocalBusFrame::request(
-            format!("req_{id}"),
+            .map_err(|_| SdkError::LocalBus("request id exhausted".to_owned()));
+        let frame = SecretFrame(LocalBusFrame::request(
+            format!("req_{}", id.as_ref().unwrap_or(&0)),
             account_id,
             sdk_api,
             method,
-            serde_json::to_value(body)?,
-        ))
-        .await
+            body,
+        ));
+        async move {
+            id?;
+            self.request_owned_frame(frame).await
+        }
     }
 
     /// Sends a frame with caller-supplied deadline and operation ID.
     ///
     /// # Errors
     /// Rejects duplicate in-flight request IDs, excess concurrency, and daemon errors.
-    pub async fn request_frame(&self, frame: LocalBusFrame) -> Result<serde_json::Value, SdkError> {
-        let deadline = super::requests::deadline(&frame)?;
-        let encoded = super::io::encode_local_bus_frame(&frame)?;
+    pub fn request_frame(
+        &self,
+        frame: LocalBusFrame,
+    ) -> impl Future<Output = Result<serde_json::Value, SdkError>> + '_ {
+        let frame = SecretFrame(frame);
+        async move { self.request_owned_frame(frame).await }
+    }
+
+    async fn request_owned_frame(
+        &self,
+        mut protected: SecretFrame,
+    ) -> Result<serde_json::Value, SdkError> {
+        let deadline = super::requests::deadline(&protected.0);
+        let encoded = encode_owned_body(&mut protected.0);
+        let deadline = deadline?;
+        let encoded = encoded?;
+        // The queue retains identifiers only; the request value has already been erased.
+        let frame = protected.0.clone();
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self.inner.pending.lock().map_err(|_| closed())?;
@@ -222,6 +220,13 @@ impl LocalBusClient {
     }
 }
 
+struct SecretFrame(LocalBusFrame);
+impl Drop for SecretFrame {
+    fn drop(&mut self) {
+        super::secrets::wipe(&mut self.0.body);
+    }
+}
+
 struct Registration {
     pending: Pending,
     id: String,
@@ -242,4 +247,85 @@ fn fail_pending(pending: &Pending, message: &str) {
 }
 fn closed() -> SdkError {
     SdkError::LocalBus("local bus connection closed".to_owned())
+}
+
+fn route_received(
+    frame: LocalBusFrame,
+    events: &mpsc::Sender<LocalBusFrame>,
+    reader_pending: &Pending,
+    reader_connected: &AtomicBool,
+) -> bool {
+    if !matches!(
+        frame.kind,
+        LocalBusFrameKind::Response | LocalBusFrameKind::Error | LocalBusFrameKind::Event
+    ) {
+        reader_connected.store(false, Ordering::Release);
+        fail_pending(reader_pending, "unexpected local bus frame kind");
+        return false;
+    }
+    if frame.kind == LocalBusFrameKind::Event {
+        if events.capacity() <= 1 {
+            let request = LocalBusFrame::request(
+                "client-lagged",
+                frame.account_id.clone(),
+                "stream",
+                "bus.subscribe",
+                serde_json::json!({}),
+            );
+            super::subscription::lagged(
+                events,
+                &request,
+                frame.seq.unwrap_or_default().saturating_sub(1),
+            );
+            reader_connected.store(false, Ordering::Release);
+            fail_pending(
+                reader_pending,
+                "local bus event queue overflow; resume from applied cursor",
+            );
+            return false;
+        }
+        if events.try_send(frame).is_err() {
+            reader_connected.store(false, Ordering::Release);
+            fail_pending(reader_pending, "local bus event queue overflow");
+            return false;
+        }
+    } else if let Ok(mut pending) = reader_pending.lock() {
+        if let Some(reply) = pending.remove(&frame.request_id) {
+            let _ = reply.send(Ok(frame));
+        }
+    } else {
+        return false;
+    }
+    true
+}
+
+fn encode_owned_body(frame: &mut LocalBusFrame) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+    let encoded = ramflux_protocol::canonical_json_bytes(frame).map(zeroize::Zeroizing::new);
+    super::secrets::wipe(&mut frame.body);
+    frame.body = serde_json::Value::Null;
+    let encoded = encoded?;
+    super::io::checked_frame_len(encoded.len())?;
+    Ok(encoded)
+}
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    #[test]
+    fn owned_unlock_body_is_erased_after_wire_encoding_and_on_encoding_failure()
+    -> Result<(), SdkError> {
+        let mut frame = LocalBusFrame::request(
+            "secret",
+            Some("a".to_owned()),
+            "account",
+            "account.unlock",
+            serde_json::json!({"passphrase":"sensitive unlock text"}),
+        );
+        let encoded = encode_owned_body(&mut frame)?;
+        assert!(String::from_utf8_lossy(&encoded).contains("sensitive unlock text"));
+        assert_eq!(frame.body, serde_json::Value::Null);
+        frame.body = serde_json::json!({"passphrase":"x".repeat(2*1024*1024)});
+        assert!(encode_owned_body(&mut frame).is_err());
+        assert_eq!(frame.body, serde_json::Value::Null);
+        Ok(())
+    }
 }

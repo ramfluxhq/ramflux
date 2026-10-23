@@ -17,27 +17,11 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
         }
         DaemonAction::Status => {
             let mut bus = LocalBusClient::connect(socket).await?;
-            print_json(
-                &bus.request::<serde_json::Value>(
-                    None,
-                    "daemon",
-                    "daemon.status",
-                    &serde_json::json!({}),
-                )
-                .await?,
-            )
+            print_json(&bus.request(None, "daemon", "daemon.status", serde_json::json!({})).await?)
         }
         DaemonAction::Stop => {
             let mut bus = LocalBusClient::connect(socket).await?;
-            print_json(
-                &bus.request::<serde_json::Value>(
-                    None,
-                    "daemon",
-                    "daemon.stop",
-                    &serde_json::json!({}),
-                )
-                .await?,
-            )
+            print_json(&bus.request(None, "daemon", "daemon.stop", serde_json::json!({})).await?)
         }
     }
 }

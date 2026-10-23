@@ -16,4 +16,6 @@ pub struct AccountOutboxEntry {
     pub table_name: String,
     pub change_kind: String,
     pub row_id: i64,
+    #[serde(default)]
+    pub keys: serde_json::Value,
 }

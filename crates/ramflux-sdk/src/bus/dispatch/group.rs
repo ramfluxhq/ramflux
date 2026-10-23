@@ -655,34 +655,74 @@ pub(crate) async fn dispatch_group_send_request(
             &encrypted_body,
         )?;
     }
+    account.client.account_db()?.store_message_content(
+        &body.conversation_id,
+        &body.message_id,
+        &plaintext_body,
+    )?;
     if let (Some(envelope_id), Some(source_principal_id), Some(target_delivery_id)) = (
         body.envelope_id.clone(),
         body.source_principal_id.clone(),
         body.target_delivery_id.clone(),
     ) {
         let created_at = now_unix_timestamp();
-        let message = GatewayDirectMessage {
+        let recipients = super::super::group_delivery::directory(&account.client, &body.group_id)?;
+        let recipient = recipients
+            .iter()
+            .filter(|row| {
+                row.get("target_delivery_id").and_then(serde_json::Value::as_str)
+                    == Some(target_delivery_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        if recipient.len() != 1 {
+            return Err(SdkError::LocalBus(
+                "group override requires one verified recipient device route".to_owned(),
+            ));
+        }
+        let recipient_device = recipient[0]
+            .get("member_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SdkError::LocalBus("group recipient device missing".to_owned()))?
+            .to_owned();
+        let mut message = GatewayDirectMessage {
             conversation_id: body.conversation_id,
             message_id: body.message_id,
             envelope_id,
             source_principal_id,
             sender_id: body.sender_id,
-            recipient_device_id: None,
+            recipient_device_id: Some(recipient_device),
             target_delivery_id,
-            encrypted_body,
+            encrypted_body: Vec::new(),
             created_at,
             ttl: body.ttl.unwrap_or(3_600),
         };
         if let Some(federation) = body.federation.as_ref() {
             let engine = account.take_live_engine().await?;
+            message.encrypted_body = serde_json::to_vec(&account.client.seal_routed_federated(
+                &engine,
+                &message,
+                &encrypted_body,
+                federation.recipient_prekey_url.as_deref(),
+            )?)?;
             let forwarded =
                 account.client.forward_federated_gateway_message(&engine, &message, federation);
             account.put_engine(engine);
             response["federated_submitted"] = serde_json::to_value(forwarded?)?;
         } else {
             let mut engine = account.take_live_engine().await?;
-            let entry =
-                account.client.submit_direct_message_via_gateway(&mut engine, message).await;
+            let entry = async {
+                message.encrypted_body = serde_json::to_vec(
+                    &account.client.seal_routed(&mut engine, &message, &encrypted_body).await?,
+                )?;
+                engine
+                    .submit_envelope(gateway_direct_message_envelope(
+                        &engine.config,
+                        &message,
+                        None,
+                    )?)
+                    .await
+            }
+            .await;
             account.put_engine(engine);
             response["submitted"] = serde_json::to_value(entry?)?;
         }
@@ -709,7 +749,7 @@ pub(crate) async fn dispatch_group_send_request(
                 SdkError::LocalBus(format!("group route lost for member {}", route.member_id))
             })?;
             let created_at = now_unix_timestamp();
-            let message = GatewayDirectMessage {
+            let mut message = GatewayDirectMessage {
                 conversation_id: body.conversation_id.clone(),
                 message_id: body.message_id.clone(),
                 envelope_id: format!("{}:{index}", body.message_id),
@@ -726,14 +766,38 @@ pub(crate) async fn dispatch_group_send_request(
             };
             if let Some(federation) = route.federation.as_ref() {
                 let engine = account.take_live_engine().await?;
+                let sealed = account.client.seal_routed_federated(
+                    &engine,
+                    &message,
+                    &message.encrypted_body,
+                    federation.recipient_prekey_url.as_deref(),
+                );
+                account.put_engine(engine);
+                message.encrypted_body = serde_json::to_vec(&sealed?)?;
+                let engine = account.take_live_engine().await?;
                 let forwarded =
                     account.client.forward_federated_gateway_message(&engine, &message, federation);
                 account.put_engine(engine);
                 federated.push(serde_json::to_value(forwarded?)?);
             } else {
                 let mut engine = account.take_live_engine().await?;
-                let entry =
-                    account.client.submit_direct_message_via_gateway(&mut engine, message).await;
+                let sealed = account
+                    .client
+                    .seal_routed(&mut engine, &message, &message.encrypted_body)
+                    .await;
+                let entry = match sealed {
+                    Ok(sealed) => {
+                        message.encrypted_body = serde_json::to_vec(&sealed)?;
+                        engine
+                            .submit_envelope(gateway_direct_message_envelope(
+                                &engine.config,
+                                &message,
+                                None,
+                            )?)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
                 account.put_engine(engine);
                 local.push(serde_json::to_value(entry?)?);
             }
@@ -769,10 +833,12 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             account.client.export_group_sender_key_distribution(group_id, &sender_id)?;
         let decoded_distribution: SdkGroupSenderKeyDistribution =
             serde_json::from_slice(&distribution)?;
-        let envelope_id = format!(
-            "group.sender_key.distribution:{group_id}:{sender_id}:{recipient_device_id}:epoch{}",
-            decoded_distribution.group_key_epoch
-        );
+        let distribution_key = format!("group/distribution-envelope/{group_id}/{sender_id}/{recipient_device_id}/{}",decoded_distribution.group_key_epoch);
+        let envelope_id = if let Some(id) = account.client.account_db()?.load_actor_state::<String>(&distribution_key)? { id } else {
+            let id = format!("envelope_{}",ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
+            account.client.account_db()?.persist_actor_state(&distribution_key,&id)?;
+            id
+        };
         if account.client.direct_message_by_id(&envelope_id)?.is_some() {
             return Ok(Some(serde_json::json!({
                 "message_id": envelope_id,
@@ -903,6 +969,29 @@ pub(crate) async fn dispatch_group_receive_request(
         let mut message_entries = Vec::new();
         let mut imported_sender_keys = Vec::new();
         for entry in entries {
+            if crate::client::routed::decode(&entry.envelope).is_ok() {
+                let pool = account.relay_quic_pool()?;
+                let delivery =
+                    account.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+                account
+                    .client
+                    .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                if delivery.routing.kind == crate::client::routed::Kind::GroupMessage
+                    && delivery.routing.conversation_id == body.conversation_id
+                    && let Some(plain) = delivery.plaintext
+                {
+                    decrypted.push(group_plaintext_json(
+                        &body.conversation_id,
+                        &body.group_id,
+                        &plain.message_id,
+                        &ramflux_protocol::decode_base64url(&plain.plaintext_body_base64).map_err(
+                            |_| SdkError::LocalBus("invalid routed group plaintext".to_owned()),
+                        )?,
+                    ));
+                }
+                gateway_entries.push(entry);
+                continue;
+            }
             if group_entry_is_sender_key_message(&entry)? {
                 message_entries.push(entry);
                 continue;
@@ -992,7 +1081,8 @@ pub(crate) async fn dispatch_group_receive_request(
     }
     .await;
     account.put_engine(engine);
-    let (gateway_entries, decrypted, sender_key_distributions) = receive_result?;
+    let (gateway_entries, decrypted, sender_key_distributions) =
+        group_receive_compat(account, &body, receive_result?)?;
     Ok(local_bus_ok(serde_json::json!({
         "gateway_entries": gateway_entries,
         "sender_key_distributions": sender_key_distributions,
@@ -1000,6 +1090,60 @@ pub(crate) async fn dispatch_group_receive_request(
         "pending_undecrypted_count": account.client.account_db()?.group_pending_undecrypted_count(&body.group_id)?,
         "messages": account.client.direct_messages(&body.conversation_id)?,
     })))
+}
+
+type GroupReceivePage = (Vec<GatewayInboxEntry>, Vec<serde_json::Value>, Vec<serde_json::Value>);
+fn group_receive_compat(
+    account: &LocalBusAccountState,
+    body: &LocalBusGroupReceiveRequest,
+    mut page: GroupReceivePage,
+) -> Result<GroupReceivePage, SdkError> {
+    let mut seen = BTreeSet::new();
+    let entries = page.0.iter().chain(&account.pending_deliveries).cloned().collect::<Vec<_>>();
+    for entry in entries {
+        let id = &entry.envelope.envelope_id;
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(route) =
+            account.client.account_db()?.load_actor_state::<crate::client::routed::Routing>(
+                &format!("routed/committed/{id}"),
+            )?
+        else {
+            continue;
+        };
+        if route.group_id.as_deref() != Some(body.group_id.as_str()) {
+            continue;
+        }
+        let Some(content) = account.client.account_db()?.message_content(id)? else {
+            continue;
+        };
+        if route.kind == crate::client::routed::Kind::GroupMessage
+            && route.conversation_id == body.conversation_id
+            && !page.1.iter().any(|value| value["message_id"] == *id)
+        {
+            page.1.push(group_plaintext_json(&route.conversation_id, &body.group_id, id, &content));
+        }
+        if route.kind == crate::client::routed::Kind::GroupControl
+            && let Ok(wrapper) =
+                serde_json::from_slice::<SdkGroupSenderKeyDistributionEnvelope>(&content)
+        {
+            let bytes = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
+                .map_err(|_| SdkError::LocalBus("invalid stored distribution".to_owned()))?;
+            let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&bytes)?;
+            if !page.2.iter().any(|value| {
+                value["group_id"] == distribution.group_id
+                    && value["sender_id"] == distribution.sender_id
+                    && value["group_key_epoch"] == distribution.group_key_epoch
+            }) {
+                page.2.push(serde_json::to_value(distribution)?);
+            }
+        }
+        if !page.0.iter().any(|value| value.envelope.envelope_id == *id) {
+            page.0.push(entry);
+        }
+    }
+    Ok(page)
 }
 
 #[cfg(test)]

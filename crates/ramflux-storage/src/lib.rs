@@ -19,6 +19,7 @@ mod row_mappers;
 mod schema;
 
 pub use account_db::AccountDb;
+pub use account_db::journal::{JournalBounds, JournalEvent};
 pub use account_db::runtime::AccountOutboxEntry;
 pub use account_index::AccountIndex;
 pub use clock::{AccountClock, unix_now};

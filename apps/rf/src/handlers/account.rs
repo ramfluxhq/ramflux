@@ -20,7 +20,9 @@ pub(crate) async fn handle_account(
             let keychain_secret =
                 KeychainSecret::new(request.account_secret.clone(), Some(request.device_seed));
             let account_id = request.local_account_id.clone();
-            let response = bus.request(None, "account", "account.create", &request).await?;
+            let response = bus
+                .request(None, "account", "account.create", serde_json::to_value(request)?)
+                .await?;
             if response.is_null() {
                 return Err(RfError::Message(
                     "account.create returned an empty response".to_owned(),
@@ -36,19 +38,13 @@ pub(crate) async fn handle_account(
             };
             print_json(&response)
         }
-        AccountAction::List => print_json(
-            &bus.request::<serde_json::Value>(
-                None,
-                "account",
-                "account.list",
-                &serde_json::json!({}),
-            )
-            .await?,
-        ),
+        AccountAction::List => {
+            print_json(&bus.request(None, "account", "account.list", serde_json::json!({})).await?)
+        }
         AccountAction::Lock(lock) => {
             let account = lock.account;
             let response = bus
-                .request(Some(account.clone()), "account", "account.lock", &serde_json::json!({}))
+                .request(Some(account.clone()), "account", "account.lock", serde_json::json!({}))
                 .await?;
             let response = if lock.use_keychain {
                 with_keychain_status(response, &account, &OsKeychain.status(&account))
@@ -65,7 +61,7 @@ pub(crate) async fn handle_account(
                 Some(selector.account),
                 "account",
                 "account.switch",
-                &serde_json::json!({}),
+                serde_json::json!({}),
             )
             .await?,
         ),
@@ -74,7 +70,7 @@ pub(crate) async fn handle_account(
                 Some(selector.account),
                 "account",
                 "account.status",
-                &serde_json::json!({}),
+                serde_json::json!({}),
             )
             .await?,
         ),
@@ -100,8 +96,14 @@ async fn handle_account_unlock(
     } else {
         None
     };
-    let response =
-        bus.request(Some(account_id.clone()), "account", "account.unlock", &request).await;
+    let response = bus
+        .request(
+            Some(account_id.clone()),
+            "account",
+            "account.unlock",
+            serde_json::to_value(&request)?,
+        )
+        .await;
     request.passphrase.zeroize();
     let response = response?;
     let mut response = with_keychain_source(response, &source, keychain_error.as_ref());
@@ -129,8 +131,13 @@ async fn handle_account_backup(
                 passphrase,
             };
             print_json(
-                &bus.request(Some(export.account), "account", "account.backup.export", &request)
-                    .await?,
+                &bus.request(
+                    Some(export.account),
+                    "account",
+                    "account.backup.export",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
             )
         }
         AccountBackupAction::Import(import) => {
@@ -142,7 +149,15 @@ async fn handle_account_backup(
                 input_path: import.input.display().to_string(),
                 passphrase,
             };
-            print_json(&bus.request(None, "account", "account.backup.import", &request).await?)
+            print_json(
+                &bus.request(
+                    None,
+                    "account",
+                    "account.backup.import",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
     }
 }
@@ -167,7 +182,7 @@ async fn handle_account_passphrase(
                     Some(rotate.account),
                     "account",
                     "account.passphrase.rotate",
-                    &request,
+                    serde_json::to_value(request)?,
                 )
                 .await?,
             )

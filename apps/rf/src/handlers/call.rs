@@ -17,18 +17,42 @@ pub(crate) async fn handle_call(socket: PathBuf, command: CallCommand) -> Result
                     .srtp_key
                     .map(|key| ramflux_protocol::encode_base64url(key.as_bytes())),
             };
-            print_json(&bus.request(Some(invite.account), "call", "call.invite", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(invite.account),
+                    "call",
+                    "call.invite",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
         CallAction::Answer(answer) => {
             let request = LocalBusCallAnswerRequest {
                 call_id: answer.call,
                 opaque_answer_base64: ramflux_protocol::encode_base64url(answer.answer.as_bytes()),
             };
-            print_json(&bus.request(Some(answer.account), "call", "call.answer", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(answer.account),
+                    "call",
+                    "call.answer",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
         CallAction::Hangup(hangup) => {
             let request = LocalBusCallHangupRequest { call_id: hangup.call };
-            print_json(&bus.request(Some(hangup.account), "call", "call.hangup", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(hangup.account),
+                    "call",
+                    "call.hangup",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
     }
 }

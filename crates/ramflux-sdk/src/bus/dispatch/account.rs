@@ -234,6 +234,17 @@ fn local_bus_account_lock(
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<(), SdkError> {
+    if let Some(account) = state.accounts.get(account_id) {
+        let db = account.client.account_db()?;
+        let tick = db.journal_bounds()?.head_seq;
+        db.append_journal(
+            &format!("account:locked:{tick}"),
+            "account.state",
+            &serde_json::json!({"local_account_id":account_id,"state":"locked"}),
+            now_unix_timestamp(),
+            None,
+        )?;
+    }
     let removed = state.accounts.remove(account_id);
     if removed.is_none() {
         return Err(SdkError::LocalBus(format!("account not open: {account_id}")));

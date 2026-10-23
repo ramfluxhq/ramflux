@@ -187,7 +187,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.set_projection_checkpoint(
             &gateway_receive_cursor_checkpoint_name(target_delivery_id),
-            &inbox_seq.to_string(),
+            &inbox_seq.max(self.gateway_receive_cursor(target_delivery_id)?).to_string(),
         )
     }
 

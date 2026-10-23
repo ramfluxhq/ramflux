@@ -27,9 +27,18 @@ impl AccountDb {
                 response_json TEXT
              );",
         )?;
+        let columns: i64 = self.connection.query_row(
+            "SELECT count(*) FROM pragma_table_info('runtime_outbox') WHERE name='keys_json'",
+            [],
+            |row| row.get(0),
+        )?;
+        if columns == 0 {
+            self.connection
+                .execute_batch("ALTER TABLE runtime_outbox ADD COLUMN keys_json TEXT")?;
+        }
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT IN ('runtime_outbox','runtime_operation','schema_migration','account_key_check')"
+             AND name NOT IN ('runtime_outbox','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -40,10 +49,11 @@ impl AccountDb {
             let quoted = table.replace('"', "\"\"");
             let literal = table.replace('\'', "''");
             let mut columns = self.connection.prepare("SELECT name FROM pragma_table_info(?1)")?;
-            let changed = columns
+            let names = columns
                 .query_map(params![table], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let changed = names
+                .iter()
                 .map(|column| {
                     let column = column.replace('"', "\"\"");
                     format!("OLD.\"{column}\" IS NOT NEW.\"{column}\"")
@@ -53,10 +63,45 @@ impl AccountDb {
             for (operation, source) in [("insert", "NEW"), ("update", "NEW"), ("delete", "OLD")] {
                 let guard =
                     if operation == "update" { format!("WHEN {changed}") } else { String::new() };
+                let fields = names
+                    .iter()
+                    .filter(|name| {
+                        matches!(
+                            name.as_str(),
+                            "conversation_id"
+                                | "message_id"
+                                | "sender_id"
+                                | "object_id"
+                                | "group_id"
+                                | "member_principal_id"
+                                | "link_id"
+                                | "requester_id"
+                                | "target_id"
+                                | "state_kind"
+                                | "contact_identity_commitment"
+                                | "identity_commitment"
+                                | "transfer_id"
+                                | "envelope_id"
+                                | "receiver_device_id"
+                                | "receipt_id"
+                                | "server_id"
+                        )
+                    })
+                    .map(|name| format!("'{name}',{source}.\"{name}\""))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let keys = if fields.is_empty() {
+                    "'{}'".to_owned()
+                } else {
+                    format!("json_object({fields})")
+                };
+                self.connection.execute_batch(&format!(
+                    "DROP TRIGGER IF EXISTS \"runtime_{quoted}_{operation}\""
+                ))?;
                 self.connection.execute_batch(&format!(
                     "CREATE TRIGGER IF NOT EXISTS \"runtime_{quoted}_{operation}\" AFTER {operation} ON \"{quoted}\" {guard}
-                     BEGIN INSERT INTO runtime_outbox(table_name,change_kind,row_id)
-                     VALUES('{literal}','{operation}',{source}.rowid); END;"
+                     BEGIN INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json)
+                     VALUES('{literal}','{operation}',{source}.rowid,{keys}); END;"
                 ))?;
             }
         }

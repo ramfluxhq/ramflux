@@ -83,7 +83,16 @@ impl AccountRuntime {
             account.client.object_store.set_cache_capacity(8);
             super::control_state::trim(account);
             super::read_model::initialize(account)?;
-            let pool = AccountReaders::start(account.client.account_db()?)?;
+            let db = account.client.account_db()?;
+            let tick = db.journal_bounds()?.head_seq;
+            db.append_journal(
+                &format!("account:unlocked:{tick}"),
+                "account.state",
+                &serde_json::json!({"local_account_id":self.id,"state":"unlocked"}),
+                now_unix_timestamp(),
+                None,
+            )?;
+            let pool = AccountReaders::start(db)?;
             *self.readers.lock().map_err(|_| stopped())? = Some(pool);
         }
         Ok(())
@@ -98,8 +107,7 @@ impl AccountRuntime {
 
     async fn publish(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
         if let Some(account) = self.state.accounts.get(&self.id) {
-            super::events::publish(account.client.account_db()?, &self.id, request, &self.events)
-                .await?;
+            super::events::publish(&account.client, &self.id, request, &self.events).await?;
         }
         Ok(())
     }
@@ -119,19 +127,72 @@ impl AccountRuntime {
             _ = shutdown.changed() => return Ok(()),
             result = self.publish(&restore) => result?,
         }
+        let mut schedule = super::sync_driver::Schedule::new()?;
+        let mut next = tokio::time::Instant::now() + schedule.min;
         loop {
             let command = tokio::select! {
                 _ = self.shutdown.changed() => break,
                 command = self.receiver.recv() => command,
+                () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
+                    let mut shutdown = self.shutdown.clone();
+                    let active = tokio::select! {
+                        _ = shutdown.changed() => break,
+                        result = self.sync() => result?,
+                    };
+                    schedule.completed(active);
+                    next = tokio::time::Instant::now() + schedule.interval;
+                    continue;
+                },
             };
             let Some(command) = command else {
                 break;
             };
+            let sent = matches!(command.request.method.rsplit('.').next(), Some("send" | "submit"));
             if Box::pin(self.apply(command)).await? {
                 break;
             }
+            if sent {
+                next = tokio::time::Instant::now();
+            }
         }
         Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<bool, SdkError> {
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            return Ok(false);
+        };
+        let result =
+            tokio::time::timeout(Duration::from_secs(20), super::sync_driver::run(account)).await;
+        let (state, activity) = match result {
+            Ok(Ok(count)) => (if count == 0 { "idle" } else { "running" }, count > 0),
+            Ok(Err(error)) => {
+                tracing::debug!(%error,"account sync failed");
+                ("error", false)
+            }
+            Err(_) => ("error", false),
+        };
+        let db = account.client.account_db()?;
+        let at = now_unix_timestamp();
+        let tick = db.load_actor_state::<u64>("sync/tick")?.unwrap_or_default() + 1;
+        db.persist_actor_state("sync/tick", &tick)?;
+        db.append_journal(
+            &format!("sync:{tick}"),
+            "sync.status",
+            &serde_json::json!({"state":state,"last_run":at,"unrouted":db.unrouted_count()?}),
+            at,
+            None,
+        )?;
+        db.append_journal(&format!("node-health:{tick}"),"node.health",&serde_json::json!({"state":if state=="error" {"unavailable"} else {"connected"},"transport":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),"last_run":at}),at,None)?;
+        let request = LocalBusFrame::request(
+            "sync",
+            Some(self.id.clone()),
+            "sync",
+            "sync.run",
+            serde_json::json!({}),
+        );
+        self.publish(&request).await?;
+        Ok(activity)
     }
 
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {

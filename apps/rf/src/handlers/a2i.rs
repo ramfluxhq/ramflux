@@ -20,15 +20,31 @@ pub(crate) async fn handle_a2i(socket: PathBuf, command: A2iCommand) -> Result<(
                 created_at: append.created_at.unwrap_or_else(rf_now_unix_timestamp),
                 target_delivery_id: append.target_delivery,
             };
-            print_json(&bus.request(Some(append.account), "a2i", "a2i.append", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(append.account),
+                    "a2i",
+                    "a2i.append",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
         A2iAction::List(selector) => print_json(
-            &bus.request(Some(selector.account), "a2i", "a2i.list_pending", &serde_json::json!({}))
+            &bus.request(Some(selector.account), "a2i", "a2i.list_pending", serde_json::json!({}))
                 .await?,
         ),
         A2iAction::Ack(ack) => {
             let request = LocalBusA2iAcknowledgeRequest { event_id: ack.event };
-            print_json(&bus.request(Some(ack.account), "a2i", "a2i.acknowledge", &request).await?)
+            print_json(
+                &bus.request(
+                    Some(ack.account),
+                    "a2i",
+                    "a2i.acknowledge",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
     }
 }

@@ -29,11 +29,12 @@ pub(super) fn broadcast(
 }
 
 pub(super) async fn publish(
-    db: &AccountDb,
+    client: &RamfluxClient,
     account_id: &str,
     request: &LocalBusFrame,
     sender: &mpsc::Sender<EventBatch>,
 ) -> Result<(), SdkError> {
+    let db = client.account_db()?;
     loop {
         let entries = db.pending_outbox(256)?;
         let Some(last) = entries.last() else {
@@ -42,6 +43,8 @@ pub(super) async fn publish(
         let last_sequence = last.sequence;
         let mut events = Vec::with_capacity(entries.len());
         for entry in entries {
+            let projected = super::journal::project(client, &entry)?;
+            db.journal_outbox(entry.sequence, &projected, now_unix_timestamp())?;
             let mut frame = local_bus_event(
                 request,
                 account_id,
@@ -56,6 +59,16 @@ pub(super) async fn publish(
         sender.send(EventBatch { events, accepted }).await.map_err(|_| closed())?;
         done.await.map_err(|_| closed())?;
         db.mark_outbox_published(last_sequence)?;
+        if matches!(request.method.as_str(), "contact.verify" | "grant.approve" | "grant.deny")
+            && let Some(subject) = request
+                .body
+                .get("contact_identity_commitment")
+                .or_else(|| request.body.get("approval_id"))
+                .and_then(serde_json::Value::as_str)
+        {
+            db.acknowledge_journal_subject(subject)?;
+        }
+        super::journal::retention(db)?;
     }
 }
 

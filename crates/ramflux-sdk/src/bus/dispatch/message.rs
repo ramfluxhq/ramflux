@@ -581,7 +581,26 @@ pub(crate) async fn dispatch_message_receive_request(
     }
     .await;
     account.put_engine(engine);
-    let (plaintext, entries) = receive_result?;
+    let (mut plaintext, entries) = receive_result?;
+    if let Some(conversation) = body.conversation_id.as_deref() {
+        for entry in &account.pending_deliveries {
+            if !plaintext.iter().any(|p| p.message_id == entry.envelope.envelope_id)
+                && let Some(route) = account
+                    .client
+                    .account_db()?
+                    .load_actor_state::<crate::client::routed::Routing>(&format!(
+                        "routed/committed/{}",
+                        entry.envelope.envelope_id
+                    ))?
+                && route.kind == crate::client::routed::Kind::Direct
+                && route.conversation_id == conversation
+                && let Some(message) =
+                    account.client.plaintext_projection_delivery(conversation, entry)?
+            {
+                plaintext.push(message);
+            }
+        }
+    }
     let fresh = account.merge_deliveries(entries)?;
     let event = if fresh.is_empty() {
         None

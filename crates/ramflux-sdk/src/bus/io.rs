@@ -34,6 +34,8 @@ pub(crate) fn local_bus_response(
         method: request.method.clone(),
         body,
         trace_id: request.trace_id.clone(),
+        seq: None,
+        at: None,
         deadline_ms: None,
         operation_id: None,
         ok: Some(true),
@@ -52,6 +54,8 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
         method: request.method.clone(),
         body: serde_json::Value::Null,
         trace_id: request.trace_id.clone(),
+        seq: None,
+        at: None,
         deadline_ms: None,
         operation_id: None,
         ok: Some(false),
@@ -94,6 +98,8 @@ pub(crate) fn local_bus_event(
         method: method.to_owned(),
         body,
         trace_id: request.trace_id.clone(),
+        seq: None,
+        at: None,
         deadline_ms: None,
         operation_id: None,
         ok: None,
@@ -170,7 +176,7 @@ pub(crate) async fn write_encoded_local_bus_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-fn checked_frame_len(len: usize) -> Result<u32, SdkError> {
+pub(super) fn checked_frame_len(len: usize) -> Result<u32, SdkError> {
     if len > MAX_LOCAL_BUS_FRAME_BYTES {
         // Reject before writing any bytes: no partial frame is emitted and, for a request, no local
         // or relay mutation has happened yet (the frame never reaches dispatch).
@@ -211,6 +217,8 @@ mod tests {
             method: "object.put".to_owned(),
             body,
             trace_id: None,
+            seq: None,
+            at: None,
             deadline_ms: None,
             operation_id: None,
             ok: None,

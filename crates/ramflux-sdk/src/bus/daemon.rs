@@ -449,7 +449,7 @@ mod tests {
                     Some("acct".to_owned()),
                     "subscription",
                     "subscription.open",
-                    &serde_json::json!({
+                    serde_json::json!({
                         "topics": ["mcp.approval.request"],
                         "attended_frontend": true,
                     }),
@@ -462,7 +462,7 @@ mod tests {
                     Some("acct".to_owned()),
                     "mcp",
                     "mcp.server.add",
-                    &serde_json::json!({
+                    serde_json::json!({
                         "server_id": "srv",
                         "command": "stdio",
                         "tool_name": "echo",
@@ -479,7 +479,7 @@ mod tests {
                     Some("acct".to_owned()),
                     "mcp",
                     "mcp.tool.started",
-                    &serde_json::json!({
+                    serde_json::json!({
                         "server_id": "srv",
                         "tool_name": "echo",
                         "arguments": {"text": "hello"},
@@ -531,7 +531,7 @@ mod tests {
             let mut client = connect_test_client(&socket_path).await;
             let status = timeout_bus_request(
                 "daemon.status",
-                client.request(None, "daemon", "daemon.status", &serde_json::json!({})),
+                client.request(None, "daemon", "daemon.status", serde_json::json!({})),
             )
             .await;
             assert_eq!(status["accounts"], 0);

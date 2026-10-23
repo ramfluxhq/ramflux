@@ -655,9 +655,7 @@ async fn daemon_stop_works_through_the_public_embedded_entrypoint() -> Result<()
     })
     .await
     .map_err(|_| failure("public daemon did not start"))?;
-    let response = client
-        .request::<serde_json::Value>(None, "daemon", "daemon.stop", &serde_json::json!({}))
-        .await?;
+    let response = client.request(None, "daemon", "daemon.stop", serde_json::json!({})).await?;
     assert_eq!(response["stopping"], true);
     tokio::time::timeout(Duration::from_secs(2), server)
         .await
@@ -886,3 +884,4 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
 }
 
 mod restore;
+mod stream;
