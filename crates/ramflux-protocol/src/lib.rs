@@ -6,6 +6,7 @@
 mod canonical_json;
 pub mod client_discovery;
 pub use client_discovery::*;
+pub mod a2ui_state;
 mod core_types;
 pub mod domain;
 mod encoding;
@@ -14,12 +15,15 @@ mod events;
 mod fixtures;
 mod header;
 mod home_node_migration;
+mod i_json;
 pub mod object_relay_v3;
 mod protocol_object;
 mod replay;
 mod signature;
 mod state;
 mod surfaces;
+pub use a2ui_state::*;
+pub use i_json::{MAX_SAFE_JSON_INTEGER, parse_i_json, validate_i_json_value};
 
 pub use canonical_json::{
     blake3_hash_bytes, canonical_json_bytes, canonical_json_string, event_id, hash_base64url,
@@ -70,7 +74,7 @@ pub use surfaces::{
     DeleteSurfaceReason, FederationHandshake, HostingModel, KeyCustodyClass, McpCapability,
     McpGrant, NotificationDeliveryClass, NotificationWake, ObjectChunkRequest, ObjectManifest,
     PushPriority, RiskLevel, SafetyDisclosure, SurfaceType, UpdateComponentsCommand,
-    UpdateDataModelCommand, surface_hash,
+    UpdateDataModelCommand, surface_hash, surface_snapshot_hash,
 };
 
 pub const CRATE_NAME: &str = "ramflux-protocol";

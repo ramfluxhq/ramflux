@@ -7,6 +7,8 @@ pub enum ProtocolError {
     Core(#[from] ramflux_core::CoreError),
     #[error("canonical serialization failed: {0}")]
     Canonical(#[from] serde_json::Error),
+    #[error("I-JSON ingress rejected: {0}")]
+    IJson(#[source] serde_json::Error),
     #[error("value is not a JSON object")]
     NotObject,
     #[error("unknown critical extension: {0}")]

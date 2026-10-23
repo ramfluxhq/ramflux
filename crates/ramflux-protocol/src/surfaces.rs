@@ -203,7 +203,9 @@ pub enum DeleteSurfaceReason {
     Error,
 }
 
-/// Computes `ramflux.a2ui.surface_hash.v1` over a renderable surface snapshot.
+/// Hashes a camelCase `CreateSurfaceCommand` object only (without the command tag).
+/// Prefer [`surface_snapshot_hash`] for a typed, unambiguous snapshot field set.
+/// Legacy self-hash fields are ignored; other representations are not interchangeable.
 ///
 /// # Errors
 /// Returns an error when canonical JSON serialization fails.
@@ -214,7 +216,23 @@ pub fn surface_hash(surface_snapshot: &Value) -> Result<String, crate::ProtocolE
         object.remove("surfaceHash");
     }
     let canonical = canonical_json_bytes(&snapshot)?;
-    Ok(hash_base64url(domain::A2UI_SURFACE_HASH, &canonical))
+    Ok(surface_hash_from_canonical(&canonical))
+}
+
+pub(crate) fn surface_hash_from_canonical(bytes: &[u8]) -> String {
+    hash_base64url(domain::A2UI_SURFACE_HASH, bytes)
+}
+
+/// Typed companion to the existing Value hash: all serialized createSurface snapshot fields.
+/// No command tag, conversation/version metadata or self-hash field is added.
+/// # Errors
+/// Rejects non-I-JSON typed values or canonical serialization failures.
+pub fn surface_snapshot_hash(
+    snapshot: &CreateSurfaceCommand,
+) -> Result<String, crate::ProtocolError> {
+    let value = serde_json::to_value(snapshot)?;
+    crate::validate_i_json_value(&value)?;
+    surface_hash(&value)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
