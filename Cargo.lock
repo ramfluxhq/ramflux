@@ -2598,6 +2598,7 @@ dependencies = [
  "ramflux-storage",
  "ramflux-sync",
  "ramflux-transport",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-pemfile",

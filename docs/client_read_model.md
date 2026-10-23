@@ -240,15 +240,32 @@ other live state remains decryptable. Only eviction erases private state and tom
 authenticated traffic for an evicted state requests a fresh encrypted reset.
 
 A gap beyond the ratchet skip limit or lost state creates durable reset work. Transport submit
-does not confirm recovery. Retry backoff starts at one minute and caps at five minutes, until
-the peer is heard on the selected current state or the pair's trusted device is removed.
-Encrypted reset acknowledgements allow a passive receiver to finish recovery. Simultaneous
-usable local reset candidates choose the lower session id; both states remain decryptable.
-An unacknowledged candidate that exceeds its skip window is replaced by a fresh bootstrap,
-so retries cannot themselves accumulate an unrecoverable gap. Identity, signing key, envelope
-signature and AEAD checks remain mandatory before promotion. `session.reset` journal metadata
-records recovery; no conversation descriptor is exposed outside the encrypted body. A failed
-attachment-slot decrypt leaves the live message ratchet unchanged.
+acceptance does not confirm recovery. A persistent pair budget survives confirmation: at most
+one reset per minute and ten attempts in any rolling 24-hour window. Refusals produce metadata
+in `session.reset`. Backoff starts at one minute and caps at five minutes, with the daily budget
+postponing later attempts. Only hearing the peer on current confirms recovery. A known evicted
+state superseded by that confirmed current is dropped without starting another reset.
+
+Contact removal/blocking, a verified manifest removing a device, and own-device revocation stop
+retry work and erase the pair's private states. Retry ticks recheck eligibility. After seven days
+from the first attempt, automatic work stops and private states are erased. `identity.directory`
+includes `pair_recovery` metadata with `state: needs_manual_recovery`; `session.reset` carries the
+same state. A subsequent valid peer confirmation clears the marker, but stale packets never
+restart automatic work while the marker remains.
+
+Encrypted reset acknowledgements let a passive receiver finish recovery. Concurrent unconfirmed
+bootstrap candidates choose the lower session id symmetrically, including a reset racing a plain
+bootstrap; both states remain decryptable. An unacknowledged candidate that exceeds its skip
+window is replaced before a further attempt. Device identity, envelope signature and AEAD checks
+remain mandatory before promotion. Orphan session flags are pruned, and at most eight recent
+tombstones per pair are retained (unattributed legacy tombstones share a bounded upgrade bucket).
+Very late authenticated bootstraps remain subject to the archive's existing compatibility rules.
+No conversation descriptor is exposed outside the encrypted body. Failed attachment-slot decrypts
+leave the live message ratchet unchanged.
+
+Group invitations and accepts reject already active members. Generic member-key persistence
+cannot overwrite an active member's key; a verified device-manifest refresh is the rotation path.
+Inactive members can still rejoin with the key proven by their signed accept and the invited role.
 
 Retained retry and dead-letter ciphertext never evict a different source. A claimed source gets
 at most two retained failures before authentication/relationship confirmation, or eight for a

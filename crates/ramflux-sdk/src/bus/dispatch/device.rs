@@ -174,6 +174,7 @@ async fn dispatch_device_revoke(
     let response: SdkDeviceRevokeResponse =
         sdk_gateway_post_json(&gateway, "/mvp1/device/revoke", &revoke).await?;
     if response.revoked {
+        account.client.apply_verified_device_revocation(&body.device_id, &manifest.principal_id)?;
         manifest.devices.retain(|device| device.device_id != body.device_id);
         write_local_bus_account_manifest(&data_root, &manifest)?;
     }

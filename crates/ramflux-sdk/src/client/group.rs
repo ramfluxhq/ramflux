@@ -1254,4 +1254,106 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn an_admin_cannot_invite_the_active_owner_under_an_attackers_key() -> Result<(), SdkError> {
+        let alice_seed = [0x72; 32];
+        let bob_seed = [0x73; 32];
+        let alice_key = device_public_key("alice", "alice_device", alice_seed);
+        let bob_key = device_public_key("bob", "bob_device", bob_seed);
+        let attacker = device_public_key("mallory", "alice_device", [0x74; 32]);
+        let alice = group_client("owner_invite_guard_alice", "alice", "alice_device", alice_seed)?;
+        let bob = group_client("owner_invite_guard_bob", "bob", "bob_device", bob_seed)?;
+        for client in [&alice, &bob] {
+            seed_group(client, &alice_key)?;
+            seed_member_key(client, "bob_device", &bob_key)?;
+        }
+        let (promotion, _) = alice.create_signed_group_role_change(
+            "group_test",
+            "alice_device",
+            "bob_device",
+            "admin",
+        )?;
+        bob.apply_group_control_event(&promotion)?;
+        let before = alice.group_state("group_test")?;
+        let event = bob.signed_group_control_base(
+            "group_test",
+            "bob_device",
+            "malicious-owner-invite".into(),
+            "group.member_invited",
+            before.group_epoch,
+            ramflux_protocol::GroupEventBody::MemberInvitedV2 {
+                group_id: "group_test".into(),
+                group_epoch: before.group_epoch,
+                invite_id: "malicious-owner-invite".into(),
+                invitee_identity: "alice_device".into(),
+                invitee_signing_public_key: attacker,
+                invited_role: "member".into(),
+                inviter_device_id: "bob_device".into(),
+                expires_at: now_unix_timestamp() + 3600,
+                reason: "active owner takeover probe".into(),
+            },
+        )?;
+        let event = bob.sign_group_control_event(event)?;
+        assert!(matches!(
+            alice.apply_group_control_event(&event),
+            Err(SdkError::Storage(StorageError::GroupPermissionDenied))
+        ));
+        assert_eq!(alice.group_state("group_test")?, before);
+        assert_eq!(
+            alice.account_db()?.group_member_device_key("group_test", "alice_device")?,
+            Some(alice_key)
+        );
+        Ok(())
+    }
+    #[test]
+    fn an_old_invite_accept_cannot_replace_a_member_who_is_now_active() -> Result<(), SdkError> {
+        let alice_seed = [0x72; 32];
+        let attacker_seed = [0x74; 32];
+        let alice_key = device_public_key("alice", "alice_device", alice_seed);
+        let attacker_key = device_public_key("mallory", "victim_device", attacker_seed);
+        let alice = group_client("accept_active_guard_alice", "alice", "alice_device", alice_seed)?;
+        let mallory =
+            group_client("accept_active_guard_mallory", "mallory", "victim_device", attacker_seed)?;
+        seed_group(&alice, &alice_key)?;
+        let (invite, _) = alice.create_signed_group_member_invite(
+            "group_test",
+            "alice_device",
+            "victim_device",
+            &attacker_key,
+            "member",
+            now_unix_timestamp() + 3600,
+            "pending before legitimate join",
+        )?;
+        let invite_id = invite_id_from_event(&invite)?;
+        let genuine = device_public_key("victim", "victim_device", [0x75; 32]);
+        seed_member_key(&alice, "victim_device", &genuine)?;
+        alice.add_group_member("group_test", "victim_device", "admin")?;
+        let before = alice.group_state("group_test")?;
+        let accept = mallory.signed_group_control_base(
+            "group_test",
+            "victim_device",
+            "malicious-old-accept".into(),
+            "group.member_accepted",
+            before.group_epoch + 1,
+            ramflux_protocol::GroupEventBody::MemberAccepted {
+                group_id: "group_test".into(),
+                previous_epoch: before.group_epoch,
+                new_group_epoch: before.group_epoch + 1,
+                invite_id,
+                invitee_identity: "victim_device".into(),
+                accepted_role: "member".into(),
+            },
+        )?;
+        let accept = mallory.sign_group_control_event(accept)?;
+        assert!(matches!(
+            alice.apply_group_control_event(&accept),
+            Err(SdkError::Storage(StorageError::GroupPermissionDenied))
+        ));
+        assert_eq!(alice.group_state("group_test")?, before);
+        assert_eq!(
+            alice.account_db()?.group_member_device_key("group_test", "victim_device")?,
+            Some(genuine)
+        );
+        Ok(())
+    }
 }

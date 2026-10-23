@@ -66,11 +66,23 @@ impl RamfluxClient {
         remote: &str,
         id: &str,
     ) -> Result<Option<(ramflux_crypto::DmSession, [u8; 32])>, SdkError> {
-        if self
+        if let Some(retired) = self
             .account_db()?
-            .load_actor_state::<bool>(&format!("dm-pair/retired/{id}"))?
-            .unwrap_or(false)
+            .load_actor_state::<serde_json::Value>(&format!("dm-pair/retired/{id}"))?
         {
+            let current =
+                self.account_db()?.load_actor_state::<String>(&pair_key(local, remote)?)?;
+            if let Some(current) = current
+                && retired["superseded_by"] == current
+                && self
+                    .account_db()?
+                    .load_actor_state::<bool>(&format!("dm-pair/confirmed/{current}"))?
+                    .unwrap_or(false)
+            {
+                return Err(SdkError::InboundRejected(
+                    "evicted state predates the confirmed pair".to_owned(),
+                ));
+            }
             return Err(SdkError::PairRecoveryRequired);
         }
         let current = self.account_db()?.load_actor_state::<String>(&pair_key(local, remote)?)?;

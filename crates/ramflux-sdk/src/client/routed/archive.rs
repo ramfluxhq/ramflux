@@ -26,7 +26,7 @@ impl RamfluxClient {
         archive.insert(0, id.to_owned());
         while archive.len() > MAX_PAIR_ARCHIVE {
             if let Some(evicted) = archive.pop() {
-                self.retire_pair(&evicted)?;
+                self.retire_pair(local, remote, &evicted)?;
             }
         }
         self.account_db()?
@@ -45,6 +45,8 @@ impl RamfluxClient {
         archive.retain(|old| old != id);
         db.persist_actor_state(&format!("{key}/archive"), &archive)?;
         db.persist_actor_state(&key, &id)?;
+        db.supersede_pair_tombstones(&key, id)?;
+        db.prune_pair_metadata()?;
         Ok(())
     }
     pub(super) fn confirm_pair_record(
@@ -74,19 +76,9 @@ impl RamfluxClient {
             .transpose()?
             .flatten()
             .unwrap_or(false);
-        let current_reset = self.pair_recovery_pending(local, remote)?;
-        if reset {
-            db.persist_actor_state(&format!("dm-pair/reset/{id}"), &true)?;
-        }
         db.persist_actor_state(&format!("dm-pair/confirmed/{id}"), &true)?;
         db.remove_actor_state(&format!("dm-pair/bootstrap/{id}"))?;
-        let usable = !current_local
-            || current_confirmed
-            || self.active_pair(local, remote)?.is_none_or(|(state, _)| {
-                state.send_counter <= u64::try_from(state.max_skip).unwrap_or(u64::MAX)
-            });
-        let simultaneous =
-            usable && current_local && !current_confirmed && (!reset || current_reset);
+        let simultaneous = current_local && !current_confirmed;
         let promote = match current.as_deref() {
             None => !archived,
             Some(old) if old == id => false,
@@ -97,7 +89,7 @@ impl RamfluxClient {
             db.append_journal(
                 &format!("pair-promoted:{id}"),
                 "session.reset",
-                &serde_json::json!({"device_id": remote, "reason": "verified_bootstrap_archived_previous"}),
+                &serde_json::json!({"device_id": remote, "reason": if reset {"verified_reset_archived_previous"} else {"verified_bootstrap_archived_previous"}}),
                 now_unix_timestamp(),
                 None,
             )?;
@@ -106,9 +98,18 @@ impl RamfluxClient {
         }
         // An archived hit is ordinary receive progress, not confirmation of the current reset.
         if db.load_actor_state::<String>(&key)?.as_deref() == Some(id) {
+            if db.actor_state_exists(&format!("{key}/manual"))? {
+                db.remove_actor_state(&format!("{key}/manual"))?;
+                db.append_journal(
+                    &format!("pair-manual-restored:{id}"),
+                    "session.reset",
+                    &serde_json::json!({"device_id":remote,"state":"healthy"}),
+                    now_unix_timestamp(),
+                    None,
+                )?;
+            }
             db.remove_actor_state(&format!("{key}/reset-pending"))?;
             db.remove_actor_state(&format!("dm-pair/reset-work/{}", pair_key(local, remote)?))?;
-            db.persist_actor_state(&format!("dm-pair/settled/{id}"), &true)?;
         }
         Ok(())
     }

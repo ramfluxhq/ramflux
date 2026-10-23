@@ -2,76 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Durable reset retry and encrypted acknowledgement, independent of inbox retry retention.
-use super::session::pair_key;
+use super::reset_policy::{MAX_RESET_LIFETIME, ResetWork};
 use super::{
     GatewayDirectMessage, GatewaySessionEngine, Kind, Opened, RamfluxClient, Route, SdkError,
 };
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ResetWork {
-    local: String,
-    remote: String,
-    attempts: u32,
-    next_at: i64,
-}
-fn work_key(local: &str, remote: &str) -> Result<String, SdkError> {
-    Ok(format!("dm-pair/reset-work/{}", pair_key(local, remote)?))
-}
 impl RamfluxClient {
-    pub(super) fn begin_pair_recovery(
-        &self,
-        local: &str,
-        remote: &str,
-        at: i64,
-    ) -> Result<bool, SdkError> {
-        let db = self.account_db()?;
-        let key = work_key(local, remote)?;
-        let existing = db.load_actor_state::<ResetWork>(&key)?;
-        if existing.as_ref().is_some_and(|work| at < work.next_at) {
-            return Ok(false);
-        }
-        db.write_transaction(|| -> Result<(), SdkError> {
-            // A passive peer may miss every retry. Start another bootstrap before our own
-            // unacknowledged send counter exceeds its receive skip window.
-            let replace = existing.is_none()
-                || self.active_pair(local, remote)?.is_some_and(|(state, _)| {
-                    state.send_counter > u64::try_from(state.max_skip).unwrap_or(u64::MAX)
-                });
-            if replace {
-                if let Some((session, _)) = self.active_pair(local, remote)? {
-                    self.archive_pair(local, remote, &session.session_id)?;
-                }
-                db.remove_actor_state(&pair_key(local, remote)?)?;
-            }
-            let attempts = existing.as_ref().map_or(1, |work| work.attempts.saturating_add(1));
-            let delay = 60_i64.saturating_mul(1_i64 << attempts.saturating_sub(1).min(3)).min(300);
-            db.persist_actor_state(
-                &key,
-                &ResetWork {
-                    local: local.to_owned(),
-                    remote: remote.to_owned(),
-                    attempts,
-                    next_at: at.saturating_add(delay),
-                },
-            )?;
-            let pair = pair_key(local, remote)?;
-            db.persist_actor_state(&format!("{pair}/reset-pending"), &true)?;
-            db.persist_actor_state(&format!("{pair}/reset-at"), &at)?;
-            db.append_journal(
-                &format!("pair-reset-attempt:{key}:{at}"),
-                "session.reset",
-                &serde_json::json!({
-                    "device_id": remote,
-                    "reason": "receive_state_unrecoverable",
-                    "attempt": attempts,
-                }),
-                at,
-                None,
-            )?;
-            Ok(())
-        })?;
-        self.finish_pair_retirement()?;
-        Ok(true)
-    }
     pub(super) async fn send_pair_reset(
         &self,
         engine: &mut GatewaySessionEngine,
@@ -155,21 +90,24 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let work = self.account_db()?.list_actor_states::<ResetWork>("dm-pair/reset-work/")?;
         let local = engine.config.device_id.clone();
-        for item in
-            work.into_iter().filter(|work| work.local == local && work.next_at <= at).take(1)
-        {
-            if self.account_db()?.client_record("device", &item.remote)?.is_none() {
-                self.account_db()?.remove_actor_state(&work_key(&item.local, &item.remote)?)?;
-                self.account_db()?.remove_actor_state(&format!(
-                    "{}/reset-pending",
-                    pair_key(&item.local, &item.remote)?
-                ))?;
+        let mut attempted = false;
+        for item in work.into_iter().filter(|work| work.local == local) {
+            if !self.pair_recovery_allowed(&item.local, &item.remote)? {
+                self.remove_device_pair(&item.remote, "retry_relationship_ended")?;
                 continue;
             }
-            if self.begin_pair_recovery(&item.local, &item.remote, at)?
-                && let Err(error) = self.send_pair_reset(engine, &item.remote).await
-            {
-                tracing::debug!(%error,"device pair reset remains pending");
+            let first = self.reset_first_at(&item)?;
+            if at >= first.saturating_add(MAX_RESET_LIFETIME) {
+                self.mark_pair_manual(&item.local, &item.remote, at)?;
+                continue;
+            }
+            if !attempted && item.next_at <= at {
+                attempted = true;
+                if self.begin_pair_recovery(&item.local, &item.remote, at)?
+                    && let Err(error) = self.send_pair_reset(engine, &item.remote).await
+                {
+                    tracing::debug!(%error,"device pair reset remains pending");
+                }
             }
         }
         Ok(())

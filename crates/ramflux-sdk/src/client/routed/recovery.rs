@@ -4,9 +4,10 @@
 //! Authenticated fresh-X3DH recovery; a reset never travels outside the encrypted route.
 use super::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError, now_unix_timestamp};
 impl RamfluxClient {
-    pub(super) fn finish_pair_retirement(&self) -> Result<(), SdkError> {
-        if self.account_db()?.load_actor_state::<bool>("secrets/retired")?.unwrap_or(false) {
-            self.account_db()?.checkpoint_retired_secrets()?;
+    pub(crate) fn finish_pair_retirement(&self) -> Result<(), SdkError> {
+        if self.account_db()?.load_actor_state::<bool>("secrets/retired")?.unwrap_or(false)
+            && self.account_db()?.checkpoint_retired_secrets_if_committed()?
+        {
             self.account_db()?.remove_actor_state("secrets/retired")?;
         }
         Ok(())
@@ -31,13 +32,16 @@ impl RamfluxClient {
         }
     }
 
-    pub(super) fn retire_pair(&self, id: &str) -> Result<(), SdkError> {
+    pub(super) fn retire_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        db.persist_actor_state(&format!("dm-pair/retired/{id}"), &true)?;
+        let pair = super::session::pair_key(local, remote)?;
+        let successor = db.load_actor_state::<String>(&pair)?;
+        db.persist_actor_state(&format!("dm-pair/retired/{id}"), &serde_json::json!({"pair":pair,"superseded_by":successor,"retired_at":now_unix_timestamp()}))?;
         db.persist_actor_state("secrets/retired", &true)?;
         for prefix in ["session", "bootstrap"] {
             db.remove_actor_state(&format!("dm-pair/{prefix}/{id}"))?;
         }
+        db.prune_pair_metadata()?;
         Ok(())
     }
     pub(crate) fn pair_recovery_pending(
@@ -63,12 +67,7 @@ impl RamfluxClient {
         self.authenticated_envelope_sender(entry)?;
         let local = engine.config.device_id.clone();
         let remote = &entry.envelope.source_device_id;
-        let own = entry.envelope.source_principal_id == engine.config.principal_id;
-        if !own
-            && self.active_pair(&local, remote)?.is_none()
-            && !self.pair_recovery_pending(&local, remote)?
-            && !self.friend_link_peer_is_accepted(&entry.envelope.source_principal_id)?
-        {
+        if !self.pair_recovery_allowed(&local, remote)? {
             return Ok(());
         }
         let at = now_unix_timestamp();

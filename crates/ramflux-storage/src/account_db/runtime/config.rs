@@ -39,6 +39,17 @@ impl AccountDb {
         Ok(())
     }
 
+    /// Checkpoints retired pages only after the outer writer phase has committed.
+    /// # Errors
+    /// Returns SQLite errors; returns false while a surrounding transaction remains open.
+    pub fn checkpoint_retired_secrets_if_committed(&self) -> Result<bool, StorageError> {
+        if !self.connection.is_autocommit()? {
+            return Ok(false);
+        }
+        self.checkpoint_retired_secrets()?;
+        Ok(true)
+    }
+
     /// Opens an independently owned, query-only encrypted connection with the same key.
     ///
     /// # Errors

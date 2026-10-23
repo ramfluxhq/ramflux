@@ -289,26 +289,30 @@ impl RamfluxClient {
                 )?;
             }
             let plaintext = self.project_routed(opened, entry, body, metadata)?;
-            self.persist_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.bundle_hash,
-                &opened.session,
-            )?;
-            let reset = opened.routing.kind == Kind::Control
-                && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
-                    matches!(
-                        value["type"].as_str(),
-                        Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
-                    )
-                });
-            self.confirm_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.session,
-                reset,
-                decode(&entry.envelope)?.x3dh.is_some(),
-            )?;
+            if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
+                || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
+            {
+                self.persist_pair(
+                    &opened.local_device,
+                    &opened.remote_device,
+                    &opened.bundle_hash,
+                    &opened.session,
+                )?;
+                let reset = opened.routing.kind == Kind::Control
+                    && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
+                        matches!(
+                            value["type"].as_str(),
+                            Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
+                        )
+                    });
+                self.confirm_pair(
+                    &opened.local_device,
+                    &opened.remote_device,
+                    &opened.session,
+                    reset,
+                    decode(&entry.envelope)?.x3dh.is_some(),
+                )?;
+            }
             for slot in slots {
                 self.persist_pair_slot_receipt(slot)?;
             }

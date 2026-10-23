@@ -209,3 +209,26 @@ fn remote_attachments_are_listed_with_public_fetch_status_only() -> Result<(), S
     }
     Ok(())
 }
+
+#[test]
+fn identity_directory_exposes_manual_pair_recovery_without_private_state() -> Result<(), SdkError> {
+    let f = Fixture::new()?;
+    let db = f.client.account_db()?;
+    db.persist_client_record("device", "bob-phone", &json!({"principal_id":"bob"}))?;
+    db.persist_client_record(
+        "identity",
+        "bob",
+        &json!({"principal_id":"bob","devices":[{"id":"bob-phone"}]}),
+    )?;
+    db.persist_actor_state("dm-pair/test/manual",&json!({"local_device_id":"alice-phone","device_id":"bob-phone","state":"needs_manual_recovery","at":10}))?;
+    let result = f.read("identity.directory", json!({}))?;
+    let bob = result["identities"]
+        .as_array()
+        .ok_or_else(|| SdkError::LocalBus("identities".into()))?
+        .iter()
+        .find(|row| row["principal_id"] == "bob")
+        .ok_or_else(|| SdkError::LocalBus("bob".into()))?;
+    assert_eq!(bob["pair_recovery"][0]["state"], "needs_manual_recovery");
+    assert_eq!(bob["pair_recovery"][0]["device_id"], "bob-phone");
+    Ok(())
+}

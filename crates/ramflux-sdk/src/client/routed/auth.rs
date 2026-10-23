@@ -75,6 +75,14 @@ impl RamfluxClient {
     }
 
     pub(super) fn trusted_device(&self, remote: &str) -> Result<Value, SdkError> {
+        if self
+            .account_db()?
+            .load_actor_state::<bool>(&format!("device/revoked/{remote}"))?
+            .unwrap_or(false)
+        {
+            return Err(SdkError::InboundRejected("revoked device".to_owned()));
+        }
+
         self.account_db()?.client_record("device", remote)?.ok_or_else(|| {
             SdkError::InboundPending("sender device has no verified manifest".to_owned())
         })

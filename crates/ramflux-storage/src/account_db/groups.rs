@@ -256,12 +256,31 @@ impl AccountDb {
         member_id: &str,
         device_signing_public_key: &str,
     ) -> Result<(), StorageError> {
+        if self.group_member_role(group_id, member_id)?.is_some()
+            && self
+                .group_member_device_key(group_id, member_id)?
+                .is_some_and(|old| old != device_signing_public_key)
+        {
+            return Err(StorageError::GroupPermissionDenied);
+        }
         self.connection.execute(
             "INSERT INTO group_member_device_key
                 (group_id, member_id, device_signing_public_key, verified_at)
-             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key",
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=excluded.group_id AND m.member_id=excluded.member_id AND m.active=1)",
             params![group_id, member_id, device_signing_public_key, self.now_unix()],
         )?;
+        Ok(())
+    }
+
+    /// Refreshes an active member key only after the caller verifies its device manifest.
+    /// # Errors
+    /// Returns SQLite errors.
+    pub fn refresh_group_keys_from_verified_manifest(
+        &self,
+        member_id: &str,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        self.connection.execute("UPDATE group_member_device_key SET device_signing_public_key=?2,verified_at=?3 WHERE member_id=?1 AND device_signing_public_key IS NOT ?2 AND EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=group_member_device_key.group_id AND m.member_id=group_member_device_key.member_id AND m.active=1)",params![member_id,key,self.now_unix()])?;
         Ok(())
     }
 
@@ -473,6 +492,9 @@ impl AccountDb {
         if !can_invite_group_member(&actor_role, &invite.invited_role) {
             return Err(StorageError::GroupPermissionDenied);
         }
+        if self.group_member_role(&invite.group_id, &invite.invitee_identity)?.is_some() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
         if self.group_member_banned(&invite.group_id, &invite.invitee_identity)? {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -542,6 +564,9 @@ impl AccountDb {
         if accept.accepted_role != invite.invited_role {
             return Err(StorageError::GroupPermissionDenied);
         }
+        if self.group_member_role(&accept.group_id, &accept.invitee_identity)?.is_some() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
         if self.group_member_banned(&accept.group_id, &accept.invitee_identity)? {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -579,6 +604,17 @@ impl AccountDb {
             params![accept.group_id, accept.new_group_epoch, applied_at],
         )?;
         self.connection.execute(
+            "INSERT INTO group_member_device_key
+                (group_id, member_id, device_signing_public_key, verified_at)
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=excluded.group_id AND m.member_id=excluded.member_id AND m.active=1)",
+            params![
+                accept.group_id,
+                invite.invitee_identity,
+                invite.invitee_signing_public_key,
+                applied_at
+            ],
+        )?;
+        self.connection.execute(
             "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at)
              VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5)",
@@ -587,17 +623,6 @@ impl AccountDb {
                 accept.invitee_identity,
                 accept.accepted_role,
                 accept.new_group_epoch,
-                applied_at
-            ],
-        )?;
-        self.connection.execute(
-            "INSERT INTO group_member_device_key
-                (group_id, member_id, device_signing_public_key, verified_at)
-             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key",
-            params![
-                accept.group_id,
-                invite.invitee_identity,
-                invite.invitee_signing_public_key,
                 applied_at
             ],
         )?;

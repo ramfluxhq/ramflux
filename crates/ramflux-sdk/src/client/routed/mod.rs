@@ -16,7 +16,9 @@ pub(crate) use committed::{committed_key, conversation_watermark, object_waterma
 mod legacy;
 mod receive;
 pub(crate) use receive::Delivery;
+mod pair_lifecycle;
 mod recovery;
+mod reset_policy;
 mod reset_work;
 mod session;
 

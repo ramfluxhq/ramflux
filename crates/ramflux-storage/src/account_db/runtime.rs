@@ -8,6 +8,7 @@ mod config;
 mod control;
 mod operations;
 mod outbox;
+mod ratchet_metadata;
 mod recovery;
 mod schema;
 

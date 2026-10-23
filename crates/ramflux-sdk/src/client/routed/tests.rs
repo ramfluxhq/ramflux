@@ -556,3 +556,9 @@ mod r5;
 
 #[path = "session_record_tests.rs"]
 mod session_record;
+
+#[path = "recovery_policy_tests.rs"]
+mod recovery_policy;
+
+#[path = "device_revocation_tests.rs"]
+mod device_revocation;

@@ -43,6 +43,7 @@ pub(crate) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<V
                 }
             }));
             // Gateway-fetched safety material is persisted by the verified contact path.
+            saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);
             saved["safety_number_available"] =
                 json!(saved.get("safety_number").is_some_and(|number| !number.is_null()));
             Ok(saved)

@@ -119,6 +119,10 @@ impl Connection {
         Ok(Statement { connection: self, sql: sql.to_owned() })
     }
 
+    pub(crate) fn is_autocommit(&self) -> Result<bool> {
+        self.call(|db| Ok(db.is_autocommit()))
+    }
+
     pub(crate) fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nested = !self.call(|db| Ok(db.is_autocommit()))?;

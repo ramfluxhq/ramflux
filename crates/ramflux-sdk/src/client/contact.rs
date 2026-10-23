@@ -12,6 +12,14 @@ impl RamfluxClient {
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
+        db.write_transaction(|| self.persist_verified_directory_rows(manifest))?;
+        self.finish_pair_retirement()
+    }
+    fn persist_verified_directory_rows(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
         let old = db
             .client_record("identity", &manifest.principal_id)?
             .unwrap_or_else(|| serde_json::json!({}));
@@ -27,6 +35,14 @@ impl RamfluxClient {
         }
         for device in &manifest.devices {
             if db
+                .load_actor_state::<bool>(&format!("device/revoked/{}", device.device_id))?
+                .unwrap_or(false)
+            {
+                return Err(SdkError::InboundRejected(
+                    "verified manifest includes a locally revoked device".to_owned(),
+                ));
+            }
+            if db
                 .client_record("device", &device.device_id)?
                 .as_ref()
                 .and_then(|record| record.get("principal_commitment"))
@@ -38,6 +54,7 @@ impl RamfluxClient {
                 ));
             }
         }
+        self.retire_devices_absent_from_manifest(manifest)?;
         let material = contact_safety_material_from_manifest(manifest)?;
         let device_set_hash =
             ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&material.devices));
@@ -56,6 +73,10 @@ impl RamfluxClient {
             &serde_json::json!({"principal_id":manifest.principal_id}),
         )?;
         for device in &manifest.devices {
+            db.refresh_group_keys_from_verified_manifest(
+                &device.device_id,
+                &device.branch_public_key,
+            )?;
             db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id}))?;
         }
         Ok(())
@@ -375,20 +396,32 @@ impl RamfluxClient {
         link_id: &str,
         scope: &str,
     ) -> Result<FriendLinkRecord, SdkError> {
-        let removed_at = now_unix_timestamp();
-        let link = self.account_db()?.remove_friend_link(link_id, scope, removed_at)?;
-        self.append_contact_control_event("friend.removed", &link)?;
-        self.cascade_object_share_revocations(&link, "friend_removed", removed_at)?;
+        let link = self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
+            let removed_at = now_unix_timestamp();
+            let link = self.account_db()?.remove_friend_link(link_id, scope, removed_at)?;
+            self.remove_principal_pairs(&link.requester_id)?;
+            self.remove_principal_pairs(&link.target_id)?;
+            self.append_contact_control_event("friend.removed", &link)?;
+            self.cascade_object_share_revocations(&link, "friend_removed", removed_at)?;
+            Ok(link)
+        })?;
+        self.finish_pair_retirement()?;
         Ok(link)
     }
 
     /// # Errors
     /// Returns an error when no account DB is unlocked or the friend link cannot be updated.
     pub fn block_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
-        let blocked_at = now_unix_timestamp();
-        let link = self.account_db()?.block_friend_link(link_id, blocked_at)?;
-        self.append_contact_control_event("friend.blocked", &link)?;
-        self.cascade_object_share_revocations(&link, "blocked", blocked_at)?;
+        let link = self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
+            let blocked_at = now_unix_timestamp();
+            let link = self.account_db()?.block_friend_link(link_id, blocked_at)?;
+            self.remove_principal_pairs(&link.requester_id)?;
+            self.remove_principal_pairs(&link.target_id)?;
+            self.append_contact_control_event("friend.blocked", &link)?;
+            self.cascade_object_share_revocations(&link, "blocked", blocked_at)?;
+            Ok(link)
+        })?;
+        self.finish_pair_retirement()?;
         Ok(link)
     }
 
@@ -1354,6 +1387,53 @@ mod tests {
         client.apply_contact_event_plaintext(&missing)?;
 
         let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+    #[test]
+    fn only_a_verified_manifest_refresh_can_rotate_an_active_group_member_key()
+    -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("manifest_group_rotation")?;
+        let initial = manifest_fixture(
+            "peer",
+            "peer_device",
+            [0x51; 32],
+            [0x52; 32],
+            [0x53; 32],
+            [0x54; 32],
+        )?;
+        client.create_group("rotation_group", "peer_device")?;
+        let first = initial.devices[0].branch_public_key.clone();
+        client.account_db()?.persist_group_member_device_key(
+            "rotation_group",
+            "peer_device",
+            &first,
+        )?;
+        let replacement = manifest_fixture(
+            "peer",
+            "peer_device",
+            [0x51; 32],
+            [0x62; 32],
+            [0x63; 32],
+            [0x64; 32],
+        )?;
+        let new_key = replacement.devices[0].branch_public_key.clone();
+        assert!(
+            client
+                .account_db()?
+                .persist_group_member_device_key("rotation_group", "peer_device", &new_key)
+                .is_err()
+        );
+        RamfluxClient::verify_device_manifest_json(
+            serde_json::to_value(&replacement)?,
+            &replacement.principal_commitment,
+        )?;
+        client.persist_identity_directory(&replacement)?;
+        assert_eq!(
+            client.account_db()?.group_member_device_key("rotation_group", "peer_device")?,
+            Some(new_key)
+        );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

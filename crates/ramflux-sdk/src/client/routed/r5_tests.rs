@@ -258,7 +258,7 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
     Ok(())
 }
 #[tokio::test]
-async fn an_authenticated_fresh_reset_archives_an_unconfirmed_local_bootstrap()
+async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
 -> Result<(), SdkError> {
     let alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
@@ -275,11 +275,12 @@ async fn an_authenticated_fresh_reset_archives_an_unconfirmed_local_bootstrap()
     )?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     bob.client.apply_routed_entry(&mut be, &pool()?, &reset, false).await?;
+    let incoming = decode(&reset.envelope)?.ciphertext.session_id;
     assert_eq!(
         bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id,
-        decode(&reset.envelope)?.ciphertext.session_id
+        old.clone().min(incoming.clone())
     );
-    assert!(bob.client.archived_pairs("bob", "alice")?.contains(&old));
+    assert!(bob.client.archived_pairs("bob", "alice")?.contains(&old.clone().max(incoming)));
     assert!(
         bob.client
             .account_db()?

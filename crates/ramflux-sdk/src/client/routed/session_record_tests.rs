@@ -6,14 +6,17 @@ use super::r5::{fresh, outgoing, settle};
 use super::review::{pool, trust};
 use super::*;
 use std::sync::{Arc, Mutex};
-type Sent = Arc<Mutex<Vec<GatewayInboxEntry>>>;
-struct Wire {
+pub(super) type Sent = Arc<Mutex<Vec<GatewayInboxEntry>>>;
+pub(super) struct Wire {
     bundle: ramflux_crypto::PrekeyBundle,
     responses: VecDeque<Vec<u8>>,
     sent: Sent,
 }
 impl Wire {
-    fn engine(local: &Fixture, remote: &Fixture) -> Result<(GatewaySessionEngine, Sent), SdkError> {
+    pub(super) fn engine(
+        local: &Fixture,
+        remote: &Fixture,
+    ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
         let sent = Arc::new(Mutex::new(Vec::new()));
         Ok((
             GatewaySessionEngine::with_test_transport(
@@ -89,10 +92,10 @@ impl ramflux_transport::GatewaySessionFrameSource for Wire {
         })
     }
 }
-fn active(f: &Fixture, remote: &str) -> Result<String, SdkError> {
+pub(super) fn active(f: &Fixture, remote: &str) -> Result<String, SdkError> {
     Ok(f.client.active_pair(&f.id, remote)?.ok_or_else(|| invalid("current pair"))?.0.session_id)
 }
-fn archive(f: &Fixture, remote: &str) -> Result<Vec<String>, SdkError> {
+pub(super) fn archive(f: &Fixture, remote: &str) -> Result<Vec<String>, SdkError> {
     Ok(f.client
         .account_db()?
         .load_actor_state::<Vec<String>>(&format!(
@@ -101,7 +104,11 @@ fn archive(f: &Fixture, remote: &str) -> Result<Vec<String>, SdkError> {
         ))?
         .unwrap_or_default())
 }
-fn gap(sender: &Fixture, receiver: &Fixture, id: &str) -> Result<GatewayInboxEntry, SdkError> {
+pub(super) fn gap(
+    sender: &Fixture,
+    receiver: &Fixture,
+    id: &str,
+) -> Result<GatewayInboxEntry, SdkError> {
     let (mut session, bundle) =
         sender.client.active_pair(&sender.id, &receiver.id)?.ok_or_else(|| invalid("pair"))?;
     for _ in 0..1001 {
@@ -110,7 +117,7 @@ fn gap(sender: &Fixture, receiver: &Fixture, id: &str) -> Result<GatewayInboxEnt
     sender.client.persist_pair(&sender.id, &receiver.id, &bundle, &session)?;
     seal(sender, receiver, outgoing(sender, receiver, id), b"past gap")
 }
-fn last(sent: &Sent) -> Result<GatewayInboxEntry, SdkError> {
+pub(super) fn last(sent: &Sent) -> Result<GatewayInboxEntry, SdkError> {
     sent.lock()
         .map_err(|_| invalid("mutex"))?
         .last()
@@ -246,6 +253,10 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
         .load_actor_state::<serde_json::Value>(&key)?
         .ok_or_else(|| invalid("accepted transport lost its durable reset"))?;
     work["next_at"] = serde_json::json!(0);
+    bob.client.account_db()?.persist_actor_state(
+        &format!("{}/reset-at", super::super::session::pair_key("bob", "alice")?),
+        &(now_unix_timestamp() - 60),
+    )?;
     bob.client.account_db()?.persist_actor_state(&key, &work)?;
     let (engine, resent) = Wire::engine(&bob, &alice)?;
     let mut account = crate::bus::state::LocalBusAccountState::new(
@@ -278,10 +289,8 @@ async fn archive_eviction_erases_the_old_state_and_requests_authenticated_reset(
     settle(&mut alice, &mut bob).await?;
     let old = active(&bob, "alice")?;
     let late = seal(&alice, &bob, outgoing(&alice, &bob, "late-old-state"), b"late")?;
-    let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     for n in 0..10 {
-        let packet = fresh(&alice, &bob, &format!("replace-{n}"))?;
-        bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await?;
+        let _packet = fresh(&bob, &alice, &format!("replace-{n}"))?;
     }
     let previous = archive(&bob, "alice")?;
     assert_eq!(previous.len(), 8);
@@ -322,6 +331,10 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
         .load_actor_state::<serde_json::Value>(&key)?
         .ok_or_else(|| invalid("no durable reset"))?;
     work["next_at"] = serde_json::json!(0);
+    bob.client.account_db()?.persist_actor_state(
+        &format!("{}/reset-at", super::super::session::pair_key("bob", "alice")?),
+        &(now_unix_timestamp() - 60),
+    )?;
     bob.client.account_db()?.persist_actor_state(&key, &work)?;
     let (engine, retries) = Wire::engine(&bob, &alice)?;
     let mut account = crate::bus::state::LocalBusAccountState::new(
