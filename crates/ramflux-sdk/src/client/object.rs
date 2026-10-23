@@ -13,6 +13,7 @@ pub(crate) struct DeferredObjectKeySlot {
     pub(super) session: ramflux_crypto::DmSession,
     pub(super) conversation_id: String,
     pub(super) commit_label: String,
+    pub(super) pair_slot: Option<SdkObjectKeySlot>,
 }
 
 impl RamfluxClient {
@@ -71,7 +72,10 @@ impl RamfluxClient {
         let message = GatewayDirectMessage {
             conversation_id: request.conversation_id.clone(),
             message_id: format!("object.slot:{}:{recipient_device_id}", object.object_id),
-            envelope_id: format!("object.slot:{}:{recipient_device_id}", object.object_id),
+            envelope_id: format!(
+                "slot_{}",
+                ramflux_protocol::encode_base64url(X25519KeyPair::random()?.public)
+            ),
             source_principal_id: sender_id.clone(),
             sender_id,
             recipient_device_id: Some(recipient_device_id.clone()),
@@ -80,32 +84,20 @@ impl RamfluxClient {
             created_at: now_unix_timestamp(),
             ttl: 3_600,
         };
-        let (mut session, x3dh) = self.load_or_create_send_dm_session(engine, &message).await?;
-        let associated_data = object_key_slot_associated_data(
-            &object.object_id,
-            &request.conversation_id,
-            &recipient_device_id,
-        );
-        let ciphertext = session.encrypt(&object_key, &associated_data)?;
-        self.persist_dm_session(
-            &request.conversation_id,
-            &format!("object-slot:{}", object.object_id),
-            "send",
-            &session,
-        )?;
+        let key_slot = self
+            .make_pair_object_slot(
+                engine,
+                &message,
+                &object.object_id,
+                &object_key,
+                &request.conversation_id,
+            )
+            .await?;
         Ok(SdkObjectSharePackage {
             schema: "ramflux.sdk.object_share_package.v1".to_owned(),
             version: 1,
             ciphertext_base64: ramflux_protocol::encode_base64url(&object.ciphertext),
-            key_slot: SdkObjectKeySlot {
-                schema: "ramflux.sdk.object_key_slot.dm.v1".to_owned(),
-                version: 1,
-                object_id: object.object_id.clone(),
-                conversation_id: request.conversation_id,
-                recipient_device_id,
-                x3dh,
-                ciphertext,
-            },
+            key_slot,
             object,
         })
     }
@@ -147,32 +139,15 @@ impl RamfluxClient {
             &object.object_id,
             &recipient_device_id,
         );
-        let slot_message = GatewayDirectMessage {
-            conversation_id: slot_conversation_id.clone(),
-            message_id: format!("attachment.slot:{}", object.object_id),
-            envelope_id: format!("attachment.slot:{}", object.object_id),
-            source_principal_id: message.source_principal_id.clone(),
-            sender_id: message.sender_id.clone(),
-            recipient_device_id: Some(recipient_device_id.clone()),
-            target_delivery_id: message.target_delivery_id.clone(),
-            encrypted_body: Vec::new(),
-            created_at: message.created_at,
-            ttl: message.ttl,
-        };
-        let (mut session, x3dh) =
-            self.load_or_create_send_dm_session(engine, &slot_message).await?;
-        let associated_data = object_key_slot_associated_data(
-            &object.object_id,
-            &slot_conversation_id,
-            &recipient_device_id,
-        );
-        let ciphertext = session.encrypt(&object_key, &associated_data)?;
-        self.persist_dm_session(
-            &slot_conversation_id,
-            &format!("attachment-slot:{}", object.object_id),
-            "send",
-            &session,
-        )?;
+        let key_slot = self
+            .make_pair_object_slot(
+                engine,
+                message,
+                &object.object_id,
+                &object_key,
+                &slot_conversation_id,
+            )
+            .await?;
         let manifest = chunk_manifest_for_object(
             &object.object_id,
             &object.ciphertext,
@@ -221,15 +196,7 @@ impl RamfluxClient {
             owner_principal_id: owner_branch.principal_id.clone(),
             owner_device_epoch: owner_branch.device_epoch,
             access_grant: Some(access_grant),
-            key_slot: SdkObjectKeySlot {
-                schema: "ramflux.sdk.object_key_slot.dm.v1".to_owned(),
-                version: 1,
-                object_id: object.object_id,
-                conversation_id: slot_conversation_id,
-                recipient_device_id,
-                x3dh,
-                ciphertext,
-            },
+            key_slot,
         })
     }
 
@@ -245,31 +212,8 @@ impl RamfluxClient {
                 package.schema
             )));
         }
-        if package.key_slot.schema != "ramflux.sdk.object_key_slot.dm.v1" {
-            return Err(SdkError::LocalBus(format!(
-                "unsupported object key slot schema: {}",
-                package.key_slot.schema
-            )));
-        }
-        let mut session = self.load_or_create_recv_dm_session(
-            &package.key_slot.conversation_id,
-            package.key_slot.x3dh.as_ref(),
-        )?;
-        let associated_data = object_key_slot_associated_data(
-            &package.key_slot.object_id,
-            &package.key_slot.conversation_id,
-            &package.key_slot.recipient_device_id,
-        );
-        let plaintext_key = session.decrypt(&package.key_slot.ciphertext, &associated_data)?;
-        let object_key: [u8; 32] = plaintext_key
-            .try_into()
-            .map_err(|_err| SdkError::LocalBus("invalid object key length".to_owned()))?;
-        self.persist_dm_session(
-            &package.key_slot.conversation_id,
-            &format!("object-slot:{}", package.object.object_id),
-            "recv",
-            &session,
-        )?;
+        let deferred = self.decrypt_object_key_slot(&package.key_slot)?;
+        let object_key = deferred.object_key;
         let ciphertext = ramflux_protocol::decode_base64url(&package.ciphertext_base64)
             .map_err(|error| SdkError::LocalBus(format!("invalid object ciphertext: {error}")))?;
         let object = self.object_store.put_received_encrypted_object_with_key(
@@ -280,6 +224,7 @@ impl RamfluxClient {
             object_key,
         );
         self.persist_object_if_unlocked(&object, Some(&object_key))?;
+        self.commit_object_key_slot_session(&deferred)?;
         Ok(object)
     }
 
@@ -292,6 +237,9 @@ impl RamfluxClient {
         &self,
         key_slot: &SdkObjectKeySlot,
     ) -> Result<DeferredObjectKeySlot, SdkError> {
+        if key_slot.version == 2 {
+            return self.decrypt_pair_object_slot(key_slot, None);
+        }
         if key_slot.schema != "ramflux.sdk.object_key_slot.dm.v1" {
             return Err(SdkError::LocalBus(format!(
                 "unsupported object key slot schema: {}",
@@ -314,6 +262,7 @@ impl RamfluxClient {
             session,
             conversation_id: key_slot.conversation_id.clone(),
             commit_label: format!("object-slot:{}", key_slot.object_id),
+            pair_slot: None,
         })
     }
 
@@ -323,6 +272,9 @@ impl RamfluxClient {
         &mut self,
         deferred: &DeferredObjectKeySlot,
     ) -> Result<(), SdkError> {
+        if let Some(slot) = deferred.pair_slot.as_ref() {
+            return self.commit_pair_object_slot(slot, &deferred.object_key);
+        }
         self.persist_dm_session(
             &deferred.conversation_id,
             &deferred.commit_label,

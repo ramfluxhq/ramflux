@@ -836,7 +836,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
-        SdkError::LocalBus(_) => RamfluxErrorCode::InvalidArgument,
+        SdkError::LocalBus(_) | SdkError::InboundRejected(_) => RamfluxErrorCode::InvalidArgument,
     };
     CAbiError::new(code, message)
 }

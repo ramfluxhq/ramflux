@@ -35,7 +35,10 @@ impl Fixture {
             device_id: self.id.clone(),
             target_delivery_id: self.id.clone(),
             prekey_http_url: None,
-        }))
+        })
+        .with_device_branch(
+            self.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?,
+        ))
     }
 }
 impl Drop for Fixture {
@@ -61,9 +64,21 @@ fn message(id: &str, conversation: &str) -> GatewayDirectMessage {
 fn seal(
     sender: &Fixture,
     receiver: &Fixture,
-    mut message: GatewayDirectMessage,
+    message: GatewayDirectMessage,
     body: &[u8],
 ) -> Result<GatewayInboxEntry, SdkError> {
+    seal_as(sender, receiver, message, body, Route::direct())
+}
+fn seal_as(
+    sender: &Fixture,
+    receiver: &Fixture,
+    mut message: GatewayDirectMessage,
+    body: &[u8],
+    route: Route,
+) -> Result<GatewayInboxEntry, SdkError> {
+    if receiver.client.account_db()?.client_record("device", &sender.id)?.is_none() {
+        review::trust(receiver, sender)?;
+    }
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
     let hash = prekey_bundle_hash(&bundle)?;
     let existing = sender.client.send_pair_session_from_url(&sender.id, &message, None);
@@ -80,9 +95,10 @@ fn seal(
         )?;
         (session, header, hash)
     };
-    let sealed = sender.client.seal_routed_with_session(
+    let sealed = sender.client.seal_routed_with_route(
         &message,
         body,
+        route,
         SealPair {
             local: &sender.id,
             remote: &receiver.id,
@@ -107,7 +123,7 @@ fn first_unknown_conversation_decrypts_and_outer_frame_has_no_route() -> Result<
     let entry = seal(&a, &b, message("envelope", conversation), b"hello first message")?;
     let opened = b.client.open_routed(&entry, "bob")?;
     assert_eq!(opened.routing.conversation_id, conversation);
-    assert_eq!(opened.body, b"hello first message");
+    assert_eq!(opened.body.as_slice(), b"hello first message");
     let outer = serde_json::to_string(&entry.envelope)?;
     assert!(!outer.contains(conversation));
     let wrapper = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
@@ -130,7 +146,7 @@ fn device_pair_session_spans_conversations_and_rejects_replay_and_tampering() ->
     let second = seal(&a, &b, message("second", "different-conversation"), b"two")?;
     let opened = b.client.open_routed(&second, "bob")?;
     assert_eq!(opened.session.session_id, session_id);
-    assert_eq!(opened.body, b"two");
+    assert_eq!(opened.body.as_slice(), b"two");
     let mut tampered = second.clone();
     tampered.envelope.envelope_id = "different-envelope".to_owned();
     assert!(b.client.open_routed(&tampered, "bob").is_err());
@@ -157,7 +173,7 @@ fn device_pair_session_supports_reply_direction() -> Result<(), SdkError> {
     reply.target_delivery_id = "alice".to_owned();
     let entry = seal(&b, &a, reply, b"reply body")?;
     let received = a.client.open_routed(&entry, "alice")?;
-    assert_eq!(received.body, b"reply body");
+    assert_eq!(received.body.as_slice(), b"reply body");
     assert_eq!(received.session.session_id, opened.session.session_id);
     Ok(())
 }
@@ -242,7 +258,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
         distribution_base64: ramflux_protocol::encode_base64url(distribution),
     };
     let entry =
-        seal(&a, &b, message("group-control", conversation), &serde_json::to_vec(&wrapper)?)?;
+        seal_group(&a, &b, message("group-control", conversation), &serde_json::to_vec(&wrapper)?)?;
     let outer = serde_json::to_string(&entry)?;
     assert!(!outer.contains(conversation));
     assert!(!outer.contains(group));
@@ -254,7 +270,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     let delivered = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
     assert_eq!(delivered.routing.kind, Kind::GroupControl);
     let inner = a.client.encrypt_group_message(group, "alice", b"private group text")?;
-    let message = seal(&a, &b, message("group-message", conversation), &inner)?;
+    let message = seal_group(&a, &b, message("group-message", conversation), &inner)?;
     let delivered = b.client.apply_routed_entry(&mut engine, &pool, &message, false).await?;
     assert_eq!(delivered.routing.kind, Kind::GroupMessage);
     let plaintext = delivered.plaintext.ok_or_else(|| invalid("missing group plaintext"))?;
@@ -269,7 +285,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
         &serde_json::json!({"conversation_id":"conflicting-conversation"}),
     )?;
     let inner = a.client.encrypt_group_message(group, "alice", b"second group message")?;
-    let next = seal(&a, &b, super::tests::message("group-next", conversation), &inner)?;
+    let next = seal_group(&a, &b, super::tests::message("group-next", conversation), &inner)?;
     assert!(b.client.apply_routed_entry(&mut engine, &pool, &next, false).await.is_err());
     let direct = seal(
         &a,
@@ -344,7 +360,7 @@ async fn group_message_before_distribution_keeps_content_retryable() -> Result<(
     let distribution = a.client.export_group_sender_key_distribution("pending-group", "alice")?;
     let inner =
         a.client.encrypt_group_message("pending-group", "alice", b"delayed-key plaintext")?;
-    let entry = seal(&a, &b, message("pending-message", "pending-conversation"), &inner)?;
+    let entry = seal_group(&a, &b, message("pending-message", "pending-conversation"), &inner)?;
     let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()
@@ -360,7 +376,7 @@ async fn group_message_before_distribution_keeps_content_retryable() -> Result<(
         actor_manifest_url: None,
         distribution_base64: ramflux_protocol::encode_base64url(distribution),
     };
-    let control = seal(
+    let control = seal_group(
         &a,
         &b,
         message("pending-control", "pending-conversation"),
@@ -380,6 +396,7 @@ struct ReceivingGateway {
     entry: Option<GatewayInboxEntry>,
     last: Option<GatewayClientFrame>,
     reader: AccountDb,
+    receipt_key: String,
     acks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl ramflux_transport::GatewaySessionFrameSink for ReceivingGateway {
@@ -392,13 +409,10 @@ impl ramflux_transport::GatewaySessionFrameSink for ReceivingGateway {
         Box::pin(async move {
             let frame: GatewayClientFrame = serde_json::from_slice(bytes)
                 .map_err(|e| ramflux_transport::TransportError::Quic(e.to_string()))?;
-            if let GatewayClientFrame::Ack { ack } = &frame {
+            if let GatewayClientFrame::Ack { .. } = &frame {
                 assert!(
                     self.reader
-                        .load_actor_state::<Routing>(&format!(
-                            "routed/committed/{}",
-                            ack.envelope_id
-                        ))
+                        .load_actor_state::<super::committed::Committed>(&self.receipt_key)
                         .map_err(|e| ramflux_transport::TransportError::Quic(e.to_string()))?
                         .is_some(),
                     "ACK preceded the durable receive commit"
@@ -463,6 +477,7 @@ async fn compatibility_receive_acks_after_commit_and_returns_cached_plaintext()
         b.config()?,
         Box::new(ReceivingGateway {
             queued: VecDeque::new(),
+            receipt_key: super::committed_key(&entry)?,
             entry: Some(entry),
             last: None,
             reader: b.client.account_db()?.open_reader()?,
@@ -505,4 +520,27 @@ async fn compatibility_receive_acks_after_commit_and_returns_cached_plaintext()
         assert_eq!(acks.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
     Ok(())
+}
+
+#[path = "review_tests.rs"]
+mod review;
+
+fn seal_group(
+    sender: &Fixture,
+    receiver: &Fixture,
+    message: GatewayDirectMessage,
+    body: &[u8],
+) -> Result<GatewayInboxEntry, SdkError> {
+    let value: serde_json::Value = serde_json::from_slice(body)?;
+    let route = if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
+        Route::group_message(value["group_id"].as_str().ok_or_else(|| invalid("group id"))?)
+    } else {
+        let decoded = ramflux_protocol::decode_base64url(
+            value["distribution_base64"].as_str().ok_or_else(|| invalid("distribution"))?,
+        )
+        .map_err(|_| invalid("distribution"))?;
+        let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&decoded)?;
+        Route::group_control(&distribution.group_id)
+    };
+    seal_as(sender, receiver, message, body, route)
 }

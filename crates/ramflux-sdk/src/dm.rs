@@ -290,6 +290,9 @@ mod tests {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SdkDmX3dhHeader {
+    /// Initial envelope identifier retained when a pair is bootstrapped by an object slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_envelope_id: Option<String>,
     pub initiator_identity_public: [u8; 32],
     pub initiator_ephemeral_public: [u8; 32],
     pub initiator_device_id_hash: [u8; 32],
@@ -447,7 +450,11 @@ pub(crate) fn gateway_direct_message_envelope(
     if let Some(franking) = franking {
         envelope.ext.ext.insert("franking".to_owned(), serde_json::to_value(franking)?);
     }
-    envelope.signed.signature = ramflux_crypto::sign_protocol_object(&envelope)?;
+    envelope.signed.signature = if let Some(branch) = config.device_branch.as_ref() {
+        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &envelope)?
+    } else {
+        ramflux_crypto::sign_protocol_object(&envelope)?
+    };
     Ok(envelope)
 }
 

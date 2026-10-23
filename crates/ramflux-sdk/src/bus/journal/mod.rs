@@ -173,3 +173,31 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod receipt_topics {
+    use super::project;
+    use crate::prelude::*;
+    #[test]
+    fn authenticated_message_metadata_preserves_received_topics_with_scoped_receipts()
+    -> Result<(), SdkError> {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
+        let root = std::env::temp_dir()
+            .join(format!("ramflux-received-topic-{}-{suffix}", std::process::id()));
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("a", "a")?;
+        client.unlock_account("a", b"secret")?;
+        client.send_direct_message("thread", "received", "peer", b"PRIVATE_BODY")?;
+        client.account_db()?.persist_actor_state("routed/message-metadata/received",&serde_json::json!({"kind":"direct","conversation_id":"thread","group_id":null,"message_id":"received"}))?;
+        let mut events = Vec::new();
+        for entry in client.account_db()?.pending_outbox(100)? {
+            events.extend(project(&client, &entry)?);
+        }
+        assert!(events.iter().any(|(topic, _, _)| topic == "message.received"));
+        assert!(!serde_json::to_string(&events)?.contains("PRIVATE_BODY"));
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

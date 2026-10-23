@@ -110,6 +110,7 @@ impl RamfluxClient {
             recipient_bundle.signed_prekey,
         )?;
         let header = SdkDmX3dhHeader {
+            bootstrap_envelope_id: None,
             initiator_identity_public: own_identity.public,
             initiator_ephemeral_public: ephemeral.public,
             initiator_device_id_hash,
@@ -213,7 +214,7 @@ impl RamfluxClient {
 
     /// Read-only introspection for realnet integration tests (T21-A2a / CTRL-028), gated behind the
     /// `itest-fingerprint` feature so it is never compiled into production binaries. Returns the
-    /// main-conversation recv session checkpoint, the attachment key-slot recv session checkpoint,
+    /// receive commit watermark (or legacy session checkpoint), the attachment key-slot watermark,
     /// and the gateway receive cursor, so a test can assert that a failed attachment import advances
     /// none of them and a successful retry advances all of them. It exposes no control or mutation
     /// surface — every field is derived from existing read-only projection/cursor lookups.
@@ -229,11 +230,15 @@ impl RamfluxClient {
             dm_attachment_slot_conversation_id(conversation_id, object_id, recipient_device_id);
         Ok(RecvCommitFingerprint {
             main_recv_checkpoint: self
-                .projection_checkpoint(&dm_session_checkpoint_name(conversation_id, "recv"))?,
-            slot_recv_checkpoint: self.projection_checkpoint(&dm_session_checkpoint_name(
-                &slot_conversation_id,
-                "recv",
-            ))?,
+                .projection_checkpoint(&dm_session_checkpoint_name(conversation_id, "recv"))?
+                .or(self.account_db()?.load_actor_state::<String>(
+                    &crate::client::routed::conversation_watermark(conversation_id),
+                )?),
+            slot_recv_checkpoint: self
+                .projection_checkpoint(&dm_session_checkpoint_name(&slot_conversation_id, "recv"))?
+                .or(self.account_db()?.load_actor_state::<String>(
+                    &crate::client::routed::object_watermark(object_id, recipient_device_id)?,
+                )?),
             receive_cursor: self.gateway_receive_cursor(target_delivery_id)?,
         })
     }

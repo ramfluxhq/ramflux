@@ -575,10 +575,7 @@ pub(crate) async fn dispatch_message_receive_request(
     if let Some(conversation) = body.conversation_id.as_deref() {
         for entry in account.pending_deliveries.iter().take(body.limit.min(64)) {
             let id = &entry.envelope.envelope_id;
-            let route =
-                account.client.account_db()?.load_actor_state::<crate::client::routed::Routing>(
-                    &format!("routed/committed/{id}"),
-                )?;
+            let route = account.client.committed_routing(entry)?;
             let legacy = account
                 .client
                 .account_db()?
@@ -642,6 +639,11 @@ async fn receive_bound_legacy(
     let mut engine = account.take_live_engine().await?;
     let result = async {
         for entry in held {
+            if account.client.legacy_routing_binding(&engine.config.device_id, &entry)?.as_deref()
+                != Some(conversation)
+            {
+                continue;
+            }
             account
                 .client
                 .receive_legacy_entry(
@@ -650,7 +652,7 @@ async fn receive_bound_legacy(
                     entry.clone(),
                     crate::client::dm::LegacyReceive {
                         conversation_id: conversation,
-                        auto_fetch_attachments: true,
+                        auto_fetch_attachments: body.auto_fetch_attachments,
                         relay_service_key_base64: body.relay_service_key_base64.clone(),
                     },
                 )
@@ -665,6 +667,10 @@ async fn receive_bound_legacy(
                     now_unix_timestamp(),
                 )
                 .await?;
+            account
+                .client
+                .account_db()?
+                .remove_unrouted(&crate::client::routed::committed_key(&entry)?)?;
             account.client.account_db()?.remove_unrouted(&entry.envelope.envelope_id)?;
             account.merge_deliveries(vec![entry])?;
         }

@@ -6,17 +6,35 @@ use super::{
     GatewayInboxEntry, RamfluxClient, SdkDmEncryptedEnvelope, SdkError, dm_device_id_hash,
 };
 impl RamfluxClient {
+    pub(crate) async fn authorize_bound_legacy(
+        &self,
+        gateway: &crate::GatewaySessionConfig,
+        entry: &GatewayInboxEntry,
+        conversation: &str,
+    ) -> Result<(), SdkError> {
+        if self.legacy_routing_binding(&gateway.device_id, entry)?.as_deref() != Some(conversation)
+        {
+            return Err(SdkError::InboundRejected(
+                "legacy delivery has no matching device/session/conversation binding".to_owned(),
+            ));
+        }
+        self.ensure_inbound_device(gateway, entry).await
+    }
+
     pub(crate) fn legacy_routing_binding(
         &self,
         local: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<String>, SdkError> {
+        if self.v2_blocks_legacy(&entry.envelope.source_device_id)? {
+            return Ok(None);
+        }
         let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|_| SdkError::LocalBus("invalid envelope encoding".to_owned()))?;
         let Ok(envelope) = serde_json::from_slice::<SdkDmEncryptedEnvelope>(&bytes) else {
             return Ok(None);
         };
-        if envelope.version != 1 {
+        if envelope.version != 1 || envelope.schema != "ramflux.sdk.dm_x3dh_envelope.v1" {
             return Err(SdkError::LocalBus("invalid routed envelope".to_owned()));
         }
         let mut binding = None;

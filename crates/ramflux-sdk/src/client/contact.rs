@@ -7,7 +7,7 @@ use crate::prekey::{SdkDeviceManifestEntry, SdkPrekeyResponse};
 use crate::prelude::*;
 
 impl RamfluxClient {
-    fn persist_identity_directory(
+    pub(crate) fn persist_identity_directory(
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
@@ -15,6 +15,29 @@ impl RamfluxClient {
         let old = db
             .client_record("identity", &manifest.principal_id)?
             .unwrap_or_else(|| serde_json::json!({}));
+        if old.get("device_set_hash").is_some()
+            && old
+                .get("contact_identity_commitment")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|commitment| commitment != manifest.principal_commitment)
+        {
+            return Err(SdkError::InboundRejected(
+                "verified principal root commitment changed".to_owned(),
+            ));
+        }
+        for device in &manifest.devices {
+            if db
+                .client_record("device", &device.device_id)?
+                .as_ref()
+                .and_then(|record| record.get("principal_commitment"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|commitment| commitment != manifest.principal_commitment)
+            {
+                return Err(SdkError::InboundRejected(
+                    "verified device owner commitment changed".to_owned(),
+                ));
+            }
+        }
         let material = contact_safety_material_from_manifest(manifest)?;
         let device_set_hash =
             ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&material.devices));
@@ -33,7 +56,7 @@ impl RamfluxClient {
             &serde_json::json!({"principal_id":manifest.principal_id}),
         )?;
         for device in &manifest.devices {
-            db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment}))?;
+            db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key}))?;
         }
         Ok(())
     }
@@ -424,14 +447,22 @@ impl RamfluxClient {
         &self,
         sender_id: &str,
     ) -> Result<Option<String>, SdkError> {
-        let Some(link) = self.account_db()?.friend_link_for_peer(sender_id)? else {
-            return Ok(None);
-        };
-        if link.blocked {
-            return Ok(Some("friend.blocked".to_owned()));
-        }
-        if link.capability_revoked_at.is_some() {
-            return Ok(Some("friend.capability_revoked".to_owned()));
+        let commitment =
+            self.account_db()?.client_record("identity", sender_id)?.and_then(|record| {
+                record
+                    .get("contact_identity_commitment")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        for peer in std::iter::once(sender_id).chain(commitment.as_deref()) {
+            if let Some(link) = self.account_db()?.friend_link_for_peer(peer)? {
+                if link.blocked {
+                    return Ok(Some("friend.blocked".to_owned()));
+                }
+                if link.capability_revoked_at.is_some() {
+                    return Ok(Some("friend.capability_revoked".to_owned()));
+                }
+            }
         }
         Ok(None)
     }

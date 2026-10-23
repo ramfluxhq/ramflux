@@ -38,11 +38,9 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
             db.persist_client_record("identity", &config.principal_id, &value)?;
         }
     }
-    db.persist_client_record(
-        "device",
-        &config.device_id,
-        &json!({"principal_id":config.principal_id}),
-    )?;
+    let mut device = db.client_record("device", &config.device_id)?.unwrap_or_else(|| json!({}));
+    device["principal_id"] = json!(config.principal_id);
+    db.persist_client_record("device", &config.device_id, &device)?;
     Ok(())
 }
 

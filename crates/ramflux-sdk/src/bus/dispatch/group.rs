@@ -568,6 +568,7 @@ async fn dispatch_group_control_delivery(
                     message,
                     delivery.payload_bytes,
                     federation,
+                    crate::client::routed::Route::group_control(delivery.group_id),
                 )?;
             let mut value = serde_json::to_value(response)?;
             value["federated"] = serde_json::Value::Bool(true);
@@ -579,6 +580,7 @@ async fn dispatch_group_control_delivery(
                     &mut engine,
                     message,
                     delivery.payload_bytes,
+                    crate::client::routed::Route::group_control(delivery.group_id),
                 )
                 .await?;
             let mut value = serde_json::to_value(entry)?;
@@ -698,12 +700,14 @@ pub(crate) async fn dispatch_group_send_request(
         };
         if let Some(federation) = body.federation.as_ref() {
             let engine = account.take_live_engine().await?;
-            message.encrypted_body = serde_json::to_vec(&account.client.seal_routed_federated(
-                &engine,
-                &message,
-                &encrypted_body,
-                federation.recipient_prekey_url.as_deref(),
-            )?)?;
+            message.encrypted_body =
+                serde_json::to_vec(&account.client.seal_routed_federated_as(
+                    &engine,
+                    &message,
+                    &encrypted_body,
+                    federation.recipient_prekey_url.as_deref(),
+                    crate::client::routed::Route::group_message(&body.group_id),
+                )?)?;
             let forwarded =
                 account.client.forward_federated_gateway_message(&engine, &message, federation);
             account.put_engine(engine);
@@ -712,7 +716,15 @@ pub(crate) async fn dispatch_group_send_request(
             let mut engine = account.take_live_engine().await?;
             let entry = async {
                 message.encrypted_body = serde_json::to_vec(
-                    &account.client.seal_routed(&mut engine, &message, &encrypted_body).await?,
+                    &account
+                        .client
+                        .seal_routed_as(
+                            &mut engine,
+                            &message,
+                            &encrypted_body,
+                            crate::client::routed::Route::group_message(&body.group_id),
+                        )
+                        .await?,
                 )?;
                 engine
                     .submit_envelope(gateway_direct_message_envelope(
@@ -766,11 +778,12 @@ pub(crate) async fn dispatch_group_send_request(
             };
             if let Some(federation) = route.federation.as_ref() {
                 let engine = account.take_live_engine().await?;
-                let sealed = account.client.seal_routed_federated(
+                let sealed = account.client.seal_routed_federated_as(
                     &engine,
                     &message,
                     &message.encrypted_body,
                     federation.recipient_prekey_url.as_deref(),
+                    crate::client::routed::Route::group_message(&body.group_id),
                 );
                 account.put_engine(engine);
                 message.encrypted_body = serde_json::to_vec(&sealed?)?;
@@ -783,7 +796,12 @@ pub(crate) async fn dispatch_group_send_request(
                 let mut engine = account.take_live_engine().await?;
                 let sealed = account
                     .client
-                    .seal_routed(&mut engine, &message, &message.encrypted_body)
+                    .seal_routed_as(
+                        &mut engine,
+                        &message,
+                        &message.encrypted_body,
+                        crate::client::routed::Route::group_message(&body.group_id),
+                    )
                     .await;
                 let entry = match sealed {
                     Ok(sealed) => {
@@ -917,14 +935,20 @@ async fn send_group_sender_key_distribution_message(
     message: GatewayDirectMessage,
     payload: &[u8],
 ) -> Result<serde_json::Value, SdkError> {
+    let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(payload)?;
+    let bytes = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
+        .map_err(|_| SdkError::InboundRejected("invalid local distribution".to_owned()))?;
+    let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&bytes)?;
+    let kind = crate::client::routed::Route::group_control(&distribution.group_id);
     if let Some(federation) = route.federation.as_ref() {
         let response = client.send_plaintext_federated_direct_message_without_franking(
-            engine, message, payload, federation,
+            engine, message, payload, federation, kind,
         )?;
         return Ok(serde_json::to_value(response)?);
     }
-    let entry =
-        client.send_plaintext_direct_message_without_franking(engine, message, payload).await?;
+    let entry = client
+        .send_plaintext_direct_message_without_franking(engine, message, payload, kind)
+        .await?;
     Ok(serde_json::to_value(entry)?)
 }
 
@@ -997,6 +1021,14 @@ pub(crate) async fn dispatch_group_receive_request(
                 gateway_entries.push(entry);
                 continue;
             }
+            if !account.client.legacy_group_binding(
+                &body.conversation_id,
+                &body.group_id,
+                &entry,
+            )? {
+                continue;
+            }
+            account.client.ensure_inbound_device(&engine.config, &entry).await?;
             if group_entry_is_sender_key_message(&entry)? {
                 message_entries.push(entry);
                 continue;
@@ -1093,6 +1125,10 @@ pub(crate) async fn dispatch_group_receive_request(
                     now_unix_timestamp(),
                 )
                 .await?;
+            account
+                .client
+                .account_db()?
+                .remove_unrouted(&crate::client::routed::committed_key(entry)?)?;
             account.client.account_db()?.remove_unrouted(&entry.envelope.envelope_id)?;
         }
         Ok::<_, SdkError>((gateway_entries, decrypted, sender_key_distributions))
@@ -1123,11 +1159,7 @@ fn group_receive_compat(
         if !seen.insert(id.clone()) {
             continue;
         }
-        let Some(route) =
-            account.client.account_db()?.load_actor_state::<crate::client::routed::Routing>(
-                &format!("routed/committed/{id}"),
-            )?
-        else {
+        let Some(route) = account.client.committed_routing(&entry)? else {
             continue;
         };
         if route.group_id.as_deref() != Some(body.group_id.as_str()) {

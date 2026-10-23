@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("inbound envelope rejected: {0}")]
+    InboundRejected(String),
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
     #[error("storage error: {0}")]

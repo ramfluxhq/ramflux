@@ -111,7 +111,7 @@ fn outbox_and_journal_commit_atomically_and_quarantine_never_evicts() -> Result<
     for n in 0..64 {
         db.hold_unrouted(&format!("e{n}"), n, b"ciphertext", 1)?;
     }
-    assert!(db.hold_unrouted("overflow", 65, b"ciphertext", 1).is_err());
+    db.hold_unrouted("overflow", 65, b"ciphertext", 1)?;
     assert_eq!(db.unrouted_count()?, 64);
     assert_eq!(db.unrouted_entries()?.len(), 64);
     drop(db);
@@ -127,6 +127,58 @@ fn deleting_message_erases_approved_content_copy() -> Result<(), StorageError> {
     assert!(db.message_content("message")?.is_some());
     db.delete_direct_message("conversation", "message", "local", "tombstone")?;
     assert_eq!(db.message_content("message")?, None);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn dead_letters_evict_oldest_expire_and_keep_ciphertext_out_of_journal() -> Result<(), StorageError>
+{
+    let (root, db) = database()?;
+    for n in 0..65 {
+        db.dead_letter_inbox(&format!("bad-{n:02}"),b"PRIVATE_CIPHERTEXT",&serde_json::json!({"envelope_id":format!("e{n}"),"error_code":"authentication_failed"}),100+n)?;
+    }
+    let count: u32 =
+        db.connection
+            .query_row("SELECT count(*) FROM runtime_inbox_dead_letter", [], |row| row.get(0))?;
+    assert_eq!(count, 64);
+    let oldest: String = db.connection.query_row(
+        "SELECT envelope_key FROM runtime_inbox_dead_letter ORDER BY received_at LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(oldest, "bad-01");
+    for event in db.journal_after(0, 100)? {
+        assert!(!serde_json::to_string(&event)?.contains("PRIVATE_CIPHERTEXT"));
+    }
+    db.expire_inbox_holds(165 + 7 * 24 * 60 * 60)?;
+    let count: u32 =
+        db.connection
+            .query_row("SELECT count(*) FROM runtime_inbox_dead_letter", [], |row| row.get(0))?;
+    assert_eq!(count, 0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backoff()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    for n in 0..65 {
+        assert_eq!(db.defer_inbox_entry(&format!("retry-{n:02}"), b"PRIVATE_RETRY", 100)?, 1);
+    }
+    assert_eq!(db.due_inbox_retries(101)?.len(), 0);
+    assert_eq!(db.due_inbox_retries(102)?.len(), 64);
+    assert_eq!(db.journal_after(0, 100)?[0].body["error_code"], "retry_capacity");
+    assert_eq!(db.defer_inbox_entry("retry-64", b"PRIVATE_RETRY", 102)?, 2);
+    assert_eq!(db.due_inbox_retries(105)?.len(), 63);
+    db.expire_inbox_holds(101 + 7 * 24 * 60 * 60)?;
+    assert_eq!(db.due_inbox_retries(i64::MAX)?.len(), 0);
+    let events = db.journal_after(0, 100)?;
+    assert!(events.iter().any(|event| event.body["error_code"] == "retry_expired"));
+    assert!(!serde_json::to_string(&events)?.contains("PRIVATE_RETRY"));
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

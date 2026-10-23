@@ -4,10 +4,10 @@
 //! Unbound legacy envelopes remain encrypted, bounded and never implicitly acknowledged.
 use super::*;
 impl AccountDb {
-    /// Holds an unbound envelope without acknowledging it. A full quarantine fails explicitly.
+    /// Holds an unbound envelope without acknowledging it. Oldest entries are evicted at capacity.
     ///
     /// # Errors
-    /// Returns storage errors or a capacity rejection. Existing entries remain intact.
+    /// Returns storage errors or an oversized-entry rejection. Capacity is bounded by eviction.
     pub fn hold_unrouted(
         &self,
         id: &str,
@@ -24,8 +24,9 @@ impl AccountDb {
                 params![id],
                 |row| row.get(0),
             )?;
-            if exists == 0 && self.unrouted_count()? >= 64 {
-                return Err(StorageError::AuthorizationRejected);
+            self.connection.execute("DELETE FROM runtime_unrouted WHERE received_at<?1",params![at.saturating_sub(7*24*60*60)])?;
+            if exists == 0 {
+                self.connection.execute("DELETE FROM runtime_unrouted WHERE envelope_id IN (SELECT envelope_id FROM runtime_unrouted ORDER BY received_at DESC,inbox_seq DESC,envelope_id DESC LIMIT -1 OFFSET 63)",[])?;
             }
             self.connection.execute(
                 "INSERT OR IGNORE INTO runtime_unrouted VALUES(?1,?2,?3,?4)",

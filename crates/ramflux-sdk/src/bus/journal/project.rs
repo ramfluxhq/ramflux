@@ -19,9 +19,7 @@ pub(crate) fn project(
                 let row = db.client_message_metadata(message)?.unwrap_or_else(
                     || json!({"id":message,"conversation_id":conversation,"removed":true}),
                 );
-                let route = db.load_actor_state::<crate::client::routed::Routing>(&format!(
-                    "routed/committed/{message}"
-                ))?;
+                let route = client.routed_message_metadata(message)?;
                 let topic = if entry.change_kind == "insert" && route.is_some() {
                     if route.as_ref().is_some_and(|route| {
                         route.kind == crate::client::routed::Kind::GroupMessage

@@ -49,6 +49,11 @@ impl RamfluxClient {
         if let Ok(envelope) = serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&encrypted_body)
             && envelope.schema == "ramflux.sdk.group_sender_key.message.v1"
         {
+            if envelope.group_id != group_id {
+                return Err(SdkError::InboundRejected(
+                    "legacy group envelope differs from requested group".to_owned(),
+                ));
+            }
             return self
                 .append_or_pending_group_message(
                     conversation_id,
@@ -69,6 +74,7 @@ impl RamfluxClient {
             self.load_or_create_recv_dm_session(&conversation_id, envelope.x3dh.as_ref())?;
         let plaintext =
             session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
+        validate_legacy_group_payload(&plaintext, group_id)?;
         self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "recv", &session)?;
         if self.apply_group_control_plaintext(&plaintext)?.is_some() {
             return Ok(GroupGatewayDeliveryResult::Message(Vec::new()));
@@ -110,6 +116,11 @@ impl RamfluxClient {
         if let Ok(envelope) = serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&encrypted_body)
             && envelope.schema == "ramflux.sdk.group_sender_key.message.v1"
         {
+            if envelope.group_id != group_id {
+                return Err(SdkError::InboundRejected(
+                    "legacy group envelope differs from requested group".to_owned(),
+                ));
+            }
             return self
                 .append_or_pending_group_message(
                     conversation_id,
@@ -130,6 +141,7 @@ impl RamfluxClient {
             self.load_or_create_recv_dm_session(&conversation_id, envelope.x3dh.as_ref())?;
         let plaintext =
             session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
+        validate_legacy_group_payload(&plaintext, group_id)?;
         self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "recv", &session)?;
         if self.apply_group_control_plaintext(&plaintext)?.is_some() {
             return Ok(GroupGatewayDeliveryResult::Message(Vec::new()));
@@ -249,10 +261,6 @@ impl RamfluxClient {
         }
         match self.decrypt_group_envelope(envelope, message_id) {
             Ok(plaintext) => {
-                if self.apply_group_control_plaintext(&plaintext)?.is_some() {
-                    self.account_db()?.remove_group_pending_undecrypted(message_id)?;
-                    return Ok(Vec::new());
-                }
                 self.send_direct_message(
                     conversation_id,
                     message_id,
@@ -332,4 +340,25 @@ impl RamfluxClient {
             })
             .map_err(SdkError::from)
     }
+}
+
+fn validate_legacy_group_payload(body: &[u8], expected: &str) -> Result<(), SdkError> {
+    let actual = if let Ok(control) = serde_json::from_slice::<SdkGroupControlEnvelope>(body) {
+        serde_json::to_value(control.event.body)?
+            .get("group_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    } else {
+        let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(body)?;
+        let bytes = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
+            .map_err(|_| SdkError::InboundRejected("invalid legacy distribution".to_owned()))?;
+        let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&bytes)?;
+        Some(distribution.group_id)
+    };
+    if actual.as_deref() != Some(expected) {
+        return Err(SdkError::InboundRejected(
+            "legacy group payload differs from requested group".to_owned(),
+        ));
+    }
+    Ok(())
 }

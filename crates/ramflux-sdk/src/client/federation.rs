@@ -5,6 +5,11 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+struct FederatedSendOptions {
+    franking: bool,
+    route: crate::client::routed::Route,
+}
+
 impl RamfluxClient {
     pub fn send_plaintext_federated_direct_message(
         &self,
@@ -14,7 +19,11 @@ impl RamfluxClient {
         federation: &LocalBusFederationRoute,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         self.send_plaintext_federated_direct_message_inner(
-            engine, message, plaintext, federation, true,
+            engine,
+            message,
+            plaintext,
+            federation,
+            FederatedSendOptions { franking: true, route: crate::client::routed::Route::direct() },
         )
     }
 
@@ -24,9 +33,14 @@ impl RamfluxClient {
         message: GatewayDirectMessage,
         plaintext: &[u8],
         federation: &LocalBusFederationRoute,
+        route: crate::client::routed::Route,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         self.send_plaintext_federated_direct_message_inner(
-            engine, message, plaintext, federation, false,
+            engine,
+            message,
+            plaintext,
+            federation,
+            FederatedSendOptions { franking: false, route },
         )
     }
 
@@ -36,13 +50,15 @@ impl RamfluxClient {
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
         federation: &LocalBusFederationRoute,
-        include_franking_ext: bool,
+        options: FederatedSendOptions,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
+        let attachments = options.route.attachments;
         let prekey_url =
             federation.recipient_prekey_url.as_deref().or(engine.config.prekey_http_url.as_deref());
-        let sealed = self.seal_routed_federated(engine, &message, plaintext, prekey_url)?;
-        let franking = include_franking_ext
-            .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
+        let sealed =
+            self.seal_routed_federated_as(engine, &message, plaintext, prekey_url, options.route)?;
+        let franking =
+            options.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
         message.encrypted_body = serde_json::to_vec(&sealed)?;
         self.send_direct_message(
             &message.conversation_id,
@@ -50,7 +66,11 @@ impl RamfluxClient {
             &message.sender_id,
             &message.encrypted_body,
         )?;
-        let (content, _) = crate::client::dm::decode_dm_attachment_body(plaintext)?;
+        let content = zeroize::Zeroizing::new(if attachments {
+            crate::client::dm::decode_dm_attachment_body(plaintext)?.0
+        } else {
+            plaintext.to_vec()
+        });
         self.account_db()?.store_message_content(
             &message.conversation_id,
             &message.message_id,
@@ -123,6 +143,7 @@ impl RamfluxClient {
             },
             &body,
             &request.federation,
+            crate::client::routed::Route::control(),
         )
     }
 

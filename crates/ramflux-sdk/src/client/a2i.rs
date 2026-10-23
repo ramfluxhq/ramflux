@@ -38,6 +38,7 @@ impl RamfluxClient {
             engine,
             message,
             &serde_json::to_vec(event)?,
+            crate::client::routed::Route::control(),
         )
         .await
     }
@@ -45,7 +46,7 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when SDK-owned DM encryption, local projection persistence, envelope
     pub async fn receive_a2i_control_events(
-        &self,
+        &mut self,
         engine: &mut GatewaySessionEngine,
         limit: usize,
     ) -> Result<Vec<A2iControlEvent>, SdkError> {
@@ -56,27 +57,56 @@ impl RamfluxClient {
         let mut events = Vec::new();
         for entry in entries {
             if crate::client::routed::decode(&entry.envelope).is_ok() {
-                let opened = self.open_routed(&entry, &engine.config.device_id)?;
-                if opened.routing.kind != crate::client::routed::Kind::Control {
-                    return Err(SdkError::LocalBus("not an A2I control delivery".to_owned()));
+                let pool = ramflux_transport::RelayQuicPool::new(
+                    ramflux_transport::RelayQuicPoolConfig::functional_default()
+                        .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+                );
+                let delivery = self.apply_routed_entry(engine, &pool, &entry, false).await?;
+                if delivery.routing.kind == crate::client::routed::Kind::Control {
+                    let key = crate::client::routed::committed_key(&entry)?
+                        .replace("routed/committed/", "routed/control/");
+                    if let Some(event) =
+                        self.account_db()?.load_actor_state::<A2iControlEvent>(&key)?
+                    {
+                        let event = self
+                            .account_db()?
+                            .load_actor_state::<A2iControlEvent>(&format!(
+                                "a2i/{}",
+                                event.event_id
+                            ))?
+                            .unwrap_or(event);
+                        if !event.acknowledged {
+                            events.push(event);
+                        }
+                    }
                 }
-                let event: A2iControlEvent = serde_json::from_slice(&opened.body)?;
-                self.persist_pair(
-                    &opened.local_device,
-                    &opened.remote_device,
-                    &opened.bundle_hash,
-                    &opened.session,
-                )?;
-                self.persist_dm_session(
-                    &opened.routing.conversation_id,
+                self.ack_gateway_delivery(
+                    engine,
                     &entry.envelope.envelope_id,
-                    "recv",
-                    &opened.session,
-                )?;
+                    &engine.config.device_id.clone(),
+                    now_unix_timestamp(),
+                )
+                .await?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-                events.push(event);
                 continue;
             }
+            let expected = a2i_control_conversation_id(
+                &entry.envelope.source_device_id,
+                &engine.config.device_id,
+            );
+            if self.legacy_routing_binding(&engine.config.device_id, &entry)?.as_deref()
+                != Some(expected.as_str())
+            {
+                self.account_db()?.hold_unrouted(
+                    &entry.envelope.envelope_id,
+                    entry.inbox_seq,
+                    &serde_json::to_vec(&entry)?,
+                    now_unix_timestamp(),
+                )?;
+                self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                continue;
+            }
+            self.ensure_inbound_device(&engine.config, &entry).await?;
             self.append_gateway_delivery(&entry)?;
             let conversation_id = a2i_control_conversation_id(
                 &entry.envelope.source_device_id,

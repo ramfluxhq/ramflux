@@ -6,6 +6,7 @@ use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+mod inbox_failure;
 mod quarantine;
 mod retention;
 
@@ -29,6 +30,8 @@ impl AccountDb {
         CREATE TABLE IF NOT EXISTS runtime_journal_bounds(singleton INTEGER PRIMARY KEY CHECK(singleton=1),head_seq INTEGER NOT NULL,pruned_through INTEGER NOT NULL);
         INSERT OR IGNORE INTO runtime_journal_bounds VALUES(1,0,0);
         CREATE TABLE IF NOT EXISTS runtime_unrouted(envelope_id TEXT PRIMARY KEY,inbox_seq INTEGER NOT NULL,entry_json BLOB NOT NULL,received_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS runtime_inbox_dead_letter(envelope_key TEXT PRIMARY KEY,entry_json BLOB NOT NULL,error_code TEXT NOT NULL,received_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS runtime_inbox_retry(envelope_key TEXT PRIMARY KEY,entry_json BLOB NOT NULL,attempts INTEGER NOT NULL,next_at INTEGER NOT NULL,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS runtime_message_content(message_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,body BLOB NOT NULL);
         CREATE INDEX IF NOT EXISTS runtime_message_content_conversation ON runtime_message_content(conversation_id,message_id);")?;
         self.connection.execute_batch("CREATE TRIGGER IF NOT EXISTS runtime_content_deleted AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_message_content WHERE message_id=NEW.message_id; END;

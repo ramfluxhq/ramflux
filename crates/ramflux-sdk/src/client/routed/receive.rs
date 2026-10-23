@@ -3,16 +3,26 @@
 
 //! Authenticated routing dispatch and commit-before-cursor receive processing.
 use super::{
-    A2iControlEvent, GatewayInboxEntry, GatewayPlaintextDelivery, GatewaySessionEngine, Kind,
-    MessageMetadata, Opened, RamfluxClient, Routing, SdkError, SdkGroupEncryptedEnvelope,
-    SdkGroupSenderKeyDistribution, SdkGroupSenderKeyDistributionEnvelope, associated_data, decode,
-    invalid, now_unix_timestamp,
+    GatewayInboxEntry, GatewayPlaintextDelivery, GatewaySessionEngine, Kind, MessageMetadata,
+    Opened, RamfluxClient, Routing, SdkError, SdkGroupSenderKeyDistribution,
+    SdkGroupSenderKeyDistributionEnvelope, associated_data, decode, invalid,
 };
 use crate::client::dm::{decode_dm_attachment_body, franking_report_metadata_for_delivery};
 
 pub(crate) struct Delivery {
     pub routing: Routing,
     pub plaintext: Option<GatewayPlaintextDelivery>,
+}
+
+#[derive(Clone, Copy)]
+struct Commit<'a> {
+    opened: &'a Opened,
+    entry: &'a GatewayInboxEntry,
+    body: &'a [u8],
+    metadata: Option<&'a MessageMetadata>,
+    membership: Option<&'a (ramflux_protocol::GroupEvent, String)>,
+    slots: &'a [crate::SdkObjectKeySlot],
+    receipt: &'a str,
 }
 
 impl RamfluxClient {
@@ -23,26 +33,55 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
-        self.append_gateway_delivery(entry)?;
-        let commit = format!("routed/committed/{}", entry.envelope.envelope_id);
-        if let Some(routing) = self.account_db()?.load_actor_state::<Routing>(&commit)? {
-            let plaintext = self.routed_committed_content(&routing, entry)?;
-            return Ok(Delivery { routing, plaintext });
+        self.ensure_inbound_device(&engine.config, entry).await?;
+        let commit = super::committed_key(entry)?;
+        if let Some(receipt) =
+            self.account_db()?.load_actor_state::<super::committed::Committed>(&commit)?
+        {
+            if receipt.entry.envelope.payload_hash != entry.envelope.payload_hash {
+                return Err(invalid("envelope id reused with a different authenticated payload"));
+            }
+            let plaintext = self.routed_committed_content(&receipt.routing, &receipt.entry)?;
+            return Ok(Delivery { routing: receipt.routing, plaintext });
         }
-        let opened = self.open_routed(entry, &engine.config.device_id)?;
-        self.confirm_routed_context(&opened.routing)?;
-        let (body, refs) = if opened.routing.kind == Kind::Direct {
-            decode_dm_attachment_body(&opened.body)?
+        let mut opened = self.open_routed(entry, &engine.config.device_id)?;
+        self.confirm_routed_context(&opened.routing, entry)?;
+        let (body, refs) = if opened.routing.attachments {
+            let (body, refs) = decode_dm_attachment_body(&opened.body)?;
+            (zeroize::Zeroizing::new(body), refs)
         } else {
             (opened.body.clone(), Vec::new())
         };
-        for attachment in &refs {
-            self.persist_received_attachment_reference(
+        let envelope = decode(&entry.envelope)?;
+        let aad = associated_data(
+            &entry.envelope.envelope_id,
+            &opened.remote_device,
+            &opened.local_device,
+            &opened.bundle_hash,
+        )?;
+        let metadata = if opened.routing.kind == Kind::Direct {
+            franking_report_metadata_for_delivery(
+                &opened.routing.conversation_id,
+                entry,
+                &envelope,
+                &opened.decrypted,
+                Some(&aad),
+            )?
+        } else {
+            None
+        };
+        let mut consumed_slots = Vec::new();
+        let accepted = self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none();
+        for attachment in refs.iter().filter(|_| accepted) {
+            if self.persist_received_reference_with_pair(
                 attachment,
                 &entry.envelope.source_principal_id,
                 &opened.routing.conversation_id,
                 &entry.envelope.envelope_id,
-            )?;
+                &mut opened.session,
+            )? {
+                consumed_slots.push(attachment.key_slot.clone());
+            }
         }
         let mut imported = Vec::new();
         if attachments
@@ -63,58 +102,26 @@ impl RamfluxClient {
         } else {
             None
         };
-        if opened.routing.kind == Kind::Direct {
-            self.apply_contact_event_plaintext(&body)?;
-        }
-        let envelope = decode(&entry.envelope)?;
-        let aad = associated_data(
-            &entry.envelope.envelope_id,
-            &opened.remote_device,
-            &opened.local_device,
-            &opened.bundle_hash,
-        )?;
-        let metadata = if opened.routing.kind == Kind::Direct {
-            franking_report_metadata_for_delivery(
-                &opened.routing.conversation_id,
-                entry,
-                &envelope,
-                &opened.decrypted,
-                Some(&aad),
-            )?
-        } else {
-            None
-        };
-        let plaintext = self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
-            if let Some((event, key)) = &membership {
-                self.apply_bootstrap_group_member_join_event(
-                    event,
-                    &entry.envelope.source_device_id,
-                    key,
-                )?;
-            }
-            let plaintext = self.project_routed(&opened, entry, &body, metadata.as_ref())?;
-            self.persist_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.bundle_hash,
-                &opened.session,
-            )?;
-            self.persist_dm_session(
-                &opened.routing.conversation_id,
-                &entry.envelope.envelope_id,
-                "recv",
-                &opened.session,
-            )?;
-            self.account_db()?.persist_actor_state(&commit, &opened.routing)?;
-            Ok(plaintext)
+        let plaintext = self.commit_routed_projection(Commit {
+            opened: &opened,
+            entry,
+            body: &body,
+            metadata: metadata.as_ref(),
+            membership: membership.as_ref(),
+            slots: &consumed_slots,
+            receipt: &commit,
         })?;
-        let plaintext = plaintext.map(|plaintext| GatewayPlaintextDelivery {
-            entry: entry.clone(),
-            conversation_id: opened.routing.conversation_id.clone(),
-            message_id: entry.envelope.envelope_id.clone(),
-            sender_id: entry.envelope.source_principal_id.clone(),
-            plaintext_body_base64: ramflux_protocol::encode_base64url(&plaintext),
-            attachments: imported,
+        self.refresh_routed_control_cache(&opened, &body)?;
+        let plaintext = plaintext.map(|plaintext| {
+            let plaintext = zeroize::Zeroizing::new(plaintext);
+            GatewayPlaintextDelivery {
+                entry: entry.clone(),
+                conversation_id: opened.routing.conversation_id.clone(),
+                message_id: entry.envelope.envelope_id.clone(),
+                sender_id: entry.envelope.source_principal_id.clone(),
+                plaintext_body_base64: ramflux_protocol::encode_base64url(&plaintext),
+                attachments: imported,
+            }
         });
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmRecv).await?;
@@ -149,11 +156,45 @@ impl RamfluxClient {
         Ok(plaintext)
     }
 
-    fn confirm_routed_context(&self, route: &Routing) -> Result<(), SdkError> {
-        if let Some(conversation) =
-            self.account_db()?.client_record("conversation", &route.conversation_id)?
+    fn confirm_routed_context(
+        &self,
+        route: &Routing,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        if matches!(route.kind, Kind::Direct | Kind::GroupMessage)
+            && self.direct_message_by_id(&route.message_id)?.is_some()
         {
+            return Err(invalid("message id is already owned by another committed delivery"));
+        }
+        let context = self.account_db()?.client_record("conversation", &route.conversation_id)?;
+        if route.kind == Kind::Direct
+            && context.is_none()
+            && self
+                .conversation_list()?
+                .iter()
+                .any(|conversation| conversation.conversation_id == route.conversation_id)
+        {
+            return Err(invalid(
+                "existing direct conversation has no explicit participant binding",
+            ));
+        }
+        if let Some(conversation) = context {
             let kind = conversation.get("kind").and_then(serde_json::Value::as_str);
+            if route.kind == Kind::Direct
+                && !conversation
+                    .get("participants")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|participants| {
+                        participants.iter().any(|id| {
+                            id.as_str() == Some(&entry.envelope.source_principal_id)
+                                || id.as_str() == Some(&entry.envelope.source_device_id)
+                        })
+                    })
+            {
+                return Err(invalid(
+                    "authenticated sender is not a direct conversation participant",
+                ));
+            }
             if (route.kind == Kind::Direct && kind == Some("group"))
                 || (matches!(route.kind, Kind::GroupMessage | Kind::GroupControl)
                     && kind == Some("direct"))
@@ -222,107 +263,45 @@ impl RamfluxClient {
         Ok(membership)
     }
 
-    fn project_routed(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-        metadata: Option<&MessageMetadata>,
-    ) -> Result<Option<Vec<u8>>, SdkError> {
-        let route = &opened.routing;
-        match route.kind {
-            Kind::Direct => {
-                if self
-                    .apply_receipt_event_plaintext(body, &entry.envelope.source_device_id)?
-                    .is_some()
-                {
-                    return Ok(None);
-                }
-                if let Some(reason) =
-                    self.friend_rejection_reason(&entry.envelope.source_principal_id)?
-                {
-                    self.account_db()?.reject_inbox_message(
-                        &route.conversation_id,
-                        &route.message_id,
-                        &entry.envelope.source_principal_id,
-                        &reason,
-                        now_unix_timestamp(),
-                    )?;
-                    return Ok(None);
-                }
-                self.append_plaintext_projection_once(
-                    &route.conversation_id,
-                    entry,
-                    body,
-                    metadata,
+    fn commit_routed_projection(&self, context: Commit<'_>) -> Result<Option<Vec<u8>>, SdkError> {
+        let Commit { opened, entry, body, metadata, membership, slots, receipt } = context;
+        self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
+            if let Some((event, key)) = membership {
+                self.apply_bootstrap_group_member_join_event(
+                    event,
+                    &entry.envelope.source_device_id,
+                    key,
                 )?;
-                if self
-                    .account_db()?
-                    .client_record("conversation", &route.conversation_id)?
-                    .is_none()
-                {
-                    self.account_db()?.persist_client_record("conversation",&route.conversation_id,&serde_json::json!({"kind":"direct","title":null,"group_id":null,"participants":[self.device_branch.as_ref().map(|branch|&branch.principal_id),Some(&entry.envelope.source_principal_id)],"direct_route":null}))?;
-                }
-                Ok(Some(body.to_vec()))
             }
-            Kind::Receipt => {
-                self.apply_receipt_event_plaintext(body, &entry.envelope.source_device_id)?
-                    .ok_or_else(|| invalid("invalid routed receipt"))?;
-                Ok(None)
+            let plaintext = self.project_routed(opened, entry, body, metadata)?;
+            self.persist_pair(
+                &opened.local_device,
+                &opened.remote_device,
+                &opened.bundle_hash,
+                &opened.session,
+            )?;
+            for slot in slots {
+                self.persist_pair_slot_receipt(slot)?;
             }
-            Kind::GroupControl => {
-                self.account_db()?.store_message_content(
-                    &route.conversation_id,
-                    &route.message_id,
-                    body,
+            if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+                self.account_db()?.persist_actor_state(
+                    &format!("routed/message-metadata/{}", opened.routing.message_id),
+                    &opened.routing,
                 )?;
-                if self.apply_group_control_plaintext(body)?.is_some() {
-                    return Ok(None);
-                }
-                if let Ok(wrapper) =
-                    serde_json::from_slice::<SdkGroupSenderKeyDistributionEnvelope>(body)
-                {
-                    let bytes = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
-                        .map_err(|_| invalid("invalid distribution"))?;
-                    self.import_group_sender_key_distribution_inner(&bytes, true)?;
-                }
-                Ok(None)
             }
-            Kind::GroupMessage => {
-                let group: SdkGroupEncryptedEnvelope = serde_json::from_slice(body)?;
-                if Some(group.group_id.as_str()) != route.group_id.as_deref() {
-                    return Err(invalid("group message routing mismatch"));
-                }
-                let mut inner = entry.clone();
-                inner.envelope.encrypted_payload = ramflux_protocol::encode_base64url(body);
-                let plaintext = self.append_or_pending_group_message(
-                    &route.conversation_id,
-                    &route.message_id,
-                    &inner,
-                    body,
-                    &group,
-                )?;
-                if !route.conversation_id.starts_with("group.sender_key.distribution:") {
-                    self.account_db()?.persist_client_record("group",&group.group_id,&serde_json::json!({"conversation_id":route.conversation_id,"conversation_ids":[route.conversation_id]}))?;
-                    self.account_db()?.persist_client_record("conversation",&route.conversation_id,&serde_json::json!({"kind":"group","group_id":group.group_id,"title":null,"direct_route":null}))?;
-                }
-                if self.direct_message_by_id(&route.message_id)?.is_some() {
-                    self.account_db()?.store_message_content(
-                        &route.conversation_id,
-                        &route.message_id,
-                        &plaintext,
-                    )?;
-                    Ok(Some(plaintext))
-                } else {
-                    Ok(None)
-                }
-            }
-            Kind::Control => {
-                let event: A2iControlEvent = serde_json::from_slice(body)?;
-                self.account_db()?
-                    .persist_actor_state(&format!("a2i/{}", event.event_id), &event)?;
-                Ok(None)
-            }
-        }
+            self.account_db()?.persist_actor_state(
+                &super::conversation_watermark(&opened.routing.conversation_id),
+                &receipt,
+            )?;
+            self.append_gateway_delivery(entry)?;
+            self.account_db()?.persist_actor_state(
+                receipt,
+                &super::committed::Committed {
+                    routing: opened.routing.clone(),
+                    entry: entry.clone(),
+                },
+            )?;
+            Ok(plaintext)
+        })
     }
 }

@@ -189,6 +189,7 @@ impl RamfluxClient {
             snapshot_id: snapshot_id.to_owned(),
             messages,
             dm_sessions,
+            pair_sessions: self.pair_history_snapshots(source_device_id)?,
             groups,
             sender_key_distributions_base64,
         })
@@ -449,6 +450,10 @@ impl RamfluxClient {
                 &session.direction,
                 &session.snapshot,
             )?;
+            imported_dm_sessions = imported_dm_sessions.saturating_add(1);
+        }
+        for pair in &bundle.pair_sessions {
+            self.archive_pair_history(pair, &bundle.source_device_id, &bundle.snapshot_id)?;
             imported_dm_sessions = imported_dm_sessions.saturating_add(1);
         }
         for message in &bundle.messages {
@@ -720,6 +725,7 @@ mod tests {
             snapshot_id: "snapshot_sync".to_owned(),
             messages,
             dm_sessions: Vec::new(),
+            pair_sessions: Vec::new(),
             groups,
             sender_key_distributions_base64: Vec::new(),
         }
@@ -819,6 +825,51 @@ mod tests {
         assert!(error.to_string().contains("below joined epoch"));
         assert!(client.direct_message_by_id("msg_sync_before_join")?.is_none());
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn own_device_pair_history_is_imported_without_activating_another_devices_ratchet()
+    -> Result<(), SdkError> {
+        let (source, source_root) =
+            client_with_account("pair-history-source", "principal_sync", "source_device_sync")?;
+        let (target, target_root) =
+            client_with_account("pair-history-target", "principal_sync", "target_device_sync")?;
+        let session = ramflux_crypto::DmSession::initiator(
+            [1; 32],
+            dm_device_id_hash("source_device_sync"),
+            dm_device_id_hash("remote_device"),
+            [2; 32],
+        )?;
+        source.persist_pair("source_device_sync", "remote_device", &[3; 32], &session)?;
+        let history = source.own_device_history_bundle(
+            "principal_sync",
+            "source_device_sync",
+            "target_device_sync",
+            "snapshot_sync",
+        )?;
+        assert_eq!(history.pair_sessions.len(), 1);
+        assert_eq!(history.dm_sessions.len(), 0);
+        let imported = target.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(imported.imported_dm_sessions, 1);
+        assert_eq!(
+            target
+                .account_db()?
+                .list_actor_states::<serde_json::Value>("own-device/pair-history/")?
+                .len(),
+            1
+        );
+        assert_eq!(
+            target.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/")?.len(),
+            0
+        );
+        assert!(target.load_dm_session("thread", "recv").is_err());
+        drop(source);
+        drop(target);
+        std::fs::remove_dir_all(source_root)?;
+        std::fs::remove_dir_all(target_root)?;
         Ok(())
     }
 }

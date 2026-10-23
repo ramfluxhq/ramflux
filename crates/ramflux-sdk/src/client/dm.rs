@@ -82,7 +82,14 @@ impl RamfluxClient {
         message: GatewayDirectMessage,
         plaintext: &[u8],
     ) -> Result<GatewayInboxEntry, SdkError> {
-        self.send_plaintext_direct_message_via_gateway_inner(engine, message, plaintext, true).await
+        self.send_plaintext_direct_message_via_gateway_inner(
+            engine,
+            message,
+            plaintext,
+            true,
+            crate::client::routed::Route::direct(),
+        )
+        .await
     }
 
     pub(crate) async fn send_plaintext_direct_message_without_franking(
@@ -90,9 +97,12 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         message: GatewayDirectMessage,
         plaintext: &[u8],
+        route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        self.send_plaintext_direct_message_via_gateway_inner(engine, message, plaintext, false)
-            .await
+        self.send_plaintext_direct_message_via_gateway_inner(
+            engine, message, plaintext, false, route,
+        )
+        .await
     }
 
     async fn send_plaintext_direct_message_via_gateway_inner(
@@ -101,8 +111,10 @@ impl RamfluxClient {
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
         include_franking_ext: bool,
+        route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let sealed = self.seal_routed(engine, &message, plaintext).await?;
+        let attachments = route.attachments;
+        let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
         let franking = include_franking_ext
             .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
         message.encrypted_body = serde_json::to_vec(&sealed)?;
@@ -112,7 +124,11 @@ impl RamfluxClient {
             &message.sender_id,
             &message.encrypted_body,
         )?;
-        let (content, _) = crate::client::dm::decode_dm_attachment_body(plaintext)?;
+        let content = zeroize::Zeroizing::new(if attachments {
+            crate::client::dm::decode_dm_attachment_body(plaintext)?.0
+        } else {
+            plaintext.to_vec()
+        });
         self.account_db()?.store_message_content(
             &message.conversation_id,
             &message.message_id,
@@ -191,6 +207,7 @@ impl RamfluxClient {
             message,
             &envelope_plaintext,
             include_franking_ext,
+            crate::client::routed::Route::attachments(),
         )
         .await
     }
@@ -205,7 +222,9 @@ impl RamfluxClient {
         envelope: SdkReceiptEventEnvelope,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let plaintext = serde_json::to_vec(&envelope)?;
-        let sealed = self.seal_routed(engine, &message, &plaintext).await?;
+        let sealed = self
+            .seal_routed_as(engine, &message, &plaintext, crate::client::routed::Route::receipt())
+            .await?;
         message.encrypted_body = serde_json::to_vec(&sealed)?;
         let gateway_envelope = gateway_direct_message_envelope(&engine.config, &message, None)?;
         let entry = engine.submit_envelope(gateway_envelope).await?;
@@ -264,6 +283,7 @@ impl RamfluxClient {
                 }
                 continue;
             }
+            let legacy_key = crate::client::routed::committed_key(&entry)?;
             let legacy_id = entry.envelope.envelope_id.clone();
             if let Some(delivery) = self
                 .receive_legacy_entry(
@@ -280,6 +300,7 @@ impl RamfluxClient {
             {
                 plaintext.push(delivery);
             }
+            self.account_db()?.remove_unrouted(&legacy_key)?;
             self.account_db()?.remove_unrouted(&legacy_id)?;
         }
         Ok(plaintext)
@@ -292,6 +313,8 @@ impl RamfluxClient {
         entry: GatewayInboxEntry,
         options: LegacyReceive<'_>,
     ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
+        self.authorize_bound_legacy(&engine.config, &entry, options.conversation_id).await?;
+
         let conversation_id = options.conversation_id;
         let terminal = format!("legacy/committed/{}", entry.envelope.envelope_id);
         if self.account_db()?.load_actor_state::<String>(&terminal)?.as_deref()

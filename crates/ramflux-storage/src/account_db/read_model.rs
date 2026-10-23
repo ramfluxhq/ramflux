@@ -20,6 +20,9 @@ impl AccountDb {
         limit: u32,
     ) -> Result<Vec<String>, StorageError> {
         let sql = match directory {
+            "device" => {
+                "SELECT substr(state_kind,18) AS id FROM runtime_actor_state WHERE state_kind GLOB 'directory/device/*'"
+            }
             "conversation" => {
                 "SELECT conversation_id AS id FROM direct_message_projection UNION SELECT conversation_id FROM conversation_projection UNION SELECT conversation_id FROM conversation_list_state UNION SELECT substr(state_kind,24) FROM runtime_actor_state WHERE state_kind GLOB 'directory/conversation/*'"
             }

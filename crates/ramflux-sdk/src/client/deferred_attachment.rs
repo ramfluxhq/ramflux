@@ -26,6 +26,8 @@ struct PreparedSlot {
     session: ramflux_crypto::DmSessionSnapshot,
     conversation_id: String,
     commit_label: String,
+    #[serde(default)]
+    pair_slot: Option<SdkObjectKeySlot>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -46,6 +48,40 @@ impl RamfluxClient {
         conversation: &str,
         message: &str,
     ) -> Result<(), SdkError> {
+        let prepared = self.decrypt_object_key_slot(&reference.key_slot).ok();
+        self.persist_received_reference_prepared(reference, owner, conversation, message, prepared)
+    }
+    pub(crate) fn persist_received_reference_with_pair(
+        &self,
+        reference: &SdkDmAttachmentRef,
+        owner: &str,
+        conversation: &str,
+        message: &str,
+        session: &mut ramflux_crypto::DmSession,
+    ) -> Result<bool, SdkError> {
+        let prepared = if reference.key_slot.version == 2 {
+            self.decrypt_pair_object_slot(&reference.key_slot, Some(session)).ok()
+        } else {
+            self.decrypt_object_key_slot(&reference.key_slot).ok()
+        };
+        let consumed = prepared.is_some() && reference.key_slot.version == 2;
+        self.persist_received_reference_prepared(
+            reference,
+            owner,
+            conversation,
+            message,
+            prepared,
+        )?;
+        Ok(consumed)
+    }
+    fn persist_received_reference_prepared(
+        &self,
+        reference: &SdkDmAttachmentRef,
+        owner: &str,
+        conversation: &str,
+        message: &str,
+        prepared: Option<DeferredObjectKeySlot>,
+    ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let key = reference_key(&reference.object_id);
         if db.load_actor_state::<ReceivedAttachment>(&key)?.is_some() {
@@ -54,13 +90,13 @@ impl RamfluxClient {
         }
         // Extract the content key while receive-time private prekeys are available, without
         // advancing its durable slot checkpoint. A bad slot must not block message receipt.
-        let prepared_slot =
-            self.decrypt_object_key_slot(&reference.key_slot).ok().map(|slot| PreparedSlot {
-                object_key: slot.object_key,
-                session: slot.session.snapshot(),
-                conversation_id: slot.conversation_id,
-                commit_label: slot.commit_label,
-            });
+        let prepared_slot = prepared.map(|slot| PreparedSlot {
+            object_key: slot.object_key,
+            session: slot.session.snapshot(),
+            conversation_id: slot.conversation_id,
+            commit_label: slot.commit_label,
+            pair_slot: slot.pair_slot,
+        });
         let metadata = json!({
             "name":null,"mime":null,"size":reference.cipher_size.checked_sub(16),
             "direction":"incoming","owner":owner,"conversation_id":conversation,
@@ -278,6 +314,7 @@ impl RamfluxClient {
                     session: ramflux_crypto::DmSession::from_snapshot(slot.session)?,
                     conversation_id: slot.conversation_id,
                     commit_label: slot.commit_label,
+                    pair_slot: slot.pair_slot,
                 })
             })
             .transpose()

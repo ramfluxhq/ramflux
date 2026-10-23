@@ -114,14 +114,57 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
             value["body_utf8"] = serde_json::json!(String::from_utf8_lossy(&content));
             let mut attachments = Vec::new();
             for object in db.client_message_object_ids(&message.message_id)? {
-                let mut row = super::read_model::row(client, "object", &object)?;
-                row["object_id"] = serde_json::json!(object);
-                row["imported"] = serde_json::json!(true);
-                attachments.push(row);
+                let metadata = super::read_model::row(client, "object", &object)?;
+                let mut reference = serde_json::json!({"object_id":object,"status":"referenced"});
+                for field in [
+                    "name",
+                    "size",
+                    "mime",
+                    "owner",
+                    "conversation_id",
+                    "message_id",
+                    "manifest_hash",
+                ] {
+                    if let Some(value) = metadata.get(field) {
+                        reference[field] = value.clone();
+                    }
+                }
+                attachments.push(reference);
             }
             value["attachments"] = serde_json::json!(attachments);
         }
         messages.push(value);
     }
     Ok(serde_json::json!({"messages":messages,"rejected":client.rejected_inbox(conversation)?}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failed_attachment_fetch_keeps_the_conversation_content_snapshot_unchanged()
+    -> Result<(), SdkError> {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
+        let root = std::env::temp_dir()
+            .join(format!("ramflux-message-fetch-snapshot-{}-{suffix}", std::process::id()));
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("a", "a")?;
+        client.unlock_account("a", b"secret")?;
+        client.send_direct_message("thread", "message", "peer", b"ciphertext")?;
+        let db = client.account_db()?;
+        db.store_message_content("thread", "message", b"approved content")?;
+        db.persist_actor_state("attachment/reference/remote", &serde_json::json!({}))?;
+        db.persist_client_record("object","remote",&serde_json::json!({"owner":"peer","size":42,"message_id":"message","conversation_id":"thread"}))?;
+        let before = message_page(&client, "thread")?;
+        db.persist_actor_state("attachment/fetch/remote",&serde_json::json!({"object_id":"remote","operation_id":"fetch","transfer_state":"failed","last_error":"attachment unavailable","attempts":1}))?;
+        assert_eq!(message_page(&client, "thread")?, before);
+        assert_eq!(
+            super::super::read_model::row(&client, "object", "remote")?["transfer_state"],
+            "failed"
+        );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
