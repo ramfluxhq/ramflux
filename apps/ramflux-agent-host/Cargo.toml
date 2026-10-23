@@ -1,0 +1,19 @@
+[package]
+name = "ramflux-agent-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ramflux-sdk.workspace = true
+ramflux-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
+
+[lints]
+workspace = true

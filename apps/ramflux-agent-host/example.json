@@ -1,0 +1,12 @@
+{
+  "socket": "/run/user/1000/ramflux/rfd.sock",
+  "state_file": "/run/user/1000/ramflux-agent/cursor.json",
+  "account_id": "agent",
+  "poll_interval_ms": 250,
+  "per_conversation_interval_ms": 1000,
+  "max_conversations": 128,
+  "rules": [
+    { "pattern": "@agent ping", "reply": "pong" },
+    { "pattern": "@agent summarize", "reply": "Summary\n- Request received.\n- Deterministic rule engine completed." }
+  ]
+}
