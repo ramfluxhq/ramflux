@@ -40,6 +40,7 @@ pub const A2I_CONTROL: &str = "ramflux.a2i_control.v1";
 pub const A2UI_SURFACE: &str = "ramflux.a2ui_surface.v1";
 pub const A2UI_SURFACE_HASH: &str = "ramflux.a2ui.surface_hash.v1";
 pub const A2UI_ACTION_ARGS: &str = "ramflux.a2ui.action_args.v1";
+pub const SURFACE_CARRIER: &str = "ramflux.surface.carrier.v2";
 pub const PUSH_ALIAS: &str = "ramflux.push_alias.v1";
 pub const FEDERATION_HANDSHAKE: &str = "ramflux.federation_handshake.v1";
 pub const X3DH_PREKEY_BUNDLE: &str = "ramflux.x3dh.prekey_bundle.v1";
@@ -62,7 +63,7 @@ pub const KEY_VERIFICATION_DEVICE_SET: &str = "ramflux.device_set.v1";
 pub const REGISTRATION_POW: &str = "ramflux.registration_pow.v1";
 pub const REGISTRATION_TRUST_TIER: &str = "ramflux.registration_trust_tier.v1";
 
-pub const ALL: [&str; 56] = [
+pub const ALL: [&str; 57] = [
     EVENT,
     ENVELOPE,
     OBJECT,
@@ -98,6 +99,7 @@ pub const ALL: [&str; 56] = [
     A2UI_SURFACE,
     A2UI_SURFACE_HASH,
     A2UI_ACTION_ARGS,
+    SURFACE_CARRIER,
     PUSH_ALIAS,
     FEDERATION_HANDSHAKE,
     X3DH_PREKEY_BUNDLE,
