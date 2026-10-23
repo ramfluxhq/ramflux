@@ -77,10 +77,26 @@ logs, exits nonzero, and retains the project for diagnosis. Compose runs from th
 state directory with absolute file paths; neither `--project-directory` nor
 `--wait` is used. Normal `down` preserves named volumes and all trust files.
 Initialization recovers missing generated trust files using the same saved keys.
-`runtime.env` explicitly sets every required keyring-provider input, including
+`runtime.env` explicitly sets every relay environment variable, including its
+30-second refresh interval and internal listener address, plus gateway/federation
+path and mode defaults. Required keyring-provider inputs include
 `RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json`
 and `RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json`.
 Concrete values avoid unresolved self-referential defaults in podman-compose 1.3.0.
+The actual-provider regression renders the complete generated project and rejects
+unresolved `${...}` expressions anywhere in the result. Run it without a container
+runtime, using an installed `podman-compose` (with its Python dependencies):
+
+```sh
+DEMO_TEST_PODMAN_COMPOSE=podman-compose \
+  python3 -m unittest discover -s deploy/scripts/tests -v
+```
+
+For a standalone provider script, set `DEMO_TEST_PODMAN_COMPOSE` to its Python
+command instead. The config test uses a stub Podman executable that permits only
+`--version`; it cannot start containers. It is explicitly skipped if no provider
+is installed or configured. Other lifecycle tests always use fake CLIs.
+
 The keyring and signed snapshot use the read-only `secrets/federation` mount; the
 relay creates and persists its verified snapshot cache and anti-rollback state in
 `relay-redb`. The wrapper never seeds or resets that cache. To repair an existing

@@ -49,7 +49,16 @@ if sys.argv[1] == "init":
         files = ("issuer-cert.json",) if name == "gateway-v3" else ("provider-keyring.json", "trust-snapshot.json")
         for filename in files:
             (directory / filename).write_text("{}")
-    (root / "identity.env").write_text("DEMO_EXPECTED_NODE_PUBLIC_KEY=test-public-pin\\nRAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY=test-offline-root\\n")
+    identity = {
+        "DEMO_EXPECTED_NODE_PUBLIC_KEY": "test-public-pin",
+        "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY": "test-offline-root",
+        "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL": "test-service-seed",
+        "RAMFLUX_GATEWAY_V3_ISSUER_SEED": "test-issuer-seed",
+        "RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL": "test-discovery-seed",
+        "RAMFLUX_ROUTER_ADMIN_TOKEN": "test-admin-token",
+        "RAMFLUX_FEDERATION_ADMIN_TOKEN": "test-admin-token",
+    }
+    (root / "identity.env").write_text("".join(f"{key}={value}\\n" for key, value in identity.items()))
 else:
     assert sys.argv[3] == "test-public-pin"
     import json
