@@ -43,14 +43,12 @@ impl RamfluxClient {
                 if session.session_id != envelope.ciphertext.session_id {
                     continue;
                 }
-                let snapshot = serde_json::to_value(session.snapshot())?;
-                let sender =
-                    serde_json::to_value(dm_device_id_hash(&entry.envelope.source_device_id))?;
-                let recipient = serde_json::to_value(dm_device_id_hash(local))?;
-                if (snapshot["sender_device_id_hash"] == sender
-                    && snapshot["recipient_device_id_hash"] == recipient)
-                    || (snapshot["sender_device_id_hash"] == recipient
-                        && snapshot["recipient_device_id_hash"] == sender)
+                let sender = dm_device_id_hash(&entry.envelope.source_device_id);
+                let recipient = dm_device_id_hash(local);
+                if (session.sender_device_id_hash == sender
+                    && session.recipient_device_id_hash == recipient)
+                    || (session.sender_device_id_hash == recipient
+                        && session.recipient_device_id_hash == sender)
                 {
                     if binding.is_some() {
                         return Ok(None);

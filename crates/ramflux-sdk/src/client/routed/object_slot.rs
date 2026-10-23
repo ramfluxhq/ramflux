@@ -78,20 +78,22 @@ impl RamfluxClient {
         };
         let (mut session, bundle) =
             self.recv_pair_session(local, &remote, "object-slot", &envelope)?;
-        let active = if let Some(current) = current {
+        if let Some(current) = current.as_ref() {
             if current.session_id != session.session_id {
                 return Err(invalid("attachment slot differs from message pair session"));
             }
-            current
-        } else {
-            &mut session
-        };
+            session = (**current).clone();
+        }
+        let active = &mut session;
         let key = zeroize::Zeroizing::new(
             active
                 .decrypt(&slot.ciphertext, &slot_aad(&slot.object_id, &remote, local, &bundle)?)?,
         );
         let object_key: [u8; 32] =
             key.as_slice().try_into().map_err(|_| invalid("invalid pair object key length"))?;
+        if let Some(current) = current {
+            *current = active.clone();
+        }
         Ok(DeferredObjectKeySlot {
             object_key,
             session: Some(ramflux_crypto::DmSession::from_snapshot(active.snapshot())?),

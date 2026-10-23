@@ -550,3 +550,6 @@ fn seal_group(
 
 #[path = "r4_tests.rs"]
 mod r4;
+
+#[path = "r5_tests.rs"]
+mod r5;

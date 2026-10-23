@@ -80,12 +80,22 @@ async fn receive(
                 } else if bytes.len() > 1024 * 1024 {
                     "oversized_retry"
                 } else {
-                    account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)?;
-                    account.client.persist_gateway_receive_cursor(
-                        engine.target_delivery_id(),
-                        entry.inbox_seq,
+                    set_failure_policy(
+                        &account.client,
+                        &engine.config.device_id,
+                        &entry,
+                        &key,
+                        &bytes,
+                        now,
                     )?;
-                    continue;
+                    if account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)? != 0 {
+                        account.client.persist_gateway_receive_cursor(
+                            engine.target_delivery_id(),
+                            entry.inbox_seq,
+                        )?;
+                        continue;
+                    }
+                    "retry_exhausted"
                 };
                 account.client.account_db()?.dead_letter_inbox(&key,&bytes,&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"error_code":code}),now)?;
                 false
@@ -204,8 +214,9 @@ fn redrive_if_state_changed(client: &RamfluxClient) -> Result<(), SdkError> {
     let db = client.account_db()?;
     let revision = db.inbox_recovery_revision()?;
     let key = "inbox/recovery-revision";
-    if db.load_actor_state::<u64>(key)?.unwrap_or(0) != revision {
-        db.redrive_inbox_dead_letters(now_unix_timestamp())?;
+    let previous = db.load_actor_state::<u64>(key)?.unwrap_or(0);
+    db.redrive_inbox_changes(previous, now_unix_timestamp())?;
+    if previous != revision {
         db.persist_actor_state(key, &revision)?;
     }
     Ok(())
@@ -231,5 +242,45 @@ fn append_pending_entries(
             entries.push(entry);
         }
     }
+    Ok(())
+}
+
+fn set_failure_policy(
+    client: &RamfluxClient,
+    local: &str,
+    entry: &GatewayInboxEntry,
+    key: &str,
+    bytes: &[u8],
+    at: i64,
+) -> Result<(), SdkError> {
+    let authenticated = client.authenticated_envelope_sender(entry).is_ok();
+    let opened = if authenticated { client.open_routed(entry, local).ok() } else { None };
+    let group = opened.as_ref().and_then(|o| o.routing.group_id.as_deref());
+    let related = if let Some(group) = group {
+        client
+            .group_state(group)
+            .is_ok_and(|state| state.members.contains(&entry.envelope.source_device_id))
+    } else {
+        client.pair_recovery_pending(local, &entry.envelope.source_device_id)?
+            || client.friend_link_peer_is_accepted(&entry.envelope.source_principal_id)?
+            || client
+                .device_branch
+                .as_ref()
+                .is_some_and(|b| b.principal_id == entry.envelope.source_principal_id)
+    };
+    let (class, subject) = if let Some(group) = group {
+        ("group", group)
+    } else if !authenticated {
+        ("manifest", entry.envelope.source_device_id.as_str())
+    } else {
+        ("none", "")
+    };
+    client.account_db()?.set_inbox_failure_policy(
+        key,
+        bytes,
+        authenticated && related,
+        (class, subject),
+        at,
+    )?;
     Ok(())
 }

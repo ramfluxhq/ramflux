@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("authenticated device pair requires a fresh bootstrap")]
+    PairRecoveryRequired,
     #[error("inbound envelope rejected: {0}")]
     InboundRejected(String),
     #[error("inbound state not ready: {0}")]

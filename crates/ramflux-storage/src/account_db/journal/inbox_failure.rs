@@ -1,28 +1,26 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Bounded encrypted dead letters and independently retried transient inbox failures.
+//! Bounded retry and dead-letter storage; admission never evicts another source.
 use super::*;
-const MAX_AGE: i64 = 7 * 24 * 60 * 60;
 impl AccountDb {
-    /// Removes expired holds and terminally records expired retries without acknowledging v1.
+    /// Expires held work using its original local lifetime, never a sender-selected long TTL.
     /// # Errors
-    /// Returns SQL or journal serialization errors.
+    /// Returns SQLite or journal serialization errors.
     pub fn expire_inbox_holds(&self, at: i64) -> Result<(), StorageError> {
         self.write_transaction(|| {
-            let floor=at.saturating_sub(MAX_AGE);
-            let mut query=self.connection.prepare("SELECT envelope_key,entry_json FROM runtime_inbox_retry WHERE created_at<?1 LIMIT 64")?;
-            let expired=query.query_map(params![floor],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(query);
-            for (key,entry) in expired {self.insert_inbox_dead_letter(&key,&entry,&serde_json::json!({"retry_key":key,"error_code":"retry_expired"}),at)?;}
-            self.connection.execute("DELETE FROM runtime_unrouted WHERE received_at<?1",params![floor])?;
-            self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE received_at<?1",params![floor])?;
-            Ok(())
+            let mut q=self.connection.prepare("SELECT r.envelope_key,r.entry_json FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE p.expires_at<=?1")?;
+            let rows=q.query_map(params![at],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(q);
+            for (key,entry) in rows { self.insert_inbox_dead_letter(&key,&entry,&serde_json::json!({"retry_key":key,"error_code":"retry_expired"}),at)?; }
+            self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key IN (SELECT envelope_key FROM runtime_inbox_policy WHERE expires_at<=?1)",params![at])?;
+            self.connection.execute("DELETE FROM runtime_unrouted WHERE received_at<?1",params![at.saturating_sub(7 * 24 * 60 * 60)])?;
+            self.cleanup_inbox_policy()
         })
     }
-    /// Durably records rejected ciphertext and terminal metadata before network ACK.
+    /// Records terminal metadata before ACK. Raw ciphertext is retained only within source quota.
     /// # Errors
-    /// Returns SQL/serialization errors. Oversized raw entries retain metadata only.
+    /// Returns SQLite or journal serialization errors.
     pub fn dead_letter_inbox(
         &self,
         key: &str,
@@ -39,21 +37,18 @@ impl AccountDb {
         metadata: &serde_json::Value,
         at: i64,
     ) -> Result<(), StorageError> {
+        let admitted = self.ensure_inbox_policy(key, entry, at)?;
         let bounded = if entry.len() <= 1024 * 1024 { entry } else { &[] };
-        self.connection.execute(
-            "INSERT OR IGNORE INTO runtime_inbox_dead_letter VALUES(?1,?2,?3,?4)",
-            params![
-                key,
-                bounded,
-                metadata.get("error_code").and_then(serde_json::Value::as_str),
-                at
-            ],
-        )?;
-        self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key IN (SELECT envelope_key FROM runtime_inbox_dead_letter ORDER BY received_at DESC,rowid DESC LIMIT -1 OFFSET 64)",[])?;
-        self.connection.execute(
-            "DELETE FROM runtime_inbox_dead_letter WHERE received_at<?1",
-            params![at.saturating_sub(MAX_AGE)],
-        )?;
+        if admitted {
+            let count: i64 = self.connection.query_row(
+                "SELECT count(*) FROM runtime_inbox_dead_letter",
+                [],
+                |r| r.get(0),
+            )?;
+            if count < 64 {
+                self.connection.execute("INSERT OR IGNORE INTO runtime_inbox_dead_letter SELECT ?1,?2,?3,first_seen FROM runtime_inbox_policy WHERE envelope_key=?1",params![key,bounded,metadata.get("error_code").and_then(serde_json::Value::as_str).unwrap_or("unknown")])?;
+            }
+        }
         self.insert_journal(
             &format!("undeliverable:{key}"),
             "message.undeliverable",
@@ -63,91 +58,78 @@ impl AccountDb {
         )?;
         self.connection
             .execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1", params![key])?;
-        Ok(())
+        self.cleanup_inbox_policy()
     }
-    /// Queues transient work without blocking later inbox entries; evictions emit terminal events.
+    /// Defers transient work; zero means its quota, lifetime, or attempt budget was exhausted.
     /// # Errors
-    /// Returns SQL/serialization errors or rejects entries above the one-MiB bound.
+    /// Returns SQLite errors or rejects a raw entry exceeding one MiB.
     pub fn defer_inbox_entry(&self, key: &str, entry: &[u8], at: i64) -> Result<u32, StorageError> {
         if entry.len() > 1024 * 1024 {
             return Err(StorageError::AuthorizationRejected);
         }
         self.write_transaction(|| {
-            self.connection.execute("INSERT INTO runtime_inbox_retry VALUES(?1,?2,1,?3,?4) ON CONFLICT(envelope_key) DO UPDATE SET attempts=attempts+1,next_at=?4+min(64,(1 << min(attempts+1,6)))",params![key,entry,at.saturating_add(2),at])?;
-            let attempts=self.connection.query_row("SELECT attempts FROM runtime_inbox_retry WHERE envelope_key=?1",params![key],|row|row.get(0))?;
-            let mut query=self.connection.prepare("SELECT envelope_key,entry_json FROM runtime_inbox_retry ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET 64")?;
-            let evicted=query.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(query);
-            for (old_key,old_entry) in evicted {self.insert_inbox_dead_letter(&old_key,&old_entry,&serde_json::json!({"retry_key":old_key,"error_code":"retry_capacity"}),at)?;}
-            Ok(attempts)
+            if !self.ensure_inbox_policy(key,entry,at)? {return Ok(0);}
+            let allowed:bool=self.connection.query_row("SELECT expires_at>?2 AND attempts<CASE WHEN trusted=1 THEN 8 ELSE 3 END FROM runtime_inbox_policy WHERE envelope_key=?1",params![key,at],|r|r.get(0))?;
+            let count:i64=self.connection.query_row("SELECT count(*) FROM runtime_inbox_retry WHERE envelope_key!=?1",params![key],|r|r.get(0))?;
+            if !allowed || count>=64 {return Ok(0);}
+            self.connection.execute("UPDATE runtime_inbox_policy SET attempts=attempts+1 WHERE envelope_key=?1",params![key])?;
+            self.connection.execute("INSERT INTO runtime_inbox_retry SELECT envelope_key,?2,attempts,?3+min(64,(1<<min(attempts,6))),first_seen FROM runtime_inbox_policy WHERE envelope_key=?1 ON CONFLICT(envelope_key) DO UPDATE SET attempts=excluded.attempts,next_at=excluded.next_at",params![key,entry,at])?;
+            Ok(self.connection.query_row("SELECT attempts FROM runtime_inbox_policy WHERE envelope_key=?1",params![key],|r|r.get(0))?)
         })
     }
-    /// Checks the retry deadline even if a peer redelivers an entry before its backoff expires.
+    /// Checks backoff even when the gateway redelivers pending work.
     /// # Errors
-    /// Returns SQL errors.
+    /// Returns SQLite errors.
     pub fn inbox_retry_ready(&self, key: &str, at: i64) -> Result<bool, StorageError> {
         Ok(self
             .connection
             .query_row(
                 "SELECT next_at<=?2 FROM runtime_inbox_retry WHERE envelope_key=?1",
                 params![key, at],
-                |row| row.get(0),
+                |r| r.get(0),
             )
             .optional()?
             .unwrap_or(true))
     }
-    /// Reads a bounded due retry page without any projection or private-key material.
+    /// Reads a bounded due retry page.
     /// # Errors
-    /// Returns SQL errors.
+    /// Returns SQLite errors.
     pub fn due_inbox_retries(&self, at: i64) -> Result<Vec<Vec<u8>>, StorageError> {
-        let mut query=self.connection.prepare("SELECT entry_json FROM runtime_inbox_retry WHERE next_at<=?1 ORDER BY created_at,envelope_key LIMIT 64")?;
-        Ok(query.query_map(params![at], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut q=self.connection.prepare("SELECT entry_json FROM runtime_inbox_retry WHERE next_at<=?1 ORDER BY created_at,envelope_key LIMIT 64")?;
+        Ok(q.query_map(params![at], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    /// Clears a retry only after durable successful processing.
+    /// Clears successful retry work and its admission state.
     /// # Errors
-    /// Returns SQL errors.
+    /// Returns SQLite errors.
     pub fn remove_inbox_retry(&self, key: &str) -> Result<(), StorageError> {
         self.connection
             .execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1", params![key])?;
-        Ok(())
+        self.cleanup_inbox_policy()
     }
-}
-
-impl AccountDb {
-    /// Returns whether the packet has durable pending retry work.
+    /// Returns whether the packet has pending retry work.
     /// # Errors
     /// Returns SQLite errors.
     pub fn has_inbox_retry(&self, key: &str) -> Result<bool, StorageError> {
         Ok(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM runtime_inbox_retry WHERE envelope_key=?1)",
             params![key],
-            |row| row.get(0),
+            |r| r.get(0),
         )?)
     }
-    /// Requeues retained ciphertext and wakes state-dependent work after membership/identity changes.
+    /// Manually wakes eligible state-dependent work, preserving age and excluding authentication failures.
     /// # Errors
-    /// Returns SQL/serialization errors. All work remains within existing queue bounds.
+    /// Returns SQLite errors.
     pub fn redrive_inbox_dead_letters(&self, at: i64) -> Result<usize, StorageError> {
-        self.write_transaction(|| {
-            let mut query = self.connection.prepare("SELECT envelope_key,entry_json FROM runtime_inbox_dead_letter WHERE length(entry_json)>0 ORDER BY received_at LIMIT (SELECT max(0,64-count(*)) FROM runtime_inbox_retry)")?;
-            let rows = query.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(query);
-            for (key,entry) in &rows {
-                self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key=?1",params![key])?;
-                self.connection.execute("INSERT INTO runtime_inbox_retry VALUES(?1,?2,0,?3,?3) ON CONFLICT(envelope_key) DO UPDATE SET entry_json=excluded.entry_json,next_at=excluded.next_at",params![key,entry,at])?;
-            }
-            self.connection.execute("UPDATE runtime_inbox_retry SET next_at=?1", params![at])?;
-            Ok(rows.len())
-        })
+        self.redrive_inbox_matching(None, at)
     }
-    /// Monotonic revision of group/manifest records, independent of journal retention.
+    /// Returns the latest actual membership/manifest change revision.
     /// # Errors
-    /// Returns SQL errors.
+    /// Returns SQLite errors.
     pub fn inbox_recovery_revision(&self) -> Result<u64, StorageError> {
         Ok(self.connection.query_row(
             "SELECT revision FROM runtime_inbox_recovery WHERE singleton=1",
             [],
-            |row| row.get(0),
+            |r| r.get(0),
         )?)
     }
 }

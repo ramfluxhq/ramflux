@@ -18,7 +18,7 @@ impl AccountDb {
     /// Returns an error if WAL/FULL cannot be enabled or the outbox cannot be installed.
     pub fn enable_runtime(&self) -> Result<(), StorageError> {
         self.connection.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA secure_delete=ON;",
         )?;
         let journal: String =
             self.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -27,7 +27,16 @@ impl AccountDb {
             return Err(StorageError::AuthorizationRejected);
         }
         self.install_journal_schema()?;
-        self.install_runtime_schema()
+        self.install_runtime_schema()?;
+        self.checkpoint_retired_secrets()
+    }
+
+    /// Checkpoints deleted secret pages after the surrounding writer transaction has committed.
+    /// # Errors
+    /// Returns SQLite errors. Busy readers may retain an older encrypted WAL generation.
+    pub fn checkpoint_retired_secrets(&self) -> Result<(), StorageError> {
+        self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
     }
 
     /// Opens an independently owned, query-only encrypted connection with the same key.

@@ -595,12 +595,12 @@ async fn transient_sender_lookup_retries_with_backoff_while_later_messages_progr
     assert_eq!(db.due_inbox_retries(now + 3)?.len(), 1);
     assert!(!db.journal_after(0, 100)?.iter().any(|event| event.topic == "message.undeliverable"));
     let key = super::super::committed_key(&pending)?;
-    db.defer_inbox_entry(&key, &serde_json::to_vec(&pending)?, now + 100)?;
+    db.defer_inbox_entry(&key, &serde_json::to_vec(&pending)?, now + 3)?;
     let (engine, _) = Inbox::engine(account.gateway_config.clone(), vec![pending])?;
     account.engine = Some(engine);
     crate::bus::sync_driver::run(&mut account).await?;
-    assert_eq!(account.client.account_db()?.due_inbox_retries(now + 103)?.len(), 0);
-    assert_eq!(account.client.account_db()?.due_inbox_retries(now + 105)?.len(), 1);
+    assert_eq!(account.client.account_db()?.due_inbox_retries(now + 6)?.len(), 0);
+    assert_eq!(account.client.account_db()?.due_inbox_retries(now + 8)?.len(), 1);
 
     Ok(())
 }

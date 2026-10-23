@@ -229,3 +229,31 @@ present and is zero. Existing message IDs, timestamps and group history-floor ch
 references retain content keys and original slots, with no ratchet snapshots; they commit with the
 message and are scoped by sender. Object ID collisions receive separate `received:` selectors.
 Fetch failures remain object-directory/events state and do not alter message content snapshots.
+
+### Device-pair recovery and bounded inbox work
+
+A verified fresh X3DH bootstrap can replace a settled session only after the pinned device
+identity, envelope signature and encrypted routing body all authenticate. A gap beyond the
+ratchet skip limit or lost receive state triggers a fresh encrypted `pair.session.reset.v1`
+control request, with at most one reset attempt per device pair per minute. The reset travels
+inside envelope v2; it adds no node-visible conversation descriptor. `session.reset` journal
+events expose device metadata and the recovery reason. Retired session ids cannot be reactivated
+by a delayed bootstrap. Failed reset submission leaves a durable pending recovery marker for
+bounded retry. A failed attachment-key-slot decrypt leaves the message ratchet unchanged.
+
+Pending retry and dead-letter ciphertext never evict a different source. A claimed source gets
+at most two retained failures before authentication/relationship confirmation, or eight for a
+verified related peer; stranger failures share a 16-entry admission budget. Each queue remains
+bounded to 64 entries. Trusted failures expire within ten minutes and eight attempts; stranger
+failures expire within thirty seconds and three attempts. The gateway TTL can shorten these
+windows. Re-drive preserves first-seen time, expiry and attempts, excludes authentication/AEAD
+and immutable routing failures, and wakes only matching group or manifest dependencies. It
+wakes at most eight entries per second, at most once per entry per minute, and only actual
+membership/key changes advance the scoped revision. The compatibility legacy unrouted hold
+keeps its existing separate retention contract.
+
+Account databases enable SQLCipher secure deletion. Upgrade removes obsolete imported live
+ratchet events and checkpoints as well as old exported pair-history state, then checkpoints
+the WAL. Retirement deletes superseded pair secrets and checkpoints after the transaction.
+This removes live database rows; filesystem snapshots, backups and previously exported blobs
+are outside this local erasure operation. Live ratchet and message-key Debug output is redacted.

@@ -133,10 +133,17 @@ fn deleting_message_erases_approved_content_copy() -> Result<(), StorageError> {
 }
 
 #[test]
-fn dead_letters_evict_oldest_expire_and_keep_ciphertext_out_of_journal() -> Result<(), StorageError>
-{
+fn dead_letters_refuse_over_capacity_expire_and_keep_ciphertext_out_of_journal()
+-> Result<(), StorageError> {
     let (root, db) = database()?;
     for n in 0..65 {
+        db.set_inbox_failure_policy(
+            &format!("bad-{n:02}"),
+            b"PRIVATE_CIPHERTEXT",
+            true,
+            ("none", ""),
+            100 + n,
+        )?;
         db.dead_letter_inbox(&format!("bad-{n:02}"),b"PRIVATE_CIPHERTEXT",&serde_json::json!({"envelope_id":format!("e{n}"),"error_code":"authentication_failed"}),100+n)?;
     }
     let count: u32 =
@@ -148,7 +155,7 @@ fn dead_letters_evict_oldest_expire_and_keep_ciphertext_out_of_journal() -> Resu
         [],
         |row| row.get(0),
     )?;
-    assert_eq!(oldest, "bad-01");
+    assert_eq!(oldest, "bad-00");
     for event in db.journal_after(0, 100)? {
         assert!(!serde_json::to_string(&event)?.contains("PRIVATE_CIPHERTEXT"));
     }
@@ -167,12 +174,23 @@ fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backo
 -> Result<(), StorageError> {
     let (root, db) = database()?;
     for n in 0..65 {
-        assert_eq!(db.defer_inbox_entry(&format!("retry-{n:02}"), b"PRIVATE_RETRY", 100)?, 1);
+        db.set_inbox_failure_policy(
+            &format!("retry-{n:02}"),
+            b"PRIVATE_RETRY",
+            true,
+            ("none", ""),
+            100,
+        )?;
+        let expected = u32::from(n < 64);
+        assert_eq!(
+            db.defer_inbox_entry(&format!("retry-{n:02}"), b"PRIVATE_RETRY", 100)?,
+            expected
+        );
     }
     assert_eq!(db.due_inbox_retries(101)?.len(), 0);
     assert_eq!(db.due_inbox_retries(102)?.len(), 64);
-    assert_eq!(db.journal_after(0, 100)?[0].body["error_code"], "retry_capacity");
-    assert_eq!(db.defer_inbox_entry("retry-64", b"PRIVATE_RETRY", 102)?, 2);
+    assert_eq!(db.journal_after(0, 100)?, Vec::<JournalEvent>::new());
+    assert_eq!(db.defer_inbox_entry("retry-63", b"PRIVATE_RETRY", 102)?, 2);
     assert_eq!(db.due_inbox_retries(105)?.len(), 63);
     db.expire_inbox_holds(101 + 7 * 24 * 60 * 60)?;
     assert_eq!(db.due_inbox_retries(i64::MAX)?.len(), 0);
@@ -185,24 +203,175 @@ fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backo
 }
 
 #[test]
-fn retained_dead_letters_redrive_without_exceeding_retry_capacity() -> Result<(), StorageError> {
+fn retained_state_dependent_dead_letters_redrive_without_exceeding_retry_capacity()
+-> Result<(), StorageError> {
     let (root, db) = database()?;
+    db.set_inbox_failure_policy("rejected", b"ciphertext", true, ("group", "g"), 100)?;
     db.dead_letter_inbox(
         "rejected",
         b"ciphertext",
-        &serde_json::json!({"error_code":"schema_invalid"}),
+        &serde_json::json!({"error_code":"membership_pending"}),
         100,
     )?;
     for n in 0..64 {
+        db.set_inbox_failure_policy(&format!("queued-{n}"), b"queued", true, ("none", ""), 100)?;
         db.defer_inbox_entry(&format!("queued-{n}"), b"queued", 100)?;
     }
     assert_eq!(db.redrive_inbox_dead_letters(101)?, 0);
-    assert_eq!(db.due_inbox_retries(101)?.len(), 64);
+    assert_eq!(db.due_inbox_retries(101)?.len(), 0);
     db.remove_inbox_retry("queued-0")?;
-    assert_eq!(db.redrive_inbox_dead_letters(102)?, 1);
-    let entries = db.due_inbox_retries(102)?;
+    assert_eq!(db.redrive_inbox_dead_letters(162)?, 1);
+    let entries = db.due_inbox_retries(162)?;
     assert_eq!(entries.len(), 64);
     assert!(entries.contains(&b"ciphertext".to_vec()));
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn a_junk_source_cannot_evict_another_sources_pending_ciphertext() -> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let genuine =
+        serde_json::to_vec(&serde_json::json!({"envelope":{"source_device_id":"friend"}}))?;
+    db.defer_inbox_entry("genuine", &genuine, 100)?;
+    db.dead_letter_inbox(
+        "genuine-dead",
+        &genuine,
+        &serde_json::json!({"error_code":"membership_pending"}),
+        100,
+    )?;
+    let junk = serde_json::to_vec(&serde_json::json!({"envelope":{"source_device_id":"junk"}}))?;
+    for n in 0..128 {
+        db.defer_inbox_entry(&format!("junk-{n}"), &junk, 100)?;
+        db.dead_letter_inbox(
+            &format!("junk-dead-{n}"),
+            &junk,
+            &serde_json::json!({"error_code":"authentication_failed"}),
+            100,
+        )?;
+    }
+    assert!(db.has_inbox_retry("genuine")?);
+    let retained: bool = db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_inbox_dead_letter WHERE envelope_key='genuine-dead')",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(retained);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    db.set_inbox_failure_policy("pending", b"packet", true, ("group", "g"), 100)?;
+    db.dead_letter_inbox(
+        "pending",
+        b"packet",
+        &serde_json::json!({"error_code":"membership_pending"}),
+        100,
+    )?;
+    db.set_inbox_failure_policy("auth", b"bad", true, ("group", "g"), 100)?;
+    db.dead_letter_inbox(
+        "auth",
+        b"bad",
+        &serde_json::json!({"error_code":"authentication_failed"}),
+        100,
+    )?;
+    assert_eq!(db.redrive_inbox_dead_letters(110)?, 1);
+    let created: i64 = db.connection.query_row(
+        "SELECT created_at FROM runtime_inbox_retry WHERE envelope_key='pending'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(created, 100);
+    assert!(!db.has_inbox_retry("auth")?);
+    assert_eq!(db.redrive_inbox_dead_letters(111)?, 0);
+    db.expire_inbox_holds(700)?;
+    assert!(!db.has_inbox_retry("pending")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn idempotent_sender_key_imports_and_unrelated_devices_do_not_trigger_redrive()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    db.persist_group_member_device_key("group", "alice", "key")?;
+    let revision = db.inbox_recovery_revision()?;
+    for _ in 0..10 {
+        db.persist_group_member_device_key("group", "alice", "key")?;
+    }
+    db.persist_client_record(
+        "device",
+        "unrelated",
+        &serde_json::json!({"principal_id":"unknown","signing_public_key":"key"}),
+    )?;
+    assert_eq!(db.inbox_recovery_revision()?, revision);
+    db.persist_group_member_device_key("group", "alice", "changed")?;
+    assert!(db.inbox_recovery_revision()? > revision);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn retry_attempts_are_bounded_even_when_the_peer_chooses_a_long_ttl() -> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let packet = serde_json::to_vec(
+        &serde_json::json!({"envelope":{"source_device_id":"stranger","created_at":100,"ttl":604_800}}),
+    )?;
+    for n in 1..=3 {
+        assert_eq!(db.defer_inbox_entry("pending", &packet, 100)?, n);
+    }
+    assert_eq!(db.defer_inbox_entry("pending", &packet, 100)?, 0);
+    db.expire_inbox_holds(130)?;
+    assert!(!db.has_inbox_retry("pending")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn legacy_imported_ratchets_are_erased_with_secure_delete_and_a_wal_checkpoint()
+-> Result<(), StorageError> {
+    use crate::{EventStore, ProjectionStore};
+    let (root, db) = database()?;
+    let id = "dm.session:thread:recv:own-device-sync:old-export";
+    db.append_event(id, "dm.ratchet_session", b"old secret snapshot")?;
+    db.set_projection_checkpoint("dm_session:thread:recv", id)?;
+    db.enable_runtime()?;
+    assert!(db.event_body(id)?.is_none());
+    assert!(db.projection_checkpoint("dm_session:thread:recv")?.is_none());
+    let enabled: i64 = db.connection.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
+    assert_eq!(enabled, 1);
+    let busy: i64 = db.connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    assert_eq!(busy, 0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn redrive_wakes_only_later_matching_changes_and_retains_rate_limited_triggers()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    db.create_group("affected", "bob")?;
+    db.set_inbox_failure_policy("pending", b"packet", true, ("group", "affected"), 100)?;
+    db.defer_inbox_entry("pending", b"packet", 100)?;
+    assert_eq!(db.redrive_inbox_changes(0, 101)?, 0);
+    db.create_group("unrelated", "bob")?;
+    assert_eq!(db.redrive_inbox_changes(0, 101)?, 0);
+    db.persist_group_member_device_key("affected", "alice", "key")?;
+    assert_eq!(db.redrive_inbox_changes(0, 102)?, 1);
+    assert_eq!(db.due_inbox_retries(102)?, vec![b"packet".to_vec()]);
+    db.persist_group_member_device_key("affected", "alice", "key")?;
+    assert_eq!(db.redrive_inbox_changes(0, 103)?, 0);
+    db.persist_group_member_device_key("affected", "alice", "new-key")?;
+    assert_eq!(db.redrive_inbox_changes(0, 104)?, 0);
+    let latest = db.inbox_recovery_revision()?;
+    assert_eq!(db.redrive_inbox_changes(latest, 162)?, 1);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

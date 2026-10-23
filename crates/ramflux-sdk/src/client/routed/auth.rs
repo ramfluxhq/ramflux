@@ -80,7 +80,7 @@ impl RamfluxClient {
         })
     }
 
-    pub(super) fn authenticated_envelope_sender(
+    pub(crate) fn authenticated_envelope_sender(
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {

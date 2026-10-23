@@ -257,9 +257,9 @@ impl AccountDb {
         device_signing_public_key: &str,
     ) -> Result<(), StorageError> {
         self.connection.execute(
-            "INSERT OR REPLACE INTO group_member_device_key
+            "INSERT INTO group_member_device_key
                 (group_id, member_id, device_signing_public_key, verified_at)
-             VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key",
             params![group_id, member_id, device_signing_public_key, self.now_unix()],
         )?;
         Ok(())
@@ -591,7 +591,7 @@ impl AccountDb {
             ],
         )?;
         self.connection.execute(
-            "INSERT OR REPLACE INTO group_member_device_key
+            "INSERT INTO group_member_device_key
                 (group_id, member_id, device_signing_public_key, verified_at)
              VALUES (?1, ?2, ?3, ?4)",
             params![

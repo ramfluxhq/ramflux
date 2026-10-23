@@ -30,7 +30,7 @@ struct RatchetContextParts<'a> {
     dh_ratchet_step: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DmSession {
     pub session_id: String,
     pub bootstrap_transcript_hash: [u8; 32],
@@ -182,7 +182,7 @@ impl std::fmt::Debug for DmDecryptionOutput {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct MessageKeys {
     pub aead_key: [u8; 32],
     pub nonce: [u8; 12],
@@ -196,6 +196,20 @@ struct MessageKeysSnapshot {
     nonce: [u8; 12],
     commitment_key: [u8; 32],
     opening_key: [u8; 32],
+}
+
+impl std::fmt::Debug for DmSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmSession")
+            .field("session_id", &self.session_id)
+            .field("secrets", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Debug for MessageKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MessageKeys { <redacted> }")
+    }
 }
 
 impl DmSessionSnapshot {
@@ -1194,6 +1208,30 @@ mod skipped_tests {
         assert_eq!(receiver.decrypt(&next, b"next id")?, b"next chain");
         let mut restored = DmSession::from_snapshot(receiver.snapshot())?;
         assert_eq!(restored.decrypt(&delayed, b"delayed id")?, b"delayed");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    #[test]
+    fn live_ratchet_and_message_key_debug_redact_secrets() -> Result<(), CryptoError> {
+        let session = DmSession::initiator([17; 32], [18; 32], [19; 32], [20; 32])?;
+        assert_eq!(
+            format!("{session:?}"),
+            format!(
+                "DmSession {{ session_id: {:?}, secrets: \"<redacted>\", .. }}",
+                session.session_id
+            )
+        );
+        let keys = MessageKeys {
+            aead_key: [17; 32],
+            nonce: [18; 12],
+            commitment_key: [19; 32],
+            opening_key: [20; 32],
+        };
+        assert_eq!(format!("{keys:?}"), "MessageKeys { <redacted> }");
         Ok(())
     }
 }

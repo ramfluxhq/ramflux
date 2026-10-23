@@ -47,7 +47,7 @@ impl RamfluxClient {
             let plaintext = self.routed_committed_content(&receipt.routing, &receipt.entry)?;
             return Ok(Delivery { routing: receipt.routing, plaintext });
         }
-        let mut opened = self.open_routed(entry, &engine.config.device_id)?;
+        let mut opened = self.open_routed_with_recovery(engine, entry).await?;
         if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
             opened.routing.message_id = self.projection_id(entry)?;
         }
@@ -105,11 +105,9 @@ impl RamfluxClient {
             references,
             receipt: &commit,
         })?;
+        self.finish_pair_retirement()?;
         let mut imported = Vec::new();
-        if attachments
-            && opened.routing.kind == Kind::Direct
-            && self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
-        {
+        if attachments && opened.routing.kind == Kind::Direct && accepted {
             for attachment in &refs {
                 imported.push(
                     self.import_dm_attachment_from_relay_via_gateway(

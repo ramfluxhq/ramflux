@@ -493,7 +493,7 @@ impl RamfluxClient {
         )))
     }
 
-    fn friend_link_peer_is_accepted(&self, peer_id: &str) -> Result<bool, SdkError> {
+    pub(crate) fn friend_link_peer_is_accepted(&self, peer_id: &str) -> Result<bool, SdkError> {
         let Some(link) = self.account_db()?.friend_link_for_peer(peer_id)? else {
             return Ok(false);
         };
