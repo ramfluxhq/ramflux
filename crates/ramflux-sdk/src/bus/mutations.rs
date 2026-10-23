@@ -23,19 +23,16 @@ pub(super) async fn execute(
     } else {
         state.attended_accounts.remove(account_id);
     }
-    // Attachment fetch owns retryable failure receipts; the generic receipt cache is terminal.
-    let key = if command.request.method == "object.fetch" {
-        None
-    } else {
-        command.request.operation_id.as_deref().or_else(|| {
-            command.request.body.get("idempotency_key").and_then(serde_json::Value::as_str)
-        })
-    };
+    let key = command.request.operation_id.as_deref().or_else(|| {
+        command.request.body.get("idempotency_key").and_then(serde_json::Value::as_str)
+    });
     if let Some(key) = key
         && (key.is_empty() || key.len() > 256)
     {
         return Err(SdkError::LocalBus("operation_id must contain 1 to 256 bytes".to_owned()));
     }
+    // Fetch owns retryable receipts, but generic header validation above still applies.
+    let key = key.filter(|_| command.request.method != "object.fetch");
     let fingerprint = if key.is_some() {
         let intent = ramflux_protocol::canonical_json_bytes(&(
             &command.request.method,

@@ -82,6 +82,27 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
             .ok_or(SdkError::AccountDbNotUnlocked)?;
         assert_eq!(saved["attempts"], attempt, "generic cache must not replay the first failure");
     }
+    let mut request = LocalBusFrame::request(
+        "invalid",
+        Some("account".to_owned()),
+        "object",
+        "object.fetch",
+        json!({"object_id":"object","operation_id":"fetch-op"}),
+    );
+    request.operation_id = Some(String::new());
+    let (outbound, _events) = mpsc::channel(16);
+    let command = AccountCommand {
+        request,
+        connection_id: 1,
+        topics: BTreeSet::new(),
+        attended: true,
+        nodes: None,
+        outbound,
+        reply: None,
+    };
+    assert!(
+        Box::pin(crate::bus::mutations::execute(&mut state, "account", &command)).await.is_err()
+    );
     drop(state);
     std::fs::remove_dir_all(root)?;
     Ok(())
