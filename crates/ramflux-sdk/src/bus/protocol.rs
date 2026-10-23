@@ -665,6 +665,13 @@ pub struct LocalBusObjectPutStatusRequest {
     pub operation_id: String,
 }
 
+/// Fetch one received attachment using its account-encrypted reference, without receiving messages.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectFetchRequest {
+    pub object_id: String,
+    pub operation_id: String,
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusObjectGetRequest {
     pub object_id: String,

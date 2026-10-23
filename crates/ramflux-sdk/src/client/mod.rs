@@ -5,6 +5,7 @@ pub mod a2i;
 pub mod account;
 pub mod contact;
 pub mod conversation;
+mod deferred_attachment;
 pub mod dm;
 pub mod dm_session;
 pub mod federation;

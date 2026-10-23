@@ -182,3 +182,30 @@ fn server_health_is_unknown_until_observed_and_not_inferred_from_tools() -> Resu
     assert_eq!(value["server_details"][0]["health_source"], "not_checked");
     Ok(())
 }
+
+#[test]
+fn remote_attachments_are_listed_with_public_fetch_status_only() -> Result<(), SdkError> {
+    let f = Fixture::new()?;
+    let db = f.client.account_db()?;
+    db.persist_actor_state(
+        "attachment/reference/remote",
+        &json!({"access_grant":"PRIVATE_GRANT","key_slot":"PRIVATE_SLOT"}),
+    )?;
+    db.persist_client_record("object", "remote", &json!({"owner":"peer","size":42,"conversation_id":"dm","message_id":"message","manifest_hash":"hash","plaintext_hash":"plain-hash","access_grant":"PRIVATE_GRANT","key_slot":"PRIVATE_SLOT"}))?;
+    let listed = f.read("object.directory", json!({"limit":1}))?;
+    assert_eq!(listed["objects"][0]["id"], "remote");
+    assert_eq!(listed["objects"][0]["transfer_state"], "not_fetched");
+    assert_eq!(listed["objects"][0]["size"], 42);
+    for state in ["failed", "retrying", "available"] {
+        db.persist_actor_state("attachment/fetch/remote", &json!({"object_id":"remote","operation_id":"fetch-op","transfer_state":state,"last_error":if state=="failed" {Some("attachment transport failed")} else {None},"attempts":2}))?;
+        let listed = f.read("object.directory", json!({}))?;
+        assert_eq!(listed["objects"][0]["transfer_state"], state);
+        assert!(!listed.to_string().contains("PRIVATE_"));
+        assert!(!listed.to_string().contains("key_slot"));
+        assert!(!listed.to_string().contains("access_grant"));
+        if state == "failed" {
+            assert_eq!(listed["objects"][0]["last_error"], "attachment transport failed");
+        }
+    }
+    Ok(())
+}

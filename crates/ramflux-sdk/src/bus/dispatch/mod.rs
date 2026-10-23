@@ -6,6 +6,7 @@ pub mod account;
 pub mod call_bot;
 pub mod contact;
 pub mod daemon;
+mod deferred_attachment;
 pub mod device;
 pub mod grant_mcp;
 pub mod group;

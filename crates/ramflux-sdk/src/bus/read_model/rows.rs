@@ -59,6 +59,7 @@ pub(super) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<V
                 "conversation_id",
                 "message_id",
                 "relay_endpoint",
+                "manifest_hash",
             ] {
                 if let Some(value) = saved.get(field).filter(|value| !value.is_null()) {
                     object[field] = value.clone();
@@ -69,6 +70,11 @@ pub(super) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<V
             object["transfer"] = db.client_object_transfer(id)?.unwrap_or(Value::Null);
             if let Some(operation) = db.object_operation(id)? {
                 object["transfer_state"] = json!(operation.state);
+            }
+            if let Some(fetch) = client.received_attachment_status(id)? {
+                object["transfer_state"] = fetch["transfer_state"].clone();
+                object["last_error"] = fetch["last_error"].clone();
+                object["operation_id"] = fetch["operation_id"].clone();
             }
             Ok(object)
         }

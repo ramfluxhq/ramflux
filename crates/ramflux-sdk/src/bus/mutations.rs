@@ -23,9 +23,14 @@ pub(super) async fn execute(
     } else {
         state.attended_accounts.remove(account_id);
     }
-    let key = command.request.operation_id.as_deref().or_else(|| {
-        command.request.body.get("idempotency_key").and_then(serde_json::Value::as_str)
-    });
+    // Attachment fetch owns retryable failure receipts; the generic receipt cache is terminal.
+    let key = if command.request.method == "object.fetch" {
+        None
+    } else {
+        command.request.operation_id.as_deref().or_else(|| {
+            command.request.body.get("idempotency_key").and_then(serde_json::Value::as_str)
+        })
+    };
     if let Some(key) = key
         && (key.is_empty() || key.len() > 256)
     {

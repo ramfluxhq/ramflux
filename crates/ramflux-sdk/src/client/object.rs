@@ -10,9 +10,9 @@ use crate::prelude::*;
 /// ACK) has succeeded. No `Debug`/serialization is derived: the session holds secret key material.
 pub(crate) struct DeferredObjectKeySlot {
     pub object_key: [u8; 32],
-    session: ramflux_crypto::DmSession,
-    conversation_id: String,
-    commit_label: String,
+    pub(super) session: ramflux_crypto::DmSession,
+    pub(super) conversation_id: String,
+    pub(super) commit_label: String,
 }
 
 impl RamfluxClient {
@@ -411,7 +411,10 @@ impl RamfluxClient {
                 attachment.schema
             )));
         }
-        let key_slot = self.decrypt_object_key_slot(&attachment.key_slot)?;
+        let key_slot = match self.received_attachment_prepared_slot(attachment)? {
+            Some(slot) => slot,
+            None => self.decrypt_object_key_slot(&attachment.key_slot)?,
+        };
         let object_key = key_slot.object_key;
         let download = self
             .download_dm_attachment_ciphertext_via_gateway(
@@ -642,22 +645,35 @@ impl RamfluxClient {
         let mut completed = Vec::new();
         let mut done_bytes = 0_u64;
         for chunk_index in 0..manifest.total_chunks {
-            let plaintext_chunk = fetch_dm_attachment_chunk_via_gateway(
-                engine,
-                pool,
-                &DmAttachmentFetch {
-                    options: &options,
-                    branch: &branch,
-                    attachment: Some(attachment),
-                    object: &object_stub,
-                    manifest: &manifest,
-                    object_key,
-                    expires_at,
+            let plaintext_chunk = match self.received_attachment_chunk(attachment, chunk_index)? {
+                Some(payload) => DmAttachmentChunk {
+                    len: u64::try_from(
+                        decrypt_chunk_payload(&object_key, &manifest, &payload)?.len(),
+                    )
+                    .unwrap_or(0),
+                    payload,
                 },
-                chunk_index,
-            )
-            .await?;
-            session.receive_chunk(plaintext_chunk.payload, &branch)?;
+                None => {
+                    fetch_dm_attachment_chunk_via_gateway(
+                        engine,
+                        pool,
+                        &DmAttachmentFetch {
+                            options: &options,
+                            branch: &branch,
+                            attachment: Some(attachment),
+                            object: &object_stub,
+                            manifest: &manifest,
+                            object_key,
+                            expires_at,
+                        },
+                        chunk_index,
+                    )
+                    .await?
+                }
+            };
+            validate_dm_attachment_chunk(attachment, chunk_index, &plaintext_chunk)?;
+            session.receive_chunk(plaintext_chunk.payload.clone(), &branch)?;
+            self.persist_received_attachment_chunk(attachment, &plaintext_chunk.payload)?;
             completed.push(chunk_index);
             completed.sort_unstable();
             completed.dedup();
@@ -1687,6 +1703,21 @@ struct DmAttachmentDownload {
 struct DmAttachmentChunk {
     payload: ChunkPayload,
     len: u64,
+}
+
+fn validate_dm_attachment_chunk(
+    reference: &SdkDmAttachmentRef,
+    index: u32,
+    chunk: &DmAttachmentChunk,
+) -> Result<(), SdkError> {
+    let expected_len = reference
+        .cipher_size
+        .saturating_sub(u64::from(index) * reference.chunk_size as u64)
+        .min(reference.chunk_size as u64);
+    if chunk.payload.chunk_index != index || chunk.len != expected_len {
+        return Err(SdkError::LocalBus("DM attachment chunk size or index mismatch".to_owned()));
+    }
+    Ok(())
 }
 
 struct DmAttachmentFetch<'a> {

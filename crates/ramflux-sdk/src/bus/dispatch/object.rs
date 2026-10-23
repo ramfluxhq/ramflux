@@ -23,7 +23,8 @@ use crate::bus::state::{ObjectGetSpoolSession, ObjectPutSpoolSession};
 pub(crate) fn hydrate_local_object_state(
     account: &mut LocalBusAccountState,
 ) -> Result<(), SdkError> {
-    account.client.hydrate_object_store_from_account_db()
+    account.client.hydrate_object_store_from_account_db()?;
+    account.client.recover_received_attachment_fetches()
 }
 
 /// T25-A5 (OBJ-IPC-01): rehydrate durable-journaled in-flight UPLOAD spools for one account on daemon
@@ -207,6 +208,7 @@ pub(crate) async fn dispatch_object_bus_request(
     let data_root = state.config.data_root.clone();
     let account = local_bus_account_mut(state, account_id)?;
     match request.method.as_str() {
+        "object.fetch" => super::deferred_attachment::dispatch(account, request).await,
         "object.put.begin" => object_put_begin(&data_root, account_id, account, request),
         "object.put.chunk" => object_put_chunk(account, request),
         // T25-A5: the spool session now carries an incremental hasher, so its finish future is boxed

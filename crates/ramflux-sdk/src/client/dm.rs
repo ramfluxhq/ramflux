@@ -358,9 +358,12 @@ impl RamfluxClient {
                 }))?;
             }
             for attachment in &attachment_refs {
-                self.account_db()?.persist_client_record("object",&attachment.object_id,&serde_json::json!({
-                    "name":null,"mime":null,"size":null,"direction":"incoming","owner":entry.envelope.source_principal_id,"conversation_id":conversation_id,"message_id":entry.envelope.envelope_id,"relay_endpoint":attachment.relay_endpoint
-                }))?;
+                self.persist_received_attachment_reference(
+                    attachment,
+                    &entry.envelope.source_principal_id,
+                    conversation_id,
+                    &entry.envelope.envelope_id,
+                )?;
             }
             // Every attachment was imported, ACKed, and projected: only now do we commit the
             // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above

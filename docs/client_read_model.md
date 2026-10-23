@@ -93,7 +93,29 @@ Uploads may carry optional `name`/`mime` metadata; streamed uploads retain metad
 through finish. DM attachments record conversation/message references on both sender and receiver.
 Direction is `outgoing`/`incoming` when observed. Fields unavailable for older/imported records
 remain null. Existing attachment payloads do not transport filename/MIME, so those fields on the
-receiving side can remain null. `object.get` accepts the directory's object ID.
+receiving side can remain null. `object.get` accepts a locally available directory object ID.
+
+Received references are persisted in the unlocked account's encrypted database even when
+`message.receive` has `auto_fetch_attachments: false`. Such rows have `transfer_state: "not_fetched"`
+and include their manifest hash and original conversation/message IDs. Grants, content keys and encrypted
+key slots remain private account state and never appear in directory rows.
+
+Call `object.fetch {object_id, operation_id}` to fetch one received reference independently of
+message receipt. Both identifiers must contain 1 to 256 bytes. The compact reply contains
+`object_id`, `operation_id`, `transfer_state`, `last_error` and `retryable`; it never includes keys,
+grants or plaintext. A failed transfer returns `transfer_state: "failed"`, a sanitized error category
+and `retryable: true`; the message remains visible. Retry with the same operation ID to resume
+verified encrypted chunk checkpoints. Interrupted attempts become retryable failures on daemon
+restart. During an attempt the directory reports `fetching` or
+`retrying`; success reports `available`, and the normal object read APIs then return the bytes.
+Successful operation IDs replay their receipt locally, including after daemon restart; reusing
+an operation ID for a different object fails. The body operation ID owns this retry policy even
+when the frame also carries a generic operation ID.
+
+One attempt permits at most 15 seconds of gateway connection setup and 60 seconds of import,
+with at most 16 MiB plaintext, 4096 chunks and 512 KiB per chunk. Access grants still expire and
+may be revoked; fetching does not renew or bypass them. Existing auto-fetch callers retain their
+receive-time import behavior. A per-object fetch never advances the main message receive cursor.
 
 ## Existing list extensions
 

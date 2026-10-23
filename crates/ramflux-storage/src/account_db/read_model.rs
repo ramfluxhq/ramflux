@@ -26,7 +26,9 @@ impl AccountDb {
             "identity" => {
                 "SELECT substr(state_kind,20) AS id FROM runtime_actor_state WHERE state_kind GLOB 'directory/identity/*'"
             }
-            "object" => "SELECT object_id AS id FROM object_index WHERE tombstoned=0",
+            "object" => {
+                "SELECT object_id AS id FROM object_index WHERE tombstoned=0 UNION SELECT substr(m.state_kind,18) AS id FROM runtime_actor_state m WHERE m.state_kind GLOB 'directory/object/*' AND EXISTS(SELECT 1 FROM runtime_actor_state r WHERE r.state_kind='attachment/reference/'||substr(m.state_kind,18)) AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.object_id=substr(m.state_kind,18) AND o.tombstoned=1)"
+            }
             "group" => "SELECT group_id AS id FROM group_projection WHERE deleted_at IS NULL",
             "server" => "SELECT server_id AS id FROM mcp_server_registry",
             "approval" => {
@@ -70,7 +72,7 @@ impl AccountDb {
     pub fn client_object_metadata(&self, id: &str) -> Result<Value, StorageError> {
         Ok(self.connection.query_row("SELECT object_id, CASE WHEN total_cipher_size>=16 THEN total_cipher_size-16 ELSE NULL END, object_state, updated_at FROM object_index WHERE object_id=?1 AND tombstoned=0", params![id], |row| {
             Ok(json!({"id":row.get::<_,String>(0)?,"size":row.get::<_,Option<i64>>(1)?,"transfer_state":row.get::<_,String>(2)?,"updated_at":row.get::<_,i64>(3)?}))
-        })?)
+        }).optional()?.unwrap_or_else(|| json!({"id":id,"transfer_state":"not_fetched","size":null,"updated_at":null})))
     }
 
     /// Returns the latest transfer's public metadata without resume tokens or bitmaps.
