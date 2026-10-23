@@ -140,7 +140,9 @@ pub(crate) async fn run_relay_client_quic(
         tokio::spawn(async move {
             match connecting.await {
                 Ok(connection) => handle_relay_client_quic_connection(connection, context).await,
-                Err(error) => tracing::warn!(%error, "relay client QUIC handshake rejected"),
+                Err(error) => {
+                    tracing::warn!(%error, detail = ?error, "relay client QUIC handshake rejected");
+                }
             }
         });
     }
@@ -243,3 +245,7 @@ pub(crate) async fn handle_relay_client_quic_connection(
 #[cfg(test)]
 #[path = "tests/quic_service.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "itest-quic-fault"))]
+#[path = "tests/quic_failure_diagnostics.rs"]
+mod failure_diagnostics_tests;

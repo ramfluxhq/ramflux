@@ -201,10 +201,13 @@ fn capture_to(path: &std::path::Path, line: &serde_json::Value) -> Result<(), ()
     let mut buffer = serde_json::to_vec(line).map_err(|_error| ())?;
     buffer.push(b'\n');
     let _guard = CAPTURE_WRITE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut file =
-        std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|_error| ())?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|error| {
+        tracing::warn!(%error, capture_path = %path.display(), "relay client QUIC capture open failed");
+    })?;
     // One write_all of the fully-formed line; still fail-closed on any I/O error.
-    file.write_all(&buffer).map_err(|_error| ())
+    file.write_all(&buffer).map_err(|error| {
+        tracing::warn!(%error, capture_path = %path.display(), "relay client QUIC capture write failed");
+    })
 }
 
 /// Writes the between-attempt restart barrier marker (also the cross-process hold claim, see

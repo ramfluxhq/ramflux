@@ -110,11 +110,11 @@ impl QuicGatewayClient {
         endpoint.set_default_client_config(quic_gateway_client_config(ca_cert)?);
         let connecting = endpoint
             .connect(peer_addr, server_name)
-            .map_err(|error| TransportError::Quic(error.to_string()))?;
+            .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
         let connection = tokio::time::timeout(timeout, connecting)
             .await
-            .map_err(|error| TransportError::Quic(error.to_string()))?
-            .map_err(|error| TransportError::Quic(error.to_string()))?;
+            .map_err(|error| TransportError::Quic(format!("{error}; phase=handshake peer={peer_addr} server_name={server_name}; detail={error:?}")))?
+            .map_err(|error| TransportError::Quic(format!("{error}; phase=handshake peer={peer_addr} server_name={server_name}; detail={error:?}")))?;
         Ok(Self { _endpoint: endpoint, connection, timeout })
     }
 
@@ -145,7 +145,9 @@ impl QuicGatewayClient {
             .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
         match tokio::time::timeout(handshake_timeout, connecting).await {
             Err(_elapsed) => Err(QuicConnectPhase::HandshakeTimeout),
-            Ok(Err(error)) => Err(QuicConnectPhase::HandshakeFailed(error.to_string())),
+            Ok(Err(error)) => {
+                Err(QuicConnectPhase::HandshakeFailed(format!("{error}; detail={error:?}")))
+            }
             Ok(Ok(connection)) => {
                 Ok(Self { _endpoint: endpoint, connection, timeout: request_timeout })
             }
@@ -166,11 +168,9 @@ impl QuicGatewayClient {
         request: &GatewayQuicRequest,
     ) -> Result<GatewayQuicResponse, QuicRequestPhase> {
         match tokio::time::timeout(self.timeout, async {
-            let (mut send, mut recv) = self
-                .connection
-                .open_bi()
-                .await
-                .map_err(|error| QuicRequestPhase::ConnectionLost(error.to_string()))?;
+            let (mut send, mut recv) = self.connection.open_bi().await.map_err(|error| {
+                QuicRequestPhase::ConnectionLost(format!("{error}; detail={error:?}"))
+            })?;
             write_quic_json_frame(&mut send, request)
                 .await
                 .map_err(quic_request_phase_from_transport)?;
@@ -218,17 +218,25 @@ impl QuicGatewayClient {
         &self,
         request: &GatewayQuicRequest,
     ) -> Result<GatewayQuicResponse, TransportError> {
-        tokio::time::timeout(self.timeout, async {
-            let (mut send, mut recv) = self
-                .connection
-                .open_bi()
-                .await
-                .map_err(|error| TransportError::Quic(error.to_string()))?;
+        let result = tokio::time::timeout(self.timeout, async {
+            let (mut send, mut recv) = self.connection.open_bi().await.map_err(|error| {
+                TransportError::Quic(format!("{error}; phase=open_stream; detail={error:?}"))
+            })?;
             write_quic_json_frame(&mut send, request).await?;
             read_quic_json_frame(&mut recv).await
         })
         .await
-        .map_err(|error| TransportError::Quic(error.to_string()))?
+        .map_err(|error| {
+            TransportError::Quic(format!("{error}; phase=request_timeout; detail={error:?}"))
+        })?;
+        result.map_err(|error| match error {
+            TransportError::Quic(reason) => TransportError::Quic(format!(
+                "{reason}; phase=request peer={}; connection_close={:?}",
+                self.connection.remote_address(),
+                self.connection.close_reason()
+            )),
+            other => other,
+        })
     }
 
     /// # Errors
@@ -236,8 +244,8 @@ impl QuicGatewayClient {
     pub async fn open_bidi_stream(&self) -> Result<QuicGatewayBidiStream, TransportError> {
         let (send, recv) = tokio::time::timeout(self.timeout, self.connection.open_bi())
             .await
-            .map_err(|error| TransportError::Quic(error.to_string()))?
-            .map_err(|error| TransportError::Quic(error.to_string()))?;
+            .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?
+            .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
         Ok(QuicGatewayBidiStream { send, recv, timeout: self.timeout })
     }
 
@@ -427,13 +435,13 @@ impl GatewaySessionFrameSink for QuicGatewayBidiStream {
         Box::pin(async move {
             tokio::time::timeout(self.timeout, write_quic_raw_frame(&mut self.send, frame))
                 .await
-                .map_err(|error| TransportError::Quic(error.to_string()))?
+                .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?
         })
     }
 
     fn finish(&mut self) -> Result<(), TransportError> {
         quinn::SendStream::finish(&mut self.send)
-            .map_err(|error| TransportError::Quic(error.to_string()))
+            .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))
     }
 }
 
@@ -442,7 +450,7 @@ impl GatewaySessionFrameSource for QuicGatewayBidiStream {
         Box::pin(async move {
             tokio::time::timeout(self.timeout, read_quic_raw_frame(&mut self.recv))
                 .await
-                .map_err(|error| TransportError::Quic(error.to_string()))?
+                .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?
         })
     }
 }
@@ -477,7 +485,8 @@ impl GatewaySessionFrameSink for quinn::SendStream {
     }
 
     fn finish(&mut self) -> Result<(), TransportError> {
-        quinn::SendStream::finish(self).map_err(|error| TransportError::Quic(error.to_string()))
+        quinn::SendStream::finish(self)
+            .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))
     }
 }
 
@@ -572,8 +581,10 @@ pub(crate) async fn write_quic_raw_frame(
         .map_err(|_error| TransportError::FrameTooLarge { len: frame.len() })?;
     send.write_all(&len.to_be_bytes())
         .await
-        .map_err(|error| TransportError::Quic(error.to_string()))?;
-    send.write_all(frame).await.map_err(|error| TransportError::Quic(error.to_string()))?;
+        .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
+    send.write_all(frame)
+        .await
+        .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
     Ok(())
 }
 
@@ -583,7 +594,9 @@ pub(crate) async fn read_quic_raw_frame(
     tracing::trace!("quinn QUIC reading JSON frame length");
     let mut len_bytes = [0_u8; 4];
     recv.read_exact(&mut len_bytes).await.map_err(|error| match error {
-        quinn::ReadExactError::ReadError(error) => TransportError::Quic(error.to_string()),
+        quinn::ReadExactError::ReadError(error) => {
+            TransportError::Quic(format!("{error}; detail={error:?}"))
+        }
         quinn::ReadExactError::FinishedEarly(size) => TransportError::Io(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             format!("gateway frame ended after {size} bytes"),
@@ -596,7 +609,9 @@ pub(crate) async fn read_quic_raw_frame(
     tracing::trace!(len, "quinn QUIC reading JSON frame body");
     let mut body = vec![0_u8; len];
     recv.read_exact(&mut body).await.map_err(|error| match error {
-        quinn::ReadExactError::ReadError(error) => TransportError::Quic(error.to_string()),
+        quinn::ReadExactError::ReadError(error) => {
+            TransportError::Quic(format!("{error}; detail={error:?}"))
+        }
         quinn::ReadExactError::FinishedEarly(size) => TransportError::Io(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             format!("gateway frame ended after {size} of {len} bytes"),
