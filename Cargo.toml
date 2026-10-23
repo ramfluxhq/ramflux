@@ -10,6 +10,7 @@ members = [
     "crates/ramflux-sdk",
     "crates/ramflux-node-core",
     "apps/rf",
+    "apps/ramflux-agent-host",
     "apps/ramflux-gateway",
     "apps/ramflux-router",
     "apps/ramflux-notify",
