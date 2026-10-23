@@ -32,6 +32,7 @@ impl RamfluxClient {
                 .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
         }
         self.persist_pair(local, remote, &bundle, &session)?;
+        self.finish_pair_retirement()?;
         Ok(SdkObjectKeySlot {
             schema: "ramflux.sdk.object_key_slot.dm.v2".to_owned(),
             version: 2,

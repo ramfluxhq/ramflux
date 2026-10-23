@@ -593,7 +593,7 @@ impl AccountDb {
         self.connection.execute(
             "INSERT INTO group_member_device_key
                 (group_id, member_id, device_signing_public_key, verified_at)
-             VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key",
             params![
                 accept.group_id,
                 invite.invitee_identity,

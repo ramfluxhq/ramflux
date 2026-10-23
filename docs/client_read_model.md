@@ -232,30 +232,41 @@ Fetch failures remain object-directory/events state and do not alter message con
 
 ### Device-pair recovery and bounded inbox work
 
-A verified fresh X3DH bootstrap can replace a confirmed session only after the pinned device
-identity, envelope signature and encrypted routing body all authenticate. A gap beyond the
-ratchet skip limit or lost receive state triggers a fresh encrypted `pair.session.reset.v1`
-control request, with at most one reset attempt per device pair per minute. The reset travels
-inside envelope v2; it adds no node-visible conversation descriptor. `session.reset` journal
-events expose device metadata and the recovery reason. This covers passive confirmation as
-well as completed local bootstrap; an explicit fresh reset can retire an unconfirmed local
-bootstrap too. Delayed headerless confirmations cannot replace a confirmed active pair. Retired session ids cannot be reactivated
-by a delayed bootstrap. Failed reset submission leaves a durable pending recovery marker for
-bounded retry. A failed attachment-key-slot decrypt leaves the message ratchet unchanged.
+Each verified device pair has one current sending state and up to eight previous receive
+states, newest first. Promotion archives the previous current state. Decrypt checks current
+then previous states by authenticated session id; an archive hit advances only that state and
+never demotes current. A verified delayed bootstrap can promote safely because traffic on the
+other live state remains decryptable. Only eviction erases private state and tombstones the id;
+authenticated traffic for an evicted state requests a fresh encrypted reset.
 
-Pending retry and dead-letter ciphertext never evict a different source. A claimed source gets
+A gap beyond the ratchet skip limit or lost state creates durable reset work. Transport submit
+does not confirm recovery. Retry backoff starts at one minute and caps at five minutes, until
+the peer is heard on the selected current state or the pair's trusted device is removed.
+Encrypted reset acknowledgements allow a passive receiver to finish recovery. Simultaneous
+usable local reset candidates choose the lower session id; both states remain decryptable.
+An unacknowledged candidate that exceeds its skip window is replaced by a fresh bootstrap,
+so retries cannot themselves accumulate an unrecoverable gap. Identity, signing key, envelope
+signature and AEAD checks remain mandatory before promotion. `session.reset` journal metadata
+records recovery; no conversation descriptor is exposed outside the encrypted body. A failed
+attachment-slot decrypt leaves the live message ratchet unchanged.
+
+Retained retry and dead-letter ciphertext never evict a different source. A claimed source gets
 at most two retained failures before authentication/relationship confirmation, or eight for a
-verified related peer; stranger failures share a 16-entry admission budget. Each queue remains
-bounded to 64 entries. Trusted failures expire within ten minutes and eight attempts; stranger
-failures expire within thirty seconds and three attempts. The gateway TTL can shorten these
-windows. Re-drive preserves first-seen time, expiry and attempts, excludes authentication/AEAD
-and immutable routing failures, and wakes only matching group or manifest dependencies. It
-wakes at most eight entries per second, at most once per entry per minute, and only actual
-membership/key changes advance the scoped revision. The compatibility legacy unrouted hold
-keeps its existing separate retention contract.
+verified related peer; strangers share a 16-entry admission budget. Each queue remains bounded
+to 64 entries. Trusted failures expire within ten minutes and eight attempts; stranger failures
+expire within thirty seconds and three attempts. Gateway TTL can shorten these windows.
+Only live retries wake after matching newer group/manifest changes. Original age, expiry and
+attempts remain unchanged, with at most eight wakes per second and one per entry per minute.
+Dead letters are terminal diagnostics and are never automatically reinserted or re-ACKed by
+membership changes. Idempotent key imports and unrelated device records do not advance scoped
+revisions. The legacy unrouted hold retains its separate retention contract.
 
-Account databases enable SQLCipher secure deletion. Upgrade removes obsolete imported live
-ratchet events and checkpoints as well as old exported pair-history state, then checkpoints
-the WAL. Retirement deletes superseded pair secrets and checkpoints after the transaction.
-This removes live database rows; filesystem snapshots, backups and previously exported blobs
-are outside this local erasure operation. Live ratchet and message-key Debug output is redacted.
+Account writers enable SQLCipher secure deletion. Upgrade overwrites obsolete imported live
+ratchet payloads and signatures, preserving ledger ids and counters as explicitly retired
+tombstones so causal references remain valid and counters cannot be reused. Reads and history
+exports omit retired payloads; surviving event signatures and history imports remain valid.
+Old exported pair history and obsolete slot snapshots are erased too. WAL checkpoints follow
+retirement transactions. Filesystem snapshots, backups and previously exported blobs are outside
+this local operation; active readers can delay checkpoint progress. Live and persisted ratchet
+message-key Debug output is redacted, and legacy routing compares typed device hashes without
+copying a full secret snapshot to JSON.

@@ -160,3 +160,64 @@ fn runtime_control_batch_and_outbox_rollback_together() -> Result<(), StorageErr
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn imported_ratchet_retirement_preserves_causal_edges_counters_and_history_signatures()
+-> Result<(), StorageError> {
+    let (root, db, _device) = signed_test_db("ratchet-retirement-ledger")?;
+    let first = "dm.session:thread:recv:own-device-sync:old1";
+    let last = "dm.session:thread:recv:own-device-sync:old2";
+    db.append_event("before", "text", b"before")?;
+    db.append_event(first, "dm.ratchet_session", b"old private snapshot")?;
+    db.append_event("after", "text", b"after")?;
+    db.append_event(last, "dm.ratchet_session", b"latest private snapshot")?;
+    db.connection.execute(
+        "UPDATE local_event_log SET causal_prev_json=?1 WHERE event_id='after'",
+        rusqlite::params![serde_json::to_string(&vec![first, "before"])?],
+    )?;
+    db.connection.execute(
+        "INSERT INTO event_causal_dependency VALUES('after',?1,'fulfilled')",
+        rusqlite::params![first],
+    )?;
+    db.set_projection_checkpoint("dm_session:thread:recv", last)?;
+    db.enable_runtime()?;
+    assert!(db.event_body(first)?.is_none());
+    assert!(db.event_body(last)?.is_none());
+    let tombstones:i64=db.connection.query_row("SELECT count(*) FROM local_event_log WHERE signature_status='retired' AND event_body=x'7b7d' AND length(signature)=0",[],|row|row.get(0))?;
+    assert_eq!(tombstones, 2);
+    let dangling:i64=db.connection.query_row("SELECT count(*) FROM event_causal_dependency d LEFT JOIN local_event_log e ON e.event_id=d.depends_on_event_id WHERE e.event_id IS NULL",[],|row|row.get(0))?;
+    assert_eq!(dangling, 0);
+    let previous: String = db.connection.query_row(
+        "SELECT causal_prev_json FROM local_event_log WHERE event_id='after'",
+        [],
+        |row| row.get(0),
+    )?;
+    for id in serde_json::from_str::<Vec<String>>(&previous)? {
+        let exists: bool = db.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_event_log WHERE event_id=?1)",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )?;
+        assert!(exists);
+    }
+    db.append_event("next", "text", b"next")?;
+    let counter: i64 = db.connection.query_row(
+        "SELECT device_counter FROM local_event_log WHERE event_id='next'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(counter, 5);
+    let bundle = db.export_history_bundle("device", "target")?;
+    assert_eq!(bundle.encrypted_event_batch.len(), 3);
+    assert!(
+        bundle.encrypted_event_batch.iter().all(|event| event.event_type != "dm.ratchet_session")
+    );
+    let (target_root, target, _) = signed_test_db("ratchet-retirement-import")?;
+    target.import_history_bundle(&bundle)?;
+    assert_eq!(target.event_body("after")?, Some(b"after".to_vec()));
+    drop(target);
+    drop(db);
+    fs::remove_dir_all(target_root)?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

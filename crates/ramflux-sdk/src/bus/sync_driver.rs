@@ -137,6 +137,7 @@ async fn receive(
             applied += 1;
         }
     }
+    account.client.retry_pair_resets(engine, now).await?;
     Ok(applied)
 }
 
@@ -215,7 +216,7 @@ fn redrive_if_state_changed(client: &RamfluxClient) -> Result<(), SdkError> {
     let revision = db.inbox_recovery_revision()?;
     let key = "inbox/recovery-revision";
     let previous = db.load_actor_state::<u64>(key)?.unwrap_or(0);
-    db.redrive_inbox_changes(previous, now_unix_timestamp())?;
+    db.redrive_inbox_changes(now_unix_timestamp())?;
     if previous != revision {
         db.persist_actor_state(key, &revision)?;
     }

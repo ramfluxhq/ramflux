@@ -116,12 +116,6 @@ impl AccountDb {
             |r| r.get(0),
         )?)
     }
-    /// Manually wakes eligible state-dependent work, preserving age and excluding authentication failures.
-    /// # Errors
-    /// Returns SQLite errors.
-    pub fn redrive_inbox_dead_letters(&self, at: i64) -> Result<usize, StorageError> {
-        self.redrive_inbox_matching(None, at)
-    }
     /// Returns the latest actual membership/manifest change revision.
     /// # Errors
     /// Returns SQLite errors.

@@ -1203,4 +1203,55 @@ mod tests {
         ));
         Ok(())
     }
+    #[test]
+    fn kicked_member_can_rejoin_and_all_members_converge() -> Result<(), SdkError> {
+        let alice_seed = [0x62; 32];
+        let bob_seed = [0x63; 32];
+        let carol_seed = [0x64; 32];
+        let alice_key = device_public_key("alice", "alice_device", alice_seed);
+        let bob_key = device_public_key("bob", "bob_device", bob_seed);
+        let alice = group_client("rejoin_alice", "alice", "alice_device", alice_seed)?;
+        let bob = group_client("rejoin_bob", "bob", "bob_device", bob_seed)?;
+        let carol = group_client("rejoin_carol", "carol", "carol_device", carol_seed)?;
+        for client in [&alice, &bob, &carol] {
+            seed_group(client, &alice_key)?;
+            client.add_group_member("group_test", "carol_device", "member")?;
+            seed_member_key(client, "bob_device", &bob_key)?;
+        }
+        let (kick, _) = alice.create_signed_group_member_kick(
+            "group_test",
+            "alice_device",
+            "bob_device",
+            "test rejoin",
+        )?;
+        bob.apply_group_control_event(&kick)?;
+        carol.apply_group_control_event(&kick)?;
+        let (invite, _) = alice.create_signed_group_member_invite(
+            "group_test",
+            "alice_device",
+            "bob_device",
+            &bob_key,
+            "member",
+            now_unix_timestamp() + 3600,
+            "test rejoin",
+        )?;
+        let invite_id = invite_id_from_event(&invite)?;
+        bob.apply_group_control_event(&invite)?;
+        carol.apply_group_control_event(&invite)?;
+        let (accept, _) =
+            bob.create_signed_group_member_accept("group_test", "bob_device", &invite_id)?;
+        alice.apply_group_control_event(&accept)?;
+        carol.apply_group_control_event(&accept)?;
+        let state = alice.group_state("group_test")?;
+        assert!(state.members.contains("bob_device"));
+        assert_eq!(state, bob.group_state("group_test")?);
+        assert_eq!(state, carol.group_state("group_test")?);
+        for client in [&alice, &bob, &carol] {
+            assert_eq!(
+                client.account_db()?.group_member_device_key("group_test", "bob_device")?,
+                Some(bob_key.clone())
+            );
+        }
+        Ok(())
+    }
 }

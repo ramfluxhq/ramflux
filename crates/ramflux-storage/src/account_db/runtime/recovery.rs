@@ -78,7 +78,18 @@ impl AccountDb {
         ] {
             self.connection.execute_batch(&format!("CREATE TRIGGER inbox_recovery_actor_{action} {timing} {action} ON runtime_actor_state WHEN NEW.state_kind LIKE 'directory/device/%' AND EXISTS(SELECT 1 FROM runtime_inbox_policy WHERE failure_class='manifest' AND subject=substr(NEW.state_kind,18)) AND ({guard}) BEGIN UPDATE runtime_inbox_recovery SET revision=revision+1; INSERT INTO runtime_inbox_changes VALUES('manifest',substr(NEW.state_kind,18),(SELECT revision FROM runtime_inbox_recovery)) ON CONFLICT(kind,subject) DO UPDATE SET revision=excluded.revision; END;"))?;
         }
-        self.connection.execute_batch("DELETE FROM projection_checkpoint WHERE last_event_id IN (SELECT event_id FROM local_event_log WHERE event_type='dm.ratchet_session' AND event_id LIKE 'dm.session:%:own-device-sync:%'); DELETE FROM local_event_log WHERE event_type='dm.ratchet_session' AND event_id LIKE 'dm.session:%:own-device-sync:%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'own-device/pair-history/%'; UPDATE runtime_actor_state SET state_json=CAST(json_remove(CAST(state_json AS TEXT),'$.prepared_slot.session') AS BLOB) WHERE state_kind LIKE 'attachment/reference/%' AND json_type(CAST(state_json AS TEXT),'$.prepared_slot.session') IS NOT NULL;")?;
+        self.retire_imported_ratchet_payloads()?;
+        self.connection.execute_batch("DELETE FROM runtime_actor_state WHERE state_kind LIKE 'own-device/pair-history/%'; UPDATE runtime_actor_state SET state_json=CAST(json_remove(CAST(state_json AS TEXT),'$.prepared_slot.session') AS BLOB) WHERE state_kind LIKE 'attachment/reference/%' AND json_type(CAST(state_json AS TEXT),'$.prepared_slot.session') IS NOT NULL;")?;
+        Ok(())
+    }
+}
+
+impl AccountDb {
+    pub(crate) fn retire_imported_ratchet_payloads(&self) -> Result<(), StorageError> {
+        // Keep ledger ids/counters as tombstones. Deleting them can invalidate causal edges or
+        // let append_event reuse the last device counter. Payloads and signatures are erased;
+        // ordinary event reads and history export exclude these explicitly retired rows.
+        self.connection.execute_batch("DELETE FROM projection_checkpoint WHERE last_event_id IN (SELECT event_id FROM local_event_log WHERE event_type='dm.ratchet_session' AND event_id LIKE 'dm.session:%:own-device-sync:%'); UPDATE local_event_log SET event_body=x'7b7d',signature=x'',signature_status='retired' WHERE event_type='dm.ratchet_session' AND event_id LIKE 'dm.session:%:own-device-sync:%' AND signature_status!='retired';")?;
         Ok(())
     }
 }

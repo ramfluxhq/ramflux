@@ -553,3 +553,6 @@ mod r4;
 
 #[path = "r5_tests.rs"]
 mod r5;
+
+#[path = "session_record_tests.rs"]
+mod session_record;

@@ -26,28 +26,29 @@ impl RamfluxClient {
         session: &ramflux_crypto::DmSession,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let record = Pair {
-            local: local.to_owned(),
-            remote: remote.to_owned(),
-            bundle: *bundle,
-            snapshot: session.snapshot(),
-        };
-        db.persist_actor_state(&format!("dm-pair/session/{}", session.session_id), &record)?;
-        let key = pair_key(local, remote)?;
-        let active = db.load_actor_state::<String>(&key)?;
-        let local_origin = db
-            .load_actor_state::<bool>(&format!("dm-pair/local/{}", session.session_id))?
-            .unwrap_or(false);
-        let active_local = active
-            .as_ref()
-            .map(|id| db.load_actor_state::<bool>(&format!("dm-pair/local/{id}")))
-            .transpose()?
-            .flatten()
-            .unwrap_or(false);
-        if active.is_none() || (local_origin && !active_local) {
-            db.persist_actor_state(&key, &session.session_id)?;
-        }
-        Ok(())
+        db.write_transaction(|| -> Result<(), SdkError> {
+            let record = Pair {
+                local: local.to_owned(),
+                remote: remote.to_owned(),
+                bundle: *bundle,
+                snapshot: session.snapshot(),
+            };
+            let record_key = format!("dm-pair/session/{}", session.session_id);
+            let new = !db.actor_state_exists(&record_key)?;
+            db.persist_actor_state(&record_key, &record)?;
+            let key = pair_key(local, remote)?;
+            let current = db.load_actor_state::<String>(&key)?;
+            let local_origin = db
+                .load_actor_state::<bool>(&format!("dm-pair/local/{}", session.session_id))?
+                .unwrap_or(false);
+            if (new && local_origin)
+                || (current.is_none()
+                    && !self.archived_pairs(local, remote)?.contains(&session.session_id))
+            {
+                self.promote_pair(local, remote, &session.session_id)?;
+            }
+            Ok(())
+        })
     }
     pub(super) fn confirm_pair(
         &self,
@@ -57,41 +58,7 @@ impl RamfluxClient {
         reset: bool,
         bootstrap: bool,
     ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let id = &session.session_id;
-        let fresh =
-            !db.load_actor_state::<bool>(&format!("dm-pair/confirmed/{id}"))?.unwrap_or(false);
-        db.persist_actor_state(&format!("dm-pair/confirmed/{id}"), &true)?;
-        db.remove_actor_state(&format!("dm-pair/bootstrap/{id}"))?;
-        if db.load_actor_state::<bool>(&format!("dm-pair/local/{id}"))?.unwrap_or(false) {
-            db.persist_actor_state(&format!("dm-pair/settled/{id}"), &true)?;
-        }
-        let key = pair_key(local, remote)?;
-        db.remove_actor_state(&format!("{key}/reset-pending"))?;
-        if let Some(active) = db.load_actor_state::<String>(&key)? {
-            // Only an authenticated and decrypted fresh bootstrap can replace a settled pair.
-            let settled =
-                db.load_actor_state::<bool>(&format!("dm-pair/settled/{active}"))?.unwrap_or(false);
-            let confirmed = db
-                .load_actor_state::<bool>(&format!("dm-pair/confirmed/{active}"))?
-                .unwrap_or(false);
-            let recovery = fresh && bootstrap && (confirmed || reset);
-            if active == *id || (!confirmed && !settled && id < &active) || recovery {
-                if active != *id && recovery {
-                    self.retire_pair(&active)?;
-                    db.persist_actor_state(&format!("dm-pair/settled/{id}"), &true)?;
-                    db.append_journal(
-                        &format!("pair-replaced:{id}"),
-                        "session.reset",
-                        &serde_json::json!({"device_id":remote,"reason":"verified_bootstrap"}),
-                        super::now_unix_timestamp(),
-                        None,
-                    )?;
-                }
-                db.persist_actor_state(&key, id)?;
-            }
-        }
-        Ok(())
+        self.confirm_pair_record(local, remote, session, reset, bootstrap)
     }
     fn load_pair(
         &self,
@@ -104,11 +71,13 @@ impl RamfluxClient {
             .load_actor_state::<bool>(&format!("dm-pair/retired/{id}"))?
             .unwrap_or(false)
         {
-            return Err(if self.pair_recovery_pending(local, remote)? {
-                SdkError::PairRecoveryRequired
-            } else {
-                invalid("retired device-pair session")
-            });
+            return Err(SdkError::PairRecoveryRequired);
+        }
+        let current = self.account_db()?.load_actor_state::<String>(&pair_key(local, remote)?)?;
+        let mut order = current.into_iter().collect::<Vec<_>>();
+        order.extend(self.archived_pairs(local, remote)?);
+        if !order.iter().any(|candidate| candidate == id) {
+            return Ok(None);
         }
         let Some(record) =
             self.account_db()?.load_actor_state::<Pair>(&format!("dm-pair/session/{id}"))?

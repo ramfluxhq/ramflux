@@ -79,6 +79,8 @@ impl AccountDb {
         for checkpoint in &bundle.projection_checkpoints {
             self.set_projection_checkpoint(&checkpoint.projection_name, &checkpoint.last_event_id)?;
         }
+        self.retire_imported_ratchet_payloads()?;
+        self.checkpoint_retired_secrets()?;
         Ok(())
     }
 
@@ -87,6 +89,7 @@ impl AccountDb {
             "SELECT event_id, event_type, actor_principal_id, actor_device_id, device_counter,
                     lamport_time, created_at, event_body, signature
                FROM local_event_log
+              WHERE signature_status != 'retired'
               ORDER BY lamport_time ASC, event_id ASC",
         )?;
         let rows = statement.query_map([], |row| {

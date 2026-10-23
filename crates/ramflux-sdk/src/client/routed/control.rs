@@ -36,7 +36,10 @@ impl RamfluxClient {
                 .persist_actor_state(&a2i_key(&event.source_device_id, &event.event_id)?, &event)?;
         } else {
             let event: Value = serde_json::from_slice(body)?;
-            if event["type"] == "pair.session.reset.v1" {
+            if matches!(
+                event["type"].as_str(),
+                Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
+            ) {
                 self.account_db()?.append_journal(&format!("pair-reset:{}", super::committed_key(entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device,"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
             } else {
                 self.project_contact_control(entry, &event)?;

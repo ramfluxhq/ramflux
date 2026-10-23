@@ -203,27 +203,19 @@ fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backo
 }
 
 #[test]
-fn retained_state_dependent_dead_letters_redrive_without_exceeding_retry_capacity()
--> Result<(), StorageError> {
+fn terminal_dead_letters_are_not_reinserted_after_membership_changes() -> Result<(), StorageError> {
     let (root, db) = database()?;
-    db.set_inbox_failure_policy("rejected", b"ciphertext", true, ("group", "g"), 100)?;
+    db.set_inbox_failure_policy("refused", b"packet", true, ("group", "g"), 100)?;
     db.dead_letter_inbox(
-        "rejected",
-        b"ciphertext",
-        &serde_json::json!({"error_code":"membership_pending"}),
+        "refused",
+        b"packet",
+        &serde_json::json!({"error_code":"retry_exhausted"}),
         100,
     )?;
-    for n in 0..64 {
-        db.set_inbox_failure_policy(&format!("queued-{n}"), b"queued", true, ("none", ""), 100)?;
-        db.defer_inbox_entry(&format!("queued-{n}"), b"queued", 100)?;
-    }
-    assert_eq!(db.redrive_inbox_dead_letters(101)?, 0);
-    assert_eq!(db.due_inbox_retries(101)?.len(), 0);
-    db.remove_inbox_retry("queued-0")?;
-    assert_eq!(db.redrive_inbox_dead_letters(162)?, 1);
-    let entries = db.due_inbox_retries(162)?;
-    assert_eq!(entries.len(), 64);
-    assert!(entries.contains(&b"ciphertext".to_vec()));
+    db.persist_group_member_device_key("g", "alice", "key")?;
+    assert_eq!(db.redrive_inbox_changes(101)?, 0);
+    assert!(!db.has_inbox_retry("refused")?);
+    assert_eq!(db.due_inbox_retries(102)?, Vec::<Vec<u8>>::new());
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -267,12 +259,7 @@ fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
 -> Result<(), StorageError> {
     let (root, db) = database()?;
     db.set_inbox_failure_policy("pending", b"packet", true, ("group", "g"), 100)?;
-    db.dead_letter_inbox(
-        "pending",
-        b"packet",
-        &serde_json::json!({"error_code":"membership_pending"}),
-        100,
-    )?;
+    db.defer_inbox_entry("pending", b"packet", 100)?;
     db.set_inbox_failure_policy("auth", b"bad", true, ("group", "g"), 100)?;
     db.dead_letter_inbox(
         "auth",
@@ -280,7 +267,8 @@ fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
         &serde_json::json!({"error_code":"authentication_failed"}),
         100,
     )?;
-    assert_eq!(db.redrive_inbox_dead_letters(110)?, 1);
+    db.persist_group_member_device_key("g", "alice", "key")?;
+    assert_eq!(db.redrive_inbox_changes(110)?, 1);
     let created: i64 = db.connection.query_row(
         "SELECT created_at FROM runtime_inbox_retry WHERE envelope_key='pending'",
         [],
@@ -288,7 +276,7 @@ fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
     )?;
     assert_eq!(created, 100);
     assert!(!db.has_inbox_retry("auth")?);
-    assert_eq!(db.redrive_inbox_dead_letters(111)?, 0);
+    assert_eq!(db.redrive_inbox_changes(111)?, 0);
     db.expire_inbox_holds(700)?;
     assert!(!db.has_inbox_retry("pending")?);
     drop(db);
@@ -360,18 +348,17 @@ fn redrive_wakes_only_later_matching_changes_and_retains_rate_limited_triggers()
     db.create_group("affected", "bob")?;
     db.set_inbox_failure_policy("pending", b"packet", true, ("group", "affected"), 100)?;
     db.defer_inbox_entry("pending", b"packet", 100)?;
-    assert_eq!(db.redrive_inbox_changes(0, 101)?, 0);
+    assert_eq!(db.redrive_inbox_changes(101)?, 0);
     db.create_group("unrelated", "bob")?;
-    assert_eq!(db.redrive_inbox_changes(0, 101)?, 0);
+    assert_eq!(db.redrive_inbox_changes(101)?, 0);
     db.persist_group_member_device_key("affected", "alice", "key")?;
-    assert_eq!(db.redrive_inbox_changes(0, 102)?, 1);
+    assert_eq!(db.redrive_inbox_changes(102)?, 1);
     assert_eq!(db.due_inbox_retries(102)?, vec![b"packet".to_vec()]);
     db.persist_group_member_device_key("affected", "alice", "key")?;
-    assert_eq!(db.redrive_inbox_changes(0, 103)?, 0);
+    assert_eq!(db.redrive_inbox_changes(103)?, 0);
     db.persist_group_member_device_key("affected", "alice", "new-key")?;
-    assert_eq!(db.redrive_inbox_changes(0, 104)?, 0);
-    let latest = db.inbox_recovery_revision()?;
-    assert_eq!(db.redrive_inbox_changes(latest, 162)?, 1);
+    assert_eq!(db.redrive_inbox_changes(104)?, 0);
+    assert_eq!(db.redrive_inbox_changes(162)?, 1);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

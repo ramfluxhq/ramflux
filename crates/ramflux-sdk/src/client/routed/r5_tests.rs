@@ -4,7 +4,7 @@
 //! Pair recovery and failed object-slot isolation regressions.
 use super::review::{pool, trust};
 use super::*;
-fn outgoing(sender: &Fixture, receiver: &Fixture, id: &str) -> GatewayDirectMessage {
+pub(super) fn outgoing(sender: &Fixture, receiver: &Fixture, id: &str) -> GatewayDirectMessage {
     let mut msg = message(id, "recovery-thread");
     msg.source_principal_id.clone_from(&sender.id);
     msg.sender_id.clone_from(&sender.id);
@@ -12,7 +12,11 @@ fn outgoing(sender: &Fixture, receiver: &Fixture, id: &str) -> GatewayDirectMess
     msg.target_delivery_id.clone_from(&receiver.id);
     msg
 }
-fn fresh(sender: &Fixture, receiver: &Fixture, id: &str) -> Result<GatewayInboxEntry, SdkError> {
+pub(super) fn fresh(
+    sender: &Fixture,
+    receiver: &Fixture,
+    id: &str,
+) -> Result<GatewayInboxEntry, SdkError> {
     trust(sender, receiver)?;
     trust(receiver, sender)?;
     let mut msg = outgoing(sender, receiver, id);
@@ -31,7 +35,7 @@ fn fresh(sender: &Fixture, receiver: &Fixture, id: &str) -> Result<GatewayInboxE
         envelope: gateway_direct_message_envelope(&sender.config()?, &msg, None)?,
     })
 }
-async fn settle(alice: &mut Fixture, bob: &mut Fixture) -> Result<(), SdkError> {
+pub(super) async fn settle(alice: &mut Fixture, bob: &mut Fixture) -> Result<(), SdkError> {
     alice.client.establish_friend_link("friend", "alice", "bob")?;
     bob.client.establish_friend_link("friend", "bob", "alice")?;
     let entry = fresh(alice, bob, "initial")?;
@@ -244,14 +248,17 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
         bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id,
         decode(&entry.envelope)?.ciphertext.session_id
     );
-    assert_eq!(
-        bob.client.account_db()?.load_actor_state::<bool>(&format!("dm-pair/retired/{old}"))?,
-        Some(true)
+    assert!(bob.client.archived_pairs("bob", "alice")?.contains(&old));
+    assert!(
+        bob.client
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&format!("dm-pair/session/{old}"))?
+            .is_some()
     );
     Ok(())
 }
 #[tokio::test]
-async fn an_authenticated_fresh_reset_retires_even_an_unconfirmed_local_bootstrap()
+async fn an_authenticated_fresh_reset_archives_an_unconfirmed_local_bootstrap()
 -> Result<(), SdkError> {
     let alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
@@ -272,9 +279,12 @@ async fn an_authenticated_fresh_reset_retires_even_an_unconfirmed_local_bootstra
         bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id,
         decode(&reset.envelope)?.ciphertext.session_id
     );
-    assert_eq!(
-        bob.client.account_db()?.load_actor_state::<bool>(&format!("dm-pair/retired/{old}"))?,
-        Some(true)
+    assert!(bob.client.archived_pairs("bob", "alice")?.contains(&old));
+    assert!(
+        bob.client
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&format!("dm-pair/session/{old}"))?
+            .is_some()
     );
     Ok(())
 }

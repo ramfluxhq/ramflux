@@ -190,7 +190,7 @@ pub struct MessageKeys {
     pub opening_key: [u8; 32],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct MessageKeysSnapshot {
     aead_key: [u8; 32],
     nonce: [u8; 12],
@@ -198,6 +198,11 @@ struct MessageKeysSnapshot {
     opening_key: [u8; 32],
 }
 
+impl std::fmt::Debug for MessageKeysSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MessageKeysSnapshot { <redacted> }")
+    }
+}
 impl std::fmt::Debug for DmSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DmSession")
@@ -1215,6 +1220,16 @@ mod skipped_tests {
 #[cfg(test)]
 mod redaction_tests {
     use super::*;
+    #[test]
+    fn persisted_message_key_debug_redacts_all_key_arrays() {
+        let snapshot = MessageKeysSnapshot {
+            aead_key: [17; 32],
+            nonce: [18; 12],
+            commitment_key: [19; 32],
+            opening_key: [20; 32],
+        };
+        assert_eq!(format!("{snapshot:?}"), "MessageKeysSnapshot { <redacted> }");
+    }
     #[test]
     fn live_ratchet_and_message_key_debug_redact_secrets() -> Result<(), CryptoError> {
         let session = DmSession::initiator([17; 32], [18; 32], [19; 32], [20; 32])?;

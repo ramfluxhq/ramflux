@@ -158,7 +158,7 @@ impl EventStore for AccountDb {
         Ok(self
             .connection
             .query_row(
-                "SELECT event_body FROM local_event_log WHERE event_id = ?1",
+                "SELECT event_body FROM local_event_log WHERE event_id = ?1 AND signature_status != 'retired'",
                 params![event_id],
                 |row| row.get(0),
             )

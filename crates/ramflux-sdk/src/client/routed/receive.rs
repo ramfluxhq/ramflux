@@ -106,6 +106,7 @@ impl RamfluxClient {
             receipt: &commit,
         })?;
         self.finish_pair_retirement()?;
+        self.reply_pair_reset(engine, &opened, &body).await;
         let mut imported = Vec::new();
         if attachments && opened.routing.kind == Kind::Direct && accepted {
             for attachment in &refs {
@@ -295,8 +296,12 @@ impl RamfluxClient {
                 &opened.session,
             )?;
             let reset = opened.routing.kind == Kind::Control
-                && serde_json::from_slice::<serde_json::Value>(body)
-                    .is_ok_and(|value| value["type"] == "pair.session.reset.v1");
+                && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
+                    matches!(
+                        value["type"].as_str(),
+                        Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
+                    )
+                });
             self.confirm_pair(
                 &opened.local_device,
                 &opened.remote_device,

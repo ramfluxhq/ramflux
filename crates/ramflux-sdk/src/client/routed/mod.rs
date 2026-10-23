@@ -5,6 +5,7 @@
 
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
+mod archive;
 mod auth;
 mod committed;
 mod context;
@@ -16,6 +17,7 @@ mod legacy;
 mod receive;
 pub(crate) use receive::Delivery;
 mod recovery;
+mod reset_work;
 mod session;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -197,6 +199,7 @@ impl RamfluxClient {
                 .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
         }
         self.persist_pair(local, remote, &bundle, session)?;
+        self.finish_pair_retirement()?;
 
         Ok(SdkDmEncryptedEnvelope {
             schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),

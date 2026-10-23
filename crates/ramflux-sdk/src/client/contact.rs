@@ -56,7 +56,7 @@ impl RamfluxClient {
             &serde_json::json!({"principal_id":manifest.principal_id}),
         )?;
         for device in &manifest.devices {
-            db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key}))?;
+            db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id}))?;
         }
         Ok(())
     }
