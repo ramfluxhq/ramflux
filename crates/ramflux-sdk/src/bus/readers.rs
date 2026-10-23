@@ -77,7 +77,10 @@ impl AccountReaders {
 
 pub(super) fn is_reader_request(method: &str) -> bool {
     super::read_model::handles(method)
-        || matches!(method, "message.list" | "message.read" | "conversation.list")
+        || matches!(
+            method,
+            "message.list" | "message.read" | "conversation.list" | "surface.get" | "surface.list"
+        )
 }
 
 fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<serde_json::Value, SdkError> {
@@ -86,6 +89,9 @@ fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<serde_json::V
     }
     if request.method == "stream.read" {
         return super::subscription::read(client.account_db()?, request);
+    }
+    if matches!(request.method.as_str(), "surface.get" | "surface.list") {
+        return super::dispatch::surface::read_surface(client, request);
     }
     match request.method.as_str() {
         "conversation.list" => {
@@ -111,7 +117,11 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
         if !message.deleted
             && let Some(content) = db.message_content(&message.message_id)?
         {
-            value["body_utf8"] = serde_json::json!(String::from_utf8_lossy(&content));
+            value["body_utf8"] = if content.starts_with(crate::client::surface::carrier::PREFIX) {
+                serde_json::json!("[Surface pending validation]")
+            } else {
+                serde_json::json!(String::from_utf8_lossy(&content))
+            };
             let mut attachments = Vec::new();
             for object in db.client_message_object_ids(&message.message_id)? {
                 let metadata = super::read_model::row(client, "object", &object)?;
@@ -132,6 +142,13 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
                 attachments.push(reference);
             }
             value["attachments"] = serde_json::json!(attachments);
+        }
+        if !message.deleted
+            && let Some((surface, text)) = client.surface_message_fallback(&message.message_id)?
+        {
+            value["content_type"] = serde_json::json!("surface");
+            value["surface_id"] = serde_json::json!(surface);
+            value["body_utf8"] = serde_json::json!(text);
         }
         messages.push(value);
     }

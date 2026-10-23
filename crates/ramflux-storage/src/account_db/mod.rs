@@ -33,6 +33,7 @@ pub mod object;
 pub mod read_model;
 pub mod recovery;
 pub mod runtime;
+pub mod surface;
 
 pub struct AccountDb {
     pub local_account_id: String,

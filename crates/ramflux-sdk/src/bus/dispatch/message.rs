@@ -586,6 +586,12 @@ pub(crate) async fn dispatch_message_receive_request(
             if body.auto_fetch_attachments {
                 delivery.attachments = compat_attachments(&account.client, &delivery.message_id)?;
             }
+            if let Some((_, fallback)) =
+                account.client.surface_message_fallback(&delivery.message_id)?
+            {
+                delivery.plaintext_body_base64 =
+                    ramflux_protocol::encode_base64url(fallback.as_bytes());
+            }
             plaintext.push(delivery);
         }
     }

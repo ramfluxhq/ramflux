@@ -220,7 +220,7 @@ fn restore_a2i_cache(account: &mut LocalBusAccountState) -> Result<(), SdkError>
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use ramflux_sync::{A2uiComponent, a2ui_surface_hash};
+    use ramflux_sync::{A2uiComponent, legacy_a2ui_render_profile_hash};
 
     fn test_state() -> LocalBusDaemonState {
         let mut client = RamfluxClient::new();
@@ -281,7 +281,7 @@ mod tests {
     fn action(surface: &A2uiSurface) -> A2uiAction {
         A2uiAction {
             surface_id: surface.surface_id.clone(),
-            surface_hash: a2ui_surface_hash(surface).expect("surface hash"),
+            surface_hash: legacy_a2ui_render_profile_hash(surface).expect("surface hash"),
             component_id: "approve".to_owned(),
             permission: "mcp.approve".to_owned(),
             source_device_id: "app_device_a2ui".to_owned(),

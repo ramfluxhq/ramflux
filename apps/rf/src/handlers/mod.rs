@@ -19,6 +19,7 @@ pub(crate) mod keychain;
 pub(crate) mod mcp;
 pub(crate) mod node;
 pub(crate) mod object;
+pub(crate) mod surface;
 
 pub(crate) use crate::cli::*;
 pub(crate) use crate::utils::*;

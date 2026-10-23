@@ -43,6 +43,12 @@ pub(super) async fn publish(
         let last_sequence = last.sequence;
         let mut events = Vec::with_capacity(entries.len());
         for entry in entries {
+            if entry.table_name == "direct_message_projection"
+                && let (Some(conversation), Some(message)) =
+                    (entry.keys["conversation_id"].as_str(), entry.keys["message_id"].as_str())
+            {
+                client.project_deferred_surface(conversation, message)?;
+            }
             let projected = super::journal::project(client, &entry)?;
             db.journal_outbox(entry.sequence, &projected, now_unix_timestamp())?;
             let mut frame = local_bus_event(
