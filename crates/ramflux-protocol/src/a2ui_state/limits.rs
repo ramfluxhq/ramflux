@@ -9,11 +9,12 @@ use serde_json::Value;
 pub const MAX_SURFACE_BLOCKS: usize = 64;
 pub const MAX_SURFACE_ACTIONS: usize = 16;
 pub const MAX_SURFACE_TEXT_CHARS: usize = 16_384;
+/// The entire canonical typed snapshot, including actions, fallback strings and JSON syntax.
 pub const MAX_SURFACE_DATA_BYTES: usize = 65_536;
 pub const MAX_SURFACE_TEXT_DELTA_BYTES: usize = 4_096;
 /// At most one block-sized batch per atomic patch.
 pub const MAX_SURFACE_PATCH_OPS: usize = MAX_SURFACE_BLOCKS;
-/// Retired final stream IDs are kept to prevent replay through remove/reinsert.
+/// Retired final stream IDs and immutable text are kept to prevent remove/reinsert replay.
 pub const MAX_SURFACE_FINALIZED_BLOCKS: usize = MAX_SURFACE_BLOCKS;
 /// Leaves room for the event envelope within the standard JSON decoder recursion budget.
 pub const MAX_SURFACE_DATA_DEPTH: usize = 64;
@@ -41,6 +42,8 @@ pub(super) fn json(value: &Value) -> Result<Vec<u8>, SurfaceReject> {
     let mut pending = vec![(value, 0_usize)];
     let mut minimum_bytes = 0_usize;
     while let Some((value, depth)) = pending.pop() {
+        #[cfg(test)]
+        super::work::visit();
         if depth > MAX_SURFACE_DATA_DEPTH {
             return Err(exceeded(SurfaceLimit::NestingDepth));
         }
@@ -83,6 +86,8 @@ pub(super) fn json(value: &Value) -> Result<Vec<u8>, SurfaceReject> {
             _ => {}
         }
     }
+    #[cfg(test)]
+    super::work::canonical();
     let bytes = crate::canonical_json_bytes(value).map_err(|_| SurfaceReject::Encoding)?;
     if bytes.len() > MAX_SURFACE_DATA_BYTES {
         return Err(exceeded(SurfaceLimit::DataBytes));

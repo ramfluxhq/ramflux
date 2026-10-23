@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Additive v2 conversation binding around the existing A2UI command contract.
-use crate::A2uiCommand;
-use serde::{Deserialize, Deserializer, Serialize};
+//! Versioned commands and opaque inputs validated from original wire bytes.
+use crate::{
+    CreateSurfaceCommand, DeleteSurfaceCommand, ProtocolError, UpdateComponentsCommand,
+    UpdateDataModelCommand,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const A2UI_CONVERSATION_SCHEMA: &str = "ramflux.a2ui.conversation.v2";
 pub const A2UI_ACTION_SCHEMA: &str = "ramflux.a2ui.action.v2";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum A2uiConversationSchema {
     #[serde(rename = "ramflux.a2ui.conversation.v2")]
@@ -20,85 +22,142 @@ pub enum A2uiActionSchema {
     V2,
 }
 
-/// Decrypted payload for a signed conversation message. The legacy signed A2UI envelope and
-/// its version-1 command fields are unchanged; this v2 wrapper binds their conversation/version.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct A2uiConversationEvent {
-    pub schema: A2uiConversationSchema,
-    pub conversation_id: String,
-    pub version: u64,
-    pub command: A2uiCommand,
+/// V2 reuses each legacy command DTO and adds commands inside the versioned carrier only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "camelCase")]
+pub enum A2uiConversationCommand {
+    CreateSurface(CreateSurfaceCommand),
+    UpdateComponents(UpdateComponentsCommand),
+    UpdateDataModel(UpdateDataModelCommand),
+    DeleteSurface(DeleteSurfaceCommand),
+    PatchSurface(PatchSurfaceCommand),
+    StreamAppend(StreamAppendCommand),
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EventFields {
-    schema: A2uiConversationSchema,
-    conversation_id: String,
-    version: u64,
-    command: A2uiCommand,
-}
-impl<'de> Deserialize<'de> for A2uiConversationEvent {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
-        let v: EventFields =
-            crate::parse_i_json(raw.get().as_bytes()).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            schema: v.schema,
-            conversation_id: v.conversation_id,
-            version: v.version,
-            command: v.command,
-        })
+impl From<crate::A2uiCommand> for A2uiConversationCommand {
+    fn from(command: crate::A2uiCommand) -> Self {
+        match command {
+            crate::A2uiCommand::CreateSurface(c) => Self::CreateSurface(c),
+            crate::A2uiCommand::UpdateComponents(c) => Self::UpdateComponents(c),
+            crate::A2uiCommand::UpdateDataModel(c) => Self::UpdateDataModel(c),
+            crate::A2uiCommand::DeleteSurface(c) => Self::DeleteSurface(c),
+        }
     }
 }
 
-/// A human decision to the surface author; the signed conversation carrier authenticates it.
-#[derive(Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct A2uiSurfaceAction {
-    pub schema: A2uiActionSchema,
-    pub conversation_id: String,
-    pub surface_id: String,
-    pub version: u64,
-    pub surface_hash: String,
-    pub action_id: String,
-    pub values: Value,
-    pub args_hash: String,
-}
-#[derive(Deserialize)]
+/// Validated decrypted v2 payload. Feed original signed plaintext bytes to
+/// [`Self::from_wire_bytes`]; never preparse through a last-wins JSON map.
+/// Private contents and absence of `Deserialize` prevent unchecked `Value` ingress.
+///
+/// ```compile_fail
+/// use ramflux_protocol::A2uiConversationEvent;
+/// let dropped_duplicate: serde_json::Value = serde_json::from_str(r#"{"x":1,"x":2}"#).unwrap();
+/// let event = serde_json::from_value::<A2uiConversationEvent>(dropped_duplicate).unwrap();
+/// ```
+/// ```compile_fail
+/// use ramflux_protocol::SurfaceState;
+/// let dropped_duplicate: serde_json::Value = serde_json::from_str(r#"{"x":1,"x":2}"#).unwrap();
+/// SurfaceState::default().apply(&dropped_duplicate).unwrap();
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct A2uiConversationEvent(EventFields);
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ActionFields {
-    schema: A2uiActionSchema,
-    conversation_id: String,
-    surface_id: String,
-    version: u64,
-    surface_hash: String,
-    action_id: String,
-    values: Value,
-    args_hash: String,
+pub(super) struct EventFields {
+    pub(super) schema: A2uiConversationSchema,
+    pub(super) conversation_id: String,
+    pub(super) version: u64,
+    pub(super) command: A2uiConversationCommand,
 }
-impl<'de> Deserialize<'de> for A2uiSurfaceAction {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
-        let v: ActionFields =
-            crate::parse_i_json(raw.get().as_bytes()).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            schema: v.schema,
-            conversation_id: v.conversation_id,
-            surface_id: v.surface_id,
-            version: v.version,
-            surface_hash: v.surface_hash,
-            action_id: v.action_id,
-            values: v.values,
-            args_hash: v.args_hash,
-        })
+impl A2uiConversationEvent {
+    /// The only ingress constructor; retains duplicate-key evidence until I-JSON validation.
+    /// # Errors
+    /// Rejects non-I-JSON original bytes and invalid v2 schemas/fields.
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        crate::parse_i_json(bytes).map(Self)
+    }
+    #[must_use]
+    pub fn conversation_id(&self) -> &str {
+        &self.0.conversation_id
+    }
+    #[must_use]
+    pub const fn version(&self) -> u64 {
+        self.0.version
+    }
+    #[must_use]
+    pub const fn command(&self) -> &A2uiConversationCommand {
+        &self.0.command
+    }
+    pub(super) const fn fields(&self) -> &EventFields {
+        &self.0
+    }
+}
+
+/// Validated human decision. The signed carrier authenticates the author and deduplicates it.
+/// There is deliberately no `Deserialize` or conversion from `Value`.
+/// ```compile_fail
+/// use ramflux_protocol::A2uiSurfaceAction;
+/// let dropped_duplicate: serde_json::Value = serde_json::from_str(r#"{"x":1,"x":2}"#).unwrap();
+/// let action = serde_json::from_value::<A2uiSurfaceAction>(dropped_duplicate).unwrap();
+/// ```
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct A2uiSurfaceAction(ActionFields);
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ActionFields {
+    pub(super) schema: A2uiActionSchema,
+    pub(super) conversation_id: String,
+    pub(super) surface_id: String,
+    pub(super) version: u64,
+    pub(super) surface_hash: String,
+    pub(super) action_id: String,
+    pub(super) values: Value,
+    pub(super) args_hash: String,
+}
+impl A2uiSurfaceAction {
+    /// # Errors
+    /// Rejects non-I-JSON original bytes and invalid v2 schemas/fields.
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        crate::parse_i_json(bytes).map(Self)
+    }
+    #[must_use]
+    pub fn conversation_id(&self) -> &str {
+        &self.0.conversation_id
+    }
+    #[must_use]
+    pub fn surface_id(&self) -> &str {
+        &self.0.surface_id
+    }
+    #[must_use]
+    pub const fn version(&self) -> u64 {
+        self.0.version
+    }
+    #[must_use]
+    pub fn surface_hash(&self) -> &str {
+        &self.0.surface_hash
+    }
+    #[must_use]
+    pub fn action_id(&self) -> &str {
+        &self.0.action_id
+    }
+    #[must_use]
+    pub fn values(&self) -> &Value {
+        &self.0.values
+    }
+    #[must_use]
+    pub fn args_hash(&self) -> &str {
+        &self.0.args_hash
+    }
+    pub(super) const fn fields(&self) -> &ActionFields {
+        &self.0
     }
 }
 impl std::fmt::Debug for A2uiSurfaceAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("A2uiSurfaceAction")
-            .field("surface_id", &self.surface_id)
-            .field("version", &self.version)
+            .field("surface_id", &self.surface_id())
+            .field("version", &self.version())
             .field("values", &"[redacted]")
             .finish_non_exhaustive()
     }

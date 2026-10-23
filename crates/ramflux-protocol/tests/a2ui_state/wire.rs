@@ -13,13 +13,15 @@ fn strict_ingress_rejects_duplicate_decoded_names_at_every_depth() {
     ] {
         assert!(parse_i_json::<Value>(input.as_bytes()).is_err(), "{input}");
     }
-    let encoded = serde_json::to_string(&event(1, A2uiCommand::CreateSurface(snapshot()))).unwrap();
+    let encoded =
+        serde_json::to_string(&event(1, A2uiConversationCommand::CreateSurface(snapshot())))
+            .unwrap();
     let duplicate = encoded.replace(r#""kind":"text""#, r#""kind":"text","kind":"button""#);
     assert_ne!(encoded, duplicate);
-    assert!(serde_json::from_str::<A2uiConversationEvent>(&duplicate).is_err());
+    assert!(A2uiConversationEvent::from_wire_bytes(duplicate.as_bytes()).is_err());
     let encoded = serde_json::to_string(&action(&created())).unwrap();
     let duplicate = encoded.replace(r#""approved":true"#, r#""approved":true,"approved":false"#);
-    assert!(serde_json::from_str::<A2uiSurfaceAction>(&duplicate).is_err());
+    assert!(A2uiSurfaceAction::from_wire_bytes(duplicate.as_bytes()).is_err());
 }
 #[test]
 fn strict_ingress_rejects_invalid_unicode_and_unsafe_numeric_tokens() {
@@ -56,34 +58,66 @@ fn strict_ingress_rejects_invalid_unicode_and_unsafe_numeric_tokens() {
 }
 #[test]
 fn versioned_wire_round_trips_and_rejects_unknown_fields_and_schemas() {
-    let event = event(1, A2uiCommand::CreateSurface(snapshot()));
+    let event = event(1, A2uiConversationCommand::CreateSurface(snapshot()));
     assert_eq!(
-        parse_i_json::<A2uiConversationEvent>(&serde_json::to_vec(&event).unwrap()).unwrap(),
+        A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&event).unwrap()).unwrap(),
         event
     );
+    let action = action(&created());
     assert_eq!(
-        serde_json::from_value::<A2uiConversationEvent>(serde_json::to_value(&event).unwrap())
-            .unwrap(),
-        event
-    );
-    let a = action(&created());
-    assert_eq!(
-        serde_json::from_slice::<A2uiSurfaceAction>(&serde_json::to_vec(&a).unwrap()).unwrap(),
-        a
+        A2uiSurfaceAction::from_wire_bytes(&serde_json::to_vec(&action).unwrap()).unwrap(),
+        action
     );
     for mutate in 0..3 {
         let mut value = serde_json::to_value(&event).unwrap();
         match mutate {
             0 => value["schema"] = json!("ramflux.a2ui.conversation.v3"),
-            1 => {
-                value["unexpected"] = json!(true);
-            }
+            1 => value["unexpected"] = json!(true),
             _ => value["command"]["unexpected"] = json!(true),
         }
-        assert!(serde_json::from_value::<A2uiConversationEvent>(value).is_err());
+        assert!(
+            A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&value).unwrap()).is_err()
+        );
     }
     let text = serde_json::to_string(&event)
         .unwrap()
         .replace("\"text\":\"\"", "\"text\":9007199254740992");
-    assert!(serde_json::from_str::<A2uiConversationEvent>(&text).is_err());
+    assert!(matches!(
+        A2uiConversationEvent::from_wire_bytes(text.as_bytes()),
+        Err(ProtocolError::IJson(_))
+    ));
+}
+#[test]
+fn legacy_v1_decoder_rejects_both_v2_only_commands() {
+    for command in [
+        json!({"command":"streamAppend","surfaceId":"s","componentId":"text","textDelta":"x","final":true}),
+        json!({"command":"patchSurface","surfaceId":"s","baseSurfaceHash":"a","ops":[],"newSurfaceHash":"b"}),
+    ] {
+        assert!(serde_json::from_value::<A2uiCommand>(command.clone()).is_err());
+        let wire = json!({"schema":A2UI_CONVERSATION_SCHEMA,"conversationId":"c","version":2,"command":command});
+        assert!(
+            A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&wire).unwrap()).is_ok()
+        );
+    }
+    for command in [
+        A2uiCommand::CreateSurface(snapshot()),
+        A2uiCommand::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }),
+    ] {
+        let wire = serde_json::to_vec(&command).unwrap();
+        assert_eq!(serde_json::from_slice::<A2uiCommand>(&wire).unwrap(), command);
+    }
+}
+#[test]
+fn duplicate_ingress_is_a_distinct_error_before_last_wins_conversion() {
+    let wire = serde_json::to_string(&event(1, A2uiConversationCommand::CreateSurface(snapshot())))
+        .unwrap();
+    let duplicate = wire.replace(r#""text":"""#, r#""text":"first","text":"last""#);
+    assert_ne!(wire, duplicate);
+    let dropped: Value = serde_json::from_str(&duplicate).unwrap();
+    assert_eq!(dropped["command"]["components"][0]["text"], "last");
+    let error = A2uiConversationEvent::from_wire_bytes(duplicate.as_bytes()).unwrap_err();
+    assert!(matches!(error, ProtocolError::IJson(_)));
+    assert!(error.to_string().starts_with("I-JSON ingress rejected:"));
+    // Compile-fail API tests prove this dropped-duplicate Value cannot be converted to a
+    // validated event or passed to apply. No public Deserialize implementation exists.
 }

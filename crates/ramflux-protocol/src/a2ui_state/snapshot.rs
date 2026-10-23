@@ -21,7 +21,9 @@ pub(super) fn action_id(v: &Value) -> Result<&str, SurfaceReject> {
     }
     v.as_str().or(name).or(id).filter(|id| !id.is_empty()).ok_or(SurfaceReject::InvalidIdentifier)
 }
-pub(super) fn validate(content: &CreateSurfaceCommand) -> Result<(), SurfaceReject> {
+pub(super) fn validated_hash(content: &CreateSurfaceCommand) -> Result<String, SurfaceReject> {
+    #[cfg(test)]
+    super::work::snapshot();
     if content.components.len() > super::MAX_SURFACE_BLOCKS {
         return Err(limits::exceeded(SurfaceLimit::Blocks));
     }
@@ -29,38 +31,24 @@ pub(super) fn validate(content: &CreateSurfaceCommand) -> Result<(), SurfaceReje
         return Err(limits::exceeded(SurfaceLimit::Actions));
     }
     limits::identifier(&content.surface_id)?;
-    limits::text(&content.fallback_text)?;
     if content.fallback_text.trim().is_empty() {
         return Err(SurfaceReject::MissingFallback);
     }
-    if let Some(text) = &content.fallback_markdown {
-        limits::text(text)?;
-    }
-    limits::text(&content.catalog)?;
-    limits::text(&content.catalog_version)?;
     let mut ids = BTreeSet::new();
-    let mut bytes = 0;
     for component in &content.components {
-        let id = component_id(component)?;
-        if !ids.insert(id) {
+        if !ids.insert(component_id(component)?) {
             return Err(SurfaceReject::DuplicateBlock);
         }
-        bytes += limits::json(component)?.len();
-        if bytes > super::MAX_SURFACE_DATA_BYTES {
-            return Err(limits::exceeded(SurfaceLimit::DataBytes));
-        }
-    }
-    bytes += limits::json(&Value::Object(content.data_model.clone()))?.len();
-    if bytes > super::MAX_SURFACE_DATA_BYTES {
-        return Err(limits::exceeded(SurfaceLimit::DataBytes));
     }
     ids.clear();
     for action in &content.allowed_actions {
-        let id = action_id(action)?;
-        if !ids.insert(id) {
+        if !ids.insert(action_id(action)?) {
             return Err(SurfaceReject::DuplicateAction);
         }
-        limits::json(action)?;
     }
-    Ok(())
+    // Exactly the typed hash input, including actions, fallback strings and JSON syntax.
+    // One bounded traversal and one canonical encoding after the complete atomic update.
+    let value = serde_json::to_value(content).map_err(|_| SurfaceReject::Encoding)?;
+    let bytes = limits::json(&value)?;
+    Ok(crate::surfaces::surface_hash_from_canonical(&bytes))
 }

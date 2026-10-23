@@ -5,7 +5,7 @@ use ramflux_protocol::*;
 use serde_json::json;
 fn rejects(content: CreateSurfaceCommand, error: SurfaceReject) {
     assert_eq!(
-        SurfaceState::default().apply(&event(1, A2uiCommand::CreateSurface(content))),
+        SurfaceState::default().apply(&event(1, A2uiConversationCommand::CreateSurface(content))),
         Err(error)
     );
 }
@@ -40,7 +40,11 @@ fn snapshot_limits_and_identifiers_have_typed_rejections() {
     rejects(c, SurfaceReject::InvalidIdentifier);
     let mut c = snapshot();
     c.data_model.insert("unsafe".into(), json!(MAX_SAFE_JSON_INTEGER + 1));
-    rejects(c, SurfaceReject::InvalidJson);
+    let wire = json!({"schema":A2UI_CONVERSATION_SCHEMA,"conversationId":"c","version":1,"command":A2uiConversationCommand::CreateSurface(c)});
+    assert!(matches!(
+        A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&wire).unwrap()),
+        Err(ProtocolError::IJson(_))
+    ));
     let mut c = snapshot();
     let mut nested = json!(true);
     for _ in 0..66 {
@@ -59,7 +63,9 @@ fn scalar_and_utf8_stream_budgets_are_distinct() {
     );
     let mut c = snapshot();
     c.components[0]["text"] = json!("x".repeat(MAX_SURFACE_TEXT_CHARS));
-    let full = SurfaceState::default().apply(&event(1, A2uiCommand::CreateSurface(c))).unwrap();
+    let full = SurfaceState::default()
+        .apply(&event(1, A2uiConversationCommand::CreateSurface(c)))
+        .unwrap();
     assert_eq!(full.apply(&stream(2, "x", false)), Err(limit(SurfaceLimit::TextCharacters)));
     assert!(full.apply(&stream(2, "", true)).is_ok());
 }
@@ -104,10 +110,9 @@ fn retirement_tombstones_have_a_finite_budget() {
                 &after,
             ))
             .unwrap();
-        let mut append = stream(state.version() + 1, "", true);
-        if let A2uiCommand::StreamAppend(c) = &mut append.command {
-            c.component_id = id;
-        }
+        let append = edit_event(&stream(state.version() + 1, "", true), |v| {
+            v["command"]["componentId"] = json!(id);
+        });
         state = state.apply(&append).unwrap();
     }
     let mut after = state.content().unwrap().clone();
@@ -137,9 +142,7 @@ fn exact_jcs_data_budget_is_accepted_then_one_stream_byte_is_rejected() {
     content.components = (0..4)
         .map(|i| json!({"id":if i==0{"text".into()}else{format!("c{i}")},"text":"x".repeat(16000)}))
         .collect();
-    let used: usize =
-        content.components.iter().map(|v| canonical_json_bytes(v).unwrap().len()).sum::<usize>()
-            + 2;
+    let used = canonical_json_bytes(&content).unwrap().len();
     let mut remaining = MAX_SURFACE_DATA_BYTES - used;
     for component in &mut content.components {
         let text = component["text"].as_str().unwrap();
@@ -152,7 +155,22 @@ fn exact_jcs_data_budget_is_accepted_then_one_stream_byte_is_rejected() {
     content.components.swap(0, 3);
     content.components[0]["id"] = json!("text");
     content.components[3]["id"] = json!("c3");
-    let state =
-        SurfaceState::default().apply(&event(1, A2uiCommand::CreateSurface(content))).unwrap();
+    let state = SurfaceState::default()
+        .apply(&event(1, A2uiConversationCommand::CreateSurface(content)))
+        .unwrap();
     assert_eq!(state.apply(&stream(2, "x", false)), Err(limit(SurfaceLimit::DataBytes)));
+}
+
+#[test]
+fn actions_and_fallback_are_inside_the_whole_snapshot_cap() {
+    let mut content = snapshot();
+    content.allowed_actions =
+        (0..16).map(|i| json!({"name":format!("a{i}"),"label":"x".repeat(5000)})).collect();
+    rejects(content, limit(SurfaceLimit::DataBytes));
+    let mut content = snapshot();
+    content.fallback_text = "𐀀".repeat(16384);
+    rejects(content, limit(SurfaceLimit::DataBytes));
+    let mut content = snapshot();
+    content.fallback_markdown = Some("𐀀".repeat(16384));
+    rejects(content, limit(SurfaceLimit::DataBytes));
 }

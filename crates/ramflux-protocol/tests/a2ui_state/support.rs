@@ -15,21 +15,35 @@ pub fn snapshot() -> CreateSurfaceCommand {
         allowed_actions: vec![json!({"name":"approve"})],
     }
 }
-pub fn event(version: u64, command: A2uiCommand) -> A2uiConversationEvent {
-    A2uiConversationEvent {
-        schema: A2uiConversationSchema::V2,
-        conversation_id: "c".into(),
-        version,
-        command,
-    }
+pub fn event(version: u64, command: A2uiConversationCommand) -> A2uiConversationEvent {
+    let command = serde_json::to_value(command).unwrap();
+    A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&json!({"schema":A2UI_CONVERSATION_SCHEMA,"conversationId":"c","version":version,"command":command})).unwrap()).unwrap()
+}
+pub fn edit_event(
+    event: &A2uiConversationEvent,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> A2uiConversationEvent {
+    let mut value = serde_json::to_value(event).unwrap();
+    edit(&mut value);
+    A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
+}
+pub fn edit_action(
+    action: &A2uiSurfaceAction,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> A2uiSurfaceAction {
+    let mut value = serde_json::to_value(action).unwrap();
+    edit(&mut value);
+    A2uiSurfaceAction::from_wire_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
 }
 pub fn created() -> SurfaceState {
-    SurfaceState::default().apply(&event(1, A2uiCommand::CreateSurface(snapshot()))).unwrap()
+    SurfaceState::default()
+        .apply(&event(1, A2uiConversationCommand::CreateSurface(snapshot())))
+        .unwrap()
 }
 pub fn stream(version: u64, text: &str, final_: bool) -> A2uiConversationEvent {
     event(
         version,
-        A2uiCommand::StreamAppend(StreamAppendCommand {
+        A2uiConversationCommand::StreamAppend(StreamAppendCommand {
             surface_id: "s".into(),
             component_id: "text".into(),
             text_delta: text.into(),
@@ -44,7 +58,7 @@ pub fn patch(
 ) -> A2uiConversationEvent {
     event(
         state.version() + 1,
-        A2uiCommand::PatchSurface(PatchSurfaceCommand {
+        A2uiConversationCommand::PatchSurface(PatchSurfaceCommand {
             surface_id: "s".into(),
             base_surface_hash: state.hash().unwrap().into(),
             ops,
@@ -55,7 +69,7 @@ pub fn patch(
 pub fn close(version: u64) -> A2uiConversationEvent {
     event(
         version,
-        A2uiCommand::DeleteSurface(DeleteSurfaceCommand {
+        A2uiConversationCommand::DeleteSurface(DeleteSurfaceCommand {
             surface_id: "s".into(),
             reason: Some(DeleteSurfaceReason::Completed),
         }),
@@ -63,14 +77,5 @@ pub fn close(version: u64) -> A2uiConversationEvent {
 }
 pub fn action(state: &SurfaceState) -> A2uiSurfaceAction {
     let values = json!({"approved":true});
-    A2uiSurfaceAction {
-        schema: A2uiActionSchema::V2,
-        conversation_id: "c".into(),
-        surface_id: "s".into(),
-        version: state.version(),
-        surface_hash: state.hash().unwrap().into(),
-        action_id: "approve".into(),
-        args_hash: surface_args_hash(&values).unwrap(),
-        values,
-    }
+    A2uiSurfaceAction::from_wire_bytes(&serde_json::to_vec(&json!({"schema":A2UI_ACTION_SCHEMA,"conversationId":"c","surfaceId":"s","version":state.version(),"surfaceHash":state.hash().unwrap(),"actionId":"approve","argsHash":surface_args_hash(&values).unwrap(),"values":values})).unwrap()).unwrap()
 }

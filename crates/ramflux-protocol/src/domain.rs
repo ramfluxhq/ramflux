@@ -39,6 +39,7 @@ pub const BOT_INSTALL_GRANT: &str = "ramflux.bot_install_grant.v1";
 pub const A2I_CONTROL: &str = "ramflux.a2i_control.v1";
 pub const A2UI_SURFACE: &str = "ramflux.a2ui_surface.v1";
 pub const A2UI_SURFACE_HASH: &str = "ramflux.a2ui.surface_hash.v1";
+pub const A2UI_ACTION_ARGS: &str = "ramflux.a2ui.action_args.v1";
 pub const PUSH_ALIAS: &str = "ramflux.push_alias.v1";
 pub const FEDERATION_HANDSHAKE: &str = "ramflux.federation_handshake.v1";
 pub const X3DH_PREKEY_BUNDLE: &str = "ramflux.x3dh.prekey_bundle.v1";
@@ -61,7 +62,7 @@ pub const KEY_VERIFICATION_DEVICE_SET: &str = "ramflux.device_set.v1";
 pub const REGISTRATION_POW: &str = "ramflux.registration_pow.v1";
 pub const REGISTRATION_TRUST_TIER: &str = "ramflux.registration_trust_tier.v1";
 
-pub const ALL: [&str; 55] = [
+pub const ALL: [&str; 56] = [
     EVENT,
     ENVELOPE,
     OBJECT,
@@ -96,6 +97,7 @@ pub const ALL: [&str; 55] = [
     A2I_CONTROL,
     A2UI_SURFACE,
     A2UI_SURFACE_HASH,
+    A2UI_ACTION_ARGS,
     PUSH_ALIAS,
     FEDERATION_HANDSHAKE,
     X3DH_PREKEY_BUNDLE,
@@ -118,3 +120,14 @@ pub const ALL: [&str; 55] = [
     REGISTRATION_POW,
     REGISTRATION_TRUST_TIER,
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn registered_domains_are_unique_and_include_a2ui_arguments() {
+        let unique = super::ALL.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), super::ALL.len());
+        assert!(unique.contains(super::A2UI_ACTION_ARGS));
+        assert_eq!(super::A2UI_ACTION_ARGS, "ramflux.a2ui.action_args.v1");
+    }
+}

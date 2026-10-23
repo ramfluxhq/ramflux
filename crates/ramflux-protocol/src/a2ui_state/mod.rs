@@ -21,5 +21,8 @@ pub use types::*;
 /// # Errors
 /// Rejects non-I-JSON values and values exceeding the surface data limits.
 pub fn surface_args_hash(values: &serde_json::Value) -> Result<String, SurfaceReject> {
-    Ok(crate::hash_base64url("ramflux.a2ui.action_args.v1", &limits::json(values)?))
+    Ok(crate::hash_base64url(crate::domain::A2UI_ACTION_ARGS, &limits::json(values)?))
 }
+
+#[cfg(test)]
+mod work;

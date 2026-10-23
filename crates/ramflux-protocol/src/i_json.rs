@@ -18,11 +18,14 @@ pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 /// Rejects invalid JSON/Unicode, noncharacters, duplicate names, unsafe exact integers,
 /// non-finite/out-of-range numbers, trailing input, or the target type's schema violations.
 pub fn parse_i_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtocolError> {
-    numbers(bytes)?;
-    let mut decoder = serde_json::Deserializer::from_slice(bytes);
-    let Strict(value) = Strict::deserialize(&mut decoder)?;
-    decoder.end()?;
-    Ok(serde_json::from_value(value)?)
+    let validated = (|| -> Result<T, serde_json::Error> {
+        numbers(bytes)?;
+        let mut decoder = serde_json::Deserializer::from_slice(bytes);
+        let Strict(value) = Strict::deserialize(&mut decoder)?;
+        decoder.end()?;
+        serde_json::from_value(value)
+    })();
+    validated.map_err(ProtocolError::IJson)
 }
 
 fn invalid(message: &'static str) -> serde_json::Error {
@@ -88,19 +91,19 @@ pub fn validate_i_json_value(value: &Value) -> Result<(), ProtocolError> {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
-            Value::String(value) => unicode(value)?,
+            Value::String(value) => unicode(value).map_err(ProtocolError::IJson)?,
             Value::Number(n) => {
                 if n.as_u64().is_some_and(|n| n > MAX_SAFE_JSON_INTEGER)
                     || n.as_i64().is_some_and(|n| n.unsigned_abs() > MAX_SAFE_JSON_INTEGER)
                     || n.as_f64().is_none_or(|n| !n.is_finite())
                 {
-                    return Err(invalid("unsafe I-JSON number").into());
+                    return Err(ProtocolError::IJson(invalid("unsafe I-JSON number")));
                 }
             }
             Value::Array(values) => pending.extend(values),
             Value::Object(values) => {
                 for (key, value) in values {
-                    unicode(key)?;
+                    unicode(key).map_err(ProtocolError::IJson)?;
                     pending.push(value);
                 }
             }

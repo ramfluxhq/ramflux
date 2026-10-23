@@ -18,7 +18,7 @@ fn lifecycle_versions_close_and_stream_final_are_terminal() {
         Err(SurfaceReject::Version { expected: 2, actual: 3 })
     );
     assert_eq!(
-        state.apply(&event(2, A2uiCommand::CreateSurface(snapshot()))),
+        state.apply(&event(2, A2uiConversationCommand::CreateSurface(snapshot()))),
         Err(SurfaceReject::AlreadyCreated)
     );
     let finished = state.apply(&stream(2, "hello", true)).unwrap();
@@ -34,23 +34,17 @@ fn lifecycle_versions_close_and_stream_final_are_terminal() {
 fn bindings_conflicts_result_hash_and_operation_rejects_are_atomic() {
     let state = created();
     let original = state.clone();
-    let mut wrong = stream(2, "x", false);
-    wrong.conversation_id = "other".into();
+    let wrong = edit_event(&stream(2, "x", false), |v| v["conversationId"] = json!("other"));
     assert_eq!(state.apply(&wrong), Err(SurfaceReject::WrongSurface));
-    if let A2uiCommand::StreamAppend(c) = &mut wrong.command {
-        c.surface_id = "other".into();
-    }
-    wrong.conversation_id = "c".into();
+    let wrong = edit_event(&stream(2, "x", false), |v| v["command"]["surfaceId"] = json!("other"));
     assert_eq!(state.apply(&wrong), Err(SurfaceReject::WrongSurface));
-    let mut p = patch(&state, vec![], state.content().unwrap());
-    if let A2uiCommand::PatchSurface(c) = &mut p.command {
-        c.base_surface_hash = "wrong".into();
-    }
+    let p = edit_event(&patch(&state, vec![], state.content().unwrap()), |v| {
+        v["command"]["baseSurfaceHash"] = json!("wrong");
+    });
     assert_eq!(state.apply(&p), Err(SurfaceReject::Conflict));
-    if let A2uiCommand::PatchSurface(c) = &mut p.command {
-        c.base_surface_hash = state.hash().unwrap().into();
-        c.new_surface_hash = "wrong".into();
-    }
+    let p = edit_event(&patch(&state, vec![], state.content().unwrap()), |v| {
+        v["command"]["newSurfaceHash"] = json!("wrong");
+    });
     assert_eq!(state.apply(&p), Err(SurfaceReject::ResultHashMismatch));
     for (op, error) in [
         (
@@ -78,13 +72,12 @@ fn bindings_conflicts_result_hash_and_operation_rejects_are_atomic() {
     }
     let mut no_text = snapshot();
     no_text.components[0] = json!({"id":"text","kind":"progress","value":1.0});
-    let no_text =
-        SurfaceState::default().apply(&event(1, A2uiCommand::CreateSurface(no_text))).unwrap();
+    let no_text = SurfaceState::default()
+        .apply(&event(1, A2uiConversationCommand::CreateSurface(no_text)))
+        .unwrap();
     assert_eq!(no_text.apply(&stream(2, "x", false)), Err(SurfaceReject::BlockNotStreamable));
-    let mut unknown = stream(2, "x", false);
-    if let A2uiCommand::StreamAppend(c) = &mut unknown.command {
-        c.component_id = "missing".into();
-    }
+    let unknown =
+        edit_event(&stream(2, "x", false), |v| v["command"]["componentId"] = json!("missing"));
     assert_eq!(state.apply(&unknown), Err(SurfaceReject::UnknownBlock));
     assert_eq!(state, original);
 }
@@ -93,40 +86,22 @@ fn action_checks_bind_every_field_and_disabled_reason() {
     let state = created();
     let valid = action(&state);
     assert_eq!(state.validate_action(&valid), Ok(()));
-    for field in 0..6 {
-        let mut a = valid.clone();
-        let error = match field {
-            0 => {
-                a.conversation_id = "other".into();
-                SurfaceReject::WrongSurface
-            }
-            1 => {
-                a.surface_id = "other".into();
-                SurfaceReject::WrongSurface
-            }
-            2 => {
-                a.version += 1;
-                SurfaceReject::Stale
-            }
-            3 => {
-                a.surface_hash = "wrong".into();
-                SurfaceReject::Stale
-            }
-            4 => {
-                a.action_id = "other".into();
-                SurfaceReject::UnknownAction
-            }
-            _ => {
-                a.values = json!({"approved":false});
-                SurfaceReject::ArgumentsHashMismatch
-            }
-        };
-        assert_eq!(state.validate_action(&a), Err(error));
+    for (field, value, error) in [
+        ("conversationId", json!("other"), SurfaceReject::WrongSurface),
+        ("surfaceId", json!("other"), SurfaceReject::WrongSurface),
+        ("version", json!(2), SurfaceReject::Stale),
+        ("surfaceHash", json!("wrong"), SurfaceReject::Stale),
+        ("actionId", json!("other"), SurfaceReject::UnknownAction),
+        ("values", json!({"approved":false}), SurfaceReject::ArgumentsHashMismatch),
+    ] {
+        let action = edit_action(&valid, |v| v[field] = value);
+        assert_eq!(state.validate_action(&action), Err(error));
     }
     let mut content = snapshot();
     content.allowed_actions[0]["disabledReason"] = json!("waiting");
-    let disabled =
-        SurfaceState::default().apply(&event(1, A2uiCommand::CreateSurface(content))).unwrap();
+    let disabled = SurfaceState::default()
+        .apply(&event(1, A2uiConversationCommand::CreateSurface(content)))
+        .unwrap();
     assert_eq!(disabled.validate_action(&action(&disabled)), Err(SurfaceReject::DisabledAction));
 }
 #[test]
@@ -137,7 +112,7 @@ fn existing_update_commands_share_the_snapshot_hash() {
     let state = state
         .apply(&event(
             2,
-            A2uiCommand::UpdateComponents(UpdateComponentsCommand {
+            A2uiConversationCommand::UpdateComponents(UpdateComponentsCommand {
                 surface_id: "s".into(),
                 base_surface_hash: state.hash().unwrap().into(),
                 components: after.components.clone(),
@@ -150,7 +125,7 @@ fn existing_update_commands_share_the_snapshot_hash() {
     let state = state
         .apply(&event(
             3,
-            A2uiCommand::UpdateDataModel(UpdateDataModelCommand {
+            A2uiConversationCommand::UpdateDataModel(UpdateDataModelCommand {
                 surface_id: "s".into(),
                 base_surface_hash: state.hash().unwrap().into(),
                 data_patch: after.data_model.clone(),
@@ -187,8 +162,12 @@ fn patch_chains_round_trip_identically_across_1024_mutations() {
                 }
             };
             let event = patch(&state, ops, &after);
-            let ordinary = serde_json::from_slice(&serde_json::to_vec(&event).unwrap()).unwrap();
-            let canonical = serde_json::from_slice(&canonical_json_bytes(&event).unwrap()).unwrap();
+            let ordinary =
+                A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&event).unwrap())
+                    .unwrap();
+            let canonical =
+                A2uiConversationEvent::from_wire_bytes(&canonical_json_bytes(&event).unwrap())
+                    .unwrap();
             let next = state.apply(&event).unwrap();
             assert_eq!(next, state.apply(&ordinary).unwrap());
             assert_eq!(next, state.apply(&canonical).unwrap());
@@ -219,8 +198,9 @@ fn nested_text_and_data_model_removal_follow_documented_semantics() {
     let mut content = snapshot();
     content.components[0] = json!({"id":"text","data":{"text":"a"}});
     content.data_model.insert("old".into(), json!({"value":1}));
-    let state =
-        SurfaceState::default().apply(&event(1, A2uiCommand::CreateSurface(content))).unwrap();
+    let state = SurfaceState::default()
+        .apply(&event(1, A2uiConversationCommand::CreateSurface(content)))
+        .unwrap();
     let state = state.apply(&stream(2, "b", false)).unwrap();
     assert_eq!(state.content().unwrap().components[0]["data"]["text"], "ab");
     let mut after = state.content().unwrap().clone();
@@ -233,7 +213,100 @@ fn nested_text_and_data_model_removal_follow_documented_semantics() {
         new_surface_hash: surface_snapshot_hash(&after).unwrap(),
     };
     assert_eq!(
-        state.apply(&event(3, A2uiCommand::UpdateDataModel(update))).unwrap().content(),
+        state.apply(&event(3, A2uiConversationCommand::UpdateDataModel(update))).unwrap().content(),
         Some(&after)
     );
+}
+
+#[test]
+fn finalized_text_is_immutable_under_replace_update_and_reinsertion() {
+    for nested in [false, true] {
+        let mut content = snapshot();
+        if nested {
+            content.components[0] = json!({"id":"text","data":{"text":""}});
+        }
+        let state = SurfaceState::default()
+            .apply(&event(1, A2uiConversationCommand::CreateSurface(content)))
+            .unwrap()
+            .apply(&stream(2, "final", true))
+            .unwrap();
+        let mut changed = state.content().unwrap().clone();
+        if nested {
+            changed.components[0]["data"]["text"] = json!("rewritten");
+        } else {
+            changed.components[0]["text"] = json!("rewritten");
+        }
+        let replacement = changed.components[0].clone();
+        assert_eq!(
+            state.apply(&patch(
+                &state,
+                vec![SurfacePatchOp::ReplaceBlock { component: replacement.clone() }],
+                &changed
+            )),
+            Err(SurfaceReject::BlockClosed)
+        );
+        let update = A2uiConversationCommand::UpdateComponents(UpdateComponentsCommand {
+            surface_id: "s".into(),
+            base_surface_hash: state.hash().unwrap().into(),
+            components: vec![replacement.clone()],
+            remove_component_ids: vec![],
+            new_surface_hash: surface_snapshot_hash(&changed).unwrap(),
+        });
+        assert_eq!(state.apply(&event(3, update)), Err(SurfaceReject::BlockClosed));
+        let mut removed = state.content().unwrap().clone();
+        removed.components.clear();
+        let removed_state = state
+            .apply(&patch(
+                &state,
+                vec![SurfacePatchOp::RemoveBlock { component_id: "text".into() }],
+                &removed,
+            ))
+            .unwrap();
+        assert_eq!(
+            removed_state.apply(&patch(
+                &removed_state,
+                vec![SurfacePatchOp::InsertBlock { index: 0, component: replacement }],
+                &changed
+            )),
+            Err(SurfaceReject::BlockClosed)
+        );
+        let restored = removed_state
+            .apply(&patch(
+                &removed_state,
+                vec![SurfacePatchOp::InsertBlock {
+                    index: 0,
+                    component: state.content().unwrap().components[0].clone(),
+                }],
+                state.content().unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(restored.apply(&stream(5, "", false)), Err(SurfaceReject::BlockClosed));
+        let mut metadata = state.content().unwrap().clone();
+        metadata.components[0]["label"] = json!("new label");
+        assert!(
+            state
+                .apply(&patch(
+                    &state,
+                    vec![SurfacePatchOp::ReplaceBlock {
+                        component: metadata.components[0].clone()
+                    }],
+                    &metadata
+                ))
+                .is_ok()
+        );
+    }
+}
+#[test]
+fn only_the_final_atomic_snapshot_is_budgeted() {
+    let state = created();
+    let mut after = state.content().unwrap().clone();
+    after.allowed_actions.clear();
+    let oversized = (0..16)
+        .map(|i| json!({"name":format!("a{i}"),"label":"x".repeat(16384)}))
+        .collect::<Vec<_>>();
+    let ops = vec![
+        SurfacePatchOp::SetActions { actions: oversized },
+        SurfacePatchOp::SetActions { actions: vec![] },
+    ];
+    assert_eq!(state.apply(&patch(&state, ops, &after)).unwrap().content(), Some(&after));
 }
