@@ -77,6 +77,15 @@ logs, exits nonzero, and retains the project for diagnosis. Compose runs from th
 state directory with absolute file paths; neither `--project-directory` nor
 `--wait` is used. Normal `down` preserves named volumes and all trust files.
 Initialization recovers missing generated trust files using the same saved keys.
+`runtime.env` explicitly sets every required keyring-provider input, including
+`RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json`
+and `RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json`.
+Concrete values avoid unresolved self-referential defaults in podman-compose 1.3.0.
+The keyring and signed snapshot use the read-only `secrets/federation` mount; the
+relay creates and persists its verified snapshot cache and anti-rollback state in
+`relay-redb`. The wrapper never seeds or resets that cache. To repair an existing
+project, run `up` with the original env file: it regenerates `runtime.env` while
+preserving identity, signed trust and named volumes; no purge is needed.
 Demo trust lasts one year; the helper refuses identities within an hour of expiry.
 There is no automatic key rotation. Preserve the private data directory and named
 volumes together when backing up; never commit or distribute `identity.json`,

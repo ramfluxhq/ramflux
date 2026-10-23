@@ -235,10 +235,14 @@ PY
       chmod 755 "$state/certs/$service"
     done
     chmod 644 "$state"/config/*.toml "$state"/secrets/gateway-v3/*.json "$state"/secrets/federation/*.json
+    # Concrete outer values avoid podman-compose 1.3.0's self-referential default interpolation.
+    # The keyring is read-only trust material; the relay owns its durable cache in relay-redb.
     cat "$state/identity.env" > "$state/runtime.env"
     cat >> "$state/runtime.env" <<ENV
 RAMFLUX_VERSION=$DEMO_VERSION
 RAMFLUX_FEDERATION_TRUST_ENDPOINT=ramflux-federation:7443
+RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json
+RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json
 RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID=$DEMO_NODE_ID
 RAMFLUX_FEDERATION_NODE_ID=$DEMO_NODE_ID
 RAMFLUX_GATEWAY_TCP_PORT=$DEMO_BIND_ADDR:$DEMO_GATEWAY_PORT

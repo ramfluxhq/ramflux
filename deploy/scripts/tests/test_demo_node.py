@@ -2,6 +2,7 @@
 """Exercise demo lifecycle and ownership safety with a fake Docker executable."""
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -45,11 +46,18 @@ if sys.argv[1] == "init":
     for name in ("gateway-v3", "federation"):
         directory = root / "secrets" / name
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "test.json").write_text("{}")
-    (root / "identity.env").write_text("DEMO_EXPECTED_NODE_PUBLIC_KEY=test-public-pin\\n")
+        files = ("issuer-cert.json",) if name == "gateway-v3" else ("provider-keyring.json", "trust-snapshot.json")
+        for filename in files:
+            (directory / filename).write_text("{}")
+    (root / "identity.env").write_text("DEMO_EXPECTED_NODE_PUBLIC_KEY=test-public-pin\\nRAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY=test-offline-root\\n")
 else:
     assert sys.argv[3] == "test-public-pin"
+    import json
+    control = json.loads((Path(__file__).parent.parent / "control.json").read_text())
+    if control.get("relay_quic_unhealthy"):
+        sys.exit("relay QUIC unhealthy")
     print("mock discovery and QUIC verification")
+    print("relay QUIC TLS/application health: healthy (demo.example.org:59447)")
 '''
         self.tool = self.executable("demo-node-tool", tool)
         self.env_file = self.root / "demo.env"
@@ -120,6 +128,46 @@ else:
         down = [args for args in self.commands() if "down" in args]
         self.assertIn("--volumes", down[-1])
         self.assertFalse(any("prune" in args or "--rmi" in args for args in self.commands()))
+
+    def test_runtime_env_supplies_production_relay_required_keys_and_mounted_paths(self):
+        self.run_script("up")
+        runtime = dict(line.split("=", 1) for line in (self.state / "runtime.env").read_text().splitlines())
+        relay_sources = SCRIPT.parents[2] / "apps/ramflux-relay/src"
+        config = (relay_sources / "config.rs").read_text()
+        trust = (relay_sources / "trust_keyring.rs").read_text()
+        # Follow the production validation inputs, so a new required lookup adds a test obligation.
+        function = re.search(r"fn relay_keyring_provider_config\(\)[^{]+\{(.*?)^\}", trust, re.S | re.M)
+        self.assertIsNotNone(function, "production provider validation function must be discoverable")
+        inputs = re.findall(r"non_empty_env\((\w+)\)", function.group(1))
+        self.assertTrue(inputs, "must derive required environment inputs from production validation")
+        constants = dict(re.findall(r'const\s+(\w+):\s*&str\s*=\s*"(RAMFLUX_[A-Z0-9_]+)"', config + trust))
+        for constant in inputs:
+            self.assertIn(constant, constants, f"unresolved relay validation input: {constant}")
+            key = constants[constant]
+            self.assertIn(key, runtime, f"runtime.env missing production-required {key}")
+            self.assertTrue(runtime[key].strip(), f"empty required {key}")
+            self.assertNotIn("${", runtime[key], f"unresolved required {key}")
+        self.assertEqual(runtime["RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE"],
+                         "/etc/ramflux/federation/provider-keyring.json")
+        self.assertEqual(runtime["RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE"],
+                         "/var/lib/ramflux/relay/trust-snapshot.json")
+        compose = (self.state / "compose.yml").read_text()
+        relay = re.search(r"^  ramflux-relay:\n(.*?)(?=^  [a-z]|\Z)", compose, re.S | re.M).group(1)
+        self.assertIn("- ./secrets/federation:/etc/ramflux/federation:ro", relay)
+        self.assertIn("- relay-redb:/var/lib/ramflux/relay", relay)
+        self.assertTrue((self.state / "secrets/federation/provider-keyring.json").is_file())
+        self.assertTrue((self.state / "secrets/federation/trust-snapshot.json").is_file())
+        # A repeated up must not delete the relay-owned anti-rollback cache volume.
+        self.run_script("up")
+        self.assertFalse(any("down" in args or "--volumes" in args for args in self.compose_commands()))
+
+    def test_status_reports_relay_quic_health_and_propagates_probe_failure(self):
+        self.run_script("up")
+        result = self.run_script("status")
+        self.assertIn("relay QUIC TLS/application health: healthy", result.stdout)
+        self.control.write_text('{"relay_quic_unhealthy": true}')
+        result = self.run_script("status", success=False)
+        self.assertIn("relay QUIC unhealthy", result.stderr)
 
     def test_refuses_foreign_containers_volumes_and_networks_even_on_purge(self):
         self.run_script("up")
