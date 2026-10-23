@@ -359,6 +359,7 @@ mod tests {
         client.set_active_account(ACCOUNT_ID).expect("active account");
         client.unlock_account(ACCOUNT_ID, b"bot-account-secret").expect("unlock account");
         let state = LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new(root.join("rfd.sock"), root.clone()),
             accounts: BTreeMap::from([(
                 ACCOUNT_ID.to_owned(),

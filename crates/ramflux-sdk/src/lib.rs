@@ -19,7 +19,9 @@ mod itest_bus_fault;
 mod itest_crash_seam;
 #[cfg(feature = "itest-rfd-fault")]
 mod itest_rfd_fault;
+mod node;
 mod object;
+pub use node::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 mod own_device_sync;
 mod prekey;
 mod prelude;

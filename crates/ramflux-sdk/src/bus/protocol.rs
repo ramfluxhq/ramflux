@@ -6,6 +6,7 @@
 use crate::prelude::*;
 
 pub struct LocalBusConfig {
+    pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
 }
@@ -45,6 +46,8 @@ pub struct LocalBusErrorBody {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusAccountCreateRequest {
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub local_account_id: String,
     pub principal_id: String,
     pub principal_commitment: String,
@@ -54,6 +57,7 @@ pub struct LocalBusAccountCreateRequest {
     pub root_seed: [u8; 32],
     pub device_seed: [u8; 32],
     pub client_mode: LocalBusClientMode,
+    #[serde(default = "unconfigured_node_gateway")]
     pub gateway: GatewayQuicEndpointConfig,
 }
 
@@ -99,6 +103,8 @@ pub struct LocalBusDeviceListResponse {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusDeviceActivateRequest {
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub device_id: String,
     pub target_delivery_id: String,
     pub device_seed: [u8; 32],
@@ -162,6 +168,8 @@ pub struct LocalBusAccountPassphraseRotateRequest {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LocalBusPersistedAccount {
+    #[serde(default)]
+    pub(crate) node_id: Option<String>,
     pub(crate) schema: String,
     pub(crate) local_account_id: String,
     pub(crate) principal_id: String,
@@ -176,6 +184,10 @@ pub(crate) struct LocalBusPersistedAccount {
     pub(crate) device_seed: [u8; 32],
     pub(crate) client_mode: LocalBusClientMode,
     pub(crate) gateway: GatewayQuicEndpointConfig,
+    #[serde(default)]
+    pub(crate) node_tcp_addr: Option<SocketAddr>,
+    #[serde(default)]
+    pub(crate) node_relay: Option<NodeRelay>,
     #[serde(default)]
     pub(crate) devices: Vec<LocalBusDeviceRecord>,
 }
@@ -200,6 +212,9 @@ impl LocalBusPersistedAccount {
             root_seed: body.root_seed,
             device_seed: body.device_seed,
             client_mode: body.client_mode.clone(),
+            node_id: body.node_id.clone(),
+            node_tcp_addr: None,
+            node_relay: None,
             gateway: body.gateway.clone(),
             devices,
         }
@@ -923,7 +938,11 @@ const fn is_false(value: &bool) -> bool {
 impl LocalBusConfig {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
-        Self { socket_path: socket_path.into(), data_root: data_root.into() }
+        Self {
+            builtin_nodes: Vec::new(),
+            socket_path: socket_path.into(),
+            data_root: data_root.into(),
+        }
     }
 }
 
@@ -985,5 +1004,18 @@ impl LocalBusMessageSubmitRequest {
             created_at: self.created_at,
             ttl: self.ttl,
         }
+    }
+}
+
+fn unconfigured_node_gateway() -> GatewayQuicEndpointConfig {
+    GatewayQuicEndpointConfig {
+        bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+        gateway_addr: SocketAddr::from(([127, 0, 0, 1], 1)),
+        server_name: String::new(),
+        ca_cert: PathBuf::new(),
+        principal_id: String::new(),
+        device_id: String::new(),
+        target_delivery_id: String::new(),
+        prekey_http_url: None,
     }
 }

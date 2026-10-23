@@ -45,12 +45,15 @@ impl RamfluxClient {
         let plaintext = serde_json::to_vec(&bundle)?;
         let object_id = format!("own-device-sync:{snapshot_id}");
         let object = self.put_encrypted_object(&object_id, &plaintext)?;
-        let relay_options = parse_relay_transfer_options(
-            Some(relay_endpoint.to_owned()),
-            relay_service_key_base64,
-            None,
-        )?
-        .ok_or_else(|| SdkError::LocalBus("own-device sync relay endpoint missing".to_owned()))?;
+        let relay_options = self
+            .relay_transfer_options(
+                Some(relay_endpoint.to_owned()),
+                relay_service_key_base64,
+                None,
+            )?
+            .ok_or_else(|| {
+                SdkError::LocalBus("own-device sync relay endpoint missing".to_owned())
+            })?;
         let transfer = self
             .upload_object_to_relay_inner_via_gateway(
                 engine,

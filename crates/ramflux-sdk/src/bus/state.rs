@@ -6,6 +6,7 @@
 use crate::prelude::*;
 
 pub(crate) struct LocalBusDaemonState {
+    pub(crate) nodes: crate::node::NodeStore,
     pub(crate) config: LocalBusConfig,
     pub(crate) accounts: BTreeMap<String, LocalBusAccountState>,
     pub(crate) active_account_id: Option<String>,

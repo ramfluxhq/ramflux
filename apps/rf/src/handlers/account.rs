@@ -189,6 +189,7 @@ pub(crate) fn local_bus_account_create_request(
         )));
     }
     Ok(LocalBusAccountCreateRequest {
+        node_id: None,
         local_account_id: create.account,
         principal_id: create.principal.clone(),
         principal_commitment,

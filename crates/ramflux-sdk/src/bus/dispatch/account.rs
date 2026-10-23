@@ -41,6 +41,7 @@ pub(crate) async fn dispatch_account_bus_request(
             let account = local_bus_account(state, account_id)?;
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
+                "node_id": read_local_bus_account_manifest(&local_bus_account_manifest_path(&state.config.data_root, account_id))?.node_id,
                 "principal_id": account.gateway_config.principal_id,
                 "target_delivery_id": account.target_delivery_id,
                 "session_id": account.engine.as_ref().map(|engine| engine.session().session_id.clone()),
@@ -102,11 +103,32 @@ pub(crate) async fn local_bus_account_create(
     let manifest_path = local_bus_account_manifest_path(&data_root, &body.local_account_id);
     if manifest_path.exists() {
         let manifest = read_local_bus_account_manifest(&manifest_path)?;
+        if body.node_id.is_some() && body.node_id != manifest.node_id {
+            return Err(crate::node::node_error("account node binding cannot be changed"));
+        }
         let response = restore_local_bus_account(state, &manifest).await?;
         state.active_account_id = Some(response.local_account_id.clone());
         return Ok(response);
     }
+    let profile = state.nodes.selected(body.node_id.as_deref(), false)?;
     let mut client = RamfluxClient::new();
+    let node_relay = profile.as_ref().map(|profile| profile.relay.clone());
+    let mut node_tcp_addr = None;
+    if let Some(profile) = profile {
+        body.node_id = Some(profile.node_id.clone());
+        body.gateway = profile.gateway_config(&data_root, body.gateway).await?;
+        node_tcp_addr = Some(crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?);
+        client.node_relay_options =
+            Some(profile.relay_options(&data_root, &body.principal_id).await?);
+    }
+    if body.gateway.ca_cert.as_os_str().is_empty() {
+        return Err(crate::node::node_error(
+            "node_id, a default node, or gateway configuration is required",
+        ));
+    }
+    body.gateway.principal_id.clone_from(&body.principal_id);
+    body.gateway.device_id.clone_from(&body.device_id);
+    body.gateway.target_delivery_id.clone_from(&body.target_delivery_id);
     let root = client.create_identity_root(&body.principal_id, body.root_seed);
     let root_public_key =
         ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
@@ -135,9 +157,12 @@ pub(crate) async fn local_bus_account_create(
         "device.branch.created",
         &serde_json::to_vec(&device_state)?,
     )?;
-    let gateway = GatewaySessionConfig::auto(body.gateway.clone()).with_device_branch(
+    let mut gateway = GatewaySessionConfig::auto(body.gateway.clone()).with_device_branch(
         client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
     );
+    if let Some(addr) = node_tcp_addr {
+        gateway = gateway.with_tcp_gateway_addr(addr);
+    }
     client
         .initialize_and_publish_prekey_bundle_via_gateway_request(
             &gateway,
@@ -151,7 +176,9 @@ pub(crate) async fn local_bus_account_create(
         .cache_verified_device_manifest(&gateway, &body.principal_commitment, "account.create")
         .await?;
     let engine = client.connect_gateway_session(gateway).await?;
-    let manifest = LocalBusPersistedAccount::from_create_request(&body);
+    let mut manifest = LocalBusPersistedAccount::from_create_request(&body);
+    manifest.node_tcp_addr = node_tcp_addr;
+    manifest.node_relay = node_relay;
     write_local_bus_account_manifest(&data_root, &manifest)?;
     let response = LocalBusAccountCreateResponse {
         local_account_id: body.local_account_id.clone(),
@@ -412,6 +439,9 @@ mod tests {
 
     fn backup_manifest() -> LocalBusPersistedAccount {
         LocalBusPersistedAccount {
+            node_id: None,
+            node_tcp_addr: None,
+            node_relay: None,
             schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
             local_account_id: "alice".to_owned(),
             principal_id: "principal_alice".to_owned(),

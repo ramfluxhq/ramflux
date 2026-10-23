@@ -273,7 +273,7 @@ pub(crate) async fn dispatch_object_bus_request(
             if let Some(operation_id) = body.operation_id.clone() {
                 return dispatch_object_put_reconciled(account, body, operation_id).await;
             }
-            let relay_options = parse_relay_transfer_options(
+            let relay_options = account.client.relay_transfer_options(
                 body.relay_endpoint.clone(),
                 body.relay_service_key_base64.clone(),
                 body.relay_interrupt_after_chunks,
@@ -310,7 +310,7 @@ pub(crate) async fn dispatch_object_bus_request(
         }
         "object.get" => {
             let body: LocalBusObjectGetRequest = serde_json::from_value(request.body.clone())?;
-            let relay_options = parse_relay_transfer_options(
+            let relay_options = account.client.relay_transfer_options(
                 body.relay_endpoint.clone(),
                 body.relay_service_key_base64.clone(),
                 body.relay_interrupt_after_chunks,
@@ -355,14 +355,16 @@ pub(crate) async fn dispatch_object_bus_request(
         "object.transfer.resume" => {
             let body: LocalBusObjectTransferResumeRequest =
                 serde_json::from_value(request.body.clone())?;
-            let relay_options = parse_relay_transfer_options(
-                body.relay_endpoint.clone(),
-                body.relay_service_key_base64.clone(),
-                body.relay_interrupt_after_chunks,
-            )?
-            .ok_or_else(|| {
-                SdkError::LocalBus("object resume requires relay_endpoint".to_owned())
-            })?;
+            let relay_options = account
+                .client
+                .relay_transfer_options(
+                    body.relay_endpoint.clone(),
+                    body.relay_service_key_base64.clone(),
+                    body.relay_interrupt_after_chunks,
+                )?
+                .ok_or_else(|| {
+                    SdkError::LocalBus("object resume requires relay_endpoint".to_owned())
+                })?;
             let status = match body.direction.as_str() {
                 OBJECT_TRANSFER_UPLOAD => {
                     let existing = account
@@ -466,7 +468,7 @@ pub(crate) async fn dispatch_object_bus_request(
         }
         "object.delete" => {
             let body: LocalBusObjectDeleteRequest = serde_json::from_value(request.body.clone())?;
-            let relay_options = parse_relay_transfer_options(
+            let relay_options = account.client.relay_transfer_options(
                 body.relay_endpoint,
                 body.relay_service_key_base64,
                 None,
@@ -531,7 +533,7 @@ async fn dispatch_object_put_reconciled_core(
     plaintext: Vec<u8>,
     operation_id: String,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let relay_options = parse_relay_transfer_options(
+    let relay_options = account.client.relay_transfer_options(
         body.relay_endpoint.clone(),
         body.relay_service_key_base64.clone(),
         body.relay_interrupt_after_chunks,
@@ -1175,7 +1177,7 @@ async fn object_get_begin(
     // session + file so we always start from a clean, freshly decrypted spool.
     object_get_spool_discard(account, &body.operation_id);
 
-    let relay_options = parse_relay_transfer_options(
+    let relay_options = account.client.relay_transfer_options(
         body.relay_endpoint.clone(),
         body.relay_service_key_base64.clone(),
         body.relay_interrupt_after_chunks,
@@ -1580,6 +1582,7 @@ mod spool_tests {
             prekey_http_url: None,
         });
         LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new(data_root.join("bus.sock"), data_root),
             accounts: BTreeMap::from([(
                 ACCOUNT.to_owned(),

@@ -10,6 +10,7 @@ pub mod device;
 pub mod grant_mcp;
 pub mod group;
 pub mod message;
+pub mod node;
 pub mod object;
 
 pub(crate) use a2i_a2ui::*;

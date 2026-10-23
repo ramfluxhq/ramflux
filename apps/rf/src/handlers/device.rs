@@ -10,6 +10,7 @@ pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Re
     match command.action {
         DeviceAction::Activate(activate) => {
             let request = ramflux_sdk::LocalBusDeviceActivateRequest {
+                node_id: None,
                 device_id: activate.device,
                 target_delivery_id: activate.target,
                 device_seed: resolve_seed(activate.device_seed_byte_hex.as_deref())?,

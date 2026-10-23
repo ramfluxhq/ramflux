@@ -56,7 +56,31 @@ async fn dispatch_device_activate(
     let data_root = state.config.data_root.clone();
     let manifest_path = local_bus_account_manifest_path(&data_root, &account_id);
     let mut manifest = read_local_bus_account_manifest(&manifest_path)?;
+    if let Some(id) = body.node_id.as_deref()
+        && manifest.node_id.as_deref().is_some_and(|bound| bound != id)
+    {
+        return Err(crate::node::node_error(
+            "device activation cannot change the account node binding",
+        ));
+    }
+    let mut relay_options = None;
+    if let Some(id) = body.node_id.as_deref() {
+        let profile = state
+            .nodes
+            .selected(Some(id), manifest.node_id.is_some())?
+            .ok_or_else(|| crate::node::node_error("unknown node"))?;
+        manifest.gateway = profile.gateway_config(&data_root, manifest.gateway).await?;
+        manifest.node_tcp_addr =
+            Some(crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?);
+        manifest.node_relay = Some(profile.relay.clone());
+        manifest.node_id = Some(id.to_owned());
+        relay_options = Some(profile.relay_options(&data_root, &manifest.principal_id).await?);
+    }
     let account = local_bus_account_mut(state, &account_id)?;
+    if let Some(options) = relay_options {
+        account.client.node_relay_options = Some(options);
+        account.relay_quic_pool = None;
+    }
     if manifest.principal_id != account.gateway_config.principal_id {
         return Err(SdkError::LocalBus("account manifest principal mismatch".to_owned()));
     }
@@ -74,7 +98,10 @@ async fn dispatch_device_activate(
     endpoint.principal_id.clone_from(&manifest.principal_id);
     endpoint.device_id.clone_from(&body.device_id);
     endpoint.target_delivery_id.clone_from(&body.target_delivery_id);
-    let gateway = GatewaySessionConfig::auto(endpoint.clone()).with_device_branch(branch);
+    let mut gateway = GatewaySessionConfig::auto(endpoint.clone()).with_device_branch(branch);
+    if let Some(addr) = manifest.node_tcp_addr {
+        gateway = gateway.with_tcp_gateway_addr(addr);
+    }
     account
         .client
         .initialize_and_publish_prekey_bundle_via_gateway_request(

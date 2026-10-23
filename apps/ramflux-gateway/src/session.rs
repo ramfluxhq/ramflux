@@ -118,7 +118,7 @@ pub(crate) async fn handle_gateway_session_transport(
         write_gateway_frame(
             &mut *send,
             &ramflux_node_core::GatewayServerFrame::Nack {
-                reason: "first gateway frame must be open".to_owned(),
+                reason: ramflux_protocol::GATEWAY_FIRST_FRAME_NACK_REASON.to_owned(),
             },
         )
         .await?;

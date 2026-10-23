@@ -21,6 +21,7 @@ pub mod storage;
 use crate::prelude::*;
 
 pub struct RamfluxClient {
+    pub(crate) node_relay_options: Option<crate::object::RelayTransferOptions>,
     pub(crate) identity_root: Option<IdentityRoot>,
     pub(crate) device_branch: Option<DeviceBranch>,
     pub(crate) account_index: Option<AccountIndex>,
@@ -35,6 +36,7 @@ pub struct RamfluxClient {
 impl Default for RamfluxClient {
     fn default() -> Self {
         Self {
+            node_relay_options: None,
             identity_root: None,
             device_branch: None,
             account_index: None,

@@ -1433,6 +1433,7 @@ mod tests {
             LocalBusAccountState::disconnected(client, gateway, "principal_mcp_test".to_owned());
         (
             LocalBusDaemonState {
+                nodes: crate::node::NodeStore::default(),
                 config: LocalBusConfig::new(root.join("bus.sock"), root.clone()),
                 accounts: BTreeMap::from([(ACCOUNT_ID.to_owned(), account)]),
                 active_account_id: Some(ACCOUNT_ID.to_owned()),
@@ -1667,6 +1668,7 @@ mod tests {
         );
 
         let mut restored_state = LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new(root.join("bus-restored.sock"), root),
             accounts: BTreeMap::from([(ACCOUNT_ID.to_owned(), restored_account)]),
             active_account_id: Some(ACCOUNT_ID.to_owned()),
@@ -1740,6 +1742,7 @@ mod tests {
         hydrate_local_mcp_state(&mut restored_account).expect("hydrate mcp state");
         assert_eq!(restored_account.mcp_standing_approvals.len(), 1);
         let mut restored_state = LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new(root.join("bus-restored.sock"), root),
             accounts: BTreeMap::from([(ACCOUNT_ID.to_owned(), restored_account)]),
             active_account_id: Some(ACCOUNT_ID.to_owned()),

@@ -59,7 +59,9 @@ async fn serve_local_bus_until_local(
     let listener = UnixListener::bind(&config.socket_path)?;
     std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o600))?;
     let socket_uid = std::fs::metadata(&config.socket_path)?.uid();
+    let nodes = crate::node::NodeStore::load(&config.data_root, &config.builtin_nodes)?;
     let mut state = LocalBusDaemonState {
+        nodes,
         config,
         accounts: BTreeMap::new(),
         active_account_id: None,
@@ -236,9 +238,23 @@ async fn restore_local_bus_account_impl(
     client.set_active_account(&manifest.local_account_id)?;
     let account_secret = passphrase_override.unwrap_or(&manifest.account_secret);
     client.unlock_account(&manifest.local_account_id, account_secret.as_bytes())?;
-    let gateway = GatewaySessionConfig::auto(manifest.gateway.clone()).with_device_branch(
+    if let (Some(id), Some(relay)) = (&manifest.node_id, &manifest.node_relay) {
+        client.node_relay_options = Some(
+            crate::node::profile_relay_options(
+                id,
+                relay,
+                &manifest.gateway.ca_cert,
+                &manifest.principal_id,
+            )
+            .await?,
+        );
+    }
+    let mut gateway = GatewaySessionConfig::auto(manifest.gateway.clone()).with_device_branch(
         client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
     );
+    if let Some(addr) = manifest.node_tcp_addr {
+        gateway = gateway.with_tcp_gateway_addr(addr);
+    }
     let engine = if connect_gateway {
         match client.connect_gateway_session(gateway.clone()).await {
             Ok(engine) => Some(engine),
@@ -491,6 +507,9 @@ pub(crate) async fn dispatch_local_bus_request(
             }
             Ok(local_bus_ok(serde_json::json!({ "subscribed": true })))
         }
+        method if method.starts_with("node.") => {
+            crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
+        }
         method if method.starts_with("account.") => {
             dispatch_account_bus_request(request, state).await
         }
@@ -560,6 +579,7 @@ mod tests {
             prekey_http_url: None,
         });
         Rc::new(Mutex::new(LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new(root.join("bus.sock"), root),
             accounts: BTreeMap::from([(
                 "acct".to_owned(),
@@ -837,6 +857,7 @@ mod tests {
     async fn local_bus_backpressure_removes_slow_subscriber_without_blocking() {
         let (outbound, mut inbound) = mpsc::channel(1);
         let mut state = LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new("bus.sock", "data"),
             accounts: BTreeMap::new(),
             active_account_id: None,
@@ -869,6 +890,7 @@ mod tests {
     async fn local_bus_unregister_removes_subscription() {
         let (outbound, mut inbound) = mpsc::channel(1);
         let mut state = LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new("bus.sock", "data"),
             accounts: BTreeMap::new(),
             active_account_id: None,

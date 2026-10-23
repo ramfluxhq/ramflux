@@ -187,6 +187,7 @@ mod tests {
             prekey_http_url: None,
         });
         LocalBusDaemonState {
+            nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new("bus.sock", "data"),
             accounts: BTreeMap::from([(
                 "acct".to_owned(),

@@ -119,12 +119,15 @@ impl RamfluxClient {
         attachment: &LocalBusMessageAttachmentInput,
         plaintext: &[u8],
     ) -> Result<SdkDmAttachmentRef, SdkError> {
-        let relay_options = parse_relay_transfer_options(
-            Some(attachment.relay_endpoint.clone()),
-            attachment.relay_service_key_base64.clone(),
-            None,
-        )?
-        .ok_or_else(|| SdkError::LocalBus("DM attachment requires relay endpoint".to_owned()))?;
+        let relay_options = self
+            .relay_transfer_options(
+                Some(attachment.relay_endpoint.clone()),
+                attachment.relay_service_key_base64.clone(),
+                None,
+            )?
+            .ok_or_else(|| {
+                SdkError::LocalBus("DM attachment requires relay endpoint".to_owned())
+            })?;
         let object = self.object_store.put_encrypted_object(&attachment.object_id, plaintext)?;
         let object_key = self.object_store.object_key(&object.object_id)?;
         self.persist_object_if_unlocked(&object, Some(&object_key))?;
@@ -450,11 +453,7 @@ impl RamfluxClient {
             expires_at: Some(i64::try_from(download.expires_at).unwrap_or(i64::MAX)),
         })?;
         let plaintext = self.decrypt_object(&attachment.object_id)?;
-        let plaintext_hash =
-            ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, &plaintext);
-        if plaintext_hash != attachment.plaintext_hash {
-            return Err(SdkError::LocalBus("DM attachment plaintext hash mismatch".to_owned()));
-        }
+        let plaintext_hash = verify_attachment_plaintext(attachment, &plaintext)?;
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::GranteeImport).await?;
         // T21-A2: the encrypted object + key + transfer state are now durably persisted and the
@@ -467,12 +466,15 @@ impl RamfluxClient {
             grant.capabilities.contains(&ramflux_protocol::ObjectRelayCapability::Ack)
         });
         if self.active_account_db.is_some() && grant_authorizes_ack {
-            let ack_options = parse_relay_transfer_options(
-                Some(attachment.relay_endpoint.clone()),
-                relay_service_key_base64,
-                None,
-            )?
-            .ok_or_else(|| SdkError::LocalBus("DM attachment relay options missing".to_owned()))?;
+            let ack_options = self
+                .relay_transfer_options(
+                    Some(attachment.relay_endpoint.clone()),
+                    relay_service_key_base64,
+                    None,
+                )?
+                .ok_or_else(|| {
+                    SdkError::LocalBus("DM attachment relay options missing".to_owned())
+                })?;
             if matches!(ack_options.token_provider, RelayTokenProvider::GatewayIssued) {
                 let branch = self
                     .device_branch
@@ -516,12 +518,13 @@ impl RamfluxClient {
         object_key: [u8; 32],
         relay_service_key_base64: Option<String>,
     ) -> Result<DmAttachmentDownload, SdkError> {
-        let options = parse_relay_transfer_options(
-            Some(attachment.relay_endpoint.clone()),
-            relay_service_key_base64,
-            None,
-        )?
-        .ok_or_else(|| SdkError::LocalBus("DM attachment relay options missing".to_owned()))?;
+        let options = self
+            .relay_transfer_options(
+                Some(attachment.relay_endpoint.clone()),
+                relay_service_key_base64,
+                None,
+            )?
+            .ok_or_else(|| SdkError::LocalBus("DM attachment relay options missing".to_owned()))?;
         let branch = self
             .device_branch
             .as_ref()
@@ -602,12 +605,13 @@ impl RamfluxClient {
         object_key: [u8; 32],
         relay_service_key_base64: Option<String>,
     ) -> Result<DmAttachmentDownload, SdkError> {
-        let options = parse_relay_transfer_options(
-            Some(attachment.relay_endpoint.clone()),
-            relay_service_key_base64,
-            None,
-        )?
-        .ok_or_else(|| SdkError::LocalBus("DM attachment relay options missing".to_owned()))?;
+        let options = self
+            .relay_transfer_options(
+                Some(attachment.relay_endpoint.clone()),
+                relay_service_key_base64,
+                None,
+            )?
+            .ok_or_else(|| SdkError::LocalBus("DM attachment relay options missing".to_owned()))?;
         let branch = self
             .device_branch
             .as_ref()
@@ -2621,4 +2625,15 @@ mod t24a2_relay_retry_tests {
             "expected the second attempt's transport error verbatim: {result:?}"
         );
     }
+}
+
+fn verify_attachment_plaintext(
+    attachment: &SdkDmAttachmentRef,
+    plaintext: &[u8],
+) -> Result<String, SdkError> {
+    let hash = ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, plaintext);
+    if hash != attachment.plaintext_hash {
+        return Err(SdkError::LocalBus("DM attachment plaintext hash mismatch".to_owned()));
+    }
+    Ok(hash)
 }

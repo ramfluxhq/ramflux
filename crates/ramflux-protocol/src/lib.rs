@@ -80,3 +80,6 @@ pub const SCHEMA_VERSION_V1: u32 = 1;
 pub const fn crate_name() -> &'static str {
     CRATE_NAME
 }
+
+/// Existing gateway rejection used by read-only pre-account probes.
+pub const GATEWAY_FIRST_FRAME_NACK_REASON: &str = "first gateway frame must be open";
