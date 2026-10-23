@@ -1,0 +1,48 @@
+---
+source: crates/ramflux-protocol/tests/task_goldens.rs
+expression: golden
+---
+start
+public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
+jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"assignee":"agent","constraints":"No network","conversation_id":"chat","requester":"human","task_id":"task","text":"Summarize café 🦀"},"type":"start"},"schema":"ramflux.task_event.v1","version":1}
+signature=uX8zAG64v4Z86Cgkf66TWCL5P9A7dzSCfWz4pPJr2V5rDr6DpU92_XUVrOPhk_MT0XcBreVucqXeLIwvYCLDDw
+fallback=Task task requested for agent: Summarize café 🦀
+Constraints: No network
+
+proposal
+public_key=oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA
+jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"assignee":"agent","conversation_id":"chat","proposer":"agent","steps":[{"id":"s","state":"proposed","title":"Step s"}],"task_id":"task","title":"Research 🦀"},"type":"proposal"},"schema":"ramflux.task_event.v1","version":1}
+signature=J8wS9oc9jKbOiEpLlavNGczdGeiDSn4xm3A6gFcrKFGOsMPu3N1CR8wdgi3jEEMmPLigvCqqkgQU4NtPa1U-BA
+fallback=Task task proposed by agent for agent (awaiting human acceptance): Research 🦀
+s: Step s (proposed)
+
+accept
+public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
+jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"task_id":"task","version":2},"type":"accept"},"schema":"ramflux.task_event.v1","version":1}
+signature=BjAhB6kmoI2xKLBE_v78Eq63GO5f3i8wSdR4kdjjIYB7S3WBqqiZnzyM2P0B19kCyb7VYEcyFQzKz0N8CRPwDg
+fallback=Task task accepted by a human
+
+decline
+public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
+jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"task_id":"task","version":2},"type":"decline"},"schema":"ramflux.task_event.v1","version":1}
+signature=VOIov25zetverY76KDGqvafV-0r-aWKtN6XVpIfAjDJZ-6gJ_FGF5t99_rEXrpOoJzrqFq-4oTyflrmqRUYNBg
+fallback=Task task declined by a human
+
+update
+public_key=oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA
+jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"state":"needs_me","steps":[{"id":"s","needs_me":{"grant_id":"grant","kind":"approval"},"state":"needs_me","title":"Step s"}],"task_id":"task","version":3},"type":"update"},"schema":"ramflux.task_event.v1","version":1}
+signature=B2pBQdzZTBJVbikIYGV0fwpPJJ3i0IOo8m5AOxgIlVNHufZwJ8Jt14zxVGBi0mwZLLZB-o8ds8G8y0yfeTyHBw
+fallback=Task task: needs_me
+s: Step s (needs_me) — needs human decision at grant
+
+cancel
+public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
+jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"task_id":"task","version":4},"type":"cancel"},"schema":"ramflux.task_event.v1","version":1}
+signature=aOVgAfQWsylqRKUjAH08ziFeuC8qa2TAZ2dNV2kt9Sk9Id631avbROYjFNmRZxbJymV25NR2qfInW7DacrvoAg
+fallback=Task task cancelled by its requester
+
+resolve
+public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
+jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"decision":"resume","decision_id":"decision","step_id":"s","target":{"grant_id":"grant","kind":"approval"},"task_id":"task","version":4},"type":"resolve"},"schema":"ramflux.task_event.v1","version":1}
+signature=LyWxnTBwWKDYik-nN12-nwUZgIV3iYkc73ztVmE0KTfBrI3S6b55tYD-ACcnpesi1_-ZtgpYWmg2hTXS0FH2DQ
+fallback=Task task: human decision resume for step s at grant (decision decision)
