@@ -44,11 +44,14 @@ impl RamfluxClient {
             let manifest =
                 crate::client::contact::fetch_verified_device_manifest(gateway, &commitment)
                     .await?;
-            let device = manifest
-                .devices
-                .iter()
-                .find(|device| device.device_id == *remote)
-                .ok_or_else(|| invalid("sender device absent from verified manifest"))?;
+            let device =
+                manifest.devices.iter().find(|device| device.device_id == *remote).ok_or_else(
+                    || {
+                        SdkError::InboundPending(
+                            "sender device absent from verified manifest".to_owned(),
+                        )
+                    },
+                )?;
             let record = serde_json::json!({"principal_id":manifest.principal_id,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key});
             verify_sender_record(entry, &record)?;
             if let Ok(wrapper) = decode(&entry.envelope)
@@ -72,9 +75,9 @@ impl RamfluxClient {
     }
 
     pub(super) fn trusted_device(&self, remote: &str) -> Result<Value, SdkError> {
-        self.account_db()?
-            .client_record("device", remote)?
-            .ok_or_else(|| invalid("sender device has no verified manifest"))
+        self.account_db()?.client_record("device", remote)?.ok_or_else(|| {
+            SdkError::InboundPending("sender device has no verified manifest".to_owned())
+        })
     }
 
     pub(super) fn authenticated_envelope_sender(

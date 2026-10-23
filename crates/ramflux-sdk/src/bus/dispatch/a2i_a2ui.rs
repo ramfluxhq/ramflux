@@ -43,18 +43,54 @@ pub(crate) async fn dispatch_a2i_bus_request(
             account.put_engine(engine);
             let received = received?;
             for event in received {
-                account.pending_a2i.entry(event.event_id.clone()).or_insert(event);
+                let key = crate::client::routed::control::a2i_key(
+                    &event.source_device_id,
+                    &event.event_id,
+                )?;
+                account.pending_a2i.entry(key).or_insert(event);
             }
-            Ok(local_bus_ok(serde_json::json!({
-                "events": account.pending_a2i.values().cloned().collect::<Vec<_>>(),
-            })))
+            restore_a2i_cache(account)?;
+            let events = account
+                .pending_a2i
+                .values()
+                .filter(|event| request.method != "a2i.list_pending" || !event.acknowledged)
+                .map(|event| -> Result<serde_json::Value, SdkError> {
+                    let mut row = serde_json::to_value(event)?;
+                    row["acknowledge_id"] =
+                        serde_json::json!(crate::client::routed::control::a2i_key(
+                            &event.source_device_id,
+                            &event.event_id
+                        )?);
+                    Ok(row)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(local_bus_ok(serde_json::json!({"events":events})))
         }
         "a2i.acknowledge" => {
             let body: LocalBusA2iAcknowledgeRequest = serde_json::from_value(request.body.clone())?;
-            let event = account.pending_a2i.get_mut(&body.event_id).ok_or_else(|| {
-                SdkError::LocalBus(format!("a2i event not found: {}", body.event_id))
-            })?;
-            event.acknowledged = true;
+            restore_a2i_cache(account)?;
+            let matches = account
+                .pending_a2i
+                .iter()
+                .filter(|(key, event)| **key == body.event_id || event.event_id == body.event_id)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return Err(SdkError::LocalBus(
+                    "a2i event selector missing or ambiguous; use the sender-scoped key".to_owned(),
+                ));
+            }
+            let event = account
+                .pending_a2i
+                .get_mut(&matches[0])
+                .ok_or_else(|| SdkError::LocalBus("a2i event missing".to_owned()))?;
+            let mut acknowledged = event.clone();
+            acknowledged.acknowledged = true;
+            account.client.account_db()?.persist_actor_state(
+                &crate::client::routed::control::a2i_key(&event.source_device_id, &event.event_id)?,
+                &acknowledged,
+            )?;
+            *event = acknowledged;
             Ok(local_bus_ok(serde_json::to_value(event)?))
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
@@ -164,6 +200,20 @@ fn a2ui_action_result_event_body(action: &A2uiAction, accepted: bool) -> serde_j
         "nonce": action.nonce,
         "accepted": accepted,
     })
+}
+
+fn restore_a2i_cache(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+    for event in account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")? {
+        let key =
+            crate::client::routed::control::a2i_key(&event.source_device_id, &event.event_id)?;
+        account.pending_a2i.retain(|old_key, old| {
+            old_key == &key
+                || old.event_id != event.event_id
+                || old.source_device_id != event.source_device_id
+        });
+        account.pending_a2i.insert(key, event);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

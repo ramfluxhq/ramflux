@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 mod auth;
 mod committed;
 mod context;
-mod control;
+pub(crate) mod control;
 mod object_slot;
 mod project;
 pub(crate) use committed::{committed_key, conversation_watermark, object_watermark};

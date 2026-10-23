@@ -9,6 +9,13 @@ use serde_json::{Value, json};
 use std::ops::AsyncFnOnce;
 use std::time::Duration;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ReferenceContext<'a> {
+    pub owner: &'a str,
+    pub conversation: &'a str,
+    pub message: &'a str,
+}
+
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_CIPHER_BYTES: u64 = 16 * 1024 * 1024 + 16;
 
@@ -23,7 +30,6 @@ struct ReceivedAttachment {
 #[derive(Serialize, Deserialize)]
 struct PreparedSlot {
     object_key: [u8; 32],
-    session: ramflux_crypto::DmSessionSnapshot,
     conversation_id: String,
     commit_label: String,
     #[serde(default)]
@@ -51,30 +57,7 @@ impl RamfluxClient {
         let prepared = self.decrypt_object_key_slot(&reference.key_slot).ok();
         self.persist_received_reference_prepared(reference, owner, conversation, message, prepared)
     }
-    pub(crate) fn persist_received_reference_with_pair(
-        &self,
-        reference: &SdkDmAttachmentRef,
-        owner: &str,
-        conversation: &str,
-        message: &str,
-        session: &mut ramflux_crypto::DmSession,
-    ) -> Result<bool, SdkError> {
-        let prepared = if reference.key_slot.version == 2 {
-            self.decrypt_pair_object_slot(&reference.key_slot, Some(session)).ok()
-        } else {
-            self.decrypt_object_key_slot(&reference.key_slot).ok()
-        };
-        let consumed = prepared.is_some() && reference.key_slot.version == 2;
-        self.persist_received_reference_prepared(
-            reference,
-            owner,
-            conversation,
-            message,
-            prepared,
-        )?;
-        Ok(consumed)
-    }
-    fn persist_received_reference_prepared(
+    pub(crate) fn persist_received_reference_prepared(
         &self,
         reference: &SdkDmAttachmentRef,
         owner: &str,
@@ -82,8 +65,24 @@ impl RamfluxClient {
         message: &str,
         prepared: Option<DeferredObjectKeySlot>,
     ) -> Result<(), SdkError> {
+        self.persist_received_reference_prepared_at(
+            reference,
+            &reference.object_id,
+            ReferenceContext { owner, conversation, message },
+            prepared,
+        )
+    }
+
+    pub(crate) fn persist_received_reference_prepared_at(
+        &self,
+        reference: &SdkDmAttachmentRef,
+        selector: &str,
+        context: ReferenceContext<'_>,
+        prepared: Option<DeferredObjectKeySlot>,
+    ) -> Result<(), SdkError> {
+        let ReferenceContext { owner, conversation, message } = context;
         let db = self.account_db()?;
-        let key = reference_key(&reference.object_id);
+        let key = reference_key(selector);
         if db.load_actor_state::<ReceivedAttachment>(&key)?.is_some() {
             // Replayed receipt must not replace access material or reset a failed/complete fetch.
             return Ok(());
@@ -92,7 +91,6 @@ impl RamfluxClient {
         // advancing its durable slot checkpoint. A bad slot must not block message receipt.
         let prepared_slot = prepared.map(|slot| PreparedSlot {
             object_key: slot.object_key,
-            session: slot.session.snapshot(),
             conversation_id: slot.conversation_id,
             commit_label: slot.commit_label,
             pair_slot: slot.pair_slot,
@@ -105,7 +103,7 @@ impl RamfluxClient {
         });
         db.persist_actor_state_batch(&[
             (key, json!(ReceivedAttachment { reference: reference.clone(), prepared_slot })),
-            (format!("directory/object/{}", reference.object_id), metadata),
+            (format!("directory/object/{selector}"), metadata),
         ])?;
         Ok(())
     }
@@ -294,8 +292,11 @@ impl RamfluxClient {
         reference: &SdkDmAttachmentRef,
     ) -> Result<Option<DeferredObjectKeySlot>, SdkError> {
         let Some(db) = self.active_account_db.as_ref() else { return Ok(None) };
+        let selector = db
+            .load_actor_state::<String>(&slot_reference_key(reference)?)?
+            .unwrap_or_else(|| reference.object_id.clone());
         let Some(stored): Option<ReceivedAttachment> =
-            db.load_actor_state(&reference_key(&reference.object_id))?
+            db.load_actor_state(&reference_key(&selector))?
         else {
             return Ok(None);
         };
@@ -311,7 +312,12 @@ impl RamfluxClient {
             .map(|slot| {
                 Ok(DeferredObjectKeySlot {
                     object_key: slot.object_key,
-                    session: ramflux_crypto::DmSession::from_snapshot(slot.session)?,
+                    session: None,
+                    legacy_slot: if slot.pair_slot.is_none() {
+                        Some(reference.key_slot.clone())
+                    } else {
+                        None
+                    },
                     conversation_id: slot.conversation_id,
                     commit_label: slot.commit_label,
                     pair_slot: slot.pair_slot,
@@ -387,3 +393,63 @@ fn public_receipt(state: &FetchState) -> Value {
 
 #[cfg(test)]
 mod tests;
+
+impl RamfluxClient {
+    pub(crate) fn persist_sender_attachment_reference(
+        &self,
+        reference: &SdkDmAttachmentRef,
+        sender: &str,
+        context: ReferenceContext<'_>,
+        prepared: Option<DeferredObjectKeySlot>,
+    ) -> Result<(), SdkError> {
+        if reference.key_slot.ciphertext.sender_device_id_hash != dm_device_id_hash(sender) {
+            return Err(SdkError::InboundRejected(
+                "attachment slot source differs from authenticated sender".to_owned(),
+            ));
+        }
+        let db = self.account_db()?;
+        let hash = ramflux_crypto::blake3_256_base64url(
+            "ramflux.received.object.sender.v2",
+            &ramflux_protocol::canonical_json_bytes(&(sender, &reference.object_id))?,
+        );
+        let owner_key = format!("attachment/owner/{}", reference.object_id);
+        let existing = db.load_actor_state::<String>(&owner_key)?;
+        let selector = if reference.object_id.starts_with("received:")
+            || existing.as_deref().is_some_and(|old| old != sender)
+        {
+            format!("received:{hash}")
+        } else {
+            reference.object_id.clone()
+        };
+        self.persist_received_reference_prepared_at(reference, &selector, context, prepared)?;
+        db.persist_actor_state(&owner_key, &existing.unwrap_or_else(|| sender.to_owned()))?;
+        db.persist_actor_state(&format!("attachment/reference-by-sender/{hash}"), &selector)?;
+        db.persist_actor_state(&slot_reference_key(reference)?, &selector)?;
+        Ok(())
+    }
+}
+fn slot_reference_key(reference: &SdkDmAttachmentRef) -> Result<String, SdkError> {
+    Ok(format!(
+        "attachment/reference-by-slot/{}",
+        ramflux_crypto::blake3_256_base64url(
+            "ramflux.received.slot.selector.v2",
+            &ramflux_protocol::canonical_json_bytes(&reference.key_slot)?
+        )
+    ))
+}
+
+impl RamfluxClient {
+    pub(super) fn received_object_alias(
+        &self,
+        selector: &str,
+    ) -> Result<Option<(String, String)>, SdkError> {
+        if !selector.starts_with("received:") {
+            return Ok(None);
+        }
+        let stored: ReceivedAttachment = self
+            .account_db()?
+            .load_actor_state(&reference_key(selector))?
+            .ok_or_else(|| SdkError::LocalBus("received object selector not found".to_owned()))?;
+        Ok(Some((stored.reference.object_id, stored.reference.manifest_hash)))
+    }
+}

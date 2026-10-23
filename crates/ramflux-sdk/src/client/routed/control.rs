@@ -17,10 +17,10 @@ impl RamfluxClient {
             {
                 return Err(invalid("control event device binding mismatch"));
             }
-            if let Some(old) = self
-                .account_db()?
-                .load_actor_state::<A2iControlEvent>(&format!("a2i/{}", event.event_id))?
-            {
+            if let Some(old) = self.account_db()?.load_actor_state::<A2iControlEvent>(&a2i_key(
+                &event.source_device_id,
+                &event.event_id,
+            )?)? {
                 event.acknowledged = old.acknowledged;
                 if event != old {
                     return Err(invalid(
@@ -32,7 +32,8 @@ impl RamfluxClient {
                 &super::committed_key(entry)?.replace("routed/committed/", "routed/control/"),
                 &event,
             )?;
-            self.account_db()?.persist_actor_state(&format!("a2i/{}", event.event_id), &event)?;
+            self.account_db()?
+                .persist_actor_state(&a2i_key(&event.source_device_id, &event.event_id)?, &event)?;
         } else {
             let event: Value = serde_json::from_slice(body)?;
             self.project_contact_control(entry, &event)?;
@@ -145,4 +146,14 @@ impl RamfluxClient {
         }
         Ok(())
     }
+}
+
+pub(crate) fn a2i_key(source: &str, event: &str) -> Result<String, SdkError> {
+    Ok(format!(
+        "a2i/scoped/{}",
+        ramflux_crypto::blake3_256_base64url(
+            "ramflux.a2i.sender.v2",
+            &ramflux_protocol::canonical_json_bytes(&(source, event))?
+        )
+    ))
 }

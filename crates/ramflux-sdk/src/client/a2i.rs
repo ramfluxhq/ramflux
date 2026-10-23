@@ -70,10 +70,12 @@ impl RamfluxClient {
                     {
                         let event = self
                             .account_db()?
-                            .load_actor_state::<A2iControlEvent>(&format!(
-                                "a2i/{}",
-                                event.event_id
-                            ))?
+                            .load_actor_state::<A2iControlEvent>(
+                                &crate::client::routed::control::a2i_key(
+                                    &event.source_device_id,
+                                    &event.event_id,
+                                )?,
+                            )?
                             .unwrap_or(event);
                         if !event.acknowledged {
                             events.push(event);
@@ -90,47 +92,109 @@ impl RamfluxClient {
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
             }
-            let expected = a2i_control_conversation_id(
-                &entry.envelope.source_device_id,
-                &engine.config.device_id,
-            );
-            if self.legacy_routing_binding(&engine.config.device_id, &entry)?.as_deref()
-                != Some(expected.as_str())
-            {
-                self.account_db()?.hold_unrouted(
-                    &entry.envelope.envelope_id,
-                    entry.inbox_seq,
-                    &serde_json::to_vec(&entry)?,
-                    now_unix_timestamp(),
-                )?;
-                self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-                continue;
+            if let Some(event) = self.receive_bound_legacy_a2i(engine, &entry).await? {
+                events.push(event);
             }
-            self.ensure_inbound_device(&engine.config, &entry).await?;
-            self.append_gateway_delivery(&entry)?;
-            let conversation_id = a2i_control_conversation_id(
-                &entry.envelope.source_device_id,
-                &engine.config.device_id,
-            );
-            let ciphertext_bytes =
-                ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload).map_err(
-                    |error| SdkError::LocalBus(format!("invalid A2I encrypted payload: {error}")),
-                )?;
-            let envelope: SdkDmEncryptedEnvelope = serde_json::from_slice(&ciphertext_bytes)?;
-            let mut session =
-                self.load_or_create_recv_dm_session(&conversation_id, envelope.x3dh.as_ref())?;
-            let body =
-                session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
-            let event: A2iControlEvent = serde_json::from_slice(&body)?;
+        }
+        Ok(events)
+    }
+    async fn receive_bound_legacy_a2i(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<A2iControlEvent>, SdkError> {
+        let expected =
+            a2i_control_conversation_id(&entry.envelope.source_device_id, &engine.config.device_id);
+        if self.legacy_routing_binding(&engine.config.device_id, entry)?.as_deref()
+            != Some(expected.as_str())
+        {
+            self.account_db()?.hold_unrouted(
+                &entry.envelope.envelope_id,
+                entry.inbox_seq,
+                &serde_json::to_vec(&entry)?,
+                now_unix_timestamp(),
+            )?;
+            self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+            return Ok(None);
+        }
+        self.ensure_inbound_device(&engine.config, entry).await?;
+        let receipt_key = format!("legacy/a2i/{}", crate::client::routed::committed_key(entry)?);
+        if let Some(receipt) =
+            self.account_db()?.load_actor_state::<LegacyControlReceipt>(&receipt_key)?
+        {
+            if receipt.payload_hash != entry.envelope.payload_hash {
+                return Err(SdkError::InboundRejected("legacy A2I envelope id reused".to_owned()));
+            }
+            self.finish_a2i_receive(engine, entry).await?;
+            let event = self
+                .account_db()?
+                .load_actor_state::<A2iControlEvent>(&crate::client::routed::control::a2i_key(
+                    &receipt.event.source_device_id,
+                    &receipt.event.event_id,
+                )?)?
+                .unwrap_or(receipt.event);
+            return Ok((!event.acknowledged).then_some(event));
+        }
+
+        let conversation_id =
+            a2i_control_conversation_id(&entry.envelope.source_device_id, &engine.config.device_id);
+        let ciphertext_bytes = ramflux_protocol::decode_base64url(
+            &entry.envelope.encrypted_payload,
+        )
+        .map_err(|error| SdkError::LocalBus(format!("invalid A2I encrypted payload: {error}")))?;
+        let envelope: SdkDmEncryptedEnvelope = serde_json::from_slice(&ciphertext_bytes)?;
+        let mut session =
+            self.load_or_create_recv_dm_session(&conversation_id, envelope.x3dh.as_ref())?;
+        let body = session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
+        let event: A2iControlEvent = serde_json::from_slice(&body)?;
+        if event.source_device_id != entry.envelope.source_device_id
+            || event.target_device_id != engine.config.device_id
+        {
+            return Err(SdkError::InboundRejected("legacy A2I endpoint mismatch".to_owned()));
+        }
+        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            self.append_gateway_delivery(entry)?;
+            self.account_db()?.persist_actor_state(
+                &receipt_key,
+                &LegacyControlReceipt {
+                    event: event.clone(),
+                    payload_hash: entry.envelope.payload_hash.clone(),
+                },
+            )?;
+
             self.persist_dm_session(
                 &conversation_id,
                 &entry.envelope.envelope_id,
                 "recv",
                 &session,
             )?;
-            self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-            events.push(event);
-        }
-        Ok(events)
+            self.account_db()?.persist_actor_state(
+                &crate::client::routed::control::a2i_key(&event.source_device_id, &event.event_id)?,
+                &event,
+            )?;
+            Ok(())
+        })?;
+        self.finish_a2i_receive(engine, entry).await?;
+        Ok(Some(event))
     }
+    async fn finish_a2i_receive(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        self.ack_gateway_delivery(
+            engine,
+            &entry.envelope.envelope_id,
+            &engine.config.device_id.clone(),
+            now_unix_timestamp(),
+        )
+        .await?;
+        self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyControlReceipt {
+    event: A2iControlEvent,
+    payload_hash: String,
 }

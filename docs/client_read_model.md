@@ -168,3 +168,60 @@ preflight cannot make distributed delivery atomic.
 `conversation.directory` group rows and `group.list` expose `member_routes` including unresolved
 members. `delivery_target_known` describes available routing metadata, not network reachability.
 `account.status` now includes `principal_commitment`, matching the self identity directory row.
+
+
+## Autonomous receive and compatibility reads
+
+The unlocked account's driver owns network receive, decryption and gateway acknowledgement.
+A gateway ACK follows a durable projection/ratchet commit and does not consume a client's local
+read. `message.receive {conversation_id, limit}` runs a synchronization pass and returns decrypted
+Direct deliveries retained in the account's recent delivery cache, including messages the driver
+already committed and ACKed before the request. The caller's conversation ID filters authenticated
+routing; it never authorizes or invents a legacy binding. Existing Direct conversations still require
+explicit sender participation. The cache holds at most 64 deliveries, is shared by local clients,
+and is not a per-connection read cursor. Repeated compatibility reads can return the same retained
+message until explicit `message.ack` removes it from this cache. Across restart or cache eviction,
+use durable `message.list` / `message.read`; resumable `bus.subscribe` provides change cursors.
+
+An outgoing envelope signed by a registered device derives `source_principal_id` from that device's
+account principal. Passing the account's root commitment in the legacy submit field does not change
+wire attribution. Receivers continue to verify device ownership and the envelope signature; they
+never accept a caller-supplied unrelated principal as the signing device's owner.
+
+Message identity is `(authenticated source device, envelope_id)`. Returned projection IDs remain
+compatible in the ordinary case; cross-sender collisions receive stable sender-qualified opaque
+IDs. The `routed:` namespace is reserved and escaped for caller-chosen wire IDs, preventing a peer
+from squatting another sender's qualified ID. Treat returned IDs as opaque; do not predict group
+fan-out IDs, which are independently randomized for each recipient.
+
+Receipts require participation in the authenticated conversation and have sender-scoped receipt IDs.
+A2I events also have sender-scoped identity. An ambiguous event ID cannot acknowledge a different
+sender's event; use the `acknowledge_id` returned by `a2i.list` / `a2i.list_pending` as the acknowledge request's `event_id`. Acknowledgements are durable across
+restart. Legacy A2I commits its event and ratchet atomically before ACK, like the v2 path.
+
+## Inbox ordering and recovery
+
+A malformed signature, authenticated ciphertext/commitment failure, or unsupported schema is
+terminal: encrypted dead-letter storage precedes ACK and a metadata-only `message.undeliverable`.
+Membership ordering, missing/freshness-dependent manifests, clock-dependent branch checks, missing
+prekeys, transport/storage availability and ratchet skip limits retry independently with backoff
+until the packet's gateway TTL. They do not block later entries or cause an early ACK. A packet
+requiring an oversized ratchet skip can recover when intermediate packets arrive; bounded oldest-first
+skipped-secret eviction prevents accumulated holes from permanently wedging the session.
+
+The private storage re-drive API can requeue retained dead-letter ciphertext. Membership and
+manifest changes automatically re-drive it and wake state-dependent retries. Retry and dead-letter
+queues each remain bounded to 64 records / one MiB per entry / seven days; re-drive leaves a dead
+letter retained when retry capacity is full. Expired or evicted material cannot be recovered through
+this API. Refused v1 downgrades remain quarantined and unacknowledged until quarantine expiry or
+explicit compatible handling. They are not dead-lettered merely because a v2 pair became active.
+
+Two simultaneously initiated sessions converge by deterministic ordering only after authenticated
+inbound confirmation for the same verified device pair; unverified/package sessions cannot select
+the outgoing session. Once a peer confirms a local session, its bootstrap header is erased and the
+bidirectional DH ratchet continues. Own-device history transfers approved plaintext content without exporting or importing live DM
+ratchets (including legacy snapshots). The legacy response counter `imported_dm_sessions` remains
+present and is zero. Existing message IDs, timestamps and group history-floor checks remain. Attachment
+references retain content keys and original slots, with no ratchet snapshots; they commit with the
+message and are scoped by sender. Object ID collisions receive separate `received:` selectors.
+Fetch failures remain object-directory/events state and do not alter message content snapshots.

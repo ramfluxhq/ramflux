@@ -18,42 +18,6 @@ struct Pair {
 }
 
 impl RamfluxClient {
-    pub(crate) fn pair_history_snapshots(
-        &self,
-        source: &str,
-    ) -> Result<Vec<crate::own_device_sync::SdkOwnDevicePairSessionSnapshot>, SdkError> {
-        Ok(self
-            .account_db()?
-            .list_actor_states::<Pair>("dm-pair/session/")?
-            .into_iter()
-            .filter(|pair| pair.local == source)
-            .map(|pair| crate::own_device_sync::SdkOwnDevicePairSessionSnapshot {
-                local_device_id: pair.local,
-                remote_device_id: pair.remote,
-                prekey_bundle_hash: pair.bundle,
-                snapshot: pair.snapshot,
-            })
-            .collect())
-    }
-    pub(crate) fn archive_pair_history(
-        &self,
-        pair: &crate::own_device_sync::SdkOwnDevicePairSessionSnapshot,
-        source: &str,
-        snapshot_id: &str,
-    ) -> Result<(), SdkError> {
-        let session = ramflux_crypto::DmSession::from_snapshot(pair.snapshot.clone())?;
-        if pair.local_device_id != source
-            || session.sender_device_id_hash != dm_device_id_hash(source)
-            || session.recipient_device_id_hash != dm_device_id_hash(&pair.remote_device_id)
-        {
-            return Err(invalid("own-device pair history source binding mismatch"));
-        }
-        self.account_db()?.persist_actor_state(
-            &format!("own-device/pair-history/{source}/{snapshot_id}/{}", session.session_id),
-            pair,
-        )?;
-        Ok(())
-    }
     pub(crate) fn persist_pair(
         &self,
         local: &str,
@@ -82,6 +46,30 @@ impl RamfluxClient {
             .unwrap_or(false);
         if active.is_none() || (local_origin && !active_local) {
             db.persist_actor_state(&key, &session.session_id)?;
+        }
+        Ok(())
+    }
+    pub(super) fn confirm_pair(
+        &self,
+        local: &str,
+        remote: &str,
+        session: &ramflux_crypto::DmSession,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let id = &session.session_id;
+        db.persist_actor_state(&format!("dm-pair/confirmed/{id}"), &true)?;
+        db.remove_actor_state(&format!("dm-pair/bootstrap/{id}"))?;
+        if db.load_actor_state::<bool>(&format!("dm-pair/local/{id}"))?.unwrap_or(false) {
+            db.persist_actor_state(&format!("dm-pair/settled/{id}"), &true)?;
+        }
+        let key = pair_key(local, remote)?;
+        if let Some(active) = db.load_actor_state::<String>(&key)? {
+            // Both candidates belong to this verified pair. A confirmed session never yields to a later bootstrap.
+            let confirmed =
+                db.load_actor_state::<bool>(&format!("dm-pair/settled/{active}"))?.unwrap_or(false);
+            if active == *id || (!confirmed && id < &active) {
+                db.persist_actor_state(&key, id)?;
+            }
         }
         Ok(())
     }
@@ -170,7 +158,7 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("recipient prekey missing"))?;
         self.new_send_pair(local, message, bundle)
     }
-    fn new_send_pair(
+    pub(super) fn new_send_pair(
         &self,
         local: &str,
         message: &GatewayDirectMessage,

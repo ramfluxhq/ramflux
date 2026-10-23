@@ -753,7 +753,7 @@ pub(crate) async fn dispatch_group_send_request(
         }
         let mut local = Vec::new();
         let mut federated = Vec::new();
-        for (index, route) in routes.into_iter().enumerate() {
+        for route in routes {
             if route.member_id == body.sender_id {
                 continue;
             }
@@ -764,7 +764,10 @@ pub(crate) async fn dispatch_group_send_request(
             let mut message = GatewayDirectMessage {
                 conversation_id: body.conversation_id.clone(),
                 message_id: body.message_id.clone(),
-                envelope_id: format!("{}:{index}", body.message_id),
+                envelope_id: format!(
+                    "envelope_{}",
+                    ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+                ),
                 source_principal_id: body
                     .source_principal_id
                     .clone()

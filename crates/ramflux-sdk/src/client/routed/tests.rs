@@ -57,7 +57,7 @@ fn message(id: &str, conversation: &str) -> GatewayDirectMessage {
         recipient_device_id: Some("bob".to_owned()),
         target_delivery_id: "bob".to_owned(),
         encrypted_body: Vec::new(),
-        created_at: 1,
+        created_at: now_unix_timestamp(),
         ttl: 3600,
     }
 }
@@ -108,11 +108,14 @@ fn seal_as(
         },
     )?;
     message.encrypted_body = serde_json::to_vec(&sealed)?;
-    Ok(GatewayInboxEntry {
-        inbox_seq: 1,
-        target_delivery_id: receiver.id.clone(),
-        envelope: gateway_direct_message_envelope(&sender.config()?, &message, None)?,
-    })
+    let mut envelope = gateway_direct_message_envelope(&sender.config()?, &message, None)?;
+    // Adversarial fixtures can deliberately claim an owner the production sender cannot emit.
+    envelope.source_principal_id.clone_from(&message.source_principal_id);
+    envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
+        sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &envelope,
+    )?;
+    Ok(GatewayInboxEntry { inbox_seq: 1, target_delivery_id: receiver.id.clone(), envelope })
 }
 
 #[test]
@@ -544,3 +547,6 @@ fn seal_group(
     };
     seal_as(sender, receiver, message, body, route)
 }
+
+#[path = "r4_tests.rs"]
+mod r4;

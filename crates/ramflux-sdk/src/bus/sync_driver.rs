@@ -44,24 +44,11 @@ async fn receive(
 ) -> Result<usize, SdkError> {
     let now = now_unix_timestamp();
     account.client.account_db()?.expire_inbox_holds(now)?;
+    redrive_if_state_changed(&account.client)?;
     let pool = account.relay_quic_pool()?;
     let cursor = account.client.gateway_receive_cursor(engine.target_delivery_id())?;
     let mut entries = engine.resume_after(cursor, 64).await?;
-    for bytes in account
-        .client
-        .account_db()?
-        .unrouted_entries()?
-        .into_iter()
-        .chain(account.client.account_db()?.due_inbox_retries(now)?)
-    {
-        let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
-        if !entries.iter().any(|item| {
-            item.envelope.source_device_id == entry.envelope.source_device_id
-                && item.envelope.envelope_id == entry.envelope.envelope_id
-        }) {
-            entries.push(entry);
-        }
-    }
+    append_pending_entries(account, &mut entries, now)?;
     entries.sort_by_key(|entry| entry.inbox_seq);
     let mut applied = 0;
     for entry in entries {
@@ -72,7 +59,12 @@ async fn receive(
                 .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
             continue;
         }
-        let outcome = process(account, engine, &pool, &entry).await;
+        let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
+        let outcome = if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
+            Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
+        } else {
+            process(account, engine, &pool, &entry).await
+        };
         let accepted = match outcome {
             Ok(false) => {
                 account
@@ -87,14 +79,13 @@ async fn receive(
                     code
                 } else if bytes.len() > 1024 * 1024 {
                     "oversized_retry"
-                } else if account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)? <= 6 {
+                } else {
+                    account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)?;
                     account.client.persist_gateway_receive_cursor(
                         engine.target_delivery_id(),
                         entry.inbox_seq,
                     )?;
                     continue;
-                } else {
-                    "retry_exhausted"
                 };
                 account.client.account_db()?.dead_letter_inbox(&key,&bytes,&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"error_code":code}),now)?;
                 false
@@ -160,7 +151,14 @@ async fn process(
         return Err(SdkError::InboundRejected("unsupported envelope schema or version".to_owned()));
     }
     if account.client.v2_blocks_legacy(&entry.envelope.source_device_id)? {
-        return Err(SdkError::InboundRejected("legacy downgrade rejected".to_owned()));
+        let db = account.client.account_db()?;
+        db.hold_unrouted(
+            &crate::client::routed::committed_key(entry)?,
+            entry.inbox_seq,
+            &serde_json::to_vec(entry)?,
+            now_unix_timestamp(),
+        )?;
+        return Ok(false);
     }
     if let Some(conversation) =
         account.client.legacy_routing_binding(&engine.config.device_id, entry)?
@@ -189,12 +187,49 @@ async fn process(
 
 fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
-        SdkError::Crypto(_) => Some("authentication_failed"),
+        SdkError::Crypto(
+            ramflux_crypto::CryptoError::VerifyFailed
+            | ramflux_crypto::CryptoError::InvalidSignatureLength(_)
+            | ramflux_crypto::CryptoError::AeadFailed
+            | ramflux_crypto::CryptoError::KeyCommitmentMismatch
+            | ramflux_crypto::CryptoError::CommitmentMismatch,
+        ) => Some("authentication_failed"),
         SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),
         SdkError::InboundRejected(_) => Some("routing_rejected"),
-        SdkError::LocalBus(_) => Some("inbound_state_invalid"),
-        SdkError::Storage(StorageError::Sqlite(_) | StorageError::Io(_)) => None,
-        SdkError::Storage(_) => Some("storage_policy_rejected"),
         _ => None,
     }
+}
+
+fn redrive_if_state_changed(client: &RamfluxClient) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    let revision = db.inbox_recovery_revision()?;
+    let key = "inbox/recovery-revision";
+    if db.load_actor_state::<u64>(key)?.unwrap_or(0) != revision {
+        db.redrive_inbox_dead_letters(now_unix_timestamp())?;
+        db.persist_actor_state(key, &revision)?;
+    }
+    Ok(())
+}
+
+fn append_pending_entries(
+    account: &LocalBusAccountState,
+    entries: &mut Vec<GatewayInboxEntry>,
+    now: i64,
+) -> Result<(), SdkError> {
+    for bytes in account
+        .client
+        .account_db()?
+        .unrouted_entries()?
+        .into_iter()
+        .chain(account.client.account_db()?.due_inbox_retries(now)?)
+    {
+        let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
+        if !entries.iter().any(|item| {
+            item.envelope.source_device_id == entry.envelope.source_device_id
+                && item.envelope.envelope_id == entry.envelope.envelope_id
+        }) {
+            entries.push(entry);
+        }
+    }
+    Ok(())
 }

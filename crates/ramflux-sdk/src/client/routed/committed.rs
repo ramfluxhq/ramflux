@@ -52,3 +52,39 @@ pub(crate) fn object_watermark(object: &str, recipient: &str) -> Result<String, 
         ramflux_crypto::blake3_256_base64url("ramflux.sdk.slot.watermark.v2", &bytes)
     ))
 }
+
+impl RamfluxClient {
+    pub(super) fn projection_id(&self, entry: &GatewayInboxEntry) -> Result<String, SdkError> {
+        let db = self.account_db()?;
+        let wire = &entry.envelope.envelope_id;
+        let scoped =
+            format!("routed:{}", committed_key(entry)?.trim_start_matches("routed/committed/"));
+        let key = format!("routed/projection/{scoped}");
+        if let Some(id) = db.load_actor_state::<String>(&key)? {
+            return Ok(id);
+        }
+        // Callers cannot pre-claim reserved identifiers: their wire IDs are escaped again.
+        if !wire.starts_with("routed:")
+            && self.direct_message_by_id(wire)?.is_none()
+            && db.load_actor_state::<String>(&format!("routed/message-owner/{wire}"))?.is_none()
+        {
+            return Ok(wire.clone());
+        }
+        Ok(scoped)
+    }
+    pub(super) fn persist_projection_owner(
+        &self,
+        entry: &GatewayInboxEntry,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let scoped =
+            format!("routed:{}", committed_key(entry)?.trim_start_matches("routed/committed/"));
+        db.persist_actor_state(&format!("routed/projection/{scoped}"), &id)?;
+        db.persist_actor_state(
+            &format!("routed/message-owner/{id}"),
+            &entry.envelope.source_device_id,
+        )?;
+        Ok(())
+    }
+}

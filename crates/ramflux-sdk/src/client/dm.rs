@@ -552,7 +552,9 @@ impl RamfluxClient {
         conversation_id: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
-        let message_id = &entry.envelope.envelope_id;
+        let route = self.committed_routing(entry)?;
+        let message_id =
+            route.as_ref().map_or(&entry.envelope.envelope_id, |route| &route.message_id);
         let Some(message) = self
             .direct_messages(conversation_id)?
             .into_iter()
@@ -637,6 +639,13 @@ impl RamfluxClient {
                 envelope.reader_device_id, authenticated_source_device_id
             )));
         }
+        let scoped_receipt = ramflux_crypto::blake3_256_base64url(
+            "ramflux.receipt.sender.v2",
+            &ramflux_protocol::canonical_json_bytes(&(
+                authenticated_source_device_id,
+                &envelope.receipt_id,
+            ))?,
+        );
         let inserted = match &envelope.event {
             SdkReceiptEventBody::Delivered {
                 conversation_id,
@@ -652,7 +661,7 @@ impl RamfluxClient {
                     )));
                 }
                 let inserted = self.account_db()?.record_receipt_event_once(ReceiptEventWrite {
-                    receipt_id: &envelope.receipt_id,
+                    receipt_id: &scoped_receipt,
                     conversation_id,
                     message_id,
                     receipt_type: "delivered",
@@ -683,7 +692,7 @@ impl RamfluxClient {
                     )));
                 }
                 let inserted = self.account_db()?.record_receipt_event_once(ReceiptEventWrite {
-                    receipt_id: &envelope.receipt_id,
+                    receipt_id: &scoped_receipt,
                     conversation_id,
                     message_id,
                     receipt_type: "read",

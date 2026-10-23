@@ -105,7 +105,7 @@ fn reference_and_key_slot_survive_encrypted_account_reopen() -> Result<(), SdkEr
     assert_eq!(stored.reference.manifest_hash, f.reference.manifest_hash);
     assert!(
         stored.prepared_slot.is_some(),
-        "content key and uncommitted slot snapshot must be durable"
+        "content key and original slot reference must be durable"
     );
     assert!(f.client.received_attachment_prepared_slot(&stored.reference)?.is_some());
     let key = f.client.decrypt_object_key_slot(&stored.reference.key_slot)?;
@@ -318,5 +318,42 @@ fn interrupted_fetch_becomes_retryable_after_restart() -> Result<(), SdkError> {
     assert_eq!(status["retryable"], true);
     assert!(status["last_error"].as_str().is_some_and(|error| error.contains("interrupted")));
     assert!(f.client.received_attachment_receipt("remote-object", "interrupted")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn received_attachment_reference_contains_no_live_ratchet_snapshot() -> Result<(), SdkError> {
+    let f = Fixture::new()?;
+    let value: serde_json::Value = f
+        .client
+        .account_db()?
+        .load_actor_state(&reference_key("remote-object"))?
+        .ok_or_else(|| SdkError::LocalBus("missing reference".to_owned()))?;
+    assert!(value["prepared_slot"].get("session").is_none());
+    assert!(value["prepared_slot"].get("object_key").is_some());
+    Ok(())
+}
+
+#[test]
+fn a_received_object_selector_resolves_only_its_expected_manifest() -> Result<(), SdkError> {
+    let mut f = Fixture::new()?;
+    f.client.persist_received_reference_prepared_at(
+        &f.reference,
+        "received:collision",
+        ReferenceContext { owner: "owner", conversation: "conversation", message: "message" },
+        None,
+    )?;
+    f.client.import_shared_object(&f.package)?;
+    assert_eq!(f.client.decrypt_object("received:collision")?, b"received attachment");
+    assert!(f.client.object_store_object("received:collision")?.is_some());
+    let mut wrong = f.reference.clone();
+    wrong.manifest_hash = "unrelated".to_owned();
+    f.client.persist_received_reference_prepared_at(
+        &wrong,
+        "received:wrong",
+        ReferenceContext { owner: "other", conversation: "other", message: "other" },
+        None,
+    )?;
+    assert!(f.client.decrypt_object("received:wrong").is_err());
     Ok(())
 }

@@ -94,10 +94,11 @@ impl RamfluxClient {
             key.as_slice().try_into().map_err(|_| invalid("invalid pair object key length"))?;
         Ok(DeferredObjectKeySlot {
             object_key,
-            session: ramflux_crypto::DmSession::from_snapshot(active.snapshot())?,
+            session: Some(ramflux_crypto::DmSession::from_snapshot(active.snapshot())?),
             conversation_id: slot.conversation_id.clone(),
             commit_label: format!("object-slot:{}", slot.object_id),
             pair_slot: Some(slot.clone()),
+            legacy_slot: None,
         })
     }
     pub(crate) fn persist_pair_slot_receipt(
@@ -134,7 +135,12 @@ impl RamfluxClient {
         let (_, bundle) =
             self.recv_pair_session(&slot.recipient_device_id, &remote, "object-slot", &envelope)?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-            self.persist_pair(&slot.recipient_device_id, &remote, &bundle, &deferred.session)?;
+            self.persist_pair(
+                &slot.recipient_device_id,
+                &remote,
+                &bundle,
+                deferred.session.as_ref().ok_or_else(|| invalid("slot session missing"))?,
+            )?;
             self.persist_pair_slot_receipt(slot)
         })
     }

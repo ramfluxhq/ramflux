@@ -11,13 +11,14 @@ impl RamfluxClient {
         group: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        let state = self.group_state(group)?;
+        let state =
+            self.group_state(group).map_err(|error| SdkError::InboundPending(error.to_string()))?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if !state.members.contains(&entry.envelope.source_device_id)
             || !(state.members.contains(&local.device_id)
                 || state.members.contains(&local.principal_id))
         {
-            return Err(invalid("authenticated group sender or recipient is not a current member"));
+            return Err(SdkError::InboundPending("group membership not yet available".to_owned()));
         }
         Ok(())
     }

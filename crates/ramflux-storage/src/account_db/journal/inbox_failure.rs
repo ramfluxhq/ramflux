@@ -112,3 +112,42 @@ impl AccountDb {
         Ok(())
     }
 }
+
+impl AccountDb {
+    /// Returns whether the packet has durable pending retry work.
+    /// # Errors
+    /// Returns SQLite errors.
+    pub fn has_inbox_retry(&self, key: &str) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_inbox_retry WHERE envelope_key=?1)",
+            params![key],
+            |row| row.get(0),
+        )?)
+    }
+    /// Requeues retained ciphertext and wakes state-dependent work after membership/identity changes.
+    /// # Errors
+    /// Returns SQL/serialization errors. All work remains within existing queue bounds.
+    pub fn redrive_inbox_dead_letters(&self, at: i64) -> Result<usize, StorageError> {
+        self.write_transaction(|| {
+            let mut query = self.connection.prepare("SELECT envelope_key,entry_json FROM runtime_inbox_dead_letter WHERE length(entry_json)>0 ORDER BY received_at LIMIT (SELECT max(0,64-count(*)) FROM runtime_inbox_retry)")?;
+            let rows = query.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(query);
+            for (key,entry) in &rows {
+                self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key=?1",params![key])?;
+                self.connection.execute("INSERT INTO runtime_inbox_retry VALUES(?1,?2,0,?3,?3) ON CONFLICT(envelope_key) DO UPDATE SET entry_json=excluded.entry_json,next_at=excluded.next_at",params![key,entry,at])?;
+            }
+            self.connection.execute("UPDATE runtime_inbox_retry SET next_at=?1", params![at])?;
+            Ok(rows.len())
+        })
+    }
+    /// Monotonic revision of group/manifest records, independent of journal retention.
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn inbox_recovery_revision(&self) -> Result<u64, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT revision FROM runtime_inbox_recovery WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+}

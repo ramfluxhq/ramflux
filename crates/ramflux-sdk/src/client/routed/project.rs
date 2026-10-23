@@ -19,6 +19,7 @@ impl RamfluxClient {
         match route.kind {
             Kind::Direct => self.project_routed_direct(opened, entry, body, metadata),
             Kind::Receipt => {
+                self.authorize_routed_receipt(opened, entry, body)?;
                 self.apply_receipt_event_plaintext(body, &entry.envelope.source_device_id)?
                     .ok_or_else(|| invalid("invalid routed receipt"))?;
                 Ok(None)
@@ -47,7 +48,9 @@ impl RamfluxClient {
             )?;
             return Ok(None);
         }
-        self.append_plaintext_projection_once(&route.conversation_id, entry, body, metadata)?;
+        let mut projection = entry.clone();
+        projection.envelope.envelope_id.clone_from(&route.message_id);
+        self.append_plaintext_projection_once(&route.conversation_id, &projection, body, metadata)?;
         if self.account_db()?.client_record("conversation", &route.conversation_id)?.is_none() {
             self.account_db()?.persist_client_record("conversation",&route.conversation_id,&serde_json::json!({"kind":"direct","title":null,"group_id":null,"participants":[self.device_branch.as_ref().map(|branch|&branch.principal_id),Some(&entry.envelope.source_principal_id)],"direct_route":null}))?;
         }
@@ -130,5 +133,42 @@ impl RamfluxClient {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl RamfluxClient {
+    fn authorize_routed_receipt(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        let value: serde_json::Value = serde_json::from_slice(body)?;
+        let event = &value["event"];
+        if event.get("conversation_id").and_then(serde_json::Value::as_str)
+            != Some(opened.routing.conversation_id.as_str())
+        {
+            return Err(invalid("receipt conversation differs from authenticated route"));
+        }
+        let db = self.account_db()?;
+        let thread = db
+            .client_record("conversation", &opened.routing.conversation_id)?
+            .ok_or_else(|| invalid("receipt conversation unknown"))?;
+        if thread["kind"] == "group" {
+            return self.require_routed_group_member(
+                thread["group_id"].as_str().ok_or_else(|| invalid("group id missing"))?,
+                entry,
+            );
+        }
+        let participant = thread["participants"].as_array().is_some_and(|ids| {
+            ids.iter().any(|id| {
+                id.as_str() == Some(&entry.envelope.source_principal_id)
+                    || id.as_str() == Some(&entry.envelope.source_device_id)
+            })
+        });
+        if !participant {
+            return Err(invalid("receipt sender is not a conversation participant"));
+        }
+        Ok(())
     }
 }

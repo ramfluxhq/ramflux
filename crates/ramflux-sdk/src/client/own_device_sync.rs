@@ -177,7 +177,13 @@ impl RamfluxClient {
             .into_iter()
             .filter(|message| Self::message_allowed_by_group_floor(message, &floor_by_group))
             .collect::<Vec<_>>();
-        let dm_sessions = self.own_device_dm_session_snapshots(&messages);
+        let mut contents = BTreeMap::new();
+        for message in &messages {
+            if let Some(body) = self.account_db()?.message_content(&message.message_id)? {
+                contents.insert(message.message_id.clone(), zeroize::Zeroizing::new(body));
+            }
+        }
+        let dm_sessions = Vec::new();
         let sender_key_distributions_base64 =
             self.own_device_sender_key_distributions(source_device_id, &groups)?;
         Ok(SdkOwnDeviceHistoryBundle {
@@ -188,34 +194,11 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
+            contents,
             dm_sessions,
-            pair_sessions: self.pair_history_snapshots(source_device_id)?,
             groups,
             sender_key_distributions_base64,
         })
-    }
-
-    fn own_device_dm_session_snapshots(
-        &self,
-        messages: &[DirectMessageRecord],
-    ) -> Vec<SdkOwnDeviceDmSessionSnapshot> {
-        let mut conversations = BTreeSet::new();
-        for message in messages {
-            conversations.insert(message.conversation_id.clone());
-        }
-        let mut sessions = Vec::new();
-        for conversation_id in conversations {
-            for direction in ["send", "recv"] {
-                if let Ok(session) = self.load_dm_session(&conversation_id, direction) {
-                    sessions.push(SdkOwnDeviceDmSessionSnapshot {
-                        conversation_id: conversation_id.clone(),
-                        direction: direction.to_owned(),
-                        snapshot: session.snapshot(),
-                    });
-                }
-            }
-        }
-        sessions
     }
 
     fn own_device_group_snapshots(
@@ -442,20 +425,8 @@ impl RamfluxClient {
             floor_by_group.insert(group.group_id.clone(), group.local_joined_epoch);
         }
         let mut imported_messages = 0_usize;
-        let mut imported_dm_sessions = 0_usize;
-        for session in &bundle.dm_sessions {
-            self.persist_dm_session_snapshot(
-                &session.conversation_id,
-                &format!("own-device-sync:{}", bundle.snapshot_id),
-                &session.direction,
-                &session.snapshot,
-            )?;
-            imported_dm_sessions = imported_dm_sessions.saturating_add(1);
-        }
-        for pair in &bundle.pair_sessions {
-            self.archive_pair_history(pair, &bundle.source_device_id, &bundle.snapshot_id)?;
-            imported_dm_sessions = imported_dm_sessions.saturating_add(1);
-        }
+        // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
+        let imported_dm_sessions = 0_usize;
         for message in &bundle.messages {
             if !Self::message_allowed_by_group_floor(message, &floor_by_group) {
                 return Err(SdkError::LocalBus(
@@ -470,6 +441,13 @@ impl RamfluxClient {
                 metadata: &message.metadata,
                 created_at: message.created_at,
             })?;
+            if let Some(content) = bundle.contents.get(&message.message_id) {
+                self.account_db()?.store_message_content(
+                    &message.conversation_id,
+                    &message.message_id,
+                    content,
+                )?;
+            }
             imported_messages = imported_messages.saturating_add(1);
         }
         let mut imported_sender_keys = 0_usize;
@@ -724,8 +702,8 @@ mod tests {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: "snapshot_sync".to_owned(),
             messages,
+            contents: BTreeMap::new(),
             dm_sessions: Vec::new(),
-            pair_sessions: Vec::new(),
             groups,
             sender_key_distributions_base64: Vec::new(),
         }
@@ -828,8 +806,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn own_device_pair_history_is_imported_without_activating_another_devices_ratchet()
-    -> Result<(), SdkError> {
+    fn own_device_history_does_not_export_live_device_pair_secrets() -> Result<(), SdkError> {
         let (source, source_root) =
             client_with_account("pair-history-source", "principal_sync", "source_device_sync")?;
         let (target, target_root) =
@@ -841,25 +818,42 @@ mod tests {
             [2; 32],
         )?;
         source.persist_pair("source_device_sync", "remote_device", &[3; 32], &session)?;
+        source.send_direct_message(
+            "history-thread",
+            "history-message",
+            "source_device_sync",
+            b"ciphertext history",
+        )?;
+        source.account_db()?.store_message_content(
+            "history-thread",
+            "history-message",
+            b"approved history plaintext",
+        )?;
+        source.persist_dm_session("history-thread", "legacy-checkpoint", "send", &session)?;
         let history = source.own_device_history_bundle(
             "principal_sync",
             "source_device_sync",
             "target_device_sync",
             "snapshot_sync",
         )?;
-        assert_eq!(history.pair_sessions.len(), 1);
+        assert!(serde_json::to_value(&history)?.get("pair_sessions").is_none());
         assert_eq!(history.dm_sessions.len(), 0);
         let imported = target.import_own_device_history_bundle(
             &envelope("source_device_sync", "target_device_sync"),
             &history,
         )?;
-        assert_eq!(imported.imported_dm_sessions, 1);
+        assert_eq!(imported.imported_dm_sessions, 0);
+        assert_eq!(
+            target.account_db()?.message_content("history-message")?,
+            Some(b"approved history plaintext".to_vec())
+        );
+        assert!(!format!("{history:?}").contains("approved history plaintext"));
         assert_eq!(
             target
                 .account_db()?
                 .list_actor_states::<serde_json::Value>("own-device/pair-history/")?
                 .len(),
-            1
+            0
         );
         assert_eq!(
             target.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/")?.len(),

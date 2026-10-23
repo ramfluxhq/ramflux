@@ -120,8 +120,17 @@ impl Connection {
     }
 
     pub(crate) fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
-        self.execute_batch("BEGIN DEFERRED")?;
-        Ok(Transaction { connection: self, committed: false })
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nested = !self.call(|db| Ok(db.is_autocommit()))?;
+        let savepoint = nested.then(|| {
+            format!("runtime_nested_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        });
+        if let Some(name) = &savepoint {
+            self.execute_batch(&format!("SAVEPOINT {name}"))?;
+        } else {
+            self.execute_batch("BEGIN DEFERRED")?;
+        }
+        Ok(Transaction { connection: self, committed: false, savepoint })
     }
 }
 
@@ -217,10 +226,15 @@ impl Rows {
 pub(crate) struct Transaction<'a> {
     connection: &'a Connection,
     committed: bool,
+    savepoint: Option<String>,
 }
 impl Transaction<'_> {
     pub(crate) fn commit(mut self) -> Result<()> {
-        self.connection.execute_batch("COMMIT")?;
+        if let Some(name) = &self.savepoint {
+            self.connection.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
+        } else {
+            self.connection.execute_batch("COMMIT")?;
+        }
         self.committed = true;
         Ok(())
     }
@@ -228,7 +242,13 @@ impl Transaction<'_> {
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = self.connection.execute_batch("ROLLBACK");
+            if let Some(name) = &self.savepoint {
+                let _ = self.connection.execute_batch(&format!(
+                    "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+                ));
+            } else {
+                let _ = self.connection.execute_batch("ROLLBACK");
+            }
         }
     }
 }
@@ -251,6 +271,21 @@ mod tests {
         })?;
         assert_ne!(owner, caller);
         assert_eq!(owner, second);
+        Ok(())
+    }
+    #[test]
+    fn nested_state_batches_rollback_with_the_outer_message_projection() -> rusqlite::Result<()> {
+        let db = Connection::open(":memory:")?;
+        db.execute_batch("CREATE TABLE state(value INTEGER)")?;
+        {
+            let _outer = db.unchecked_transaction()?;
+            db.execute_batch("INSERT INTO state VALUES(1)")?;
+            let inner = db.unchecked_transaction()?;
+            db.execute_batch("INSERT INTO state VALUES(2)")?;
+            inner.commit()?;
+        }
+        let count: i64 = db.query_row("SELECT count(*) FROM state", [], |row| row.get(0))?;
+        assert_eq!(count, 0);
         Ok(())
     }
 }

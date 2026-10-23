@@ -8,6 +8,7 @@ mod config;
 mod control;
 mod operations;
 mod outbox;
+mod recovery;
 mod schema;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

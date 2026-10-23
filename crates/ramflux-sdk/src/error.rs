@@ -9,6 +9,8 @@ use crate::prelude::*;
 pub enum SdkError {
     #[error("inbound envelope rejected: {0}")]
     InboundRejected(String),
+    #[error("inbound state not ready: {0}")]
+    InboundPending(String),
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
     #[error("storage error: {0}")]

@@ -38,7 +38,7 @@ pub(crate) struct SdkOwnDeviceSyncSigningBody<'a> {
     pub(crate) key_slot_recipient_device_id: &'a str,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkOwnDeviceHistoryBundle {
     pub(crate) schema: String,
     pub(crate) version: u32,
@@ -47,9 +47,9 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
     pub(crate) target_device_id: String,
     pub(crate) snapshot_id: String,
     pub(crate) messages: Vec<DirectMessageRecord>,
-    pub(crate) dm_sessions: Vec<SdkOwnDeviceDmSessionSnapshot>,
     #[serde(default)]
-    pub(crate) pair_sessions: Vec<SdkOwnDevicePairSessionSnapshot>,
+    pub(crate) contents: BTreeMap<String, zeroize::Zeroizing<Vec<u8>>>,
+    pub(crate) dm_sessions: Vec<SdkOwnDeviceDmSessionSnapshot>,
     pub(crate) groups: Vec<SdkOwnDeviceGroupSnapshot>,
     pub(crate) sender_key_distributions_base64: Vec<String>,
 }
@@ -58,14 +58,6 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
 pub(crate) struct SdkOwnDeviceDmSessionSnapshot {
     pub(crate) conversation_id: String,
     pub(crate) direction: String,
-    pub(crate) snapshot: ramflux_crypto::DmSessionSnapshot,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub(crate) struct SdkOwnDevicePairSessionSnapshot {
-    pub(crate) local_device_id: String,
-    pub(crate) remote_device_id: String,
-    pub(crate) prekey_bundle_hash: [u8; 32],
     pub(crate) snapshot: ramflux_crypto::DmSessionSnapshot,
 }
 
@@ -137,6 +129,12 @@ pub(crate) fn group_message_epoch(message: &DirectMessageRecord) -> Option<(Stri
     serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
         .ok()
         .map(|envelope| (envelope.group_id, envelope.group_key_epoch))
+}
+
+impl std::fmt::Debug for SdkOwnDeviceHistoryBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SdkOwnDeviceHistoryBundle").field("content", &"<redacted>").finish()
+    }
 }
 
 #[cfg(test)]

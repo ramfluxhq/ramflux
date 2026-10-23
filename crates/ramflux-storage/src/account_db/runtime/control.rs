@@ -66,3 +66,16 @@ impl AccountDb {
         body.map(|body| serde_json::from_slice(&body).map_err(StorageError::from)).transpose()
     }
 }
+
+impl AccountDb {
+    /// Removes private actor state in the caller's transaction.
+    /// # Errors
+    /// Returns SQLite errors.
+    pub fn remove_actor_state(&self, key: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM runtime_actor_state WHERE state_kind=?1",
+            rusqlite::params![key],
+        )?;
+        Ok(())
+    }
+}

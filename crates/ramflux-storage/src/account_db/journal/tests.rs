@@ -183,3 +183,27 @@ fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backo
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn retained_dead_letters_redrive_without_exceeding_retry_capacity() -> Result<(), StorageError> {
+    let (root, db) = database()?;
+    db.dead_letter_inbox(
+        "rejected",
+        b"ciphertext",
+        &serde_json::json!({"error_code":"schema_invalid"}),
+        100,
+    )?;
+    for n in 0..64 {
+        db.defer_inbox_entry(&format!("queued-{n}"), b"queued", 100)?;
+    }
+    assert_eq!(db.redrive_inbox_dead_letters(101)?, 0);
+    assert_eq!(db.due_inbox_retries(101)?.len(), 64);
+    db.remove_inbox_retry("queued-0")?;
+    assert_eq!(db.redrive_inbox_dead_letters(102)?, 1);
+    let entries = db.due_inbox_retries(102)?;
+    assert_eq!(entries.len(), 64);
+    assert!(entries.contains(&b"ciphertext".to_vec()));
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

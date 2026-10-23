@@ -436,7 +436,11 @@ pub(crate) fn gateway_direct_message_envelope(
         ext: ramflux_protocol::Ext::default(),
         signed: sdk_signed_fields(""),
         envelope_id: message.envelope_id.clone(),
-        source_principal_id: message.source_principal_id.clone(),
+        // Attribution belongs to the authenticated signing device, not caller aliases.
+        source_principal_id: config.device_branch.as_ref().map_or_else(
+            || message.source_principal_id.clone(),
+            |branch| branch.principal_id.clone(),
+        ),
         source_device_id: config.device_id.clone(),
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,

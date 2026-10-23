@@ -10,10 +10,11 @@ use crate::prelude::*;
 /// ACK) has succeeded. No `Debug`/serialization is derived: the session holds secret key material.
 pub(crate) struct DeferredObjectKeySlot {
     pub object_key: [u8; 32],
-    pub(super) session: ramflux_crypto::DmSession,
+    pub(super) session: Option<ramflux_crypto::DmSession>,
     pub(super) conversation_id: String,
     pub(super) commit_label: String,
     pub(super) pair_slot: Option<SdkObjectKeySlot>,
+    pub(super) legacy_slot: Option<SdkObjectKeySlot>,
 }
 
 impl RamfluxClient {
@@ -259,10 +260,11 @@ impl RamfluxClient {
             .map_err(|_err| SdkError::LocalBus("invalid object key length".to_owned()))?;
         Ok(DeferredObjectKeySlot {
             object_key,
-            session,
+            session: Some(session),
             conversation_id: key_slot.conversation_id.clone(),
             commit_label: format!("object-slot:{}", key_slot.object_id),
             pair_slot: None,
+            legacy_slot: Some(key_slot.clone()),
         })
     }
 
@@ -275,12 +277,32 @@ impl RamfluxClient {
         if let Some(slot) = deferred.pair_slot.as_ref() {
             return self.commit_pair_object_slot(slot, &deferred.object_key);
         }
-        self.persist_dm_session(
-            &deferred.conversation_id,
-            &deferred.commit_label,
-            "recv",
-            &deferred.session,
-        )
+        let expected =
+            dm_session_event_id(&deferred.conversation_id, "recv", &deferred.commit_label);
+        if self
+            .projection_checkpoint(&dm_session_checkpoint_name(&deferred.conversation_id, "recv"))?
+            .as_deref()
+            == Some(expected.as_str())
+        {
+            return Ok(());
+        }
+        let rebuilt;
+        let session = if let Some(session) = deferred.session.as_ref() {
+            session
+        } else {
+            rebuilt =
+                self.decrypt_object_key_slot(deferred.legacy_slot.as_ref().ok_or_else(|| {
+                    SdkError::LocalBus("legacy slot reference missing".to_owned())
+                })?)?;
+            if rebuilt.object_key != deferred.object_key {
+                return Err(SdkError::LocalBus("prepared legacy key mismatch".to_owned()));
+            }
+            rebuilt
+                .session
+                .as_ref()
+                .ok_or_else(|| SdkError::LocalBus("legacy slot session missing".to_owned()))?
+        };
+        self.persist_dm_session(&deferred.conversation_id, &deferred.commit_label, "recv", session)
     }
 
     #[cfg(feature = "itest-local-mint")]
@@ -732,13 +754,18 @@ impl RamfluxClient {
         &self,
         object_id: &str,
     ) -> Result<Option<EncryptedObject>, SdkError> {
-        if let Some(object) = self.object_store.cached_object(object_id) {
-            return Ok(Some(object.clone()));
-        }
-        match self.active_account_db.as_ref() {
-            Some(db) => Ok(db.load_object::<EncryptedObject>(object_id)?.map(|(object, _)| object)),
-            None => Ok(None),
-        }
+        let alias = self.received_object_alias(object_id)?;
+        let wire = alias.as_ref().map_or(object_id, |(wire, _)| wire);
+        let object = if let Some(object) = self.object_store.cached_object(wire) {
+            Some(object.clone())
+        } else if let Some(db) = self.active_account_db.as_ref() {
+            db.load_object::<EncryptedObject>(wire)?.map(|(object, _)| object)
+        } else {
+            None
+        };
+        Ok(object.filter(|object| {
+            alias.as_ref().is_none_or(|(_, manifest)| object.manifest_hash == *manifest)
+        }))
     }
 
     fn object_content_key(&self, object_id: &str) -> Result<[u8; 32], SdkError> {
@@ -786,6 +813,11 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SdkError> {
+        let alias = self.received_object_alias(object_id)?;
+        if alias.is_some() && self.object_store_object(object_id)?.is_none() {
+            return Err(SyncError::ObjectNotFound.into());
+        }
+        let object_id = alias.as_ref().map_or(object_id, |(wire, _)| wire.as_str());
         if self.object_store.cached_object(object_id).is_some() {
             return Ok(self.object_store.decrypt_object(object_id)?);
         }

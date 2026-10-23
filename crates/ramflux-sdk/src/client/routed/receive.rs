@@ -14,7 +14,6 @@ pub(crate) struct Delivery {
     pub plaintext: Option<GatewayPlaintextDelivery>,
 }
 
-#[derive(Clone, Copy)]
 struct Commit<'a> {
     opened: &'a Opened,
     entry: &'a GatewayInboxEntry,
@@ -22,6 +21,10 @@ struct Commit<'a> {
     metadata: Option<&'a MessageMetadata>,
     membership: Option<&'a (ramflux_protocol::GroupEvent, String)>,
     slots: &'a [crate::SdkObjectKeySlot],
+    references: Vec<(
+        &'a crate::dm::SdkDmAttachmentRef,
+        Option<crate::client::object::DeferredObjectKeySlot>,
+    )>,
     receipt: &'a str,
 }
 
@@ -45,6 +48,9 @@ impl RamfluxClient {
             return Ok(Delivery { routing: receipt.routing, plaintext });
         }
         let mut opened = self.open_routed(entry, &engine.config.device_id)?;
+        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+            opened.routing.message_id = self.projection_id(entry)?;
+        }
         self.confirm_routed_context(&opened.routing, entry)?;
         let (body, refs) = if opened.routing.attachments {
             let (body, refs) = decode_dm_attachment_body(&opened.body)?;
@@ -71,18 +77,34 @@ impl RamfluxClient {
             None
         };
         let mut consumed_slots = Vec::new();
+        let mut references = Vec::new();
         let accepted = self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none();
         for attachment in refs.iter().filter(|_| accepted) {
-            if self.persist_received_reference_with_pair(
-                attachment,
-                &entry.envelope.source_principal_id,
-                &opened.routing.conversation_id,
-                &entry.envelope.envelope_id,
-                &mut opened.session,
-            )? {
+            let prepared = if attachment.key_slot.version == 2 {
+                self.decrypt_pair_object_slot(&attachment.key_slot, Some(&mut opened.session)).ok()
+            } else {
+                self.decrypt_object_key_slot(&attachment.key_slot).ok()
+            };
+            if prepared.is_some() && attachment.key_slot.version == 2 {
                 consumed_slots.push(attachment.key_slot.clone());
             }
+            references.push((attachment, prepared));
         }
+        let membership = if opened.routing.kind == Kind::GroupControl {
+            self.prepare_routed_group_control(engine, &opened).await?
+        } else {
+            None
+        };
+        let plaintext = self.commit_routed_projection(Commit {
+            opened: &opened,
+            entry,
+            body: &body,
+            metadata: metadata.as_ref(),
+            membership: membership.as_ref(),
+            slots: &consumed_slots,
+            references,
+            receipt: &commit,
+        })?;
         let mut imported = Vec::new();
         if attachments
             && opened.routing.kind == Kind::Direct
@@ -97,27 +119,13 @@ impl RamfluxClient {
                 );
             }
         }
-        let membership = if opened.routing.kind == Kind::GroupControl {
-            self.prepare_routed_group_control(engine, &opened).await?
-        } else {
-            None
-        };
-        let plaintext = self.commit_routed_projection(Commit {
-            opened: &opened,
-            entry,
-            body: &body,
-            metadata: metadata.as_ref(),
-            membership: membership.as_ref(),
-            slots: &consumed_slots,
-            receipt: &commit,
-        })?;
         self.refresh_routed_control_cache(&opened, &body)?;
         let plaintext = plaintext.map(|plaintext| {
             let plaintext = zeroize::Zeroizing::new(plaintext);
             GatewayPlaintextDelivery {
                 entry: entry.clone(),
                 conversation_id: opened.routing.conversation_id.clone(),
-                message_id: entry.envelope.envelope_id.clone(),
+                message_id: opened.routing.message_id.clone(),
                 sender_id: entry.envelope.source_principal_id.clone(),
                 plaintext_body_base64: ramflux_protocol::encode_base64url(&plaintext),
                 attachments: imported,
@@ -161,11 +169,6 @@ impl RamfluxClient {
         route: &Routing,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        if matches!(route.kind, Kind::Direct | Kind::GroupMessage)
-            && self.direct_message_by_id(&route.message_id)?.is_some()
-        {
-            return Err(invalid("message id is already owned by another committed delivery"));
-        }
         let context = self.account_db()?.client_record("conversation", &route.conversation_id)?;
         if route.kind == Kind::Direct
             && context.is_none()
@@ -264,13 +267,26 @@ impl RamfluxClient {
     }
 
     fn commit_routed_projection(&self, context: Commit<'_>) -> Result<Option<Vec<u8>>, SdkError> {
-        let Commit { opened, entry, body, metadata, membership, slots, receipt } = context;
+        let Commit { opened, entry, body, metadata, membership, slots, receipt, references } =
+            context;
         self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
             if let Some((event, key)) = membership {
                 self.apply_bootstrap_group_member_join_event(
                     event,
                     &entry.envelope.source_device_id,
                     key,
+                )?;
+            }
+            for (reference, prepared) in references {
+                self.persist_sender_attachment_reference(
+                    reference,
+                    &entry.envelope.source_device_id,
+                    crate::client::deferred_attachment::ReferenceContext {
+                        owner: &entry.envelope.source_principal_id,
+                        conversation: &opened.routing.conversation_id,
+                        message: &opened.routing.message_id,
+                    },
+                    prepared,
                 )?;
             }
             let plaintext = self.project_routed(opened, entry, body, metadata)?;
@@ -280,10 +296,12 @@ impl RamfluxClient {
                 &opened.bundle_hash,
                 &opened.session,
             )?;
+            self.confirm_pair(&opened.local_device, &opened.remote_device, &opened.session)?;
             for slot in slots {
                 self.persist_pair_slot_receipt(slot)?;
             }
             if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+                self.persist_projection_owner(entry, &opened.routing.message_id)?;
                 self.account_db()?.persist_actor_state(
                     &format!("routed/message-metadata/{}", opened.routing.message_id),
                     &opened.routing,

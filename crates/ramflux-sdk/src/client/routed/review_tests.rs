@@ -12,13 +12,13 @@ pub(super) fn trust(receiver: &Fixture, sender: &Fixture) -> Result<(), SdkError
     }))?;
     Ok(())
 }
-fn pool() -> Result<ramflux_transport::RelayQuicPool, SdkError> {
+pub(super) fn pool() -> Result<ramflux_transport::RelayQuicPool, SdkError> {
     Ok(ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()
             .map_err(|e| invalid(&e.to_string()))?,
     ))
 }
-fn legacy(sender: &Fixture, receiver: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
+pub(super) fn legacy(sender: &Fixture, receiver: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
     let mut msg = message("legacy-unbound", "thread");
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
     let (mut session, header) =
@@ -139,8 +139,11 @@ async fn a_duplicate_cannot_replace_the_original_authenticated_attribution() -> 
         bob.client.apply_routed_entry(&mut engine, &pool()?, &collision, false).await
     {
         assert_eq!(
-            delivery.plaintext.ok_or_else(|| invalid("missing original content"))?.sender_id,
-            "alice"
+            delivery
+                .plaintext
+                .ok_or_else(|| invalid("missing independently scoped content"))?
+                .sender_id,
+            "carol"
         );
     }
     let mut forged = entry.clone();
@@ -236,12 +239,12 @@ fn a_valid_device_cannot_claim_another_principal_before_friend_checks() -> Resul
 }
 
 type Writes = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
-struct Inbox {
+pub(super) struct Inbox {
     responses: VecDeque<Vec<u8>>,
     writes: Writes,
 }
 impl Inbox {
-    fn engine(
+    pub(super) fn engine(
         config: GatewaySessionConfig,
         entries: Vec<GatewayInboxEntry>,
     ) -> Result<(GatewaySessionEngine, Writes), SdkError> {
@@ -824,5 +827,64 @@ async fn an_authenticated_alias_still_honors_a_block_on_its_root_commitment() ->
     assert!(result.plaintext.is_none());
     assert!(bob.client.account_db()?.message_content("blocked-alias")?.is_none());
     assert_eq!(bob.client.rejected_inbox("thread")?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_commitment_submit_remains_readable_after_autonomous_receive_ack()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 41)?;
+    let mut bob = Fixture::new("bob", 61)?;
+    trust(&bob, &alice)?;
+    bob.client.establish_friend_link("s48-friend", "bob", "alice")?;
+    let mut outgoing = message("s48-history", "conv_s48_bob_alice");
+    let mut entry = seal(&alice, &bob, outgoing.clone(), b"s48 historical dm")?;
+    outgoing.source_principal_id =
+        crate::identity_root_public_key_commitment_for_seed("alice", [41; 32]);
+    outgoing.encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
+        .map_err(|_| invalid("payload"))?;
+    entry.envelope = gateway_direct_message_envelope(&alice.config()?, &outgoing, None)?;
+    let (engine, writes) = Inbox::engine(bob.config()?, vec![entry])?;
+    let mut account = crate::bus::state::LocalBusAccountState::new(
+        std::mem::take(&mut bob.client),
+        engine,
+        "bob".to_owned(),
+    );
+    crate::bus::sync_driver::run(&mut account).await?;
+    assert_eq!(account.client.direct_messages("conv_s48_bob_alice")?.len(), 1);
+    assert_eq!(account.pending_deliveries.len(), 1);
+    assert!(writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
+    let (engine, _) = Inbox::engine(account.gateway_config.clone(), Vec::new())?;
+    account.engine = Some(engine);
+    let mut state = crate::bus::state::LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        config: LocalBusConfig::new(bob.root.join("bus.sock"), &bob.root),
+        accounts: BTreeMap::from([("bob".to_owned(), account)]),
+        active_account_id: Some("bob".to_owned()),
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    let (outbound, _) = tokio::sync::mpsc::channel(4);
+    let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
+    let request = LocalBusFrame::request(
+        "s48-receive",
+        Some("bob".to_owned()),
+        "message",
+        "message.receive",
+        serde_json::json!({"conversation_id":"conv_s48_bob_alice","limit":16,"auto_fetch_attachments":false}),
+    );
+    let result = crate::bus::dispatch::message::dispatch_message_receive_request(
+        &request,
+        &mut state,
+        &connection,
+    )
+    .await?;
+    assert_eq!(result.response_body["decrypted_messages"][0]["sender_id"], "alice");
+    assert_eq!(
+        result.response_body["decrypted_messages"][0]["plaintext_body_base64"],
+        ramflux_protocol::encode_base64url(b"s48 historical dm")
+    );
+    assert_eq!(result.response_body["entries"].as_array().map(Vec::len), Some(1));
     Ok(())
 }

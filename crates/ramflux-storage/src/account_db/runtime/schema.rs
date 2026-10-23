@@ -38,7 +38,7 @@ impl AccountDb {
         }
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT IN ('runtime_outbox','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry')"
+             AND name NOT IN ('runtime_outbox','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -105,6 +105,7 @@ impl AccountDb {
                 ))?;
             }
         }
+        self.install_inbox_recovery_schema()?;
         transaction.commit()?;
         Ok(())
     }
