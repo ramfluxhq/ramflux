@@ -84,7 +84,16 @@ fn disabled_builtin_remains_disabled_after_restart_and_requires_pin() -> Result<
     builtin.builtin = true;
     builtin.pin_source = NodePinSource::Builtin;
     builtin.safety_warnings.clear();
-    let mut store = NodeStore::load(&root.0, &[builtin.clone()])?;
+    let mut injected = serde_json::to_value(&builtin)?;
+    let fields =
+        injected.as_object_mut().ok_or_else(|| super::node_error("profile is not an object"))?;
+    for name in ["discovery_url", "signaling_turn_addr", "protocol_versions", "client_capabilities"]
+    {
+        fields.remove(name);
+    }
+    let from_client: NodeProfile = serde_json::from_value(injected)?;
+    assert_eq!(from_client.discovery_url, "");
+    let mut store = NodeStore::load(&root.0, &[from_client])?;
     store
         .profiles
         .get_mut(&builtin.node_id)

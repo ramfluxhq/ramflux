@@ -32,6 +32,7 @@ pub struct NodeRelay {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NodeProfile {
+    #[serde(default)]
     pub discovery_url: String,
     pub node_id: String,
     pub node_public_key: String,
@@ -40,8 +41,11 @@ pub struct NodeProfile {
     pub gateway: NodeGateway,
     pub relay: NodeRelay,
     pub prekey_http_url: String,
+    #[serde(default)]
     pub signaling_turn_addr: String,
+    #[serde(default)]
     pub protocol_versions: Vec<String>,
+    #[serde(default)]
     pub client_capabilities: Vec<String>,
     pub discovered_at: u64,
     pub expires_at: u64,
