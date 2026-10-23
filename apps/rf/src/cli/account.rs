@@ -53,6 +53,8 @@ pub(crate) struct AccountUnlock {
 #[derive(Args)]
 pub(crate) struct AccountCreate {
     #[arg(long)]
+    pub(crate) node: Option<String>,
+    #[arg(long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) principal: String,
@@ -75,7 +77,7 @@ pub(crate) struct AccountCreate {
     #[arg(long, hide = true)]
     pub(crate) prekey_http_url: Option<String>,
     #[arg(long)]
-    pub(crate) ca_cert: PathBuf,
+    pub(crate) ca_cert: Option<PathBuf>,
     #[arg(long)]
     pub(crate) root_seed_byte_hex: Option<String>,
     #[arg(long)]

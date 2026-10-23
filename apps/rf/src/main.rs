@@ -37,6 +37,7 @@ async fn main() {
 async fn run() -> Result<(), RfError> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Node(command) => handlers::node::handle_node(cli.socket, command).await,
         Command::Daemon(command) => handlers::daemon::handle_daemon(cli.socket, command).await,
         Command::Account(command) => handlers::account::handle_account(cli.socket, command).await,
         Command::Contact(command) => handlers::contact::handle_contact(cli.socket, command).await,

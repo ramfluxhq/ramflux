@@ -23,6 +23,8 @@ pub(crate) enum DeviceAction {
 #[derive(Args)]
 pub(crate) struct DeviceActivate {
     #[arg(long)]
+    pub(crate) node: Option<String>,
+    #[arg(long)]
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) device: String,

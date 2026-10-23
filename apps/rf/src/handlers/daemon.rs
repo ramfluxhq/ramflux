@@ -8,7 +8,10 @@ use super::*;
 pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Result<(), RfError> {
     match command.action {
         DaemonAction::Start(start) => {
-            let config = LocalBusConfig::new(socket, start.data_root);
+            let mut config = LocalBusConfig::new(socket, start.data_root);
+            if let Some(path) = start.builtin_nodes {
+                config.builtin_nodes = serde_json::from_slice(&std::fs::read(path)?)?;
+            }
             ramflux_sdk::serve_local_bus(config).await?;
             Ok(())
         }

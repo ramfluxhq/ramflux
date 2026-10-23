@@ -100,6 +100,9 @@ impl NodeStore {
         if record.expires_at <= now {
             return Err(node_error("discovery candidate expired; add again"));
         }
+        if expected.is_some_and(|key| key != record.node_public_key) {
+            return Err(node_error("expected public key does not match discovery record"));
+        }
         if source == NodePinSource::Builtin {
             return Err(node_error("built-in profiles must be injected at daemon startup"));
         }

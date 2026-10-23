@@ -189,7 +189,7 @@ pub(crate) fn local_bus_account_create_request(
         )));
     }
     Ok(LocalBusAccountCreateRequest {
-        node_id: None,
+        node_id: create.node,
         local_account_id: create.account,
         principal_id: create.principal.clone(),
         principal_commitment,
@@ -203,7 +203,7 @@ pub(crate) fn local_bus_account_create_request(
             bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             gateway_addr: create.gateway_addr.parse()?,
             server_name: create.server_name,
-            ca_cert: create.ca_cert,
+            ca_cert: create.ca_cert.unwrap_or_default(),
             principal_id: create.principal,
             device_id: create.device,
             target_delivery_id: create.target,

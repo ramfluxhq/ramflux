@@ -17,6 +17,7 @@ pub(crate) mod grant;
 pub(crate) mod group;
 pub(crate) mod keychain;
 pub(crate) mod mcp;
+pub(crate) mod node;
 pub(crate) mod object;
 
 pub(crate) use crate::cli::*;

@@ -106,6 +106,11 @@ impl NodeProfile {
         mut endpoint: GatewayQuicEndpointConfig,
     ) -> Result<GatewayQuicEndpointConfig, SdkError> {
         endpoint.gateway_addr = resolve_node_addr(&self.gateway.quic_addr).await?;
+        endpoint.bind_addr = if endpoint.gateway_addr.is_ipv6() {
+            std::net::SocketAddr::from(([0_u16; 8], 0))
+        } else {
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+        };
         endpoint.server_name.clone_from(&self.gateway.server_name);
         endpoint.ca_cert = self.write_ca(root)?;
         endpoint.prekey_http_url = Some(self.prekey_http_url.clone());

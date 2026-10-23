@@ -19,7 +19,9 @@ mod grant;
 mod group;
 mod keychain;
 mod mcp;
+mod node;
 mod object;
+pub(crate) use node::*;
 
 pub(crate) use a2i_a2ui::*;
 pub(crate) use account::*;
@@ -47,6 +49,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Command {
     Daemon(DaemonCommand),
+    Node(NodeCommand),
     Account(AccountCommand),
     Contact(ContactCommand),
     Device(DeviceCommand),

@@ -22,6 +22,9 @@ pub(crate) enum DaemonAction {
 
 #[derive(Args)]
 pub(crate) struct DaemonStart {
+    /// JSON array of client-supplied built-in profiles with factory public-key pins.
+    #[arg(long)]
+    pub(crate) builtin_nodes: Option<PathBuf>,
     #[arg(long, default_value = DEFAULT_DATA_ROOT)]
     pub(crate) data_root: PathBuf,
 }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 mod admin_http;
+mod discovery;
 mod flow;
 mod helpers;
 #[cfg(feature = "itest-http")]
@@ -12,13 +13,14 @@ mod state;
 use std::sync::Arc;
 
 pub(crate) use admin_http::{FederationAdminHttpContext, serve_admin_http};
+pub(crate) use discovery::{federation_discovery_surface, federation_node_signing_seed};
 pub(crate) use flow::{
     handle_s8_forward_envelope, handle_s8_receive_envelope, handle_s12_discovery_resolve,
     start_outbound_spool_retry_loop,
 };
 pub(crate) use helpers::{
-    federation_discovery_surface, federation_node_signing_seed, mesh_tls_config,
-    mesh_transport_error, now_unix_seconds, router_get_json, router_mesh_client, router_post_json,
+    mesh_tls_config, mesh_transport_error, now_unix_seconds, router_get_json, router_mesh_client,
+    router_post_json,
 };
 #[cfg(feature = "itest-http")]
 pub(crate) use itest_http::serve_itest_http;
