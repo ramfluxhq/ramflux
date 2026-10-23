@@ -9,7 +9,7 @@ use ramflux_protocol::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
     CryptoError, FrankingCommitmentInput, X25519KeyPair, blake3_256, franking_commitment,
@@ -51,6 +51,7 @@ pub struct DmSession {
     pub previous_sending_chain_length: u64,
     pub max_skip: usize,
     pub skipped_message_keys: BTreeMap<String, MessageKeys>,
+    skipped_message_secrets: BTreeMap<String, Secret32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -76,6 +77,8 @@ pub struct DmSessionSnapshot {
     previous_sending_chain_length: u64,
     max_skip: usize,
     skipped_message_keys: BTreeMap<String, MessageKeysSnapshot>,
+    #[serde(default)]
+    skipped_message_secrets: BTreeMap<String, [u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
@@ -125,11 +128,17 @@ pub struct DmCiphertext {
     pub ciphertext_hash: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct DmDecryptionOutput {
     pub plaintext: Vec<u8>,
     pub opening_key: [u8; 32],
     pub commitment_key: [u8; 32],
+}
+
+impl std::fmt::Debug for DmDecryptionOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DmDecryptionOutput { [redacted] }")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
@@ -376,6 +385,7 @@ impl DmSession {
             previous_sending_chain_length: 0,
             max_skip: default_dm_max_skip(),
             skipped_message_keys: BTreeMap::new(),
+            skipped_message_secrets: BTreeMap::new(),
         }
     }
 
@@ -457,7 +467,8 @@ impl DmSession {
         ciphertext: &DmCiphertext,
         associated_data: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        Ok(self.decrypt_with_franking_keys(ciphertext, associated_data)?.plaintext)
+        let mut output = self.decrypt_with_franking_keys(ciphertext, associated_data)?;
+        Ok(std::mem::take(&mut output.plaintext))
     }
 
     /// # Errors
@@ -482,22 +493,32 @@ impl DmSession {
         if computed_header_hash? != ciphertext.header_hash {
             return Err(CryptoError::CommitmentMismatch);
         }
-        let skipped_key_id = Some(skipped_key_id(
+        let skipped_id = skipped_key_id(
             &ciphertext.ratchet_public_key.unwrap_or([0_u8; 32]),
             ciphertext.counter,
-        ));
+        );
         let mut used_skipped_key = false;
-        let message_keys = if let Some(key_id) = skipped_key_id
-            && let Some(message_keys) = self.skipped_message_keys.remove(&key_id)
-        {
+        let message_keys = if let Some(secret) = self.skipped_message_secrets.get(&skipped_id) {
             used_skipped_key = true;
-            message_keys
+            derive_message_keys(
+                secret.expose(),
+                &self.message_context(
+                    self.recv_direction_tag(),
+                    ciphertext.counter,
+                    &canonical,
+                    associated_data,
+                ),
+            )?
+        } else if let Some(keys) = self.skipped_message_keys.get(&skipped_id) {
+            // Read old persisted snapshots without changing the on-wire KDF or ciphertext format.
+            used_skipped_key = true;
+            keys.clone()
         } else {
-            self.ratchet_for_header(&header, associated_data)?;
+            self.ratchet_for_header(&header)?;
             if ciphertext.counter < self.receive_counter {
                 return Err(CryptoError::AeadFailed);
             }
-            self.skip_message_keys(ciphertext.counter, &header, associated_data)?;
+            self.skip_message_keys(ciphertext.counter)?;
             let recv_direction_tag = self.recv_direction_tag();
             let remote_epoch = header.device_epoch;
             let direction_context = self.direction_context(
@@ -517,14 +538,19 @@ impl DmSession {
             derive_message_keys(&message_secret, &message_context)?
         };
         let aad = dm_header_associated_data(associated_data, &canonical);
-        let plaintext = ChaCha20Poly1305::new(Key::from_slice(&message_keys.aead_key))
-            .decrypt(
-                Nonce::from_slice(&ciphertext.nonce),
-                Payload { msg: ciphertext.ciphertext.as_ref(), aad: &aad },
-            )
-            .map_err(|_err| CryptoError::AeadFailed)?;
+        let mut plaintext = Zeroizing::new(
+            ChaCha20Poly1305::new(Key::from_slice(&message_keys.aead_key))
+                .decrypt(
+                    Nonce::from_slice(&ciphertext.nonce),
+                    Payload { msg: ciphertext.ciphertext.as_ref(), aad: &aad },
+                )
+                .map_err(|_err| CryptoError::AeadFailed)?,
+        );
         verify_commitments(ciphertext, &plaintext, associated_data, &canonical, &message_keys)?;
-        if !used_skipped_key {
+        if used_skipped_key {
+            self.skipped_message_secrets.remove(&skipped_id);
+            self.skipped_message_keys.remove(&skipped_id);
+        } else {
             let recv_direction_tag = self.recv_direction_tag();
             self.receiving_chain_key = Secret32::new(advance_chain_key(
                 self.receiving_chain_key.expose(),
@@ -538,7 +564,7 @@ impl DmSession {
             self.receive_counter = self.receive_counter.saturating_add(1);
         }
         Ok(DmDecryptionOutput {
-            plaintext,
+            plaintext: std::mem::take(&mut *plaintext),
             opening_key: message_keys.opening_key,
             commitment_key: message_keys.commitment_key,
         })
@@ -572,6 +598,11 @@ impl DmSession {
             is_initiator_side: self.is_initiator_side,
             previous_sending_chain_length: self.previous_sending_chain_length,
             max_skip: self.max_skip,
+            skipped_message_secrets: self
+                .skipped_message_secrets
+                .iter()
+                .map(|(id, secret)| (id.clone(), *secret.expose()))
+                .collect(),
             skipped_message_keys: self
                 .skipped_message_keys
                 .iter()
@@ -615,6 +646,11 @@ impl DmSession {
             is_initiator_side: snapshot.is_initiator_side,
             previous_sending_chain_length: snapshot.previous_sending_chain_length,
             max_skip: snapshot.max_skip,
+            skipped_message_secrets: snapshot
+                .skipped_message_secrets
+                .into_iter()
+                .map(|(id, secret)| (id, Secret32::new(secret)))
+                .collect(),
             skipped_message_keys: snapshot
                 .skipped_message_keys
                 .into_iter()
@@ -633,16 +669,12 @@ impl DmSession {
         })
     }
 
-    fn ratchet_for_header(
-        &mut self,
-        header: &DmHeader,
-        associated_data: &[u8],
-    ) -> Result<(), CryptoError> {
+    fn ratchet_for_header(&mut self, header: &DmHeader) -> Result<(), CryptoError> {
         let remote_public = header.dh_ratchet_public;
         if remote_public == [0_u8; 32] || self.dhr_public == Some(remote_public) {
             return Ok(());
         }
-        self.skip_message_keys(header.pn, header, associated_data)?;
+        self.skip_message_keys(header.pn)?;
         self.dhr_public = Some(remote_public);
         let local_private = self.dhs_private.as_ref().ok_or(CryptoError::AeadFailed)?;
         let dh = StaticSecret::from(*local_private.expose())
@@ -758,44 +790,34 @@ impl DmSession {
         )
     }
 
-    fn skip_message_keys(
-        &mut self,
-        until_counter: u64,
-        reference_header: &DmHeader,
-        associated_data: &[u8],
-    ) -> Result<(), CryptoError> {
+    fn skip_message_keys(&mut self, until_counter: u64) -> Result<(), CryptoError> {
         if until_counter < self.receive_counter {
             return Ok(());
         }
         let skipped = until_counter.saturating_sub(self.receive_counter);
-        if usize::try_from(skipped).map_or(true, |skipped| skipped > self.max_skip) {
+        if usize::try_from(skipped).map_or(true, |skipped| {
+            skipped
+                .saturating_add(self.skipped_message_keys.len())
+                .saturating_add(self.skipped_message_secrets.len())
+                > self.max_skip
+        }) {
             return Err(CryptoError::MaxSkipExceeded);
         }
         let remote_public = self.dhr_public.unwrap_or([0_u8; 32]);
         while self.receive_counter < until_counter {
-            let mut skipped_header = reference_header.clone();
-            skipped_header.n = self.receive_counter;
-            skipped_header.message_event_id =
-                format!("{}:{}", self.session_id, self.receive_counter);
             let recv_direction_tag = self.recv_direction_tag();
             let direction_context = self.direction_context(
                 recv_direction_tag,
-                &skipped_header.dh_ratchet_public,
+                &remote_public,
                 self.receive_counter,
-                skipped_header.device_epoch,
+                self.device_epoch_remote,
             );
             let (_next_chain, message_secret) =
                 kdf_ck(self.receiving_chain_key.expose(), &direction_context)?;
-            let canonical = skipped_header.canonical_header_bytes()?;
-            let message_context = self.message_context(
-                recv_direction_tag,
-                self.receive_counter,
-                &canonical,
-                associated_data,
+            self.skipped_message_secrets.insert(
+                skipped_key_id(&remote_public, self.receive_counter),
+                Secret32::new(message_secret),
             );
-            let key = derive_message_keys(&message_secret, &message_context)?;
-            self.skipped_message_keys
-                .insert(skipped_key_id(&remote_public, self.receive_counter), key);
             self.receiving_chain_key = Secret32::new(advance_chain_key(
                 self.receiving_chain_key.expose(),
                 &direction_context,
@@ -1037,4 +1059,51 @@ fn verify_commitments(
         return Err(CryptoError::CommitmentMismatch);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod skipped_tests {
+    use super::*;
+    #[test]
+    fn delayed_messages_use_their_own_associated_data_after_snapshot_restore()
+    -> Result<(), CryptoError> {
+        let mut sender = DmSession::initiator([1; 32], [2; 32], [3; 32], [4; 32])?;
+        let mut receiver = DmSession::recipient([1; 32], [3; 32], [2; 32], [4; 32])?;
+        let first = sender.encrypt(b"first", b"first envelope id")?;
+        let second = sender.encrypt(b"second", b"second envelope id")?;
+        assert_eq!(receiver.decrypt(&second, b"second envelope id")?, b"second");
+        let mut receiver = DmSession::from_snapshot(receiver.snapshot())?;
+        let mut tampered = first.clone();
+        tampered.ciphertext[0] ^= 1;
+        assert!(receiver.decrypt(&tampered, b"first envelope id").is_err());
+        assert_eq!(receiver.decrypt(&first, b"first envelope id")?, b"first");
+        assert!(receiver.decrypt(&first, b"first envelope id").is_err());
+        Ok(())
+    }
+    #[test]
+    fn delayed_previous_chain_messages_keep_their_original_ratchet_context()
+    -> Result<(), CryptoError> {
+        let initial = X25519KeyPair::from_seed([5; 32]);
+        let signed = X25519KeyPair::from_seed([6; 32]);
+        let mut sender = DmSession::initiator_with_remote_ratchet(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            &initial,
+            signed.public,
+        )?;
+        let mut receiver =
+            DmSession::recipient_with_local_ratchet([1; 32], [3; 32], [2; 32], [4; 32], &signed)?;
+        let first = sender.encrypt(b"first", b"first id")?;
+        let delayed = sender.encrypt(b"delayed", b"delayed id")?;
+        receiver.decrypt(&first, b"first id")?;
+        let reply = receiver.encrypt(b"reply", b"reply id")?;
+        sender.decrypt(&reply, b"reply id")?;
+        let next = sender.encrypt(b"next chain", b"next id")?;
+        assert_eq!(receiver.decrypt(&next, b"next id")?, b"next chain");
+        let mut restored = DmSession::from_snapshot(receiver.snapshot())?;
+        assert_eq!(restored.decrypt(&delayed, b"delayed id")?, b"delayed");
+        Ok(())
+    }
 }
