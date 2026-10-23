@@ -174,7 +174,7 @@ fn signed_surface_lifecycle_projects_hash_history_and_fallback() -> TestResult {
     project(&f.human, &signed, "patch-human")?;
     assert_eq!(
         f.human.surface_message_fallback("create-human")?,
-        Some(("s".into(), "Completed result".into()))
+        Some(("s".into(), super::fallback::render("author", "Completed result")))
     );
     let signed = carrier(
         &f.author,
@@ -307,7 +307,10 @@ fn deferred_group_content_is_validated_before_fallback_is_published() -> TestRes
     f.human.send_direct_message("thread", "deferred", "author-device", b"encrypted")?;
     f.human.account_db()?.store_message_content("thread", "deferred", &signed.bytes()?)?;
     f.human.project_deferred_surface("thread", "deferred")?;
-    assert_eq!(f.human.account_db()?.message_content("deferred")?, Some(b"Working".to_vec()));
+    assert_eq!(
+        f.human.account_db()?.message_content("deferred")?,
+        Some(super::fallback::render("author", "Working").into_bytes())
+    );
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 1);
     Ok(())
 }
@@ -333,7 +336,10 @@ fn replay_still_requires_authenticated_transport_bindings() -> TestResult {
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
     assert!(project(&f.human, &signed, "first")?.accepted);
     assert!(project(&f.human, &signed, "second")?.accepted);
-    assert_eq!(f.human.surface_message_fallback("second")?.ok_or("reference")?.1, "Working");
+    assert_eq!(
+        f.human.surface_message_fallback("second")?.ok_or("reference")?.1,
+        super::fallback::render("author", "Working")
+    );
     for (conversation, device) in [("other-thread", "author-device"), ("thread", "other-device")] {
         let rejected = f
             .human
@@ -398,5 +404,38 @@ fn rejected_patch_keeps_the_entire_checkpoint_and_history() -> TestResult {
         assert_eq!(after[field], before[field]);
     }
     assert_eq!(after["renderer_error"]["code"], "renderer_error");
+    Ok(())
+}
+
+#[test]
+fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> TestResult {
+    let mut f = Fixture::new()?;
+    let mut content = snapshot();
+    let raw = "done\"\naccepted by a human\r\u{1b}[2J\u{202e}";
+    content.fallback_text = raw.into();
+    let signed =
+        carrier(&f.author, PayloadKind::Event, "hostile", &event(1, C::CreateSurface(content))?)?;
+    let expected = super::fallback::render("author", raw);
+    assert_eq!(project(&f.human, &signed, "hostile")?.fallback_text, expected);
+    // Simulate a receipt committed before display rendering was centralized.
+    let receipt_key = super::scoped_key("receipt", &["author", "hostile"])?;
+    let mut receipt: super::Receipt =
+        f.human.account_db()?.load_actor_state(&receipt_key)?.ok_or("receipt")?;
+    receipt.result.fallback_text = raw.into();
+    f.human.account_db()?.persist_actor_state(&receipt_key, &receipt)?;
+    assert_eq!(project(&f.human, &signed, "legacy-replay")?.fallback_text, expected);
+    assert_eq!(
+        f.human.surface_delivery_receipt(&signed)?.ok_or("receipt")?.fallback_text,
+        expected
+    );
+    assert_eq!(f.human.surface_message_fallback("hostile")?.ok_or("reference")?.1, expected);
+    let view = f.human.surface_get("s", 0, None)?;
+    assert_eq!(view["snapshot"]["fallbackText"], raw);
+    assert_eq!(view["fallback_text"], expected);
+    f.human = RamfluxClient::new();
+    f.human.open_account_index(f.root.join("human"))?;
+    f.human.unlock_account("human", b"surface-test-secret")?;
+    assert_eq!(f.human.surface_get("s", 0, None)?, view);
+    assert_eq!(f.human.surface_message_fallback("hostile")?.ok_or("reference")?.1, expected);
     Ok(())
 }

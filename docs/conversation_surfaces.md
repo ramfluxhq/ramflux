@@ -54,3 +54,14 @@ The legacy recursive render-profile digest in `ramflux-sync` is named
 `legacy_a2ui_render_profile_hash`. It hashes a different v1 object (recursive
 component permissions and snake_case profile fields) under `A2I_CONTROL` and
 retains that wire contract. It is not a conversation snapshot hash.
+
+Text message presentation uses one adapter in the SDK surface module. It prints
+`Surface author="..." fallback_text="..."`, with each untrusted field quoted and
+all controls and non-ASCII characters escaped. This conservative ASCII rendering
+prevents embedded newlines, terminal escapes and Unicode direction controls from
+creating or rearranging status lines. The author comes from the authenticated
+surface record. Signed snapshot data and canonical hashes remain unchanged;
+the `surface.get` snapshot is structured data, while its top-level fallback is
+rendered text. Unicode text remains
+available in its original form in that snapshot. The adapter is the integration
+point for a shared protocol text-rendering rule.

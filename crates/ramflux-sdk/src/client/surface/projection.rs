@@ -48,8 +48,9 @@ impl RamfluxClient {
             }
             let fingerprint=ramflux_protocol::hash_base64url("ramflux.surface.delivery.v1",body);
             let receipt_key=scoped_key("receipt",&[principal,&carrier.message_id])?;
-            if let Some(receipt)=self.account_db()?.load_actor_state::<Receipt>(&receipt_key)?{
+            if let Some(mut receipt)=self.account_db()?.load_actor_state::<Receipt>(&receipt_key)?{
                 if receipt.fingerprint==fingerprint{
+                    receipt.result = self.refresh_surface_outcome(&carrier, receipt.result)?;
                     self.account_db()?.persist_actor_state(&key("message",message),&json!({"surface_id":carrier.surface_id,"conversation_id":conversation,"accepted":receipt.result.accepted,"fallback_text":receipt.result.fallback_text,"kind":carrier.payload_kind}))?;
                     return Ok(Some(receipt.result));
                 }
@@ -76,14 +77,39 @@ impl RamfluxClient {
             scoped_key("receipt", &[&carrier.sender_principal_id, &carrier.message_id])?;
         let fingerprint =
             ramflux_protocol::hash_base64url("ramflux.surface.delivery.v1", &carrier.bytes()?);
-        Ok(self.account_db()?.load_actor_state::<Receipt>(&receipt_key)?.map(|receipt| {
-            if receipt.fingerprint == fingerprint {
-                receipt.result
-            } else {
-                Outcome::rejected(json!({"code":"message_id_conflict"}))
-            }
+        let Some(receipt) = self.account_db()?.load_actor_state::<Receipt>(&receipt_key)? else {
+            return Ok(None);
+        };
+        Ok(Some(if receipt.fingerprint == fingerprint {
+            self.refresh_surface_outcome(carrier, receipt.result)?
+        } else {
+            Outcome::rejected(json!({"code":"message_id_conflict"}))
         }))
     }
+    // Re-render old receipts from the canonical raw fallback. This also upgrades pre-adapter
+    // receipts without changing their fingerprint or replaying any surface transition.
+    fn refresh_surface_outcome(
+        &self,
+        carrier: &Carrier,
+        mut outcome: Outcome,
+    ) -> Result<Outcome, SdkError> {
+        if outcome.accepted {
+            let view = self.account_db()?.client_record("surface", &carrier.surface_id)?;
+            outcome.fallback_text = view
+                .as_ref()
+                .filter(|v| {
+                    v["conversation_id"] == carrier.conversation_id
+                        && v["author_principal_id"] == carrier.author_principal_id
+                })
+                .and_then(|v| v["fallback_text"].as_str())
+                .map_or_else(
+                    || "[Surface unavailable]".into(),
+                    |text| super::fallback::render(&carrier.author_principal_id, text),
+                );
+        }
+        Ok(outcome)
+    }
+
     pub(crate) fn preflight_surface(&self, carrier: &Carrier) -> Result<Outcome, SdkError> {
         let payload = self.verify_surface_carrier(
             carrier,
@@ -150,15 +176,7 @@ impl RamfluxClient {
                 }
                 let state = saved.as_ref().map_or_else(SurfaceState::default, |(_, s)| s.clone());
                 match state.apply(event) {
-                    Ok(next) => Ok(Outcome {
-                        accepted: true,
-                        fallback_text: next
-                            .content()
-                            .ok_or_else(|| invalid("surface content absent"))?
-                            .fallback_text
-                            .clone(),
-                        renderer_error: None,
-                    }),
+                    Ok(next) => Outcome::accepted(&carrier.author_principal_id, &next),
                     Err(error) => {
                         Ok(Outcome::rejected(json!({"code":"renderer_error","reject":error})))
                     }
@@ -186,15 +204,7 @@ impl RamfluxClient {
                 if self.account_db()?.load_actor_state::<Value>(&used)?.is_some() {
                     return Ok(reject("action_already_used"));
                 }
-                Ok(Outcome {
-                    accepted: true,
-                    fallback_text: state
-                        .content()
-                        .ok_or_else(|| invalid("surface content absent"))?
-                        .fallback_text
-                        .clone(),
-                    renderer_error: None,
-                })
+                Outcome::accepted(&carrier.author_principal_id, &state)
             }
         }
     }
@@ -236,7 +246,7 @@ impl RamfluxClient {
                 let history =
                     format!("{}{:020}", key("history", &carrier.surface_id) + "/", state.version());
                 db.persist_actor_state(&history,&json!({"version":state.version(),"surface_hash":state.hash(),"wire_base64":carrier.wire_base64,"carrier_base64":ramflux_protocol::encode_base64url(carrier.bytes()?),"message_id":carrier.message_id}))?;
-                db.persist_client_record("surface",&carrier.surface_id,&json!({"id":carrier.surface_id,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"author_principal_id":carrier.author_principal_id,"author_device_id":author_device,"version":state.version(),"surface_hash":state.hash(),"closed":state.is_closed(),"fallback_text":outcome.fallback_text,"renderer_error":null}))?;
+                db.persist_client_record("surface",&carrier.surface_id,&json!({"id":carrier.surface_id,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"author_principal_id":carrier.author_principal_id,"author_device_id":author_device,"version":state.version(),"surface_hash":state.hash(),"closed":state.is_closed(),"fallback_text":state.content().ok_or_else(|| invalid("surface content absent"))?.fallback_text,"renderer_error":null}))?;
             }
             Payload::Action(action) => {
                 let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
