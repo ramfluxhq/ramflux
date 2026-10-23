@@ -6,16 +6,19 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+import sys
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "demo-node.sh"
 
 
 class DemoNodeTests(unittest.TestCase):
+    PROVIDER = "docker"
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ramflux-demo-shell-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.home = self.root / "home"
@@ -24,34 +27,14 @@ class DemoNodeTests(unittest.TestCase):
         self.control = self.root / "control.json"
         self.control.write_text("{}")
         self.journal = self.root / "commands.jsonl"
-        docker = f'''#!/usr/bin/env python3
-import json
-from pathlib import Path
-import sys
-args = sys.argv[1:]
-with Path({str(self.journal)!r}).open("a") as output:
-    output.write(json.dumps(args) + "\\n")
-control = json.loads(Path({str(self.control)!r}).read_text())
-kind = None
-if args[:2] == ["ps", "-aq"]: kind = "container"
-if args[:3] == ["volume", "ls", "-q"]: kind = "volume"
-if args[:3] == ["network", "ls", "-q"]: kind = "network"
-if args == ["volume", "ls", "-q"] and control.get("unlabeled") == "volume":
-    print("demo-test_gateway-redb")
-elif args == ["network", "ls", "--format", "{{{{.Name}}}}"] and control.get("unlabeled") == "network":
-    print("demo-test_default")
-elif kind and control.get("foreign") == kind:
-    print("foreign-resource")
-elif args[0] == "inspect" or (len(args) > 1 and args[1] == "inspect"):
-    if "Health.Status" in " ".join(args):
-        print(control.get("health", "healthy"))
-    else:
-        print("foreign-owner")
-elif args[0] == "compose" and "ps" in args and "-q" in args:
-    if not control.get("stopped"):
-        print("service-id")
-'''
-        self.executable("docker", docker)
+        (self.root / "provider.txt").write_text(self.PROVIDER)
+        (self.root / "clock").write_text("0")
+        fixture = SCRIPT.parent / "tests/fake_demo_runtime.py"
+        for name in ("docker", "podman", "podman-compose", "date", "sleep"):
+            wrapper = "#!/bin/sh\nexec " + " ".join(shlex.quote(str(part)) for part in (
+                sys.executable, fixture, "--fixture-root", self.root, "--name", name,
+            )) + ' "$@"\n'
+            self.executable(name, wrapper)
         self.executable("cargo", "#!/bin/sh\nexit 0\n")
         self.executable("rustup", "#!/bin/sh\nexit 1\n")
         tool = '''#!/usr/bin/env python3
@@ -71,7 +54,8 @@ else:
         self.tool = self.executable("demo-node-tool", tool)
         self.env_file = self.root / "demo.env"
         values = dict(DEMO_HOST="demo.example.org", DEMO_PROJECT="demo-test",
-                      DEMO_DATA_DIR=str(self.state), DEMO_TOOL=str(self.tool))
+                      DEMO_DATA_DIR=str(self.state), DEMO_TOOL=str(self.tool),
+                      DEMO_HEALTH_TIMEOUT_SECONDS="3", DEMO_HEALTH_POLL_SECONDS="1")
         self.env_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items()))
         self.environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", HOME=str(self.home))
 
@@ -95,6 +79,9 @@ else:
             return []
         return [json.loads(line) for line in self.journal.read_text().splitlines()]
 
+    def compose_commands(self):
+        return [args for args in self.commands() if args[0] == "compose" and args != ["compose", "version"]]
+
     def test_requires_env_and_refuses_unowned_data(self):
         self.run_script("up", env_file=self.root / "missing.env", success=False)
         self.state.mkdir()
@@ -105,8 +92,18 @@ else:
 
     def test_repeat_up_preserves_ca_and_named_volumes_until_explicit_purge(self):
         self.state.mkdir(mode=0o755)
-        self.run_script("up")
+        result = self.run_script("up")
+        self.assertIn("demo URL: http://demo.example.org:59482", result.stdout)
+        self.assertIn("all seven demo services are healthy", result.stdout)
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
+        environment = (self.state / "runtime.env").read_text()
+        for advertised in ("59443", "59447", "59482", "59478", "59453"):
+            self.assertIn(advertised, environment)
+        calls = [json.loads(line) for line in (self.root / "cli.jsonl").read_text().splitlines()]
+        compose_up = next(call for call in calls if "up" in call["args"])
+        expected = "docker" if self.PROVIDER == "docker" else "podman-compose"
+        self.assertEqual(compose_up["name"], expected)
+        self.assertEqual(compose_up["cwd"], str(self.state))
         ca = (self.state / "certs/ca.pem").read_bytes()
         owner = (self.state / "owner.token").read_text()
         self.run_script("up")
@@ -133,7 +130,7 @@ else:
                 result = self.run_script("down", "--purge", success=False)
                 self.assertIn("refusing foreign", result.stderr)
                 self.assertTrue(self.state.exists())
-                self.assertFalse(any(args[0] == "compose" for args in self.commands()))
+                self.assertFalse(self.compose_commands())
 
     def test_refuses_unlabeled_volume_and_network_name_collisions(self):
         self.run_script("up")
@@ -142,7 +139,7 @@ else:
                 self.control.write_text(json.dumps({"unlabeled": kind}))
                 self.journal.write_text("")
                 self.run_script("up", success=False)
-                self.assertFalse(any(args[0] == "compose" for args in self.commands()))
+                self.assertFalse(self.compose_commands())
 
     def test_status_fails_for_stopped_or_unhealthy_services(self):
         self.run_script("up")
@@ -171,6 +168,48 @@ else:
         self.run_script("status", "--remote")
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands(), [])
+
+    def test_health_wait_retries_starting_services_until_healthy(self):
+        self.control.write_text('{"healthy_after": 2}')
+        result = self.run_script("up")
+        self.assertIn("waiting for demo health", result.stdout)
+        sleeps = [args for args in self.commands() if args[0] == "1"]
+        self.assertEqual(len(sleeps), 2)
+        self.assertIn("all seven demo services are healthy", result.stdout)
+        inspected = [args[-1] for args in self.commands() if args[0] == "inspect" and "--format" not in args]
+        for service in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention"):
+            self.assertIn(f"id-ramflux-{service}", inspected)
+
+    def test_health_wait_timeout_keeps_project_and_prints_diagnostics(self):
+        self.control.write_text('{"health": "starting"}')
+        result = self.run_script("up", success=False)
+        self.assertIn("health wait failed", result.stderr)
+        self.assertIn("mock project logs", result.stderr)
+        self.assertEqual((self.root / "clock").read_text(), "3")
+        self.assertTrue((self.state / "identity.env").exists())
+        self.assertFalse(any("down" in args for args in self.compose_commands()))
+        self.assertNotIn("demo URL:", result.stdout)
+
+    def test_health_wait_fails_immediately_on_stopped_unhealthy_or_unchecked_services(self):
+        for scenario in ({"container_state": "exited"}, {"health": "unhealthy"}, {"missing_health": True}, {"duplicate": True}):
+            with self.subTest(scenario=scenario):
+                self.control.write_text(json.dumps(scenario))
+                result = self.run_script("up", success=False)
+                self.assertIn("health wait failed", result.stderr)
+                self.assertEqual((self.root / "clock").read_text(), "0")
+                self.assertNotIn("demo URL:", result.stdout)
+
+    def test_existing_explicit_ports_override_new_defaults(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_HTTP_PORT=58482\n")
+        self.run_script("up")
+        self.run_script("up")
+        self.assertIn("http://demo.example.org:58482", (self.state / "runtime.env").read_text())
+
+
+class PodmanComposeDemoNodeTests(DemoNodeTests):
+    PROVIDER = "podman"
+
 
 
 if __name__ == "__main__":
