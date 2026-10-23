@@ -52,9 +52,10 @@ pub struct DmSession {
     pub max_skip: usize,
     pub skipped_message_keys: BTreeMap<String, MessageKeys>,
     skipped_message_secrets: BTreeMap<String, Secret32>,
+    skipped_order: std::collections::VecDeque<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DmSessionSnapshot {
     schema: String,
     version: u32,
@@ -79,10 +80,50 @@ pub struct DmSessionSnapshot {
     skipped_message_keys: BTreeMap<String, MessageKeysSnapshot>,
     #[serde(default)]
     skipped_message_secrets: BTreeMap<String, [u8; 32]>,
+    #[serde(default)]
+    skipped_order: std::collections::VecDeque<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+impl std::fmt::Debug for DmSessionSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmSessionSnapshot").field("secrets", &"<redacted>").finish()
+    }
+}
+impl Zeroize for DmSessionSnapshot {
+    fn zeroize(&mut self) {
+        self.root_key.zeroize();
+        self.sending_chain_key.zeroize();
+        self.receiving_chain_key.zeroize();
+        self.dhs_private.zeroize();
+        for secret in self.skipped_message_secrets.values_mut() {
+            secret.zeroize();
+        }
+        for keys in self.skipped_message_keys.values_mut() {
+            keys.aead_key.zeroize();
+            keys.commitment_key.zeroize();
+            keys.opening_key.zeroize();
+            keys.nonce.zeroize();
+        }
+        self.skipped_message_secrets.clear();
+        self.skipped_message_keys.clear();
+        self.skipped_order.clear();
+    }
+}
+impl Drop for DmSessionSnapshot {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+impl ZeroizeOnDrop for DmSessionSnapshot {}
+
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct Secret32([u8; 32]);
+
+impl std::fmt::Debug for Secret32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret32(<redacted>)")
+    }
+}
 
 impl Secret32 {
     #[must_use]
@@ -386,6 +427,7 @@ impl DmSession {
             max_skip: default_dm_max_skip(),
             skipped_message_keys: BTreeMap::new(),
             skipped_message_secrets: BTreeMap::new(),
+            skipped_order: std::collections::VecDeque::new(),
         }
     }
 
@@ -549,6 +591,7 @@ impl DmSession {
         verify_commitments(ciphertext, &plaintext, associated_data, &canonical, &message_keys)?;
         if used_skipped_key {
             self.skipped_message_secrets.remove(&skipped_id);
+            self.skipped_order.retain(|id| id != &skipped_id);
             self.skipped_message_keys.remove(&skipped_id);
         } else {
             let recv_direction_tag = self.recv_direction_tag();
@@ -598,6 +641,7 @@ impl DmSession {
             is_initiator_side: self.is_initiator_side,
             previous_sending_chain_length: self.previous_sending_chain_length,
             max_skip: self.max_skip,
+            skipped_order: self.skipped_order.clone(),
             skipped_message_secrets: self
                 .skipped_message_secrets
                 .iter()
@@ -623,12 +667,12 @@ impl DmSession {
 
     /// # Errors
     /// Returns an error when the snapshot schema or version is unsupported.
-    pub fn from_snapshot(snapshot: DmSessionSnapshot) -> Result<Self, CryptoError> {
+    pub fn from_snapshot(mut snapshot: DmSessionSnapshot) -> Result<Self, CryptoError> {
         if snapshot.schema != "ramflux.dm_session.snapshot.v1" || snapshot.version != 1 {
             return Err(CryptoError::UnsupportedDmSessionSnapshot);
         }
         Ok(Self {
-            session_id: snapshot.session_id,
+            session_id: std::mem::take(&mut snapshot.session_id),
             bootstrap_transcript_hash: snapshot.bootstrap_transcript_hash,
             root_key: Secret32::new(snapshot.root_key),
             sending_chain_key: Secret32::new(snapshot.sending_chain_key),
@@ -646,13 +690,12 @@ impl DmSession {
             is_initiator_side: snapshot.is_initiator_side,
             previous_sending_chain_length: snapshot.previous_sending_chain_length,
             max_skip: snapshot.max_skip,
-            skipped_message_secrets: snapshot
-                .skipped_message_secrets
+            skipped_order: std::mem::take(&mut snapshot.skipped_order),
+            skipped_message_secrets: std::mem::take(&mut snapshot.skipped_message_secrets)
                 .into_iter()
                 .map(|(id, secret)| (id, Secret32::new(secret)))
                 .collect(),
-            skipped_message_keys: snapshot
-                .skipped_message_keys
+            skipped_message_keys: std::mem::take(&mut snapshot.skipped_message_keys)
                 .into_iter()
                 .map(|(key_id, keys)| {
                     (
@@ -795,12 +838,7 @@ impl DmSession {
             return Ok(());
         }
         let skipped = until_counter.saturating_sub(self.receive_counter);
-        if usize::try_from(skipped).map_or(true, |skipped| {
-            skipped
-                .saturating_add(self.skipped_message_keys.len())
-                .saturating_add(self.skipped_message_secrets.len())
-                > self.max_skip
-        }) {
+        if usize::try_from(skipped).map_or(true, |skipped| skipped > self.max_skip) {
             return Err(CryptoError::MaxSkipExceeded);
         }
         let remote_public = self.dhr_public.unwrap_or([0_u8; 32]);
@@ -814,10 +852,23 @@ impl DmSession {
             );
             let (_next_chain, message_secret) =
                 kdf_ck(self.receiving_chain_key.expose(), &direction_context)?;
-            self.skipped_message_secrets.insert(
-                skipped_key_id(&remote_public, self.receive_counter),
-                Secret32::new(message_secret),
-            );
+            let skipped_id = skipped_key_id(&remote_public, self.receive_counter);
+            while self.skipped_message_keys.len() + self.skipped_message_secrets.len()
+                >= self.max_skip
+            {
+                let oldest = self
+                    .skipped_order
+                    .pop_front()
+                    .or_else(|| self.skipped_message_keys.keys().next().cloned())
+                    .or_else(|| self.skipped_message_secrets.keys().next().cloned());
+                let Some(oldest) = oldest else {
+                    break;
+                };
+                self.skipped_message_keys.remove(&oldest);
+                self.skipped_message_secrets.remove(&oldest);
+            }
+            self.skipped_order.push_back(skipped_id.clone());
+            self.skipped_message_secrets.insert(skipped_id, Secret32::new(message_secret));
             self.receiving_chain_key = Secret32::new(advance_chain_key(
                 self.receiving_chain_key.expose(),
                 &direction_context,
@@ -1064,6 +1115,45 @@ fn verify_commitments(
 #[cfg(test)]
 mod skipped_tests {
     use super::*;
+    #[test]
+    fn skipped_secret_eviction_keeps_a_pair_progressing_after_lost_packets()
+    -> Result<(), CryptoError> {
+        let mut sender = DmSession::initiator([1; 32], [2; 32], [3; 32], [4; 32])?;
+        let mut receiver = DmSession::recipient([1; 32], [3; 32], [2; 32], [4; 32])?;
+        receiver.max_skip = 2;
+        let packets =
+            (0..8).map(|_| sender.encrypt(b"message", b"aad")).collect::<Result<Vec<_>, _>>()?;
+        receiver.decrypt(&packets[2], b"aad")?;
+        assert_eq!(receiver.decrypt(&packets[4], b"aad")?, b"message");
+        let mut receiver = DmSession::from_snapshot(receiver.snapshot())?;
+        assert_eq!(receiver.decrypt(&packets[6], b"aad")?, b"message");
+        assert!(receiver.skipped_message_secrets.len() <= 2);
+        assert!(receiver.decrypt(&packets[0], b"aad").is_err());
+        assert_eq!(receiver.decrypt(&packets[5], b"aad")?, b"message");
+        Ok(())
+    }
+    #[test]
+    fn oversized_skip_recovers_after_intermediate_packet_without_resetting_keys()
+    -> Result<(), CryptoError> {
+        let mut sender = DmSession::initiator([1; 32], [2; 32], [3; 32], [4; 32])?;
+        let mut receiver = DmSession::recipient([1; 32], [3; 32], [2; 32], [4; 32])?;
+        receiver.max_skip = 2;
+        let packets =
+            (0..7).map(|_| sender.encrypt(b"message", b"aad")).collect::<Result<Vec<_>, _>>()?;
+        assert!(matches!(receiver.decrypt(&packets[6], b"aad"), Err(CryptoError::MaxSkipExceeded)));
+        receiver.decrypt(&packets[2], b"aad")?;
+        receiver.decrypt(&packets[4], b"aad")?;
+        assert_eq!(receiver.decrypt(&packets[6], b"aad")?, b"message");
+        Ok(())
+    }
+    #[test]
+    fn serialized_session_snapshots_never_disclose_secret_arrays_in_debug()
+    -> Result<(), CryptoError> {
+        let session = DmSession::initiator([13; 32], [2; 32], [3; 32], [4; 32])?;
+        let snapshot = session.snapshot();
+        assert!(!format!("{snapshot:?}").contains("root_key"));
+        Ok(())
+    }
     #[test]
     fn delayed_messages_use_their_own_associated_data_after_snapshot_restore()
     -> Result<(), CryptoError> {
