@@ -232,12 +232,14 @@ Fetch failures remain object-directory/events state and do not alter message con
 
 ### Device-pair recovery and bounded inbox work
 
-A verified fresh X3DH bootstrap can replace a settled session only after the pinned device
+A verified fresh X3DH bootstrap can replace a confirmed session only after the pinned device
 identity, envelope signature and encrypted routing body all authenticate. A gap beyond the
 ratchet skip limit or lost receive state triggers a fresh encrypted `pair.session.reset.v1`
 control request, with at most one reset attempt per device pair per minute. The reset travels
 inside envelope v2; it adds no node-visible conversation descriptor. `session.reset` journal
-events expose device metadata and the recovery reason. Retired session ids cannot be reactivated
+events expose device metadata and the recovery reason. This covers passive confirmation as
+well as completed local bootstrap; an explicit fresh reset can retire an unconfirmed local
+bootstrap too. Delayed headerless confirmations cannot replace a confirmed active pair. Retired session ids cannot be reactivated
 by a delayed bootstrap. Failed reset submission leaves a durable pending recovery marker for
 bounded retry. A failed attachment-key-slot decrypt leaves the message ratchet unchanged.
 

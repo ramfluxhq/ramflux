@@ -224,3 +224,57 @@ fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), Sd
     assert_eq!(opened.session, before);
     Ok(())
 }
+
+#[tokio::test]
+async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Result<(), SdkError> {
+    let mut alice = Fixture::new("alice", 41)?;
+    let mut bob = Fixture::new("bob", 61)?;
+    settle(&mut alice, &mut bob).await?;
+    let old =
+        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
+    alice
+        .client
+        .account_db()?
+        .remove_actor_state(&super::super::session::pair_key("alice", "bob")?)?;
+    alice.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
+    let entry = fresh(&alice, &bob, "alice-state-loss")?;
+    let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
+    bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await?;
+    assert_eq!(
+        bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id,
+        decode(&entry.envelope)?.ciphertext.session_id
+    );
+    assert_eq!(
+        bob.client.account_db()?.load_actor_state::<bool>(&format!("dm-pair/retired/{old}"))?,
+        Some(true)
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn an_authenticated_fresh_reset_retires_even_an_unconfirmed_local_bootstrap()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 41)?;
+    let mut bob = Fixture::new("bob", 61)?;
+    trust(&alice, &bob)?;
+    trust(&bob, &alice)?;
+    let pending = fresh(&bob, &alice, "unconfirmed-bob")?;
+    let old = decode(&pending.envelope)?.ciphertext.session_id;
+    let reset = seal_as(
+        &alice,
+        &bob,
+        outgoing(&alice, &bob, "reset"),
+        br#"{"type":"pair.session.reset.v1"}"#,
+        Route::control(),
+    )?;
+    let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
+    bob.client.apply_routed_entry(&mut be, &pool()?, &reset, false).await?;
+    assert_eq!(
+        bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id,
+        decode(&reset.envelope)?.ciphertext.session_id
+    );
+    assert_eq!(
+        bob.client.account_db()?.load_actor_state::<bool>(&format!("dm-pair/retired/{old}"))?,
+        Some(true)
+    );
+    Ok(())
+}

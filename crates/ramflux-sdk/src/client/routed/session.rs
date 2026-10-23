@@ -54,6 +54,8 @@ impl RamfluxClient {
         local: &str,
         remote: &str,
         session: &ramflux_crypto::DmSession,
+        reset: bool,
+        bootstrap: bool,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let id = &session.session_id;
@@ -68,10 +70,14 @@ impl RamfluxClient {
         db.remove_actor_state(&format!("{key}/reset-pending"))?;
         if let Some(active) = db.load_actor_state::<String>(&key)? {
             // Only an authenticated and decrypted fresh bootstrap can replace a settled pair.
-            let confirmed =
+            let settled =
                 db.load_actor_state::<bool>(&format!("dm-pair/settled/{active}"))?.unwrap_or(false);
-            if active == *id || (!confirmed && id < &active) || (confirmed && fresh) {
-                if active != *id && confirmed {
+            let confirmed = db
+                .load_actor_state::<bool>(&format!("dm-pair/confirmed/{active}"))?
+                .unwrap_or(false);
+            let recovery = fresh && bootstrap && (confirmed || reset);
+            if active == *id || (!confirmed && !settled && id < &active) || recovery {
+                if active != *id && recovery {
                     self.retire_pair(&active)?;
                     db.persist_actor_state(&format!("dm-pair/settled/{id}"), &true)?;
                     db.append_journal(

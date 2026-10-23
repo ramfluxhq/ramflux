@@ -294,7 +294,16 @@ impl RamfluxClient {
                 &opened.bundle_hash,
                 &opened.session,
             )?;
-            self.confirm_pair(&opened.local_device, &opened.remote_device, &opened.session)?;
+            let reset = opened.routing.kind == Kind::Control
+                && serde_json::from_slice::<serde_json::Value>(body)
+                    .is_ok_and(|value| value["type"] == "pair.session.reset.v1");
+            self.confirm_pair(
+                &opened.local_device,
+                &opened.remote_device,
+                &opened.session,
+                reset,
+                decode(&entry.envelope)?.x3dh.is_some(),
+            )?;
             for slot in slots {
                 self.persist_pair_slot_receipt(slot)?;
             }
