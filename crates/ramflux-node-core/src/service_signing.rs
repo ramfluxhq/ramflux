@@ -200,9 +200,7 @@ impl std::fmt::Debug for NodeServiceSigningKey {
 
 impl Drop for NodeServiceSigningKey {
     fn drop(&mut self) {
-        for byte in &mut self.seed {
-            *byte = 0;
-        }
+        self.seed.fill(0);
     }
 }
 

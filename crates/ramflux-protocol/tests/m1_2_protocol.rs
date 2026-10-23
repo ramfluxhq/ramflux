@@ -198,7 +198,7 @@ fn a2ui_commands_and_surface_hash_are_canonical() -> Result<(), Box<dyn std::err
 
     for command in [create, update_components, update_data, delete] {
         let canonical = canonical_json_bytes(&command)?;
-        assert!(!canonical.is_empty());
+        assert_ne!(canonical.len(), 0);
     }
 
     let with_hash = json!({"surfaceId":"surf_01","surface_hash":"ignored","components":[]});

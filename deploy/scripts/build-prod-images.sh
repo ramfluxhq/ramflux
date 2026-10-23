@@ -20,8 +20,8 @@ DEPLOY_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 WORKSPACE_DIR=$(CDPATH= cd -- "$DEPLOY_DIR/.." && pwd)   # ramflux repo root (Cargo workspace)
 
 TC=""
-if command -v rustup >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q '^1\.96\.0'; then
-  TC="+1.96.0"
+if command -v rustup >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q '^1\.99\.0'; then
+  TC="+1.99.0"
 fi
 
 printf '>> production host pre-build: compiling 7 node binaries (release)\n'

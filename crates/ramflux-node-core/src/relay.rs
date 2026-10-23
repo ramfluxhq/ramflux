@@ -7749,7 +7749,7 @@ mod tests {
             .apply_owner_session_tombstone(t14d_tombstone_request(), now)
             .map_err(|error| error.to_string())?;
         assert!(!replay.changed);
-        assert!(replay.affected_chunks.is_empty());
+        assert_eq!(replay.affected_chunks.len(), 0);
         Ok(())
     }
 

@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(franking_value["message_event_id"], ciphertext.message_event_id);
         assert_eq!(franking_value["commitment"], ciphertext.commitment);
         assert_eq!(franking_value["ciphertext_hash"], ciphertext.ciphertext_hash);
-        assert!(!envelope.signed.signature.is_empty());
+        assert_ne!(envelope.signed.signature, "");
 
         let serialized = serde_json::to_value(&envelope)?;
         assert_eq!(serialized["ext"]["franking"], *franking_value);

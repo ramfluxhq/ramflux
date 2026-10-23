@@ -1261,12 +1261,12 @@ mod tests {
         store.append(NotifyWalPayload::QueueEntry(entry))?;
         store.record_provider_attempt(notify_wal_attempt("wal_delivered_1"))?;
         store.mark_delivered("wal_delivered_1")?;
-        assert!(store.pending_entries_without_attempts(10).is_empty());
+        assert_eq!(store.pending_entries_without_attempts(10).len(), 0);
         drop(store);
 
         let reopened = NotifyWalStore::open(&root)?;
         assert!(reopened.get("queue:wal_delivered_1").is_none());
-        assert!(reopened.pending_entries_without_attempts(10).is_empty());
+        assert_eq!(reopened.pending_entries_without_attempts(10).len(), 0);
         assert_eq!(reopened.provider_attempts("wal_delivered_1").len(), 1);
 
         remove_notify_wal_dir(root);
@@ -1307,7 +1307,7 @@ mod tests {
         store.append(NotifyWalPayload::QueueEntry(notify_wal_queue_entry("wal_compact_drop")))?;
         store.record_provider_attempt(notify_wal_attempt("wal_compact_drop"))?;
         store.mark_delivered("wal_compact_drop")?;
-        assert!(!notify_wal_segment_ids(&root)?.is_empty());
+        assert_ne!(notify_wal_segment_ids(&root)?.len(), 0);
 
         store.compact()?;
         let segments_after_compaction = notify_wal_segment_ids(&root)?;

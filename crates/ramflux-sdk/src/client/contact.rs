@@ -1179,8 +1179,9 @@ mod tests {
             .object_share_grant("object_shared", "principal_bob")?
             .ok_or_else(|| SdkError::LocalBus("missing revoked grant".to_owned()))?;
         assert!(revoked.revoked_at.is_some());
-        assert!(
-            client.account_db()?.object_share_grants_for_recipients(&["principal_bob"])?.is_empty()
+        assert_eq!(
+            client.account_db()?.object_share_grants_for_recipients(&["principal_bob"])?.len(),
+            0
         );
         assert_eq!(
             client.account_db()?.object_share_grants_for_recipients(&["principal_carol"])?.len(),

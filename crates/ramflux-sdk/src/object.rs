@@ -1128,7 +1128,7 @@ mod tests {
         assert_eq!(grant.owner_public_key, public_key);
         assert_eq!(grant.owner_signing_key_id, "device_a");
         assert_eq!(grant.version, ramflux_protocol::OBJECT_RELAY_V3_PROOF_VERSION);
-        assert!(!grant.owner_signature.is_empty());
+        assert_ne!(grant.owner_signature, "");
         ramflux_crypto::verify_canonical_signature(
             &ramflux_protocol::object_access_grant_signing_bytes(&grant)?,
             &grant.owner_signature,

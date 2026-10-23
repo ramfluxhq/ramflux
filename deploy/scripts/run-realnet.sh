@@ -16,7 +16,7 @@
 # Requirements (the realnet tests self-orchestrate `docker compose up --build`):
 #   - docker OR podman (with a `docker compose` provider) on PATH
 #   - the two sibling checkouts above
-#   - Rust toolchain >= 1.96.0 (uses +1.96.0 if rustup has it)
+#   - Rust toolchain >= 1.99.0 (uses +1.99.0 if rustup has it)
 #
 # Realnet execution is Linux-only in practice: the compose-backed services and
 # optional runtime probes are Linux-only.
@@ -50,8 +50,8 @@ fi
 printf '>> container runtime: %s (%s)\n' "$RT" "$($RT --version 2>/dev/null | head -1)"
 
 TC=""
-if command -v rustup >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q '^1\.96\.0'; then
-  TC="+1.96.0"
+if command -v rustup >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q '^1\.99\.0'; then
+  TC="+1.99.0"
 fi
 
 # --- Host pre-build (Option B): compile the 7 node binaries OUTSIDE Docker on

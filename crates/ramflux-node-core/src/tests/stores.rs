@@ -266,7 +266,7 @@ fn router_wal_submission_respects_redb_ack_cursor_on_restore()
     let restored = reopened
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_wal_ack".to_owned()))?;
-    assert!(restored.resume("target_router_wal_ack", 0, 10).is_empty());
+    assert_eq!(restored.resume("target_router_wal_ack", 0, 10).len(), 0);
     assert_eq!(
         restored.cursor_state("target_router_wal_ack").and_then(|cursor| cursor.last_envelope_id),
         Some("env_router_wal_acked".to_owned())
@@ -391,7 +391,7 @@ fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
     let restored = reopened
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_incremental".to_owned()))?;
-    assert!(restored.resume("target_ack_incremental", 0, 10).is_empty());
+    assert_eq!(restored.resume("target_ack_incremental", 0, 10).len(), 0);
     assert_eq!(
         restored.cursor_state("target_ack_incremental").and_then(|cursor| cursor.last_envelope_id),
         Some("env_ack_incremental".to_owned())
@@ -701,7 +701,7 @@ fn notify_wal_store_replays_delivered_tombstones() -> Result<(), Box<dyn std::er
     drop(store);
 
     let reopened = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
-    assert!(reopened.pending_entries_without_attempts(10)?.is_empty());
+    assert_eq!(reopened.pending_entries_without_attempts(10)?.len(), 0);
     let state = reopened
         .load_state()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("notify_wal_delivered".to_owned()))?;
@@ -846,8 +846,8 @@ fn notify_wal_store_drops_bad_raw_wake_without_repeating() -> Result<(), Box<dyn
         store.queue_raw_wake_for_async_accept_async(b"{\"bad\":true}".to_vec(), 1_760_000_000),
     )?;
 
-    assert!(store.pending_entries_without_attempts(10)?.is_empty());
-    assert!(store.pending_entries_without_attempts(10)?.is_empty());
+    assert_eq!(store.pending_entries_without_attempts(10)?.len(), 0);
+    assert_eq!(store.pending_entries_without_attempts(10)?.len(), 0);
     let state = store
         .load_state()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("notify_raw_attempt".to_owned()))?;
@@ -858,7 +858,7 @@ fn notify_wal_store_drops_bad_raw_wake_without_repeating() -> Result<(), Box<dyn
     drop(store);
 
     let reopened = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
-    assert!(reopened.pending_entries_without_attempts(10)?.is_empty());
+    assert_eq!(reopened.pending_entries_without_attempts(10)?.len(), 0);
     let state = reopened
         .load_state()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("notify_raw_attempt_reopen".to_owned()))?;
@@ -967,7 +967,7 @@ fn relay_redb_incremental_tombstone_survives_restart() -> Result<(), Box<dyn std
     let payload = reopened
         .relay_chunk_entry("chunk_relay_1")?
         .ok_or_else(|| NodeCoreError::EnvelopeNotFound("chunk_relay_1".to_owned()))?;
-    assert!(payload.encrypted_chunk.is_empty());
+    assert_eq!(payload.encrypted_chunk.len(), 0);
     Ok(())
 }
 

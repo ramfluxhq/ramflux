@@ -1,4 +1,4 @@
-FROM rust:1.96 AS source-build
+FROM rust:1.99 AS source-build
 
 ARG BIN
 WORKDIR /workspace

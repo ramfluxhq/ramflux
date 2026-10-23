@@ -331,7 +331,7 @@ fn lifecycle_reactivate_appends_ordered_recovery_lineage_events()
         rejected_router.mvp7_apply_lifecycle_event(&forged_request),
         Err(NodeCoreError::Unauthorized(_))
     ));
-    assert!(rejected_router.identity_lineage_events("principal_recovery").is_empty());
+    assert_eq!(rejected_router.identity_lineage_events("principal_recovery").len(), 0);
     Ok(())
 }
 

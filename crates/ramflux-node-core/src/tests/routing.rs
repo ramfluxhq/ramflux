@@ -150,7 +150,7 @@ fn nack_after_ack_returns_existing_cursor_idempotently() -> Result<(), Box<dyn s
 
     let acked = inbox.apply_ack(&ack("env_ack_then_nack"))?;
     assert!(acked.acked_envelope_ids.contains("env_ack_then_nack"));
-    assert!(inbox.pull_after("target_a", 0, 10).is_empty());
+    assert_eq!(inbox.pull_after("target_a", 0, 10).len(), 0);
 
     let nacked = inbox.apply_nack(&nack("env_ack_then_nack", NackReason::RateLimited))?;
     assert_eq!(nacked.target_delivery_id, "target_a");
@@ -520,8 +520,8 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
     assert_eq!(delivery.nack.proof_hash.as_deref(), Some(migration.migration_proof_hash.as_str()));
     assert_eq!(delivery.nack.new_home_node_hint.as_deref(), Some("node_new_delivery.example"));
     assert_eq!(delivery.nack.signed.signing_key_id, "router:home_node_migration");
-    assert!(delivery.nack.signed.signature.is_empty());
-    assert!(router.resume(&request.target_delivery_id, 0, 10).is_empty());
+    assert_eq!(delivery.nack.signed.signature, "");
+    assert_eq!(router.resume(&request.target_delivery_id, 0, 10).len(), 0);
 
     let unmigrated = router.submit_envelope(envelope(
         "env_unmigrated_delivery",
@@ -568,7 +568,7 @@ fn home_node_migration_delivery_signs_nack_when_node_service_signer_is_configure
     };
     assert_eq!(delivery.proof_hash, migration.migration_proof_hash);
     assert_eq!(delivery.nack.signed.signing_key_id, signer.signing_key_id());
-    assert!(!delivery.nack.signed.signature.is_empty());
+    assert_ne!(delivery.nack.signed.signature, "");
     ramflux_protocol::verify_signed_fields(
         &delivery.nack,
         &delivery.nack.signed,
@@ -830,7 +830,7 @@ fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
         return Err(format!("expected fallback nack, got {outcome:?}").into());
     };
     assert_eq!(delivery.nack.reason, NackReason::HomeNodeMigrated);
-    assert!(!delivery.nack.signed.signature.is_empty());
+    assert_ne!(delivery.nack.signed.signature, "");
 
     let mut loop_guarded =
         envelope("env_forward_loop_guard", &request.target_delivery_id, DeliveryClass::OpaqueEvent);

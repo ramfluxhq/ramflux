@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(token.issuer_node_id, NODE_ID);
         assert_eq!(token.gateway_instance_id, GATEWAY_INSTANCE);
         assert_eq!(token.issuer_certificate_id, "cert-b-1");
-        assert!(!token.issuer_signature.is_empty());
+        assert_ne!(token.issuer_signature, "");
         // The issued token verifies against its own certificate chain and the pinned node root.
         ramflux_node_core::verify_relay_token_v3_with_certificate(
             &token,

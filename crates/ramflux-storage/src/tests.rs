@@ -278,7 +278,7 @@ fn mcp_grant_audit_and_tools_roundtrip() -> Result<(), StorageError> {
     })?;
     assert_eq!(db.load_mcp_tools::<TestMcpTool>()?, vec![tool.clone()]);
     db.remove_mcp_tool(&tool.server_id, &tool.tool_name)?;
-    assert!(db.load_mcp_tools::<TestMcpTool>()?.is_empty());
+    assert_eq!(db.load_mcp_tools::<TestMcpTool>()?.len(), 0);
 
     let standing = TestMcpGrant {
         grant_id: "standing_mcp_1".to_owned(),
@@ -494,7 +494,7 @@ fn object_share_grants_record_query_and_revoke_idempotently() -> Result<(), Stor
         .revoke_object_share_grant("object_grant_1", "principal_bob", 2_000)?
         .ok_or_else(|| StorageError::MessageNotFound("object_grant_1".to_owned()))?;
     assert_eq!(revoked.revoked_at, Some(2_000));
-    assert!(db.object_share_grants_for_recipients(&["principal_bob"])?.is_empty());
+    assert_eq!(db.object_share_grants_for_recipients(&["principal_bob"])?.len(), 0);
 
     let revoked_again = db
         .revoke_object_share_grant("object_grant_1", "principal_bob", 3_000)?
@@ -522,7 +522,7 @@ fn object_share_grant_reshare_clears_revocation() -> Result<(), StorageError> {
         .revoke_object_share_grant("object_grant_1", "principal_bob", 2_000)?
         .ok_or_else(|| StorageError::MessageNotFound("object_grant_1".to_owned()))?;
     assert_eq!(revoked.revoked_at, Some(2_000));
-    assert!(db.object_share_grants_for_recipients(&["principal_bob"])?.is_empty());
+    assert_eq!(db.object_share_grants_for_recipients(&["principal_bob"])?.len(), 0);
 
     let reshared =
         db.record_object_share_grant(&ObjectShareGrantWrite { shared_at: 4_000, ..write })?;
@@ -738,7 +738,7 @@ fn append_event_with_device_signer_writes_verifiable_signature() -> Result<(), S
     let (signature_bytes, status, created_at) = event_signature_status(&db, "evt_signed_1")?;
     let signature = String::from_utf8_lossy(&signature_bytes).into_owned();
     assert_eq!(status, "self");
-    assert!(!signature.is_empty());
+    assert_ne!(signature, "");
     assert!(created_at > 1_700_000_000);
     assert_ne!(created_at, 1_760_000_000);
 
@@ -778,7 +778,7 @@ fn history_import_verifies_event_signatures_and_rejects_forgery() -> Result<(), 
     source_db.append_event("evt_history_1", "test.history", b"history-body")?;
     let bundle = source_db.export_history_bundle("device", "target-device")?;
     assert_eq!(bundle.encrypted_event_batch.len(), 1);
-    assert!(!bundle.encrypted_event_batch[0].signature.is_empty());
+    assert_ne!(bundle.encrypted_event_batch[0].signature, "");
 
     let target_root = temp_root("history-target-signature");
     let target_index = AccountIndex::open(&target_root)?;

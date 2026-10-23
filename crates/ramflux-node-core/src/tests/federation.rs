@@ -94,7 +94,7 @@ fn federation_redb_store_spools_retries_and_expires_outbound_forward()
     assert_eq!(after_delivery.len(), 1);
     assert_eq!(after_delivery[0].seq, entry_b.seq);
     assert_eq!(reopened.expire_outbound_spool(111)?, 1);
-    assert!(reopened.list_pending_for_peer("node_b.example", 10)?.is_empty());
+    assert_eq!(reopened.list_pending_for_peer("node_b.example", 10)?.len(), 0);
     Ok(())
 }
 

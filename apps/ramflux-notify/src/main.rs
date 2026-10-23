@@ -3269,7 +3269,7 @@ mod tests {
         assert!(received.headers.contains_key("ramflux-push-alias-hash"));
         assert!(received.headers.contains_key("ramflux-collapse-key-hash"));
         assert_eq!(received.headers.get("content-encoding").map(String::as_str), Some("aes128gcm"));
-        assert!(!received.body.is_empty());
+        assert_ne!(received.body.len(), 0);
         for forbidden in
             [b"wake_dispatch".as_slice(), b"target:".as_slice(), b"encrypted_hint".as_slice()]
         {
