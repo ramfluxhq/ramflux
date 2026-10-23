@@ -22,6 +22,12 @@ impl RamfluxClient {
         } else {
             view["snapshot"] = Value::Null;
         }
+        if let (Some(author), Some(text)) =
+            (view["author_principal_id"].as_str(), view["fallback_text"].as_str())
+        {
+            let rendered = super::fallback::render(author, text);
+            view["fallback_text"] = json!(rendered);
+        }
         let prefix = key("history", id) + "/";
         let mut history: Vec<Value> =
             db.surface_history_page(&prefix, &format!("{prefix}{history_after:020}"), 101)?;
@@ -107,17 +113,20 @@ impl RamfluxClient {
             .as_str()
             .ok_or_else(|| invalid("surface message binding absent"))?;
         let current = db.client_record("surface", id)?;
-        let text = if reference["accepted"] == true {
-            current
-                .as_ref()
-                .and_then(|v| v.get("fallback_text"))
-                .or_else(|| reference.get("fallback_text"))
-        } else {
-            reference.get("fallback_text")
-        };
+        if reference["accepted"] == true
+            && let Some(view) = &current
+            && let (Some(author), Some(text)) =
+                (view["author_principal_id"].as_str(), view["fallback_text"].as_str())
+        {
+            return Ok(Some((id.to_owned(), super::fallback::render(author, text))));
+        }
+        if reference["accepted"] == true {
+            return Ok(Some((id.to_owned(), "[Surface unavailable]".into())));
+        }
+        // Rejected receipts contain only fixed local text.
         Ok(Some((
             id.to_owned(),
-            text.and_then(Value::as_str).unwrap_or("[Surface unavailable]").to_owned(),
+            reference["fallback_text"].as_str().unwrap_or("[Surface unavailable]").to_owned(),
         )))
     }
 }
