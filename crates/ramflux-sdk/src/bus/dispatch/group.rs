@@ -957,11 +957,16 @@ pub(crate) async fn dispatch_group_receive_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
+    super::super::sync_driver::run(account).await?;
     let mut engine = account.take_live_engine().await?;
     let receive_result = async {
-        let after_inbox_seq = account.client.gateway_receive_cursor(engine.target_delivery_id())?;
-        let mut entries = engine.resume_after(after_inbox_seq, body.limit).await?;
-        entries.retain(|entry| entry.inbox_seq > after_inbox_seq);
+        let mut entries = Vec::<GatewayInboxEntry>::new();
+        for bytes in account.client.account_db()?.unrouted_entries()? {
+            let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
+            if !entries.iter().any(|e| e.envelope.envelope_id == entry.envelope.envelope_id) {
+                entries.push(entry);
+            }
+        }
         entries.sort_by_key(|entry| entry.inbox_seq);
         let mut gateway_entries = Vec::new();
         let mut decrypted = Vec::new();
@@ -1076,6 +1081,19 @@ pub(crate) async fn dispatch_group_receive_request(
                     &pending.plaintext,
                 ));
             }
+        }
+        for entry in &gateway_entries {
+            let device = engine.config.device_id.clone();
+            account
+                .client
+                .ack_gateway_delivery(
+                    &mut engine,
+                    &entry.envelope.envelope_id,
+                    &device,
+                    now_unix_timestamp(),
+                )
+                .await?;
+            account.client.account_db()?.remove_unrouted(&entry.envelope.envelope_id)?;
         }
         Ok::<_, SdkError>((gateway_entries, decrypted, sender_key_distributions))
     }

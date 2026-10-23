@@ -147,7 +147,9 @@ impl AccountRuntime {
             let Some(command) = command else {
                 break;
             };
-            let sent = matches!(command.request.method.rsplit('.').next(), Some("send" | "submit"));
+            let sent = matches!(command.request.method.rsplit('.').next(), Some("send" | "submit"))
+                || command.request.method == "a2i.append"
+                || command.request.method.starts_with("message.receipt.");
             if Box::pin(self.apply(command)).await? {
                 break;
             }

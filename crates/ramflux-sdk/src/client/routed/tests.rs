@@ -362,3 +362,135 @@ async fn group_message_before_distribution_keeps_content_retryable() -> Result<(
     assert_eq!(b.client.account_db()?.group_pending_undecrypted_count("pending-group")?, 0);
     Ok(())
 }
+
+struct ReceivingGateway {
+    queued: VecDeque<GatewayServerFrame>,
+    entry: Option<GatewayInboxEntry>,
+    last: Option<GatewayClientFrame>,
+    reader: AccountDb,
+    acks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl ramflux_transport::GatewaySessionFrameSink for ReceivingGateway {
+    fn send_frame<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<(), ramflux_transport::TransportError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let frame: GatewayClientFrame = serde_json::from_slice(bytes)
+                .map_err(|e| ramflux_transport::TransportError::Quic(e.to_string()))?;
+            if let GatewayClientFrame::Ack { ack } = &frame {
+                assert!(
+                    self.reader
+                        .load_actor_state::<Routing>(&format!(
+                            "routed/committed/{}",
+                            ack.envelope_id
+                        ))
+                        .map_err(|e| ramflux_transport::TransportError::Quic(e.to_string()))?
+                        .is_some(),
+                    "ACK preceded the durable receive commit"
+                );
+                self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.last = Some(frame);
+            Ok(())
+        })
+    }
+    fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
+        Ok(())
+    }
+}
+impl ramflux_transport::GatewaySessionFrameSource for ReceivingGateway {
+    fn recv_frame(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<Vec<u8>, ramflux_transport::TransportError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            if let Some(frame) = self.queued.pop_front() {
+                return serde_json::to_vec(&frame)
+                    .map_err(|e| ramflux_transport::TransportError::Quic(e.to_string()));
+            }
+            let frame = match self.last.take() {
+                Some(GatewayClientFrame::Heartbeat { now }) => {
+                    GatewayServerFrame::Heartbeat { now }
+                }
+                Some(GatewayClientFrame::Resume { .. }) => {
+                    GatewayServerFrame::Resume { entries: self.entry.take().into_iter().collect() }
+                }
+                Some(GatewayClientFrame::Ack { ack }) => {
+                    self.queued.push_back(GatewayServerFrame::Cursor { cursor: None });
+                    GatewayServerFrame::Ack {
+                        cursor: GatewayCursor {
+                            target_delivery_id: "bob".to_owned(),
+                            inbox_seq: 1,
+                            last_envelope_id: Some(ack.envelope_id.clone()),
+                            acked_envelope_ids: vec![ack.envelope_id],
+                            nacked_envelope_ids: BTreeMap::new(),
+                        },
+                    }
+                }
+                _ => GatewayServerFrame::Nack { reason: "unexpected frame".to_owned() },
+            };
+            serde_json::to_vec(&frame)
+                .map_err(|e| ramflux_transport::TransportError::Quic(e.to_string()))
+        })
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn compatibility_receive_acks_after_commit_and_returns_cached_plaintext()
+-> Result<(), SdkError> {
+    let a = Fixture::new("alice", 161)?;
+    let mut b = Fixture::new("bob", 171)?;
+    b.client.account_db()?.establish_friend_link("link", "bob", "alice")?;
+    let entry =
+        seal(&a, &b, message("compat-first", "compat-conversation"), b"compatibility plaintext")?;
+    let acks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine = GatewaySessionEngine::with_test_transport(
+        b.config()?,
+        Box::new(ReceivingGateway {
+            queued: VecDeque::new(),
+            entry: Some(entry),
+            last: None,
+            reader: b.client.account_db()?.open_reader()?,
+            acks: std::sync::Arc::clone(&acks),
+        }),
+    );
+    let client = std::mem::replace(&mut b.client, RamfluxClient::new());
+    let mut state = LocalBusDaemonState {
+        config: LocalBusConfig::new(b.root.join("bus.sock"), &b.root),
+        nodes: crate::node::NodeStore::default(),
+        account_index: None,
+        accounts: BTreeMap::from([(
+            "bob".to_owned(),
+            LocalBusAccountState::new(client, engine, "commitment".to_owned()),
+        )]),
+        active_account_id: Some("bob".to_owned()),
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    let connection = LocalBusConnectionState::new(1, tx);
+    let request = LocalBusFrame::request(
+        "receive",
+        Some("bob".to_owned()),
+        "message",
+        "message.receive",
+        serde_json::json!({"conversation_id":"compat-conversation","limit":10}),
+    );
+    for _ in 0..2 {
+        let reply = crate::bus::dispatch::message::dispatch_message_receive_request(
+            &request,
+            &mut state,
+            &connection,
+        )
+        .await?;
+        assert_eq!(
+            reply.response_body["decrypted_messages"][0]["plaintext_body_base64"],
+            ramflux_protocol::encode_base64url(b"compatibility plaintext")
+        );
+        assert_eq!(acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    Ok(())
+}

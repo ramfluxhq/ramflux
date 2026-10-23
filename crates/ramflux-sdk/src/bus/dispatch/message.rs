@@ -554,70 +554,135 @@ pub(crate) async fn dispatch_message_receive_request(
     let account_id = request_account_id(request)?;
     let body: LocalBusMessageReceiveRequest = serde_json::from_value(request.body.clone())?;
     let account = local_bus_account_mut(state, account_id)?;
-    let mut engine = account.take_live_engine().await?;
-    let pool = account.relay_quic_pool()?;
-    let receive_result = async {
-        let plaintext = if let Some(conversation_id) = body.conversation_id.as_deref() {
-            account
-                .client
-                .receive_gateway_plaintext_deliveries(
-                    &mut engine,
-                    &pool,
-                    body.limit,
-                    conversation_id,
-                    body.auto_fetch_attachments,
-                    body.relay_service_key_base64.clone(),
-                )
-                .await?
-        } else {
-            Vec::new()
-        };
-        let entries = if body.conversation_id.is_none() && plaintext.is_empty() {
-            account.client.receive_gateway_deliveries(&mut engine, body.limit).await?
-        } else {
-            plaintext.iter().map(|delivery| delivery.entry.clone()).collect()
-        };
-        Ok::<_, SdkError>((plaintext, entries))
-    }
-    .await;
-    account.put_engine(engine);
-    let (mut plaintext, entries) = receive_result?;
+    let before = account
+        .pending_deliveries
+        .iter()
+        .map(|entry| entry.envelope.envelope_id.clone())
+        .collect::<BTreeSet<_>>();
+    super::super::sync_driver::run(account).await?;
+    receive_bound_legacy(account, &body).await?;
+    let mut plaintext = Vec::new();
     if let Some(conversation) = body.conversation_id.as_deref() {
-        for entry in &account.pending_deliveries {
-            if !plaintext.iter().any(|p| p.message_id == entry.envelope.envelope_id)
-                && let Some(route) = account
-                    .client
-                    .account_db()?
-                    .load_actor_state::<crate::client::routed::Routing>(&format!(
-                        "routed/committed/{}",
-                        entry.envelope.envelope_id
-                    ))?
-                && route.kind == crate::client::routed::Kind::Direct
-                && route.conversation_id == conversation
-                && let Some(message) =
+        for entry in account.pending_deliveries.iter().take(body.limit.min(64)) {
+            let id = &entry.envelope.envelope_id;
+            let route =
+                account.client.account_db()?.load_actor_state::<crate::client::routed::Routing>(
+                    &format!("routed/committed/{id}"),
+                )?;
+            let legacy = account
+                .client
+                .account_db()?
+                .load_actor_state::<String>(&format!("legacy/committed/{id}"))?;
+            let matching = route.is_some_and(|route| {
+                route.kind == crate::client::routed::Kind::Direct
+                    && route.conversation_id == conversation
+            }) || legacy.as_deref() == Some(conversation);
+            if matching
+                && let Some(mut delivery) =
                     account.client.plaintext_projection_delivery(conversation, entry)?
             {
-                plaintext.push(message);
+                if body.auto_fetch_attachments {
+                    delivery.attachments =
+                        compat_attachments(&account.client, &delivery.message_id)?;
+                }
+                plaintext.push(delivery);
             }
         }
     }
-    let fresh = account.merge_deliveries(entries)?;
-    let event = if fresh.is_empty() {
-        None
-    } else {
-        Some(local_bus_event(
+    let fresh = account
+        .pending_deliveries
+        .iter()
+        .filter(|entry| !before.contains(&entry.envelope.envelope_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let event = (!fresh.is_empty()).then(|| {
+        local_bus_event(
             request,
             account_id,
             "gateway",
             "gateway.deliver",
-            serde_json::json!({ "entries": fresh }),
-        ))
-    };
+            serde_json::json!({"entries":fresh}),
+        )
+    });
     Ok(LocalBusDispatchResult {
-        response_body: serde_json::json!({
-            "entries": account.pending_page(body.limit),
-            "decrypted_messages": plaintext,
-        }),
+        response_body: serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext}),
         event,
     })
+}
+
+async fn receive_bound_legacy(
+    account: &mut LocalBusAccountState,
+    body: &LocalBusMessageReceiveRequest,
+) -> Result<(), SdkError> {
+    let held = account
+        .client
+        .account_db()?
+        .unrouted_entries()?
+        .into_iter()
+        .map(|bytes| serde_json::from_slice::<GatewayInboxEntry>(&bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(conversation) = body.conversation_id.as_deref() else {
+        account.merge_deliveries(held)?;
+        return Ok(());
+    };
+    if held.is_empty() {
+        return Ok(());
+    }
+    let pool = account.relay_quic_pool()?;
+    let mut engine = account.take_live_engine().await?;
+    let result = async {
+        for entry in held {
+            account
+                .client
+                .receive_legacy_entry(
+                    &mut engine,
+                    &pool,
+                    entry.clone(),
+                    crate::client::dm::LegacyReceive {
+                        conversation_id: conversation,
+                        auto_fetch_attachments: true,
+                        relay_service_key_base64: body.relay_service_key_base64.clone(),
+                    },
+                )
+                .await?;
+            let device = engine.config.device_id.clone();
+            account
+                .client
+                .ack_gateway_delivery(
+                    &mut engine,
+                    &entry.envelope.envelope_id,
+                    &device,
+                    now_unix_timestamp(),
+                )
+                .await?;
+            account.client.account_db()?.remove_unrouted(&entry.envelope.envelope_id)?;
+            account.merge_deliveries(vec![entry])?;
+        }
+        Ok::<(), SdkError>(())
+    }
+    .await;
+    account.put_engine(engine);
+    result
+}
+
+fn compat_attachments(
+    client: &RamfluxClient,
+    message: &str,
+) -> Result<Vec<SdkDmAttachmentImportResult>, SdkError> {
+    let mut attachments = Vec::new();
+    for id in client.account_db()?.client_message_object_ids(message)? {
+        let Some(object) = client.object_store_object(&id)?.filter(|object| !object.tombstoned)
+        else {
+            continue;
+        };
+        let plaintext = client.decrypt_object(&id)?;
+        attachments.push(SdkDmAttachmentImportResult {
+            object_id: id,
+            manifest_hash: object.manifest_hash,
+            plaintext_hash: object.plaintext_hash,
+            plaintext_base64: ramflux_protocol::encode_base64url(&plaintext),
+            imported: true,
+        });
+    }
+    Ok(attachments)
 }
