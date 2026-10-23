@@ -169,15 +169,8 @@ pub fn verify_federation_server_record(
     if record.node_ca_cert_pem.trim().is_empty() {
         return Err(NodeCoreError::ItestHttp("federation discovery record missing CA".to_owned()));
     }
-    let allowed_clock_skew = 300_u64;
-    if record.expires_at.saturating_add(allowed_clock_skew) < now {
-        return Err(NodeCoreError::ItestHttp("federation discovery record expired".to_owned()));
-    }
-    if record.updated_at > now.saturating_add(allowed_clock_skew) {
-        return Err(NodeCoreError::ItestHttp(
-            "federation discovery record issued in the future".to_owned(),
-        ));
-    }
+    ramflux_protocol::verify_discovery_freshness(record.updated_at, record.expires_at, now)
+        .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
     let signed_bytes = ramflux_protocol::signed_bytes(record)
         .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
     ramflux_crypto::verify_canonical_signature(

@@ -93,6 +93,10 @@ pub(crate) fn handle_admin_request(
                 }),
             )?;
         }
+        ("GET", "/.well-known/ramflux/client") => {
+            let record = discovery.client_record()?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &record)?;
+        }
         ("GET", "/.well-known/ramflux/server") => {
             let record = discovery.well_known_record()?;
             log_admin_well_known(&record);

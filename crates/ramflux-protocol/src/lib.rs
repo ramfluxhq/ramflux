@@ -4,6 +4,8 @@
 //! Ramflux C1 protocol types, canonical JSON, and fixture helpers.
 
 mod canonical_json;
+pub mod client_discovery;
+pub use client_discovery::*;
 mod core_types;
 pub mod domain;
 mod encoding;

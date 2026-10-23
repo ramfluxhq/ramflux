@@ -199,6 +199,61 @@ pub(crate) fn federation_node_signing_seed(
 }
 
 impl FederationDiscoverySurface {
+    pub(crate) fn client_record(
+        &self,
+    ) -> Result<ramflux_protocol::WellKnownClientRecord, ramflux_node_core::NodeCoreError> {
+        let now = now_unix_seconds()?;
+        let value = |name: &str, fallback: String| non_empty_env(name).unwrap_or(fallback);
+        let mut record = ramflux_protocol::WellKnownClientRecord {
+            schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
+            node_id: self.node_id.clone(),
+            node_public_key: self.node_public_key.clone(),
+            node_ca_cert_pem: self.node_ca_cert_pem.clone(),
+            gateway_quic_addr: value(
+                "RAMFLUX_CLIENT_GATEWAY_QUIC_ADDR",
+                format!("{}:443", self.node_id),
+            ),
+            gateway_tcp_addr: value(
+                "RAMFLUX_CLIENT_GATEWAY_TCP_ADDR",
+                format!("{}:443", self.node_id),
+            ),
+            gateway_server_name: value(
+                "RAMFLUX_CLIENT_GATEWAY_SERVER_NAME",
+                "ramflux-gateway".to_owned(),
+            ),
+            relay_quic_addr: value(
+                "RAMFLUX_CLIENT_RELAY_QUIC_ADDR",
+                format!("{}:17447", self.node_id),
+            ),
+            relay_server_name: value(
+                "RAMFLUX_CLIENT_RELAY_SERVER_NAME",
+                "ramflux-relay".to_owned(),
+            ),
+            prekey_http_url: value(
+                "RAMFLUX_CLIENT_PREKEY_HTTP_URL",
+                format!("https://{}", self.node_id),
+            ),
+            signaling_turn_addr: value(
+                "RAMFLUX_CLIENT_SIGNALING_TURN_ADDR",
+                format!("{}:3478", self.node_id),
+            ),
+            protocol_versions: self.protocol_versions.clone(),
+            client_capabilities: vec![
+                "opaque_delivery".to_owned(),
+                "prekey".to_owned(),
+                "object_relay".to_owned(),
+            ],
+            updated_at: now,
+            expires_at: now.saturating_add(ramflux_protocol::DISCOVERY_MAX_CACHE_TTL_SECONDS),
+            signature: String::new(),
+        };
+        let bytes = ramflux_protocol::client_discovery_signing_bytes(&record)
+            .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+        record.signature =
+            ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, self.node_signing_seed);
+        Ok(record)
+    }
+
     pub(crate) fn well_known_record(
         &self,
     ) -> Result<ramflux_node_core::FederationServerRecord, ramflux_node_core::NodeCoreError> {
