@@ -266,6 +266,13 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     let inner = a.client.encrypt_group_message(group, "alice", b"second group message")?;
     let next = seal(&a, &b, super::tests::message("group-next", conversation), &inner)?;
     assert!(b.client.apply_routed_entry(&mut engine, &pool, &next, false).await.is_err());
+    let direct = seal(
+        &a,
+        &b,
+        super::tests::message("direct-kind-conflict", conversation),
+        b"not a group ciphertext",
+    )?;
+    assert!(b.client.apply_routed_entry(&mut engine, &pool, &direct, false).await.is_err());
     Ok(())
 }
 

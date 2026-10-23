@@ -30,7 +30,7 @@ impl RamfluxClient {
             return Ok(Delivery { routing, plaintext });
         }
         let opened = self.open_routed(entry, &engine.config.device_id)?;
-        self.confirm_routed_group(&opened.routing)?;
+        self.confirm_routed_context(&opened.routing)?;
         let (body, refs) = if opened.routing.kind == Kind::Direct {
             decode_dm_attachment_body(&opened.body)?
         } else {
@@ -144,7 +144,27 @@ impl RamfluxClient {
         Ok(plaintext)
     }
 
-    fn confirm_routed_group(&self, route: &Routing) -> Result<(), SdkError> {
+    fn confirm_routed_context(&self, route: &Routing) -> Result<(), SdkError> {
+        if let Some(conversation) =
+            self.account_db()?.client_record("conversation", &route.conversation_id)?
+        {
+            let kind = conversation.get("kind").and_then(serde_json::Value::as_str);
+            if (route.kind == Kind::Direct && kind == Some("group"))
+                || (matches!(route.kind, Kind::GroupMessage | Kind::GroupControl)
+                    && kind == Some("direct"))
+            {
+                return Err(invalid(
+                    "authenticated routing kind conflicts with local conversation",
+                ));
+            }
+            if matches!(route.kind, Kind::GroupMessage | Kind::GroupControl)
+                && let Some(group) =
+                    conversation.get("group_id").and_then(serde_json::Value::as_str)
+                && Some(group) != route.group_id.as_deref()
+            {
+                return Err(invalid("authenticated group conflicts with local conversation"));
+            }
+        }
         if let Some(group) = route.group_id.as_deref()
             && let Some(link) = self.account_db()?.client_record("group", group)?
             && let Some(conversation) =

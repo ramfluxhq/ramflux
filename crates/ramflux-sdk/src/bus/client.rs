@@ -52,6 +52,7 @@ impl LocalBusClient {
         let (disconnected, mut writer_disconnect) = watch::channel(false);
         let reader_pending = Arc::clone(&pending);
         let reader_task = tokio::spawn(async move {
+            let mut last_seq = 0;
             loop {
                 let frame = match read_local_bus_frame(&mut reader).await {
                     Ok(frame) => frame,
@@ -68,7 +69,13 @@ impl LocalBusClient {
                         frame.kind, frame.method, frame.request_id
                     ),
                 );
-                if !route_received(frame, &events, &reader_pending, &reader_connected) {
+                if !route_received(
+                    frame,
+                    &events,
+                    &reader_pending,
+                    &reader_connected,
+                    &mut last_seq,
+                ) {
                     break;
                 }
             }
@@ -254,6 +261,7 @@ fn route_received(
     events: &mpsc::Sender<LocalBusFrame>,
     reader_pending: &Pending,
     reader_connected: &AtomicBool,
+    last_seq: &mut u64,
 ) -> bool {
     if !matches!(
         frame.kind,
@@ -272,11 +280,7 @@ fn route_received(
                 "bus.subscribe",
                 serde_json::json!({}),
             );
-            super::subscription::lagged(
-                events,
-                &request,
-                frame.seq.unwrap_or_default().saturating_sub(1),
-            );
+            super::subscription::lagged(events, &request, *last_seq);
             reader_connected.store(false, Ordering::Release);
             fail_pending(
                 reader_pending,
@@ -284,10 +288,14 @@ fn route_received(
             );
             return false;
         }
+        let seq = frame.seq;
         if events.try_send(frame).is_err() {
             reader_connected.store(false, Ordering::Release);
             fail_pending(reader_pending, "local bus event queue overflow");
             return false;
+        }
+        if let Some(seq) = seq {
+            *last_seq = seq;
         }
     } else if let Ok(mut pending) = reader_pending.lock() {
         if let Some(reply) = pending.remove(&frame.request_id) {
@@ -326,6 +334,51 @@ mod secret_tests {
         frame.body = serde_json::json!({"passphrase":"x".repeat(2*1024*1024)});
         assert!(encode_owned_body(&mut frame).is_err());
         assert_eq!(frame.body, serde_json::Value::Null);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    #[test]
+    fn local_overflow_reports_actual_delivered_sequence_for_filtered_topics() -> Result<(), SdkError>
+    {
+        let (tx, mut rx) = mpsc::channel(3);
+        let pending = Arc::new(PendingMutex::new(BTreeMap::new()));
+        let connected = AtomicBool::new(true);
+        let mut last = 0;
+        for seq in [10, 40] {
+            let frame = LocalBusFrame {
+                kind: LocalBusFrameKind::Event,
+                seq: Some(seq),
+                ..LocalBusFrame::request(
+                    "event",
+                    Some("a".to_owned()),
+                    "stream",
+                    "message.received",
+                    serde_json::json!({}),
+                )
+            };
+            assert!(route_received(frame, &tx, &pending, &connected, &mut last));
+        }
+        let frame = LocalBusFrame {
+            kind: LocalBusFrameKind::Event,
+            seq: Some(90),
+            ..LocalBusFrame::request(
+                "overflow",
+                Some("a".to_owned()),
+                "stream",
+                "message.received",
+                serde_json::json!({}),
+            )
+        };
+        assert!(!route_received(frame, &tx, &pending, &connected, &mut last));
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.seq, Some(10));
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.seq, Some(40));
+        let lagged = rx.try_recv().map_err(|_| closed())?;
+        assert_eq!(lagged.method, "stream.lagged");
+        assert_eq!(lagged.body["last_delivered_seq"], 40);
         Ok(())
     }
 }

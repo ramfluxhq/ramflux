@@ -6,7 +6,7 @@ use super::supervisor::Supervisor;
 use crate::prelude::*;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -73,10 +73,13 @@ impl GatewaySessionFrameSource for Gateway {
 }
 
 fn root(name: &str) -> PathBuf {
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
-    PathBuf::from("/tmp").join(format!("ramflux-actor-{name}-{}-{unique}", std::process::id()))
+    PathBuf::from("/tmp")
+        .join(format!("ramflux-actor-{name}-{}-{sequence}-{unique}", std::process::id()))
 }
 fn account(
     root: &Path,
@@ -190,7 +193,8 @@ async fn client(
     let path = root("socket");
     std::fs::create_dir_all(&path)?;
     let socket = path.join("bus.sock");
-    let listener = UnixListener::bind(&socket)?;
+    let listener = UnixListener::bind(&socket)
+        .map_err(|error| failure(&format!("test socket bind {}: {error}", socket.display())))?;
     let client = LocalBusClient::connect(&socket).await?;
     let (stream, _) = listener.accept().await?;
     let task = tokio::task::spawn_local(super::connection::handle(stream, supervisor, id));
