@@ -310,3 +310,52 @@ fn only_the_final_atomic_snapshot_is_budgeted() {
     ];
     assert_eq!(state.apply(&patch(&state, ops, &after)).unwrap().content(), Some(&after));
 }
+
+#[test]
+fn result_patch_updates_fallback_and_binds_it_into_the_snapshot_hash() {
+    let state = created();
+    let mut result_only = state.content().unwrap().clone();
+    result_only.components[0]["text"] = json!("Result ready");
+    let mut after = result_only.clone();
+    after.fallback_text = "Completed: result ready".into();
+    let ops = vec![
+        SurfacePatchOp::ReplaceBlock { component: after.components[0].clone() },
+        SurfacePatchOp::SetFallbackText { fallback_text: after.fallback_text.clone() },
+    ];
+    let event = patch(&state, ops, &after);
+    let next = state.apply(&event).unwrap();
+    assert_eq!(next.content().unwrap().fallback_text, "Completed: result ready");
+    assert_eq!(next.content().unwrap().components[0]["text"], "Result ready");
+    assert_ne!(next.hash(), state.hash());
+    assert_eq!(next.hash(), Some(surface_snapshot_hash(&after).unwrap().as_str()));
+    assert_ne!(
+        surface_snapshot_hash(&after).unwrap(),
+        surface_snapshot_hash(&result_only).unwrap()
+    );
+    let wrong_digest = edit_event(&event, |v| {
+        v["command"]["newSurfaceHash"] = json!(surface_snapshot_hash(&result_only).unwrap());
+    });
+    assert_eq!(state.apply(&wrong_digest), Err(SurfaceReject::ResultHashMismatch));
+    for (text, error) in [
+        (" ".into(), SurfaceReject::MissingFallback),
+        (
+            "x".repeat(MAX_SURFACE_TEXT_CHARS + 1),
+            SurfaceReject::LimitExceeded { limit: SurfaceLimit::TextCharacters },
+        ),
+        (
+            "𐀀".repeat(MAX_SURFACE_TEXT_CHARS),
+            SurfaceReject::LimitExceeded { limit: SurfaceLimit::DataBytes },
+        ),
+    ] {
+        let mut after = state.content().unwrap().clone();
+        after.fallback_text = text.clone();
+        assert_eq!(
+            state.apply(&patch(
+                &state,
+                vec![SurfacePatchOp::SetFallbackText { fallback_text: text }],
+                &after
+            )),
+            Err(error)
+        );
+    }
+}

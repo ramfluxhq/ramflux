@@ -179,6 +179,7 @@ pub enum SurfacePatchOp {
     InsertBlock { index: usize, component: Value },
     RemoveBlock { component_id: String },
     SetActions { actions: Vec<Value> },
+    SetFallbackText { fallback_text: String },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

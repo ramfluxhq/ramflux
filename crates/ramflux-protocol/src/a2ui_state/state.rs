@@ -250,6 +250,9 @@ fn patch_one(content: &mut CreateSurfaceCommand, op: &SurfacePatchOp) -> Result<
         }
         SurfacePatchOp::RemoveBlock { component_id } => remove(content, component_id)?,
         SurfacePatchOp::SetActions { actions } => content.allowed_actions.clone_from(actions),
+        SurfacePatchOp::SetFallbackText { fallback_text } => {
+            content.fallback_text.clone_from(fallback_text);
+        }
     }
     Ok(())
 }
