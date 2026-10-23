@@ -14,19 +14,19 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SurfaceState {
-    content: Option<CreateSurfaceCommand>,
-    hash: Option<String>,
-    conversation_id: Option<String>,
-    version: u64,
-    closed: bool,
-    final_components: BTreeMap<Arc<str>, Arc<FinalText>>,
+    pub(super) content: Option<CreateSurfaceCommand>,
+    pub(super) hash: Option<String>,
+    pub(super) conversation_id: Option<String>,
+    pub(super) version: u64,
+    pub(super) closed: bool,
+    pub(super) final_components: BTreeMap<Arc<str>, Arc<FinalText>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FinalText {
-    nested: bool,
-    text: String,
+pub(super) struct FinalText {
+    pub(super) nested: bool,
+    pub(super) text: String,
 }
-fn stream_text(component: &Value) -> Option<(bool, &str)> {
+pub(super) fn stream_text(component: &Value) -> Option<(bool, &str)> {
     if let Some(value) = component.get("text") {
         value.as_str().map(|text| (false, text))
     } else {

@@ -13,6 +13,7 @@ pub mod group;
 pub mod message;
 pub mod node;
 pub mod object;
+pub(crate) mod surface;
 
 pub(crate) use a2i_a2ui::*;
 pub(crate) use account::*;
