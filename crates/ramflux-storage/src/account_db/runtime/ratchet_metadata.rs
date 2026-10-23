@@ -24,6 +24,13 @@ impl AccountDb {
             .query_map(params![local, remote], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    /// Recovers the original start of a legacy pending reset from retained journal evidence.
+    /// # Errors
+    /// Returns SQLite errors; missing evidence is explicit rather than renewing the lifetime.
+    pub fn legacy_pair_reset_first_at(&self, pair: &str) -> Result<Option<i64>, StorageError> {
+        let prefix = format!("pair-reset-attempt:dm-pair/reset-work/{pair}:");
+        Ok(self.connection.query_row("SELECT max(at) FROM runtime_journal WHERE substr(source_key,1,length(?1))=?1 AND json_extract(CAST(body_json AS TEXT),'$.attempt')=1",params![prefix],|row|row.get(0))?)
+    }
     /// Prunes flags for erased sessions and keeps at most eight recent tombstones per pair.
     /// Legacy tombstones lacking an owner share one bounded upgrade bucket.
     /// # Errors

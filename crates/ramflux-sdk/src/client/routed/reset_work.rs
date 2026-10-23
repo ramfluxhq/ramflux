@@ -91,12 +91,12 @@ impl RamfluxClient {
         let work = self.account_db()?.list_actor_states::<ResetWork>("dm-pair/reset-work/")?;
         let local = engine.config.device_id.clone();
         let mut attempted = false;
-        for item in work.into_iter().filter(|work| work.local == local) {
+        for mut item in work.into_iter().filter(|work| work.local == local) {
             if !self.pair_recovery_allowed(&item.local, &item.remote)? {
                 self.remove_device_pair(&item.remote, "retry_relationship_ended")?;
                 continue;
             }
-            let first = self.reset_first_at(&item)?;
+            let first = self.normalize_reset_work(&mut item)?;
             if at >= first.saturating_add(MAX_RESET_LIFETIME) {
                 self.mark_pair_manual(&item.local, &item.remote, at)?;
                 continue;

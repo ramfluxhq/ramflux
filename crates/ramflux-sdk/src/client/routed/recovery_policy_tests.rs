@@ -279,3 +279,42 @@ async fn evicted_packets_older_than_a_confirmed_successor_are_dropped_without_re
     assert_eq!(archive(&bob, "alice")?, previous);
     Ok(())
 }
+
+#[tokio::test]
+async fn upgrading_legacy_work_uses_its_original_attempt_instead_of_renewing_from_the_last_retry()
+-> Result<(), SdkError> {
+    for retained_start in [true, false] {
+        let mut alice = Fixture::new("alice", 41)?;
+        let mut bob = Fixture::new("bob", 61)?;
+        settle(&mut alice, &mut bob).await?;
+        let now = now_unix_timestamp();
+        assert!(bob.client.begin_pair_recovery("bob", "alice", now)?);
+        let db = bob.client.account_db()?;
+        let mut legacy =
+            db.load_actor_state::<serde_json::Value>(&work()?)?.ok_or_else(|| invalid("work"))?;
+        let _ = legacy.as_object_mut().ok_or_else(|| invalid("work object"))?.remove("first_at");
+        legacy["next_at"] = serde_json::json!(now + 300);
+        db.persist_actor_state(&work()?, &legacy)?;
+        let first = now - 7 * 86400;
+        if retained_start {
+            db.append_journal(
+                &format!("pair-reset-attempt:{}:{first}", work()?),
+                "session.reset",
+                &serde_json::json!({"device_id":"alice","attempt":1}),
+                first,
+                None,
+            )?;
+        }
+        let (mut be, sent) = Wire::engine(&bob, &alice)?;
+        bob.client.retry_pair_resets(&mut be, now).await?;
+        assert!(!has_work(&bob)?);
+        assert!(
+            bob.client
+                .account_db()?
+                .load_actor_state::<serde_json::Value>(&format!("{}/manual", pair()?))?
+                .is_some()
+        );
+        assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
+    }
+    Ok(())
+}

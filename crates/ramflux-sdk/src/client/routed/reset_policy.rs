@@ -20,17 +20,21 @@ pub(super) fn work_key(local: &str, remote: &str) -> Result<String, SdkError> {
     Ok(format!("dm-pair/reset-work/{}", pair_key(local, remote)?))
 }
 impl RamfluxClient {
-    pub(super) fn reset_first_at(&self, work: &ResetWork) -> Result<i64, SdkError> {
-        // Upgrade older work records conservatively from its persisted last attempt, never from each tick.
-        Ok(work.first_at.unwrap_or(
-            self.account_db()?
-                .load_actor_state::<i64>(&format!(
-                    "{}/reset-at",
-                    pair_key(&work.local, &work.remote)?
-                ))?
-                .unwrap_or(0),
-        ))
+    pub(super) fn normalize_reset_work(&self, work: &mut ResetWork) -> Result<i64, SdkError> {
+        if let Some(first) = work.first_at {
+            return Ok(first);
+        }
+        // Legacy work predates first_at. Never mistake a recent retry for its creation time.
+        // If retention removed the original attempt, fail closed to manual recovery.
+        let first = self
+            .account_db()?
+            .legacy_pair_reset_first_at(&pair_key(&work.local, &work.remote)?)?
+            .unwrap_or(0);
+        work.first_at = Some(first);
+        self.account_db()?.persist_actor_state(&work_key(&work.local, &work.remote)?, work)?;
+        Ok(first)
     }
+
     pub(super) fn begin_pair_recovery(
         &self,
         local: &str,
@@ -43,9 +47,9 @@ impl RamfluxClient {
             return Ok(false);
         }
         let key = work_key(local, remote)?;
-        let existing = db.load_actor_state::<ResetWork>(&key)?;
-        if let Some(work) = &existing
-            && at >= self.reset_first_at(work)?.saturating_add(MAX_RESET_LIFETIME)
+        let mut existing = db.load_actor_state::<ResetWork>(&key)?;
+        if let Some(work) = &mut existing
+            && at >= self.normalize_reset_work(work)?.saturating_add(MAX_RESET_LIFETIME)
         {
             self.mark_pair_manual(local, remote, at)?;
             return Ok(false);
@@ -81,8 +85,7 @@ impl RamfluxClient {
                 }
                 db.remove_actor_state(&pair)?;
             }
-            let first =
-                existing.as_ref().map(|work| self.reset_first_at(work)).transpose()?.unwrap_or(at);
+            let first = existing.as_ref().and_then(|work| work.first_at).unwrap_or(at);
             let count = existing.as_ref().map_or(1, |work| work.attempts.saturating_add(1));
             let delay = 60_i64.saturating_mul(1_i64 << count.saturating_sub(1).min(3)).min(300);
             db.persist_actor_state(
