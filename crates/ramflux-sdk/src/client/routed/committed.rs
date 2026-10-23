@@ -70,6 +70,14 @@ impl RamfluxClient {
         {
             return Ok(wire.clone());
         }
+        if self.direct_message_by_id(&scoped)?.is_some()
+            || db.load_actor_state::<String>(&format!("routed/message-owner/{scoped}"))?.is_some()
+        {
+            return Ok(format!(
+                "{scoped}:{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
+        }
         Ok(scoped)
     }
     pub(super) fn persist_projection_owner(

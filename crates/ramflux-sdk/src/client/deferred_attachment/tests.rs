@@ -258,7 +258,11 @@ async fn deadline_and_invalid_reference_are_recorded_without_touching_messages()
     malformed.total_chunks = 4097;
     f.client.account_db()?.persist_actor_state(
         &reference_key("remote-object"),
-        &ReceivedAttachment { reference: malformed, prepared_slot: None },
+        &ReceivedAttachment {
+            reference: malformed,
+            prepared_slot: None,
+            authenticated_sender: None,
+        },
     )?;
     let result = f
         .client

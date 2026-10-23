@@ -487,3 +487,44 @@ async fn acknowledging_a2i_control_persists_the_decision_beyond_the_memory_cache
     assert!(events[0].acknowledged);
     Ok(())
 }
+
+#[tokio::test]
+async fn unowned_legacy_rows_cannot_squat_new_sender_scoped_projection_or_attachment_ids()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 41)?;
+    let mut bob = Fixture::new("bob", 61)?;
+    trust(&bob, &alice)?;
+    bob.client.establish_friend_link("friend", "bob", "alice")?;
+    let slot = seal(&alice, &bob, message("old-slot", "slot-thread"), b"slot")?;
+    let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
+    bob.client.apply_routed_entry(&mut engine, &pool()?, &slot, false).await?;
+    let reference = reference(&slot)?;
+    bob.client.account_db()?.persist_actor_state(
+        "attachment/reference/same-object",
+        &serde_json::json!({"reference":reference,"prepared_slot":null}),
+    )?;
+    let wrapper = serde_json::json!({"schema":"ramflux.sdk.dm_attachment_envelope.v1","version":1,"body_base64":ramflux_protocol::encode_base64url(b"genuine"),"attachments":[reference]});
+    let entry = seal_as(
+        &alice,
+        &bob,
+        message("old-collision", "genuine-thread"),
+        &serde_json::to_vec(&wrapper)?,
+        Route::attachments(),
+    )?;
+    let scoped =
+        format!("routed:{}", committed_key(&entry)?.trim_start_matches("routed/committed/"));
+    bob.client.send_direct_message("old-attacker", "old-collision", "carol", b"old squat")?;
+    bob.client.send_direct_message("old-attacker", &scoped, "carol", b"old reserved squat")?;
+    bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    let messages = bob.client.direct_messages("genuine-thread")?;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        bob.client.account_db()?.message_content(&messages[0].message_id)?,
+        Some(b"genuine".to_vec())
+    );
+    let refs =
+        bob.client.account_db()?.list_actor_states::<serde_json::Value>("attachment/reference/")?;
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs.iter().filter(|r| r["authenticated_sender"] == "alice").count(), 1);
+    Ok(())
+}

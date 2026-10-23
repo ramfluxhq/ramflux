@@ -24,6 +24,8 @@ const MAX_CIPHER_BYTES: u64 = 16 * 1024 * 1024 + 16;
 struct ReceivedAttachment {
     reference: SdkDmAttachmentRef,
     #[serde(default)]
+    authenticated_sender: Option<String>,
+    #[serde(default)]
     prepared_slot: Option<PreparedSlot>,
 }
 
@@ -102,7 +104,14 @@ impl RamfluxClient {
             "manifest_hash":reference.manifest_hash,"plaintext_hash":reference.plaintext_hash,
         });
         db.persist_actor_state_batch(&[
-            (key, json!(ReceivedAttachment { reference: reference.clone(), prepared_slot })),
+            (
+                key,
+                json!(ReceivedAttachment {
+                    reference: reference.clone(),
+                    prepared_slot,
+                    authenticated_sender: None
+                }),
+            ),
             (format!("directory/object/{selector}"), metadata),
         ])?;
         Ok(())
@@ -412,18 +421,38 @@ impl RamfluxClient {
             "ramflux.received.object.sender.v2",
             &ramflux_protocol::canonical_json_bytes(&(sender, &reference.object_id))?,
         );
-        let owner_key = format!("attachment/owner/{}", reference.object_id);
-        let existing = db.load_actor_state::<String>(&owner_key)?;
-        let selector = if reference.object_id.starts_with("received:")
-            || existing.as_deref().is_some_and(|old| old != sender)
+        let scoped_key = format!("attachment/reference-by-sender/{hash}");
+        let mapped = db.load_actor_state::<String>(&scoped_key)?;
+        let existing: Option<ReceivedAttachment> =
+            db.load_actor_state(&reference_key(&reference.object_id))?;
+        let mut selector = mapped.unwrap_or_else(|| {
+            if reference.object_id.starts_with("received:")
+                || existing
+                    .as_ref()
+                    .is_some_and(|old| old.authenticated_sender.as_deref() != Some(sender))
+            {
+                format!("received:{hash}")
+            } else {
+                reference.object_id.clone()
+            }
+        });
+        if db
+            .load_actor_state::<ReceivedAttachment>(&reference_key(&selector))?
+            .is_some_and(|old| old.authenticated_sender.as_deref() != Some(sender))
         {
-            format!("received:{hash}")
-        } else {
-            reference.object_id.clone()
-        };
+            selector = format!(
+                "received:{hash}:{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            );
+        }
         self.persist_received_reference_prepared_at(reference, &selector, context, prepared)?;
-        db.persist_actor_state(&owner_key, &existing.unwrap_or_else(|| sender.to_owned()))?;
-        db.persist_actor_state(&format!("attachment/reference-by-sender/{hash}"), &selector)?;
+        let mut stored: ReceivedAttachment =
+            db.load_actor_state(&reference_key(&selector))?.ok_or_else(|| {
+                SdkError::LocalBus("attachment reference missing after commit".to_owned())
+            })?;
+        stored.authenticated_sender = Some(sender.to_owned());
+        db.persist_actor_state(&reference_key(&selector), &stored)?;
+        db.persist_actor_state(&scoped_key, &selector)?;
         db.persist_actor_state(&slot_reference_key(reference)?, &selector)?;
         Ok(())
     }
