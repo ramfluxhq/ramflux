@@ -4,6 +4,7 @@
 //! Account-owned surfaces in authenticated conversation messages, independent of pair sessions.
 mod backfill;
 pub(crate) mod carrier;
+mod fallback;
 mod projection;
 mod read;
 pub(crate) use carrier::{Carrier, Payload, PayloadKind, command_id, invalid};
@@ -30,6 +31,18 @@ pub(crate) struct Outcome {
     pub renderer_error: Option<Value>,
 }
 impl Outcome {
+    fn accepted(
+        author: &str,
+        state: &ramflux_protocol::SurfaceState,
+    ) -> Result<Self, crate::SdkError> {
+        let content = state.content().ok_or_else(|| invalid("surface content absent"))?;
+        Ok(Self {
+            accepted: true,
+            fallback_text: fallback::render(author, &content.fallback_text),
+            renderer_error: None,
+        })
+    }
+
     pub(crate) fn rejected(error: Value) -> Self {
         Self {
             accepted: false,
