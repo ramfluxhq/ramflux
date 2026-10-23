@@ -620,6 +620,14 @@ pub(crate) async fn dispatch_group_send_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusGroupSendRequest = serde_json::from_value(request.body.clone())?;
+    let fanout_routes = if body.envelope_id.is_some()
+        && body.source_principal_id.is_some()
+        && body.target_delivery_id.is_some()
+    {
+        None
+    } else {
+        Some(super::super::group_delivery::resolve(account, &body)?)
+    };
     let plaintext_body_base64 =
         body.plaintext_body_base64.as_deref().unwrap_or(&body.encrypted_body_base64);
     let plaintext_body = ramflux_protocol::decode_base64url(plaintext_body_base64)
@@ -679,7 +687,7 @@ pub(crate) async fn dispatch_group_send_request(
             response["submitted"] = serde_json::to_value(entry?)?;
         }
     } else {
-        let routes = account.client.group_member_routes(&body.group_id)?;
+        let routes = fanout_routes.unwrap_or_default();
         let mut sender_key_distribution = Vec::new();
         for route in routes.iter().cloned() {
             if route.member_id == body.sender_id {
@@ -697,15 +705,18 @@ pub(crate) async fn dispatch_group_send_request(
             if route.member_id == body.sender_id {
                 continue;
             }
-            let Some(target_delivery_id) = route.target_delivery_id.clone() else {
-                continue;
-            };
+            let target_delivery_id = route.target_delivery_id.clone().ok_or_else(|| {
+                SdkError::LocalBus(format!("group route lost for member {}", route.member_id))
+            })?;
             let created_at = now_unix_timestamp();
             let message = GatewayDirectMessage {
                 conversation_id: body.conversation_id.clone(),
                 message_id: body.message_id.clone(),
                 envelope_id: format!("{}:{index}", body.message_id),
-                source_principal_id: body.source_principal_id.clone().unwrap_or_default(),
+                source_principal_id: body
+                    .source_principal_id
+                    .clone()
+                    .unwrap_or_else(|| account.gateway_config.principal_id.clone()),
                 sender_id: body.sender_id.clone(),
                 recipient_device_id: Some(route.member_id.clone()),
                 target_delivery_id,

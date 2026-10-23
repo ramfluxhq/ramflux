@@ -43,6 +43,7 @@ pub(crate) async fn dispatch_account_bus_request(
                 "local_account_id": account_id,
                 "node_id": read_local_bus_account_manifest(&local_bus_account_manifest_path(&state.config.data_root, account_id))?.node_id,
                 "principal_id": account.gateway_config.principal_id,
+                "principal_commitment":account.principal_commitment,
                 "target_delivery_id": account.target_delivery_id,
                 "session_id": account.engine.as_ref().map(|engine| engine.session().session_id.clone()),
                 "active_transport_kind": account.engine.as_ref().map(|engine| engine.active_transport_kind().wire_name()),
@@ -482,6 +483,8 @@ mod tests {
 
     fn backup_manifest() -> LocalBusPersistedAccount {
         LocalBusPersistedAccount {
+            label: None,
+            kind: None,
             activation_pending: false,
             node_id: None,
             node_tcp_addr: None,

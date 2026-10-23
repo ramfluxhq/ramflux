@@ -175,6 +175,10 @@ pub struct LocalBusAccountPassphraseRotateRequest {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LocalBusPersistedAccount {
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) activation_pending: bool,
     #[serde(default)]
@@ -212,6 +216,15 @@ impl LocalBusPersistedAccount {
         }];
         Self {
             activation_pending: true,
+            label: None,
+            kind: Some(
+                if body.client_mode == LocalBusClientMode::HeadlessAi {
+                    "headless_ai"
+                } else {
+                    "human"
+                }
+                .to_owned(),
+            ),
             schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
             local_account_id: body.local_account_id.clone(),
             principal_id: body.principal_id.clone(),

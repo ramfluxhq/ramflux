@@ -28,6 +28,7 @@ pub mod identity_verification;
 pub mod mcp;
 pub mod messages;
 pub mod object;
+pub mod read_model;
 pub mod recovery;
 pub mod runtime;
 

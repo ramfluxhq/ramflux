@@ -14,6 +14,7 @@ pub(super) async fn execute(
     if let Some(nodes) = &command.nodes {
         state.nodes = nodes.clone();
     }
+    super::read_model::validate(&command.request)?;
     let mut connection =
         LocalBusConnectionState::new(command.connection_id, command.outbound.clone());
     connection.topics.clone_from(&command.topics);
@@ -52,6 +53,9 @@ pub(super) async fn execute(
         .transpose()?
         .flatten();
     let result = dispatch_local_bus_request(&command.request, state, &mut connection).await?;
+    if let Some(account) = state.accounts.get(account_id) {
+        super::read_model::capture(account, &command.request, &result.response_body)?;
+    }
     if let (Some(snapshot), Some(account)) = (snapshot, state.accounts.get_mut(account_id)) {
         super::control_state::commit(account, snapshot)?;
     }

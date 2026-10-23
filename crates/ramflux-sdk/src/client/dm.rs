@@ -352,6 +352,16 @@ impl RamfluxClient {
                 &projection_body,
                 metadata.as_ref(),
             )?;
+            if self.account_db()?.client_record("conversation", conversation_id)?.is_none() {
+                self.account_db()?.persist_client_record("conversation",conversation_id,&serde_json::json!({
+                    "kind":"direct","title":null,"group_id":null,"participants":[engine.config.principal_id,entry.envelope.source_principal_id],"direct_route":null
+                }))?;
+            }
+            for attachment in &attachment_refs {
+                self.account_db()?.persist_client_record("object",&attachment.object_id,&serde_json::json!({
+                    "name":null,"mime":null,"size":null,"direction":"incoming","owner":entry.envelope.source_principal_id,"conversation_id":conversation_id,"message_id":entry.envelope.envelope_id,"relay_endpoint":attachment.relay_endpoint
+                }))?;
+            }
             // Every attachment was imported, ACKed, and projected: only now do we commit the
             // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above
             // returns before this point, leaving the persisted ratchet snapshot and cursor intact so

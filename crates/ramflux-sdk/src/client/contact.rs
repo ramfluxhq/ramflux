@@ -7,6 +7,37 @@ use crate::prekey::{SdkDeviceManifestEntry, SdkPrekeyResponse};
 use crate::prelude::*;
 
 impl RamfluxClient {
+    fn persist_identity_directory(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let old = db
+            .client_record("identity", &manifest.principal_id)?
+            .unwrap_or_else(|| serde_json::json!({}));
+        let material = contact_safety_material_from_manifest(manifest)?;
+        let device_set_hash =
+            ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&material.devices));
+        let safety_number = if old.get("device_set_hash").and_then(serde_json::Value::as_str)
+            == Some(device_set_hash.as_str())
+        {
+            old.get("safety_number").cloned().unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        };
+        let devices=manifest.devices.iter().map(|device|serde_json::json!({"id":device.device_id,"device_id":device.device_id,"label":null,"last_seen":null,"verified_at":now_unix_timestamp(),"target_delivery_id":device.target_delivery_id,"signing_public_key":device.branch_public_key})).collect::<Vec<_>>();
+        db.persist_client_record("identity",&manifest.principal_id,&serde_json::json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":old.get("kind"),"is_self":self.device_branch.as_ref().is_some_and(|branch|branch.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":device_set_hash,"safety_number":safety_number}))?;
+        db.persist_client_record(
+            "commitment",
+            &manifest.principal_commitment,
+            &serde_json::json!({"principal_id":manifest.principal_id}),
+        )?;
+        for device in &manifest.devices {
+            db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment}))?;
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when the manifest JSON is malformed or fails fail-closed device-set
     /// verification for the expected identity commitment.
@@ -123,6 +154,7 @@ impl RamfluxClient {
         source: &str,
     ) -> Result<SdkDeviceManifestResponse, SdkError> {
         let manifest = fetch_verified_device_manifest(gateway, principal_commitment).await?;
+        self.persist_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
             self.account_db()?.upsert_device_directory_entry(
@@ -223,6 +255,7 @@ impl RamfluxClient {
                 )
             })?;
         let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
+        self.persist_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
             self.account_db()?.upsert_device_directory_entry(
@@ -268,6 +301,7 @@ impl RamfluxClient {
         source: &str,
     ) -> Result<SdkDeviceManifestEntry, SdkError> {
         let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
+        self.persist_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
             self.account_db()?.upsert_device_directory_entry(

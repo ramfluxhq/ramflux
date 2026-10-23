@@ -82,6 +82,7 @@ impl AccountRuntime {
         if missing && let Some(account) = self.state.accounts.get_mut(&self.id) {
             account.client.object_store.set_cache_capacity(8);
             super::control_state::trim(account);
+            super::read_model::initialize(account)?;
             let pool = AccountReaders::start(account.client.account_db()?)?;
             *self.readers.lock().map_err(|_| stopped())? = Some(pool);
         }

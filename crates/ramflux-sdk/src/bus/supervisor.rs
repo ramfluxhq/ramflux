@@ -259,7 +259,16 @@ impl Supervisor {
 
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
         let index = self.index.clone();
-        let active = tokio::task::spawn_blocking(move || index.active_account())
+        let root = self.config.data_root.clone();
+        let (active,known) = tokio::task::spawn_blocking(move || -> Result<_,SdkError> {
+            let mut known=Vec::new();
+            for id in index.known_account_ids()? {
+                let path=local_bus_account_manifest_path(&root,&id);
+                let manifest=path.exists().then(||read_local_bus_account_manifest(&path)).transpose()?;
+                known.push(serde_json::json!({"id":id,"label":manifest.as_ref().and_then(|m|m.label.as_ref()),"kind":manifest.as_ref().and_then(|m|m.kind.as_ref()),"principal_id":manifest.as_ref().map(|m|&m.principal_id)}));
+            }
+            Ok((index.active_account()?,known))
+        })
             .await
             .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
         let accounts = self
@@ -270,7 +279,21 @@ impl Supervisor {
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         let active = active.filter(|id| accounts.contains(id));
-        Ok(reply(serde_json::json!({"accounts":accounts, "active_account_id":active})))
+        let mut known = known;
+        for row in &mut known {
+            row["state"] = serde_json::json!(if row
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| accounts.iter().any(|account| account == id))
+            {
+                "unlocked"
+            } else {
+                "locked"
+            });
+        }
+        Ok(reply(
+            serde_json::json!({"accounts":accounts, "account_details":known, "active_account_id":active}),
+        ))
     }
 
     async fn prepare_import(

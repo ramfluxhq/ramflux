@@ -121,6 +121,8 @@ fn account_with_counter(
     write_local_bus_account_manifest(
         root,
         &LocalBusPersistedAccount {
+            label: None,
+            kind: None,
             activation_pending: false,
             node_id: None,
             node_tcp_addr: None,
@@ -714,6 +716,171 @@ async fn account_credentials_are_durable_before_activation_can_fail_or_be_cancel
         "the actor retains its writer for cancellation cleanup and outbox publication"
     );
     drop(state);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_directories_progress_while_gateway_is_blocked() -> Result<(), SdkError> {
+    LocalSet::new()
+        .run_until(async {
+            let root = root("directories-progress");
+            let (entered, blocked) = oneshot::channel();
+            let initialize =
+                actor_account(&root, "alice", Some(entered), Arc::new(AtomicBool::new(false)));
+            let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
+            let (one, server) = client(Rc::clone(&supervisor), 1).await?;
+            let slow_client = one.clone();
+            let slow = tokio::task::spawn_local(async move {
+                slow_client
+                    .request_frame(request(
+                        "slow",
+                        "alice",
+                        "message.receive",
+                        serde_json::json!({"limit":1}),
+                    ))
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), blocked)
+                .await
+                .map_err(|_| failure("gateway not entered"))?
+                .map_err(|_| failure("gateway dropped"))?;
+            for method in [
+                "conversation.directory",
+                "identity.directory",
+                "object.directory",
+                "group.list",
+                "mcp.server.list",
+                "mcp.approval.list",
+            ] {
+                let result = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    one.request_frame(request(
+                        method,
+                        "alice",
+                        method,
+                        serde_json::json!({"limit":5}),
+                    )),
+                )
+                .await
+                .map_err(|_| failure("directory blocked behind gateway"))??;
+                assert!(result.get("next_cursor").is_some());
+            }
+            slow.abort();
+            let _ = slow.await;
+            drop(one);
+            let _ = server.await;
+            supervisor.shutdown().await?;
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn account_read_model_retains_locked_manifest_profiles_after_restart() -> Result<(), SdkError>
+{
+    LocalSet::new()
+        .run_until(async {
+            let root = root("locked-directory");
+            let initialize = actor_account(&root, "alice", None, Arc::new(AtomicBool::new(false)));
+            let profile_root = root.clone();
+            let initialize: AccountInitializer = Box::new(move |index| {
+                let account = initialize(index)?;
+                let path = local_bus_account_manifest_path(&profile_root, "alice");
+                let mut manifest = read_local_bus_account_manifest(&path)?;
+                manifest.label = Some("Work".to_owned());
+                manifest.kind = Some("headless_ai".to_owned());
+                write_local_bus_account_manifest(&profile_root, &manifest)?;
+                Ok(account)
+            });
+            let first = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
+            let (socket, server) = client(Rc::clone(&first), 1).await?;
+            let list = socket
+                .request_frame(request("list", "alice", "account.list", serde_json::json!({})))
+                .await?;
+            assert_eq!(list["account_details"][0]["state"], "unlocked");
+            assert_eq!(list["account_details"][0]["label"], "Work");
+            socket
+                .request_frame(request("lock", "alice", "account.lock", serde_json::json!({})))
+                .await?;
+            drop(socket);
+            let _ = server.await;
+            first.shutdown().await?;
+            drop(first);
+            let restarted = supervisor(&root, BTreeMap::new())?;
+            let (socket, server) = client(Rc::clone(&restarted), 2).await?;
+            let list = socket
+                .request_frame(request(
+                    "list-again",
+                    "alice",
+                    "account.list",
+                    serde_json::json!({}),
+                ))
+                .await?;
+            assert_eq!(list["accounts"], serde_json::json!([]));
+            assert_eq!(list["account_details"][0]["state"], "locked");
+            assert_eq!(list["account_details"][0]["kind"], "headless_ai");
+            drop(socket);
+            let _ = server.await;
+            restarted.shutdown().await?;
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn approval_directory_and_events_preserve_origin_context() -> Result<(), SdkError> {
+    LocalSet::new().run_until(async {
+        let root=root("approval-context");let initialize=actor_account(&root,"alice",None,Arc::new(AtomicBool::new(false)));
+        let supervisor=supervisor(&root,BTreeMap::from([("alice".to_owned(),initialize)]))?;
+        let (mut socket,server)=client(Rc::clone(&supervisor),1).await?;
+        socket.request_frame(request("subscribe","alice","subscription.open",serde_json::json!({"topics":["mcp.approval.request"]}))).await?;
+        socket.request_frame(request("server","alice","mcp.server.add",serde_json::json!({"server_id":"server","command":"stdio-echo","tool_name":"echo","capability":"read_conversation","risk_level":"low"}))).await?;
+        socket.request_frame(request("tool","alice","mcp.tool.started",serde_json::json!({"server_id":"server","tool_name":"echo","arguments":{"text":"context"},"conversation_id":"thread","context_id":"context"}))).await?;
+        let event=tokio::time::timeout(Duration::from_secs(2),socket.next_event()).await.map_err(|_|failure("approval event missing"))??;
+        assert_eq!(event.body["conversation_id"],"thread");
+        let approvals=socket.request_frame(request("approvals","alice","mcp.approval.list",serde_json::json!({"limit":10}))).await?;
+        assert_eq!(approvals["approvals"][0]["conversation_id"],"thread");assert_eq!(approvals["approvals"][0]["context_id"],"context");
+        drop(socket);let _=server.await;supervisor.shutdown().await?;std::fs::remove_dir_all(root)?;Ok(())
+    }).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn group_send_lists_every_missing_member_before_writing_a_message() -> Result<(), SdkError> {
+    LocalSet::new().run_until(async {
+        let root=root("group-routes");let initialize=actor_account(&root,"alice",None,Arc::new(AtomicBool::new(false)));
+        let initialize:AccountInitializer=Box::new(move |index| {
+            let account=initialize(index)?;account.client.create_group("group","device-alice")?;
+            account.client.add_group_member("group","device-bob","member")?;account.client.add_group_member("group","device-charlie","member")?;Ok(account)
+        });
+        let supervisor=supervisor(&root,BTreeMap::from([("alice".to_owned(),initialize)]))?;let (socket,server)=client(Rc::clone(&supervisor),1).await?;
+        let response=socket.request_frame(request("send","alice","group.send",serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"group message")}))).await;
+        let error=response.err().ok_or_else(||failure("group send silently omitted members"))?.to_string();
+        assert!(error.contains("device-bob"));assert!(error.contains("device-charlie"));assert!(error.contains("unreachable_members"));
+        let messages=socket.request_frame(request("read","alice","message.list",serde_json::json!({"conversation_id":"thread"}))).await?;assert_eq!(messages["messages"],serde_json::json!([]));
+        drop(socket);let _=server.await;supervisor.shutdown().await?;std::fs::remove_dir_all(root)?;Ok(())
+    }).await
+}
+
+#[test]
+fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Result<(), SdkError> {
+    let root = root("group-directory-routes");
+    let account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+    account.client.create_group("group", "device-alice")?;
+    account.client.add_group_member("group", "device-bob", "member")?;
+    let db = account.client.account_db()?;
+    db.persist_client_record("device", "device-bob", &serde_json::json!({"principal_id":"bob"}))?;
+    db.persist_client_record("identity","bob",&serde_json::json!({"contact_identity_commitment":"commitment-bob","devices":[{"device_id":"device-bob","signing_public_key":"public-key","target_delivery_id":"delivery-bob"}]}))?;
+    let body: LocalBusGroupSendRequest = serde_json::from_value(
+        serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":""}),
+    )?;
+    let routes = super::group_delivery::resolve(&account, &body)?;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].target_delivery_id.as_deref(), Some("delivery-bob"));
+    assert_eq!(routes[0].member_principal_commitment.as_deref(), Some("commitment-bob"));
+    drop(account);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

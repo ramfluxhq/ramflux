@@ -594,8 +594,9 @@ fn mcp_emit_lifecycle_event(
     account_id: &str,
     account: &mut LocalBusAccountState,
     event_type: &str,
-    body: serde_json::Value,
+    mut body: serde_json::Value,
 ) -> Result<(), SdkError> {
+    super::super::read_model::capture_mcp_event(account, request, event_type, &mut body)?;
     let audit = mcp_audit_record(event_type, &body);
     account.client.account_db()?.append_mcp_audit(&McpAuditWrite {
         audit: &audit,
@@ -1348,6 +1349,16 @@ fn mcp_verify_standing_approval_signature(
 pub(crate) fn hydrate_local_mcp_state(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
     for manifest in account.client.account_db()?.load_mcp_tools::<McpToolManifest>()? {
         account.mcp_registry.install_tool(manifest);
+    }
+    for value in account
+        .client
+        .account_db()?
+        .list_actor_states::<serde_json::Value>("directory/approval/")?
+    {
+        if value.get("status").and_then(serde_json::Value::as_str) == Some("pending") {
+            let approval: LocalMcpApprovalRecord = serde_json::from_value(value)?;
+            account.mcp_pending_approvals.insert(approval.approval_id.clone(), approval);
+        }
     }
     account.mcp_grants = account.client.account_db()?.load_mcp_grants::<LocalMcpGrantRecord>()?;
     account.mcp_standing_approvals = account

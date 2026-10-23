@@ -74,3 +74,16 @@ impl AccountIndex {
         Ok(())
     }
 }
+
+impl AccountIndex {
+    /// Lists all known account ids, including explicitly locked accounts.
+    ///
+    /// # Errors
+    /// Returns errors querying the index.
+    pub fn known_account_ids(&self) -> Result<Vec<String>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT local_account_id FROM local_account ORDER BY local_account_id")?;
+        Ok(statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}

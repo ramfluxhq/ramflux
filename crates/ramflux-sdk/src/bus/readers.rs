@@ -76,10 +76,14 @@ impl AccountReaders {
 }
 
 pub(super) fn is_reader_request(method: &str) -> bool {
-    matches!(method, "message.list" | "message.read" | "conversation.list")
+    super::read_model::handles(method)
+        || matches!(method, "message.list" | "message.read" | "conversation.list")
 }
 
 fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<serde_json::Value, SdkError> {
+    if super::read_model::handles(&request.method) {
+        return super::read_model::read(client, request);
+    }
     match request.method.as_str() {
         "conversation.list" => {
             Ok(serde_json::json!({"conversations": client.conversation_list()?}))
