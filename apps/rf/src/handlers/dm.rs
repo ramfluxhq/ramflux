@@ -153,6 +153,8 @@ fn rf_dm_attachments(send: &DmSend) -> Result<Vec<LocalBusMessageAttachmentInput
         .map(|(index, path)| {
             let bytes = std::fs::read(path)?;
             Ok(LocalBusMessageAttachmentInput {
+                name: None,
+                mime: None,
                 object_id: format!("attachment:{}:{index}", send.message),
                 plaintext_base64: ramflux_protocol::encode_base64url(&bytes),
                 chunk_size: send.attachment_chunk_size,

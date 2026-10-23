@@ -387,7 +387,7 @@ impl TcpTlsGatewayClient {
         let stream = tokio::time::timeout(timeout, connector.connect(server_name, tcp))
             .await
             .map_err(|error| TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error)))?
-            .map_err(|error| TransportError::Tls(error.to_string()))?;
+            .map_err(TransportError::Io)?;
         Ok((
             Self,
             TcpTlsGatewayBidiStream { stream: tokio_rustls::TlsStream::Client(stream), timeout },

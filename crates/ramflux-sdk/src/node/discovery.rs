@@ -22,18 +22,16 @@ pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRe
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|error| node_error(&error.to_string()))?;
+        .map_err(discovery_error)?;
     let mut response = client
         .get(url)
         .send()
         .await
-        .map_err(|error| node_error(&error.to_string()))?
+        .map_err(discovery_error)?
         .error_for_status()
-        .map_err(|error| node_error(&error.to_string()))?;
+        .map_err(discovery_error)?;
     let mut bytes = Vec::new();
-    while let Some(chunk) =
-        response.chunk().await.map_err(|error| node_error(&error.to_string()))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(discovery_error)? {
         if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 {
             return Err(node_error("discovery record exceeds size limit"));
         }
@@ -45,4 +43,8 @@ pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRe
         return Err(node_error("discovery node_id mismatch"));
     }
     Ok(record)
+}
+
+fn discovery_error(error: reqwest::Error) -> SdkError {
+    ramflux_transport::TransportError::HttpClient(error.without_url()).into()
 }

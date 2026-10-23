@@ -15,6 +15,7 @@ mod group_delivery;
 pub mod io;
 mod journal;
 mod lifecycle;
+mod metadata;
 mod mutations;
 pub mod protocol;
 mod read_model;

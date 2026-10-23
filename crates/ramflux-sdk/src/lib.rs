@@ -56,7 +56,7 @@ pub use bus::{
     LocalBusGroupMemberRemoveRequest, LocalBusGroupMemberRoute, LocalBusGroupMessageDeleteRequest,
     LocalBusGroupReceiveRequest, LocalBusGroupRequest, LocalBusGroupRoleSetRequest,
     LocalBusGroupSendRequest, LocalBusGroupSenderKeyExportRequest,
-    LocalBusGroupSenderKeyImportRequest, LocalBusMcpApprovalDecisionRequest,
+    LocalBusGroupSenderKeyImportRequest, LocalBusIoCause, LocalBusMcpApprovalDecisionRequest,
     LocalBusMcpApprovalGrantRequest, LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest,
     LocalBusMessageAckRequest, LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
     LocalBusMessageFrankingEvidenceRequest, LocalBusMessageReceiptDeliveredRequest,

@@ -56,11 +56,12 @@ pub(crate) fn capture(
         let root = account.client.account_index()?.root();
         let path = local_bus_account_manifest_path(root, &db.local_account_id);
         let mut manifest = read_local_bus_account_manifest(&path)?;
-        if let Some(label) = body.get("label").and_then(Value::as_str) {
-            manifest.label = Some(label.to_owned());
+        let metadata: LocalBusAccountCreateRequest = serde_json::from_value(body.clone())?;
+        if metadata.label.is_some() {
+            manifest.label = metadata.label;
         }
-        if let Some(kind) = body.get("kind").and_then(Value::as_str) {
-            manifest.kind = Some(kind.to_owned());
+        if metadata.kind.is_some() {
+            manifest.kind = metadata.kind;
         }
         write_local_bus_account_manifest(root, &manifest)?;
     }
@@ -95,8 +96,15 @@ pub(crate) fn capture(
         db.persist_client_record("conversation",id,&json!({"kind":"direct","title":body.get("title"),"participants":participants,"group_id":null,"direct_route":{"recipient_principal_commitment":commitment,"recipient_device_ids":body.get("recipient_device_id").map(|id|vec![id.clone()]).unwrap_or_default(),"target_delivery_id":body.get("target_delivery_id"),"federation":body.get("federation")}}))?;
         if let Some(attachments) = body.get("attachments").and_then(Value::as_array) {
             for attachment in attachments {
-                let id = required(attachment, "object_id")?;
-                object_metadata(db, id, attachment, own, Some(body))?;
+                let attachment: LocalBusMessageAttachmentInput =
+                    serde_json::from_value(attachment.clone())?;
+                object_metadata(
+                    db,
+                    &attachment.object_id,
+                    &serde_json::to_value(&attachment)?,
+                    own,
+                    Some(body),
+                )?;
             }
         }
     }
@@ -118,6 +126,13 @@ pub(crate) fn capture(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct ObjectMetadata {
+    name: Option<String>,
+    mime: Option<String>,
+    relay_endpoint: Option<String>,
+}
+
 fn object_metadata(
     db: &AccountDb,
     id: &str,
@@ -128,8 +143,13 @@ fn object_metadata(
     let mut value = db
         .client_record("object", id)?
         .unwrap_or_else(|| json!({"direction":"outgoing","owner":own}));
-    for field in ["name", "mime", "relay_endpoint"] {
-        if let Some(text) = body.get(field).and_then(Value::as_str) {
+    let metadata: ObjectMetadata = serde_json::from_value(body.clone())?;
+    for (field, text) in [
+        ("name", metadata.name),
+        ("mime", metadata.mime),
+        ("relay_endpoint", metadata.relay_endpoint),
+    ] {
+        if let Some(text) = text {
             if text.len() > 1024 {
                 return Err(SdkError::LocalBus(format!("{field} exceeds 1024 bytes")));
             }

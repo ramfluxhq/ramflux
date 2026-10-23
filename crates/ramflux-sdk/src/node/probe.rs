@@ -7,6 +7,7 @@ use super::{
     NodeProfile, Path, SdkError, Serialize, SocketAddr, fetch_client_record, local_bus_ok,
     node_error, now_unix_timestamp, read_local_bus_account_manifest, resolve_node_addr,
 };
+use crate::bus::io::local_bus_error_body;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource};
 use std::time::Instant;
 
@@ -18,6 +19,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct GatewayProbe {
     /// Per-transport result; TCP is attempted only when QUIC application probing fails.
     pub transport: serde_json::Value,
+    /// Structured failures keyed by transport; socket sources retain native errno.
+    pub errors: serde_json::Value,
     /// `ok`, `unexpected_response`, `timeout`, or `not_available`.
     pub app: &'static str,
     /// `requires_account` for a pre-account probe.
@@ -67,8 +70,9 @@ pub(crate) async fn dispatch_probe(
         state.nodes.save(&state.config.data_root)?;
     }
     if status != "ok" {
+        let error = fetched.as_ref().err().map(local_bus_error_body);
         return Ok(local_bus_ok(serde_json::json!({"node_id": id, "healthy": false,
-            "discovery": {"status": status, "expires_at": profile.expires_at},
+            "discovery": {"status": status, "expires_at": profile.expires_at, "error": error},
             "gateway": {"transport": {"quic": "not_attempted", "tcp": "not_attempted"}, "app": "not_available", "session": "not_attempted", "rtt_ms": 0},
             "relay": {"status": "not_attempted"}, "prekey": {"status": "not_attempted"}, "checked_at": now})));
     }
@@ -77,15 +81,27 @@ pub(crate) async fn dispatch_probe(
     let fresh = NodeProfile::from_record(record, now);
     let ca = fresh.write_ca(&state.config.data_root)?;
     let mut gateway = probe_gateway(&fresh, &ca).await;
-    gateway.session = probe_bound_session(state, id).await?;
+    gateway.session = match probe_bound_session(state, id).await {
+        Ok(session) => session,
+        Err(error) => {
+            gateway.errors["session"] = serde_json::json!(local_bus_error_body(&error));
+            "failed"
+        }
+    };
     let relay = probe_relay(&fresh, &ca).await;
     let prekey = tokio::time::timeout(PROBE_TIMEOUT, probe_prekey_tls(&fresh)).await;
     let prekey_ok = matches!(prekey, Ok(Ok(())));
+    let prekey_error = match &prekey {
+        Ok(Err(error)) => Some(local_bus_error_body(error)),
+        _ => None,
+    };
+    let relay_ok = matches!(relay, Ok(true));
+    let relay_error = relay.as_ref().err().map(local_bus_error_body);
     Ok(local_bus_ok(serde_json::json!({"node_id": id,
-        "healthy": status == "ok" && gateway.app == "ok" && relay,
+        "healthy": status == "ok" && gateway.app == "ok" && relay_ok,
         "discovery": {"status": status, "expires_at": expires_at}, "gateway": gateway,
-        "relay": {"status": if relay {"ok"} else {"failed"}},
-        "prekey": {"status": if prekey_ok {"ok"} else {"failed"}}, "checked_at": now})))
+        "relay": {"status": if relay_ok {"ok"} else {"failed"}, "error": relay_error},
+        "prekey": {"status": if prekey_ok {"ok"} else {"failed"}, "error": prekey_error}, "checked_at": now})))
 }
 
 async fn probe_bound_session(
@@ -111,15 +127,15 @@ async fn probe_bound_session(
                     let _ = engine.close("node probe finished").await;
                     "ok"
                 }
-                Err(_) => "failed",
+                Err(error) => return Err(error),
             });
         }
     }
     Ok("requires_account")
 }
 
-async fn probe_relay(profile: &NodeProfile, ca: &Path) -> bool {
-    let result = tokio::time::timeout(PROBE_TIMEOUT, async {
+async fn probe_relay(profile: &NodeProfile, ca: &Path) -> Result<bool, SdkError> {
+    tokio::time::timeout(PROBE_TIMEOUT, async {
         let addr = resolve_node_addr(&profile.relay.quic_addr).await?;
         let response = crate::object::relay_quic_health_probe(
             &addr.to_string(),
@@ -130,24 +146,32 @@ async fn probe_relay(profile: &NodeProfile, ca: &Path) -> bool {
         .await?;
         Ok::<_, SdkError>(response.status == 200)
     })
-    .await;
-    matches!(result, Ok(Ok(true)))
+    .await
+    .map_err(|error| SdkError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, error)))?
 }
 
 async fn probe_gateway(profile: &NodeProfile, ca: &Path) -> GatewayProbe {
     let started = Instant::now();
     let quic = gateway_quic(profile, ca).await;
     let (quic_transport, quic_app) = probe_outcome(&quic);
+    let mut errors = serde_json::json!({});
+    if let Err(error) = &quic {
+        errors["quic"] = serde_json::json!(local_bus_error_body(error));
+    }
     let (tcp_transport, app) = if quic_app == "ok" {
         ("not_attempted", quic_app)
     } else {
         let tcp = gateway_tcp(profile, ca).await;
+        if let Err(error) = &tcp {
+            errors["tcp"] = serde_json::json!(local_bus_error_body(error));
+        }
         let (transport, app) = probe_outcome(&tcp);
         (transport, app)
     };
     GatewayProbe {
         transport: serde_json::json!({"quic": quic_transport, "tcp": tcp_transport}),
         app,
+        errors,
         session: "requires_account",
         rtt_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     }
@@ -182,7 +206,7 @@ async fn gateway_quic(profile: &NodeProfile, ca: &Path) -> Result<&'static str, 
     let result = app_challenge(&mut stream).await;
     let _ = stream.finish();
     client.close();
-    Ok(result)
+    result
 }
 
 async fn gateway_tcp(profile: &NodeProfile, ca: &Path) -> Result<&'static str, SdkError> {
@@ -195,12 +219,12 @@ async fn gateway_tcp(profile: &NodeProfile, ca: &Path) -> Result<&'static str, S
         PROBE_TIMEOUT,
     )
     .await?;
-    Ok(app_challenge(&mut stream).await)
+    app_challenge(&mut stream).await
 }
 
 async fn app_challenge<T: GatewaySessionFrameSink + GatewaySessionFrameSource>(
     stream: &mut T,
-) -> &'static str {
+) -> Result<&'static str, SdkError> {
     let challenge =
         serde_json::json!({"frame_type": "heartbeat", "now": now_unix_timestamp().unsigned_abs()});
     let result = tokio::time::timeout(PROBE_TIMEOUT, async {
@@ -215,9 +239,10 @@ async fn app_challenge<T: GatewaySessionFrameSink + GatewaySessionFrameSource>(
     })
     .await;
     match result {
-        Ok(Ok(true)) => "ok",
-        Ok(Ok(false) | Err(_)) => "unexpected_response",
-        Err(_) => "timeout",
+        Ok(Ok(true)) => Ok("ok"),
+        Ok(Ok(false)) => Ok("unexpected_response"),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Ok("timeout"),
     }
 }
 
@@ -244,10 +269,7 @@ async fn probe_prekey_tls(profile: &NodeProfile) -> Result<(), SdkError> {
     let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
         .map_err(|error| node_error(&error.to_string()))?;
     let tcp = tokio::net::TcpStream::connect((host, port)).await?;
-    let _tls = connector
-        .connect(server_name, tcp)
-        .await
-        .map_err(|error| node_error(&error.to_string()))?;
+    let _tls = connector.connect(server_name, tcp).await?;
     Ok(())
 }
 

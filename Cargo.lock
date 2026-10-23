@@ -1950,6 +1950,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2594,6 +2600,7 @@ dependencies = [
  "blake3",
  "cbindgen",
  "hmac",
+ "mime",
  "ramflux-crypto",
  "ramflux-protocol",
  "ramflux-storage",

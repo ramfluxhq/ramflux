@@ -695,6 +695,8 @@ async fn account_credentials_are_durable_before_activation_can_fail_or_be_cancel
         subscribers: BTreeMap::new(),
     };
     let body = LocalBusAccountCreateRequest {
+        label: None,
+        kind: None,
         node_id: None,
         local_account_id: "alice".to_owned(),
         principal_id: "alice".to_owned(),
@@ -889,3 +891,4 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
 
 mod restore;
 mod stream;
+mod metadata;

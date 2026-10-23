@@ -119,13 +119,14 @@ pub(super) fn validate(request: &LocalBusFrame) -> Result<(), SdkError> {
             return Err(invalid("client metadata field exceeds 1024 bytes"));
         }
     }
-    if request.method == "account.create"
-        && request
-            .body
-            .get("kind")
-            .is_some_and(|kind| !matches!(kind.as_str(), Some("human" | "headless_ai" | "bot")))
-    {
-        return Err(invalid("invalid account kind"));
+    match request.method.as_str() {
+        "account.create" => {
+            let _: LocalBusAccountCreateRequest = serde_json::from_value(request.body.clone())?;
+        }
+        "message.submit" => {
+            let _: LocalBusMessageSubmitRequest = serde_json::from_value(request.body.clone())?;
+        }
+        _ => {}
     }
     Ok(())
 }

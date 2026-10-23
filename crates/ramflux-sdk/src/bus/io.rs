@@ -59,11 +59,27 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
         deadline_ms: None,
         operation_id: None,
         ok: Some(false),
-        error: Some(LocalBusErrorBody {
-            code: local_bus_error_code(error).to_owned(),
-            message: error.to_string(),
-            retry_after_ms: None,
-        }),
+        error: Some(local_bus_error_body(error)),
+    }
+}
+
+pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    let mut cause = None;
+    while let Some(source) = current {
+        if let Some(io) = source.downcast_ref::<std::io::Error>() {
+            cause = Some(LocalBusIoCause {
+                kind: format!("{:?}", io.kind()),
+                raw_os_error: io.raw_os_error(),
+            });
+        }
+        current = source.source();
+    }
+    LocalBusErrorBody {
+        code: local_bus_error_code(error).to_owned(),
+        message: error.to_string(),
+        retry_after_ms: None,
+        cause,
     }
 }
 

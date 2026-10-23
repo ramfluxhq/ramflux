@@ -162,3 +162,59 @@ fn profile_endpoints_take_priority_over_environment_and_development_options()
     })?;
     Ok(())
 }
+
+#[test]
+fn structured_bus_error_retains_nested_socket_errno_without_inference() -> Result<(), SdkError> {
+    let io = std::io::Error::from_raw_os_error(65);
+    let expected_kind = format!("{:?}", io.kind());
+    let error = SdkError::Transport(ramflux_transport::TransportError::Io(io));
+    let body = crate::bus::io::local_bus_error_body(&error);
+    let encoded = serde_json::to_value(&body)?;
+    assert_eq!(encoded["cause"]["raw_os_error"], 65);
+    assert_eq!(encoded["cause"]["kind"], expected_kind);
+    // Existing peers can still send error bodies with no cause field.
+    let legacy: LocalBusErrorBody = serde_json::from_value(
+        serde_json::json!({"code":"ValidationFailed","message":"failed","retry_after_ms":null}),
+    )?;
+    assert!(legacy.cause.is_none());
+    let timeout = crate::bus::io::local_bus_error_body(&SdkError::Io(std::io::Error::from(
+        std::io::ErrorKind::TimedOut,
+    )));
+    assert_eq!(serde_json::to_value(timeout)?["cause"]["raw_os_error"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_retains_socket_source_and_strips_request_url() -> Result<(), SdkError> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    let origin = format!("http://127.0.0.1:{port}/private?token=secret");
+    let error = super::fetch_client_record(&origin)
+        .await
+        .err()
+        .ok_or_else(|| super::node_error("expected connect failure"))?;
+    let encoded = serde_json::to_value(crate::bus::io::local_bus_error_body(&error))?;
+    assert_eq!(encoded["cause"]["kind"], "ConnectionRefused");
+    assert!(encoded["cause"]["raw_os_error"].is_number());
+    let diagnostic = format!("{error:?}");
+    assert!(!diagnostic.contains("http://") && !diagnostic.contains("token=secret"));
+    assert!(super::fetch_client_record("http://user:password@127.0.0.1").await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_probe_retains_tcp_socket_cause_in_failed_health_response() -> Result<(), SdkError>
+{
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let addr = listener.local_addr()?;
+    drop(listener);
+    let root = TestRoot::new()?;
+    let mut profile = record(1)?;
+    profile.gateway_tcp_addr = addr.to_string();
+    let probe = super::probe_gateway_pre_account(&profile, &root.0.join("missing.pem")).await;
+    assert_eq!(probe.transport["tcp"], "failed");
+    assert_eq!(probe.errors["tcp"]["cause"]["kind"], "ConnectionRefused");
+    assert!(probe.errors["tcp"]["cause"]["raw_os_error"].is_number());
+    Ok(())
+}

@@ -19,6 +19,30 @@ These are live subscription events; a subscriber that connects after completion 
 for the current state. Locked accounts are not auto-restored. Failed restores can be retried with
 `account.unlock` and the correct passphrase.
 
+## Typed display metadata
+
+`LocalBusAccountCreateRequest` accepts optional `label` and `kind`. Labels contain at most 64
+Unicode characters; kind is `human`, `headless_ai`, or `bot`. An absent kind retains the existing
+client-mode default. `LocalBusMessageAttachmentInput` accepts optional `name` and `mime`: name is
+at most 255 UTF-8 bytes without `/`, `\\`, or control characters; MIME is a concrete type/subtype
+with optional parameters, at most 1024 bytes. Invalid metadata is rejected before dispatch.
+Absent or null fields are accepted; absent values stay omitted when typed requests are serialized.
+
+## Node socket diagnostics
+
+Local-bus error bodies may include `cause: {kind, raw_os_error}` when an `io::Error` exists in
+the source chain. `kind` is the Rust error-kind name (for example `HostUnreachable` or
+`ConnectionRefused`), and `raw_os_error` is the native errno or null. Values come from the error,
+never message parsing. Clients can use the native platform and errno to explain OS-specific
+network permission or routing failures. Discovery HTTP errors omit request URLs, credentials,
+query strings and fragments while preserving their source chain.
+
+`node.probe` retains its health response and adds structured errors at `discovery.error`,
+`gateway.errors.quic`, `gateway.errors.tcp`, `gateway.errors.session`, `relay.error`, and
+`prekey.error` when those stages fail. Each uses the same bus error shape. Not every failure has
+an OS cause: protocol rejection, missing authentication, and QUIC timeouts need not provide errno.
+These diagnostics do not establish a platform permission denial from a string or invent errno.
+
 ## Pagination
 
 `conversation.directory`, `identity.directory`, and `object.directory` accept:

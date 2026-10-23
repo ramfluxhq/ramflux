@@ -102,6 +102,14 @@ pub(crate) async fn local_bus_account_create(
     state: &mut LocalBusDaemonState,
     mut body: LocalBusAccountCreateRequest,
 ) -> Result<LocalBusAccountCreateResponse, SdkError> {
+    if let Some(label) = &body.label {
+        crate::bus::metadata::validate_label(label)
+            .map_err(|message| SdkError::LocalBus(message.to_owned()))?;
+    }
+    if let Some(kind) = &body.kind {
+        crate::bus::metadata::validate_kind(kind)
+            .map_err(|message| SdkError::LocalBus(message.to_owned()))?;
+    }
     let data_root = state.config.data_root.clone();
     let manifest_path = local_bus_account_manifest_path(&data_root, &body.local_account_id);
     if manifest_path.exists() {

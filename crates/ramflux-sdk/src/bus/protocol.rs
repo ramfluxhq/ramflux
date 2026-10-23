@@ -53,10 +53,33 @@ pub struct LocalBusErrorBody {
     pub code: String,
     pub message: String,
     pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<LocalBusIoCause>,
+}
+
+/// A socket-level source from the error chain, without request URLs or credentials.
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct LocalBusIoCause {
+    /// Rust `io::ErrorKind` debug name, for example `HostUnreachable`.
+    pub kind: String,
+    /// Native OS errno, when the source provides one; never inferred from text.
+    pub raw_os_error: Option<i32>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusAccountCreateRequest {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::metadata::label"
+    )]
+    pub label: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::metadata::kind"
+    )]
+    pub kind: Option<String>,
     #[serde(default)]
     pub node_id: Option<String>,
     pub local_account_id: String,
@@ -220,15 +243,17 @@ impl LocalBusPersistedAccount {
         }];
         Self {
             activation_pending: true,
-            label: None,
-            kind: Some(
-                if body.client_mode == LocalBusClientMode::HeadlessAi {
-                    "headless_ai"
-                } else {
-                    "human"
-                }
-                .to_owned(),
-            ),
+            label: body.label.clone(),
+            kind: body.kind.clone().or_else(|| {
+                Some(
+                    if body.client_mode == LocalBusClientMode::HeadlessAi {
+                        "headless_ai"
+                    } else {
+                        "human"
+                    }
+                    .to_owned(),
+                )
+            }),
             schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
             local_account_id: body.local_account_id.clone(),
             principal_id: body.principal_id.clone(),
@@ -275,6 +300,18 @@ pub struct LocalBusMessageSubmitRequest {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusMessageAttachmentInput {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::metadata::name"
+    )]
+    pub name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::metadata::mime"
+    )]
+    pub mime: Option<String>,
     pub object_id: String,
     pub plaintext_base64: String,
     pub chunk_size: usize,
