@@ -37,6 +37,7 @@ pub(super) fn identifier(value: &str) -> Result<(), SurfaceReject> {
 }
 
 pub(super) fn json(value: &Value) -> Result<Vec<u8>, SurfaceReject> {
+    crate::validate_i_json_value(value).map_err(|_| SurfaceReject::InvalidJson)?;
     let mut pending = vec![(value, 0_usize)];
     let mut minimum_bytes = 0_usize;
     while let Some((value, depth)) = pending.pop() {

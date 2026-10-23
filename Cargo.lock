@@ -2515,7 +2515,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
- "sha2",
  "thiserror 2.0.18",
 ]
 

@@ -1,0 +1,289 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Atomic projection and optimistic concurrency for conversation-bound A2UI commands.
+use super::{
+    A2uiConversationEvent, A2uiSurfaceAction, MAX_SURFACE_FINALIZED_BLOCKS, MAX_SURFACE_PATCH_OPS,
+    MAX_SURFACE_TEXT_CHARS, MAX_SURFACE_TEXT_DELTA_BYTES, SurfaceLimit, SurfacePatchOp,
+    SurfaceReject, limits, snapshot, surface_args_hash,
+};
+use crate::{A2uiCommand, CreateSurfaceCommand, MAX_SAFE_JSON_INTEGER, surface_snapshot_hash};
+use serde_json::Value;
+use std::collections::BTreeSet;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SurfaceState {
+    content: Option<CreateSurfaceCommand>,
+    hash: Option<String>,
+    conversation_id: Option<String>,
+    version: u64,
+    closed: bool,
+    final_components: BTreeSet<String>,
+}
+impl SurfaceState {
+    #[must_use]
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        self.closed
+    }
+    #[must_use]
+    pub const fn content(&self) -> Option<&CreateSurfaceCommand> {
+        self.content.as_ref()
+    }
+    #[must_use]
+    pub fn hash(&self) -> Option<&str> {
+        self.hash.as_deref()
+    }
+
+    /// Return the next state without mutating this state on either success or rejection.
+    /// # Errors
+    /// Rejects invalid versions, conversation bindings, hashes, operations and resource limits.
+    pub fn apply(&self, event: &A2uiConversationEvent) -> Result<Self, SurfaceReject> {
+        if self.closed {
+            return Err(SurfaceReject::Closed);
+        }
+        if self.version >= MAX_SAFE_JSON_INTEGER {
+            return Err(SurfaceReject::VersionExhausted);
+        }
+        let expected = self.version + 1;
+        if event.version != expected {
+            return Err(SurfaceReject::Version { expected, actual: event.version });
+        }
+        limits::identifier(&event.conversation_id)?;
+        crate::validate_i_json_value(
+            &serde_json::to_value(event).map_err(|_| SurfaceReject::Encoding)?,
+        )
+        .map_err(|_| SurfaceReject::InvalidJson)?;
+        let mut next = self.clone();
+        match (&self.content, &event.command) {
+            (None, A2uiCommand::CreateSurface(content)) => {
+                snapshot::validate(content)?;
+                next.content = Some(content.clone());
+                next.conversation_id = Some(event.conversation_id.clone());
+            }
+            (None, _) => return Err(SurfaceReject::NotCreated),
+            (Some(_), A2uiCommand::CreateSurface(_)) => return Err(SurfaceReject::AlreadyCreated),
+            (Some(content), command) => {
+                if self.conversation_id.as_deref() != Some(&event.conversation_id)
+                    || command_id(command) != content.surface_id
+                {
+                    return Err(SurfaceReject::WrongSurface);
+                }
+                self.update(&mut next, command)?;
+            }
+        }
+        next.version = event.version;
+        next.hash = Some(
+            surface_snapshot_hash(next.content.as_ref().ok_or(SurfaceReject::NotCreated)?)
+                .map_err(|_| SurfaceReject::Encoding)?,
+        );
+        Ok(next)
+    }
+
+    fn update(&self, next: &mut Self, command: &A2uiCommand) -> Result<(), SurfaceReject> {
+        let content = next.content.as_mut().ok_or(SurfaceReject::NotCreated)?;
+        let declared_hash = match command {
+            A2uiCommand::UpdateComponents(update) => {
+                self.base(&update.base_surface_hash)?;
+                if update.components.len().saturating_add(update.remove_component_ids.len())
+                    > MAX_SURFACE_PATCH_OPS
+                {
+                    return Err(limits::exceeded(SurfaceLimit::PatchOperations));
+                }
+                let mut ids = BTreeSet::new();
+                for id in &update.remove_component_ids {
+                    if !ids.insert(id.as_str()) {
+                        return Err(SurfaceReject::DuplicateBlock);
+                    }
+                    remove(content, id)?;
+                }
+                for component in &update.components {
+                    let id = snapshot::component_id(component)?;
+                    if !ids.insert(id) {
+                        return Err(SurfaceReject::DuplicateBlock);
+                    }
+                    if let Some(index) = position(content, id) {
+                        content.components[index] = component.clone();
+                    } else {
+                        content.components.push(component.clone());
+                    }
+                }
+                Some(&update.new_surface_hash)
+            }
+            A2uiCommand::UpdateDataModel(update) => {
+                self.base(&update.base_surface_hash)?;
+                // Top-level merge: null removes a member, nested values replace atomically.
+                for (key, value) in &update.data_patch {
+                    if value.is_null() {
+                        content.data_model.remove(key);
+                    } else {
+                        content.data_model.insert(key.clone(), value.clone());
+                    }
+                }
+                Some(&update.new_surface_hash)
+            }
+            A2uiCommand::PatchSurface(patch) => {
+                self.base(&patch.base_surface_hash)?;
+                if patch.ops.len() > MAX_SURFACE_PATCH_OPS {
+                    return Err(limits::exceeded(SurfaceLimit::PatchOperations));
+                }
+                for op in &patch.ops {
+                    patch_one(content, op)?;
+                }
+                Some(&patch.new_surface_hash)
+            }
+            A2uiCommand::StreamAppend(append) => {
+                append_text(content, append, &mut next.final_components)?;
+                None
+            }
+            A2uiCommand::DeleteSurface(_) => {
+                next.closed = true;
+                None
+            }
+            A2uiCommand::CreateSurface(_) => return Err(SurfaceReject::AlreadyCreated),
+        };
+        snapshot::validate(content)?;
+        let hash = surface_snapshot_hash(content).map_err(|_| SurfaceReject::Encoding)?;
+        if declared_hash.is_some_and(|declared| declared != &hash) {
+            return Err(SurfaceReject::ResultHashMismatch);
+        }
+        Ok(())
+    }
+
+    fn base(&self, hash: &str) -> Result<(), SurfaceReject> {
+        if self.hash.as_deref() == Some(hash) { Ok(()) } else { Err(SurfaceReject::Conflict) }
+    }
+
+    /// Validate a decision against the current snapshot without consuming a version.
+    /// # Errors
+    /// Rejects closed, stale, mismatched, disabled or unbound decisions and invalid arguments.
+    pub fn validate_action(&self, action: &A2uiSurfaceAction) -> Result<(), SurfaceReject> {
+        if self.closed {
+            return Err(SurfaceReject::Closed);
+        }
+        let content = self.content.as_ref().ok_or(SurfaceReject::NotCreated)?;
+        if action.surface_id != content.surface_id
+            || self.conversation_id.as_deref() != Some(&action.conversation_id)
+        {
+            return Err(SurfaceReject::WrongSurface);
+        }
+        if action.version != self.version || self.hash.as_deref() != Some(&action.surface_hash) {
+            return Err(SurfaceReject::Stale);
+        }
+        let descriptor = content
+            .allowed_actions
+            .iter()
+            .find(|v| snapshot::action_id(v).ok() == Some(&action.action_id))
+            .ok_or(SurfaceReject::UnknownAction)?;
+        if descriptor
+            .get("disabledReason")
+            .or_else(|| descriptor.get("disabled_reason"))
+            .is_some_and(|v| !v.is_null())
+        {
+            return Err(SurfaceReject::DisabledAction);
+        }
+        if surface_args_hash(&action.values)? != action.args_hash {
+            return Err(SurfaceReject::ArgumentsHashMismatch);
+        }
+        Ok(())
+    }
+}
+fn command_id(command: &A2uiCommand) -> &str {
+    match command {
+        A2uiCommand::CreateSurface(c) => &c.surface_id,
+        A2uiCommand::UpdateComponents(c) => &c.surface_id,
+        A2uiCommand::UpdateDataModel(c) => &c.surface_id,
+        A2uiCommand::DeleteSurface(c) => &c.surface_id,
+        A2uiCommand::PatchSurface(c) => &c.surface_id,
+        A2uiCommand::StreamAppend(c) => &c.surface_id,
+    }
+}
+fn position(content: &CreateSurfaceCommand, id: &str) -> Option<usize> {
+    content.components.iter().position(|v| snapshot::component_id(v).ok() == Some(id))
+}
+fn remove(content: &mut CreateSurfaceCommand, id: &str) -> Result<(), SurfaceReject> {
+    let index = position(content, id).ok_or(SurfaceReject::UnknownBlock)?;
+    content.components.remove(index);
+    Ok(())
+}
+fn patch_one(content: &mut CreateSurfaceCommand, op: &SurfacePatchOp) -> Result<(), SurfaceReject> {
+    match op {
+        SurfacePatchOp::ReplaceBlock { component } => {
+            let index = position(content, snapshot::component_id(component)?)
+                .ok_or(SurfaceReject::UnknownBlock)?;
+            content.components[index] = component.clone();
+        }
+        SurfacePatchOp::InsertBlock { index, component } => {
+            let id = snapshot::component_id(component)?;
+            if position(content, id).is_some() {
+                return Err(SurfaceReject::DuplicateBlock);
+            }
+            if *index > content.components.len() {
+                return Err(SurfaceReject::InvalidInsertPosition);
+            }
+            content.components.insert(*index, component.clone());
+        }
+        SurfacePatchOp::RemoveBlock { component_id } => remove(content, component_id)?,
+        SurfacePatchOp::SetActions { actions } => content.allowed_actions.clone_from(actions),
+    }
+    // Intermediate operations must also respect bounds, not just the final snapshot.
+    snapshot::validate(content)
+}
+
+fn append_text(
+    content: &mut CreateSurfaceCommand,
+    append: &crate::StreamAppendCommand,
+    final_components: &mut BTreeSet<String>,
+) -> Result<(), SurfaceReject> {
+    if final_components.contains(&append.component_id) {
+        return Err(SurfaceReject::BlockClosed);
+    }
+    if append.text_delta.len() > MAX_SURFACE_TEXT_DELTA_BYTES {
+        return Err(limits::exceeded(SurfaceLimit::TextDeltaBytes));
+    }
+    let index = position(content, &append.component_id).ok_or(SurfaceReject::UnknownBlock)?;
+    let component = &mut content.components[index];
+    let field = if component.get("text").is_some() {
+        component.get_mut("text")
+    } else {
+        component.get_mut("data").and_then(|v| v.get_mut("text"))
+    };
+    let Some(Value::String(text)) = field else {
+        return Err(SurfaceReject::BlockNotStreamable);
+    };
+    // Bound allocation before appending; scalar count is checked below.
+    if text.chars().count() + append.text_delta.chars().count() > MAX_SURFACE_TEXT_CHARS {
+        return Err(limits::exceeded(SurfaceLimit::TextCharacters));
+    }
+    text.push_str(&append.text_delta);
+    if append.final_ {
+        if final_components.len() >= MAX_SURFACE_FINALIZED_BLOCKS {
+            return Err(limits::exceeded(SurfaceLimit::FinalizedBlocks));
+        }
+        final_components.insert(append.component_id.clone());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::A2uiConversationSchema;
+    #[test]
+    fn version_exhaustion_never_wraps() {
+        let state = SurfaceState { version: MAX_SAFE_JSON_INTEGER, ..SurfaceState::default() };
+        let event = A2uiConversationEvent {
+            schema: A2uiConversationSchema::V2,
+            conversation_id: "c".into(),
+            version: 1,
+            command: A2uiCommand::DeleteSurface(crate::DeleteSurfaceCommand {
+                surface_id: "s".into(),
+                reason: None,
+            }),
+        };
+        assert_eq!(state.apply(&event), Err(SurfaceReject::VersionExhausted));
+    }
+}

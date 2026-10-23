@@ -130,6 +130,9 @@ pub enum A2uiCommand {
     UpdateComponents(UpdateComponentsCommand),
     UpdateDataModel(UpdateDataModelCommand),
     DeleteSurface(DeleteSurfaceCommand),
+    /// Conversation-v2 extension; legacy command variants retain their wire fields.
+    PatchSurface(crate::PatchSurfaceCommand),
+    StreamAppend(crate::StreamAppendCommand),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -215,6 +218,18 @@ pub fn surface_hash(surface_snapshot: &Value) -> Result<String, crate::ProtocolE
     }
     let canonical = canonical_json_bytes(&snapshot)?;
     Ok(hash_base64url(domain::A2UI_SURFACE_HASH, &canonical))
+}
+
+/// Typed companion to the existing Value hash: all serialized createSurface snapshot fields.
+/// No command tag, conversation/version metadata or self-hash field is added.
+/// # Errors
+/// Rejects non-I-JSON typed values or canonical serialization failures.
+pub fn surface_snapshot_hash(
+    snapshot: &CreateSurfaceCommand,
+) -> Result<String, crate::ProtocolError> {
+    let value = serde_json::to_value(snapshot)?;
+    crate::validate_i_json_value(&value)?;
+    surface_hash(&value)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
