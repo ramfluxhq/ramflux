@@ -12,12 +12,29 @@ use std::time::Instant;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Serialize)]
-struct GatewayProbe {
-    transport: serde_json::Value,
-    app: &'static str,
-    session: &'static str,
-    rtt_ms: u64,
+/// Verified transport and Heartbeat-first application diagnostics, without account authentication.
+#[derive(Clone, Debug, Serialize)]
+#[must_use]
+pub struct GatewayProbe {
+    /// Per-transport result; TCP is attempted only when QUIC application probing fails.
+    pub transport: serde_json::Value,
+    /// `ok`, `unexpected_response`, `timeout`, or `not_available`.
+    pub app: &'static str,
+    /// `requires_account` for a pre-account probe.
+    pub session: &'static str,
+    /// Total gateway probe duration.
+    pub rtt_ms: u64,
+}
+
+/// Probes the advertised gateway over verified QUIC, then verified TCP-TLS on failure.
+/// Sends Heartbeat first and accepts only the protocol-constant Nack; never sends Open or Auth.
+/// Callers must verify the discovery record's signature, freshness and operator pin first.
+pub async fn probe_gateway_pre_account(
+    record: &ramflux_protocol::WellKnownClientRecord,
+    ca: &Path,
+) -> GatewayProbe {
+    let profile = NodeProfile::from_record(record.clone(), now_unix_timestamp().unsigned_abs());
+    probe_gateway(&profile, ca).await
 }
 
 pub(crate) async fn dispatch_probe(

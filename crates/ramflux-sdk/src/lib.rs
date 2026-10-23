@@ -21,7 +21,9 @@ mod itest_crash_seam;
 mod itest_rfd_fault;
 mod node;
 mod object;
-pub use node::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
+pub use node::{
+    GatewayProbe, NodeGateway, NodePinSource, NodeProfile, NodeRelay, probe_gateway_pre_account,
+};
 mod own_device_sync;
 mod prekey;
 mod prelude;

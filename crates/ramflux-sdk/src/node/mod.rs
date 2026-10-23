@@ -7,6 +7,7 @@ use ramflux_protocol::{WellKnownClientRecord, verify_client_discovery_record};
 use serde::{Deserialize, Serialize};
 mod discovery;
 pub(crate) mod probe;
+pub use probe::{GatewayProbe, probe_gateway_pre_account};
 mod profile;
 mod store;
 pub(crate) use discovery::fetch_client_record;

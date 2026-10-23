@@ -66,6 +66,8 @@ else:
     if control.get("relay_quic_unhealthy"):
         sys.exit("relay QUIC unhealthy")
     print("mock discovery and QUIC verification")
+    print("node key fingerprint: test-public-fingerprint")
+    print("gateway pre-account health: healthy (quic=ok tcp=not_attempted session=requires_account)")
     print("relay QUIC TLS/application health: healthy (demo.example.org:59447)")
 '''
         self.tool = self.executable("demo-node-tool", tool)
@@ -174,6 +176,8 @@ else:
         self.run_script("up")
         result = self.run_script("status")
         self.assertIn("relay QUIC TLS/application health: healthy", result.stdout)
+        self.assertIn("node key fingerprint: test-public-fingerprint", result.stdout)
+        self.assertIn("gateway pre-account health: healthy", result.stdout)
         self.control.write_text('{"relay_quic_unhealthy": true}')
         result = self.run_script("status", success=False)
         self.assertIn("relay QUIC unhealthy", result.stderr)

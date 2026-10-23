@@ -120,9 +120,16 @@ The federation HTTP listener also exposes token-protected administration routes;
 keep its port limited to the demo LAN and keep the generated admin token private.
 
 `status` checks all seven container health states, then fetches the client record,
-verifies freshness, signature and the saved operator public key, and probes both
-gateway and relay QUIC `/healthz` using that record's CA and advertised endpoints.
-It exits nonzero on any failure. Health probes do not prove account creation, DM,
+verifies freshness, signature and the saved operator public key, and prints the
+node key fingerprint using the same discovery domain as `node.add`/`node.list`.
+It calls the SDK's pre-account gateway probe: verified QUIC first, then verified
+TCP-TLS fallback if needed, using the signed record's CA and server name. The
+first application frame is Heartbeat; only the protocol-constant
+`first gateway frame must be open` Nack counts as success. No Open or Auth frame
+is sent, and gateway session status remains `requires_account`. The relay check
+continues to use client-facing QUIC `/healthz` and requires status 200. The helper
+prints the selected gateway transport results and relay health; it exits nonzero
+on any failure. Health probes do not prove account creation, DM,
 attachments, or TURN behavior; those require the desktop/controller acceptance.
 
 For a LAN check on another machine, build the same helper natively there and use
