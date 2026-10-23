@@ -51,7 +51,7 @@ async fn revoke_endpoint(
         )?;
         let response = serde_json::to_vec(&ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: json!({"device_id":"alice","revoked":true}),
+            body: json!({"device_id":request.body["device_id"],"revoked":true}),
         })?;
         stream.write_u32(u32::try_from(response.len()).map_err(|_| invalid("response"))?).await?;
         stream.write_all(&response).await?;
@@ -72,9 +72,7 @@ async fn revoke_endpoint(
         server,
     ))
 }
-#[tokio::test]
-async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_rejects_stale_cache()
--> Result<(), SdkError> {
+async fn revoked_fixture(target: &str) -> Result<(Fixture, Fixture), SdkError> {
     let mut alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
@@ -120,7 +118,7 @@ async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_r
         Some("bob".into()),
         "device",
         "device.revoke",
-        json!({"device_id":"alice"}),
+        json!({"device_id":target}),
     );
     let response =
         crate::bus::dispatch::device::dispatch_device_bus_request(&request, &mut state).await?;
@@ -129,6 +127,12 @@ async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_r
     bob.client = std::mem::take(
         &mut state.accounts.get_mut("bob").ok_or_else(|| invalid("account"))?.client,
     );
+    Ok((alice, bob))
+}
+#[tokio::test]
+async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_rejects_stale_cache()
+-> Result<(), SdkError> {
+    let (alice, bob) = Box::pin(revoked_fixture("alice")).await?;
     let work = format!("dm-pair/reset-work/{}", super::super::session::pair_key("bob", "alice")?);
     assert!(bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work)?.is_none());
     assert!(bob.client.active_pair("bob", "alice")?.is_none());
@@ -138,5 +142,52 @@ async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_r
     );
     super::review::trust(&bob, &alice)?;
     assert!(matches!(bob.client.trusted_device("alice"), Err(SdkError::InboundRejected(_))));
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoking_the_current_device_clears_all_pairs_and_fences_pair_traffic()
+-> Result<(), SdkError> {
+    let (alice, mut bob) = Box::pin(revoked_fixture("bob")).await?;
+    assert_eq!(
+        bob.client
+            .account_db()?
+            .list_actor_states::<serde_json::Value>("dm-pair/reset-work/")?
+            .len(),
+        0
+    );
+    assert_eq!(
+        bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?.len(),
+        0
+    );
+    let (mut be, sent) = super::session_record::Wire::engine(&bob, &alice)?;
+    let incoming = seal(
+        &alice,
+        &bob,
+        super::r5::outgoing(&alice, &bob, "revoked-local-incoming"),
+        b"old traffic",
+    )?;
+    assert!(
+        bob.client
+            .apply_routed_entry(&mut be, &super::review::pool()?, &incoming, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        bob.client
+            .send_plaintext_direct_message_via_gateway(
+                &mut be,
+                super::r5::outgoing(&bob, &alice, "revoked-local-outgoing"),
+                b"do not send"
+            )
+            .await
+            .is_err()
+    );
+    bob.client.retry_pair_resets(&mut be, now_unix_timestamp() + 86400).await?;
+    assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
+    assert_eq!(
+        bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?.len(),
+        0
+    );
     Ok(())
 }

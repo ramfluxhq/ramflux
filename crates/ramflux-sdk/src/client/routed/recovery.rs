@@ -17,6 +17,7 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         entry: &GatewayInboxEntry,
     ) -> Result<super::Opened, SdkError> {
+        self.require_pair_device_active(&engine.config.device_id)?;
         match self.open_routed(entry, &engine.config.device_id) {
             Ok(opened) => Ok(opened),
             Err(error) => {

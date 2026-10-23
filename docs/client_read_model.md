@@ -247,7 +247,8 @@ postponing later attempts. Only hearing the peer on current confirms recovery. A
 state superseded by that confirmed current is dropped without starting another reset.
 
 Contact removal/blocking, a verified manifest removing a device, and own-device revocation stop
-retry work and erase the pair's private states. Retry ticks recheck eligibility. After seven days
+retry work and erase the pair's private states. Revoking the local device clears all its pairs
+and fences pair traffic. Retry ticks recheck eligibility. After seven days
 from the first attempt, automatic work stops and private states are erased. `identity.directory`
 includes `pair_recovery` metadata with `state: needs_manual_recovery`; `session.reset` carries the
 same state. Older pending records recover their original start from retained journal evidence;

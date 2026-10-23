@@ -121,6 +121,7 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         message: &GatewayDirectMessage,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]), SdkError> {
+        self.require_pair_device_active(&engine.config.device_id)?;
         let recipient = message
             .recipient_device_id
             .as_deref()
@@ -153,6 +154,7 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         url: Option<&str>,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]), SdkError> {
+        self.require_pair_device_active(local)?;
         let remote = message
             .recipient_device_id
             .as_deref()

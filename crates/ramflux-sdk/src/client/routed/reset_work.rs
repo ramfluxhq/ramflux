@@ -121,6 +121,9 @@ impl RamfluxClient {
         if opened.routing.kind == Kind::Control
             && serde_json::from_slice::<serde_json::Value>(body)
                 .is_ok_and(|value| value["type"] == "pair.session.reset.v1")
+            && self
+                .pair_recovery_allowed(&opened.local_device, &opened.remote_device)
+                .is_ok_and(|allowed| allowed)
             && let Err(error) = self
                 .send_pair_control(engine, &opened.remote_device, "pair.session.reset.ack.v1")
                 .await

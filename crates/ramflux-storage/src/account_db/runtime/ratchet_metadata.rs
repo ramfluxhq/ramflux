@@ -31,6 +31,15 @@ impl AccountDb {
         let prefix = format!("pair-reset-attempt:dm-pair/reset-work/{pair}:");
         Ok(self.connection.query_row("SELECT max(at) FROM runtime_journal WHERE substr(source_key,1,length(?1))=?1 AND json_extract(CAST(body_json AS TEXT),'$.attempt')=1",params![prefix],|row|row.get(0))?)
     }
+    /// Finds every peer owned by a local device, including work with no remaining live state.
+    /// # Errors
+    /// Returns SQLite errors.
+    pub fn pair_peer_devices(&self, local: &str) -> Result<Vec<String>, StorageError> {
+        let mut query=self.connection.prepare("SELECT DISTINCT remote FROM (SELECT json_extract(CAST(state_json AS TEXT),'$.remote') AS remote FROM runtime_actor_state WHERE (state_kind LIKE 'dm-pair/session/%' OR state_kind LIKE 'dm-pair/reset-work/%') AND json_extract(CAST(state_json AS TEXT),'$.local')=?1 UNION SELECT json_extract(CAST(state_json AS TEXT),'$.device_id') AS remote FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/%/manual' AND json_extract(CAST(state_json AS TEXT),'$.local_device_id')=?1) WHERE remote IS NOT NULL ORDER BY remote")?;
+        Ok(query
+            .query_map(params![local], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
     /// Prunes flags for erased sessions and keeps at most eight recent tombstones per pair.
     /// Legacy tombstones lacking an owner share one bounded upgrade bucket.
     /// # Errors

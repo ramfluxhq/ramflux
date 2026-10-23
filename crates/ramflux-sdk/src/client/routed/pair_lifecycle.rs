@@ -6,12 +6,25 @@ use super::session::pair_key;
 use super::{RamfluxClient, SdkError, now_unix_timestamp};
 use serde_json::{Value, json};
 impl RamfluxClient {
+    pub(super) fn require_pair_device_active(&self, local: &str) -> Result<(), SdkError> {
+        if self
+            .account_db()?
+            .load_actor_state::<bool>(&format!("device/revoked/{local}"))?
+            .unwrap_or(false)
+        {
+            return Err(SdkError::InboundRejected("local device is revoked".to_owned()));
+        }
+        Ok(())
+    }
     pub(super) fn pair_recovery_allowed(
         &self,
         local: &str,
         remote: &str,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
+        if db.load_actor_state::<bool>(&format!("device/revoked/{local}"))?.unwrap_or(false) {
+            return Ok(false);
+        }
         if db.load_actor_state::<bool>(&format!("device/revoked/{remote}"))?.unwrap_or(false) {
             return Ok(false);
         }
@@ -30,7 +43,7 @@ impl RamfluxClient {
             self.device_branch.as_ref().is_some_and(|device| device.principal_id == principal);
         Ok(own
             || self.friend_link_peer_is_accepted(principal)?
-            || self.active_pair(local, remote)?.is_some()
+            || db.actor_state_exists(&pair_key(local, remote)?)?
             || self.pair_recovery_pending(local, remote)?)
     }
     pub(crate) fn apply_verified_device_revocation(
@@ -44,7 +57,13 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         db.write_transaction(|| -> Result<(), SdkError> {
-            self.remove_device_pair(remote, "own_device_revoked")?;
+            if remote == own.device_id {
+                for peer in db.pair_peer_devices(&own.device_id)? {
+                    self.remove_device_pair(&peer, "own_device_revoked")?;
+                }
+            } else {
+                self.remove_device_pair(remote, "own_device_revoked")?;
+            }
             db.remove_actor_state(&format!("directory/device/{remote}"))?;
             db.persist_actor_state(&format!("device/revoked/{remote}"), &true)?;
             Ok(())
