@@ -43,3 +43,24 @@ async fn failed(
 #[cfg(test)]
 #[path = "tests/deferred_attachment.rs"]
 mod tests;
+
+/// A completed received object is local data, even when discovery configured a default relay.
+pub(super) fn read_relay_options(
+    account: &LocalBusAccountState,
+    object_id: &str,
+    endpoint: Option<String>,
+    service_key: Option<String>,
+    interrupt: Option<u32>,
+) -> Result<Option<RelayTransferOptions>, SdkError> {
+    if endpoint.is_none()
+        && service_key.is_none()
+        && interrupt.is_none()
+        && account
+            .client
+            .received_attachment_status(object_id)?
+            .is_some_and(|status| status["transfer_state"] == "available")
+    {
+        return Ok(None);
+    }
+    account.client.relay_transfer_options(endpoint, service_key, interrupt)
+}

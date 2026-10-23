@@ -6,16 +6,18 @@ use super::*;
 use crate::bus::actor::AccountCommand;
 use serde_json::json;
 
-#[tokio::test]
-async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<(), SdkError> {
+fn test_root() -> PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
-    let root = std::env::temp_dir().join(format!("rf-fetch-bus-{}-{unique}", std::process::id()));
+    std::env::temp_dir().join(format!("rf-fetch-bus-{}-{unique}", std::process::id()))
+}
+
+fn make_state(root: &Path) -> Result<LocalBusDaemonState, SdkError> {
     let mut client = RamfluxClient::new();
     client.create_identity_root("recipient", [0x51; 32]);
     client.create_device_branch("recipient", "device", 1, [0x52; 32]);
-    client.open_account_index(&root)?;
+    client.open_account_index(root)?;
     client.create_account("account", "commitment")?;
     client.unlock_account("account", b"secret")?;
     client.account_db()?.persist_actor_state("attachment/reference/object", &json!({"reference":{
@@ -38,10 +40,10 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
         target_delivery_id: "target".to_owned(),
         prekey_http_url: None,
     });
-    let mut state = LocalBusDaemonState {
+    Ok(LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),
-        config: LocalBusConfig::new(root.join("bus.sock"), root.clone()),
+        config: LocalBusConfig::new(root.join("bus.sock"), root.to_path_buf()),
         accounts: BTreeMap::from([(
             "account".to_owned(),
             LocalBusAccountState::disconnected(client, gateway, "commitment".to_owned()),
@@ -49,7 +51,13 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
         active_account_id: Some("account".to_owned()),
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
-    };
+    })
+}
+
+#[tokio::test]
+async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<(), SdkError> {
+    let root = test_root();
+    let mut state = make_state(&root)?;
     for attempt in 1..=2 {
         let mut request = LocalBusFrame::request(
             "request",
@@ -103,6 +111,59 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
     assert!(
         Box::pin(crate::bus::mutations::execute(&mut state, "account", &command)).await.is_err()
     );
+    drop(state);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn fetched_attachment_reads_are_local_with_a_saved_node_profile() -> Result<(), SdkError> {
+    let root = test_root();
+    let mut state = make_state(&root)?;
+    let account = state.accounts.get_mut("account").ok_or(SdkError::AccountDbNotUnlocked)?;
+    account.client.node_relay_options =
+        parse_relay_transfer_options(Some("https://relay.invalid".to_owned()), None, None)?;
+    assert!(read_relay_options(account, "object", None, None, None)?.is_some());
+    account.client.put_encrypted_object("object", b"local bytes")?;
+    account.client.account_db()?.persist_actor_state("attachment/fetch/object", &json!({
+        "object_id":"object","operation_id":"fetch-op","transfer_state":"available","last_error":null,"attempts":1,
+    }))?;
+    assert!(read_relay_options(account, "object", None, None, None)?.is_none());
+    assert!(
+        read_relay_options(
+            account,
+            "object",
+            Some("https://relay.invalid".to_owned()),
+            None,
+            None
+        )?
+        .is_some()
+    );
+    let request = LocalBusFrame::request(
+        "read",
+        Some("account".to_owned()),
+        "object",
+        "object.get",
+        json!({"object_id":"object"}),
+    );
+    let read =
+        Box::pin(crate::bus::dispatch::object::dispatch_object_bus_request(&request, &mut state))
+            .await?;
+    assert_eq!(
+        read.response_body["plaintext_base64"],
+        ramflux_protocol::encode_base64url(b"local bytes")
+    );
+    let request = LocalBusFrame::request(
+        "begin",
+        Some("account".to_owned()),
+        "object",
+        "object.get.begin",
+        json!({"object_id":"object","operation_id":"read-local","protocol_version":1}),
+    );
+    let begin =
+        Box::pin(crate::bus::dispatch::object::dispatch_object_bus_request(&request, &mut state))
+            .await?;
+    assert_eq!(begin.response_body["total_len"], b"local bytes".len());
     drop(state);
     std::fs::remove_dir_all(root)?;
     Ok(())

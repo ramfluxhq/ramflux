@@ -312,7 +312,9 @@ pub(crate) async fn dispatch_object_bus_request(
         }
         "object.get" => {
             let body: LocalBusObjectGetRequest = serde_json::from_value(request.body.clone())?;
-            let relay_options = account.client.relay_transfer_options(
+            let relay_options = super::deferred_attachment::read_relay_options(
+                account,
+                &body.object_id,
                 body.relay_endpoint.clone(),
                 body.relay_service_key_base64.clone(),
                 body.relay_interrupt_after_chunks,
@@ -1179,7 +1181,9 @@ async fn object_get_begin(
     // session + file so we always start from a clean, freshly decrypted spool.
     object_get_spool_discard(account, &body.operation_id);
 
-    let relay_options = account.client.relay_transfer_options(
+    let relay_options = super::deferred_attachment::read_relay_options(
+        account,
+        &body.object_id,
         body.relay_endpoint.clone(),
         body.relay_service_key_base64.clone(),
         body.relay_interrupt_after_chunks,

@@ -108,6 +108,8 @@ and `retryable: true`; the message remains visible. Retry with the same operatio
 verified encrypted chunk checkpoints. Interrupted attempts become retryable failures on daemon
 restart. During an attempt the directory reports `fetching` or
 `retrying`; success reports `available`, and the normal object read APIs then return the bytes.
+Bare `object.get` and `object.get.begin` requests for a completed received attachment use its local
+bytes even with a saved node relay profile; explicit relay requests retain their existing behavior.
 Successful operation IDs replay their receipt locally, including after daemon restart; reusing
 an operation ID for a different object fails. The body operation ID owns this retry policy even
 when the frame also carries a generic operation ID.
