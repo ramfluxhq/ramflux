@@ -56,7 +56,7 @@ async fn receive(
     let mut applied = 0;
     for entry in entries {
         if crate::client::routed::decode(&entry.envelope).is_ok() {
-            account.client.apply_routed_entry(engine, &pool, &entry, true).await?;
+            account.client.apply_routed_entry(engine, &pool, &entry, false).await?;
         } else if let Some(conversation) =
             account.client.legacy_routing_binding(&engine.config.device_id, &entry)?
         {
@@ -68,7 +68,7 @@ async fn receive(
                     entry.clone(),
                     crate::client::dm::LegacyReceive {
                         conversation_id: &conversation,
-                        auto_fetch_attachments: true,
+                        auto_fetch_attachments: false,
                         relay_service_key_base64: None,
                     },
                 )

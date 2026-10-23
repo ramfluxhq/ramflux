@@ -383,7 +383,12 @@ impl RamfluxClient {
                 }))?;
         }
         for attachment in &attachment_refs {
-            self.persist_received_attachment_reference(attachment,&entry.envelope.source_principal_id,conversation_id,&entry.envelope.envelope_id)?;
+            self.persist_received_attachment_reference(
+                attachment,
+                &entry.envelope.source_principal_id,
+                conversation_id,
+                &entry.envelope.envelope_id,
+            )?;
         }
         // Every attachment was imported, ACKed, and projected: only now do we commit the
         // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above

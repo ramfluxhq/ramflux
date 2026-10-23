@@ -36,6 +36,14 @@ impl RamfluxClient {
         } else {
             (opened.body.clone(), Vec::new())
         };
+        for attachment in &refs {
+            self.persist_received_attachment_reference(
+                attachment,
+                &entry.envelope.source_principal_id,
+                &opened.routing.conversation_id,
+                &entry.envelope.envelope_id,
+            )?;
+        }
         let mut imported = Vec::new();
         if attachments
             && opened.routing.kind == Kind::Direct
@@ -97,9 +105,6 @@ impl RamfluxClient {
                 "recv",
                 &opened.session,
             )?;
-        for attachment in &refs {
-            self.account_db()?.persist_client_record("object",&attachment.object_id,&serde_json::json!({"name":null,"mime":null,"direction":"incoming","owner":entry.envelope.source_principal_id,"conversation_id":opened.routing.conversation_id,"message_id":entry.envelope.envelope_id,"relay_endpoint":attachment.relay_endpoint}))?;
-        }
             self.account_db()?.persist_actor_state(&commit, &opened.routing)?;
             Ok(plaintext)
         })?;

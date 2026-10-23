@@ -561,6 +561,16 @@ pub(crate) async fn dispatch_message_receive_request(
         .collect::<BTreeSet<_>>();
     super::super::sync_driver::run(account).await?;
     receive_bound_legacy(account, &body).await?;
+    if body.auto_fetch_attachments
+        && let Some(conversation) = body.conversation_id.as_deref()
+    {
+        super::super::attachment_scheduler::fetch_for_conversation(
+            account,
+            conversation,
+            body.limit,
+        )
+        .await?;
+    }
     let mut plaintext = Vec::new();
     if let Some(conversation) = body.conversation_id.as_deref() {
         for entry in account.pending_deliveries.iter().take(body.limit.min(64)) {

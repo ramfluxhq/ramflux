@@ -9,8 +9,13 @@ struct Fixture {
 }
 impl Fixture {
     fn new(id: &str, seed: u8) -> Result<Self, SdkError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
-        let root = PathBuf::from(format!("/tmp/ramflux-routed-{id}-{}-{now}", std::process::id()));
+        let root = PathBuf::from(format!(
+            "/tmp/ramflux-routed-{id}-{}-{sequence}-{now}",
+            std::process::id()
+        ));
         let mut client = RamfluxClient::new();
         client.create_identity_root(id, [seed; 32]);
         client.create_device_branch(id, id, 1, [seed + 1; 32]);

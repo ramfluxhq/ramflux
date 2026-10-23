@@ -194,7 +194,14 @@ impl AccountRuntime {
             serde_json::json!({}),
         );
         self.publish(&request).await?;
-        Ok(activity)
+        // Publish message receipt before spending any transfer budget on its deferred objects.
+        let fetched = if let Some(account) = self.state.accounts.get_mut(&self.id) {
+            super::attachment_scheduler::run_next(account).await?
+        } else {
+            false
+        };
+        self.publish(&request).await?;
+        Ok(activity || fetched)
     }
 
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {

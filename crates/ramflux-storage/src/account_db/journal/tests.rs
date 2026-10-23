@@ -3,11 +3,13 @@
 use super::*;
 use crate::{AccountDbKey, AccountIndex};
 fn database() -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let root =
-        std::env::temp_dir().join(format!("ramflux-journal-{}-{unique}", std::process::id()));
+    let root = std::env::temp_dir()
+        .join(format!("ramflux-journal-{}-{sequence}-{unique}", std::process::id()));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "principal")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::derive("a", b"secret"))?;

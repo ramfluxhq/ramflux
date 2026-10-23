@@ -5,7 +5,7 @@
 use crate::bus::protocol::LocalBusObjectFetchRequest;
 use crate::prelude::*;
 
-pub(super) async fn dispatch(
+pub(crate) async fn dispatch(
     account: &mut LocalBusAccountState,
     request: &LocalBusFrame,
 ) -> Result<LocalBusDispatchResult, SdkError> {

@@ -119,6 +119,12 @@ fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Res
             return Ok(());
         }
     }
+    if let Some(id) = key.strip_prefix("attachment/fetch/") {
+        let row = super::super::read_model::row(client, "object", id)
+            .unwrap_or_else(|_| json!({"id":id,"removed":true}));
+        events.push(("object.transfer.progress".to_owned(), row.clone(), None));
+        events.push(("object.changed".to_owned(), row, None));
+    }
     if key.starts_with("stream/a2ui/")
         && let Some(value) = db.load_actor_state::<Value>(key)?
         && let Some(topic) = field(&value, "topic")

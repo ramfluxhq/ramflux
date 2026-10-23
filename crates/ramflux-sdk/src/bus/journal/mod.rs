@@ -111,6 +111,24 @@ mod tests {
             b"FORBIDDEN_MESSAGE_CONTENT",
         )?;
         client.account_db()?.persist_client_record("approval","approval",&serde_json::json!({"id":"approval","approval_id":"approval","event_type":"mcp.approval.request","details":{"arguments":{"text":"FORBIDDEN_TOOL_ARGUMENT"}}}))?;
+        client.account_db()?.persist_actor_state(
+            "attachment/reference/remote",
+            &serde_json::json!({"access_grant":"PRIVATE_GRANT","key_slot":"PRIVATE_SLOT"}),
+        )?;
+        client.account_db()?.persist_client_record(
+            "object",
+            "remote",
+            &serde_json::json!({
+                "owner":"peer","size":42,"access_grant":"PRIVATE_GRANT","key_slot":"PRIVATE_SLOT"
+            }),
+        )?;
+        client.account_db()?.persist_actor_state(
+            "attachment/fetch/remote",
+            &serde_json::json!({
+                "object_id":"remote","transfer_state":"retrying","operation_id":"fetch-op",
+                "last_error":null,"attempts":2
+            }),
+        )?;
         let event = LocalBusFrame {
             kind: LocalBusFrameKind::Event,
             ..LocalBusFrame::request(
@@ -125,6 +143,10 @@ mod tests {
         let mut topics = BTreeSet::new();
         for entry in client.account_db()?.pending_outbox(256)? {
             for (topic, body, _) in project(&client, &entry)? {
+                if topic == "object.transfer.progress" {
+                    assert_eq!(body["id"], "remote");
+                    assert_eq!(body["transfer_state"], "retrying");
+                }
                 topics.insert(topic);
                 let encoded = serde_json::to_string(&body)?;
                 for forbidden in [
@@ -134,12 +156,16 @@ mod tests {
                     "encrypted_body",
                     "arguments",
                     "object_content_key",
+                    "PRIVATE_",
+                    "access_grant",
+                    "key_slot",
                 ] {
                     assert!(!encoded.contains(forbidden));
                 }
             }
         }
         assert!(topics.contains("message.updated"));
+        assert!(topics.contains("object.transfer.progress"));
         assert!(topics.contains("mcp.approval.request"));
         assert!(topics.contains("ramflux.a2ui.action_submitted"));
         drop(client);

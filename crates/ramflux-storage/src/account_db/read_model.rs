@@ -153,3 +153,29 @@ impl AccountDb {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
+
+impl AccountDb {
+    /// Selects a bounded background-fetch page using identifiers and public scheduling state only.
+    ///
+    /// # Errors
+    /// Returns SQL errors. Private attachment reference bodies are never selected.
+    pub fn pending_received_attachment_ids(
+        &self,
+        now: i64,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT substr(r.state_kind,22) AS id FROM runtime_actor_state r
+             LEFT JOIN runtime_actor_state f ON f.state_kind='attachment/fetch/'||substr(r.state_kind,22)
+             LEFT JOIN runtime_actor_state s ON s.state_kind='sync/attachment/'||substr(r.state_kind,22)
+             WHERE r.state_kind GLOB 'attachment/reference/*'
+               AND coalesce(json_extract(CAST(f.state_json AS TEXT),'$.transfer_state'),'not_fetched')<>'available'
+               AND coalesce(json_extract(CAST(s.state_json AS TEXT),'$.attempts'),0)<3
+               AND coalesce(json_extract(CAST(s.state_json AS TEXT),'$.next_at'),0)<=?1
+             ORDER BY r.state_kind LIMIT ?2",
+        )?;
+        Ok(query
+            .query_map(params![now, limit.min(64)], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
