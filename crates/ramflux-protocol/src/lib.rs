@@ -19,7 +19,14 @@ mod protocol_object;
 mod replay;
 mod signature;
 mod state;
+pub mod surface_v2;
 mod surfaces;
+pub use surface_v2::{
+    SURFACE_HASH_DOMAIN, SurfaceAction, SurfaceActionDefinition, SurfaceActionRisk,
+    SurfaceActionSchema, SurfaceBlock, SurfaceBlockKind, SurfaceContent, SurfaceEvent,
+    SurfaceLimit, SurfacePatchOp, SurfaceReject, SurfaceState,
+    surface_hash as conversation_surface_hash,
+};
 
 pub use canonical_json::{
     blake3_hash_bytes, canonical_json_bytes, canonical_json_string, event_id, hash_base64url,
