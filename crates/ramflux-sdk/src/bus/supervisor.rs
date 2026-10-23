@@ -113,14 +113,25 @@ impl Supervisor {
                 let connection = LocalBusConnectionState::new(0, outbound);
                 let request = LocalBusFrame::request(
                     "restore",
-                    Some(manifest.local_account_id),
+                    Some(manifest.local_account_id.clone()),
                     "account",
                     "account.unlock",
                     serde_json::json!({"passphrase":manifest.account_secret}),
                 );
-                if let Err(error) = supervisor.request(request, &connection).await {
-                    tracing::warn!(%error, "account restore failed");
-                }
+                let body = match supervisor.request(request.clone(), &connection).await {
+                    Ok(_) => serde_json::json!({"state":"unlocked"}),
+                    Err(error) => {
+                        tracing::warn!(%error, "account restore failed");
+                        serde_json::json!({"state":"failed", "error":local_bus_error(&request, &error).error})
+                    }
+                };
+                supervisor.broadcast(&[local_bus_event(
+                    &request,
+                    &manifest.local_account_id,
+                    "account",
+                    "account.restore.finished",
+                    body,
+                )]);
             });
         }
         Ok(())

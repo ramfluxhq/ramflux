@@ -6,7 +6,7 @@
 use crate::prelude::*;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const ACCOUNT_BACKUP_SCHEMA: &str = "ramflux.local_bus.account_backup.v1";
 const ACCOUNT_BACKUP_VERSION: u32 = 1;
@@ -251,14 +251,17 @@ async fn local_bus_account_unlock(
     account_id: &str,
     body: &mut LocalBusAccountUnlockRequest,
 ) -> Result<LocalBusAccountCreateResponse, SdkError> {
-    if state.accounts.contains_key(account_id) {
-        return Err(SdkError::LocalBus(format!("account already open: {account_id}")));
-    }
+    let passphrase = Zeroizing::new(std::mem::take(&mut body.passphrase));
     let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
     let manifest = read_local_bus_account_manifest(&manifest_path)?;
-    let response =
-        restore_local_bus_account_with_passphrase(state, &manifest, &body.passphrase).await?;
-    body.passphrase.zeroize();
+    let response = if let Some(account) = state.accounts.get(account_id) {
+        // The actor serializes startup restore and client unlock. Repeated unlocks must still
+        // authenticate against the wrapped database key, never the cached manifest secret.
+        account.client.verify_active_account_secret(account_id, passphrase.as_bytes())?;
+        local_bus_account_response(&manifest, account)
+    } else {
+        restore_local_bus_account_with_passphrase(state, &manifest, &passphrase).await?
+    };
     state.active_account_id = Some(response.local_account_id.clone());
     Ok(response)
 }

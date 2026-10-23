@@ -4,6 +4,21 @@ All methods use local-bus protocol v1 request frames. Supply `account_id` for ac
 They use the account's query-only reader connections and one SQLite snapshot per request; they do
 not acquire the mutation mailbox or contact a gateway/relay. A locked account has no read pool.
 
+## Startup account restore
+
+`account.unlock` is safe to repeat while startup auto-restore is running or after an account has
+opened. Every uncached unlock verifies the supplied `passphrase` against the wrapped database key,
+including when the account is already open, and returns the normal account creation/unlock response.
+A wrong passphrase still fails. Existing operation-ID receipt replay semantics are unchanged.
+
+Subscribe with `subscription.open` for the account and topic `account.restore.finished` to receive
+startup restore completion. The event body is `{"state":"unlocked"}` on success, or
+`{"state":"failed","error":{"code":"...","message":"...","retry_after_ms":null}}`
+on failure. Success means the local account is open; its gateway session may still be disconnected.
+These are live subscription events; a subscriber that connects after completion uses `account.list`
+for the current state. Locked accounts are not auto-restored. Failed restores can be retried with
+`account.unlock` and the correct passphrase.
+
 ## Pagination
 
 `conversation.directory`, `identity.directory`, and `object.directory` accept:

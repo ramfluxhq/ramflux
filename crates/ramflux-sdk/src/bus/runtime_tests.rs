@@ -884,3 +884,5 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+mod restore;
