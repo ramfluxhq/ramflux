@@ -5,6 +5,7 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+#[derive(Clone)]
 pub struct LocalBusConfig {
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
@@ -31,6 +32,12 @@ pub struct LocalBusFrame {
     pub method: String,
     pub body: serde_json::Value,
     pub trace_id: Option<String>,
+    /// Absolute Unix deadline in milliseconds, checked before applying a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    /// Account-scoped retry key for a mutating request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +175,8 @@ pub struct LocalBusAccountPassphraseRotateRequest {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LocalBusPersistedAccount {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) activation_pending: bool,
     #[serde(default)]
     pub(crate) node_id: Option<String>,
     pub(crate) schema: String,
@@ -202,6 +211,7 @@ impl LocalBusPersistedAccount {
             is_local: true,
         }];
         Self {
+            activation_pending: true,
             schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
             local_account_id: body.local_account_id.clone(),
             principal_id: body.principal_id.clone(),
@@ -966,6 +976,8 @@ impl LocalBusFrame {
             method: method.into(),
             body,
             trace_id: None,
+            deadline_ms: None,
+            operation_id: None,
             ok: None,
             error: None,
         }

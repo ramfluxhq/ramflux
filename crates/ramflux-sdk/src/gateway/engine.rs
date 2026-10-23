@@ -16,8 +16,14 @@ pub struct GatewaySessionEngine {
 }
 
 enum GatewaySessionClientTransport {
-    Quic { _client: ramflux_transport::QuicGatewayClient },
-    TcpTls { _client: ramflux_transport::TcpTlsGatewayClient },
+    #[cfg(test)]
+    Injected,
+    Quic {
+        _client: ramflux_transport::QuicGatewayClient,
+    },
+    TcpTls {
+        _client: ramflux_transport::TcpTlsGatewayClient,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +164,27 @@ impl GatewaySessionEngine {
         };
         engine.remember_session_for_resume();
         Ok(engine)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_transport(
+        config: GatewaySessionConfig,
+        stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
+    ) -> Self {
+        Self {
+            config,
+            stream,
+            _transport: GatewaySessionClientTransport::Injected,
+            session: GatewaySessionState {
+                session_id: "test-session".to_owned(),
+                gateway_id: "test-gateway".to_owned(),
+                resume_token: "test-resume".to_owned(),
+                resume_window_seconds: 60,
+                accepted_inbox_seq: 0,
+            },
+            request_counter: 0,
+            pending_deliveries: VecDeque::new(),
+        }
     }
 
     #[must_use]

@@ -6,7 +6,7 @@ use crate::*;
 use rusqlite::types::Type;
 
 pub(crate) fn contact_verification_from_row(
-    row: &rusqlite::Row<'_>,
+    row: &crate::database::Row,
 ) -> rusqlite::Result<ContactVerificationRecord> {
     let kt_tree_size_i64: Option<i64> = row.get(9)?;
     let kt_leaf_index_i64: Option<i64> = row.get(11)?;
@@ -27,7 +27,9 @@ pub(crate) fn contact_verification_from_row(
     })
 }
 
-pub(crate) fn friend_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FriendLinkRecord> {
+pub(crate) fn friend_link_from_row(
+    row: &crate::database::Row,
+) -> rusqlite::Result<FriendLinkRecord> {
     let blocked: i64 = row.get(5)?;
     Ok(FriendLinkRecord {
         link_id: row.get(0)?,
@@ -41,7 +43,7 @@ pub(crate) fn friend_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<
 }
 
 pub(crate) fn rejected_inbox_from_row(
-    row: &rusqlite::Row<'_>,
+    row: &crate::database::Row,
 ) -> rusqlite::Result<RejectedInboxRecord> {
     Ok(RejectedInboxRecord {
         conversation_id: row.get(0)?,
@@ -53,7 +55,7 @@ pub(crate) fn rejected_inbox_from_row(
 }
 
 pub(crate) fn object_share_grant_from_row(
-    row: &rusqlite::Row<'_>,
+    row: &crate::database::Row,
 ) -> rusqlite::Result<ObjectShareGrantRecord> {
     Ok(ObjectShareGrantRecord {
         object_id: row.get(0)?,
@@ -67,7 +69,7 @@ pub(crate) fn object_share_grant_from_row(
 }
 
 pub(crate) fn guardian_recovery_share_from_row(
-    row: &rusqlite::Row<'_>,
+    row: &crate::database::Row,
 ) -> rusqlite::Result<GuardianRecoveryShareRecord> {
     Ok(GuardianRecoveryShareRecord {
         owner_principal_id: row.get(0)?,
@@ -91,7 +93,7 @@ pub(crate) fn guardian_recovery_share_from_row(
 }
 
 pub(crate) fn pending_recovery_from_row(
-    row: &rusqlite::Row<'_>,
+    row: &crate::database::Row,
 ) -> rusqlite::Result<PendingRecoveryRecord> {
     let recovery_quorum_json: Vec<u8> = row.get(9)?;
     let context_json: Vec<u8> = row.get(10)?;
@@ -117,7 +119,7 @@ pub(crate) fn pending_recovery_from_row(
 }
 
 pub(crate) fn pending_recovery_approval_from_row(
-    row: &rusqlite::Row<'_>,
+    row: &crate::database::Row,
 ) -> rusqlite::Result<PendingRecoveryApprovalRecord> {
     let approval_json: Vec<u8> = row.get(3)?;
     Ok(PendingRecoveryApprovalRecord {

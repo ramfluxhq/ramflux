@@ -34,6 +34,8 @@ pub(crate) fn local_bus_response(
         method: request.method.clone(),
         body,
         trace_id: request.trace_id.clone(),
+        deadline_ms: None,
+        operation_id: None,
         ok: Some(true),
         error: None,
     }
@@ -50,6 +52,8 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
         method: request.method.clone(),
         body: serde_json::Value::Null,
         trace_id: request.trace_id.clone(),
+        deadline_ms: None,
+        operation_id: None,
         ok: Some(false),
         error: Some(LocalBusErrorBody {
             code: local_bus_error_code(error).to_owned(),
@@ -90,6 +94,8 @@ pub(crate) fn local_bus_event(
         method: method.to_owned(),
         body,
         trace_id: request.trace_id.clone(),
+        deadline_ms: None,
+        operation_id: None,
         ok: None,
         error: None,
     }
@@ -143,22 +149,36 @@ pub(crate) async fn write_local_bus_frame<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let body = encode_local_bus_frame(frame)?;
+    write_encoded_local_bus_frame(writer, &body).await
+}
+
+pub(crate) fn encode_local_bus_frame(frame: &LocalBusFrame) -> Result<Vec<u8>, SdkError> {
     let body = ramflux_protocol::canonical_json_bytes(frame)?;
-    if body.len() > MAX_LOCAL_BUS_FRAME_BYTES {
+    checked_frame_len(body.len())?;
+    Ok(body)
+}
+
+pub(crate) async fn write_encoded_local_bus_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    body: &[u8],
+) -> Result<(), SdkError> {
+    let len = checked_frame_len(body.len())?;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(body).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+fn checked_frame_len(len: usize) -> Result<u32, SdkError> {
+    if len > MAX_LOCAL_BUS_FRAME_BYTES {
         // Reject before writing any bytes: no partial frame is emitted and, for a request, no local
         // or relay mutation has happened yet (the frame never reaches dispatch).
         return Err(SdkError::LocalBus(format!(
-            "local bus frame too large: {} > {MAX_LOCAL_BUS_FRAME_BYTES}",
-            body.len()
+            "local bus frame too large: {len} > {MAX_LOCAL_BUS_FRAME_BYTES}"
         )));
     }
-    let len = u32::try_from(body.len()).map_err(|_error| {
-        SdkError::LocalBus(format!("local bus frame too large: {}", body.len()))
-    })?;
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&body).await?;
-    writer.flush().await?;
-    Ok(())
+    u32::try_from(len).map_err(|_| SdkError::LocalBus(format!("local bus frame too large: {len}")))
 }
 
 pub(crate) async fn read_local_bus_frame<R>(reader: &mut R) -> Result<LocalBusFrame, SdkError>
@@ -191,6 +211,8 @@ mod tests {
             method: "object.put".to_owned(),
             body,
             trace_id: None,
+            deadline_ms: None,
+            operation_id: None,
             ok: None,
             error: None,
         }

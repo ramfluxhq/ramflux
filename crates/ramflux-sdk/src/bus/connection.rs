@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Socket framing, request multiplexing and connection-scoped cancellation.
+
+use super::supervisor::Supervisor;
+use crate::prelude::*;
+use tokio::task::JoinSet;
+
+pub(super) async fn serve(
+    config: LocalBusConfig,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), SdkError> {
+    std::fs::create_dir_all(&config.data_root)?;
+    set_owner_only_dir_permissions(&config.data_root)?;
+    let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
+    if let Some(parent) = config.socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if config.socket_path.exists() {
+        std::fs::remove_file(&config.socket_path)?;
+    }
+    let listener = UnixListener::bind(&config.socket_path)?;
+    set_owner_only_file_permissions(&config.socket_path)?;
+    let uid = std::fs::metadata(&config.socket_path)?.uid();
+    let supervisor = Supervisor::new(config)?;
+    let mut background = JoinSet::new();
+    supervisor.hydrate(&mut background)?;
+    let result = accept(listener, uid, supervisor, shutdown).await;
+    background.abort_all();
+    while background.join_next().await.is_some() {}
+    result
+}
+
+pub(super) async fn accept(
+    listener: UnixListener,
+    uid: u32,
+    supervisor: Rc<Supervisor>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), SdkError> {
+    let socket = super::socket::SocketFile::new(&listener)?;
+    let mut stopping = supervisor.stop_requested();
+    let mut connections = JoinSet::new();
+    let mut next = 1_u64;
+    loop {
+        tokio::select! {
+            _ = stopping.changed() => break,
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { break; }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                verify_local_bus_peer(&stream, uid)?;
+                let supervisor = Rc::clone(&supervisor);
+                let id = next;
+                next = next.checked_add(1).ok_or_else(|| SdkError::LocalBus("connection id exhausted".to_owned()))?;
+                connections.spawn_local(async move { handle(stream, supervisor, id).await });
+            }
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Ok(Err(error)) = result { tracing::warn!(%error, "local bus connection ended"); }
+            }
+        }
+    }
+    drop(listener);
+    if let Some(socket) = &socket {
+        socket.remove()?;
+    }
+    if *stopping.borrow() {
+        let mut response = supervisor.stop_response();
+        while !*response.borrow() {
+            if response.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    supervisor.shutdown().await
+}
+
+pub(super) async fn handle(
+    stream: UnixStream,
+    supervisor: Rc<Supervisor>,
+    id: u64,
+) -> Result<(), SdkError> {
+    let (mut reader, mut writer) = stream.into_split();
+    let (incoming, mut frames) = mpsc::channel(64);
+    let (disconnect, mut disconnected) = watch::channel(false);
+    let reader_task = tokio::task::spawn_local(async move {
+        loop {
+            let frame = read_local_bus_frame(&mut reader).await;
+            let failed = frame.is_err();
+            if incoming.try_send(frame).is_err() || failed {
+                break;
+            }
+        }
+        let _ = disconnect.send(true);
+    });
+    let (outbound, mut receiver) = mpsc::channel::<LocalBusFrame>(64);
+    let writer_supervisor = Rc::clone(&supervisor);
+    let writer_task = tokio::task::spawn_local(async move {
+        let _lifetime = WriterStopped { supervisor: Rc::clone(&writer_supervisor), connection: id };
+        while let Some(frame) = receiver.recv().await {
+            write_local_bus_frame(&mut writer, &frame).await?;
+            if frame.method == "daemon.stop" {
+                writer_supervisor.finish_stop_response(id, &frame.request_id);
+            }
+        }
+        Ok::<(), SdkError>(())
+    });
+    let _cleanup =
+        ConnectionTasks { reader: reader_task.abort_handle(), writer: writer_task.abort_handle() };
+    let mut connection = LocalBusConnectionState::new(id, outbound.clone());
+    let mut requests = JoinSet::new();
+    let mut inflight = BTreeSet::new();
+    let result = loop {
+        tokio::select! {
+            _ = disconnected.changed() => break Ok(()),
+            frame = frames.recv(), if requests.len() < 64 => {
+                let request = match frame {
+                    None => break Ok(()),
+                    Some(frame) => match frame {
+                    Ok(request) => request,
+                    Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
+                    Err(error) => break Err(error),
+                    },
+                };
+                if let Err(error) = super::requests::deadline(&request) {
+                    outbound.send(local_bus_error(&request,&error)).await.map_err(|_| closed())?;
+                    continue;
+                }
+                if request.kind != LocalBusFrameKind::Request {
+                    outbound.send(local_bus_error(&request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
+                    continue;
+                }
+                if !inflight.insert(request.request_id.clone()) {
+                    outbound.send(local_bus_error(&request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
+                    continue;
+                }
+                if request.method == "subscription.open" {
+                    let body: LocalBusSubscriptionOpenRequest = match serde_json::from_value(request.body.clone()) {
+                        Ok(body) => body,
+                        Err(error) => {
+                            outbound.send(local_bus_error(&request,&SdkError::from(error))).await.map_err(|_| closed())?;
+                            inflight.remove(&request.request_id);
+                            continue;
+                        }
+                    };
+                    connection.topics.extend(body.topics);
+                    if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                        connection.attended_account_id.clone_from(&request.account_id);
+                    }
+                    if let Some(account_id) = request.account_id.clone() { supervisor.subscribe(&connection, account_id); }
+                    outbound.send(local_bus_response(&request, serde_json::json!({"subscribed":true}))).await.map_err(|_| closed())?;
+                    inflight.remove(&request.request_id);
+                    continue;
+                }
+                let context = LocalBusConnectionState {
+                    connection_id: id, outbound: outbound.clone(), topics: connection.topics.clone(),
+                    attended_account_id: connection.attended_account_id.clone(), pending_events: Vec::new(),
+                };
+                requests.spawn_local(super::requests::respond(request, Rc::clone(&supervisor), context));
+            }
+            Some(result) = requests.join_next(), if !requests.is_empty() => {
+                match result {
+                    Ok((id, result)) => { inflight.remove(&id); if let Err(error) = result { break Err(error); } }
+                    Err(error) => break Err(SdkError::LocalBus(format!("request task failed: {error}"))),
+                }
+            }
+        }
+    };
+    requests.abort_all();
+    while requests.join_next().await.is_some() {}
+    supervisor.disconnect(id);
+    reader_task.abort();
+    let _ = reader_task.await;
+    writer_task.abort();
+    let _ = writer_task.await;
+    result
+}
+
+fn closed() -> SdkError {
+    SdkError::LocalBus("local bus connection closed".to_owned())
+}
+
+struct ConnectionTasks {
+    reader: tokio::task::AbortHandle,
+    writer: tokio::task::AbortHandle,
+}
+impl Drop for ConnectionTasks {
+    fn drop(&mut self) {
+        self.reader.abort();
+        self.writer.abort();
+    }
+}
+
+struct WriterStopped {
+    supervisor: Rc<Supervisor>,
+    connection: u64,
+}
+impl Drop for WriterStopped {
+    fn drop(&mut self) {
+        self.supervisor.finish_stop_connection(self.connection);
+    }
+}

@@ -7,11 +7,34 @@ use crate::prelude::*;
 
 impl RamfluxClient {
     pub fn open_account_index(&mut self, root: impl AsRef<Path>) -> Result<(), SdkError> {
-        let index = AccountIndex::open(root)?;
+        let index = match self.account_index.take() {
+            Some(index) if index.root() == root.as_ref() => index,
+            _ => AccountIndex::open(root)?,
+        };
         if !self.vault_secret_source_is_custom {
             self.vault_secret_source = Some(Box::new(FileVaultSecretSource::new(index.root())));
         }
         self.account_index = Some(index);
+        Ok(())
+    }
+
+    /// Verifies a passphrase using the supervisor index and already-open account key.
+    ///
+    /// # Errors
+    /// Returns an error for a wrong secret, missing key wrapping, or a locked account.
+    pub fn verify_active_account_secret(
+        &self,
+        account_id: &str,
+        secret: &[u8],
+    ) -> Result<(), SdkError> {
+        let vault_secret = self.vault_secret_source()?.vault_secret(account_id)?;
+        let wrapping_key = account_db_key_encryption_key(&vault_secret, secret);
+        let wrapped = self
+            .account_index()?
+            .load_wrapped_db_key(account_id)?
+            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        let key = unwrap_with_vault_secret(&wrapping_key, &wrapped)?;
+        self.account_db()?.verify_key(&key)?;
         Ok(())
     }
 

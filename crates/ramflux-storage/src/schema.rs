@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 #![allow(clippy::wildcard_imports)]
+use crate::database::Connection;
 use crate::*;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 
 struct AccountMigration {
     schema_version: i64,
@@ -1183,7 +1184,7 @@ fn ensure_column(
 ) -> Result<(), StorageError> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table_name})"))?;
     let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
+    while let Some(row) = rows.next() {
         let existing: String = row.get(1)?;
         if existing == column_name {
             return Ok(());

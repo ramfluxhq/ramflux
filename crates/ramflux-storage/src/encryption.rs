@@ -2,10 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 #![allow(clippy::wildcard_imports)]
+use crate::database::Connection;
 use crate::*;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -115,6 +116,8 @@ impl VaultSecretSource for FileVaultSecretSource {
         let mut file = options.open(&path)?;
         file.write_all(&secret)?;
         file.sync_all()?;
+        fs::File::open(parent)?.sync_all()?;
+        fs::File::open(&self.root)?.sync_all()?;
         #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Ok(secret)

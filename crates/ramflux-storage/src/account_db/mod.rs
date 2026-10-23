@@ -3,13 +3,14 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::database::Connection;
 use crate::encryption::{
     AccountKeyWrappingProvider, WrappedAccountDbKey, apply_key, current_encryption_mode,
     verify_or_install_key_fingerprint, wrap_with_vault_secret,
 };
 use crate::schema::migrate_account_db;
 use crate::*;
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -28,6 +29,7 @@ pub mod mcp;
 pub mod messages;
 pub mod object;
 pub mod recovery;
+pub mod runtime;
 
 pub struct AccountDb {
     pub local_account_id: String,
@@ -51,13 +53,14 @@ impl AccountDb {
         let path = index.root().join(account.db_relative_path);
         let connection = Connection::open(&path)?;
         apply_key(&connection, key)?;
+        connection.execute_batch("PRAGMA synchronous=FULL;")?;
         let mode = current_encryption_mode(&connection);
         if mode != EncryptionMode::SqlCipher && !insecure_test_sqlite_allowed() {
             return Err(StorageError::EncryptionUnavailable { mode });
         }
         migrate_account_db(&connection)?;
         verify_or_install_key_fingerprint(&connection, key)?;
-        Ok(Self {
+        let db = Self {
             local_account_id: local_account_id.to_owned(),
             path,
             mode,
@@ -67,7 +70,19 @@ impl AccountDb {
             connection,
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
-        })
+        };
+        db.enable_runtime()?;
+        Ok(db)
+    }
+
+    /// # Errors
+    /// Returns an error when the supplied unwrapped key does not match the open account.
+    pub fn verify_key(&self, key: &AccountDbKey) -> Result<(), StorageError> {
+        if self.current_key.fingerprint() == key.fingerprint() {
+            Ok(())
+        } else {
+            Err(StorageError::AccountKeyMismatch)
+        }
     }
 
     #[must_use]

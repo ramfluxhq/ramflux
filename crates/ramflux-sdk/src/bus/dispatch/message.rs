@@ -34,7 +34,7 @@ pub(crate) async fn dispatch_message_bus_request(
                 .await;
             account.put_engine(engine);
             let cursor = result?;
-            account.mark_acked(&body.envelope_id);
+            account.mark_acked(&body.envelope_id)?;
             Ok(local_bus_ok(serde_json::to_value(cursor)?))
         }
         "message.delete" => {
@@ -582,7 +582,7 @@ pub(crate) async fn dispatch_message_receive_request(
     .await;
     account.put_engine(engine);
     let (plaintext, entries) = receive_result?;
-    let fresh = account.merge_deliveries(entries);
+    let fresh = account.merge_deliveries(entries)?;
     let event = if fresh.is_empty() {
         None
     } else {

@@ -2,11 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 #![allow(clippy::wildcard_imports)]
+use crate::database::Connection;
 use crate::*;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod operations;
+
+#[derive(Clone)]
 pub struct AccountIndex {
     root: PathBuf,
     connection: Connection,
@@ -19,8 +23,13 @@ impl AccountIndex {
         fs::create_dir_all(root.as_ref())?;
         let path = root.as_ref().join(ACCOUNT_INDEX_FILE);
         let connection = Connection::open(path)?;
+        connection.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;",
+        )?;
         migrate_account_index(&connection)?;
-        Ok(Self { root: root.as_ref().to_path_buf(), connection })
+        let index = Self { root: root.as_ref().to_path_buf(), connection };
+        index.install_operation_schema()?;
+        Ok(index)
     }
 
     /// # Errors
@@ -34,6 +43,9 @@ impl AccountIndex {
         let object_dir_relative_path = format!("accounts/{local_account_id}/objects");
         let account_dir = self.root.join(format!("accounts/{local_account_id}"));
         fs::create_dir_all(account_dir.join("objects"))?;
+        fs::File::open(&account_dir)?.sync_all()?;
+        fs::File::open(self.root.join("accounts"))?.sync_all()?;
+        fs::File::open(&self.root)?.sync_all()?;
         self.connection.execute(
             "INSERT OR REPLACE INTO local_account (
                 local_account_id, principal_commitment, display_label, db_relative_path,

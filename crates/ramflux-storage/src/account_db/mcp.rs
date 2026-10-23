@@ -132,6 +132,19 @@ impl AccountDb {
         Ok(audit)
     }
 
+    /// # Errors
+    /// Returns an error when the bounded audit view cannot be read or decoded.
+    pub fn load_recent_mcp_audit<T: DeserializeOwned>(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<T>, StorageError> {
+        let mut statement = self.connection.prepare("SELECT audit_body FROM (SELECT audit_body,created_at,audit_id FROM audit_log WHERE audit_type LIKE 'mcp.%' AND audit_body IS NOT NULL ORDER BY created_at DESC,audit_id DESC LIMIT ?1) ORDER BY created_at,audit_id")?;
+        statement
+            .query_map(params![limit], |row| row.get::<_, Vec<u8>>(0))?
+            .map(|row| Ok(serde_json::from_slice(&row?)?))
+            .collect()
+    }
+
     pub fn upsert_mcp_tool<T>(&self, write: &McpToolWrite<'_, T>) -> Result<(), StorageError>
     where
         T: Serialize,

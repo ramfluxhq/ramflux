@@ -9,6 +9,8 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+pub type StoredObject<T> = (T, Option<[u8; 32]>);
+
 pub type StoredObjects<T> = (Vec<T>, BTreeMap<String, [u8; 32]>);
 
 impl AccountDb {
@@ -151,6 +153,56 @@ impl AccountDb {
         self.object_share_grant(object_id, recipient_principal_id)
     }
 
+    /// # Errors
+    /// Returns an error if the object row, serialized body or content key is invalid.
+    pub fn load_object<T: DeserializeOwned>(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<StoredObject<T>>, StorageError> {
+        let row: Option<(Vec<u8>, Option<Vec<u8>>)> = self.connection.query_row(
+            "SELECT object_body,object_content_key FROM object_index WHERE object_id=?1 AND object_body IS NOT NULL",
+            params![object_id], |row| Ok((row.get(0)?,row.get(1)?))
+        ).optional()?;
+        row.map(|(body, key)| {
+            let key = key
+                .map(|key| {
+                    key.try_into().map_err(|_| {
+                        StorageError::KeyWrappingFailed(
+                            "invalid object content key length".to_owned(),
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok((serde_json::from_slice(&body)?, key))
+        })
+        .transpose()
+    }
+
+    /// # Errors
+    /// Returns an error if the bounded persisted object cache page cannot be decoded.
+    pub fn load_recent_objects<T: DeserializeOwned>(
+        &self,
+        limit: usize,
+    ) -> Result<StoredObjects<T>, StorageError> {
+        let mut statement = self.connection.prepare("SELECT object_id FROM object_index WHERE object_body IS NOT NULL ORDER BY updated_at DESC,object_id LIMIT ?1")?;
+        let ids = statement
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut objects = Vec::with_capacity(ids.len());
+        let mut keys = BTreeMap::new();
+        for id in ids {
+            if let Some((object, key)) = self.load_object::<T>(&id)? {
+                objects.push(object);
+                if let Some(key) = key {
+                    keys.insert(id, key);
+                }
+            }
+        }
+        Ok((objects, keys))
+    }
+
     pub fn load_objects<T>(&self) -> Result<StoredObjects<T>, StorageError>
     where
         T: DeserializeOwned,
@@ -258,7 +310,7 @@ impl AccountDb {
         }
         query.push_str(" ORDER BY updated_at DESC LIMIT 1");
         let mut statement = self.connection.prepare(&query)?;
-        let mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<ObjectTransferRecord> {
+        let mapper = |row: &crate::database::Row| -> rusqlite::Result<ObjectTransferRecord> {
             let manifest_hash: Vec<u8> = row.get(4)?;
             let missing: Vec<u8> = row.get(7)?;
             let completed: Vec<u8> = row.get(8)?;

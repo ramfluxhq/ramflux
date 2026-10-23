@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! WAL durability and consistent query-only read connections.
+
+use super::super::AccountDb;
+use crate::StorageError;
+use crate::database::Connection;
+use crate::encryption::{apply_key, verify_or_install_key_fingerprint};
+use rusqlite::OpenFlags;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+impl AccountDb {
+    /// Enables the durable runtime contract before readers or network requests start.
+    ///
+    /// # Errors
+    /// Returns an error if WAL/FULL cannot be enabled or the outbox cannot be installed.
+    pub fn enable_runtime(&self) -> Result<(), StorageError> {
+        self.connection.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;",
+        )?;
+        let journal: String =
+            self.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        let sync: i64 = self.connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+        if journal != "wal" || sync != 2 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.install_runtime_schema()
+    }
+
+    /// Opens an independently owned, query-only encrypted connection with the same key.
+    ///
+    /// # Errors
+    /// Returns an error when opening or authenticating the read connection fails.
+    pub fn open_reader(&self) -> Result<Self, StorageError> {
+        let connection = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        apply_key(&connection, &self.current_key)?;
+        verify_or_install_key_fingerprint(&connection, &self.current_key)?;
+        connection.execute_batch("PRAGMA query_only=ON; PRAGMA synchronous=FULL;")?;
+        Ok(Self {
+            local_account_id: self.local_account_id.clone(),
+            path: self.path.clone(),
+            mode: self.mode,
+            current_key: self.current_key.clone(),
+            device_signer: self.device_signer.clone(),
+            clock: self.clock.clone(),
+            connection,
+            volatile_typing: RefCell::new(BTreeMap::new()),
+            volatile_presence: RefCell::new(BTreeMap::new()),
+        })
+    }
+
+    /// Groups all reads in the callback under one SQLite snapshot.
+    ///
+    /// # Errors
+    /// Returns callback errors or errors beginning/ending the read transaction.
+    pub fn read_snapshot<T, E>(&self, read: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        let transaction = self.connection.unchecked_transaction().map_err(StorageError::from)?;
+        let result = read()?;
+        transaction.commit().map_err(StorageError::from)?;
+        Ok(result)
+    }
+}

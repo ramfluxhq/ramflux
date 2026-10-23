@@ -402,7 +402,7 @@ pub(crate) async fn dispatch_object_bus_request(
             Ok(local_bus_ok(serde_json::json!({ "transfer": status })))
         }
         "object.list" => Ok(local_bus_ok(serde_json::json!({
-            "objects": account.client.object_store.objects(),
+            "objects": account.client.persisted_objects()?,
         }))),
         "object.share" => {
             let body: LocalBusObjectShareRequest = serde_json::from_value(request.body.clone())?;
@@ -650,7 +650,7 @@ async fn dispatch_object_put_reconciled_core(
             let record = existing
                 .as_ref()
                 .ok_or_else(|| SdkError::LocalBus("adopt without a record".to_owned()))?;
-            let object = account.client.object_store_object(&body.object_id).ok_or_else(|| {
+            let object = account.client.object_store_object(&body.object_id)?.ok_or_else(|| {
                 SdkError::LocalBus("local_committed object missing from the store".to_owned())
             })?;
             let bound = record.manifest_hash.as_deref() == Some(object.manifest_hash.as_str())
@@ -675,7 +675,7 @@ async fn dispatch_object_put_reconciled_core(
     #[cfg(feature = "itest-rfd-fault")]
     crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::PutAfterLocalCommitted).await?;
 
-    let object = account.client.object_store_object(&body.object_id).ok_or_else(|| {
+    let object = account.client.object_store_object(&body.object_id)?.ok_or_else(|| {
         SdkError::LocalBus("object missing from the store after local commit".to_owned())
     })?;
     let manifest_hash = object.manifest_hash.clone();
@@ -1582,6 +1582,7 @@ mod spool_tests {
             prekey_http_url: None,
         });
         LocalBusDaemonState {
+            account_index: None,
             nodes: crate::node::NodeStore::default(),
             config: LocalBusConfig::new(data_root.join("bus.sock"), data_root),
             accounts: BTreeMap::from([(

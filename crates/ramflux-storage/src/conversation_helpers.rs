@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 #![allow(clippy::wildcard_imports)]
+use crate::database::Connection;
 use crate::*;
-use rusqlite::{Connection, params};
+use rusqlite::params;
 
 pub(crate) fn has_unread_after_read(
     connection: &Connection,

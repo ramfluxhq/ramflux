@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Account thread lifecycle, ordered command ownership and unconditional DB teardown.
+
+use super::actor::{AccountCommand, AccountInitializer};
+use super::events::EventBatch;
+use super::readers::AccountReaders;
+use crate::prelude::*;
+use std::sync::{Arc, Mutex as RoutingMutex};
+
+type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
+
+pub(super) struct Bootstrap {
+    pub account_id: String,
+    pub config: LocalBusConfig,
+    pub nodes: crate::node::NodeStore,
+    pub index: AccountIndex,
+    pub events: mpsc::Sender<EventBatch>,
+    pub initial: Option<AccountInitializer>,
+    pub receiver: mpsc::Receiver<AccountCommand>,
+    pub readers: ReaderSlot,
+    pub shutdown: watch::Receiver<bool>,
+    pub ready: std::sync::mpsc::SyncSender<()>,
+}
+
+struct AccountRuntime {
+    id: String,
+    state: LocalBusDaemonState,
+    receiver: mpsc::Receiver<AccountCommand>,
+    readers: ReaderSlot,
+    events: mpsc::Sender<EventBatch>,
+    shutdown: watch::Receiver<bool>,
+}
+
+pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    LocalSet::new().block_on(&runtime, async move {
+        let Bootstrap {
+            account_id,
+            config,
+            nodes,
+            index,
+            events,
+            initial,
+            receiver,
+            readers,
+            shutdown,
+            ready,
+        } = bootstrap;
+        let initial = initial.map(|initialize| initialize(index.clone())).transpose()?;
+        let state = LocalBusDaemonState {
+            account_index: Some(index),
+            config,
+            nodes,
+            accounts: initial
+                .map(|account| BTreeMap::from([(account_id.clone(), account)]))
+                .unwrap_or_default(),
+            active_account_id: None,
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        };
+        let mut account =
+            AccountRuntime { id: account_id, state, receiver, readers, events, shutdown };
+        let result = Box::pin(account.serve(ready)).await;
+        let request = LocalBusFrame::request(
+            "shutdown",
+            Some(account.id.clone()),
+            "account",
+            "account.flush",
+            serde_json::json!({}),
+        );
+        let flushed = account.publish(&request).await;
+        account.close_readers().await;
+        result.and(flushed)
+    })
+}
+
+impl AccountRuntime {
+    fn initialize_readers(&mut self) -> Result<(), SdkError> {
+        let missing = self.readers.lock().map_err(|_| stopped())?.is_none();
+        if missing && let Some(account) = self.state.accounts.get_mut(&self.id) {
+            account.client.object_store.set_cache_capacity(8);
+            super::control_state::trim(account);
+            let pool = AccountReaders::start(account.client.account_db()?)?;
+            *self.readers.lock().map_err(|_| stopped())? = Some(pool);
+        }
+        Ok(())
+    }
+
+    async fn close_readers(&self) {
+        let pool = self.readers.lock().ok().and_then(|mut readers| readers.take());
+        if let Some(pool) = pool {
+            pool.stop().await;
+        }
+    }
+
+    async fn publish(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+        if let Some(account) = self.state.accounts.get(&self.id) {
+            super::events::publish(account.client.account_db()?, &self.id, request, &self.events)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+        self.initialize_readers()?;
+        let _ = ready.send(());
+        let restore = LocalBusFrame::request(
+            "restore",
+            Some(self.id.clone()),
+            "account",
+            "account.unlock",
+            serde_json::json!({}),
+        );
+        let mut shutdown = self.shutdown.clone();
+        tokio::select! {
+            _ = shutdown.changed() => return Ok(()),
+            result = self.publish(&restore) => result?,
+        }
+        loop {
+            let command = tokio::select! {
+                _ = self.shutdown.changed() => break,
+                command = self.receiver.recv() => command,
+            };
+            let Some(command) = command else {
+                break;
+            };
+            if Box::pin(self.apply(command)).await? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
+        if *self.shutdown.borrow() {
+            return Ok(true);
+        }
+        let mut reply = command.reply.take().ok_or_else(stopped)?;
+        if reply.is_closed() {
+            return Ok(false);
+        }
+        let locking = command.request.method == "account.lock";
+        let lifecycle = locking || command.request.method == "account.passphrase.rotate";
+        if lifecycle {
+            self.close_readers().await;
+        }
+        let mut stopping = false;
+        let mut cancelled = false;
+        let result = if lifecycle {
+            super::mutations::execute(&mut self.state, &self.id, &command).await
+        } else {
+            tokio::select! {
+                biased;
+                _ = self.shutdown.changed() => { stopping = true; Err(stopped()) },
+                () = reply.closed() => { cancelled = true; Err(stopped()) },
+                result = super::mutations::execute(&mut self.state, &self.id, &command) => result,
+            }
+        };
+        if let Some(account) = self.state.accounts.get_mut(&self.id) {
+            super::control_state::trim(account);
+        }
+        if stopping {
+            return Ok(true);
+        }
+        if cancelled {
+            self.publish(&command.request).await?;
+            return Ok(false);
+        }
+        let result = match self.initialize_readers() {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        let result = match self.publish(&command.request).await {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        let _ = reply.send(result);
+        Ok(locking && self.state.accounts.is_empty())
+    }
+}
+
+fn stopped() -> SdkError {
+    SdkError::LocalBus("account runtime stopped".to_owned())
+}

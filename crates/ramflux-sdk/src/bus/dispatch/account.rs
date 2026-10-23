@@ -78,7 +78,9 @@ pub(crate) async fn dispatch_account_bus_request(
         "account.backup.import" => {
             let mut body: LocalBusAccountBackupImportRequest =
                 serde_json::from_value(request.body.clone())?;
-            let response = local_bus_account_backup_import(state, &mut body).await?;
+            let response =
+                local_bus_account_backup_import(state, &mut body, request.account_id.as_deref())
+                    .await?;
             Ok(local_bus_ok(serde_json::to_value(response)?))
         }
         "account.passphrase.rotate" => {
@@ -106,12 +108,22 @@ pub(crate) async fn local_bus_account_create(
         if body.node_id.is_some() && body.node_id != manifest.node_id {
             return Err(crate::node::node_error("account node binding cannot be changed"));
         }
+        if let Some(account) = state.accounts.get_mut(&manifest.local_account_id) {
+            if let Err(error) = account.ensure_gateway_live().await {
+                tracing::warn!(%error,"account restored without a live gateway session");
+            }
+            return Ok(local_bus_account_response(&manifest, account));
+        }
         let response = restore_local_bus_account(state, &manifest).await?;
         state.active_account_id = Some(response.local_account_id.clone());
         return Ok(response);
     }
     let profile = state.nodes.selected(body.node_id.as_deref(), false)?;
     let mut client = RamfluxClient::new();
+    client.account_index = state.account_index.clone();
+    if state.account_index.is_some() {
+        client.object_store.set_cache_capacity(8);
+    }
     let node_relay = profile.as_ref().map(|profile| profile.relay.clone());
     let mut node_tcp_addr = None;
     if let Some(profile) = profile {
@@ -129,21 +141,17 @@ pub(crate) async fn local_bus_account_create(
     body.gateway.principal_id.clone_from(&body.principal_id);
     body.gateway.device_id.clone_from(&body.device_id);
     body.gateway.target_delivery_id.clone_from(&body.target_delivery_id);
-    let root = client.create_identity_root(&body.principal_id, body.root_seed);
-    let root_public_key =
-        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let derived_commitment = identity_root_public_key_commitment(&root_public_key)?;
-    if body.principal_commitment.is_empty() {
-        body.principal_commitment.clone_from(&derived_commitment);
-    } else if body.principal_commitment != derived_commitment {
-        return Err(SdkError::LocalBus(format!(
-            "principal_commitment mismatch: expected {derived_commitment}"
-        )));
-    }
-    client.create_device_branch(&body.principal_id, &body.device_id, 1, body.device_seed);
+    initialize_created_account(&mut client, &mut body)?;
     client.open_account_index(&data_root)?;
+    if client.account_index()?.account(&body.local_account_id).is_ok() {
+        return Err(SdkError::LocalBus(
+            "account creation requires reconciliation: index exists without a manifest".to_owned(),
+        ));
+    }
     client.create_account(&body.local_account_id, &body.principal_commitment)?;
-    client.set_active_account(&body.local_account_id)?;
+    if state.account_index.is_none() {
+        client.set_active_account(&body.local_account_id)?;
+    }
     client.unlock_account(&body.local_account_id, body.account_secret.as_bytes())?;
     let mode = body.client_mode.clone();
     let device_state = serde_json::json!({
@@ -163,40 +171,62 @@ pub(crate) async fn local_bus_account_create(
     if let Some(addr) = node_tcp_addr {
         gateway = gateway.with_tcp_gateway_addr(addr);
     }
-    client
-        .initialize_and_publish_prekey_bundle_via_gateway_request(
-            &gateway,
-            &body.principal_commitment,
-            &body.device_id,
-            &body.target_delivery_id,
-            body.device_seed,
-        )
-        .await?;
-    client
-        .cache_verified_device_manifest(&gateway, &body.principal_commitment, "account.create")
-        .await?;
-    let engine = client.connect_gateway_session(gateway).await?;
     let mut manifest = LocalBusPersistedAccount::from_create_request(&body);
     manifest.node_tcp_addr = node_tcp_addr;
     manifest.node_relay = node_relay;
+    // Persist recovery credentials before any remote registration/publish can be acknowledged.
     write_local_bus_account_manifest(&data_root, &manifest)?;
-    let response = LocalBusAccountCreateResponse {
-        local_account_id: body.local_account_id.clone(),
-        principal_id: body.principal_id,
-        principal_commitment: body.principal_commitment.clone(),
-        device_id: body.device_id.clone(),
-        target_delivery_id: body.target_delivery_id,
-        client_mode: body.client_mode,
-        session_id: engine.session().session_id.clone(),
-        active_transport_kind: engine.active_transport_kind().wire_name().to_owned(),
-    };
-    let local_account_id = body.local_account_id;
-    state.active_account_id = Some(local_account_id.clone());
+    let id = body.local_account_id;
     state.accounts.insert(
-        local_account_id,
-        LocalBusAccountState::new(client, engine, body.principal_commitment),
+        id.clone(),
+        LocalBusAccountState::disconnected(client, gateway, body.principal_commitment),
     );
-    Ok(response)
+    let account = local_bus_account_mut(state, &id)?;
+    account.activation_pending = true;
+    account.ensure_gateway_live().await?;
+    state.active_account_id = Some(id.clone());
+    Ok(local_bus_account_response(&manifest, local_bus_account(state, &id)?))
+}
+
+pub(crate) fn local_bus_account_response(
+    manifest: &LocalBusPersistedAccount,
+    account: &LocalBusAccountState,
+) -> LocalBusAccountCreateResponse {
+    LocalBusAccountCreateResponse {
+        local_account_id: manifest.local_account_id.clone(),
+        principal_id: manifest.principal_id.clone(),
+        principal_commitment: manifest.principal_commitment.clone(),
+        device_id: manifest.device_id.clone(),
+        target_delivery_id: manifest.target_delivery_id.clone(),
+        client_mode: manifest.client_mode.clone(),
+        session_id: account.engine.as_ref().map_or_else(
+            || "disconnected".to_owned(),
+            |engine| engine.session().session_id.clone(),
+        ),
+        active_transport_kind: account.engine.as_ref().map_or_else(
+            || "disconnected".to_owned(),
+            |engine| engine.active_transport_kind().wire_name().to_owned(),
+        ),
+    }
+}
+
+fn initialize_created_account(
+    client: &mut RamfluxClient,
+    body: &mut LocalBusAccountCreateRequest,
+) -> Result<(), SdkError> {
+    let root = client.create_identity_root(&body.principal_id, body.root_seed);
+    let root_public_key =
+        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
+    let derived_commitment = identity_root_public_key_commitment(&root_public_key)?;
+    if body.principal_commitment.is_empty() {
+        body.principal_commitment.clone_from(&derived_commitment);
+    } else if body.principal_commitment != derived_commitment {
+        return Err(SdkError::LocalBus(format!(
+            "principal_commitment mismatch: expected {derived_commitment}"
+        )));
+    }
+    client.create_device_branch(&body.principal_id, &body.device_id, 1, body.device_seed);
+    Ok(())
 }
 
 fn local_bus_account_lock(
@@ -267,12 +297,20 @@ fn local_bus_account_backup_export(
 async fn local_bus_account_backup_import(
     state: &mut LocalBusDaemonState,
     body: &mut LocalBusAccountBackupImportRequest,
+    expected_account: Option<&str>,
 ) -> Result<LocalBusAccountCreateResponse, SdkError> {
     let bytes = std::fs::read(&body.input_path)?;
     let backup: LocalBusAccountBackupFile = serde_json::from_slice(&bytes)?;
     let manifest = decrypt_account_backup(&backup, &mut body.passphrase)?;
+    if expected_account.is_some_and(|id| id != manifest.local_account_id) {
+        return Err(SdkError::LocalBus("backup account changed during import".to_owned()));
+    }
     write_local_bus_account_manifest(&state.config.data_root, &manifest)?;
-    ensure_local_bus_account_index_record(&state.config.data_root, &manifest)?;
+    ensure_local_bus_account_index_record(
+        &state.config.data_root,
+        &manifest,
+        state.account_index.clone(),
+    )?;
     state.accounts.remove(&manifest.local_account_id);
     // Backup import is an offline root/account restore. Rejoining gateway and publishing a fresh
     // device prekey is a separate device-activation flow, so do not touch the network here.
@@ -284,8 +322,12 @@ async fn local_bus_account_backup_import(
 fn ensure_local_bus_account_index_record(
     data_root: &Path,
     manifest: &LocalBusPersistedAccount,
+    shared_index: Option<AccountIndex>,
 ) -> Result<(), SdkError> {
-    let index = AccountIndex::open(data_root)?;
+    let index = match shared_index {
+        Some(index) => index,
+        None => AccountIndex::open(data_root)?,
+    };
     match index.account(&manifest.local_account_id) {
         Ok(_record) => Ok(()),
         Err(StorageError::AccountNotFound(_)) => {
@@ -302,7 +344,9 @@ fn local_bus_account_passphrase_rotate(
     body: &mut LocalBusAccountPassphraseRotateRequest,
 ) -> Result<(), SdkError> {
     if let Some(old_passphrase) = body.old_passphrase.as_mut() {
-        verify_existing_account_passphrase(&state.config.data_root, account_id, old_passphrase)?;
+        local_bus_account(state, account_id)?
+            .client
+            .verify_active_account_secret(account_id, old_passphrase.as_bytes())?;
         old_passphrase.zeroize();
     }
     {
@@ -318,14 +362,13 @@ fn local_bus_account_passphrase_rotate(
     Ok(())
 }
 
-fn verify_existing_account_passphrase(
-    data_root: &Path,
-    account_id: &str,
-    old_passphrase: &str,
-) -> Result<(), SdkError> {
-    let mut verifier = RamfluxClient::new();
-    verifier.open_account_index(data_root)?;
-    verifier.unlock_account(account_id, old_passphrase.as_bytes())
+pub(crate) fn local_bus_backup_account_id(
+    mut body: LocalBusAccountBackupImportRequest,
+) -> Result<String, SdkError> {
+    let bytes = std::fs::read(&body.input_path)?;
+    let backup: LocalBusAccountBackupFile = serde_json::from_slice(&bytes)?;
+    let manifest = decrypt_account_backup(&backup, &mut body.passphrase)?;
+    Ok(manifest.local_account_id)
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -439,6 +482,7 @@ mod tests {
 
     fn backup_manifest() -> LocalBusPersistedAccount {
         LocalBusPersistedAccount {
+            activation_pending: false,
             node_id: None,
             node_tcp_addr: None,
             node_relay: None,

@@ -40,7 +40,11 @@ impl RamfluxClient {
     }
 
     pub(crate) fn hydrate_object_store_from_account_db(&mut self) -> Result<(), SdkError> {
-        let (objects, object_keys) = self.account_db()?.load_objects::<EncryptedObject>()?;
+        let (objects, object_keys) = if let Some(limit) = self.object_store.cache_capacity() {
+            self.account_db()?.load_recent_objects::<EncryptedObject>(limit)?
+        } else {
+            self.account_db()?.load_objects::<EncryptedObject>()?
+        };
         self.object_store.replace_persisted(objects, object_keys);
         Ok(())
     }
@@ -50,13 +54,9 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         request: LocalBusObjectShareRequest,
     ) -> Result<SdkObjectSharePackage, SdkError> {
-        let object = self
-            .object_store
-            .objects()
-            .into_iter()
-            .find(|object| object.object_id == request.object_id)
-            .ok_or(SyncError::ObjectNotFound)?;
-        let object_key = self.object_store.object_key(&object.object_id)?;
+        let object =
+            self.object_store_object(&request.object_id)?.ok_or(SyncError::ObjectNotFound)?;
+        let object_key = self.object_content_key(&object.object_id)?;
         let recipient_device_id = request.recipient_device_id.clone().ok_or_else(|| {
             SdkError::LocalBus("object.share requires recipient_device_id".to_owned())
         })?;
@@ -129,7 +129,7 @@ impl RamfluxClient {
                 SdkError::LocalBus("DM attachment requires relay endpoint".to_owned())
             })?;
         let object = self.object_store.put_encrypted_object(&attachment.object_id, plaintext)?;
-        let object_key = self.object_store.object_key(&object.object_id)?;
+        let object_key = self.object_content_key(&object.object_id)?;
         self.persist_object_if_unlocked(&object, Some(&object_key))?;
         self.upload_object_to_relay_inner_via_gateway(
             engine,
@@ -695,7 +695,7 @@ impl RamfluxClient {
         plaintext: &[u8],
     ) -> Result<EncryptedObject, SdkError> {
         let object = self.object_store.put_encrypted_object(object_id, plaintext)?;
-        let object_key = self.object_store.object_key(&object.object_id)?;
+        let object_key = self.object_content_key(&object.object_id)?;
         self.persist_object_if_unlocked(&object, Some(&object_key))?;
         Ok(object)
     }
@@ -760,8 +760,36 @@ impl RamfluxClient {
     }
 
     /// Looks up an installed/adopted object by id from the in-memory store.
-    pub(crate) fn object_store_object(&self, object_id: &str) -> Option<EncryptedObject> {
-        self.object_store.objects().into_iter().find(|object| object.object_id == object_id)
+    pub(crate) fn object_store_object(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<EncryptedObject>, SdkError> {
+        if let Some(object) = self.object_store.cached_object(object_id) {
+            return Ok(Some(object.clone()));
+        }
+        match self.active_account_db.as_ref() {
+            Some(db) => Ok(db.load_object::<EncryptedObject>(object_id)?.map(|(object, _)| object)),
+            None => Ok(None),
+        }
+    }
+
+    fn object_content_key(&self, object_id: &str) -> Result<[u8; 32], SdkError> {
+        if let Ok(key) = self.object_store.object_key(object_id) {
+            return Ok(key);
+        }
+        let Some(db) = self.active_account_db.as_ref() else {
+            return Err(SyncError::ObjectKeyMissing.into());
+        };
+        db.load_object::<EncryptedObject>(object_id)?
+            .and_then(|(_, key)| key)
+            .ok_or_else(|| SyncError::ObjectKeyMissing.into())
+    }
+
+    pub(crate) fn persisted_objects(&self) -> Result<Vec<EncryptedObject>, SdkError> {
+        match self.active_account_db.as_ref() {
+            Some(db) => Ok(db.load_objects::<EncryptedObject>()?.0),
+            None => Ok(self.object_store.objects()),
+        }
     }
 
     /// Reads the durable reconciliation record for `object_id`, if any.
@@ -790,12 +818,26 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SdkError> {
-        Ok(self.object_store.decrypt_object(object_id)?)
+        if self.object_store.cached_object(object_id).is_some() {
+            return Ok(self.object_store.decrypt_object(object_id)?);
+        }
+        let db = self.active_account_db.as_ref().ok_or(SyncError::ObjectNotFound)?;
+        let (object, key) =
+            db.load_object::<EncryptedObject>(object_id)?.ok_or(SyncError::ObjectNotFound)?;
+        let mut single = ObjectStore::new();
+        single.cache_persisted_object(object, key);
+        Ok(single.decrypt_object(object_id)?)
     }
 
     /// # Errors
     /// Returns an error when the object does not exist or cannot be tombstoned.
     pub fn tombstone_object(&mut self, object_id: &str) -> Result<(), SdkError> {
+        if self.object_store.cached_object(object_id).is_none() {
+            let db = self.active_account_db.as_ref().ok_or(SyncError::ObjectNotFound)?;
+            let (object, key) =
+                db.load_object::<EncryptedObject>(object_id)?.ok_or(SyncError::ObjectNotFound)?;
+            self.object_store.cache_persisted_object(object, key);
+        }
         self.object_store.tombstone(object_id)?;
         if let Some(db) = self.active_account_db.as_ref() {
             db.set_object_tombstoned(object_id)?;
@@ -823,12 +865,7 @@ impl RamfluxClient {
                 "v3 relay tombstone requires gateway-issued QUIC configuration".to_owned(),
             ));
         }
-        let object = self
-            .object_store
-            .objects()
-            .into_iter()
-            .find(|object| object.object_id == object_id)
-            .ok_or(SyncError::ObjectNotFound)?;
+        let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
         let branch = self
             .device_branch
             .as_ref()
@@ -945,12 +982,7 @@ impl RamfluxClient {
         chunk_size: usize,
         options: &RelayTransferOptions,
     ) -> Result<SdkObjectTransferStatus, SdkError> {
-        let object = self
-            .object_store
-            .objects()
-            .into_iter()
-            .find(|object| object.object_id == object_id)
-            .ok_or(SyncError::ObjectNotFound)?;
+        let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
         self.upload_object_to_relay_inner(&object, chunk_size, options)
     }
 
@@ -962,12 +994,7 @@ impl RamfluxClient {
         chunk_size: usize,
         options: &RelayTransferOptions,
     ) -> Result<SdkObjectTransferStatus, SdkError> {
-        let object = self
-            .object_store
-            .objects()
-            .into_iter()
-            .find(|object| object.object_id == object_id)
-            .ok_or(SyncError::ObjectNotFound)?;
+        let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
         self.upload_object_to_relay_inner_via_gateway(engine, pool, &object, chunk_size, options)
             .await
     }
@@ -980,13 +1007,8 @@ impl RamfluxClient {
         options: &RelayTransferOptions,
         ack: bool,
     ) -> Result<Vec<u8>, SdkError> {
-        let object = self
-            .object_store
-            .objects()
-            .into_iter()
-            .find(|object| object.object_id == object_id)
-            .ok_or(SyncError::ObjectNotFound)?;
-        let object_key = self.object_store.object_key(&object.object_id)?;
+        let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
+        let object_key = self.object_content_key(&object.object_id)?;
         let branch = self
             .device_branch
             .as_ref()
@@ -1172,13 +1194,8 @@ impl RamfluxClient {
             .as_ref()
             .ok_or_else(|| SdkError::LocalBus("object relay requires a device branch".to_owned()))?
             .clone();
-        let object = self
-            .object_store
-            .objects()
-            .into_iter()
-            .find(|object| object.object_id == object_id)
-            .ok_or(SyncError::ObjectNotFound)?;
-        let object_key = self.object_store.object_key(object_id)?;
+        let object = self.object_store_object(object_id)?.ok_or(SyncError::ObjectNotFound)?;
+        let object_key = self.object_content_key(object_id)?;
         let chunk_size = self
             .account_db()?
             .object_transfer(object_id, Some(OBJECT_TRANSFER_UPLOAD))?
@@ -1341,7 +1358,7 @@ impl RamfluxClient {
         chunk_size: usize,
         options: &RelayTransferOptions,
     ) -> Result<SdkObjectTransferStatus, SdkError> {
-        let object_key = self.object_store.object_key(&object.object_id)?;
+        let object_key = self.object_content_key(&object.object_id)?;
         let branch = self.device_branch.as_ref().ok_or_else(|| {
             SdkError::LocalBus("object relay requires a device branch".to_owned())
         })?;
@@ -1473,7 +1490,7 @@ impl RamfluxClient {
         chunk_size: usize,
         options: &RelayTransferOptions,
     ) -> Result<SdkObjectTransferStatus, SdkError> {
-        let object_key = self.object_store.object_key(&object.object_id)?;
+        let object_key = self.object_content_key(&object.object_id)?;
         let branch = self.device_branch.as_ref().ok_or_else(|| {
             SdkError::LocalBus("object relay requires a device branch".to_owned())
         })?;

@@ -8,6 +8,7 @@ mod account_index;
 mod clock;
 mod constants;
 mod conversation_helpers;
+mod database;
 mod encryption;
 mod error;
 mod event_store;
@@ -18,6 +19,7 @@ mod row_mappers;
 mod schema;
 
 pub use account_db::AccountDb;
+pub use account_db::runtime::AccountOutboxEntry;
 pub use account_index::AccountIndex;
 pub use clock::{AccountClock, unix_now};
 pub use constants::*;

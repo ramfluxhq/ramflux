@@ -11,6 +11,8 @@ use ramflux_core::ObjectId;
 use ramflux_crypto::DeviceBranch;
 use ramflux_protocol::{decode_base64url, encode_base64url};
 
+mod cache;
+
 const OBJECT_SYNC_V1: &str = "object_sync_v1";
 const DEFAULT_SYNC_SESSION_ID: &str = "local_object_sync_session";
 const DEFAULT_PEER_DEVICE_ID: &str = "local_peer_device";
@@ -62,6 +64,7 @@ impl PreparedEncryptedObject {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ObjectStore {
+    cache: std::cell::RefCell<Option<cache::CachePolicy>>,
     objects: BTreeMap<String, EncryptedObject>,
     object_keys: BTreeMap<String, [u8; 32]>,
 }
@@ -125,6 +128,8 @@ impl ObjectStore {
         let PreparedEncryptedObject { object, object_key } = prepared;
         self.objects.insert(object.object_id.clone(), object.clone());
         self.object_keys.insert(object.object_id.clone(), *object_key);
+        self.touch_cached(&object.object_id);
+        self.evict_cached();
         object
     }
 
@@ -189,13 +194,15 @@ impl ObjectStore {
             plaintext_hash,
         );
         self.object_keys.insert(object_id.to_owned(), object_key);
+        self.touch_cached(object_id);
+        self.evict_cached();
         object
     }
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_object(&self, object_id: &str) -> Result<Vec<u8>, SyncError> {
-        let object = self.objects.get(object_id).ok_or(SyncError::ObjectNotFound)?;
+        let object = self.cached_object(object_id).ok_or(SyncError::ObjectNotFound)?;
         if object.tombstoned {
             return Err(SyncError::ObjectTombstoned);
         }
@@ -207,6 +214,7 @@ impl ObjectStore {
     /// # Errors
     /// Returns an error when the object key is missing.
     pub fn object_key(&self, object_id: &str) -> Result<[u8; 32], SyncError> {
+        self.touch_cached(object_id);
         self.object_keys.get(object_id).copied().ok_or(SyncError::ObjectKeyMissing)
     }
 
@@ -223,6 +231,13 @@ impl ObjectStore {
         self.objects =
             objects.into_iter().map(|object| (object.object_id.clone(), object)).collect();
         self.object_keys = object_keys;
+        if let Some(cache) = self.cache.get_mut().as_mut() {
+            cache.recent.clear();
+        }
+        for id in self.objects.keys() {
+            self.touch_cached(id);
+        }
+        self.evict_cached();
     }
 
     /// # Errors

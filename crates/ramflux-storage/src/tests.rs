@@ -109,7 +109,10 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "audit_log",
 ];
 
-fn table_exists(connection: &rusqlite::Connection, table_name: &str) -> Result<bool, StorageError> {
+fn table_exists(
+    connection: &crate::database::Connection,
+    table_name: &str,
+) -> Result<bool, StorageError> {
     let count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
         rusqlite::params![table_name],
@@ -889,7 +892,7 @@ fn client_db_reopen_preserves_full_delete_journal_durability() -> Result<(), Sto
     let journal_mode: String =
         db.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
     let synchronous: i64 = db.connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
-    assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
     assert_eq!(synchronous, 2, "SQLite FULL synchronous must guard fsync-before-ACK");
     drop(db);
 
@@ -900,7 +903,7 @@ fn client_db_reopen_preserves_full_delete_journal_durability() -> Result<(), Sto
         reopened.connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
     let reopened_synchronous: i64 =
         reopened.connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
-    assert_eq!(reopened_journal.to_ascii_lowercase(), "delete");
+    assert_eq!(reopened_journal.to_ascii_lowercase(), "wal");
     assert_eq!(reopened_synchronous, 2);
     let _ = fs::remove_dir_all(root);
     Ok(())
@@ -1209,3 +1212,6 @@ fn test_recovery_quorum() -> ramflux_protocol::RecoveryQuorumConfigured {
         ],
     }
 }
+
+#[path = "runtime_tests.rs"]
+mod runtime_tests;

@@ -6,6 +6,7 @@
 use crate::prelude::*;
 
 pub(crate) struct LocalBusDaemonState {
+    pub(crate) account_index: Option<AccountIndex>,
     pub(crate) nodes: crate::node::NodeStore,
     pub(crate) config: LocalBusConfig,
     pub(crate) accounts: BTreeMap<String, LocalBusAccountState>,
@@ -66,6 +67,7 @@ pub(crate) struct ObjectGetSpoolSession {
 }
 
 pub(crate) struct LocalBusAccountState {
+    pub(crate) activation_pending: bool,
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
     /// Per-account relay QUIC connection pool (T24-A2), shared via `Arc`. Lazily built on first
@@ -80,8 +82,10 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
     pub(crate) pending_deliveries: Vec<GatewayInboxEntry>,
-    pub(crate) acked_envelope_ids: BTreeSet<String>,
+    pub(crate) acked_envelope_ids: super::ack_cache::AckCache,
     pub(crate) calls: BTreeMap<String, LocalCallRecord>,
+    pub(crate) call_lru: VecDeque<String>,
+    pub(crate) a2i_lru: VecDeque<String>,
     pub(crate) bots: BTreeMap<String, LocalBotRecord>,
     pub(crate) pending_a2i: BTreeMap<String, A2iControlEvent>,
     pub(crate) mcp_registry: McpRegistry,
@@ -96,6 +100,7 @@ pub(crate) struct LocalBusAccountState {
 }
 
 impl LocalBusAccountState {
+    #[cfg(test)]
     pub(crate) fn new(
         client: RamfluxClient,
         engine: GatewaySessionEngine,
@@ -104,6 +109,7 @@ impl LocalBusAccountState {
         let gateway_config = engine.config.clone();
         let target_delivery_id = engine.target_delivery_id().to_owned();
         Self {
+            activation_pending: false,
             client,
             engine: Some(engine),
             relay_quic_pool: None,
@@ -111,8 +117,10 @@ impl LocalBusAccountState {
             principal_commitment,
             target_delivery_id,
             pending_deliveries: Vec::new(),
-            acked_envelope_ids: BTreeSet::new(),
+            acked_envelope_ids: super::ack_cache::AckCache::new(),
             calls: BTreeMap::new(),
+            call_lru: VecDeque::new(),
+            a2i_lru: VecDeque::new(),
             bots: BTreeMap::new(),
             pending_a2i: BTreeMap::new(),
             mcp_registry: McpRegistry::new(),
@@ -132,6 +140,7 @@ impl LocalBusAccountState {
     ) -> Self {
         let target_delivery_id = gateway_config.target_delivery_id.clone();
         Self {
+            activation_pending: false,
             client,
             engine: None,
             relay_quic_pool: None,
@@ -139,8 +148,10 @@ impl LocalBusAccountState {
             principal_commitment,
             target_delivery_id,
             pending_deliveries: Vec::new(),
-            acked_envelope_ids: BTreeSet::new(),
+            acked_envelope_ids: super::ack_cache::AckCache::new(),
             calls: BTreeMap::new(),
+            call_lru: VecDeque::new(),
+            a2i_lru: VecDeque::new(),
             bots: BTreeMap::new(),
             pending_a2i: BTreeMap::new(),
             mcp_registry: McpRegistry::new(),
@@ -156,11 +167,12 @@ impl LocalBusAccountState {
     pub(crate) fn merge_deliveries(
         &mut self,
         entries: Vec<GatewayInboxEntry>,
-    ) -> Vec<GatewayInboxEntry> {
+    ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
         let mut fresh = Vec::new();
         for entry in entries {
             let envelope_id = &entry.envelope.envelope_id;
             if self.acked_envelope_ids.contains(envelope_id)
+                || self.client.account_db()?.has_gateway_ack(envelope_id)?
                 || self
                     .pending_deliveries
                     .iter()
@@ -171,44 +183,88 @@ impl LocalBusAccountState {
             self.pending_deliveries.push(entry.clone());
             fresh.push(entry);
         }
-        fresh
+        Ok(fresh)
     }
 
     pub(crate) fn pending_page(&self, limit: usize) -> Vec<GatewayInboxEntry> {
         self.pending_deliveries.iter().take(limit).cloned().collect()
     }
 
-    pub(crate) fn mark_acked(&mut self, envelope_id: &str) {
+    pub(crate) fn mark_acked(&mut self, envelope_id: &str) -> Result<(), SdkError> {
+        self.client.account_db()?.remember_gateway_ack(envelope_id)?;
         self.acked_envelope_ids.insert(envelope_id.to_owned());
         self.pending_deliveries.retain(|entry| entry.envelope.envelope_id != envelope_id);
+        Ok(())
     }
 
-    pub(crate) async fn ensure_gateway_live(&mut self) -> Result<(), SdkError> {
-        let target_delivery_id = self.target_delivery_id.clone();
-        let last_seen_inbox_seq = self
-            .client
-            .gateway_cursor(&target_delivery_id)?
-            .max(self.client.gateway_receive_cursor(&target_delivery_id)?);
-        if let Some(engine) = self.engine.as_mut() {
-            gateway_session_timeout("gateway ensure live", engine.ensure_live(last_seen_inbox_seq))
-                .await
-        } else {
-            let mut config = self.gateway_config.clone();
-            config.last_seen_inbox_seq = last_seen_inbox_seq;
-            if config.device_branch.is_none()
-                && let Some(branch) = self.client.device_branch.as_ref()
-                && branch.principal_id == config.principal_id
-                && branch.device_id == config.device_id
-                && branch.device_epoch == config.device_epoch
+    pub(crate) fn ensure_gateway_live(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SdkError>> + '_>> {
+        Box::pin(async move {
+            let root = self.client.account_index()?.root().to_path_buf();
+            let id = self.client.account_db()?.local_account_id.clone();
+            let path = local_bus_account_manifest_path(&root, &id);
+            let mut pending =
+                if path.exists() { Some(read_local_bus_account_manifest(&path)?) } else { None };
+            if let Some(manifest) = pending.as_ref().filter(|manifest| manifest.activation_pending)
             {
-                config.device_branch = Some(std::sync::Arc::new(branch.clone()));
+                self.client
+                    .initialize_and_publish_prekey_bundle_via_gateway_request(
+                        &self.gateway_config,
+                        &manifest.principal_commitment,
+                        &manifest.device_id,
+                        &manifest.target_delivery_id,
+                        manifest.device_seed,
+                    )
+                    .await?;
+                self.client
+                    .cache_verified_device_manifest(
+                        &self.gateway_config,
+                        &manifest.principal_commitment,
+                        "account.create",
+                    )
+                    .await?;
             }
-            self.engine = Some(
-                gateway_session_timeout("gateway connect", GatewaySessionEngine::connect(config))
+            let target_delivery_id = self.target_delivery_id.clone();
+            let last_seen_inbox_seq = self
+                .client
+                .gateway_cursor(&target_delivery_id)?
+                .max(self.client.gateway_receive_cursor(&target_delivery_id)?);
+            let connected = if let Some(engine) = self.engine.as_mut() {
+                gateway_session_timeout(
+                    "gateway ensure live",
+                    engine.ensure_live(last_seen_inbox_seq),
+                )
+                .await
+            } else {
+                let mut config = self.gateway_config.clone();
+                config.last_seen_inbox_seq = last_seen_inbox_seq;
+                if config.device_branch.is_none()
+                    && let Some(branch) = self.client.device_branch.as_ref()
+                    && branch.principal_id == config.principal_id
+                    && branch.device_id == config.device_id
+                    && branch.device_epoch == config.device_epoch
+                {
+                    config.device_branch = Some(std::sync::Arc::new(branch.clone()));
+                }
+                self.engine = Some(
+                    gateway_session_timeout(
+                        "gateway connect",
+                        GatewaySessionEngine::connect(config),
+                    )
                     .await?,
-            );
+                );
+                Ok(())
+            };
+            connected?;
+            if let Some(manifest) = pending.as_mut().filter(|manifest| manifest.activation_pending)
+            {
+                manifest.activation_pending = false;
+                write_local_bus_account_manifest(&root, manifest)?;
+                self.activation_pending = false;
+            }
             Ok(())
-        }
+        })
     }
 
     pub(crate) async fn take_live_engine(&mut self) -> Result<GatewaySessionEngine, SdkError> {
@@ -291,10 +347,12 @@ impl LocalBusDaemonState {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn unregister_connection(&mut self, connection_id: u64) {
         self.subscribers.remove(&connection_id);
     }
 
+    #[cfg(test)]
     pub(crate) fn broadcast_events(&mut self, events: &[LocalBusFrame]) {
         let mut stale_connections = BTreeSet::new();
         for event in events {
