@@ -561,39 +561,32 @@ pub(crate) async fn dispatch_message_receive_request(
         .collect::<BTreeSet<_>>();
     super::super::sync_driver::run(account).await?;
     receive_bound_legacy(account, &body).await?;
-    if body.auto_fetch_attachments
-        && let Some(conversation) = body.conversation_id.as_deref()
-    {
-        super::super::attachment_scheduler::fetch_for_conversation(
+    if body.auto_fetch_attachments {
+        super::super::attachment_scheduler::fetch_for_page(
             account,
-            conversation,
+            body.conversation_id.as_deref(),
             body.limit,
         )
         .await?;
     }
     let mut plaintext = Vec::new();
-    if let Some(conversation) = body.conversation_id.as_deref() {
-        for entry in account.pending_deliveries.iter().take(body.limit.min(64)) {
-            let id = &entry.envelope.envelope_id;
-            let route = account.client.committed_routing(entry)?;
-            let legacy = account
-                .client
-                .account_db()?
-                .load_actor_state::<String>(&format!("legacy/committed/{id}"))?;
-            let matching = route.is_some_and(|route| {
-                route.kind == crate::client::routed::Kind::Direct
-                    && route.conversation_id == conversation
-            }) || legacy.as_deref() == Some(conversation);
-            if matching
-                && let Some(mut delivery) =
-                    account.client.plaintext_projection_delivery(conversation, entry)?
-            {
-                if body.auto_fetch_attachments {
-                    delivery.attachments =
-                        compat_attachments(&account.client, &delivery.message_id)?;
-                }
-                plaintext.push(delivery);
+    for entry in &account.pending_deliveries {
+        if plaintext.len() >= body.limit.min(64) {
+            break;
+        }
+        let Some((conversation, _)) = account.client.committed_direct_context(entry)? else {
+            continue;
+        };
+        if body.conversation_id.as_deref().is_some_and(|requested| requested != conversation) {
+            continue;
+        }
+        if let Some(mut delivery) =
+            account.client.plaintext_projection_delivery(&conversation, entry)?
+        {
+            if body.auto_fetch_attachments {
+                delivery.attachments = compat_attachments(&account.client, &delivery.message_id)?;
             }
+            plaintext.push(delivery);
         }
     }
     let fresh = account

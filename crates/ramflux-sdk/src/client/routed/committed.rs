@@ -96,3 +96,22 @@ impl RamfluxClient {
         Ok(())
     }
 }
+
+impl RamfluxClient {
+    pub(crate) fn committed_direct_context(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<(String, String)>, SdkError> {
+        if let Some(route) = self.committed_routing(entry)? {
+            return Ok((route.kind == super::Kind::Direct)
+                .then_some((route.conversation_id, route.message_id)));
+        }
+        Ok(self
+            .account_db()?
+            .load_actor_state::<String>(&format!(
+                "legacy/committed/{}",
+                entry.envelope.envelope_id
+            ))?
+            .map(|conversation| (conversation, entry.envelope.envelope_id.clone())))
+    }
+}

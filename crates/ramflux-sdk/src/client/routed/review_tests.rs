@@ -888,3 +888,89 @@ async fn root_commitment_submit_remains_readable_after_autonomous_receive_ack()
     assert_eq!(result.response_body["entries"].as_array().map(Vec::len), Some(1));
     Ok(())
 }
+
+#[tokio::test]
+async fn unfiltered_receive_decrypts_own_device_delivery_after_background_ack()
+-> Result<(), SdkError> {
+    let mut bob_a = Fixture::new("bob-a", 41)?;
+    let mut bob_b = Fixture::new("bob-b", 61)?;
+    for fixture in [&mut bob_a, &mut bob_b] {
+        let seed = if fixture.id == "bob-a" { 42 } else { 62 };
+        fixture.client.create_identity_root("bob", [41; 32]);
+        fixture.client.create_device_branch("bob", &fixture.id, 1, [seed; 32]);
+    }
+    trust(&bob_b, &bob_a)?;
+    let mut device = bob_b
+        .client
+        .account_db()?
+        .client_record("device", "bob-a")?
+        .ok_or_else(|| invalid("device"))?;
+    device["principal_id"] = serde_json::json!("bob");
+    bob_b.client.account_db()?.persist_client_record("device", "bob-a", &device)?;
+    let mut outgoing = message("own-device-message", "own-device-thread");
+    outgoing.source_principal_id = "bob".to_owned();
+    outgoing.sender_id = "bob-a".to_owned();
+    outgoing.recipient_device_id = Some("bob-b".to_owned());
+    outgoing.target_delivery_id = "bob-b".to_owned();
+    let mut valid = seal(&bob_a, &bob_b, outgoing, b"s35 encrypted own-device sync")?;
+    valid.inbox_seq = 2;
+    let mut poison = valid.clone();
+    poison.inbox_seq = 1;
+    poison.envelope.envelope_id = "opaque-placeholder".to_owned();
+    poison.envelope.encrypted_payload = ramflux_protocol::encode_base64url(b"not an E2EE envelope");
+    let (engine, writes) = Inbox::engine(bob_b.config()?, vec![poison, valid])?;
+    let mut account = crate::bus::state::LocalBusAccountState::new(
+        std::mem::take(&mut bob_b.client),
+        engine,
+        "bob".to_owned(),
+    );
+    crate::bus::sync_driver::run(&mut account).await?;
+    assert_eq!(account.pending_deliveries.len(), 1);
+    assert_eq!(
+        writes
+            .lock()
+            .map_err(|_| invalid("mutex"))?
+            .iter()
+            .filter(|v| v["frame_type"] == "ack")
+            .count(),
+        2
+    );
+    let (engine, _) = Inbox::engine(account.gateway_config.clone(), Vec::new())?;
+    account.engine = Some(engine);
+    let mut state = crate::bus::state::LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        config: LocalBusConfig::new(bob_b.root.join("bus.sock"), &bob_b.root),
+        accounts: BTreeMap::from([("bob".to_owned(), account)]),
+        active_account_id: Some("bob".to_owned()),
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    let (outbound, _) = tokio::sync::mpsc::channel(4);
+    let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
+    let request = LocalBusFrame::request(
+        "s35-receive",
+        Some("bob".to_owned()),
+        "message",
+        "message.receive",
+        serde_json::json!({"conversation_id":null,"limit":16,"auto_fetch_attachments":false}),
+    );
+    let result = crate::bus::dispatch::message::dispatch_message_receive_request(
+        &request,
+        &mut state,
+        &connection,
+    )
+    .await?;
+    assert_eq!(result.response_body["decrypted_messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(result.response_body["decrypted_messages"][0]["sender_id"], "bob");
+    assert_eq!(
+        result.response_body["decrypted_messages"][0]["entry"]["envelope"]["source_device_id"],
+        "bob-a"
+    );
+    assert_eq!(
+        result.response_body["decrypted_messages"][0]["plaintext_body_base64"],
+        ramflux_protocol::encode_base64url(b"s35 encrypted own-device sync")
+    );
+    assert_eq!(result.response_body["entries"].as_array().map(Vec::len), Some(1));
+    Ok(())
+}

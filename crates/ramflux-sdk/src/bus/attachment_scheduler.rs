@@ -63,24 +63,25 @@ pub(super) async fn fetch(
     }
 }
 
-pub(super) async fn fetch_for_conversation(
+pub(super) async fn fetch_for_page(
     account: &mut LocalBusAccountState,
-    conversation: &str,
+    conversation: Option<&str>,
     limit: usize,
 ) -> Result<(), SdkError> {
     let mut ids = BTreeSet::new();
-    for entry in account.pending_deliveries.iter().take(limit.min(64)) {
-        let id = &entry.envelope.envelope_id;
-        let route = account.client.committed_routing(entry)?;
-        let legacy = account
-            .client
-            .account_db()?
-            .load_actor_state::<String>(&format!("legacy/committed/{id}"))?;
-        if route.is_some_and(|route| route.conversation_id == conversation)
-            || legacy.as_deref() == Some(conversation)
-        {
-            ids.extend(account.client.account_db()?.client_message_object_ids(id)?);
+    let mut selected = 0;
+    for entry in &account.pending_deliveries {
+        if selected >= limit.min(64) {
+            break;
         }
+        let Some((thread, message)) = account.client.committed_direct_context(entry)? else {
+            continue;
+        };
+        if conversation.is_some_and(|requested| requested != thread) {
+            continue;
+        }
+        selected += 1;
+        ids.extend(account.client.account_db()?.client_message_object_ids(&message)?);
     }
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         for id in ids {

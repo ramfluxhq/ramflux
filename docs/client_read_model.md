@@ -178,7 +178,11 @@ read. `message.receive {conversation_id, limit}` runs a synchronization pass and
 Direct deliveries retained in the account's recent delivery cache, including messages the driver
 already committed and ACKed before the request. The caller's conversation ID filters authenticated
 routing; it never authorizes or invents a legacy binding. Existing Direct conversations still require
-explicit sender participation. The cache holds at most 64 deliveries, is shared by local clients,
+explicit sender participation. With an omitted/null conversation ID, the response includes committed Direct deliveries across
+conversations, selected from their authenticated routing. The limit applies after filtering.
+Unbound legacy or malformed opaque payloads are never guessed into decrypted messages. Attachment
+auto-fetch uses the same selected page and its existing shared timeout.
+The cache holds at most 64 deliveries, is shared by local clients,
 and is not a per-connection read cursor. Repeated compatibility reads can return the same retained
 message until explicit `message.ack` removes it from this cache. Across restart or cache eviction,
 use durable `message.list` / `message.read`; resumable `bus.subscribe` provides change cursors.
