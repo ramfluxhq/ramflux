@@ -7,6 +7,12 @@
 #     TEST_FILTER  cargo test name filter; default "realnet" (all realnet tests).
 #                  e.g. mvp01_realnet | mvp_s01_gateway_session
 #
+# Options:
+#   RAMFLUX_REALNET_PREBUILD_ONLY=1  Build and stage the seven service binaries,
+#                                  then exit without runtime checks, cleanup or tests.
+#   RAMFLUX_REALNET_PRUNE_IMAGES=1   Opt into global dangling-image pruning.
+#                                  Default: skip image pruning on shared hosts.
+#
 # Clone layout (the runner checks out two sibling repos under one parent dir):
 #   <parent>/ramflux/         the open monorepo (this deploy dir is ramflux/deploy)
 #   <parent>/ramflux-itest/   the realnet integration-test harness
@@ -34,20 +40,22 @@ WORKSPACE_DIR=$(CDPATH= cd -- "$DEPLOY_DIR/.." && pwd)    # ramflux (Cargo works
 PARENT_DIR=$(CDPATH= cd -- "$WORKSPACE_DIR/.." && pwd)    # realnet-clone parent
 ITEST_DIR="$PARENT_DIR/ramflux-itest"
 
-if [ ! -d "$ITEST_DIR" ]; then
-  echo "ERROR: ramflux-itest not found at $ITEST_DIR (need a sibling checkout of ramflux + ramflux-itest)" >&2
-  exit 2
-fi
+if [ "${RAMFLUX_REALNET_PREBUILD_ONLY:-0}" != "1" ]; then
+  if [ ! -d "$ITEST_DIR" ]; then
+    echo "ERROR: ramflux-itest not found at $ITEST_DIR (need a sibling checkout of ramflux + ramflux-itest)" >&2
+    exit 2
+  fi
 
-if command -v docker >/dev/null 2>&1; then
-  RT=docker
-elif command -v podman >/dev/null 2>&1; then
-  RT=podman
-else
-  echo "ERROR: need docker or podman on PATH (realnet tests run a compose up)" >&2
-  exit 2
+  if command -v docker >/dev/null 2>&1; then
+    RT=docker
+  elif command -v podman >/dev/null 2>&1; then
+    RT=podman
+  else
+    echo "ERROR: need docker or podman on PATH (realnet tests run a compose up)" >&2
+    exit 2
+  fi
+  printf '>> container runtime: %s (%s)\n' "$RT" "$($RT --version 2>/dev/null | head -1)"
 fi
-printf '>> container runtime: %s (%s)\n' "$RT" "$($RT --version 2>/dev/null | head -1)"
 
 TC=""
 if command -v rustup >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q '^1\.99\.0'; then
@@ -185,6 +193,11 @@ for b in gateway router notify federation relay signaling retention; do
   strip "$DEPLOY_DIR/itest-bin/ramflux-$b" 2>/dev/null || true
 done
 
+if [ "${RAMFLUX_REALNET_PREBUILD_ONLY:-0}" = "1" ]; then
+  printf '>> host pre-build complete: binaries staged; skipping cleanup and tests (RAMFLUX_REALNET_PREBUILD_ONLY=1)\n'
+  exit 0
+fi
+
 # Pre-clean: a previously KILLED run can leave stale ramflux-* containers
 # (runc residue blocks normal teardown), and the next run silently REUSES them
 # instead of recreating from fresh images -> validation runs against stale code
@@ -204,7 +217,11 @@ done
 # Reclaim dangling image layers orphaned by prior `compose up --build` runs;
 # rootless podman accumulates these and can fill the disk. Dangling-only prune
 # keeps the active tagged images + builder cache intact.
-$RT image prune -f >/dev/null 2>&1 || true
+if [ "${RAMFLUX_REALNET_PRUNE_IMAGES:-0}" = "1" ]; then
+  $RT image prune -f >/dev/null 2>&1 || true
+else
+  printf '>> pre-clean: skipping global image prune (set RAMFLUX_REALNET_PRUNE_IMAGES=1 to opt in)\n'
+fi
 
 # Self-bounding timeout: a normal filtered realnet run is ~20s single-mesh,
 # ~50s two-stack. If it runs much longer it is almost certainly HUNG (stale
