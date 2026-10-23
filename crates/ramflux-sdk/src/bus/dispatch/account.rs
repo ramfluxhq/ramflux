@@ -39,9 +39,15 @@ pub(crate) async fn dispatch_account_bus_request(
         "account.status" => {
             let account_id = request_account_id(request)?;
             let account = local_bus_account(state, account_id)?;
+            let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
+                &state.config.data_root,
+                account_id,
+            ))?;
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
-                "node_id": read_local_bus_account_manifest(&local_bus_account_manifest_path(&state.config.data_root, account_id))?.node_id,
+                "node_id": manifest.node_id,
+                "client_mode":manifest.client_mode,
+                "local_device_authorized":manifest.devices.iter().any(|device|device.device_id==account.gateway_config.device_id),
                 "principal_id": account.gateway_config.principal_id,
                 "principal_commitment":account.principal_commitment,
                 "device_id": account.gateway_config.device_id,

@@ -2393,6 +2393,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "ramflux-agent-host"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ramflux-protocol",
+ "ramflux-sdk",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ramflux-core"
 version = "0.1.0"
 dependencies = [
