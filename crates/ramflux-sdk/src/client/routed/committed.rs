@@ -8,24 +8,52 @@ pub(super) struct Committed {
     pub routing: Routing,
     pub entry: GatewayInboxEntry,
 }
-pub(crate) fn committed_key(entry: &GatewayInboxEntry) -> Result<String, SdkError> {
+pub(crate) fn committed_key(
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &str,
+) -> Result<String, SdkError> {
     let bytes = ramflux_protocol::canonical_json_bytes(&(
-        &entry.envelope.source_device_id,
-        &entry.envelope.envelope_id,
+        source.root_commitment(),
+        source.device_id(),
+        envelope,
     ))?;
     Ok(format!(
         "routed/committed/{}",
-        ramflux_crypto::blake3_256_base64url("ramflux.sdk.receipt.v2", &bytes)
+        ramflux_crypto::blake3_256_base64url("ramflux.sdk.receipt.v3", &bytes)
     ))
 }
+
 impl RamfluxClient {
+    pub(crate) fn authenticated_committed_key(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<String, SdkError> {
+        committed_key(&self.authenticated_device_identity(entry)?, &entry.envelope.envelope_id)
+    }
+    /// Unauthenticated inputs have no device identity and cannot reserve a device's retry bucket.
+    /// They use an opaque, globally bounded quarantine key until manifest discovery authenticates them.
+    pub(crate) fn inbox_admission_key(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<String, SdkError> {
+        if let Ok(key) = self.authenticated_committed_key(entry) {
+            return Ok(key);
+        }
+        Ok(format!(
+            "inbox/unverified/{}",
+            ramflux_protocol::hash_base64url(
+                "ramflux.sdk.unverified_inbox.v1",
+                &ramflux_protocol::canonical_json_bytes(&entry.envelope)?
+            )
+        ))
+    }
     pub(crate) fn committed_routing(
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<Routing>, SdkError> {
         Ok(self
             .account_db()?
-            .load_actor_state::<Committed>(&committed_key(entry)?)?
+            .load_actor_state::<Committed>(&self.authenticated_committed_key(entry)?)?
             .map(|receipt| receipt.routing))
     }
 }
@@ -57,8 +85,10 @@ impl RamfluxClient {
     pub(super) fn projection_id(&self, entry: &GatewayInboxEntry) -> Result<String, SdkError> {
         let db = self.account_db()?;
         let wire = &entry.envelope.envelope_id;
-        let scoped =
-            format!("routed:{}", committed_key(entry)?.trim_start_matches("routed/committed/"));
+        let scoped = format!(
+            "routed:{}",
+            self.authenticated_committed_key(entry)?.trim_start_matches("routed/committed/")
+        );
         let key = format!("routed/projection/{scoped}");
         if let Some(id) = db.load_actor_state::<String>(&key)? {
             return Ok(id);
@@ -86,12 +116,14 @@ impl RamfluxClient {
         id: &str,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let scoped =
-            format!("routed:{}", committed_key(entry)?.trim_start_matches("routed/committed/"));
+        let scoped = format!(
+            "routed:{}",
+            self.authenticated_committed_key(entry)?.trim_start_matches("routed/committed/")
+        );
         db.persist_actor_state(&format!("routed/projection/{scoped}"), &id)?;
         db.persist_actor_state(
             &format!("routed/message-owner/{id}"),
-            &entry.envelope.source_device_id,
+            &self.authenticated_device_identity(entry)?.storage_key(),
         )?;
         Ok(())
     }

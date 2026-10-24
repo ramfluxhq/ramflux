@@ -30,6 +30,10 @@ impl RamfluxClient {
             })?;
         let root = self.device_root(&event.target_device_id)?;
         let mut event = event.clone();
+        let source = self.bind_owned_a2i_event(&mut event)?;
+        if engine.config.device_id != source.device_id() {
+            return Err(SdkError::InboundRejected("A2I source engine mismatch".into()));
+        }
         event.target_device_id =
             super::identity_authority::device_namespace::wire_device_id(&event.target_device_id)?;
         let conversation_id =
@@ -76,7 +80,8 @@ impl RamfluxClient {
                 );
                 let delivery = self.apply_routed_entry(engine, &pool, &entry, false).await?;
                 if delivery.routing.kind == crate::client::routed::Kind::Control {
-                    let key = crate::client::routed::committed_key(&entry)?
+                    let key = self
+                        .authenticated_committed_key(&entry)?
                         .replace("routed/committed/", "routed/control/");
                     if let Some(event) =
                         self.account_db()?.load_actor_state::<A2iControlEvent>(&key)?
@@ -85,7 +90,7 @@ impl RamfluxClient {
                             .account_db()?
                             .load_actor_state::<A2iControlEvent>(
                                 &crate::client::routed::control::a2i_key(
-                                    &event.source_device_id,
+                                    &self.a2i_event_identity(&event)?,
                                     &event.event_id,
                                 )?,
                             )?
@@ -131,7 +136,7 @@ impl RamfluxClient {
             return Ok(None);
         }
         self.ensure_inbound_device(&engine.config, entry).await?;
-        let receipt_key = format!("legacy/a2i/{}", crate::client::routed::committed_key(entry)?);
+        let receipt_key = format!("legacy/a2i/{}", self.authenticated_committed_key(entry)?);
         if let Some(receipt) =
             self.account_db()?.load_actor_state::<LegacyControlReceipt>(&receipt_key)?
         {
@@ -142,7 +147,7 @@ impl RamfluxClient {
             let event = self
                 .account_db()?
                 .load_actor_state::<A2iControlEvent>(&crate::client::routed::control::a2i_key(
-                    &receipt.event.source_device_id,
+                    &self.authenticated_device_identity(entry)?,
                     &receipt.event.event_id,
                 )?)?
                 .unwrap_or(receipt.event);
@@ -159,12 +164,13 @@ impl RamfluxClient {
         let mut session =
             self.load_or_create_recv_dm_session(&conversation_id, envelope.x3dh.as_ref())?;
         let body = session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
-        let event: A2iControlEvent = serde_json::from_slice(&body)?;
+        let mut event: A2iControlEvent = serde_json::from_slice(&body)?;
         if event.source_device_id != entry.envelope.source_device_id
             || event.target_device_id != engine.config.device_id
         {
             return Err(SdkError::InboundRejected("legacy A2I endpoint mismatch".to_owned()));
         }
+        let source = self.bind_received_a2i_event(&mut event, entry)?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.append_gateway_delivery(entry)?;
             self.account_db()?.persist_actor_state(
@@ -182,7 +188,7 @@ impl RamfluxClient {
                 &session,
             )?;
             self.account_db()?.persist_actor_state(
-                &crate::client::routed::control::a2i_key(&event.source_device_id, &event.event_id)?,
+                &crate::client::routed::control::a2i_key(&source, &event.event_id)?,
                 &event,
             )?;
             Ok(())

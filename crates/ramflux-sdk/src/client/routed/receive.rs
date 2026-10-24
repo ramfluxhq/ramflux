@@ -88,7 +88,7 @@ impl RamfluxClient {
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
         self.ensure_inbound_device(&engine.config, entry).await?;
-        let commit = super::committed_key(entry)?;
+        let commit = self.authenticated_committed_key(entry)?;
         if let Some(receipt) = self.account_db()?.load_actor_state::<Committed>(&commit)? {
             if receipt.entry.envelope.payload_hash != entry.envelope.payload_hash {
                 return Err(invalid("envelope id reused with a different authenticated payload"));

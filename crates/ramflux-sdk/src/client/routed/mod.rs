@@ -13,7 +13,7 @@ mod context;
 pub(crate) mod control;
 mod object_slot;
 mod project;
-pub(crate) use committed::{committed_key, conversation_watermark, object_watermark};
+pub(crate) use committed::{conversation_watermark, object_watermark};
 mod legacy;
 mod receive;
 pub(crate) use receive::Delivery;

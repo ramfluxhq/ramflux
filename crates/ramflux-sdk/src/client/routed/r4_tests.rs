@@ -231,6 +231,8 @@ async fn two_authenticated_devices_can_deliver_the_same_a2i_event_id_independent
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     for sender in [&alice, &carol] {
         let event = A2iControlEvent {
+            source_principal_id: None,
+            source_principal_commitment: None,
             event_id: "same-event".to_owned(),
             event_type: "a2i.control".to_owned(),
             source_device_id: sender.id.clone(),
@@ -263,6 +265,8 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
     let conversation = a2i_control_conversation_id("alice", "bob");
     let mut msg = from(&alice, &bob, "legacy-control", &conversation);
     let event = A2iControlEvent {
+        source_principal_id: None,
+        source_principal_commitment: None,
         event_id: "legacy-event".to_owned(),
         event_type: "a2i.control".to_owned(),
         source_device_id: "alice".to_owned(),
@@ -463,6 +467,8 @@ async fn acknowledging_a2i_control_persists_the_decision_beyond_the_memory_cache
     let mut bob = Fixture::new("bob", 61)?;
     trust(&bob, &alice)?;
     let event = A2iControlEvent {
+        source_principal_id: None,
+        source_principal_commitment: None,
         event_id: "ack-event".to_owned(),
         event_type: "a2i.control".to_owned(),
         source_device_id: "alice".to_owned(),
@@ -537,8 +543,10 @@ async fn unowned_legacy_rows_cannot_squat_new_sender_scoped_projection_or_attach
         &serde_json::to_vec(&wrapper)?,
         Route::attachments(),
     )?;
-    let scoped =
-        format!("routed:{}", committed_key(&entry)?.trim_start_matches("routed/committed/"));
+    let scoped = format!(
+        "routed:{}",
+        bob.client.authenticated_committed_key(&entry)?.trim_start_matches("routed/committed/")
+    );
     bob.client.send_direct_message("old-attacker", "old-collision", "carol", b"old squat")?;
     bob.client.send_direct_message("old-attacker", &scoped, "carol", b"old reserved squat")?;
     bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;

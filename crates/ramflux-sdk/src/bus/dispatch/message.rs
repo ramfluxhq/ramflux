@@ -759,7 +759,7 @@ async fn receive_bound_legacy(
             account
                 .client
                 .account_db()?
-                .remove_unrouted(&crate::client::routed::committed_key(&entry)?)?;
+                .remove_unrouted(&account.client.inbox_admission_key(&entry)?)?;
             account.client.account_db()?.remove_unrouted(&entry.envelope.envelope_id)?;
             account.merge_deliveries(vec![entry])?;
         }

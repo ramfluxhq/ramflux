@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
+mod device_identity;
 pub(crate) mod device_namespace;
 mod directory;
 mod owned;

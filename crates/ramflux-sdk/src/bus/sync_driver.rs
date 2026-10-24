@@ -87,7 +87,7 @@ async fn receive(
     let mut applied = 0;
     let mut replies = Vec::new();
     for entry in entries {
-        let key = crate::client::routed::committed_key(&entry)?;
+        let key = account.client.inbox_admission_key(&entry)?;
         if !account.client.account_db()?.inbox_retry_ready(&key, now)? {
             account
                 .client
@@ -201,7 +201,7 @@ async fn process(
     if account.client.v2_blocks_legacy(&account.client.inbound_device_reference(entry)?)? {
         let db = account.client.account_db()?;
         db.hold_unrouted(
-            &crate::client::routed::committed_key(entry)?,
+            &account.client.inbox_admission_key(entry)?,
             entry.inbox_seq,
             &serde_json::to_vec(entry)?,
             now_unix_timestamp(),
@@ -227,7 +227,7 @@ async fn process(
         return Ok((true, None));
     }
     let db = account.client.account_db()?;
-    let key = crate::client::routed::committed_key(entry)?;
+    let key = account.client.inbox_admission_key(entry)?;
     db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
     db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"inbox_seq":entry.inbox_seq}),now_unix_timestamp(),None)?;
     Ok((false, None))

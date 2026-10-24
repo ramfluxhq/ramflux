@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 pub mod a2i;
+mod a2i_identity;
 pub mod account;
 pub mod contact;
 pub(crate) mod contact_resolution;
