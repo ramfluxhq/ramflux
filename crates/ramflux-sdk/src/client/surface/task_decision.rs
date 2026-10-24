@@ -72,6 +72,12 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("task surface decision snapshot missing"))?;
         let witnessed = proof.restore(&receipt, &SurfaceState::default(), action.version())?;
         witnessed.validate_action(&action).map_err(|e| invalid(&e.to_string()))?;
+        let binding = action
+            .task_binding()
+            .ok_or_else(|| invalid("task surface action has no task binding"))?;
+        if binding.task_id != resolution.task_id || binding.step_id != resolution.step_id {
+            return Err(invalid("task surface action belongs to another task or step"));
+        }
         let expected = match resolution.decision {
             TaskDecision::Resume => "resume",
             TaskDecision::Deny => "deny",

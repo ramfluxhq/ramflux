@@ -103,6 +103,14 @@ impl A2uiConversationEvent {
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct A2uiSurfaceAction(ActionFields);
+
+/// Task and step named by a requester-signed surface action and its creator receipt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceTaskBinding {
+    pub task_id: String,
+    pub step_id: String,
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ActionFields {
@@ -114,6 +122,8 @@ pub(super) struct ActionFields {
     pub(super) action_id: String,
     pub(super) values: Value,
     pub(super) args_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) task_binding: Option<SurfaceTaskBinding>,
 }
 impl A2uiSurfaceAction {
     /// # Errors
@@ -148,6 +158,10 @@ impl A2uiSurfaceAction {
     #[must_use]
     pub fn args_hash(&self) -> &str {
         &self.0.args_hash
+    }
+    #[must_use]
+    pub const fn task_binding(&self) -> Option<&SurfaceTaskBinding> {
+        self.0.task_binding.as_ref()
     }
     pub(super) const fn fields(&self) -> &ActionFields {
         &self.0

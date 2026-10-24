@@ -31,6 +31,8 @@ pub(crate) struct Packet {
     pub principal: String,
     pub device: String,
     pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_expires_at: Option<i64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Job {
@@ -54,7 +56,9 @@ impl Packet {
     }
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
         let mut bytes = PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(self)?);
+        let mut wire = self.clone();
+        wire.local_expires_at = None;
+        bytes.extend(serde_json::to_vec(&wire)?);
         super::check_delivery_size(bytes.len())?;
         Ok(bytes)
     }
@@ -63,6 +67,21 @@ impl Packet {
             "ramflux.task.approval.request.v1",
             &ramflux_protocol::canonical_json_bytes(self.request())?,
         ))
+    }
+    pub(crate) fn deadline(&self) -> i64 {
+        self.local_expires_at.unwrap_or_else(|| {
+            self.request().approval.expires_at.min(
+                crate::time::now_unix_timestamp().saturating_add(super::approval_retention::TTL),
+            )
+        })
+    }
+    pub(crate) fn received(&self) -> Self {
+        let mut packet = self.clone();
+        packet.local_expires_at =
+            Some(self.request().approval.expires_at.min(
+                crate::time::now_unix_timestamp().saturating_add(super::approval_retention::TTL),
+            ));
+        packet
     }
     pub(crate) fn recipient(&self) -> &str {
         match self.payload {
@@ -106,6 +125,7 @@ impl RamfluxClient {
             principal: d.principal_id.clone(),
             device: d.device_id.clone(),
             signature: String::new(),
+            local_expires_at: None,
         };
         packet.signature =
             ramflux_crypto::sign_canonical_bytes_with_device_branch(&packet.signing_bytes()?, d);
@@ -123,31 +143,13 @@ impl RamfluxClient {
         if self.account_db()?.actor_state_exists(&key)? {
             return Ok(());
         }
-        self.bounded_task_approval_store(
+        let mut packet = packet.clone();
+        packet.local_expires_at = Some(packet.deadline());
+        self.store_task_approval_row(
             &key,
             &Job { packet: packet.clone(), attempts: 0, next_at: 0 },
+            &packet,
         )
-    }
-    fn bounded_task_approval_store(
-        &self,
-        key: &str,
-        value: &impl Serialize,
-    ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let (namespace, _) =
-            key.rsplit_once('/').ok_or_else(|| invalid("approval storage namespace missing"))?;
-        let (count, bytes) = db.task_state_usage(&(namespace.to_owned() + "/"))?;
-        let existing = db.actor_state_exists(key)?;
-        let byte_limit = if namespace == "task/approval_in" { 384 * 1024 } else { 2 * 1024 * 1024 };
-        if (!existing && count >= 64)
-            || bytes
-                .saturating_add(u64::try_from(serde_json::to_vec(value)?.len()).unwrap_or(u64::MAX))
-                > byte_limit
-        {
-            return Err(SdkError::InboundPending("task approval inbox capacity reached".into()));
-        }
-        db.persist_actor_state(key, value)?;
-        Ok(())
     }
     pub(crate) fn receive_task_approval(
         &self,
@@ -168,8 +170,38 @@ impl RamfluxClient {
         Ok(true)
     }
     pub(crate) fn accept_task_approval(&self, packet: &Packet) -> Result<(), SdkError> {
+        let mut received = packet.received();
+        if self.device_branch.as_ref().is_some_and(|local| local.device_id == packet.device) {
+            received.local_expires_at = Some(packet.deadline());
+        }
+        let packet = received;
         let request = packet.request();
         let b = &request.binding;
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if matches!(packet.payload, Payload::Decision { .. }) && local.principal_id == b.assignee {
+            if let Some(receipt) = self.task_approval_receipt(&packet.id()?)? {
+                let fingerprint = ramflux_protocol::hash_base64url(
+                    "ramflux.task.approval.decision.v1",
+                    &ramflux_protocol::canonical_json_bytes(&packet.payload)?,
+                );
+                if receipt.fingerprint != fingerprint {
+                    return Err(crate::task_refusal::refused(
+                        crate::TaskRefusalCode::DecisionConsumed,
+                        "task approval already decided",
+                    ));
+                }
+                return Ok(());
+            }
+            let original = self
+                .account_db()?
+                .load_actor_state::<Packet>(&key("approval_source", &packet.id()?))?
+                .ok_or_else(|| invalid("task approval decision has no local source"))?;
+            if ramflux_protocol::canonical_json_bytes(request)?
+                != ramflux_protocol::canonical_json_bytes(original.request())?
+            {
+                return Err(invalid("task decision differs from original MCP approval"));
+            }
+        }
         let target = NeedsMe::Approval { grant_id: request.grant_body.grant_id.clone() };
         validate_display(request)?;
         let view = self.task_get(Some(&b.conversation_id), &b.task_id)?;
@@ -234,7 +266,7 @@ impl RamfluxClient {
             if matches!(packet.payload, Payload::Request { .. }) { "in" } else { "decision_in" };
         let id = packet.id()?;
         let storage = key(&format!("approval_{phase}"), &id);
-        self.persist_task_approval(packet, &id, phase, &storage)
+        self.persist_task_approval(&packet, &id, phase, &storage)
     }
     fn persist_task_approval(
         &self,
@@ -246,28 +278,29 @@ impl RamfluxClient {
         let b = &packet.request().binding;
         let db = self.account_db()?;
         db.write_transaction(|| {
-            if let Some(old)=db.load_actor_state::<Packet>(storage)? {
-                // The first human decision wins across all requester devices.
-                if serde_json::to_vec(&old.payload)?!=serde_json::to_vec(&packet.payload)? {
-                    return Err(crate::task_refusal::refused(crate::TaskRefusalCode::DecisionConsumed,"task approval already decided"));
-                }
+            if let Some(receipt)=self.task_approval_receipt(id)? {
+                let fingerprint=ramflux_protocol::hash_base64url("ramflux.task.approval.decision.v1",&ramflux_protocol::canonical_json_bytes(&packet.payload)?);
+                if matches!(packet.payload,Payload::Decision {..}) && receipt.fingerprint!=fingerprint {return Err(crate::task_refusal::refused(crate::TaskRefusalCode::DecisionConsumed,"task approval already decided"));}
                 return Ok(());
             }
-            if phase=="in" && db.actor_state_exists(&key("approval_decision_in",id))? {return Ok(());}
-            let existing=db.task_record_page::<Packet>("task/approval_in/","task/approval_in/",129)?;
-            if phase=="in" && existing.iter().filter(|(_,p)|p.principal==packet.principal).count()>=16 {
-                return Err(SdkError::InboundPending("task approval sender inbox capacity reached".into()));
+            if let Some(old)=db.load_actor_state::<Packet>(storage)? {
+                if ramflux_protocol::canonical_json_bytes(&old.payload)?!=ramflux_protocol::canonical_json_bytes(&packet.payload)? {return Err(crate::task_refusal::refused(crate::TaskRefusalCode::DecisionConsumed,"task approval already decided"));}
+                return Ok(());
             }
-            if phase=="in" {
-                let used=existing.iter().filter(|(_,p)|p.principal==packet.principal).try_fold(0usize,|bytes,(_,p)|Ok::<_,SdkError>(bytes.saturating_add(serde_json::to_vec(p)?.len())))?;
-                if used.saturating_add(serde_json::to_vec(packet)?.len())>96*1024 {return Err(SdkError::InboundPending("task approval sender byte capacity reached".into()));}
+            self.store_task_approval_row(storage,packet,packet)?;
+            if phase=="decision_in" {
+                db.delete_task_state(&key("approval_in",id))?;
+                let local=self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+                if local.principal_id==b.requester {
+                    let state=if packet.device==local.device_id {super::approval_retention::DeliveryState::Pending}else{super::approval_retention::DeliveryState::Submitted};
+                    self.retire_task_approval(packet,state,None)?;
+                }
             }
-            self.bounded_task_approval_store(storage,packet)?;
-            if phase=="decision_in" {db.delete_task_state(&key("approval_in",id))?;}
             db.append_journal(&format!("task-approval:{phase}:{id}"),match &packet.payload {Payload::Request {..}=>"mcp.approval.request",Payload::Decision {approved:true,..}=>"mcp.approval.granted",Payload::Decision {approved:false,..}=>"mcp.approval.denied"},&json!({"approval_id":format!("task_approval_{id}"),"task_id":b.task_id,"conversation_id":b.conversation_id}),crate::time::now_unix_timestamp(),None)?;
             Ok(())
         })
     }
+
     pub(crate) fn task_remote_approvals(&self) -> Result<Vec<Value>, SdkError> {
         let db = self.account_db()?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -277,7 +310,7 @@ impl RamfluxClient {
             let id = packet.id()?;
             let request = packet.request();
             if request.binding.requester != local.principal_id
-                || request.approval.expires_at <= crate::time::now_unix_timestamp()
+                || packet.deadline() <= crate::time::now_unix_timestamp()
                 || db.actor_state_exists(&key("approval_decision_in", &id))?
             {
                 continue;
@@ -297,6 +330,11 @@ impl RamfluxClient {
                 continue;
             }
             let mut value = serde_json::to_value(&request.approval)?;
+            value["confirmation_mode"] = json!("task_requester");
+            value["risk_level"] =
+                serde_json::to_value(request.grant_body.capability.default_risk())?;
+            value["expires_at"] = json!(packet.deadline());
+            value["details"] = json!({"arguments":request.approval.details["arguments"],"arguments_hash":request.grant_body.arguments_hash,"single_use":request.grant_body.single_use,"full_delegation":request.grant_body.full_delegation,"task_binding":request.binding});
             value["approval_id"] = json!(format!("task_approval_{id}"));
             value["decision_id"] = json!(request.approval.approval_id);
             value["task_binding"] = serde_json::to_value(&request.binding)?;
@@ -314,6 +352,18 @@ impl RamfluxClient {
         step: &str,
     ) -> Result<String, SdkError> {
         let Some(scoped) = id.strip_prefix("task_approval_") else { return Ok(id.into()) };
+        if let Some(receipt) = self.task_approval_receipt(scoped)? {
+            if receipt.binding.conversation_id != conversation
+                || receipt.binding.task_id != task
+                || receipt.binding.step_id != step
+            {
+                return Err(crate::task_refusal::refused(
+                    crate::TaskRefusalCode::DecisionMismatch,
+                    "approval belongs to another task intervention",
+                ));
+            }
+            return Ok(receipt.approval_id);
+        }
         let packet = self
             .account_db()?
             .load_actor_state::<Packet>(&key("approval_in", scoped))?
@@ -329,35 +379,6 @@ impl RamfluxClient {
             ));
         }
         Ok(packet.request().approval.approval_id.clone())
-    }
-    pub(crate) fn decide_task_approval(&self, id: &str, approved: bool) -> Result<Value, SdkError> {
-        let id =
-            id.strip_prefix("task_approval_").ok_or_else(|| invalid("invalid task approval id"))?;
-        let db = self.account_db()?;
-        let packet = db
-            .load_actor_state::<Packet>(&key("approval_in", id))?
-            .or(db.load_actor_state::<Packet>(&key("approval_decision_in", id))?)
-            .ok_or_else(|| invalid("task approval not found"))?;
-        let request = packet.request().clone();
-        let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if device.principal_id != request.binding.requester {
-            return Err(invalid("only task requester may decide approval"));
-        }
-        let signature = if approved {
-            Some(ramflux_crypto::sign_with_device_branch(device, &request.grant_body)?)
-        } else {
-            None
-        };
-        let decision = self.sign_task_approval(Payload::Decision {
-            request: Box::new(request),
-            approved,
-            grant_signature: signature,
-        })?;
-        db.write_transaction(|| {
-            self.accept_task_approval(&decision)?;
-            self.queue_task_approval(&decision)?;
-            Ok(json!({"approval_id":format!("task_approval_{id}"),"decision_id":decision.request().approval.approval_id,"grant_id":decision.request().grant_body.grant_id,"status":if approved {"approved"} else {"denied"},"delivery_state":"pending"}))
-        })
     }
 }
 

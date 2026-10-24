@@ -29,16 +29,36 @@ impl RamfluxClient {
             {
                 return Ok(());
             }
-            let Some(largest) = largest else { break };
-            let victim = db
-                .task_lifecycle_rows(None, None, false)?
-                .into_iter()
-                .filter_map(|v| serde_json::from_value::<Lifecycle>(v).ok())
-                .filter(|r| {
-                    !(r.compacted || r.conversation_id == c.conversation_id && r.task_id == task)
-                        && r.usage.get(&largest).is_some_and(|u| u.bytes > 0 || u.events > 0)
-                })
-                .max_by_key(|r| r.usage.get(&largest).map_or(0, |u| u.bytes));
+            let local =
+                &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
+            let mut candidates = Vec::new();
+            for value in db.task_lifecycle_rows(None, None, false)? {
+                let row: Lifecycle = serde_json::from_value(value)?;
+                if row.compacted || row.conversation_id == c.conversation_id && row.task_id == task
+                {
+                    continue;
+                }
+                let view = db
+                    .load_actor_state::<serde_json::Value>(&scoped(
+                        "view",
+                        &row.conversation_id,
+                        &row.task_id,
+                    )?)?
+                    .unwrap_or_default();
+                if !row.terminal && (view["requester"] == *local || view["assignee"] == *local) {
+                    continue;
+                }
+                candidates.push(row);
+            }
+            let victim = candidates.into_iter().max_by_key(|row| {
+                (
+                    row.terminal,
+                    largest.as_ref().is_some_and(|source| {
+                        row.usage.get(source).is_some_and(|u| u.bytes > 0 || u.events > 0)
+                    }),
+                    row.bytes,
+                )
+            });
             let Some(victim) = victim else { break };
             self.compact_task(&victim, false)?;
         }

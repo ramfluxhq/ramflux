@@ -8,19 +8,16 @@ use ramflux_protocol::TaskEventBody;
 use serde_json::{Value, json};
 impl RamfluxClient {
     pub(super) fn remember_task_no_role(&self, c: &Carrier) -> Result<(), SdkError> {
-        if !matches!(c.event()?.event(), TaskEventBody::Start(_)) {
+        let event = c.event()?;
+        let TaskEventBody::Start(start) = event.event() else {
             return Ok(());
-        }
+        };
         let db = self.account_db()?;
-        let key = scoped(
-            "no_role",
-            &c.conversation_id,
-            &serde_json::to_string(&(c.event()?.event().task_id(), &c.principal_id))?,
-        )?;
-        if db.load_actor_state::<Value>(&key)?.is_none() {
+        let key = scoped("no_role", &c.conversation_id, event.event().task_id())?;
+        if db.load_actor_state::<Value>(&key)?.is_none_or(|old| old["source"] != c.principal_id) {
             db.persist_actor_state(
                 &key,
-                &json!({"source":c.principal_id,"at":crate::time::now_unix_timestamp()}),
+                &json!({"source":c.principal_id,"starter":c.principal_id,"requester":start.requester,"assignee":start.assignee,"at":crate::time::now_unix_timestamp()}),
             )?;
         }
         db.prune_task_no_role(crate::time::now_unix_timestamp())?;
@@ -35,17 +32,32 @@ impl RamfluxClient {
         {
             return Ok(false);
         }
-        Ok(self
-            .account_db()?
+        let event = c.event()?;
+        let db = self.account_db()?;
+        let row = db
             .load_actor_state::<Value>(&scoped(
                 "no_role",
                 &c.conversation_id,
-                &serde_json::to_string(&(c.event()?.event().task_id(), &c.principal_id))?,
+                event.event().task_id(),
             )?)?
-            .is_some_and(|v| {
-                v["at"].as_i64().is_some_and(|at| {
-                    crate::time::now_unix_timestamp().saturating_sub(at) < 7 * 86400
-                })
-            }))
+            .or(db.load_actor_state::<Value>(&scoped(
+                "no_role",
+                &c.conversation_id,
+                &serde_json::to_string(&(event.event().task_id(), &c.principal_id))?,
+            )?)?);
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        if row["at"]
+            .as_i64()
+            .is_none_or(|at| crate::time::now_unix_timestamp().saturating_sub(at) >= 7 * 86400)
+        {
+            return Ok(false);
+        }
+        if matches!(event.event(), TaskEventBody::Start(_)) {
+            return Ok(row["source"] == c.principal_id);
+        }
+        // No follow-up can change the endpoint roles established by a rejected Start.
+        Ok(true)
     }
 }

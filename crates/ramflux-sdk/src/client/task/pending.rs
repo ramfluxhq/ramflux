@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub(super) struct Pending {
     #[serde(default)]
     pub task_id: String,
+    #[serde(default)]
+    pub(super) step_id: Option<String>,
     pub carrier: Carrier,
     pub(super) conversation: String,
     pub(super) message: String,
@@ -87,6 +89,10 @@ impl RamfluxClient {
             }
             let pending = Pending {
                 task_id: c.event()?.event().task_id().into(),
+                step_id: match c.event()?.event() {
+                    TaskEventBody::Resolve(r) => Some(r.step_id.clone()),
+                    _ => None,
+                },
                 carrier: c.clone(),
                 conversation: delivery.conversation.into(),
                 message: delivery.message.into(),

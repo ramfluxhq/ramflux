@@ -50,7 +50,10 @@ fn surface_project(
         .ok_or_else(|| invalid("surface absent"))
 }
 fn exercise(input: bool, read_only: bool) -> TestResult {
-    let f = Fixture::new()?;
+    exercise_with_restart(input, read_only, false)
+}
+fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestResult {
+    let mut f = Fixture::new()?;
     let command = ramflux_protocol::A2uiConversationCommand::CreateSurface(
         ramflux_protocol::CreateSurfaceCommand {
             surface_id: "form".into(),
@@ -102,7 +105,7 @@ fn exercise(input: bool, read_only: bool) -> TestResult {
     let view = f.agent.surface_get("form", 0, None)?;
     let values = json!({"decision":"resume","private_input":"PRIVATE_TASK_FORM_VALUE"});
     let action = serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.action.v2","conversationId":"thread","surfaceId":"form","version":1,"surfaceHash":view["surface_hash"],"actionId":"answer","values":values,"argsHash":ramflux_protocol::surface_args_hash(&values)?}),
+        &json!({"schema":"ramflux.a2ui.action.v2","conversationId":"thread","surfaceId":"form","version":1,"surfaceHash":view["surface_hash"],"actionId":"answer","taskBinding":{"task_id":"task","step_id":"step"},"values":values,"argsHash":ramflux_protocol::surface_args_hash(&values)?}),
     )?;
     let action = surface_carrier(&f.human, PayloadKind::Action, "answer-form", &action)?;
     assert!(surface_project(&f.agent, &action)?.accepted);
@@ -114,10 +117,21 @@ fn exercise(input: bool, read_only: bool) -> TestResult {
         mark_read_only(&f.agent, &action, decision_id)?;
     }
 
+    let binding = if restart {
+        drop(f.human.active_account_db.take());
+        f.human.unlock_account("human", b"task-test-secret")?;
+        let encoded = f.agent.task_surface_receipt("thread", "form", "agent", decision_id)?;
+        let receipt = SurfaceCarrier::decode(&ramflux_protocol::decode_base64url(&encoded)?)?
+            .ok_or("receipt")?;
+        assert!(surface_project(&f.human, &receipt)?.accepted);
+        f.human.surface_get("form", 0, None)?["actions"][0]["task_binding"].clone()
+    } else {
+        json!({"task_id":"task","step_id":"step"})
+    };
     let resolution = TaskResolve {
-        task_id: "task".into(),
+        task_id: binding["task_id"].as_str().ok_or("receipt task id")?.into(),
         base_revision: 2,
-        step_id: "step".into(),
+        step_id: binding["step_id"].as_str().ok_or("receipt step id")?.into(),
         target,
         decision_id: decision_id.into(),
         decision: TaskDecision::Resume,
@@ -182,4 +196,10 @@ fn mark_read_only(
     row["actionable"] = json!(false);
     client.account_db()?.persist_actor_state(&key, &row)?;
     Ok(())
+}
+
+#[test]
+fn r5_a_creator_receipt_names_the_task_and_step_after_requester_restart_before_its_arrival()
+-> TestResult {
+    exercise_with_restart(true, false, true)
 }

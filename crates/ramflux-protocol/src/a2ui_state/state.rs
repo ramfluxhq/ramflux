@@ -229,6 +229,10 @@ impl SurfaceState {
     /// Rejects closed, stale, mismatched, disabled or unbound decisions and invalid arguments.
     pub fn validate_action(&self, action: &A2uiSurfaceAction) -> Result<(), SurfaceReject> {
         let action = action.fields();
+        if let Some(binding) = &action.task_binding {
+            limits::identifier(&binding.task_id)?;
+            limits::identifier(&binding.step_id)?;
+        }
         if self.closed {
             return Err(SurfaceReject::Closed);
         }

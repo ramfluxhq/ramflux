@@ -13,6 +13,8 @@ pub(super) struct LocalIntentStatus {
     pub at: i64,
     executor: String,
     task_id: String,
+    #[serde(default)]
+    step_id: Option<String>,
     conversation_id: String,
     pub(super) carrier_hash: String,
     pending: bool,
@@ -29,7 +31,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.account_db()?.append_journal(
             &format!("task-pending:{key}:{state}"), "task.changed",
-            &serde_json::json!({"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"pending":pending,"pending_state":state,"actor_kind_verified":super::actor_kind_verified(self, &c.principal_id, &c.device_id)}), now, None,
+            &serde_json::json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"pending":pending,"pending_state":state,"actor_kind_verified":super::actor_kind_verified(self, &c.principal_id, &c.device_id)}), now, None,
         )?;
         Ok(())
     }
@@ -208,6 +210,10 @@ impl RamfluxClient {
                             .clone()
                             .ok_or_else(|| invalid("local intent executor missing"))?,
                         task_id: p.carrier.event()?.event().task_id().to_owned(),
+                        step_id: match p.carrier.event()?.event() {
+                            TaskEventBody::Resolve(r) => Some(r.step_id.clone()),
+                            _ => None,
+                        },
                         conversation_id: p.conversation.clone(),
                         carrier_hash: super::certificate::carrier_hash(&p.carrier)?,
                         pending: true,

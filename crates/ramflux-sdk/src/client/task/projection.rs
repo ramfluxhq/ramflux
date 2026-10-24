@@ -408,7 +408,7 @@ impl RamfluxClient {
         view["created_at"] = json!(history.created_at);
         view["updated_at"] = json!(history.updated_at);
         db.persist_actor_state(&scoped("view", &task.conversation_id, &task.task_id)?, &view)?;
-        db.append_journal(&format!("task:{}:{}",scoped("event",&task.conversation_id,&task.task_id)?,task.version),"task.changed",&json!({"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state,"actor_kind_verified":kind_verified}),delivery.at,None)?;
+        db.append_journal(&format!("task:{}:{}",scoped("event",&task.conversation_id,&task.task_id)?,task.version),"task.changed",&json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state,"actor_kind_verified":kind_verified}),delivery.at,None)?;
         self.record_task_lifecycle(&task, &history)?;
         if forward_owned {
             self.queue_task_owned_forward(
