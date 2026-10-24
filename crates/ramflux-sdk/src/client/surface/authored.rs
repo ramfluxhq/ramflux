@@ -129,25 +129,31 @@ impl RamfluxClient {
             {
                 return Err(invalid("own copy source differs from the local author"));
             }
-            let control = self.surface_control_packet(carrier, super::ControlKind::Own, epoch)?;
-            let bytes = control.bytes()?;
-            let message = Self::surface_timeline_id(carrier)?;
-            let reference = carrier.surface_reference()?;
-            let thread = self
-                .account_db()?
-                .client_record("conversation", &carrier.conversation_id)?
-                .ok_or_else(|| invalid("own surface conversation missing"))?;
-            crate::bus::own_device_copy::stage(
-                self,
-                crate::client::own_device_copy::OwnMessageInput {
-                    id: &message,
-                    created_at: crate::prelude::now_unix_timestamp(),
-                    conversation: &carrier.conversation_id,
-                    group: thread["group_id"].as_str(),
-                    body: &bytes,
-                },
-                Some(("surface", &reference)),
-            )
+            self.account_db()?.write_transaction(|| {
+                let control = self.live_surface_control_packet(carrier, epoch)?;
+                let bytes = zeroize::Zeroizing::new(control.bytes()?);
+                let message = Self::surface_timeline_id(carrier)?;
+                let reference = carrier.surface_reference()?;
+                let thread = self
+                    .account_db()?
+                    .client_record("conversation", &carrier.conversation_id)?
+                    .ok_or_else(|| invalid("own surface conversation missing"))?;
+                crate::bus::own_device_copy::stage(
+                    self,
+                    crate::client::own_device_copy::OwnMessageInput {
+                        id: &message,
+                        created_at: crate::prelude::now_unix_timestamp(),
+                        conversation: &carrier.conversation_id,
+                        group: thread["group_id"].as_str(),
+                        body: &bytes,
+                    },
+                    Some(("surface", &reference)),
+                )?;
+                if control.context.is_some() {
+                    self.mark_own_surface_context_announced(&carrier.conversation_id, epoch)?;
+                }
+                Ok::<_, SdkError>(())
+            })
         })();
         match result {
             Ok(()) => Ok(true),

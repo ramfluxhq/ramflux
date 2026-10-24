@@ -110,7 +110,7 @@ fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Res
                 if prefix == "directory/surface/" { "surface" } else { "surface_error" };
             let view = db
                 .client_record(directory, id)?
-                .unwrap_or_else(|| json!({"surface_id":id,"removed":true}));
+                .unwrap_or_else(|| json!({"surface_id":id,"surface_ref":id,"removed":true}));
             events.push((
                 if directory == "surface" { "surface.changed" } else { "surface.rejected" }
                     .to_owned(),
@@ -230,4 +230,40 @@ fn project_contact(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+    #[test]
+    fn surface_removal_includes_the_scoped_reference_without_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-surface-removal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("a", "root")?;
+        client.unlock_account("a", b"test")?;
+        let reference = "opaque-conversation-author-surface-reference";
+        let entry = AccountOutboxEntry {
+            sequence: 1,
+            table_name: "runtime_actor_state".into(),
+            change_kind: "delete".into(),
+            row_id: 0,
+            keys: json!({"state_kind":format!("directory/surface/{reference}")}),
+        };
+        let events = project(&client, &entry)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "surface.changed");
+        assert_eq!(events[0].1["surface_ref"], reference);
+        assert_eq!(events[0].1["removed"], true);
+        assert!(events[0].1.get("snapshot").is_none());
+        assert!(events[0].1.get("fallback_text").is_none());
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

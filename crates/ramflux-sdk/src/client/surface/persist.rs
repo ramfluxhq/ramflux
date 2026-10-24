@@ -15,6 +15,9 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let reference = carrier.surface_reference()?;
         let previous = self.surface_state_ref(&reference)?;
+        let created_at = previous.as_ref().and_then(|(r, _)| r.created_at).or(carrier.posted_at);
+        let updated_at =
+            carrier.updated_at.or_else(|| previous.as_ref().and_then(|(r, _)| r.updated_at));
         let author_device = previous.map_or_else(
             || {
                 carrier.snapshot.as_ref().map_or_else(
@@ -31,6 +34,8 @@ impl RamfluxClient {
             db.delete_surface_state(&key("out_of_sync", &reference))?;
         }
         let record = StoredSurface {
+            created_at,
+            updated_at,
             surface_id: carrier.surface_id.clone(),
             conversation_id: carrier.conversation_id.clone(),
             author_principal_id: carrier.author_principal_id.clone(),
@@ -47,7 +52,7 @@ impl RamfluxClient {
         let executor = self.device_branch.as_ref().is_some_and(|local| {
             local.principal_id == carrier.author_principal_id && local.device_id == author_device
         });
-        db.persist_client_record("surface",&reference,&json!({"id":reference,"surface_ref":reference,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"author_principal_id":carrier.author_principal_id,"author_device_id":author_device,"executor_device_id":author_device,"is_action_executor":executor,"out_of_sync":self.surface_is_out_of_sync(&reference)?,"version":state.version(),"surface_hash":state.hash(),"closed":state.is_closed(),"fallback_text":state.content().ok_or_else(||invalid("surface content absent"))?.fallback_text,"renderer_error":null}))?;
+        db.persist_client_record("surface",&reference,&json!({"created_at":created_at,"posted_at":created_at,"updated_at":updated_at,"streams":state.stream_states(),"id":reference,"surface_ref":reference,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"author_principal_id":carrier.author_principal_id,"author_device_id":author_device,"executor_device_id":author_device,"is_action_executor":executor,"out_of_sync":self.surface_is_out_of_sync(&reference)?,"version":state.version(),"surface_hash":state.hash(),"closed":state.is_closed(),"fallback_text":state.content().ok_or_else(||invalid("surface content absent"))?.fallback_text,"renderer_error":null}))?;
         Ok(())
     }
     pub(super) fn bootstrap_owned_surface(&self, carrier: &Carrier) -> Result<(), SdkError> {

@@ -12,7 +12,7 @@ mod group;
 mod outgoing;
 mod own_checkpoint;
 mod own_history;
-pub(crate) use control::{ControlKind, SurfaceControl};
+pub(crate) use control::{CONTROL_PREFIX, ControlKind, SurfaceControl};
 pub(crate) use own_checkpoint::OwnedSurfaceCheckpoint;
 pub(crate) use own_history::{SurfaceExportMetadata, SurfaceHistoryExport};
 mod delivery;
@@ -23,6 +23,7 @@ mod persist;
 mod projection;
 mod read;
 mod resync_request;
+pub(crate) use resync_request::ResyncReply;
 mod scope;
 mod snapshot;
 pub(crate) use carrier::{Carrier, Payload, PayloadKind, command_id, invalid};
@@ -37,6 +38,10 @@ pub(crate) struct StoredSurface {
     pub author_principal_id: String,
     pub author_device_id: String,
     pub checkpoint_base64: String,
+    #[serde(default)]
+    pub created_at: Option<i64>,
+    #[serde(default)]
+    pub updated_at: Option<i64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Receipt {
@@ -48,6 +53,8 @@ pub(crate) struct Outcome {
     pub accepted: bool,
     pub fallback_text: String,
     pub renderer_error: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<crate::SurfaceRefusalCode>,
     #[serde(default)]
     pub retryable: bool,
     #[serde(default)]
@@ -63,6 +70,7 @@ impl Outcome {
             accepted: true,
             fallback_text: fallback::render(author, &content.fallback_text),
             renderer_error: None,
+            reason_code: None,
             retryable: false,
             queued: false,
         })
@@ -80,6 +88,7 @@ impl Outcome {
         Self {
             accepted: false,
             fallback_text: "[Surface rejected]".into(),
+            reason_code: Some(crate::SurfaceRefusalCode::renderer(&error)),
             renderer_error: Some(error),
             retryable: false,
             queued: false,

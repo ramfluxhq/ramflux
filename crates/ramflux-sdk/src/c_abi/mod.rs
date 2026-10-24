@@ -837,7 +837,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
-        SdkError::SurfaceDeliveryTooLarge { .. }
+        SdkError::SurfaceRefused { .. }
+        | SdkError::SurfaceDeliveryTooLarge { .. }
         | SdkError::LocalBus(_)
         | SdkError::InboundRejected(_)
         | SdkError::InboundPending(_)

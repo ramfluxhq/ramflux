@@ -92,7 +92,14 @@ impl RamfluxClient {
                     return Ok(reject("action_not_for_author"));
                 }
                 if let Err(error) = state.validate_action(action) {
-                    return Ok(Outcome::rejected(json!({"code":"renderer_error","reject":error})));
+                    let mut result =
+                        Outcome::rejected(json!({"code":"renderer_error","reject":error}));
+                    if action.version() == state.version()
+                        && state.hash() != Some(action.surface_hash())
+                    {
+                        result.reason_code = Some(crate::SurfaceRefusalCode::StaleHash);
+                    }
+                    return Ok(result);
                 }
                 let used = super::decision::decision_key(carrier, action)?;
                 if self.account_db()?.load_actor_state::<Value>(&used)?.is_some() {
@@ -213,11 +220,12 @@ impl RamfluxClient {
         );
         let view =
             surface.map(|reference| db.client_record("surface", reference)).transpose()?.flatten();
-        db.persist_client_record("surface_error",&error_id,&json!({"conversation_id":conversation,"message_id":message,"sender_device_id":sender.device,"envelope_id":sender.envelope_id,"surface_ref":surface,"surface_id":view.as_ref().map(|v|&v["surface_id"]),"author_principal_id":view.as_ref().map(|v|&v["author_principal_id"]),"renderer_error":error}))?;
+        db.persist_client_record("surface_error",&error_id,&json!({"conversation_id":conversation,"message_id":message,"sender_device_id":sender.device,"envelope_id":sender.envelope_id,"surface_ref":surface,"surface_id":view.as_ref().map(|v|&v["surface_id"]),"author_principal_id":view.as_ref().map(|v|&v["author_principal_id"]),"renderer_error":error,"reason_code":crate::SurfaceRefusalCode::renderer(error)}))?;
         if let (Some(reference), Some(mut view)) = (surface, view)
             && view["conversation_id"] == conversation
         {
             view["renderer_error"] = error.clone();
+            view["reason_code"] = serde_json::to_value(crate::SurfaceRefusalCode::renderer(error))?;
             db.persist_client_record("surface", reference, &view)?;
         }
         Ok(())

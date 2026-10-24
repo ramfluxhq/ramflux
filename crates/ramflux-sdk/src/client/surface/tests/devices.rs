@@ -30,6 +30,7 @@ impl Terminals {
                 let device = remote.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
                 local.account_db()?.persist_client_record("device", &device.device_id, &json!({
                     "principal_id":device.principal_id,
+                    "target_delivery_id":device.device_id,
                     "principal_commitment":remote.surface_local_root_commitment()?,
                     "signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())
                 }))?;
@@ -225,5 +226,36 @@ fn own_surface_history_omits_group_state_below_the_current_membership_floor() ->
     assert_eq!(source.own_surface_history_export(None)?.checkpoints.len(), 1);
     db.upsert_group_local_membership_snapshot("g", 5, 128, "none", "author-device", "owner", 5)?;
     assert_eq!(source.own_surface_history_controls()?.len(), 0);
+    Ok(())
+}
+
+#[test]
+fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestResult {
+    let t = Terminals::new()?;
+    let author = &t.clients[0];
+    let create =
+        carrier(author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
+    assert!(project(author, &create, "create")?.accepted);
+    assert!(author.live_surface_control_packet(&create, None)?.context.is_some());
+    author.mark_own_surface_context_announced("thread", None)?;
+    let delta = carrier(
+        author,
+        PayloadKind::Event,
+        "append",
+        &event(
+            2,
+            C::StreamAppend(StreamAppendCommand {
+                surface_id: "s".into(),
+                component_id: "stream".into(),
+                text_delta: "x".into(),
+                final_: false,
+            }),
+        )?,
+    )?;
+    let live = author.live_surface_control_packet(&delta, None)?;
+    assert!(live.context.is_none());
+    assert_eq!(live.manifests.len(), 0);
+    assert!(author.surface_control_packet(&delta, ControlKind::Own, None)?.context.is_some());
+    assert!(!author.own_surface_context_announced("thread", Some(2))?);
     Ok(())
 }

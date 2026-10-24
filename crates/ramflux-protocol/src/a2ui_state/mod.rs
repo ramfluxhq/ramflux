@@ -15,7 +15,7 @@ pub use limits::{
     MAX_SURFACE_FINALIZED_BLOCKS, MAX_SURFACE_PATCH_OPS, MAX_SURFACE_TEXT_CHARS,
     MAX_SURFACE_TEXT_DELTA_BYTES,
 };
-pub use state::SurfaceState;
+pub use state::{SurfaceState, SurfaceStreamState};
 pub use types::*;
 
 /// Uses the protocol's existing BLAKE3/base64url hash primitive with an argument-specific domain.

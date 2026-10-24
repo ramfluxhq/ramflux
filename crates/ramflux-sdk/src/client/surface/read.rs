@@ -31,6 +31,10 @@ impl RamfluxClient {
         if let Some((record, state)) = self.surface_state_ref(id)? {
             view["snapshot"] = serde_json::to_value(state.content())?;
             view["author_device_id"] = json!(record.author_device_id);
+            view["streams"] = json!(state.stream_states());
+            view["created_at"] = json!(record.created_at);
+            view["posted_at"] = json!(record.created_at);
+            view["updated_at"] = json!(record.updated_at);
         } else {
             view["snapshot"] = Value::Null;
         }
@@ -168,6 +172,11 @@ pub(crate) fn surface_metadata(view: &Value) -> Value {
     for field in [
         "surface_id",
         "surface_ref",
+        "removed",
+        "streams",
+        "created_at",
+        "posted_at",
+        "updated_at",
         "message_id",
         "sender_device_id",
         "envelope_id",
@@ -182,6 +191,7 @@ pub(crate) fn surface_metadata(view: &Value) -> Value {
         "executor_device_id",
         "is_action_executor",
         "renderer_error",
+        "reason_code",
         "last_action_id",
         "last_action_message_id",
     ] {

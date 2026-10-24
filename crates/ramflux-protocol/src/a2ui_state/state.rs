@@ -46,6 +46,14 @@ pub(super) fn stream_text(component: &Value) -> Option<(bool, &str)> {
         component.pointer("/data/text").and_then(Value::as_str).map(|text| (true, text))
     }
 }
+/// Whether a text component currently accepts appends or has been finalized.
+/// `Open` describes protocol capability, rather than evidence that a producer is active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceStreamState {
+    Open,
+    Final,
+}
 impl SurfaceState {
     #[must_use]
     pub const fn version(&self) -> u64 {
@@ -66,6 +74,29 @@ impl SurfaceState {
     #[must_use]
     pub fn hash(&self) -> Option<&str> {
         self.hash.as_deref()
+    }
+
+    /// Read content-free finality for every text-capable component.
+    #[must_use]
+    pub fn stream_states(&self) -> BTreeMap<String, SurfaceStreamState> {
+        self.content
+            .as_ref()
+            .into_iter()
+            .flat_map(|content| &content.components)
+            .filter_map(|component| {
+                stream_text(component)?;
+                let id = component.get("id")?.as_str()?;
+                let final_ = self.closed
+                    || self
+                        .final_components
+                        .get(final_component_key(id).as_str())
+                        .is_some_and(|value| value.matches(component));
+                Some((
+                    id.to_owned(),
+                    if final_ { SurfaceStreamState::Final } else { SurfaceStreamState::Open },
+                ))
+            })
+            .collect()
     }
 
     /// Return the next state without mutating this state on either success or rejection.

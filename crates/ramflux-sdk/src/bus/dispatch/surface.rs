@@ -20,6 +20,12 @@ pub(crate) async fn dispatch_surface(
     state: &mut LocalBusDaemonState,
     _connection: &LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    dispatch_surface_inner(request, state).await.map_err(crate::surface_refusal::map_surface_error)
+}
+async fn dispatch_surface_inner(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
     let id = request_account_id(request)?;
     if request.method == "surface.request_resync" {
         let reference = required(&request.body, "surface_ref")?;
@@ -103,6 +109,9 @@ pub(crate) fn read_surface(
     client: &RamfluxClient,
     request: &LocalBusFrame,
 ) -> Result<Value, SdkError> {
+    read_surface_inner(client, request).map_err(crate::surface_refusal::map_surface_error)
+}
+fn read_surface_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, SdkError> {
     match request.method.as_str() {
         "surface.get" => {
             let after = request.body["history_after"].as_u64().unwrap_or(0);
@@ -177,6 +186,8 @@ fn prepare_carrier(
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
+        posted_at: None,
+        updated_at: None,
         payload_kind: kind,
         conversation_id: body.conversation_id.clone(),
         surface_id: surface_id.to_owned(),
@@ -200,7 +211,9 @@ pub(super) async fn request_resync(
     reference: &str,
 ) -> Result<Value, SdkError> {
     let Some(request) = account.client.prepare_surface_resync_request(reference)? else {
-        return Ok(json!({"rate_limited":true,"retry_after_seconds":60}));
+        return Ok(
+            json!({"rate_limited":true,"reason_code":crate::SurfaceRefusalCode::RateLimited,"retry_after_seconds":60}),
+        );
     };
     let root = if account
         .client
@@ -230,8 +243,8 @@ pub(super) async fn request_resync(
             if request.author==engine.config.principal_id && device.device_id==engine.config.device_id {continue;}
             let request:LocalBusMessageSubmitRequest=serde_json::from_value(json!({"conversation_id":request.conversation_id,"message_id":crate::new_surface_message_id()?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":engine.config.principal_id,"sender_id":engine.config.device_id,"recipient_device_id":device.device_id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":600}))?;
             let message=request.into_gateway_message_with_body(Vec::new());
-            match account.client.send_plaintext_direct_message_without_franking(&mut engine,message,&body,crate::client::routed::Route::control()).await {
-                Ok(_)=>submitted+=1,
+            match super::surface_transport::submit_pair_control(&account.client,&mut engine,message,&body,None).await {
+                Ok(())=>submitted+=1,
                 Err(error)=>{failure.get_or_insert(error);}
             }
         }

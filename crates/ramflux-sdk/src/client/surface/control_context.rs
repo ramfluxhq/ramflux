@@ -12,6 +12,69 @@ impl RamfluxClient {
             root.signing_key.verifying_key().to_bytes(),
         ))
     }
+    pub(super) fn own_surface_context_announced(
+        &self,
+        conversation: &str,
+        epoch: Option<u64>,
+    ) -> Result<bool, SdkError> {
+        Ok(self
+            .account_db()?
+            .load_actor_state::<Value>(&Self::own_surface_context_key(conversation, epoch)?)?
+            .and_then(|v| v["expires_at"].as_i64())
+            .is_some_and(|at| at > crate::prelude::now_unix_timestamp()))
+    }
+    fn own_surface_context_key(conversation: &str, epoch: Option<u64>) -> Result<String, SdkError> {
+        super::scoped_key(
+            "own_context_announced",
+            &[conversation, &epoch.map_or_else(|| "direct".into(), |e| e.to_string())],
+        )
+    }
+    pub(super) fn mark_own_surface_context_announced(
+        &self,
+        conversation: &str,
+        epoch: Option<u64>,
+    ) -> Result<(), SdkError> {
+        let now = crate::prelude::now_unix_timestamp();
+        let db = self.account_db()?;
+        db.persist_actor_state(
+            &Self::own_surface_context_key(conversation, epoch)?,
+            &json!({"expires_at":now.saturating_add(600)}),
+        )?;
+        db.retain_expiring_actor_states("surface/own_context_announced/", now, 1024)?;
+        Ok(())
+    }
+    pub(super) fn require_existing_own_surface_context(
+        &self,
+        conversation: &str,
+        group: Option<&str>,
+        epoch: Option<u64>,
+        source: &str,
+    ) -> Result<(), SdkError> {
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let thread =
+            self.account_db()?.client_record("conversation", conversation)?.ok_or_else(|| {
+                SdkError::InboundPending("own surface context unavailable; resync required".into())
+            })?;
+        if thread["group_id"].as_str() != group {
+            return Err(invalid("own surface group context mismatch"));
+        }
+        if let Some(group) = group {
+            self.authorize_surface_peer_context(
+                conversation,
+                Some(group),
+                &local.principal_id,
+                source,
+                epoch,
+            )?;
+        } else if thread["kind"] != "direct"
+            || !thread["participants"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == &local.principal_id))
+        {
+            return Err(invalid("own surface direct context mismatch"));
+        }
+        Ok(())
+    }
     pub(super) fn authorize_owned_surface_source(&self, source: &Value) -> Result<(), SdkError> {
         let commitment = self.surface_local_root_commitment()?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;

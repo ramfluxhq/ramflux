@@ -10,6 +10,7 @@ mod operations;
 mod outbox;
 mod ratchet_metadata;
 mod recovery;
+mod retention;
 mod schema;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

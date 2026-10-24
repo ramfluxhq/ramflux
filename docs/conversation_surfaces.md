@@ -137,11 +137,14 @@ the last valid snapshot remains visible. The author calls `surface.resync` with
 A recipient can call `surface.request_resync` with `surface_ref`, or
 `rf surface request-resync --account ... --surface-ref ...`. The surface must be
 out of sync. Requests use authenticated pair controls to the author's devices;
-only the original author device answers through the existing full-state send path.
+only the original author device answers with a full-state control over the pair route
+to the requesting device. Group recovery never broadcasts or journals unrelated rows.
 This deterministic coordinator prevents amplification across author devices and
 must be online to answer. Requesters are limited to one request per surface per
-60 seconds; the author admits at most one response per surface/requester root and
-principal per 60 seconds, across requester devices and envelope IDs. The admission
+60 seconds; the author maintains one shared window per surface, allowing one response per
+requester device and at most 64 devices per 60 seconds. Each requester root/principal
+can request at most 32 distinct surfaces in that window. Guard tables retain at most
+2,048 live rows each; pending replies retain at most 256 rows and expire in 60 seconds. The admission
 window commits before the synchronous send; after a failed reply the requester can
 try again next window. No surface delivery outbox or group scheduler is introduced.
 
@@ -196,3 +199,29 @@ The DM lifetime remains 600 seconds. JSON byte-array ciphertext expansion is a
 shared transport framing limitation; changing that versioned envelope is separate
 from the surface delivery change. History trimming measures each item once and
 accounts incrementally for framing and omission metadata.
+
+
+### Own-device copies and client metadata
+
+Live own copies use `ramflux.sdk.own_device_message.v2`. The node sees only an
+opaque logical ID, nonce, ciphertext, signature and recipient cryptographic slots.
+Conversation, group, principal/root, original timestamps and logical message context
+are inside authenticated encryption; slots contain no conversation ID. Routing
+identity and fresh outer envelope timestamps remain available to the node.
+FIFO retry sequencing prevents an older backed-off copy being overtaken. Disposable
+copy receipts retain at most 4,096 rows (logical expiry plus 300 seconds), and copy
+statuses at most 2,048 rows (900 seconds). The first live copy per conversation/epoch
+carries bootstrap context, refreshed after 600 seconds; subsequent copies carry only
+the event and necessary signer proof. Explicit history export still carries full
+context. Legacy v1 queued copies fail their own-copy status and require a fresh copy
+or history sync; peer delivery status is independent.
+
+`surface.get` and content-free `surface.changed` metadata include `streams`, a map
+of text-capable component IDs to `open` or `final`. Open means appends are permitted;
+final means the protocol finalized that block or closed the surface. This map does
+not change the content hash. Created/posted and updated times are author-signed
+seconds since the Unix epoch, preserved through resync; old undated carriers expose
+null rather than a fabricated author time. These are display metadata, not trusted
+clock or transport-order evidence. Removal and close metadata carry `surface_ref`.
+Refusals expose stable snake-case `reason_code` values, including `stale_version`,
+`stale_hash`, `not_author`, `not_out_of_sync`, `rate_limited` and `too_large`.

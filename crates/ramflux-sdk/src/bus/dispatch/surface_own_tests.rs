@@ -65,7 +65,11 @@ fn entry(envelope: ramflux_protocol::Envelope, sequence: u64) -> GatewayInboxEnt
     envelope.target_delivery_id = "sibling".into();
     GatewayInboxEntry { inbox_seq: sequence, target_delivery_id: "sibling".into(), envelope }
 }
-fn append(client: &RamfluxClient, previous: &Carrier, version: u64) -> Result<Carrier, SdkError> {
+pub(super) fn append(
+    client: &RamfluxClient,
+    previous: &Carrier,
+    version: u64,
+) -> Result<Carrier, SdkError> {
     let wire = ramflux_protocol::encode_a2ui_conversation_event(
         "thread",
         version,
@@ -340,4 +344,172 @@ fn peer_receiver(
     peer.client.persist_identity_directory(&super::fixture::manifest(source)?)?;
     peer.client.account_db()?.establish_friend_link("source-link", "peer", "sender")?;
     Ok(peer_config)
+}
+
+#[tokio::test]
+async fn own_copy_node_payload_hides_private_group_root_principal_and_dates() -> TestResult {
+    let root = runtime_tests::root("own-private-metadata");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let (sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let group = "private-group-marker";
+    source.client.create_group(group, "device-sender")?;
+    source.client.account_db()?.persist_client_record(
+        "conversation",
+        "thread",
+        &json!({"kind":"group","group_id":group}),
+    )?;
+    let create = super::dm_tests::create_carrier(&source.client)?;
+    let own = Arc::default();
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    gateway.own = Arc::clone(&own);
+    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    assert!(source.client.queue_surface_own_copy(&create, Some(1))?);
+    assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
+    let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
+    let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
+    let raw = bytes.strip_prefix(crate::client::own_device_copy::PREFIX).ok_or("packet")?;
+    let packet: Value = serde_json::from_slice(raw)?;
+    for field in
+        ["principal", "root", "source", "conversation", "group", "created_at", "expires_at"]
+    {
+        assert!(packet.get(field).is_none(), "public field {field}");
+    }
+    let text = std::str::from_utf8(raw)?;
+    for value in ["thread", group, "sender", &source.client.surface_local_root_commitment()?] {
+        assert!(!text.contains(&serde_json::to_string(value)?), "private value escaped AEAD");
+    }
+    for slot in packet["slots"].as_array().ok_or("slots")? {
+        assert!(slot.get("conversation_id").is_none());
+        assert!(slot.get("object_id").is_none());
+    }
+    assert!(sibling.client.receive_own_device_message(&receiver, &entry(envelope, 1)).await?);
+    assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 1);
+    assert_eq!(sibling.client.account_db()?.actor_state_usage("dm-pair/object-slot/")?.0, 0);
+    assert_eq!(sibling.client.account_db()?.actor_state_usage("routed/slot-watermark/")?.0, 0);
+    directory.abort();
+    drop(sibling);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_backed_off_first_copy_blocks_newer_hash_ordered_copies_until_retry() -> TestResult {
+    use crate::client::own_device_copy::OwnMessageInput;
+    let root = runtime_tests::root("own-copy-order");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let (sibling, config, _receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let mut ids = (0..20).map(|i| format!("copy-{i}")).collect::<Vec<_>>();
+    ids.sort_by_key(|id| {
+        crate::bus::own_device_copy::copy_id(&source.client, id).unwrap_or_default()
+    });
+    let first = ids.last().ok_or("first")?;
+    let second = ids.first().ok_or("second")?;
+    let now = now_unix_timestamp();
+    let own = Arc::default();
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    gateway.own = Arc::clone(&own);
+    gateway.fail_own_ack = true;
+    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
+    for id in [first, second] {
+        crate::bus::own_device_copy::stage(
+            &source.client,
+            OwnMessageInput {
+                id,
+                created_at: now,
+                conversation: "thread",
+                group: None,
+                body: b"typed-control",
+            },
+            None,
+        )?;
+        let _ = crate::bus::own_device_copy::flush(&mut source).await?;
+    }
+    assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 1);
+    for key in source.client.account_db()?.actor_state_key_page("own-device/send/", 256)? {
+        let mut work: Value = source.client.account_db()?.load_actor_state(&key)?.ok_or("work")?;
+        work["next_at"] = json!(0);
+        source.client.account_db()?.persist_actor_state(&key, &work)?;
+    }
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    gateway.own = Arc::clone(&own);
+    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    for _ in 0..3 {
+        let _ = crate::bus::own_device_copy::flush(&mut source).await?;
+    }
+    let captures = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(captures.len(), 3);
+    assert_eq!(captures[0].encrypted_payload, captures[1].encrypted_payload);
+    let packet =
+        |envelope: &ramflux_protocol::Envelope| -> Result<Value, Box<dyn std::error::Error>> {
+            let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
+            Ok(serde_json::from_slice(
+                bytes.strip_prefix(crate::client::own_device_copy::PREFIX).ok_or("packet")?,
+            )?)
+        };
+    assert_eq!(
+        packet(&captures[1])?["id"],
+        crate::bus::own_device_copy::copy_id(&source.client, first)?
+    );
+    assert_eq!(
+        packet(&captures[2])?["id"],
+        crate::bus::own_device_copy::copy_id(&source.client, second)?
+    );
+    drop(captures);
+    directory.abort();
+    drop(sibling);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_oversized_prepared_copy_is_terminal_after_one_ratchet_step() -> TestResult {
+    use crate::client::own_device_copy::OwnMessageInput;
+    let root = runtime_tests::root("own-copy-too-large");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let (sibling, config, _receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let own = Arc::default();
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    gateway.own = Arc::clone(&own);
+    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    let body = vec![b'x'; crate::client::own_device_copy::MAX_PACKET_BYTES - 100];
+    crate::bus::own_device_copy::stage(
+        &source.client,
+        OwnMessageInput {
+            id: "large",
+            created_at: now_unix_timestamp(),
+            conversation: "thread",
+            group: None,
+            body: &body,
+        },
+        None,
+    )?;
+    let _ = crate::bus::own_device_copy::flush(&mut source).await?;
+    assert_eq!(crate::bus::own_device_copy::status(&source.client, "large")?, "failed");
+    assert_eq!(source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
+    let before = source.client.account_db()?.list_actor_states::<Value>("dm-pair/session/")?;
+    assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 0);
+    assert_eq!(before, source.client.account_db()?.list_actor_states::<Value>("dm-pair/session/")?);
+    assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+    directory.abort();
+    drop(sibling);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }

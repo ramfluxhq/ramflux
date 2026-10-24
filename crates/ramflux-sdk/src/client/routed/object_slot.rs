@@ -120,7 +120,24 @@ impl RamfluxClient {
         slot: &SdkObjectKeySlot,
         key: &[u8; 32],
     ) -> Result<(), SdkError> {
-        if self.account_db()?.load_actor_state::<bool>(&slot_receipt(slot)?)?.unwrap_or(false) {
+        self.commit_pair_key_slot(slot, key, true)
+    }
+    pub(crate) fn commit_inline_pair_key_slot(
+        &self,
+        slot: &SdkObjectKeySlot,
+        key: &[u8; 32],
+    ) -> Result<(), SdkError> {
+        self.commit_pair_key_slot(slot, key, false)
+    }
+    fn commit_pair_key_slot(
+        &self,
+        slot: &SdkObjectKeySlot,
+        key: &[u8; 32],
+        persistent_receipt: bool,
+    ) -> Result<(), SdkError> {
+        if persistent_receipt
+            && self.account_db()?.load_actor_state::<bool>(&slot_receipt(slot)?)?.unwrap_or(false)
+        {
             return Ok(());
         }
         // Rebase the key-slot receive onto the current ratchet, never a cached pre-download snapshot.
@@ -150,7 +167,7 @@ impl RamfluxClient {
                 &bundle,
                 deferred.session.as_ref().ok_or_else(|| invalid("slot session missing"))?,
             )?;
-            self.persist_pair_slot_receipt(slot)
+            if persistent_receipt { self.persist_pair_slot_receipt(slot) } else { Ok(()) }
         })
     }
 }

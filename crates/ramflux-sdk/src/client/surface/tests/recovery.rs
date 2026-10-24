@@ -42,7 +42,7 @@ fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advanci
     Ok(())
 }
 #[test]
-fn only_original_author_device_answers_once_per_requester_window_and_recovery_converges()
+fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges()
 -> TestResult {
     let terminals = devices::Terminals::new()?;
     let [author, sibling, human, human_two] = terminals.clients.as_slice() else {
@@ -80,7 +80,7 @@ fn only_original_author_device_answers_once_per_requester_window_and_recovery_co
         let answer = receiver.take_surface_resync_answer(&entry)?;
         if i == 0 {
             let answer = answer.ok_or("original author response")?;
-            assert!(project(human, &answer, "resync")?.accepted);
+            assert!(project(human, &answer.carrier, "resync")?.accepted);
             let view = human.surface_get("s", 0, None)?;
             assert_eq!(view["out_of_sync"], false);
             assert_eq!(view["surface_hash"], author.surface_get("s", 0, None)?["surface_hash"]);
@@ -89,16 +89,23 @@ fn only_original_author_device_answers_once_per_requester_window_and_recovery_co
         }
         assert!(receiver.take_surface_resync_answer(&entry)?.is_none());
     }
-    // Different requester devices and envelope ids share the same principal/root rate window.
+    // Only the requesting device receives a reply; siblings share the surface window but each
+    // can recover once. A second envelope from that same device cannot elicit another reply.
     let again = devices::entry(human_two, "request-again")?;
     assert!(author.receive_surface_resync_request(&again, "thread", &bytes)?);
-    assert!(author.take_surface_resync_answer(&again)?.is_none());
+    let second = author.take_surface_resync_answer(&again)?.ok_or("second device response")?;
+    assert_eq!(second.destination.device, "human-two");
+    assert!(project(human_two, &second.carrier, "second-resync")?.accepted);
+    let duplicate = devices::entry(human_two, "request-again-duplicate")?;
+    author.receive_surface_resync_request(&duplicate, "thread", &bytes)?;
+    assert!(author.take_surface_resync_answer(&duplicate)?.is_none());
+    assert_eq!(author.account_db()?.actor_state_usage("surface/resync_answered/")?.0, 1);
     sibling.mark_surface_out_of_sync(&create, 2)?;
     let own = sibling.prepare_surface_resync_request(&reference)?.ok_or("sibling request")?;
     let entry = devices::entry(sibling, "sibling-needs-resync")?;
     author.receive_surface_resync_request(&entry, "thread", &serde_json::to_vec(&own)?)?;
     let own_reply = author.take_surface_resync_answer(&entry)?.ok_or("own resync response")?;
-    assert!(project(sibling, &own_reply, "own-resync")?.accepted);
+    assert!(project(sibling, &own_reply.carrier, "own-resync")?.accepted);
     assert_eq!(sibling.surface_get("s", 0, None)?["out_of_sync"], false);
     let mut foreign = devices::entry(human, "wrong-principal")?;
     foreign.envelope.source_principal_id = "unrelated".into();

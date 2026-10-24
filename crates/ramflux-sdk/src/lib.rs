@@ -88,6 +88,7 @@ pub use dm::{
     SdkSelectedFrankingEvidence,
 };
 pub use error::SdkError;
+mod surface_refusal;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,
     SdkFederatedSubmitResponse,
@@ -111,3 +112,4 @@ pub use records::{
     LocalBotRecord, LocalBotTrustPinRecord, LocalCallRecord, LocalMcpApprovalRecord,
     LocalMcpAuditRecord, LocalMcpGrantRecord, LocalMcpStandingApprovalRecord,
 };
+pub use surface_refusal::SurfaceRefusalCode;

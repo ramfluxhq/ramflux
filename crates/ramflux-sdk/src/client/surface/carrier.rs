@@ -19,6 +19,10 @@ pub(crate) enum PayloadKind {
 pub(crate) struct Carrier {
     pub schema: String,
     pub content_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
     pub payload_kind: PayloadKind,
     pub conversation_id: String,
     pub surface_id: String,
@@ -109,6 +113,15 @@ impl Carrier {
         Ok(bytes)
     }
     fn validate_identifiers(&self) -> Result<(), SdkError> {
+        if [self.posted_at, self.updated_at]
+            .into_iter()
+            .flatten()
+            .any(|at| !(0..=253_402_300_799).contains(&at))
+            || self.posted_at.zip(self.updated_at).is_some_and(|(posted, updated)| posted > updated)
+        {
+            return Err(invalid("surface display timestamp is outside the supported range"));
+        }
+
         for id in [
             &self.conversation_id,
             &self.surface_id,
@@ -163,6 +176,22 @@ impl RamfluxClient {
         {
             return Err(invalid("surface carrier source mismatch"));
         }
+        let prior = self.account_db()?.client_record("surface", &carrier.surface_reference()?)?;
+        if carrier.posted_at.is_none() {
+            carrier.posted_at = prior.as_ref().and_then(|v| v["created_at"].as_i64());
+            if carrier.posted_at.is_none()
+                && matches!(carrier.payload()?, Payload::Event(event) if event.version()==1 && matches!(event.command(),ramflux_protocol::A2uiConversationCommand::CreateSurface(_)))
+            {
+                carrier.posted_at = Some(crate::prelude::now_unix_timestamp());
+            }
+        }
+        carrier.updated_at = Some(
+            carrier
+                .updated_at
+                .unwrap_or_else(crate::prelude::now_unix_timestamp)
+                .max(carrier.posted_at.unwrap_or(0))
+                .max(prior.as_ref().and_then(|v| v["updated_at"].as_i64()).unwrap_or(0)),
+        );
         carrier.signature = ramflux_crypto::sign_with_device_branch(device, &carrier.signing()?)?;
         // Apply the same transport budget before sending as on receive.
         if carrier.bytes()?.len()

@@ -85,6 +85,8 @@ fn carrier(
     let mut signed = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
+        posted_at: None,
+        updated_at: None,
         payload_kind: kind,
         conversation_id: "thread".into(),
         surface_id: "s".into(),
@@ -525,3 +527,98 @@ mod export;
 
 #[path = "tests/recovery.rs"]
 mod recovery;
+
+#[test]
+fn stream_finality_and_author_dates_are_metadata_even_when_content_hash_does_not_change()
+-> TestResult {
+    let f = Fixture::new()?;
+    let mut first = carrier(
+        &f.author,
+        PayloadKind::Event,
+        "dated-create",
+        &event(1, C::CreateSurface(snapshot()))?,
+    )?;
+    first.posted_at = Some(1000);
+    first.updated_at = Some(1000);
+    first = f.author.sign_surface_carrier(first)?;
+    assert!(project(&f.author, &first, "create")?.accepted);
+    assert!(project(&f.human, &first, "create")?.accepted);
+    let original = f.human.surface_get("s", 0, None)?;
+    assert_eq!(original["created_at"], 1000);
+    assert_eq!(original["updated_at"], 1000);
+    assert_eq!(original["streams"]["stream"], "open");
+    let mut final_ = carrier(
+        &f.author,
+        PayloadKind::Event,
+        "dated-final",
+        &event(
+            2,
+            C::StreamAppend(StreamAppendCommand {
+                surface_id: "s".into(),
+                component_id: "stream".into(),
+                text_delta: String::new(),
+                final_: true,
+            }),
+        )?,
+    )?;
+    final_.updated_at = Some(2000);
+    final_ = f.author.sign_surface_carrier(final_)?;
+    assert!(project(&f.author, &final_, "final")?.accepted);
+    assert!(project(&f.human, &final_, "final")?.accepted);
+    let view = f.human.surface_get("s", 0, None)?;
+    assert_eq!(view["surface_hash"], original["surface_hash"]);
+    assert_eq!(view["streams"]["stream"], "final");
+    assert_eq!(view["streams"]["result"], "open");
+    assert_eq!(view["created_at"], 1000);
+    assert_eq!(view["updated_at"], 2000);
+    let metadata = super::surface_metadata(&view);
+    assert_eq!(metadata["streams"]["stream"], "final");
+    assert!(metadata.get("snapshot").is_none());
+    assert!(metadata.get("fallback_text").is_none());
+    let resync = f.author.prepare_surface_resync(&first.surface_reference()?, "dated-resync")?;
+    assert_eq!(resync.posted_at, Some(1000));
+    assert_eq!(resync.updated_at, Some(2000));
+    let close = carrier(
+        &f.author,
+        PayloadKind::Event,
+        "dated-close",
+        &event(3, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+    )?;
+    assert!(project(&f.human, &close, "close")?.accepted);
+    let closed = super::surface_metadata(&f.human.surface_get("s", 0, None)?);
+    assert_eq!(closed["surface_ref"], first.surface_reference()?);
+    assert_eq!(closed["closed"], true);
+    assert_eq!(closed["streams"]["result"], "final");
+    Ok(())
+}
+
+#[test]
+fn surface_refusals_have_stable_codes_for_policy_versions_hashes_and_size() -> TestResult {
+    use crate::SurfaceRefusalCode as Code;
+    let f = Fixture::new()?;
+    create(&f)?;
+    let reference =
+        f.author.surface_get("s", 0, None)?["surface_ref"].as_str().ok_or("ref")?.to_owned();
+    let author = f.human.prepare_surface_resync(&reference, "not-author").err().ok_or("refusal")?;
+    assert_eq!(crate::bus::io::local_bus_error_body(&author).code, "not_author");
+    let not_out = f.human.prepare_surface_resync_request(&reference).err().ok_or("not-out")?;
+    assert_eq!(crate::bus::io::local_bus_error_body(&not_out).code, "not_out_of_sync");
+    for (reject, code) in [
+        (ramflux_protocol::SurfaceReject::Version { expected: 2, actual: 1 }, Code::StaleVersion),
+        (ramflux_protocol::SurfaceReject::Conflict, Code::StaleHash),
+        (ramflux_protocol::SurfaceReject::ResultHashMismatch, Code::StaleHash),
+        (
+            ramflux_protocol::SurfaceReject::LimitExceeded {
+                limit: ramflux_protocol::SurfaceLimit::DataBytes,
+            },
+            Code::TooLarge,
+        ),
+    ] {
+        let outcome = Outcome::protocol_rejected(&reject);
+        assert_eq!(outcome.reason_code, Some(code));
+        assert_eq!(serde_json::to_value(outcome)?["reason_code"], code.as_str());
+    }
+    let size = SdkError::SurfaceDeliveryTooLarge { bytes: 10, limit: 9 };
+    assert_eq!(crate::bus::io::local_bus_error_body(&size).code, "too_large");
+    Ok(())
+}

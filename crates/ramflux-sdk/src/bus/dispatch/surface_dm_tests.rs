@@ -159,6 +159,8 @@ pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
+        posted_at: None,
+        updated_at: None,
         payload_kind: PayloadKind::Event,
         conversation_id: "thread".into(),
         surface_id: "surface".into(),

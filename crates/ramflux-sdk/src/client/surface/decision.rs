@@ -157,6 +157,8 @@ impl RamfluxClient {
         let receipt = self.sign_surface_carrier(Carrier {
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
+            posted_at: None,
+            updated_at: None,
             payload_kind: PayloadKind::ActionReceipt,
             conversation_id: original.conversation_id.clone(),
             surface_id: original.surface_id.clone(),

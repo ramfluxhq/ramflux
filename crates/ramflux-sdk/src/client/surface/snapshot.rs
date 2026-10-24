@@ -127,11 +127,13 @@ impl RamfluxClient {
         reference: &str,
         message_id: &str,
     ) -> Result<Carrier, SdkError> {
-        let (record, state) =
-            self.surface_state_ref(reference)?.ok_or_else(|| invalid("resync surface absent"))?;
+        let (record, state) = self
+            .surface_state_ref(reference)?
+            .ok_or_else(|| crate::SurfaceRefusalCode::NotFound.error("resync surface absent"))?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if local.principal_id != record.author_principal_id {
-            return Err(invalid("only the author may resynchronize a surface"));
+            return Err(crate::SurfaceRefusalCode::NotAuthor
+                .error("only the author may resynchronize a surface"));
         }
         let wire = ramflux_protocol::encode_a2ui_conversation_event(
             &record.conversation_id,
@@ -143,6 +145,8 @@ impl RamfluxClient {
         let candidate = Carrier {
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
+            posted_at: record.created_at,
+            updated_at: record.updated_at,
             payload_kind: super::PayloadKind::Event,
             conversation_id: record.conversation_id,
             surface_id: record.surface_id,

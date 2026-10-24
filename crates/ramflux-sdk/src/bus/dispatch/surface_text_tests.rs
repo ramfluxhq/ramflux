@@ -7,8 +7,8 @@ use crate::bus::runtime_tests;
 use crate::client::surface::SurfaceSender;
 use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
-struct Delivery {
-    envelope: ramflux_protocol::Envelope,
+pub(super) struct Delivery {
+    pub(super) envelope: ramflux_protocol::Envelope,
 }
 
 #[tokio::test]
@@ -49,6 +49,8 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
+        posted_at: None,
+        updated_at: None,
         payload_kind: PayloadKind::Event,
         conversation_id: request.conversation_id,
         surface_id: "surface".into(),
@@ -93,7 +95,7 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
     Ok(())
 }
 
-fn members(
+pub(super) fn members(
     root: &std::path::Path,
     source: &LocalBusAccountState,
     count: u8,
@@ -158,7 +160,7 @@ fn members(
     }
     Ok(peers)
 }
-fn assert_receivers(
+pub(super) fn assert_receivers(
     peers: &[LocalBusAccountState],
     deliveries: &[Delivery],
     epoch: u64,
@@ -251,7 +253,7 @@ fn assert_receivers(
     Ok(())
 }
 
-async fn directory_config(
+pub(super) async fn directory_config(
     root: &std::path::Path,
     source: &mut LocalBusAccountState,
     peers: &[LocalBusAccountState],
@@ -460,6 +462,8 @@ fn maximal_carrier_in(
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
+        posted_at: None,
+        updated_at: None,
         payload_kind: PayloadKind::Event,
         conversation_id: conversation.into(),
         surface_id: surface.into(),
@@ -557,6 +561,8 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
         ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&wire)?);
     resync.snapshot.as_mut().ok_or("compact proof")?.metadata.as_mut().ok_or("metadata")?["version"] =
         wire["version"].clone();
+    resync.posted_at = Some(253_402_300_799);
+    resync.updated_at = Some(253_402_300_799);
     resync = source.client.sign_surface_carrier(resync)?;
     source.client.verify_surface_carrier(&resync, &principal, &device)?;
     let bytes = resync.bytes()?;

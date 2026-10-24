@@ -49,9 +49,31 @@ impl RamfluxClient {
         kind: ControlKind,
         group_epoch: Option<u64>,
     ) -> Result<SurfaceControl, SdkError> {
+        self.surface_control_packet_inner(carrier, kind, group_epoch, true)
+    }
+    pub(super) fn live_surface_control_packet(
+        &self,
+        carrier: &Carrier,
+        group_epoch: Option<u64>,
+    ) -> Result<SurfaceControl, SdkError> {
+        let include_context =
+            !self.own_surface_context_announced(&carrier.conversation_id, group_epoch)?;
+        self.surface_control_packet_inner(carrier, ControlKind::Own, group_epoch, include_context)
+    }
+    fn surface_control_packet_inner(
+        &self,
+        carrier: &Carrier,
+        kind: ControlKind,
+        group_epoch: Option<u64>,
+        include_context: bool,
+    ) -> Result<SurfaceControl, SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let mut manifests = Vec::new();
-        let context = if kind == ControlKind::Own {
+        let manifests = if kind == ControlKind::Own {
+            self.own_surface_signer_manifests(carrier)?
+        } else {
+            Vec::new()
+        };
+        let context = if kind == ControlKind::Own && include_context {
             let thread = self
                 .account_db()?
                 .client_record("conversation", &carrier.conversation_id)?
@@ -68,24 +90,6 @@ impl RamfluxClient {
                 thread["participants"].as_array().map_or_else(Vec::new, |ids| {
                     ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()
                 });
-            let mut principals = vec![carrier.sender_principal_id.clone()];
-            if let Payload::ActionReceipt { original, .. } = carrier.payload()? {
-                principals.push(original.sender_principal_id);
-            }
-            principals.sort();
-            principals.dedup();
-            for principal in principals {
-                if principal == local.principal_id {
-                    continue;
-                }
-                let manifest = self
-                    .account_db()?
-                    .load_actor_state::<SdkDeviceManifestResponse>(&format!(
-                        "identity/manifest/{principal}"
-                    ))?
-                    .ok_or_else(|| invalid("forwarded surface signer manifest missing"))?;
-                manifests.push(manifest);
-            }
             let friend = if group.is_none() {
                 let peer = participants.iter().find(|id| *id != &local.principal_id);
                 if let Some(peer) = peer {
@@ -123,6 +127,32 @@ impl RamfluxClient {
             context,
             manifests,
         })
+    }
+    fn own_surface_signer_manifests(
+        &self,
+        carrier: &Carrier,
+    ) -> Result<Vec<SdkDeviceManifestResponse>, SdkError> {
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let mut manifests = Vec::new();
+        let mut principals = vec![carrier.sender_principal_id.clone()];
+        if let Payload::ActionReceipt { original, .. } = carrier.payload()? {
+            principals.push(original.sender_principal_id);
+        }
+        principals.sort();
+        principals.dedup();
+        for principal in principals {
+            if principal == local.principal_id {
+                continue;
+            }
+            let manifest = self
+                .account_db()?
+                .load_actor_state::<SdkDeviceManifestResponse>(&format!(
+                    "identity/manifest/{principal}"
+                ))?
+                .ok_or_else(|| invalid("forwarded surface signer manifest missing"))?;
+            manifests.push(manifest);
+        }
+        Ok(manifests)
     }
     pub(crate) fn receive_surface_control(
         &self,
@@ -175,28 +205,35 @@ impl RamfluxClient {
         let signer = self.verified_surface_signer(&carrier)?;
         self.verify_surface_carrier(&carrier, &signer, &carrier.sender_device_id)?;
         if control.kind == ControlKind::Own {
-            let context =
-                control.context.as_ref().ok_or_else(|| invalid("own surface context missing"))?;
-            if context.conversation_id != conversation
-                || context.group.as_ref().map(|g| g.group_id.as_str()) != group
-            {
-                return Err(invalid("own surface routing context mismatch"));
-            }
-            if let Some(group) = &context.group {
-                let epoch = control
-                    .group_epoch
-                    .ok_or_else(|| invalid("own surface group epoch missing"))?;
-                if epoch < group.local_joined_epoch
-                    || epoch > group.group_epoch
-                    || self
-                        .account_db()?
-                        .group_member_joined_epoch(&group.group_id, &local_device(self)?)?
-                        .is_some_and(|floor| epoch < floor)
+            if let Some(context) = &control.context {
+                if context.conversation_id != conversation
+                    || context.group.as_ref().map(|g| g.group_id.as_str()) != group
                 {
-                    return Err(invalid("own surface snapshot is below the joined epoch"));
+                    return Err(invalid("own surface routing context mismatch"));
                 }
+                if let Some(group) = &context.group {
+                    let epoch = control
+                        .group_epoch
+                        .ok_or_else(|| invalid("own surface group epoch missing"))?;
+                    if epoch < group.local_joined_epoch
+                        || epoch > group.group_epoch
+                        || self
+                            .account_db()?
+                            .group_member_joined_epoch(&group.group_id, &local_device(self)?)?
+                            .is_some_and(|floor| epoch < floor)
+                    {
+                        return Err(invalid("own surface snapshot is below the joined epoch"));
+                    }
+                }
+                self.import_surface_context(context, &entry.envelope.source_device_id)?;
+            } else {
+                self.require_existing_own_surface_context(
+                    conversation,
+                    group,
+                    control.group_epoch,
+                    &entry.envelope.source_device_id,
+                )?;
             }
-            self.import_surface_context(context, &entry.envelope.source_device_id)?;
             self.bootstrap_owned_surface(&carrier)?;
         } else {
             self.authorize_surface_peer_context(

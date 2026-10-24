@@ -141,6 +141,48 @@ async fn copy_own(
     )
 }
 
+pub(crate) async fn send_resync_reply(
+    account: &mut LocalBusAccountState,
+    reply: &crate::client::surface::ResyncReply,
+) -> Result<(), SdkError> {
+    account.client.validate_surface_resync_reply(reply)?;
+    let target = &reply.destination;
+    if target.expires_at <= now_unix_timestamp() {
+        return Err(invalid("surface resync reply expired"));
+    }
+    let control = account.client.surface_control_packet(
+        &reply.carrier,
+        crate::client::surface::ControlKind::Peer,
+        target.epoch,
+    )?;
+    let body = zeroize::Zeroizing::new(control.bytes()?);
+    let mut engine = account.take_live_engine().await?;
+    let result=async {
+        let request:LocalBusMessageSubmitRequest=serde_json::from_value(json!({"conversation_id":reply.carrier.conversation_id,"message_id":reply.carrier.message_id,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":engine.config.principal_id,"sender_id":engine.config.device_id,"recipient_device_id":target.device,"recipient_principal_commitment":target.root,"target_delivery_id":target.target,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":600}))?;
+        let message=request.into_gateway_message_with_body(Vec::new());
+        submit_pair_control(&account.client,&mut engine,message,&body,target.group.as_deref()).await?;
+        Ok::<_,SdkError>(())
+    }.await;
+    account.put_engine(engine);
+    result
+}
+pub(super) async fn submit_pair_control(
+    client: &RamfluxClient,
+    engine: &mut GatewaySessionEngine,
+    mut message: GatewayDirectMessage,
+    body: &[u8],
+    group: Option<&str>,
+) -> Result<(), SdkError> {
+    let mut route = crate::client::routed::Route::control();
+    route.group_id = group.map(str::to_owned);
+    let packet = client.seal_routed_as(engine, &message, body, route).await?;
+    message.encrypted_body = serde_json::to_vec(&packet)?;
+    engine
+        .submit_envelope(gateway_direct_message_envelope(&engine.config, &message, None)?)
+        .await?;
+    Ok(())
+}
+
 fn peer_commitments(
     account: &LocalBusAccountState,
     carrier: &Carrier,
@@ -194,3 +236,7 @@ mod dm_tests;
 #[cfg(test)]
 #[path = "surface_own_tests.rs"]
 mod own_tests;
+
+#[cfg(test)]
+#[path = "surface_resync_tests.rs"]
+mod resync_tests;

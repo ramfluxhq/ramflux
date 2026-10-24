@@ -177,7 +177,9 @@ impl RamfluxClient {
         opened: &Opened,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if opened.routing.kind == Kind::Control {
+        if opened.routing.kind == Kind::Control
+            && !body.starts_with(crate::client::surface::CONTROL_PREFIX)
+        {
             let value: Value = serde_json::from_slice(body)?;
             if value["type"] == "object.revoke_access"
                 && let Some(id) = value.get("object_id").and_then(Value::as_str)

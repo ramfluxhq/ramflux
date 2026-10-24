@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Inline per-message own-device controls: one ciphertext, existing pair-wrapped recipient keys.
+//! Private per-message own-device controls with opaque, pair-wrapped recipient key slots.
 use crate::prelude::*;
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
@@ -10,51 +10,154 @@ use aes_gcm::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeroize::Zeroize;
-const DOMAIN: &str = "ramflux.sdk.own_device_message.v1";
-pub(crate) const PREFIX: &[u8] = b"ramflux.own_device_message.v1\n";
+pub(crate) const DOMAIN: &str = "ramflux.sdk.own_device_message.v2";
+pub(crate) const PREFIX: &[u8] = b"ramflux.own_device_message.v2\n";
 pub(crate) const MAX_PACKET_BYTES: usize = 512 * 1024;
+pub(crate) const TOO_LARGE: &str = "own-device message byte budget exceeded";
+const RECEIPTS: &str = "own-device/message-receipt/";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OwnDeviceMessage {
     pub schema: String,
     pub id: String,
-    pub principal: String,
-    pub root: String,
-    pub source: String,
-    pub conversation: String,
-    pub group: Option<String>,
-    pub created_at: i64,
-    pub expires_at: i64,
     pub nonce: String,
     pub ciphertext: String,
-    pub slots: Vec<SdkObjectKeySlot>,
+    pub slots: Vec<OwnKeySlot>,
     pub signature: String,
 }
-impl OwnDeviceMessage {
-    fn validate_scope(
+/// Only the recipient selector and cryptographic bootstrap are needed outside AEAD.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnKeySlot {
+    pub recipient_device_id: String,
+    x3dh: Option<SdkDmX3dhHeader>,
+    ciphertext: ramflux_crypto::DmCiphertext,
+}
+impl OwnKeySlot {
+    fn object_slot(&self, id: &str) -> SdkObjectKeySlot {
+        SdkObjectKeySlot {
+            schema: "ramflux.sdk.object_key_slot.dm.v2".into(),
+            version: 2,
+            object_id: id.into(),
+            conversation_id: String::new(),
+            recipient_device_id: self.recipient_device_id.clone(),
+            x3dh: self.x3dh.clone(),
+            ciphertext: self.ciphertext.clone(),
+        }
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateContext {
+    message: String,
+    principal: String,
+    root: String,
+    source: String,
+    conversation: String,
+    group: Option<String>,
+    created_at: i64,
+    expires_at: i64,
+}
+impl PrivateContext {
+    fn validate(
         &self,
-        client: &RamfluxClient,
-        entry: &GatewayInboxEntry,
+        id: &str,
+        principal: &str,
+        root: &str,
+        source: &str,
+        now: i64,
     ) -> Result<(), SdkError> {
-        let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if self.schema != DOMAIN
-            || self.root != client.surface_local_root_commitment()?
-            || self.principal != local.principal_id
-            || self.source != entry.envelope.source_device_id
-            || self.principal != entry.envelope.source_principal_id
-            || self.slots.len() > 1024
-            || self.id.is_empty()
-            || self.id.len() > 256
+        if self.principal != principal
+            || self.root != root
+            || self.source != source
             || self.conversation.is_empty()
             || self.conversation.len() > 256
-            || self.group.as_ref().is_some_and(|id| id.is_empty() || id.len() > 256)
-            || self.created_at > now_unix_timestamp().saturating_add(300)
-            || self.expires_at < now_unix_timestamp()
+            || self.group.as_ref().is_some_and(|s| s.is_empty() || s.len() > 256)
+            || self.message.is_empty()
+            || self.message.len() > 256
+            || self.created_at > now.saturating_add(300)
+            || self.expires_at < now
             || self.expires_at <= self.created_at
             || self.expires_at > self.created_at.saturating_add(600)
+            || id != copy_id(&self.root, &self.source, &self.message)?
+        {
+            return Err(invalid("own-device private scope or lifetime mismatch"));
+        }
+        Ok(())
+    }
+}
+impl Drop for PrivateContext {
+    fn drop(&mut self) {
+        self.message.zeroize();
+        self.principal.zeroize();
+        self.root.zeroize();
+        self.source.zeroize();
+        self.conversation.zeroize();
+        self.group.zeroize();
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct Receipt {
+    fingerprint: String,
+    source: String,
+    target: String,
+    valid_until: i64,
+    expires_at: i64,
+}
+impl Receipt {
+    fn validate(
+        &self,
+        source: &str,
+        target: &str,
+        fingerprint: &str,
+        now: i64,
+    ) -> Result<(), SdkError> {
+        if self.valid_until < now || self.source != source || self.target != target {
+            return Err(invalid("own-device replay scope or lifetime mismatch"));
+        }
+        if self.fingerprint != fingerprint {
+            return Err(invalid("own-device message id conflict"));
+        }
+        Ok(())
+    }
+}
+impl OwnDeviceMessage {
+    fn open(
+        &self,
+        key: &[u8; 32],
+    ) -> Result<(PrivateContext, zeroize::Zeroizing<Vec<u8>>), SdkError> {
+        let cipher =
+            Aes256Gcm::new_from_slice(key.as_ref()).map_err(|_| invalid("own-device key"))?;
+        let nonce = ramflux_protocol::decode_base64url(&self.nonce)
+            .map_err(|_| invalid("own-device nonce"))?;
+        if nonce.len() != 12 {
+            return Err(invalid("own-device nonce length"));
+        }
+        let ciphertext = ramflux_protocol::decode_base64url(&self.ciphertext)
+            .map_err(|_| invalid("own-device ciphertext encoding"))?;
+        let plaintext = zeroize::Zeroizing::new(
+            cipher
+                .decrypt(Nonce::from_slice(&nonce), Payload { msg: &ciphertext, aad: &self.aad()? })
+                .map_err(|_| invalid("own-device decryption failed"))?,
+        );
+        let split = plaintext
+            .iter()
+            .position(|b| *b == b'\n')
+            .filter(|n| *n <= 4096)
+            .ok_or_else(|| invalid("own-device private context missing"))?;
+        let context: PrivateContext = ramflux_protocol::parse_i_json(&plaintext[..split])?;
+        let body = zeroize::Zeroizing::new(plaintext[split + 1..].to_vec());
+        Ok((context, body))
+    }
+    fn validate(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+        if self.schema != DOMAIN
+            || self.id.is_empty()
+            || self.id.len() > 256
+            || self.slots.is_empty()
+            || self.slots.len() > 1024
             || entry.envelope.delivery_class != ramflux_protocol::DeliveryClass::SelfDeviceControl
         {
-            return Err(invalid("own-device message scope or lifetime mismatch"));
+            return Err(invalid("own-device message scope mismatch"));
         }
         Ok(())
     }
@@ -64,29 +167,19 @@ impl OwnDeviceMessage {
         Ok(json!({"domain":DOMAIN,"body":body}))
     }
     fn aad(&self) -> Result<Vec<u8>, SdkError> {
-        Ok(ramflux_protocol::canonical_json_bytes(&(
-            DOMAIN,
-            &self.id,
-            &self.principal,
-            &self.root,
-            &self.source,
-            &self.conversation,
-            &self.group,
-            self.created_at,
-            self.expires_at,
-        ))?)
+        Ok(ramflux_protocol::canonical_json_bytes(&(DOMAIN, &self.id))?)
     }
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
         let mut bytes = PREFIX.to_vec();
         bytes.extend(serde_json::to_vec(self)?);
         if bytes.len() > MAX_PACKET_BYTES {
-            return Err(invalid("own-device message byte budget exceeded"));
+            return Err(invalid(TOO_LARGE));
         }
         Ok(bytes)
     }
 }
-fn invalid(message: &str) -> SdkError {
-    SdkError::InboundRejected(message.into())
+fn invalid(reason: &str) -> SdkError {
+    SdkError::InboundRejected(reason.into())
 }
 #[derive(Clone, Copy)]
 pub(crate) struct OwnMessageInput<'a> {
@@ -102,41 +195,43 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         input: OwnMessageInput<'_>,
     ) -> Result<Option<OwnDeviceMessage>, SdkError> {
+        if input.body.len() > MAX_PACKET_BYTES {
+            return Err(invalid(TOO_LARGE));
+        }
         let root = self.surface_local_root_commitment()?;
         let manifest = self
             .cache_verified_device_manifest(&engine.config, &root, "own_device_message")
             .await?;
         let source = engine.config.device_id.clone();
-        if !manifest.devices.iter().any(|device| device.device_id == source) {
+        if !manifest.devices.iter().any(|d| d.device_id == source) {
             return Err(invalid("own-device source is not active"));
         }
-        let targets = manifest
-            .devices
-            .into_iter()
-            .filter(|device| device.device_id != source)
-            .collect::<Vec<_>>();
+        let targets =
+            manifest.devices.into_iter().filter(|d| d.device_id != source).collect::<Vec<_>>();
         if targets.is_empty() {
             return Ok(None);
         }
-        let now = input.created_at;
-        let mut packet = OwnDeviceMessage {
-            schema: DOMAIN.into(),
-            id: ramflux_protocol::hash_base64url(
-                DOMAIN,
-                &ramflux_protocol::canonical_json_bytes(&(&root, &source, input.id))?,
-            ),
+        let context = PrivateContext {
+            message: input.id.into(),
             principal: engine.config.principal_id.clone(),
             root,
             source: source.clone(),
             conversation: input.conversation.into(),
             group: input.group.map(str::to_owned),
-            created_at: now,
-            expires_at: now.saturating_add(600),
+            created_at: input.created_at,
+            expires_at: input.created_at.saturating_add(600),
+        };
+        let mut packet = OwnDeviceMessage {
+            schema: DOMAIN.into(),
+            id: copy_id(&context.root, &source, input.id)?,
             nonce: ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..12]),
             ciphertext: String::new(),
             slots: Vec::new(),
             signature: String::new(),
         };
+        let mut plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&context)?);
+        plaintext.push(b'\n');
+        plaintext.extend_from_slice(input.body);
         let key = zeroize::Zeroizing::new(ramflux_crypto::random_32()?);
         let nonce = ramflux_protocol::decode_base64url(&packet.nonce)
             .map_err(|_| invalid("own-device nonce"))?;
@@ -146,19 +241,21 @@ impl RamfluxClient {
             cipher
                 .encrypt(
                     Nonce::from_slice(&nonce),
-                    Payload { msg: input.body, aad: &packet.aad()? },
+                    Payload { msg: &plaintext, aad: &packet.aad()? },
                 )
                 .map_err(|_| invalid("own-device encryption failed"))?,
         );
         for target in targets {
             let request: LocalBusMessageSubmitRequest = serde_json::from_value(
-                json!({"conversation_id":input.conversation,"message_id":input.id,"envelope_id":packet.id,"source_principal_id":packet.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":packet.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":now,"ttl":600}),
+                json!({"conversation_id":packet.id,"message_id":packet.id,"envelope_id":packet.id,"source_principal_id":context.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":context.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":input.created_at,"ttl":600}),
             )?;
             let message = request.into_gateway_message_with_body(Vec::new());
-            packet.slots.push(
-                self.make_pair_object_slot(engine, &message, &packet.id, &key, input.conversation)
-                    .await?,
-            );
+            let slot = self.make_pair_object_slot(engine, &message, &packet.id, &key, "").await?;
+            packet.slots.push(OwnKeySlot {
+                recipient_device_id: slot.recipient_device_id,
+                x3dh: slot.x3dh,
+                ciphertext: slot.ciphertext,
+            });
         }
         packet.signature = ramflux_crypto::sign_with_device_branch(
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -174,33 +271,40 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|_| invalid("own-device encoding"))?;
+        if bytes.starts_with(b"ramflux.own_device_message.v1\n") {
+            return Err(invalid("legacy own-device message requires a fresh copy"));
+        }
         let Some(raw) = bytes.strip_prefix(PREFIX) else { return Ok(false) };
         if bytes.len() > MAX_PACKET_BYTES {
-            return Err(invalid("own-device message byte budget exceeded"));
+            return Err(invalid(TOO_LARGE));
         }
         let packet: OwnDeviceMessage = ramflux_protocol::parse_i_json(raw)?;
+        packet.validate(entry)?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        packet.validate_scope(self, entry)?;
-        let receipt = format!("own-device/message-receipt/{}", packet.id);
+        if entry.envelope.source_principal_id != local.principal_id {
+            return Err(invalid("own-device principal mismatch"));
+        }
+        let root = self.surface_local_root_commitment()?;
+        let now = now_unix_timestamp();
+        let db = self.account_db()?;
+        db.retain_expiring_actor_states(RECEIPTS, now, 4096)?;
+        let receipt_key = format!("{RECEIPTS}{}", packet.id);
         let fingerprint = ramflux_protocol::hash_base64url(DOMAIN, &bytes);
-        if let Some(old) = self.account_db()?.load_actor_state::<String>(&receipt)? {
-            if old != fingerprint {
-                return Err(invalid("own-device message id conflict"));
-            }
+        if let Some(old) = db.load_actor_state::<Receipt>(&receipt_key)? {
+            old.validate(&entry.envelope.source_device_id, &local.device_id, &fingerprint, now)?;
             return Ok(true);
         }
         let manifest = self
-            .cache_verified_device_manifest(gateway, &packet.root, "own_device_message_receive")
+            .cache_verified_device_manifest(gateway, &root, "own_device_message_receive")
             .await?;
         let source = manifest
             .devices
             .iter()
-            .find(|device| device.device_id == packet.source)
+            .find(|d| d.device_id == entry.envelope.source_device_id)
             .ok_or_else(|| invalid("own-device sender is not active"))?;
-        if !manifest.devices.iter().any(|device| device.device_id == local.device_id) {
+        if !manifest.devices.iter().any(|d| d.device_id == local.device_id) {
             return Err(invalid("own-device recipient is not active"));
         }
-        // Fanout changes outer routing fields. The immutable inner signature authenticates them.
         ramflux_crypto::verify_device_branch_signature(
             &source.branch_public_key,
             &packet.signing()?,
@@ -209,59 +313,64 @@ impl RamfluxClient {
         let slots = packet
             .slots
             .iter()
-            .filter(|slot| slot.recipient_device_id == local.device_id)
+            .filter(|s| s.recipient_device_id == local.device_id)
             .collect::<Vec<_>>();
         if slots.len() != 1 {
             return Err(invalid("own-device recipient slot ambiguity"));
         }
-        let slot = slots[0];
-        if slot.object_id != packet.id
-            || slot.conversation_id != packet.conversation
-            || slot.version != 2
-            || slot.ciphertext.sender_device_id_hash != dm_device_id_hash(&packet.source)
+        let slot = slots[0].object_slot(&packet.id);
+        if slot.ciphertext.sender_device_id_hash
+            != dm_device_id_hash(&entry.envelope.source_device_id)
         {
             return Err(invalid("own-device key slot scope mismatch"));
         }
-        let mut deferred = match self.decrypt_object_key_slot(slot) {
+        let mut deferred = match self.decrypt_object_key_slot(&slot) {
             Ok(deferred) => deferred,
             Err(SdkError::PairRecoveryRequired) => {
-                self.begin_pair_recovery(&local.device_id, &packet.source, now_unix_timestamp())?;
+                self.begin_pair_recovery(&local.device_id, &entry.envelope.source_device_id, now)?;
                 return Err(SdkError::PairRecoveryRequired);
             }
             Err(error) => return Err(error),
         };
         let key = zeroize::Zeroizing::new(deferred.object_key);
         deferred.object_key.zeroize();
-        let cipher =
-            Aes256Gcm::new_from_slice(key.as_ref()).map_err(|_| invalid("own-device key"))?;
-        let nonce = ramflux_protocol::decode_base64url(&packet.nonce)
-            .map_err(|_| invalid("own-device nonce"))?;
-        if nonce.len() != 12 {
-            return Err(invalid("own-device nonce length"));
-        }
-        let ciphertext = ramflux_protocol::decode_base64url(&packet.ciphertext)
-            .map_err(|_| invalid("own-device ciphertext encoding"))?;
-        let plaintext = zeroize::Zeroizing::new(
-            cipher
-                .decrypt(
-                    Nonce::from_slice(&nonce),
-                    Payload { msg: &ciphertext, aad: &packet.aad()? },
-                )
-                .map_err(|_| invalid("own-device decryption failed"))?,
-        );
-        self.account_db()?.write_transaction(|| {
+        let (context, body) = packet.open(&key)?;
+        context.validate(
+            &packet.id,
+            &local.principal_id,
+            &root,
+            &entry.envelope.source_device_id,
+            now,
+        )?;
+        db.write_transaction(|| {
             if !self.receive_surface_control(
                 entry,
-                &packet.conversation,
-                packet.group.as_deref(),
-                &plaintext,
+                &context.conversation,
+                context.group.as_deref(),
+                &body,
             )? {
                 return Err(invalid("unsupported own-device control"));
             }
-            self.commit_pair_object_slot(slot, &key)?;
-            self.account_db()?.persist_actor_state(&receipt, &fingerprint)?;
+            self.commit_inline_pair_key_slot(&slot, &key)?;
+            db.persist_actor_state(
+                &receipt_key,
+                &Receipt {
+                    fingerprint,
+                    source: context.source.clone(),
+                    target: local.device_id.clone(),
+                    valid_until: context.expires_at,
+                    expires_at: context.expires_at.saturating_add(300),
+                },
+            )?;
+            db.retain_expiring_actor_states(RECEIPTS, now, 4096)?;
             Ok::<_, SdkError>(())
         })?;
         Ok(true)
     }
+}
+pub(crate) fn copy_id(root: &str, source: &str, message: &str) -> Result<String, SdkError> {
+    Ok(ramflux_protocol::hash_base64url(
+        DOMAIN,
+        &ramflux_protocol::canonical_json_bytes(&(root, source, message))?,
+    ))
 }

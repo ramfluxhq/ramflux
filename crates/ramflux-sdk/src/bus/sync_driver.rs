@@ -36,8 +36,10 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     let result = receive(account, &mut engine).await;
     account.put_engine(engine);
     let (received, replies) = result?;
-    for carrier in replies {
-        if let Err(error) = super::dispatch::surface_transport::send(account, &carrier).await {
+    for reply in replies {
+        if let Err(error) =
+            super::dispatch::surface_transport::send_resync_reply(account, &reply).await
+        {
             tracing::warn!(%error,"surface resync reply failed; requester may retry next window");
         }
     }
@@ -50,8 +52,9 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
 async fn receive(
     account: &mut LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
-) -> Result<(usize, Vec<crate::client::surface::Carrier>), SdkError> {
+) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
     let now = now_unix_timestamp();
+    account.client.prune_surface_resync_state()?;
     account.client.account_db()?.expire_inbox_holds(now)?;
     redrive_if_state_changed(&account.client)?;
     let pool = account.relay_quic_pool()?;
@@ -150,7 +153,7 @@ async fn process(
     engine: &mut GatewaySessionEngine,
     pool: &ramflux_transport::RelayQuicPool,
     entry: &GatewayInboxEntry,
-) -> Result<(bool, Option<crate::client::surface::Carrier>), SdkError> {
+) -> Result<(bool, Option<crate::client::surface::ResyncReply>), SdkError> {
     if account.client.receive_own_device_message(&engine.config, entry).await? {
         return Ok((true, None));
     }
