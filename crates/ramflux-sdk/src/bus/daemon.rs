@@ -221,7 +221,7 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("account.") => {
             dispatch_account_bus_request(request, state).await
         }
-        "surface.send" | "surface.action" | "surface.resync" => {
+        "surface.send" | "surface.action" | "surface.resync" | "surface.request_resync" => {
             crate::bus::dispatch::surface::dispatch_surface(request, state, connection).await
         }
         method if method.starts_with("message.") => {

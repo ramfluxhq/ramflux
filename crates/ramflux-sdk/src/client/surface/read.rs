@@ -175,6 +175,8 @@ pub(crate) fn surface_metadata(view: &Value) -> Value {
         "author_principal_id",
         "version",
         "surface_hash",
+        "delivery_devices",
+        "own_device_copy_state",
         "closed",
         "out_of_sync",
         "executor_device_id",

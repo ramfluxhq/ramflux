@@ -82,7 +82,7 @@ fn carrier(
     wire: &[u8],
 ) -> Result<Carrier, SdkError> {
     let device = sender.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    sender.sign_surface_carrier(Carrier {
+    let mut signed = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         payload_kind: kind,
@@ -95,8 +95,55 @@ fn carrier(
         wire_base64: ramflux_protocol::encode_base64url(wire),
         signature: String::new(),
         snapshot: None,
-    })
+    };
+    if signed.payload_kind == PayloadKind::Event {
+        attach_reference_hash(sender, &mut signed, wire)?;
+    }
+    sender.sign_surface_carrier(signed)
 }
+// Model the authoring sequence separately from the receiver's projection and delivery order.
+fn attach_reference_hash(
+    sender: &RamfluxClient,
+    carrier: &mut Carrier,
+    wire: &[u8],
+) -> Result<(), SdkError> {
+    let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(wire)?;
+    let prefix = format!("test/author-model/{}/", carrier.surface_reference()?);
+    let previous_key = format!("{prefix}{:020}", event.version().saturating_sub(1));
+    let saved = sender.account_db()?.load_actor_state::<Vec<u8>>(&previous_key)?;
+    let previous = if let Some(bytes) = saved {
+        ramflux_protocol::SurfaceState::from_checkpoint_bytes(&bytes)
+            .map_err(|_| super::invalid("reference checkpoint"))?
+    } else if event.version() > 1 {
+        let create = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(
+            &event_bytes_for_reference_create()?,
+        )?;
+        ramflux_protocol::SurfaceState::default()
+            .apply(&create)
+            .map_err(|_| super::invalid("reference create"))?
+    } else {
+        ramflux_protocol::SurfaceState::default()
+    };
+    let next = previous.apply(&event);
+    let expected = next.as_ref().unwrap_or(&previous);
+    if !matches!(event.command(), C::CreateSurface(_)) {
+        carrier.snapshot = Some(super::SnapshotProof::delta(expected, &carrier.sender_device_id));
+    }
+    if let Ok(next) = next {
+        let id = format!("{prefix}{:020}", event.version());
+        if !sender.account_db()?.actor_state_exists(&id)? {
+            sender.account_db()?.persist_actor_state(
+                &id,
+                &next.checkpoint_bytes().map_err(|_| super::invalid("reference checkpoint"))?,
+            )?;
+        }
+    }
+    Ok(())
+}
+fn event_bytes_for_reference_create() -> Result<Vec<u8>, serde_json::Error> {
+    event(1, C::CreateSurface(snapshot()))
+}
+
 fn project(
     client: &RamfluxClient,
     carrier: &Carrier,
@@ -475,3 +522,6 @@ mod devices;
 
 #[path = "tests/export.rs"]
 mod export;
+
+#[path = "tests/recovery.rs"]
+mod recovery;

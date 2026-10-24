@@ -17,7 +17,6 @@ impl RamfluxClient {
             {
                 return Err(invalid("surface logical message id already used"));
             }
-            let first = self.surface_delivery_receipt(carrier)?.is_none();
             let outcome = self
                 .project_surface_message(
                     &carrier.conversation_id,
@@ -34,10 +33,8 @@ impl RamfluxClient {
                 )?
                 .ok_or_else(|| invalid("surface projection absent"))?;
             if outcome.accepted {
-                if first {
-                    self.mark_own_history_changed()?;
-                }
                 self.retain_authored_surface(carrier)?;
+                self.queue_surface_own_copy(carrier, group_epoch)?;
                 if self.direct_message_by_id(&timeline)?.is_none() {
                     self.send_direct_message(
                         &carrier.conversation_id,

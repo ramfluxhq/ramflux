@@ -58,9 +58,7 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("surface conversation missing"))?;
             let group = if let Some(id) = thread["group_id"].as_str() {
                 Some(
-                    self.own_device_group_snapshots(&local.device_id)?
-                        .into_iter()
-                        .find(|g| g.group_id == id)
+                    self.own_device_group_snapshot(id, &local.device_id)?
                         .ok_or_else(|| invalid("own-device group access unavailable"))?,
                 )
             } else {

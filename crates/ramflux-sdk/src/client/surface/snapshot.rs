@@ -62,7 +62,7 @@ impl SnapshotProof {
         self.metadata.is_some() || !self.checkpoint_base64.is_empty()
     }
     pub(super) fn matches_hash(&self, state: &SurfaceState) -> bool {
-        self.surface_hash.as_deref().is_none_or(|hash| state.hash() == Some(hash))
+        self.surface_hash.as_deref().is_some_and(|hash| state.hash() == Some(hash))
     }
     pub(super) fn restore(
         &self,

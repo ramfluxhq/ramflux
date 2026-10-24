@@ -207,6 +207,16 @@ impl RamfluxClient {
             &carrier.signing()?,
             &carrier.signature,
         )?;
-        carrier.payload()
+        let payload = carrier.payload()?;
+        if let Payload::Event(event) = &payload
+            && !matches!(
+                event.command(),
+                ramflux_protocol::A2uiConversationCommand::CreateSurface(_)
+            )
+            && carrier.snapshot.as_ref().and_then(|proof| proof.surface_hash.as_ref()).is_none()
+        {
+            return Err(invalid("surface delta requires a result hash"));
+        }
+        Ok(payload)
     }
 }

@@ -430,9 +430,16 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
 }
 
 fn maximal_carrier(source: &RamfluxClient) -> Result<Carrier, Box<dyn std::error::Error>> {
+    maximal_carrier_in(source, "thread", "surface")
+}
+fn maximal_carrier_in(
+    source: &RamfluxClient,
+    conversation: &str,
+    surface: &str,
+) -> Result<Carrier, Box<dyn std::error::Error>> {
     use ramflux_protocol::{MAX_SURFACE_DATA_BYTES, canonical_json_bytes};
     let mut content = CreateSurfaceCommand {
-        surface_id: "surface".into(),
+        surface_id: surface.into(),
         surface_type: SurfaceType::StatusPanel,
         catalog: "basic".into(),
         catalog_version: "1".into(),
@@ -446,7 +453,7 @@ fn maximal_carrier(source: &RamfluxClient) -> Result<Carrier, Box<dyn std::error
     content.data_model.insert("padding".into(), json!("x".repeat(padding)));
     assert_eq!(canonical_json_bytes(&content)?.len(), MAX_SURFACE_DATA_BYTES);
     let request = crate::SurfaceSendRequest::event(
-        "thread",
+        conversation,
         1,
         &A2uiConversationCommand::CreateSurface(content),
     )?;
@@ -454,12 +461,27 @@ fn maximal_carrier(source: &RamfluxClient) -> Result<Carrier, Box<dyn std::error
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         payload_kind: PayloadKind::Event,
-        conversation_id: "thread".into(),
-        surface_id: "surface".into(),
+        conversation_id: conversation.into(),
+        surface_id: surface.into(),
         message_id: request.message_id,
-        sender_principal_id: "sender".into(),
-        sender_device_id: "device-sender".into(),
-        author_principal_id: "sender".into(),
+        sender_principal_id: source
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .principal_id
+            .clone(),
+        sender_device_id: source
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .device_id
+            .clone(),
+        author_principal_id: source
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .principal_id
+            .clone(),
         wire_base64: request.wire_base64,
         signature: String::new(),
         snapshot: None,
@@ -476,10 +498,10 @@ fn finalize_all_blocks(
     use ramflux_protocol::StreamAppendCommand;
     for i in 0..64 {
         let wire = ramflux_protocol::encode_a2ui_conversation_event(
-            "thread",
+            &carrier.conversation_id,
             i + 2,
             &A2uiConversationCommand::StreamAppend(StreamAppendCommand {
-                surface_id: "surface".into(),
+                surface_id: carrier.surface_id.clone(),
                 component_id: format!("block-{i}"),
                 text_delta: String::new(),
                 final_: true,
@@ -491,9 +513,110 @@ fn finalize_all_blocks(
         delta.snapshot = None;
         source.attach_surface_snapshot(&mut delta)?;
         delta = source.sign_surface_carrier(delta)?;
-        assert!(delta.bytes()?.len() < 2048);
+        if carrier.conversation_id.len() <= 32 && carrier.sender_device_id.len() <= 32 {
+            assert!(delta.bytes()?.len() < 2048);
+        } else {
+            assert!(delta.bytes()?.len() < crate::client::surface::MAX_DELIVERY_BYTES / 8);
+        }
         assert!(!delta.snapshot.as_ref().ok_or("result hash")?.is_full());
         assert!(source.stage_surface_outgoing(&delta, Some(epoch))?.accepted);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_frame_with_margin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = runtime_tests::root("surface-max-ids");
+    let mut source =
+        runtime_tests::account(&root, "sender", None, Arc::new(AtomicBool::new(false)))?;
+    let principal = "a".repeat(256);
+    let device = "d".repeat(256);
+    let conversation = "c".repeat(256);
+    let surface = "s".repeat(256);
+    let remote = "r".repeat(256);
+    source.client.create_identity_root(&principal, [97; 32]);
+    source.client.create_device_branch(&principal, &device, 1, [98; 32]);
+    source.client.account_db()?.persist_client_record(
+        "conversation",
+        &conversation,
+        &json!({"kind":"direct","participants":[principal,"peer"]}),
+    )?;
+    let mut create = maximal_carrier_in(&source.client, &conversation, &surface)?;
+    create.message_id = "m".repeat(256);
+    create = source.client.sign_surface_carrier(create)?;
+    assert!(source.client.stage_surface_outgoing(&create, None)?.accepted);
+    finalize_all_blocks(&source.client, &create, 1)?;
+    let mut resync =
+        source.client.prepare_surface_resync(&create.surface_reference()?, &"z".repeat(256))?;
+    // Transport framing must also fit the longest valid I-JSON version representation.
+    let mut wire: Value =
+        serde_json::from_slice(&ramflux_protocol::decode_base64url(&resync.wire_base64)?)?;
+    wire["version"] = json!(9_007_199_254_740_991_u64);
+    resync.wire_base64 =
+        ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&wire)?);
+    resync.snapshot.as_mut().ok_or("compact proof")?.metadata.as_mut().ok_or("metadata")?["version"] =
+        wire["version"].clone();
+    resync = source.client.sign_surface_carrier(resync)?;
+    source.client.verify_surface_carrier(&resync, &principal, &device)?;
+    let bytes = resync.bytes()?;
+    let margin = crate::client::surface::MAX_DELIVERY_BYTES
+        .checked_sub(bytes.len())
+        .ok_or("maximum identifiers exceeded carrier cap")?;
+    assert!(margin >= 128, "carrier margin {margin}");
+    let session = ramflux_crypto::DmSession::initiator(
+        [75; 32],
+        dm_device_id_hash(&device),
+        dm_device_id_hash(&remote),
+        [3; 32],
+    )?;
+    source.client.persist_pair(&device, &remote, &[4; 32], &session)?;
+    let config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse()?,
+        gateway_addr: "127.0.0.1:1".parse()?,
+        server_name: "unused-test".into(),
+        ca_cert: root.join("unused.pem"),
+        principal_id: principal.clone(),
+        device_id: device.clone(),
+        target_delivery_id: device.clone(),
+        prekey_http_url: None,
+    })
+    .with_device_branch(source.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?);
+    let gateway = super::fixture::RecordingGateway::new(Arc::default());
+    let lengths = gateway.frame_lengths.clone();
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(gateway));
+    let mut message = GatewayDirectMessage {
+        conversation_id: conversation,
+        message_id: "l".repeat(256),
+        envelope_id: "e".repeat(256),
+        source_principal_id: principal,
+        sender_id: device,
+        recipient_device_id: Some(remote.clone()),
+        target_delivery_id: remote,
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 600,
+    };
+    message.encrypted_body = serde_json::to_vec(&source.client.seal_routed_federated_as(
+        &engine,
+        &message,
+        &bytes,
+        None,
+        crate::client::routed::Route::direct(),
+    )?)?;
+    engine
+        .submit_envelope(gateway_direct_message_envelope(&engine.config, &message, None)?)
+        .await?;
+    let measured = lengths.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0];
+    assert!(measured + 64 * 1024 < ramflux_transport::MAX_GATEWAY_FRAME_BYTES);
+    eprintln!(
+        "max-id resync carrier={} margin={} DM frame={} margin={}",
+        bytes.len(),
+        margin,
+        measured,
+        ramflux_transport::MAX_GATEWAY_FRAME_BYTES - measured
+    );
+    drop(source);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }

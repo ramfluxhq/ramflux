@@ -198,17 +198,6 @@ impl RamfluxClient {
             )
         ))
     }
-    pub(crate) fn mark_own_history_changed(&self) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let revision = db
-            .load_actor_state::<u64>("own-device/history_revision")?
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| SdkError::LocalBus("own-device history revision exhausted".into()))?;
-        db.persist_actor_state("own-device/history_revision", &revision)?;
-        Ok(())
-    }
-
     fn own_device_history_bundle(
         &self,
         principal_commitment: &str,
@@ -277,46 +266,48 @@ impl RamfluxClient {
         &self,
         source_device_id: &str,
     ) -> Result<Vec<SdkOwnDeviceGroupSnapshot>, SdkError> {
-        let mut groups = Vec::new();
-        for group in self.groups()? {
-            let Some(role) = group.roles.get(source_device_id).cloned() else {
-                continue;
-            };
-            let Some(joined_epoch) =
-                self.account_db()?.group_member_joined_epoch(&group.group_id, source_device_id)?
-            else {
-                continue;
-            };
-            let mut members = Vec::with_capacity(group.members.len());
-            for member_id in &group.members {
-                let Some(role) = group.roles.get(member_id).cloned() else {
-                    continue;
-                };
-                let Some(member_joined_epoch) =
-                    self.account_db()?.group_member_joined_epoch(&group.group_id, member_id)?
-                else {
-                    continue;
-                };
+        self.groups()?
+            .into_iter()
+            .filter_map(|group| {
+                self.own_device_group_snapshot(&group.group_id, source_device_id).transpose()
+            })
+            .collect()
+    }
+    pub(crate) fn own_device_group_snapshot(
+        &self,
+        id: &str,
+        source_device_id: &str,
+    ) -> Result<Option<SdkOwnDeviceGroupSnapshot>, SdkError> {
+        let group = self.group_state(id)?;
+        let Some(role) = group.roles.get(source_device_id).cloned() else { return Ok(None) };
+        let Some(joined_epoch) =
+            self.account_db()?.group_member_joined_epoch(id, source_device_id)?
+        else {
+            return Ok(None);
+        };
+        let mut members = Vec::with_capacity(group.members.len());
+        for member in &group.members {
+            if let Some(role) = group.roles.get(member).cloned()
+                && let Some(joined_epoch) =
+                    self.account_db()?.group_member_joined_epoch(id, member)?
+            {
                 members.push(SdkOwnDeviceGroupMemberSnapshot {
-                    member_id: member_id.clone(),
+                    member_id: member.clone(),
                     role,
-                    joined_epoch: member_joined_epoch,
+                    joined_epoch,
                 });
             }
-            let group_id = group.group_id.clone();
-            let routes = self.group_member_routes(&group_id)?;
-            groups.push(SdkOwnDeviceGroupSnapshot {
-                group_id,
-                group_epoch: group.group_epoch,
-                max_members: group.max_members,
-                new_member_history: group.new_member_history,
-                local_role: role,
-                local_joined_epoch: joined_epoch,
-                members,
-                routes,
-            });
         }
-        Ok(groups)
+        Ok(Some(SdkOwnDeviceGroupSnapshot {
+            group_id: id.into(),
+            group_epoch: group.group_epoch,
+            max_members: group.max_members,
+            new_member_history: group.new_member_history,
+            local_role: role,
+            local_joined_epoch: joined_epoch,
+            members,
+            routes: self.group_member_routes(id)?,
+        }))
     }
 
     fn own_device_sender_key_distributions(
@@ -522,12 +513,11 @@ impl RamfluxClient {
                 )?;
                 continue;
             }
-            if bundle.surface_message_epochs.get(&message.message_id).is_some_and(
-                |(group, epoch)| floor_by_group.get(group).is_none_or(|floor| epoch < floor),
-            ) {
-                return Err(SdkError::LocalBus("own-device sync surface message below joined epoch".into()));
-
-            }
+            Self::validate_owned_surface_message_floor(
+                bundle,
+                &message.message_id,
+                &floor_by_group,
+            )?;
             self.account_db()?.import_direct_message_projection(DirectMessageWrite {
                 conversation_id: &message.conversation_id,
                 message_id: &message.message_id,

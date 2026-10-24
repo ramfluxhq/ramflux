@@ -57,13 +57,13 @@ async fn two_device_peer_retries_keep_one_logical_timeline_and_safe_failed_fallb
     Ok(())
 }
 
-struct PeerFixture {
-    peers: Vec<LocalBusAccountState>,
-    config: GatewaySessionConfig,
-    address: SocketAddr,
-    directory: tokio::task::JoinHandle<()>,
+pub(super) struct PeerFixture {
+    pub(super) peers: Vec<LocalBusAccountState>,
+    pub(super) config: GatewaySessionConfig,
+    pub(super) address: SocketAddr,
+    pub(super) directory: tokio::task::JoinHandle<()>,
 }
-async fn peer_fixture(
+pub(super) async fn peer_fixture(
     root: &Path,
     source: &mut LocalBusAccountState,
 ) -> Result<PeerFixture, Box<dyn std::error::Error>> {
@@ -78,7 +78,8 @@ async fn peer_fixture(
         )?;
         peer.client.create_identity_root("peer", [91; 32]);
         peer.client.create_device_branch("peer", device, 1, [92 + u8::try_from(index)?; 32]);
-        let manifest = super::fixture::manifest(&peer.client)?;
+        let mut manifest = super::fixture::manifest(&peer.client)?;
+        manifest.devices[0].target_delivery_id = device.to_string();
         if let Some(existing) = peer_manifest.as_mut() {
             let existing: &mut crate::prekey::SdkDeviceManifestResponse = existing;
             existing.devices.extend(manifest.devices);
@@ -139,7 +140,7 @@ async fn peer_fixture(
     .with_device_branch(source.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?);
     Ok(PeerFixture { peers, config, address, directory })
 }
-fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
+pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
     let request = crate::SurfaceSendRequest::event(
         "thread",
         1,

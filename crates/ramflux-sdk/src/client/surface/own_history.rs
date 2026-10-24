@@ -322,6 +322,25 @@ fn fit_export(page: &mut SurfaceHistoryExport, budget: usize) -> Result<(), SdkE
     Ok(())
 }
 
+impl RamfluxClient {
+    pub(crate) fn validate_owned_surface_message_floor(
+        bundle: &crate::own_device_sync::SdkOwnDeviceHistoryBundle,
+        message: &str,
+        floors: &std::collections::BTreeMap<String, u64>,
+    ) -> Result<(), SdkError> {
+        if bundle
+            .surface_message_epochs
+            .get(message)
+            .is_some_and(|(group, epoch)| floors.get(group).is_none_or(|floor| epoch < floor))
+        {
+            return Err(SdkError::LocalBus(
+                "own-device sync surface message below joined epoch".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

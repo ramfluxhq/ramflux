@@ -74,7 +74,7 @@ impl RamfluxClient {
         Ok(())
     }
 
-    pub(super) fn trusted_device(&self, remote: &str) -> Result<Value, SdkError> {
+    pub(crate) fn trusted_device(&self, remote: &str) -> Result<Value, SdkError> {
         if self
             .account_db()?
             .load_actor_state::<bool>(&format!("device/revoked/{remote}"))?

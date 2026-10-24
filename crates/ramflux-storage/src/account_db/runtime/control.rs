@@ -90,3 +90,68 @@ impl AccountDb {
         Ok(())
     }
 }
+
+fn namespace_end(prefix: &str) -> Result<String, StorageError> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    let last = bytes.pop().filter(|byte| *byte < 127).ok_or(StorageError::AuthorizationRejected)?;
+    bytes.push(last + 1);
+    String::from_utf8(bytes).map_err(|_| StorageError::AuthorizationRejected)
+}
+impl AccountDb {
+    /// Count records and encoded bytes with an indexed namespace range, without decoding values.
+    /// # Errors
+    /// Rejects an empty prefix or a non-ASCII final character; returns SQL errors.
+    pub fn actor_state_usage(&self, prefix: &str) -> Result<(u64, u64), StorageError> {
+        let end = namespace_end(prefix)?;
+        Ok(self.connection.query_row("SELECT count(*),coalesce(sum(length(state_json)),0) FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2",params![prefix,end],|row|Ok((row.get(0)?,row.get(1)?)))?)
+    }
+    /// Read a bounded page of namespace keys without decoding private state values.
+    /// # Errors
+    /// Rejects unsupported prefixes and returns SQL errors.
+    pub fn actor_state_key_page(
+        &self,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        let end = namespace_end(prefix)?;
+        let mut query=self.connection.prepare("SELECT state_kind FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2 ORDER BY state_kind LIMIT ?3")?;
+        Ok(query
+            .query_map(params![prefix, end, limit.min(4096)], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn actor_queue_usage_and_pages_exclude_neighbor_namespaces()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-queue-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let index = crate::AccountIndex::open(&root)?;
+        index.create_account("a", "root")?;
+        let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;
+        let body = serde_json::json!({"payload":"中文 🦀"});
+        for key in ["queue/a", "queue/b", "queue0/a", "queud/a", "unrelated/a"] {
+            db.persist_actor_state(key, &body)?;
+        }
+        assert_eq!(db.actor_state_key_page("queue/", 1)?, vec!["queue/a"]);
+        assert_eq!(db.actor_state_key_page("queue/", 0)?, Vec::<String>::new());
+        assert_eq!(
+            db.actor_state_usage("queue/")?,
+            (2, 2 * u64::try_from(serde_json::to_vec(&body)?.len())?)
+        );
+        db.remove_actor_state("queue/a")?;
+        assert_eq!(db.actor_state_key_page("queue/", 10)?, vec!["queue/b"]);
+        assert_eq!(db.actor_state_usage("empty/")?, (0, 0));
+        assert!(db.actor_state_usage("").is_err());
+        drop(db);
+        drop(index);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

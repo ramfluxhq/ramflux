@@ -3,12 +3,12 @@
 
 use super::*;
 use crate::client::surface::{ControlKind, control::SurfaceControl};
-struct Terminals {
+pub(super) struct Terminals {
     root: PathBuf,
-    clients: Vec<RamfluxClient>,
+    pub(super) clients: Vec<RamfluxClient>,
 }
 impl Terminals {
-    fn new() -> Result<Self, SdkError> {
+    pub(super) fn new() -> Result<Self, SdkError> {
         let root = std::env::temp_dir().join(crate::new_surface_message_id()?);
         let mut clients = Vec::new();
         for (principal, device, root_seed, device_seed) in [
@@ -49,7 +49,10 @@ impl Drop for Terminals {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
-fn entry(source: &RamfluxClient, id: &str) -> Result<crate::GatewayInboxEntry, SdkError> {
+pub(super) fn entry(
+    source: &RamfluxClient,
+    id: &str,
+) -> Result<crate::GatewayInboxEntry, SdkError> {
     let d = source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     Ok(serde_json::from_value(
         json!({"inbox_seq":1,"target_delivery_id":"test-target","envelope":{

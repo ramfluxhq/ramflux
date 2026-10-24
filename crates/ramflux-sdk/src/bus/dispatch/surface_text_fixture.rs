@@ -11,13 +11,60 @@ type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
 pub(super) struct RecordingGateway {
     last: Option<GatewayClientFrame>,
+    cursor: Option<GatewayCursor>,
+    pub inbox: Vec<GatewayInboxEntry>,
     pub fail_after: Option<usize>,
+    pub fail_target: Option<String>,
+    pub fail_own_ack: bool,
+    pub own: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
     pub frame_lengths: Arc<Mutex<Vec<usize>>>,
     pub delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
 }
 impl RecordingGateway {
+    fn own_response(
+        &mut self,
+        fanout: crate::GatewayOwnDeviceFanoutFrame,
+    ) -> Result<GatewayServerFrame, TransportError> {
+        let bytes = ramflux_protocol::decode_base64url(&fanout.envelope.encrypted_payload)
+            .map_err(|e| TransportError::Quic(e.to_string()))?;
+        let raw = bytes
+            .strip_prefix(crate::client::own_device_copy::PREFIX)
+            .ok_or_else(|| TransportError::Quic("expected per-message own copy".into()))?;
+        let packet: crate::client::own_device_copy::OwnDeviceMessage =
+            serde_json::from_slice(raw).map_err(|e| TransportError::Quic(e.to_string()))?;
+        self.own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(fanout.envelope);
+        if self.fail_own_ack {
+            return Err(TransportError::Quic("injected lost own-copy ACK".into()));
+        }
+        Ok(GatewayServerFrame::OwnDeviceFanout {
+            response: crate::GatewayOwnDeviceFanoutResponse {
+                principal_id: fanout.principal_id,
+                source_device_id: fanout.source_device_id,
+                delivered: packet
+                    .slots
+                    .into_iter()
+                    .map(|slot| crate::GatewayOwnDeviceFanoutDelivery {
+                        device_id: slot.recipient_device_id,
+                        target_delivery_id: "sibling".into(),
+                        outcome: "online".into(),
+                        inbox_seq: Some(1),
+                    })
+                    .collect(),
+            },
+        })
+    }
     pub fn new(delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>) -> Self {
-        Self { last: None, fail_after: None, frame_lengths: Arc::default(), delivered }
+        Self {
+            last: None,
+            cursor: None,
+            inbox: Vec::new(),
+            fail_after: None,
+            fail_target: None,
+            fail_own_ack: false,
+            own: Arc::default(),
+            frame_lengths: Arc::default(),
+            delivered,
+        }
     }
 }
 impl GatewaySessionFrameSink for RecordingGateway {
@@ -36,6 +83,11 @@ impl GatewaySessionFrameSink for RecordingGateway {
             }) {
                 return Err(TransportError::Quic("injected submit failure".into()));
             }
+            if let Ok(GatewayClientFrame::Submit { submit }) = serde_json::from_slice(bytes)
+                && self.fail_target.as_ref() == Some(&submit.envelope.target_delivery_id)
+            {
+                return Err(TransportError::Quic("injected target failure".into()));
+            }
             self.frame_lengths
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -53,6 +105,12 @@ impl GatewaySessionFrameSink for RecordingGateway {
 impl GatewaySessionFrameSource for RecordingGateway {
     fn recv_frame(&mut self) -> FrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
+            if self.last.is_none()
+                && let Some(cursor) = self.cursor.take()
+            {
+                return serde_json::to_vec(&GatewayServerFrame::Cursor { cursor: Some(cursor) })
+                    .map_err(|e| TransportError::Quic(e.to_string()));
+            }
             let response = match self.last.take() {
                 Some(GatewayClientFrame::Submit { submit }) => {
                     self.delivered
@@ -67,6 +125,9 @@ impl GatewaySessionFrameSource for RecordingGateway {
                         },
                     }
                 }
+                Some(GatewayClientFrame::OwnDeviceFanout { fanout }) => {
+                    self.own_response(fanout)?
+                }
                 Some(GatewayClientFrame::PrekeyFetch { device_id }) => GatewayServerFrame::Prekey {
                     response: crate::prekey::SdkPrekeyResponse {
                         target_delivery_id: Some(
@@ -78,7 +139,18 @@ impl GatewaySessionFrameSource for RecordingGateway {
                     },
                 },
                 Some(GatewayClientFrame::Resume { .. }) => {
-                    GatewayServerFrame::Resume { entries: Vec::new() }
+                    GatewayServerFrame::Resume { entries: std::mem::take(&mut self.inbox) }
+                }
+                Some(GatewayClientFrame::Ack { ack }) => {
+                    let cursor = GatewayCursor {
+                        target_delivery_id: "sender".into(),
+                        inbox_seq: 1,
+                        last_envelope_id: Some(ack.envelope_id.clone()),
+                        acked_envelope_ids: vec![ack.envelope_id],
+                        nacked_envelope_ids: BTreeMap::new(),
+                    };
+                    self.cursor = Some(cursor.clone());
+                    GatewayServerFrame::Ack { cursor }
                 }
                 Some(GatewayClientFrame::Heartbeat { now }) => {
                     GatewayServerFrame::Heartbeat { now }

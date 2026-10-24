@@ -193,6 +193,8 @@ fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
             }),
         )?);
         held.surface_id = format!("unknown-{i}");
+        let wire = ramflux_protocol::decode_base64url(&held.wire_base64)?;
+        attach_reference_hash(&f.author, &mut held, &wire)?;
         held = f.author.sign_surface_carrier(held)?;
         assert!(project(&f.human, &held, &held.message_id)?.queued);
     }
