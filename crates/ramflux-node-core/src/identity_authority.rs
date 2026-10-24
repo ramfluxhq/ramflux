@@ -12,6 +12,16 @@ pub struct DeviceSetPublishRequest {
     pub root_public_key: String,
     pub record: SignedDeviceSetRecord,
 }
+impl DeviceSetPublishRequest {
+    /// Verify signature and root commitment without accessing registry state.
+    /// # Errors
+    /// Rejects malformed, forged or oversized signed records.
+    pub fn verify_signature(&self) -> Result<(), NodeCoreError> {
+        let root = ramflux_crypto::verifying_key_from_base64url(&self.root_public_key)
+            .map_err(|e| crypto(&e))?;
+        ramflux_crypto::verify_signed_device_set(&root, &self.record).map_err(|e| crypto(&e))
+    }
+}
 fn reject(reason: &str) -> NodeCoreError {
     NodeCoreError::ItestHttp(reason.into())
 }
@@ -33,6 +43,27 @@ impl IdentityRegistry {
             == Some(&request.root_public_key)
             && *stored == request.record)
             .then_some(stored)
+    }
+    pub(crate) fn require_pinned_publication_root(
+        &self,
+        request: &DeviceSetPublishRequest,
+    ) -> Result<(), NodeCoreError> {
+        if self.root_public_keys_by_commitment.get(&request.record.principal_commitment)
+            != Some(&request.root_public_key)
+        {
+            return Err(reject("publication root is not enrolled"));
+        }
+        Ok(())
+    }
+    pub(crate) fn validate_publication_revision(
+        &self,
+        request: &DeviceSetPublishRequest,
+    ) -> Result<(), NodeCoreError> {
+        if let Some(old) = self.signed_device_sets.get(&request.record.principal_commitment) {
+            ramflux_crypto::validate_device_set_transition(old, &request.record)
+                .map_err(|e| crypto(&e))?;
+        }
+        Ok(())
     }
     /// Publish a verified full record as-is; identical retransmission is idempotent.
     /// # Errors

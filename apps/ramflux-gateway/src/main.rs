@@ -4,6 +4,7 @@
 mod clients;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 mod compio_gateway;
+mod ingress;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod object_issue;

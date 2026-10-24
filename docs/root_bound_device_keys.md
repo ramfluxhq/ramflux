@@ -76,14 +76,19 @@ Publishing a record alone cannot enroll a new root.
 Exact record/root retransmissions take a read path without cloning or persisting
 the registry. Gateway publication admission is bounded by both the actual source
 IP and principal commitment. Per-minute defaults are 60 per principal and 120 per
-source, with at most 4096 active admission buckets. Configuration uses
+source, with at most 4096 admission buckets. Signatures and root commitments are
+verified before charging root quotas; malformed claims never spend a victim's
+root allowance. Already observed signed epochs do not consume mutation quota on
+replay. Source admission still applies to every decoded publication. IPv4 sources
+use addresses (including mapped IPv4); IPv6 sources aggregate by /64. Saturated
+admission state evicts least recently used entries instead of denying all new
+publishers. Configuration uses
 `RAMFLUX_GATEWAY_DEVICE_SET_PER_PRINCIPAL_PER_MINUTE`,
 `RAMFLUX_GATEWAY_DEVICE_SET_PER_SOURCE_PER_MINUTE`, and
 `RAMFLUX_GATEWAY_DEVICE_SET_MAX_BUCKETS`; values must be positive and are capped
-at 10000, 20000 and 65536, respectively. A full table rejects new admission rather
-than evicting active quota windows. Both QUIC and TCP-TLS gateway JSON framing
-reject duplicate keys before decoding into generic values. The node pins the identity
-root and kind; it rejects a device ID already owned by another identity.
+at 10000, 20000 and 65536, respectively. Every gateway framed runtime rejects
+duplicate keys before generic-value normalization. The node pins the identity root
+and kind, and rejects key updates outside the expected root's device namespace.
 
 `POST /mvp2/device-set` accepts `{ "root_public_key": "...", "record": { ... } }`
 for an enrolled root and returns the accepted record. `GET /mvp2/device-set/<principal_commitment>` returns the complete record or null.
@@ -101,6 +106,9 @@ publishing its authority changes to readers. Identity snapshot persistence also
 uses that lock and the current registry, so a captured older snapshot cannot
 replace a newer signed epoch. Deletion cleanup also takes its current identity state and commits cleanup under
 that same writer lock; it cannot persist an earlier captured identity snapshot.
+The service's durable deletion finalizer computes the candidate identity/lifecycle
+and target cleanup under that lock, commits them in one storage transaction, then
+publishes the candidate. Its non-durable variant remains for in-process callers.
 Session persistence retains its existing lifecycle.
 
 Irreversible identity deletion removes its key/route records but retains a minimal
@@ -123,8 +131,9 @@ The existing prekey/device-auth lookup endpoints accept an opaque lookup token:
 `root~BASE64URL(JSON([root_commitment,device_id]))` or
 `principal~BASE64URL(JSON([principal_id,device_id]))`. The gateway uses the latter
 for session authentication. Responses keep the original signed local device ID.
-An unqualified legacy lookup works only when that name identifies one registered
-device; ambiguous lookups fail closed. SDK consumers must retain root context
+Bare lookups serve only unambiguous legacy pre-v2 registrations. Root-bound devices
+always require qualified lookups. Missing, ambiguous or unqualified root-bound
+lookups return explicit errors rather than keys or an empty successful lookup. SDK consumers must retain root context
 when selecting a target, rather than treating the raw local ID as globally unique.
 
 ## Legacy migration and client integration
@@ -161,3 +170,7 @@ hierarchy rather than adopting Matrix's wire format or extra signing-key tiers.
 also makes the identity authentication boundary explicit: a valid prekey signature
 alone does not authenticate a human identity. Root trust/fingerprint comparison
 and the subsequent client safety policy remain necessary.
+
+All gateway framed runtimes (quinn QUIC, TCP-TLS and compio QUIC) share strict
+I-JSON parsing, a 1 MiB frame limit and signed-publication admission before router
+dispatch. The compio transport's later JSON frames also use the strict parser.

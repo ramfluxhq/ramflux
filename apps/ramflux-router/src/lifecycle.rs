@@ -32,17 +32,7 @@ pub(crate) fn handle_mvp7_lifecycle_finalize(
     store: &ramflux_node_core::RouterRedbStore,
 ) -> anyhow::Result<ramflux_node_core::LifecycleResponse> {
     let request: ramflux_node_core::LifecycleFinalizeRequest = serde_json::from_slice(body)?;
-    let target_delivery_id = state
-        .mvp1_identities_snapshot()
-        .target_delivery_id_for_principal(&request.principal_id)
-        .map(str::to_owned);
-    let response = state.mvp7_finalize_delete(&request)?;
-    if let Some(target_delivery_id) = target_delivery_id {
-        state.persist_deleted_target(store, &target_delivery_id, &response.record)?;
-    } else {
-        store.record_lifecycle_record(&response.record)?;
-        state.persist_identity_registry(store)?;
-    }
+    let response = state.mvp7_finalize_delete_durable(&request, store)?;
     Ok(response)
 }
 

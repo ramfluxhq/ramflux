@@ -141,9 +141,8 @@ async fn handle_gateway_compio_quic_stream(
 ) -> anyhow::Result<()> {
     let (mut send, mut recv) = stream.split();
     let first_raw = recv.read_frame().await?;
-    let first_frame: serde_json::Value = serde_json::from_slice(&first_raw)?;
-    if first_frame.get("frame_type").is_some() {
-        let frame: ramflux_node_core::GatewayClientFrame = serde_json::from_value(first_frame)?;
+    let first = crate::ingress::parse(&first_raw, remote_addr.ip())?;
+    if let crate::ingress::Ingress::Session(frame) = first {
         let (write_sender, write_receiver) =
             tokio::sync::mpsc::channel(GATEWAY_COMPIO_WRITE_CHANNEL_CAPACITY);
         let (read_sender, read_receiver) =
@@ -154,7 +153,7 @@ async fn handle_gateway_compio_quic_stream(
             }
         })
         .detach();
-        spawn_gateway_session_worker(write_sender, read_receiver, context, remote_addr, frame)?;
+        spawn_gateway_session_worker(write_sender, read_receiver, context, remote_addr, *frame)?;
         while let Ok(frame) = recv.read_frame().await {
             if read_sender.send(frame).await.is_err() {
                 break;
@@ -163,7 +162,9 @@ async fn handle_gateway_compio_quic_stream(
         return Ok(());
     }
 
-    let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
+    let crate::ingress::Ingress::Request(request) = first else {
+        anyhow::bail!("gateway ingress dispatch mismatch");
+    };
     let response = dispatch_gateway_request_blocking(context.router.clone(), request).await?;
     send.write_json_message(&response).await?;
     send.finish()?;
