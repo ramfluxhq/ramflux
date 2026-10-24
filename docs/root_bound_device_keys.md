@@ -327,7 +327,9 @@ the account's own root, including when a foreign peer reuses a sibling's name.
 
 Root-qualified group-pin reads exclude unscoped legacy rows even if their public
 key matches. Explicit qualified pin creation stores its root at insertion; it does
-not adopt an old by-name pin. Sender admission still verifies that key's root
+not adopt an old by-name pin. Group-scoped literal-slot reads prefer that explicit
+root-bound pin over leftover unscoped rows, while multiple bound roots remain
+ambiguous. Sender admission still verifies that key's root
 proof and active signed set. Old unscoped rows remain historical data. Direct-add
 v1 joins from administrators without the signed-root extension/invite witness
 stay pending; later epoch changes may wait too. Administrators must upgrade and
