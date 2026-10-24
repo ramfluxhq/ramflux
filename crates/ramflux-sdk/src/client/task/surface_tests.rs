@@ -106,13 +106,16 @@ fn exercise(input: bool, read_only: bool) -> TestResult {
     let view = f.agent.surface_get("form", 0, None)?;
     let decision_id = view["actions"][0]["id"].as_str().ok_or("decision id")?;
     if read_only {
-        let rows = f.agent.account_db()?.surface_history_page::<serde_json::Value>(
-            "surface/actions/",
-            "surface/actions/",
-            100,
-        )?;
-        let (key, mut row) =
-            rows.into_iter().find(|(_, row)| row["id"] == decision_id).ok_or("stored action")?;
+        let key = format!(
+            "{}/{}",
+            crate::client::surface::key("actions", &action.surface_reference()?),
+            decision_id
+        );
+        let mut row = f
+            .agent
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&key)?
+            .ok_or("stored action")?;
         row["actionable"] = json!(false);
         f.agent.account_db()?.persist_actor_state(&key, &row)?;
     }
