@@ -48,6 +48,7 @@ fn router_redb_store_restores_home_node_migration_state() -> Result<(), Box<dyn 
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     let request = registration_request(
+        &router,
         "principal_migrate_store",
         "device_migrate_store",
         831,
@@ -100,6 +101,7 @@ fn router_redb_store_restores_home_node_route_state() -> Result<(), Box<dyn std:
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     let request = registration_request(
+        &router,
         "principal_route_store",
         "device_route_store",
         842,
@@ -307,6 +309,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
     let router = RouterCore::new();
     store.save_router(&router)?;
     router.mvp1_register_identity(&registration_request(
+        &router,
         "principal_fanout",
         "device_source",
         601,
@@ -314,6 +317,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
         "ip_fanout_source",
     )?)?;
     router.mvp1_register_identity(&registration_request(
+        &router,
         "principal_fanout",
         "device_peer",
         602,
@@ -411,7 +415,8 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
         &router.session("target_online_keyed").ok_or("missing keyed session after upsert")?,
     )?;
 
-    let register = registration_request("principal_keyed", "device_delete", 501, None, "ip_keyed")?;
+    let register =
+        registration_request(&router, "principal_keyed", "device_delete", 501, None, "ip_keyed")?;
     router.mvp1_register_identity(&register)?;
     store.record_identity_registry(&router.mvp1_identities_snapshot())?;
     store.record_session_entry(

@@ -170,6 +170,18 @@ pub(crate) fn dispatch_protected_itest_request(
                 router_get_json(router, path)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
+        ("POST", "/mvp2/device-set") => {
+            let request: ramflux_node_core::DeviceSetPublishRequest =
+                ramflux_protocol::parse_i_json(&request.body)?;
+            let response: ramflux_protocol::SignedDeviceSetRecord =
+                router_post_json(router, "/mvp2/device-set", &request)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
+        ("GET", path) if path.starts_with("/mvp2/device-set/") => {
+            let response: Option<ramflux_protocol::SignedDeviceSetRecord> =
+                router_get_json(router, path)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
         ("POST", "/mvp1/identity/register") => {
             let mut registration: ramflux_node_core::IdentityRegisterRequest =
                 serde_json::from_slice(&request.body)?;

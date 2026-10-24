@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use crate::identity_authority::handle_signed_device_set;
 use std::io::Write;
 use std::time::Instant;
 
@@ -30,6 +31,9 @@ pub(crate) fn handle_itest_request(
         || handle_itest_s1_request(stream, &request, router)?
         || handle_itest_admin_request(stream, &request, router)?
     {
+        return Ok(());
+    }
+    if crate::identity_authority::handle_itest_identity_authority(stream, &request, router)? {
         return Ok(());
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -449,6 +453,15 @@ fn handle_mesh_general_value(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
     match (method, path) {
+        ("POST", "/mvp2/device-set") => {
+            let response = handle_signed_device_set(body, router)?;
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
+        ("GET", path) if path.starts_with("/mvp2/device-set/") => {
+            let response =
+                router.state().signed_device_set(path.trim_start_matches("/mvp2/device-set/"));
+            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
+        }
         ("POST", "/mvp1/identity/register") => {
             let response = handle_mvp1_identity_register(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
@@ -655,15 +668,19 @@ fn handle_mvp1_identity_register(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
 ) -> anyhow::Result<ramflux_node_core::IdentityRegistrationResponse> {
-    let request: ramflux_node_core::IdentityRegisterRequest = serde_json::from_slice(body)?;
+    let mut request: ramflux_node_core::IdentityRegisterRequest =
+        ramflux_protocol::parse_i_json(body)?;
+    request.now = i64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+    )?;
     tracing::info!(
         principal_id = %request.proof.principal_id,
         device_id = %request.proof.device_id,
         target_delivery_id = %request.target_delivery_id,
         "router decoded mvp1 identity registration"
     );
-    let response = state.mvp1_register_identity(&request)?;
-    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    let response = state.register_identity_durable(&request, store)?;
+    state.persist_identity_registry(store)?;
     let session = state
         .session(&response.target_delivery_id)
         .ok_or_else(|| anyhow::anyhow!("session missing after identity registration"))?;
@@ -694,7 +711,7 @@ fn handle_mvp6_registration_policy(
     let request: ramflux_node_core::RegistrationPolicy = serde_json::from_slice(body)?;
     state.mvp6_set_registration_policy(request);
     let response = state.mvp6_registration_policy();
-    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    state.persist_identity_registry(store)?;
     Ok(response)
 }
 
@@ -705,7 +722,7 @@ fn handle_mvp6_friend_request(
 ) -> anyhow::Result<ramflux_node_core::FriendRequestBudgetResponse> {
     let request: ramflux_node_core::FriendRequestBudgetRequest = serde_json::from_slice(body)?;
     let response = state.mvp6_record_friend_request(&request)?;
-    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    state.persist_identity_registry(store)?;
     Ok(response)
 }
 
@@ -725,7 +742,7 @@ fn handle_mvp1_device_revoke(
 ) -> anyhow::Result<ramflux_node_core::DeviceRevokeResponse> {
     let request: ramflux_node_core::DeviceRevokeRequest = serde_json::from_slice(body)?;
     let response = state.mvp1_revoke_device(&request)?;
-    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    state.persist_identity_registry(store)?;
     Ok(response)
 }
 
@@ -740,7 +757,7 @@ fn handle_mvp1_prekey_publish(
         "router decoded mvp1 prekey publish"
     );
     let response = state.mvp1_publish_prekey(request)?;
-    store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+    state.persist_identity_registry(store)?;
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),

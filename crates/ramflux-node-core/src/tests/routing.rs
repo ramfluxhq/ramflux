@@ -231,6 +231,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
 
     let router = RouterCore::new();
     router.mvp1_register_identity(&registration_request(
+        &router,
         "principal_fanout_collision_a",
         "source_a",
         701,
@@ -238,6 +239,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         "ip_fanout_collision_a_source",
     )?)?;
     router.mvp1_register_identity(&registration_request(
+        &router,
         "principal_fanout_collision_a",
         "c",
         702,
@@ -245,6 +247,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         "ip_fanout_collision_a_peer",
     )?)?;
     router.mvp1_register_identity(&registration_request(
+        &router,
         "principal_fanout_collision_b",
         "source_b",
         703,
@@ -252,6 +255,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         "ip_fanout_collision_b_source",
     )?)?;
     router.mvp1_register_identity(&registration_request(
+        &router,
         "principal_fanout_collision_b",
         "b:c",
         704,
@@ -373,6 +377,7 @@ fn home_node_migration_apply_is_idempotent_and_rejects_rollback()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = RouterCore::new();
     let request = registration_request(
+        &router,
         "principal_migrate_apply",
         "device_migrate_apply",
         801,
@@ -431,6 +436,7 @@ fn home_node_migration_registration_guard_respects_effective_at()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = RouterCore::new();
     let initial = registration_request(
+        &router,
         "principal_migrate_register",
         "device_migrate_root",
         811,
@@ -450,6 +456,7 @@ fn home_node_migration_registration_guard_respects_effective_at()
     router.apply_home_node_migration(&proof, &initial.proof, initial.now + 1)?;
 
     let before = registration_request(
+        &router,
         "principal_migrate_register",
         "device_before_effective",
         812,
@@ -459,6 +466,7 @@ fn home_node_migration_registration_guard_respects_effective_at()
     router.mvp1_register_identity(&before)?;
 
     let mut after = registration_request(
+        &router,
         "principal_migrate_register",
         "device_after_effective",
         813,
@@ -472,6 +480,7 @@ fn home_node_migration_registration_guard_respects_effective_at()
     );
 
     let mut other = registration_request(
+        &router,
         "principal_not_migrated",
         "device_not_migrated",
         814,
@@ -489,6 +498,7 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
 {
     let router = RouterCore::new();
     let request = registration_request(
+        &router,
         "principal_migrate_delivery",
         "device_migrate_delivery",
         821,
@@ -539,6 +549,7 @@ fn home_node_migration_delivery_signs_nack_when_node_service_signer_is_configure
     let signer = NodeServiceSigningKey::from_seed([0x73; 32]);
     router.set_node_service_signer(Some(signer.clone()));
     let request = registration_request(
+        &router,
         "principal_migrate_signed_nack",
         "device_migrate_signed_nack",
         822,
@@ -593,6 +604,7 @@ fn home_node_route_update_proof_applies_and_rejects_invalid_inputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = RouterCore::new();
     let request = registration_request(
+        &router,
         "principal_route_update",
         "device_route_update",
         841,
@@ -650,6 +662,7 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = RouterCore::new();
     let request = registration_request(
+        &router,
         "principal_forward_window",
         "device_forward_window",
         843,
@@ -736,6 +749,7 @@ fn home_node_migration_new_home_accepts_forwarded_local_delivery()
     let router = RouterCore::new();
     router.set_local_home_node_id(Some("node_new_local.example".to_owned()));
     let request = registration_request(
+        &router,
         "principal_forward_new_home",
         "device_forward_new_home",
         845,
@@ -782,6 +796,7 @@ fn home_node_migration_new_home_accepts_forwarded_local_delivery()
     assert_eq!(envelope_id, "env_forward_new_home");
 
     let mut new_device = registration_request(
+        &router,
         "principal_forward_new_home",
         "device_forward_new_home_after",
         846,
@@ -799,6 +814,7 @@ fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
     let router = RouterCore::new();
     router.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([0x95; 32])));
     let request = registration_request(
+        &router,
         "principal_forward_fallback",
         "device_forward_fallback",
         844,
@@ -914,6 +930,7 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
     assert!(
         router
             .mvp1_register_identity(&registration_request(
+                &router,
                 "alice_pow_missing",
                 "alice_device_missing",
                 1,
@@ -925,6 +942,7 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
     assert!(
         router
             .mvp1_register_identity(&registration_request(
+                &router,
                 "alice_pow_bad",
                 "alice_device_bad",
                 2,
@@ -936,6 +954,7 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
 
     let alice_pow = solved_pow("alice_pow_ok", POW_BITS);
     let alice = router.mvp1_register_identity(&registration_request(
+        &router,
         "alice_pow_ok",
         "alice_device_ok",
         3,
@@ -948,6 +967,7 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
     assert!(
         router
             .mvp1_register_identity(&registration_request(
+                &router,
                 "bob_pow_ok",
                 "bob_device_ok",
                 4,
@@ -960,6 +980,7 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
     assert!(
         router
             .mvp1_register_identity(&registration_request(
+                &router,
                 "carol_pow_limited",
                 "carol_device_limited",
                 5,

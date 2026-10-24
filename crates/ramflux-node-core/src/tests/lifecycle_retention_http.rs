@@ -7,7 +7,8 @@ use super::*;
 fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = RouterCore::new();
-    let register = registration_request("principal_delete", "device_delete", 91, None, "ip_a")?;
+    let register =
+        registration_request(&router, "principal_delete", "device_delete", 91, None, "ip_a")?;
     router.mvp1_register_identity(&register)?;
     router.submit_envelope(envelope(
         "env_before_delete",

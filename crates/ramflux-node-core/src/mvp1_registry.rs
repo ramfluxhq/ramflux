@@ -22,6 +22,8 @@ pub const IDENTITY_BIND_CAPABILITY: &str = "device.delivery.bind";
 pub struct IdentityRegisterRequest {
     pub root_public_key: String,
     #[serde(default)]
+    pub device_set: Option<ramflux_protocol::SignedDeviceSetRecord>,
+    #[serde(default)]
     pub principal_commitment: String,
     pub branch_public_key: String,
     pub proof: ramflux_crypto::BranchProofDocument,
@@ -158,6 +160,8 @@ pub struct DeviceManifestEntry {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceManifestResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_device_set: Option<ramflux_protocol::SignedDeviceSetRecord>,
     pub principal_id: String,
     pub principal_commitment: String,
     pub root_public_key: String,
@@ -216,13 +220,18 @@ pub(crate) struct IdentityDeviceRecord {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IdentityRegistry {
-    root_public_keys: BTreeMap<String, String>,
     #[serde(default)]
-    root_public_keys_by_commitment: BTreeMap<String, String>,
+    pub(crate) identity_authority_fences:
+        BTreeMap<String, crate::identity_authority::IdentityAuthorityFence>,
+    #[serde(default)]
+    pub(crate) signed_device_sets: BTreeMap<String, ramflux_protocol::SignedDeviceSetRecord>,
+    pub(crate) root_public_keys: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) root_public_keys_by_commitment: BTreeMap<String, String>,
     pub(crate) devices: BTreeMap<String, IdentityDeviceRecord>,
-    revoked_devices: BTreeSet<String>,
+    pub(crate) revoked_devices: BTreeSet<String>,
     seen_proofs: BTreeSet<String>,
-    prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
+    pub(crate) prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
     #[serde(default)]
     registration_policy: RegistrationPolicy,
     #[serde(default)]
@@ -242,6 +251,16 @@ impl IdentityRegistry {
     /// # Errors
     /// Returns an error when the proof is invalid, replayed, expired, or revoked.
     pub fn register_identity(
+        &mut self,
+        request: &IdentityRegisterRequest,
+    ) -> Result<(SessionDescriptor, RegistrationTrustTier), NodeCoreError> {
+        let mut candidate = self.clone();
+        candidate.authorize_root_bound_registration(request)?;
+        let result = candidate.register_identity_inner(request)?;
+        *self = candidate;
+        Ok(result)
+    }
+    fn register_identity_inner(
         &mut self,
         request: &IdentityRegisterRequest,
     ) -> Result<(SessionDescriptor, RegistrationTrustTier), NodeCoreError> {
@@ -430,6 +449,11 @@ impl IdentityRegistry {
     /// # Errors
     /// Returns an error when the revocation is not signed by the registered principal root.
     pub fn revoke_device(&mut self, request: &DeviceRevokeRequest) -> Result<bool, NodeCoreError> {
+        if self.signed_device_sets.contains_key(&request.principal_commitment) {
+            return Err(NodeCoreError::ItestHttp(
+                "root-bound devices require a newer signed device-set revocation".into(),
+            ));
+        }
         let expected_root = self
             .root_public_keys_by_commitment
             .get(&request.principal_commitment)
@@ -478,6 +502,7 @@ impl IdentityRegistry {
         let device = self.devices.get(&request.device_id).ok_or_else(|| {
             NodeCoreError::ItestHttp(format!("unknown device: {}", request.device_id))
         })?;
+        self.authorize_bound_prekey(device, &request.bundle)?;
         let branch_public_key =
             ramflux_crypto::verifying_key_from_base64url(&device.branch_public_key)
                 .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
@@ -489,7 +514,7 @@ impl IdentityRegistry {
 
     #[must_use]
     pub fn prekey_bundle(&self, device_id: &str) -> Option<&ramflux_crypto::PrekeyBundle> {
-        if self.revoked_devices.contains(device_id) {
+        if !self.device_is_usable(device_id) {
             return None;
         }
         self.prekey_bundles.get(device_id)
@@ -497,7 +522,7 @@ impl IdentityRegistry {
 
     #[must_use]
     pub fn principal_commitment_for_device(&self, device_id: &str) -> Option<&str> {
-        if self.revoked_devices.contains(device_id) {
+        if !self.device_is_usable(device_id) {
             return None;
         }
         self.devices.get(device_id).map(|device| device.principal_commitment.as_str())
@@ -507,7 +532,7 @@ impl IdentityRegistry {
     pub fn identity_keys_for_target_delivery_id(&self, target_delivery_id: &str) -> Vec<String> {
         let Some(device) = self.devices.values().find(|device| {
             device.target_delivery_id == target_delivery_id
-                && !self.revoked_devices.contains(&device.device_id)
+                && self.device_is_usable(&device.device_id)
         }) else {
             return Vec::new();
         };
@@ -529,7 +554,7 @@ impl IdentityRegistry {
             .values()
             .filter(|device| {
                 device.principal_commitment == principal_commitment
-                    && !self.revoked_devices.contains(&device.device_id)
+                    && self.device_is_usable(&device.device_id)
             })
             .filter_map(|device| {
                 let prekey_bundle = self.prekey_bundles.get(&device.device_id)?;
@@ -550,8 +575,13 @@ impl IdentityRegistry {
             })
             .collect::<Vec<_>>();
         devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-        let principal_id = devices.first()?.principal_id.clone();
+        let signed_device_set = self.signed_device_sets.get(principal_commitment).cloned();
+        let principal_id = signed_device_set
+            .as_ref()
+            .map(|set| set.principal_id.clone())
+            .or_else(|| devices.first().map(|device| device.principal_id.clone()))?;
         Some(DeviceManifestResponse {
+            signed_device_set,
             principal_id,
             principal_commitment: principal_commitment.to_owned(),
             root_public_key: root_public_key.clone(),
@@ -562,6 +592,9 @@ impl IdentityRegistry {
     #[must_use]
     pub fn device_auth_key(&self, device_id: &str) -> Option<DeviceAuthKeyResponse> {
         let device = self.devices.get(device_id)?;
+        if !self.revoked_devices.contains(device_id) && !self.device_is_usable(device_id) {
+            return None;
+        }
         Some(DeviceAuthKeyResponse {
             principal_id: device.principal_id.clone(),
             device_id: device.device_id.clone(),
@@ -574,7 +607,7 @@ impl IdentityRegistry {
 
     #[must_use]
     pub fn target_delivery_id_for_device(&self, device_id: &str) -> Option<&str> {
-        if self.revoked_devices.contains(device_id) {
+        if !self.device_is_usable(device_id) {
             return None;
         }
         self.devices.get(device_id).map(|device| device.target_delivery_id.as_str())
@@ -584,7 +617,9 @@ impl IdentityRegistry {
     pub fn target_delivery_id_for_principal(&self, principal_id: &str) -> Option<&str> {
         self.devices
             .values()
-            .find(|device| device.principal_id == principal_id)
+            .find(|device| {
+                device.principal_id == principal_id && self.device_is_usable(&device.device_id)
+            })
             .map(|device| device.target_delivery_id.as_str())
     }
 
@@ -599,7 +634,7 @@ impl IdentityRegistry {
             .filter(|device| {
                 device.principal_id == principal_id
                     && device.device_id != source_device_id
-                    && !self.revoked_devices.contains(&device.device_id)
+                    && self.device_is_usable(&device.device_id)
             })
             .map(|device| (device.device_id.clone(), device.target_delivery_id.clone()))
             .collect()
@@ -639,6 +674,18 @@ impl IdentityRegistry {
     }
 
     pub(crate) fn remove_principal_metadata(&mut self, principal_id: &str) -> usize {
+        // Preserve a minimal commitment fence after irreversible identity deletion.
+        // It retains no root/device key or route and cannot authorize future enrollments.
+        for set in self.signed_device_sets.values().filter(|set| set.principal_id == principal_id) {
+            self.identity_authority_fences.insert(
+                set.principal_commitment.clone(),
+                crate::identity_authority::IdentityAuthorityFence {
+                    principal_kind: set.principal_kind,
+                    deleted: true,
+                },
+            );
+        }
+        self.signed_device_sets.retain(|_, record| record.principal_id != principal_id);
         let before_devices = self.devices.len();
         let before_prekeys = self.prekey_bundles.len();
         let before_trust = self.registration_trust_tiers.len();

@@ -333,12 +333,7 @@ impl RouterRedbStore {
         let inbox_started = Instant::now();
         self.replace_incremental_router_tables(&snapshot)?;
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
-        save_snapshot(
-            &self.db,
-            ROUTER_SNAPSHOT_TABLE,
-            ROUTER_IDENTITY_REGISTRY_KEY,
-            &snapshot.mvp1_identities,
-        )?;
+        router.persist_identity_registry(self)?;
         save_snapshot(
             &self.db,
             ROUTER_SNAPSHOT_TABLE,

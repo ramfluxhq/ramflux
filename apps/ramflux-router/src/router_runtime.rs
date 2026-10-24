@@ -481,22 +481,55 @@ mod tests {
         target_delivery_id: &str,
         nonce: u64,
     ) -> anyhow::Result<()> {
-        let root_seed = seed_from_nonce(0x31, nonce);
+        let root_seed = ramflux_crypto::blake3_256(
+            "ramflux.test.registration_root.v1",
+            principal_id.as_bytes(),
+        );
         let device_seed = seed_from_nonce(0x41, nonce);
         let root = ramflux_crypto::create_identity_root(principal_id, root_seed);
         let device = ramflux_crypto::create_device_branch(principal_id, device_id, 1, device_seed);
-        let proof = ramflux_crypto::authorize_device_branch(
+        let agreement = ramflux_crypto::X25519KeyPair::from_seed(seed_from_nonce(0x51, nonce));
+        let proof = ramflux_crypto::authorize_device_branch_v2(
             &root,
             &device,
-            ramflux_node_core::IDENTITY_BIND_AUDIENCE,
-            vec![ramflux_node_core::IDENTITY_BIND_CAPABILITY.to_owned()],
-            1_760_000_000 + i64::try_from(nonce)?,
-            1_760_003_600 + i64::try_from(nonce)?,
+            ramflux_crypto::BranchAuthorization {
+                audience: ramflux_node_core::IDENTITY_BIND_AUDIENCE,
+                capability_scope: vec![ramflux_node_core::IDENTITY_BIND_CAPABILITY.into()],
+                issued_at: 1_760_000_000 + i64::try_from(nonce)?,
+                expires_at: 1_760_003_600 + i64::try_from(nonce)?,
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                agreement_identity_public_key: agreement.public,
+            },
+        )?;
+        let commitment =
+            ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
+        let previous = state.signed_device_set(&commitment);
+        let mut entries = previous.as_ref().map_or_else(Vec::new, |set| set.devices.clone());
+        let keys = ramflux_crypto::device_key_commitments(
+            &ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes()),
+            &ramflux_protocol::encode_base64url(agreement.public),
+        )?;
+        entries.push(ramflux_protocol::SignedDeviceSetEntry {
+            device_id: device_id.into(),
+            device_epoch: 1,
+            signing_key_commitment: keys.0,
+            agreement_key_commitment: keys.1,
+            status: ramflux_protocol::DeviceSetStatus::Active,
+            revoked_at: None,
+        });
+        let device_set = ramflux_crypto::sign_device_set(
+            &root,
+            ramflux_crypto::DeviceSetSigningInput {
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                device_set_epoch: previous.map_or(1, |set| set.device_set_epoch + 1),
+                devices: entries,
+            },
         )?;
         let root_public_key =
             ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
         let root_public_key_bytes = ramflux_protocol::decode_base64url(&root_public_key)?;
         let request = ramflux_node_core::IdentityRegisterRequest {
+            device_set: Some(device_set),
             principal_commitment: ramflux_crypto::blake3_256_base64url(
                 "ramflux.identity.root_public_key.commitment.v1",
                 &root_public_key_bytes,
