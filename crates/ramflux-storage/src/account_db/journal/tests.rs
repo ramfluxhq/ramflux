@@ -675,6 +675,12 @@ fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
     db.persist_group_member_device_key("legacy", &qualified, "same-key")?;
     assert_eq!(db.group_member_device_key("legacy", &qualified)?.as_deref(), Some("same-key"));
     assert_eq!(db.group_member_device_key("legacy", &foreign)?, None);
+    let selected = db
+        .group_member_key_binding_by_name("legacy", "shared")?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(selected.principal_commitment.as_deref(), Some("bob-root"));
+    assert_eq!(db.group_member_device_key("legacy", "shared")?.as_deref(), Some("same-key"));
+
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

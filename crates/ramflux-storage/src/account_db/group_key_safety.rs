@@ -76,7 +76,7 @@ impl AccountDb {
         group: &str,
         raw: &str,
     ) -> Result<Option<GroupMemberKeyBinding>, StorageError> {
-        let mut query=self.connection.prepare("SELECT k.member_id FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) WHERE k.group_id=?1 AND COALESCE(k.raw_device_id,k.member_id)=?2 AND m.active=1 LIMIT 2")?;
+        let mut query=self.connection.prepare("SELECT k.member_id FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) WHERE k.group_id=?1 AND COALESCE(k.raw_device_id,k.member_id)=?2 AND m.active=1 AND (k.principal_commitment IS NOT NULL OR NOT EXISTS(SELECT 1 FROM group_member_device_key bound WHERE bound.group_id=k.group_id AND COALESCE(bound.raw_device_id,bound.member_id)=?2 AND bound.principal_commitment IS NOT NULL)) LIMIT 2")?;
         let keys = query
             .query_map(params![group, raw], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
