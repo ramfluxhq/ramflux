@@ -26,6 +26,7 @@ mod kdf;
 mod key_verification;
 mod prekey;
 mod recovery;
+mod sframe;
 mod signing;
 mod x3dh;
 #[cfg(test)]
@@ -98,3 +99,5 @@ pub const FIXTURE_SIGNING_KEY_BYTES: [u8; 32] = [
 pub const fn crate_name() -> &'static str {
     CRATE_NAME
 }
+
+pub use sframe::{SFRAME_AES_256_GCM_SHA512_128, SFrameHeader, SFrameReceiver, SFrameSender};
