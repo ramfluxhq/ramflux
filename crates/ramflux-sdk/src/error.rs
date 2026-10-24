@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("task delivery payload is too large: {bytes} bytes (limit {limit})")]
+    TaskDeliveryTooLarge { bytes: usize, limit: usize },
     #[error("{message}")]
     SurfaceRefused { reason: crate::SurfaceRefusalCode, message: String },
     #[error("surface delivery too large: {bytes} bytes exceeds {limit}")]

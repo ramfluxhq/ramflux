@@ -79,7 +79,7 @@ pub(super) fn is_reader_request(method: &str) -> bool {
     super::read_model::handles(method)
         || matches!(
             method,
-            "message.list" | "message.read" | "conversation.list" | "surface.get" | "surface.list"
+            "message.list" | "message.read" | "conversation.list" | "surface.get" | "surface.list" | "task.get" | "task.list"
         )
 }
 
@@ -93,6 +93,7 @@ pub(super) fn read(
     if request.method == "stream.read" {
         return super::subscription::read(client.account_db()?, request);
     }
+    if matches!(request.method.as_str(), "task.get" | "task.list") {return super::dispatch::task::read_task(client,request);}
     if matches!(request.method.as_str(), "surface.get" | "surface.list") {
         return super::dispatch::surface::read_surface(client, request);
     }
@@ -152,6 +153,10 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
             value["content_type"] = serde_json::json!("surface");
             value["surface_id"] = serde_json::json!(surface);
             value["body_utf8"] = serde_json::json!(text);
+        }
+        if !message.deleted && let Some(task)=client.task_message_metadata(conversation,&message.message_id)? {
+            value["content_type"]=serde_json::json!("task");value["task_id"]=task["task_id"].clone();
+            value["actor_kind_verified"]=task["actor_kind_verified"].clone();value["body_utf8"]=task["fallback_text"].clone();
         }
         messages.push(value);
     }

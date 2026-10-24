@@ -88,7 +88,7 @@ impl GatewaySessionFrameSource for Gateway {
     }
 }
 
-pub(super) fn root(name: &str) -> PathBuf {
+pub(super) pub(super) fn root(name: &str) -> PathBuf {
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
     let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
@@ -97,7 +97,7 @@ pub(super) fn root(name: &str) -> PathBuf {
     PathBuf::from("/tmp")
         .join(format!("ramflux-actor-{name}-{}-{sequence}-{unique}", std::process::id()))
 }
-pub(super) fn account(
+pub(super) pub(super) fn account(
     root: &Path,
     id: &str,
     blocked: Option<oneshot::Sender<()>>,

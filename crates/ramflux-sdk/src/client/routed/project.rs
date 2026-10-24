@@ -65,7 +65,9 @@ impl RamfluxClient {
             body,
             false,
         )?;
-        let display = surface.as_ref().map_or(body, |result| result.fallback_text.as_bytes());
+        if self.account_db()?.client_record("conversation",&route.conversation_id)?.is_none() {self.account_db()?.persist_client_record("conversation",&route.conversation_id,&serde_json::json!({"kind":"direct","participants":[self.device_branch.as_ref().map(|b|&b.principal_id),Some(&entry.envelope.source_principal_id)]}))?;}
+        let task=self.project_task_message(&crate::client::task::Delivery{conversation:&route.conversation_id,message:&route.message_id,principal:&entry.envelope.source_principal_id,device:&entry.envelope.source_device_id,at:entry.envelope.created_at},body)?;
+        let display=task.as_ref().map_or_else(||surface.as_ref().map_or(body,|r|r.fallback_text.as_bytes()),|r|r.fallback_text.as_bytes());
         self.append_plaintext_projection_once(
             &route.conversation_id,
             &projection,
@@ -163,8 +165,9 @@ impl RamfluxClient {
                 &plaintext,
                 false,
             )?;
-            let is_surface = surface.is_some();
-            let display = surface.map_or(plaintext, |result| result.fallback_text.into_bytes());
+            let task=self.project_task_message(&crate::client::task::Delivery{conversation:&route.conversation_id,message:&route.message_id,principal:&entry.envelope.source_principal_id,device:&entry.envelope.source_device_id,at:entry.envelope.created_at},&plaintext)?;
+            let is_surface=surface.is_some() || task.is_some();
+            let display=task.map_or_else(||surface.map_or(plaintext,|r|r.fallback_text.into_bytes()),|r|r.fallback_text.into_bytes());
             if is_surface {
                 self.account_db()?.replace_surface_message_content(
                     &route.conversation_id,
