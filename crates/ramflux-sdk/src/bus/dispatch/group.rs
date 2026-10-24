@@ -19,7 +19,7 @@ pub(crate) async fn dispatch_group_bus_request(
             if let Some(public_key) = body.creator_signing_public_key.as_ref() {
                 account.client.account_db()?.persist_group_member_device_key(
                     &body.group_id,
-                    &body.creator_id,
+                    &account.client.local_device_identity(&body.creator_id)?,
                     public_key,
                 )?;
             }
@@ -1455,6 +1455,25 @@ mod tests {
         Ok(())
     }
 
+    fn verified_member_add_body(
+        client: &RamfluxClient,
+        group: &str,
+        principal: &str,
+        device: &str,
+        seed: [u8; 32],
+    ) -> Result<LocalBusGroupMemberAddRequest, SdkError> {
+        let manifest = crate::client::identity_authority::test_support::remote_manifest(
+            principal, device, seed,
+        )?;
+        client.observe_device_manifest_json(
+            serde_json::to_value(&manifest)?,
+            &manifest.principal_commitment,
+        )?;
+        let mut body = member_add_body(group, device);
+        body.member_principal_commitment = Some(manifest.principal_commitment);
+        body.member_signing_public_key = Some(manifest.devices[0].branch_public_key.clone());
+        Ok(body)
+    }
     #[test]
     fn dispatch_onboard_event_owner_can_sign_multiple_direct_adds() -> Result<(), SdkError> {
         let alice = account_state(
@@ -1466,7 +1485,13 @@ mod tests {
         )?;
         alice.client.create_group("group_s44", "alice_device_s44")?;
 
-        let bob_body = member_add_body("group_s44", "bob_device_s44");
+        let bob_body = verified_member_add_body(
+            &alice.client,
+            "group_s44",
+            "bob",
+            "bob_device_s44",
+            [81; 32],
+        )?;
         let bob_group = alice.client.account_db()?.add_group_member(
             &bob_body.group_id,
             &bob_body.member_id,
@@ -1485,7 +1510,13 @@ mod tests {
         )?;
         assert!(bob_event.is_some());
 
-        let carol_body = member_add_body("group_s44", "carol_device_s44");
+        let carol_body = verified_member_add_body(
+            &alice.client,
+            "group_s44",
+            "carol",
+            "carol_device_s44",
+            [91; 32],
+        )?;
         let carol_group = alice.client.account_db()?.add_group_member(
             &carol_body.group_id,
             &carol_body.member_id,

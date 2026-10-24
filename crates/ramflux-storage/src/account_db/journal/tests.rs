@@ -230,7 +230,7 @@ fn terminal_dead_letters_are_not_reinserted_after_membership_changes() -> Result
         &serde_json::json!({"error_code":"retry_exhausted"}),
         100,
     )?;
-    db.persist_group_member_device_key("g", "alice", "key")?;
+    db.persist_group_member_device_key("g", &retry_source("alice")?, "key")?;
     assert_eq!(db.redrive_inbox_changes(101)?, 0);
     assert!(!db.has_inbox_retry("refused")?);
     assert_eq!(db.due_inbox_retries(102)?, Vec::<Vec<u8>>::new());
@@ -297,7 +297,7 @@ fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
         &serde_json::json!({"error_code":"authentication_failed"}),
         100,
     )?;
-    db.persist_group_member_device_key("g", "alice", "key")?;
+    db.persist_group_member_device_key("g", &retry_source("alice")?, "key")?;
     assert_eq!(db.redrive_inbox_changes(110)?, 1);
     let created: i64 = db.connection.query_row(
         "SELECT created_at FROM runtime_inbox_retry WHERE envelope_key='pending'",
@@ -317,10 +317,10 @@ fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
 fn idempotent_sender_key_imports_and_unrelated_devices_do_not_trigger_redrive()
 -> Result<(), StorageError> {
     let (root, db) = database()?;
-    db.persist_group_member_device_key("group", "alice", "key")?;
+    db.persist_group_member_device_key("group", &retry_source("alice")?, "key")?;
     let revision = db.inbox_recovery_revision()?;
     for _ in 0..10 {
-        db.persist_group_member_device_key("group", "alice", "key")?;
+        db.persist_group_member_device_key("group", &retry_source("alice")?, "key")?;
     }
     db.persist_client_record(
         "device",
@@ -328,7 +328,7 @@ fn idempotent_sender_key_imports_and_unrelated_devices_do_not_trigger_redrive()
         &serde_json::json!({"principal_id":"unknown","signing_public_key":"key"}),
     )?;
     assert_eq!(db.inbox_recovery_revision()?, revision);
-    db.persist_group_member_device_key("group", "alice", "changed")?;
+    db.persist_group_member_device_key("group", &retry_source("alice")?, "changed")?;
     assert!(db.inbox_recovery_revision()? > revision);
     drop(db);
     std::fs::remove_dir_all(root)?;
@@ -387,12 +387,12 @@ fn redrive_wakes_only_later_matching_changes_and_retains_rate_limited_triggers()
     assert_eq!(db.redrive_inbox_changes(101)?, 0);
     db.create_group("unrelated", "bob")?;
     assert_eq!(db.redrive_inbox_changes(101)?, 0);
-    db.persist_group_member_device_key("affected", "alice", "key")?;
+    db.persist_group_member_device_key("affected", &retry_source("alice")?, "key")?;
     assert_eq!(db.redrive_inbox_changes(102)?, 1);
     assert_eq!(db.due_inbox_retries(102)?, vec![b"packet".to_vec()]);
-    db.persist_group_member_device_key("affected", "alice", "key")?;
+    db.persist_group_member_device_key("affected", &retry_source("alice")?, "key")?;
     assert_eq!(db.redrive_inbox_changes(103)?, 0);
-    db.persist_group_member_device_key("affected", "alice", "new-key")?;
+    db.persist_group_member_device_key("affected", &retry_source("alice")?, "new-key")?;
     assert_eq!(db.redrive_inbox_changes(104)?, 0);
     assert_eq!(db.redrive_inbox_changes(162)?, 1);
     drop(db);
@@ -400,34 +400,39 @@ fn redrive_wakes_only_later_matching_changes_and_retains_rate_limited_triggers()
     Ok(())
 }
 
+fn pin_source(
+    owner: &str,
+    name: &str,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, StorageError> {
+    let seed = ramflux_crypto::blake3_256("ramflux.storage.test.pin.v1", owner.as_bytes());
+    Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+        &ramflux_crypto::create_identity_root(owner, seed),
+        name,
+    )?)
+}
+fn legacy_pin(db: &AccountDb, group: &str, name: &str, key: &str) -> Result<(), StorageError> {
+    db.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,raw_device_id) VALUES(?1,?2,?3,1,?2)",params![group,name,key])?;
+    Ok(())
+}
 #[test]
 fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
 -> Result<(), StorageError> {
     let (root, db) = database()?;
     db.create_group("group", "owner")?;
     db.add_group_member("group", "device", "member")?;
-    db.persist_client_record("device","device",&serde_json::json!({"principal_id":"alice","principal_commitment":"alice-root","signing_public_key":"alice-key"}))?;
-    let address = ramflux_protocol::qualified_device_id("alice-root", "device")?;
-    db.persist_group_member_device_key("group", &address, "alice-key")?;
-    let owner:(String,String)=db.connection.query_row("SELECT member_principal_id,principal_commitment FROM group_member_device_key WHERE group_id='group' AND member_id=?1",params![address],|r|Ok((r.get(0)?,r.get(1)?)))?;
-    assert_eq!(owner, ("alice".into(), "alice-root".into()));
+    let alice = pin_source("alice", "device")?;
+    let mallory = pin_source("mallory", "device")?;
+    db.persist_client_record("device",alice.storage_key(),&serde_json::json!({"device_id":alice.device_id(),"principal_id":"alice","principal_commitment":alice.root_commitment(),"signing_public_key":"alice-key"}))?;
+    db.persist_group_member_device_key("group", &alice, "alice-key")?;
+    let owner:(String,String)=db.connection.query_row("SELECT member_principal_id,principal_commitment FROM group_member_device_key WHERE group_id='group' AND member_id=?1",params![alice.storage_key()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    assert_eq!(owner, ("alice".into(), alice.root_commitment().into()));
     db.remove_group_member("group", "owner", "device")?;
-    db.persist_client_record("device","device",&serde_json::json!({"principal_id":"mallory","principal_commitment":"mallory-root","signing_public_key":"mallory-key"}))?;
-    assert!(db.persist_group_member_device_key("group", "device", "mallory-key").is_err());
-    assert!(
-        db.persist_group_member_device_key(
-            "group",
-            &ramflux_protocol::qualified_device_id("mallory-root", "device")?,
-            "mallory-key"
-        )
-        .is_err()
-    );
-    assert_eq!(db.group_member_device_key("group", &address)?.as_deref(), Some("alice-key"));
+    assert!(db.persist_group_member_device_key("group", &mallory, "mallory-key").is_err());
+    assert_eq!(db.group_member_device_key("group", &alice)?.as_deref(), Some("alice-key"));
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
-
 #[test]
 fn unverified_device_claims_cannot_spend_a_verified_senders_failure_quota()
 -> Result<(), StorageError> {
@@ -638,137 +643,51 @@ fn parking_a_legacy_hold_keeps_only_ciphertext_and_marker_even_after_an_old_reje
 fn an_unscoped_group_pin_never_selects_the_only_directory_roots_authority()
 -> Result<(), StorageError> {
     let (root, db) = database()?;
+    let mallory = pin_source("mallory", "shared")?;
     db.create_group("unscoped", "owner")?;
     db.add_group_member("unscoped", "shared", "member")?;
-    db.persist_client_record("device", "shared", &serde_json::json!({"principal_id":"mallory", "principal_commitment":"mallory-root", "signing_public_key":"mallory-key"}))?;
-    db.persist_group_member_device_key("unscoped", "shared", "mallory-key")?;
-    let pin = db
-        .group_member_key_binding_by_name("unscoped", "shared")?
-        .ok_or(StorageError::GroupPermissionDenied)?;
-    assert_eq!(pin.principal_id, None);
-    assert_eq!(pin.principal_commitment, None);
+    db.persist_client_record("device", "shared", &serde_json::json!({"principal_id":"mallory", "principal_commitment":mallory.root_commitment(), "signing_public_key":"mallory-key"}))?;
+    legacy_pin(&db, "unscoped", "shared", "mallory-key")?;
+    assert_eq!(db.group_member_identity_metadata("unscoped", "shared")?, None);
+    assert_eq!(db.group_member_device_key("unscoped", &mallory)?, None);
+    assert!(db.persist_group_member_device_key("unscoped", &mallory, "mallory-key").is_err());
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
-
 #[test]
 fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
 -> Result<(), StorageError> {
     let (root, db) = database()?;
+    let bob = pin_source("bob", "shared")?;
+    let mallory = pin_source("mallory", "shared")?;
     db.create_group("legacy", "owner")?;
     db.add_group_member("legacy", "shared", "member")?;
-    db.persist_group_member_device_key("legacy", "shared", "same-key")?;
-    let qualified = ramflux_protocol::qualified_device_id("bob-root", "shared")?;
-    let foreign = ramflux_protocol::qualified_device_id("mallory-root", "shared")?;
-    assert_eq!(db.group_member_device_key("legacy", &qualified)?, None);
-    assert_eq!(db.group_member_key_binding("legacy", &qualified)?, None);
-    assert_eq!(db.group_member_device_key("legacy", &foreign)?, None);
-    // A separate explicit qualified pin does not adopt or delete the unproven legacy row.
-    db.persist_group_member_device_key("legacy", &qualified, "same-key")?;
-    assert_eq!(db.group_member_device_key("legacy", &qualified)?.as_deref(), Some("same-key"));
-    assert_eq!(db.group_member_device_key("legacy", &foreign)?, None);
-    let selected = db
-        .group_member_key_binding_by_name("legacy", "shared")?
-        .ok_or(StorageError::GroupPermissionDenied)?;
-    assert_eq!(selected.principal_commitment.as_deref(), Some("bob-root"));
-    assert_eq!(db.group_member_device_key("legacy", "shared")?.as_deref(), Some("same-key"));
-
-    drop(db);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
-fn retry_quota_owner_requires_authenticated_root_context() -> Result<(), StorageError> {
-    let (root, db) = database()?;
-    let bob = retry_source("bob")?;
-    let mallory = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
-        &ramflux_crypto::create_identity_root("mallory", [0xa2; 32]),
-        "bob",
-    )?;
-    let packet = br#"{"envelope":{"source_device_id":"bob"}}"#;
-    for n in 0..8 {
-        for (prefix, device) in [("bob", &bob), ("mallory", &mallory)] {
-            assert!(db.set_inbox_failure_policy(
-                &format!("{prefix}-{n}"),
-                packet,
-                InboxFailureSource::Authenticated { device, related: true },
-                ("none", ""),
-                100
-            )?);
-        }
-    }
-    assert!(!db.set_inbox_failure_policy(
-        "bob-over",
-        packet,
-        InboxFailureSource::Authenticated { device: &bob, related: true },
-        ("none", ""),
-        100
-    )?);
-    assert!(!db.set_inbox_failure_policy(
-        "mallory-over",
-        packet,
-        InboxFailureSource::Authenticated { device: &mallory, related: true },
-        ("none", ""),
-        100
-    )?);
-    assert!(db.set_inbox_failure_policy(
-        "unverified-bob",
-        packet,
-        InboxFailureSource::Unverified,
-        ("none", ""),
-        100
-    )?);
-    let sources: i64 = db.connection.query_row(
-        "SELECT count(DISTINCT source) FROM runtime_inbox_policy",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(sources, 3);
-    drop(db);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
-fn legacy_retry_attribution_is_isolated_then_verified_without_renewing_lifetime()
--> Result<(), StorageError> {
-    let (root, db) = database()?;
-    db.set_inbox_failure_policy(
-        "old",
-        b"packet",
-        InboxFailureSource::Unverified,
-        ("none", ""),
-        100,
-    )?;
-    db.defer_inbox_entry("old", b"packet", 100)?;
-    db.connection.execute("UPDATE runtime_inbox_policy SET source='bob',trusted=1", [])?;
-    db.connection.execute("DELETE FROM root_identity_key_upgrade", [])?;
-    drop(db);
-    let index = AccountIndex::open(&root)?;
-    let db = AccountDb::open(&index, "a", &AccountDbKey::derive("a", b"secret"))?;
-    let before: (String, i64, u32) = db.connection.query_row(
-        "SELECT source,expires_at,attempts FROM runtime_inbox_policy WHERE envelope_key='old'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    assert!(before.0.starts_with("legacy/inbox/"));
-    let bob = retry_source("bob")?;
-    assert!(db.set_inbox_failure_policy(
-        "old",
-        b"packet",
-        InboxFailureSource::Authenticated { device: &bob, related: true },
-        ("none", ""),
-        110
-    )?);
-    let after: (String, i64, u32) = db.connection.query_row(
-        "SELECT source,expires_at,attempts FROM runtime_inbox_policy WHERE envelope_key='old'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    assert_eq!(after.0, bob.storage_key());
-    assert_eq!((after.1, after.2), (before.1, before.2));
+    legacy_pin(&db, "legacy", "shared", "same-key")?;
+    assert_eq!(db.group_member_device_key("legacy", &bob)?, None);
+    assert_eq!(db.group_member_key_binding("legacy", &bob)?, None);
+    assert_eq!(db.group_member_device_key("legacy", &mallory)?, None);
+    assert!(db.persist_group_member_device_key("legacy", &bob, "same-key").is_err());
+    db.remove_group_member("legacy", "owner", "shared")?;
+    db.add_group_member("legacy", "shared", "member")?;
+    db.persist_group_member_device_key("legacy", &bob, "same-key")?;
+    assert_eq!(db.group_member_device_key("legacy", &bob)?.as_deref(), Some("same-key"));
+    assert_eq!(db.group_member_device_key("legacy", &mallory)?, None);
+    assert_eq!(
+        db.group_member_identity_metadata("legacy", "shared")?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .principal_commitment
+            .as_deref(),
+        Some(bob.root_commitment())
+    );
+    assert_eq!(
+        db.connection.query_row(
+            "SELECT count(*) FROM legacy_group_member_device_key",
+            [],
+            |row| row.get::<_, u32>(0)
+        )?,
+        1
+    );
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

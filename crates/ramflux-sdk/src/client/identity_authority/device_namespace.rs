@@ -135,6 +135,9 @@ impl RamfluxClient {
         if pinned && self.friend_link_peer_is_accepted(principal)? {
             return Ok(true);
         }
-        Ok(self.account_db()?.has_group_device_relationship(principal, root, device)?)
+        Ok(self.account_db()?.has_group_device_relationship(
+            principal,
+            &self.device_identity_for_root(root, device)?,
+        )?)
     }
 }

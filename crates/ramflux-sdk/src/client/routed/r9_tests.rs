@@ -19,12 +19,20 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     let original = manifest(&alice)?;
     bob.client.account_db()?.persist_group_member_device_key(
         "pinned",
-        "alice",
+        &crate::client::identity_authority::test_support::group_device(
+            &bob.client,
+            "pinned",
+            "alice",
+        )?,
         &original.devices[0].branch_public_key,
     )?;
     bob.client.account_db()?.bind_group_member_key_identity(
         "pinned",
-        "alice",
+        &crate::client::identity_authority::test_support::group_device(
+            &bob.client,
+            "pinned",
+            "alice",
+        )?,
         "alice",
         &original.principal_commitment,
         &original.devices[0].branch_public_key,
@@ -80,7 +88,14 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     );
     assert_eq!(bob.client.direct_messages("group-thread")?, Vec::new());
     assert_eq!(
-        bob.client.account_db()?.group_member_device_key("pinned", "alice")?,
+        bob.client.account_db()?.group_member_device_key(
+            "pinned",
+            &crate::client::identity_authority::test_support::group_device(
+                &bob.client,
+                "pinned",
+                "alice"
+            )?
+        )?,
         Some(original.devices[0].branch_public_key.clone())
     );
     Ok(())

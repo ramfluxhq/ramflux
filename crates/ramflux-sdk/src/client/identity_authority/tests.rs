@@ -218,10 +218,10 @@ fn newer_root_authorized_rotation_retires_pairs_rotates_group_pin_and_preserves_
     peer.client.add_group_member("group", &reference, "member")?;
     let db = peer.client.account_db()?;
     let old = &original.devices[0].branch_public_key;
-    db.persist_group_member_device_key("group", &reference, old)?;
+    db.persist_group_member_device_key("group", &peer.client.device_identity(&reference)?, old)?;
     db.bind_group_member_key_identity(
         "group",
-        &reference,
+        &peer.client.device_identity(&reference)?,
         "alice",
         &original.principal_commitment,
         old,
@@ -250,7 +250,7 @@ fn newer_root_authorized_rotation_retires_pairs_rotates_group_pin_and_preserves_
             .any(|d| d == &reference)
     );
     assert_eq!(
-        db.group_member_device_key("group", &reference)?,
+        db.group_member_device_key("group", &peer.client.device_identity(&reference)?)?,
         Some(rotated.devices[0].branch_public_key.clone())
     );
     assert!(peer.client.friend_link_peer_is_accepted("alice")?);

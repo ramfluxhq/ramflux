@@ -111,7 +111,10 @@ fn seed_group_named(
     client: &RamfluxClient,
     group_id: &str,
     alice_key: &str,
+    bob_key: &str,
 ) -> Result<(), SdkError> {
+    let bob = fixture_manifest(bob_key, "bob_device")?;
+    client.observe_device_manifest_json(serde_json::to_value(&bob)?, &bob.principal_commitment)?;
     let manifest = fixture_manifest(alice_key, "alice_device")?;
     client.observe_device_manifest_json(
         serde_json::to_value(&manifest)?,
@@ -138,8 +141,8 @@ fn seed_group_named(
     }
     Ok(())
 }
-fn seed_group(client: &RamfluxClient, alice_key: &str) -> Result<(), SdkError> {
-    seed_group_named(client, "group_test", alice_key)
+fn seed_group(client: &RamfluxClient, alice_key: &str, bob_key: &str) -> Result<(), SdkError> {
+    seed_group_named(client, "group_test", alice_key, bob_key)
 }
 fn seed_member_key(client: &RamfluxClient, member: &str, public: &str) -> Result<(), SdkError> {
     let manifest = fixture_manifest(public, member)?;
@@ -200,7 +203,14 @@ fn bootstrap_member_join_requires_verified_actor_key_and_source_device() -> Resu
     assert_eq!(state.roles.get("alice_device").map(String::as_str), Some("owner"));
     assert_eq!(state.roles.get("bob_device").map(String::as_str), Some("member"));
     assert_eq!(
-        bob.account_db()?.group_member_device_key_by_name("group_join", "alice_device")?,
+        bob.account_db()?.group_member_device_key(
+            "group_join",
+            &crate::client::identity_authority::test_support::group_device(
+                &bob,
+                "group_join",
+                "alice_device"
+            )?
+        )?,
         Some(alice_key)
     );
     assert_ne!(bob_key, carol_key);
@@ -212,7 +222,8 @@ fn owner_can_generate_onboard_events_for_multiple_direct_adds() -> Result<(), Sd
     let alice_seed = [0x75; 32];
     let alice_key = device_public_key("alice", "alice_device", alice_seed)?;
     let alice = group_client("alice_multi_join", "alice", "alice_device", alice_seed)?;
-    seed_group_named(&alice, "group_multi_join", &alice_key)?;
+    let bob_key = device_public_key("bob", "bob_device", [0x74; 32])?;
+    seed_group_named(&alice, "group_multi_join", &alice_key, &bob_key)?;
 
     let bob_event = alice.create_signed_group_member_join_event(
         "group_multi_join",
@@ -261,8 +272,9 @@ fn signed_group_role_change_rejects_forgery_epoch_mismatch_and_replay() -> Resul
     let alice_key = device_public_key("alice", "alice_device", alice_seed)?;
     let alice = group_client("alice", "alice", "alice_device", alice_seed)?;
     let bob = group_client("bob", "bob", "bob_device", [0x44; 32])?;
-    seed_group(&alice, &alice_key)?;
-    seed_group(&bob, &alice_key)?;
+    let bob_key = device_public_key("bob", "bob_device", [0x44; 32])?;
+    seed_group(&alice, &alice_key, &bob_key)?;
+    seed_group(&bob, &alice_key, &bob_key)?;
 
     let (event, _state) = alice.create_signed_group_role_change(
         "group_test",
@@ -311,9 +323,9 @@ fn signed_group_invite_accept_enforces_state_expiry_and_bound_invitee_key() -> R
     let alice = group_client("alice_s46", "alice", "alice_device", alice_seed)?;
     let bob = group_client("bob_s46", "bob", "bob_device", bob_seed)?;
     let carol = group_client("carol_s46", "carol", "carol_device", carol_seed)?;
-    seed_group(&alice, &alice_key)?;
-    seed_group(&bob, &alice_key)?;
-    seed_group(&carol, &alice_key)?;
+    seed_group(&alice, &alice_key, &bob_key)?;
+    seed_group(&bob, &alice_key, &bob_key)?;
+    seed_group(&carol, &alice_key, &bob_key)?;
     seed_member_key(&alice, "bob_device", &bob_key)?;
     seed_member_key(&bob, "bob_device", &bob_key)?;
     seed_member_key(&carol, "bob_device", &bob_key)?;
@@ -350,8 +362,8 @@ fn signed_group_invite_accept_enforces_state_expiry_and_bound_invitee_key() -> R
     ));
 
     let expired_group = "group_expired";
-    seed_group_named(&alice, expired_group, &alice_key)?;
-    seed_group_named(&carol, expired_group, &alice_key)?;
+    seed_group_named(&alice, expired_group, &alice_key, &bob_key)?;
+    seed_group_named(&carol, expired_group, &alice_key, &bob_key)?;
     let (expired_invite, _state) = alice.create_signed_group_member_invite(
         expired_group,
         "alice_device",
@@ -378,8 +390,8 @@ fn signed_group_kick_ban_and_delete_apply_authoritatively() -> Result<(), SdkErr
     let bob_key = device_public_key("bob", "bob_device", bob_seed)?;
     let alice = group_client("alice_s45", "alice", "alice_device", alice_seed)?;
     let bob = group_client("bob_s45", "bob", "bob_device", bob_seed)?;
-    seed_group(&alice, &alice_key)?;
-    seed_group(&bob, &alice_key)?;
+    seed_group(&alice, &alice_key, &bob_key)?;
+    seed_group(&bob, &alice_key, &bob_key)?;
     seed_member_key(&alice, "bob_device", &bob_key)?;
     seed_member_key(&bob, "bob_device", &bob_key)?;
 
@@ -413,7 +425,7 @@ fn signed_group_kick_ban_and_delete_apply_authoritatively() -> Result<(), SdkErr
     ));
 
     let alice_ban = group_client("alice_s45_ban", "alice", "alice_device", alice_seed)?;
-    seed_group(&alice_ban, &alice_key)?;
+    seed_group(&alice_ban, &alice_key, &bob_key)?;
     seed_member_key(&alice_ban, "bob_device", &bob_key)?;
     let (_ban, state) = alice_ban.create_signed_group_member_ban(
         "group_test",
@@ -445,7 +457,7 @@ fn kicked_member_can_rejoin_and_all_members_converge() -> Result<(), SdkError> {
     let carol = group_client("rejoin_carol", "carol", "carol_device", carol_seed)?;
     let carol_key = device_public_key("carol", "carol_device", carol_seed)?;
     for client in [&alice, &bob, &carol] {
-        seed_group(client, &alice_key)?;
+        seed_group(client, &alice_key, &bob_key)?;
         let manifest = fixture_manifest(&carol_key, "carol_device")?;
         client
             .observe_device_manifest_json(serde_json::to_value(&manifest)?, &root_for("carol"))?;
@@ -487,7 +499,14 @@ fn kicked_member_can_rejoin_and_all_members_converge() -> Result<(), SdkError> {
     assert_eq!(state, carol.group_state("group_test")?);
     for client in [&alice, &bob, &carol] {
         assert_eq!(
-            client.account_db()?.group_member_device_key_by_name("group_test", "bob_device")?,
+            client.account_db()?.group_member_device_key(
+                "group_test",
+                &crate::client::identity_authority::test_support::group_device(
+                    client,
+                    "group_test",
+                    "bob_device"
+                )?
+            )?,
             Some(bob_key.clone())
         );
     }
@@ -503,7 +522,7 @@ fn an_admin_cannot_invite_the_active_owner_under_an_attackers_key() -> Result<()
     let alice = group_client("owner_invite_guard_alice", "alice", "alice_device", alice_seed)?;
     let bob = group_client("owner_invite_guard_bob", "bob", "bob_device", bob_seed)?;
     for client in [&alice, &bob] {
-        seed_group(client, &alice_key)?;
+        seed_group(client, &alice_key, &bob_key)?;
         seed_member_key(client, "bob_device", &bob_key)?;
     }
     let (promotion, _) = alice.create_signed_group_role_change(
@@ -539,7 +558,14 @@ fn an_admin_cannot_invite_the_active_owner_under_an_attackers_key() -> Result<()
     ));
     assert_eq!(alice.group_state("group_test")?, before);
     assert_eq!(
-        alice.account_db()?.group_member_device_key_by_name("group_test", "alice_device")?,
+        alice.account_db()?.group_member_device_key(
+            "group_test",
+            &crate::client::identity_authority::test_support::group_device(
+                &alice,
+                "group_test",
+                "alice_device"
+            )?
+        )?,
         Some(alice_key)
     );
     Ok(())
@@ -553,7 +579,8 @@ fn an_old_invite_accept_cannot_replace_a_member_who_is_now_active() -> Result<()
     let alice = group_client("accept_active_guard_alice", "alice", "alice_device", alice_seed)?;
     let mallory =
         group_client("accept_active_guard_mallory", "mallory", "victim_device", attacker_seed)?;
-    seed_group(&alice, &alice_key)?;
+    let bob_key = device_public_key("bob", "bob_device", [0x73; 32])?;
+    seed_group(&alice, &alice_key, &bob_key)?;
     let (invite, _) = alice.create_signed_group_member_invite(
         "group_test",
         "alice_device",
@@ -597,7 +624,14 @@ fn an_old_invite_accept_cannot_replace_a_member_who_is_now_active() -> Result<()
     ));
     assert_eq!(alice.group_state("group_test")?, before);
     assert_eq!(
-        alice.account_db()?.group_member_device_key_by_name("group_test", "victim_device")?,
+        alice.account_db()?.group_member_device_key(
+            "group_test",
+            &crate::client::identity_authority::test_support::group_device(
+                &alice,
+                "group_test",
+                "victim_device"
+            )?
+        )?,
         Some(genuine)
     );
     Ok(())
@@ -609,7 +643,8 @@ fn member_and_admin_join_events_cannot_promote_the_actor_or_demote_the_owner()
         let owner = group_client("join-owner-guard", "alice", "alice_device", [71; 32])?;
         let attacker = ramflux_crypto::create_device_branch("bob", "bob_device", 1, [72; 32]);
         let owner_key = device_public_key("alice", "alice_device", [71; 32])?;
-        seed_group(&owner, &owner_key)?;
+        let bob_key = device_public_key("bob", "bob_device", [72; 32])?;
+        seed_group(&owner, &owner_key, &bob_key)?;
         if role == "admin" {
             owner.account_db()?.upsert_group_member_snapshot(
                 "group_test",

@@ -170,13 +170,24 @@ mod tests {
             address
         );
         assert_eq!(
-            db.group_member_key_binding("legacy-group", &nested)?
+            db.group_member_identity_metadata("legacy-group", &address)?
                 .ok_or(StorageError::AuthorizationRejected)?
                 .principal_commitment
                 .as_deref(),
             Some("mallory-root")
         );
-        assert!(db.group_member_key_binding("legacy-group", &address)?.is_none());
+        let live = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            &ramflux_crypto::create_identity_root("bob", [41; 32]),
+            "phone",
+        )?;
+        assert!(db.group_member_key_binding("legacy-group", &live)?.is_none());
+        assert!(
+            ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+                &ramflux_crypto::create_identity_root("mallory", [51; 32]),
+                &address
+            )
+            .is_err()
+        );
         db.persist_client_record("device", &address, &json!({"device_id":address,"principal_commitment":"bob-root","signing_public_key":"nested-bob"}))?;
         db.upsert_device_directory_entry(&address, "bob-root", "verified", 3)?;
         assert_eq!(

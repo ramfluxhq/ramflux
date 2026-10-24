@@ -304,7 +304,7 @@ impl RamfluxClient {
                         message_id: message_id.to_owned(),
                         sender_id: envelope.sender_id.clone(),
                         inbox_seq: entry.inbox_seq,
-                        envelope_json: serde_json::to_vec(entry)?,
+                        envelope_json: super::group_pending::encode(entry, encrypted_body)?,
                         created_at: now_unix_timestamp(),
                     },
                 )?;

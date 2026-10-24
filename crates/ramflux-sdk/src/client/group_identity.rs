@@ -23,31 +23,60 @@ impl RamfluxClient {
         group: &str,
         raw: &str,
     ) -> Result<String, SdkError> {
-        if let Some(binding) = self
-            .account_db()?
-            .group_member_key_binding_by_name(group, raw)
-            .map_err(|error| match error {
-                StorageError::AmbiguousDeviceId(_) => {
-                    SdkError::InboundPending("ambiguous group member root".into())
-                }
-                other => other.into(),
+        Ok(self
+            .group_route_identity(group, raw)?
+            .ok_or_else(|| {
+                SdkError::InboundPending("group member root context unavailable".into())
             })?
+            .storage_key()
+            .to_owned())
+    }
+    pub(super) fn group_route_identity(
+        &self,
+        group: &str,
+        raw: &str,
+    ) -> Result<Option<ramflux_crypto::RootQualifiedDeviceRef>, SdkError> {
+        if let Some(binding) = self.account_db()?.group_member_identity_metadata(group, raw)?
             && let Some(root) = binding.principal_commitment
         {
-            return Ok(ramflux_protocol::qualified_device_id(&root, raw)?);
+            return self.device_identity_for_root(&root, raw).map(Some);
         }
         if self.device_branch.as_ref().is_some_and(|own| own.device_id == raw) {
-            return self.local_device_reference(raw);
+            return self.local_device_identity(raw).map(Some);
         }
-        if let Some(root) = self
-            .group_member_routes(group)?
-            .iter()
-            .find(|route| route.member_id == raw)
-            .and_then(|route| route.member_principal_commitment.as_ref())
-        {
-            return Ok(ramflux_protocol::qualified_device_id(root, raw)?);
+        let mut identities = std::collections::BTreeSet::new();
+        for route in self.account_db()?.list_actor_states::<LocalBusGroupMemberRoute>(
+            &crate::group::group_route_prefix(group),
+        )? {
+            if route.member_id == raw
+                && let Some(root) = route.member_principal_commitment
+            {
+                identities.insert(self.device_identity_for_root(&root, raw)?);
+            }
         }
-        Err(SdkError::InboundPending("group member root context unavailable".into()))
+        if identities.len() > 1 {
+            return Err(SdkError::InboundPending("ambiguous group route root".into()));
+        }
+        if let Some(device) = identities.into_iter().next() {
+            return Ok(Some(device));
+        }
+        Ok(self.legacy_group_member_route(group, raw)?.map(|(device, _)| device))
+    }
+    pub(super) fn legacy_group_member_route(
+        &self,
+        group: &str,
+        raw: &str,
+    ) -> Result<Option<(ramflux_crypto::RootQualifiedDeviceRef, LocalBusGroupMemberRoute)>, SdkError>
+    {
+        let id = crate::group::legacy_group_member_route_event_id(group, raw);
+        let Some(bytes) = self.event_body(&id)? else { return Ok(None) };
+        let route: LocalBusGroupMemberRoute = serde_json::from_slice(&bytes)?;
+        if route.member_id != raw {
+            return Err(SdkError::InboundRejected("legacy group route name mismatch".into()));
+        }
+        let Some(root) = &route.member_principal_commitment else { return Ok(None) };
+        let identity = self.device_identity_for_root(root, raw)?;
+        Ok(Some((identity, route)))
     }
     pub(crate) fn require_group_payload_sender(
         &self,
@@ -69,7 +98,7 @@ impl RamfluxClient {
         self.require_group_sender_pin(
             group,
             &entry.envelope.source_principal_id,
-            &entry.envelope.source_device_id,
+            &self.authenticated_device_identity(entry)?,
         )
     }
 
@@ -77,17 +106,17 @@ impl RamfluxClient {
         &self,
         group: &str,
         principal: &str,
-        device: &str,
+        device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let owner = db
             .client_record("identity", principal)?
             .ok_or_else(|| SdkError::InboundPending("group root unavailable".into()))?;
-        let root = owner["contact_identity_commitment"]
-            .as_str()
-            .ok_or_else(|| SdkError::InboundPending("group root missing".into()))?;
-        let reference = ramflux_protocol::qualified_device_id(root, device)?;
-        let device = reference.as_str();
+        if owner["contact_identity_commitment"].as_str() != Some(device.root_commitment()) {
+            return Err(SdkError::InboundRejected(
+                "group sender root differs from pinned relationship".into(),
+            ));
+        }
         let binding = db
             .group_member_key_binding(group, device)?
             .ok_or_else(|| SdkError::InboundPending("group member key not pinned".into()))?;
@@ -95,7 +124,7 @@ impl RamfluxClient {
         let bound_principal = binding.principal_id;
         let bound_commitment = binding.principal_commitment;
         let record = db
-            .client_record("device", device)?
+            .client_record("device", device.storage_key())?
             .ok_or_else(|| SdkError::InboundPending("group member identity unavailable".into()))?;
         let commitment = record["principal_commitment"].as_str().ok_or_else(|| {
             SdkError::InboundPending("group member commitment unavailable".into())
@@ -122,22 +151,19 @@ impl RamfluxClient {
         let root_public =
             ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
         let db = self.account_db()?;
-        let reference = ramflux_protocol::qualified_device_id(
-            &crate::identity_root_public_key_commitment(&root_public)?,
-            &local.device_id,
-        )?;
         let commitment = crate::prekey::identity_root_public_key_commitment(&root_public)?;
-        if let Some(binding) = db.group_member_key_binding(group, &reference)?
+        let identity = self.owned_device_identity()?;
+        if let Some(binding) = db.group_member_key_binding(group, &identity)?
             && binding.signing_public_key == public
             && binding.principal_id.as_deref() == Some(local.principal_id.as_str())
             && binding.principal_commitment.as_deref() == Some(commitment.as_str())
         {
             return Ok(());
         }
-        db.persist_group_member_device_key(group, &reference, &public)?;
+        db.persist_group_member_device_key(group, &identity, &public)?;
         db.bind_group_member_key_identity(
             group,
-            &reference,
+            &identity,
             &local.principal_id,
             &crate::prekey::identity_root_public_key_commitment(&root_public)?,
             &public,
@@ -163,7 +189,8 @@ impl RamfluxClient {
         } else {
             self.group_device_reference(group, device)?
         };
-        let device = device.as_str();
+        let identity = self.device_identity(&device)?;
+        let device = identity.storage_key();
         let db = self.account_db()?;
         if db.client_record("device", device)?.is_none() {
             return Err(SdkError::InboundPending("joined member identity unavailable".into()));
@@ -176,8 +203,8 @@ impl RamfluxClient {
         ) else {
             return Err(SdkError::InboundPending("joined member identity incomplete".into()));
         };
-        db.persist_group_member_device_key(group, device, key)?;
-        db.bind_group_member_key_identity(group, device, principal, commitment, key)?;
+        db.persist_group_member_device_key(group, &identity, key)?;
+        db.bind_group_member_key_identity(group, &identity, principal, commitment, key)?;
         Ok(())
     }
 }

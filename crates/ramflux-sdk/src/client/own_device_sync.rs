@@ -354,7 +354,12 @@ impl RamfluxClient {
                         sender_key_seed: state.session_snapshot.root_key_bytes(),
                         sender_device_signing_public_key: self
                             .account_db()?
-                            .group_member_device_key(&group.group_id, member_id)?,
+                            .group_member_device_key(
+                                &group.group_id,
+                                &self.device_identity(
+                                    &self.group_device_reference(&group.group_id, member_id)?,
+                                )?,
+                            )?,
                     };
                     distributions.push(ramflux_protocol::encode_base64url(&serde_json::to_vec(
                         &distribution,

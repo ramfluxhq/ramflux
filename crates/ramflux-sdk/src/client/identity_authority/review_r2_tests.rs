@@ -144,7 +144,7 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
     )?;
     let local = alice.client.local_device_identity("alice")?;
     let bob_device = alice.client.device_identity(&bob_ref)?;
-    let pin = alice.client.account_db()?.group_member_device_key("group", &bob_ref)?;
+    let pin = alice.client.account_db()?.group_member_device_key("group", &bob_device)?;
     let pair = ramflux_crypto::DmSession::initiator(
         [1; 32],
         dm_device_id_hash("alice"),
@@ -173,7 +173,7 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
     observe(&alice.client, &m)?;
     alice.client.require_cached_root_authority(&bob_ref)?;
     assert!(alice.client.require_cached_root_authority(&mallory_ref).is_err());
-    assert_eq!(alice.client.account_db()?.group_member_device_key("group", &bob_ref)?, pin);
+    assert_eq!(alice.client.account_db()?.group_member_device_key("group", &bob_device)?, pin);
     assert_eq!(
         alice.client.active_pair(&local, &bob_device)?.ok_or("bob pair")?.0.session_id,
         pair.session_id
@@ -265,8 +265,18 @@ fn a_foreign_roots_copy_of_the_local_name_cannot_prevent_creating_an_own_group()
     observe(&owner.client, &stranger.manifest()?)?;
     owner.client.create_group("own-group", "alice")?;
     let own = owner.client.local_device_reference("alice")?;
-    let binding =
-        owner.client.account_db()?.group_member_key_binding("own-group", &own)?.ok_or("own pin")?;
+    let binding = owner
+        .client
+        .account_db()?
+        .group_member_key_binding(
+            "own-group",
+            &crate::client::identity_authority::test_support::group_device(
+                &owner.client,
+                "own-group",
+                &own,
+            )?,
+        )?
+        .ok_or("own pin")?;
     assert_eq!(binding.principal_id.as_deref(), Some("alice"));
     assert_eq!(
         binding.signing_public_key,
