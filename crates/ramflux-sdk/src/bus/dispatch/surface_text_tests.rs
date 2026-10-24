@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Local cryptographic proof through the prepared standard group transport (no network).
+//! Surface delivery exercises the same synchronous group adapter as text.
 use super::*;
-use crate::bus::{runtime_tests, surface_jobs};
+use crate::bus::runtime_tests;
 use crate::client::surface::SurfaceSender;
 use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+struct Delivery {
+    envelope: ramflux_protocol::Envelope,
+}
 
 #[tokio::test]
-async fn hundred_device_group_receives_one_sender_key_surface_and_retries_retained_ciphertexts()
+async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame_budget()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = runtime_tests::root("surface-hundred-group");
+    let root = runtime_tests::root("surface-text-group");
     let mut source = runtime_tests::account(
         &root.join("sender"),
         "sender",
@@ -25,12 +28,12 @@ async fn hundred_device_group_receives_one_sender_key_surface_and_retries_retain
         config,
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));
-    let epoch = source.client.group_state("group")?.group_epoch;
     source.client.account_db()?.persist_client_record(
         "conversation",
         "thread",
         &json!({"kind":"group","group_id":"group"}),
     )?;
+    let epoch = source.client.group_state("group")?.group_epoch;
     let command = A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
         surface_id: "surface".into(),
         surface_type: SurfaceType::StatusPanel,
@@ -38,12 +41,12 @@ async fn hundred_device_group_receives_one_sender_key_surface_and_retries_retain
         catalog_version: "1".into(),
         fallback_text: "中文 é 🦀".into(),
         fallback_markdown: None,
-        components: vec![json!({"id":"result","text":"done"})],
+        components: vec![json!({"id":"result","text":"🦀".repeat(1500)})],
         data_model: serde_json::Map::default(),
         allowed_actions: Vec::new(),
     });
     let request = crate::SurfaceSendRequest::event("thread", 1, &command)?;
-    let carrier = source.client.sign_surface_carrier(Carrier {
+    let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         payload_kind: PayloadKind::Event,
@@ -56,37 +59,33 @@ async fn hundred_device_group_receives_one_sender_key_surface_and_retries_retain
         wire_base64: request.wire_base64,
         signature: String::new(),
         snapshot: None,
-    })?;
-    let plan =
-        plan(&source, &carrier)?.ok_or_else(|| SdkError::LocalBus("group plan absent".into()))?;
-    assert_eq!(plan.routes.len(), 99);
-    surface_jobs::admit(&source, 1, plan.bytes)?;
-    let deliveries = prepare(&mut source, &carrier, plan).await?;
-    assert_eq!(deliveries.len(), 198);
-    assert_receivers(&peers, &deliveries, epoch, 1)?;
-    assert_full_queue_preserves_ratchets(&mut source, &carrier, &deliveries[0].envelope).await?;
-    // 198 physical envelopes occupy one admitted publication, with no 64-recipient ceiling.
-    surface_jobs::enqueue_group(&source, deliveries)?;
-    let rows = source.client.account_db()?.surface_history_page::<serde_json::Value>(
-        "surface/transport/",
-        "surface/transport/",
-        65,
-    )?;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["deliveries"].as_array().map(Vec::len), Some(198));
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut sent = 0;
-    while sent < 198 && std::time::Instant::now() < deadline {
-        sent += surface_jobs::run(&mut source).await?;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    source.client.attach_surface_snapshot(&mut carrier)?;
+    carrier = source.client.sign_surface_carrier(carrier)?;
+    let response = send(&mut source, &carrier).await?;
+    assert_eq!(response["delivery_state"], "submitted");
+    assert_eq!(response["accepted"], true);
+    let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert_eq!(envelopes.len(), 198);
+    let mut deliveries = Vec::new();
+    for peer in &peers {
+        let id = peer
+            .client
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .principal_id
+            .as_str();
+        deliveries.extend(
+            envelopes
+                .iter()
+                .filter(|envelope| envelope.target_delivery_id == id)
+                .cloned()
+                .map(|envelope| Delivery { envelope }),
+        );
     }
-    assert_eq!(sent, 198);
-    let remaining = source.client.account_db()?.surface_history_page::<serde_json::Value>(
-        "surface/transport/",
-        "surface/transport/",
-        65,
-    )?;
-    assert_eq!(remaining, Vec::<serde_json::Value>::new());
+    assert_receivers(&peers, &deliveries, epoch, 1)?;
+    assert_admission(&mut source, &carrier, &captured).await?;
     directory.abort();
     drop(peers);
     drop(source);
@@ -249,62 +248,6 @@ fn assert_receivers(
     Ok(())
 }
 
-async fn assert_full_queue_preserves_ratchets(
-    source: &mut LocalBusAccountState,
-    carrier: &Carrier,
-    envelope: &ramflux_protocol::Envelope,
-) -> Result<(), SdkError> {
-    let epoch = source.client.group_state("group")?.group_epoch;
-    let before = serde_json::to_value(source.client.load_group_sender_key_state(
-        "group",
-        "device-sender",
-        epoch,
-        "send",
-    )?)?;
-    let pairs = source.client.account_db()?.surface_history_page::<serde_json::Value>(
-        "dm-pair/session/",
-        "dm-pair/session/",
-        100,
-    )?;
-    surface_jobs::enqueue(source, vec![envelope.clone(); 64])?;
-    let full = super::plan(source, carrier)?.ok_or_else(|| SdkError::LocalBus("plan".into()))?;
-    assert!(prepare(source, carrier, full).await.is_err());
-    let rows = source.client.account_db()?.surface_record_page::<serde_json::Value>(
-        "surface/transport/",
-        "surface/transport/",
-        65,
-    )?;
-    for (key, _) in rows {
-        source.client.account_db()?.delete_surface_state(&key)?;
-    }
-    let mut oversized =
-        super::plan(source, carrier)?.ok_or_else(|| SdkError::LocalBus("plan".into()))?;
-    oversized.bytes = 32 * 1024 * 1024 + 1;
-    assert!(prepare(source, carrier, oversized).await.is_err());
-    let mut wrong_root =
-        super::plan(source, carrier)?.ok_or_else(|| SdkError::LocalBus("plan".into()))?;
-    wrong_root.routes[0].member_principal_commitment = Some(source.principal_commitment.clone());
-    assert!(prepare(source, carrier, wrong_root).await.is_err());
-    assert_eq!(
-        serde_json::to_value(source.client.load_group_sender_key_state(
-            "group",
-            "device-sender",
-            epoch,
-            "send"
-        )?)?,
-        before
-    );
-    assert_eq!(
-        source.client.account_db()?.surface_history_page::<serde_json::Value>(
-            "dm-pair/session/",
-            "dm-pair/session/",
-            100
-        )?,
-        pairs
-    );
-    Ok(())
-}
-
 async fn directory_config(
     root: &std::path::Path,
     source: &mut LocalBusAccountState,
@@ -333,131 +276,64 @@ async fn directory_config(
     Ok((config, task))
 }
 
-#[tokio::test]
-async fn hundred_devices_converge_after_fifty_production_sends_with_real_clock()
--> Result<(), Box<dyn std::error::Error>> {
-    let root = runtime_tests::root("surface-burst");
-    let mut source = runtime_tests::account(
-        &root.join("sender"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
+async fn assert_admission(
+    source: &mut LocalBusAccountState,
+    carrier: &Carrier,
+    captured: &Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
+) -> Result<(), SdkError> {
+    let pair_rows = source.client.account_db()?.surface_history_page::<serde_json::Value>(
+        "dm-pair/session/",
+        "dm-pair/session/",
+        200,
     )?;
-    let peers = members(&root, &source)?;
-    let epoch = source.client.group_state("group")?.group_epoch;
-    source.client.account_db()?.persist_client_record(
-        "conversation",
-        "thread",
-        &json!({"kind":"group","group_id":"group"}),
-    )?;
-    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    source.put_engine(GatewaySessionEngine::with_test_transport(
-        config,
-        Box::new(super::fixture::RecordingGateway::new(captured.clone())),
+    let mut oversized = carrier.clone();
+    oversized.wire_base64 = "x".repeat(crate::client::surface::MAX_DELIVERY_BYTES);
+    assert!(matches!(
+        send(source, &oversized).await,
+        Err(SdkError::SurfaceDeliveryTooLarge { .. })
     ));
-    let started = std::time::Instant::now();
-    author_burst(&mut source).await?;
-    let db = source.client.account_db()?;
-    let mut rows = db.surface_record_page::<serde_json::Value>(
-        "surface/transport/",
-        "surface/transport/",
-        65,
-    )?;
-    assert_eq!(rows.len(), 1); // 50 updates retain one full state, not 50 recipient batches.
-    assert!(rows[0].1["deliveries"].as_array().is_some_and(Vec::is_empty));
-    // An expired coalesced job regenerates the retained full snapshot, with fresh packet TTLs.
-    rows[0].1["group"]["enqueued_at"] = json!(now_unix_timestamp() - 601);
-    db.persist_actor_state(&rows[0].0, &rows[0].1)?;
-    loop {
-        super::super::super::sync_driver::run(&mut source).await?;
-        if source
-            .client
-            .account_db()?
-            .surface_history_page::<serde_json::Value>(
-                "surface/transport/",
-                "surface/transport/",
-                65,
-            )?
-            .is_empty()
-        {
-            break;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "real-clock burst convergence exceeded 120 seconds"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    let envelopes =
-        std::mem::take(&mut *captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-    assert_eq!(envelopes.len(), 198);
-    let deliveries = envelopes
-        .into_iter()
-        .map(|envelope| Delivery {
-            envelope,
-            federation: None,
-            ack_key: None,
-            attempts: 0,
-            next_at: 0,
-        })
-        .collect::<Vec<_>>();
-    assert_receivers(&peers, &deliveries, epoch, 50)?;
-    let hash = source.client.surface_get("surface", 0, None)?["surface_hash"].clone();
-    for peer in &peers {
-        assert_eq!(peer.client.surface_get("surface", 0, None)?["surface_hash"], hash);
-    }
-    assert!(started.elapsed() < Duration::from_secs(120));
-    directory.abort();
-    drop(peers);
-    drop(source);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-async fn author_burst(source: &mut LocalBusAccountState) -> Result<(), SdkError> {
-    for version in 1..=50 {
-        let command = if version == 1 {
-            A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-                surface_id: "surface".into(),
-                surface_type: SurfaceType::StatusPanel,
-                catalog: "basic".into(),
-                catalog_version: "1".into(),
-                fallback_text: "中文 é 🦀".into(),
-                fallback_markdown: None,
-                components: vec![json!({"id":"result","text":""})],
-                data_model: serde_json::Map::default(),
-                allowed_actions: Vec::new(),
-            })
-        } else {
-            A2uiConversationCommand::StreamAppend(ramflux_protocol::StreamAppendCommand {
-                surface_id: "surface".into(),
-                component_id: "result".into(),
-                text_delta: version.to_string(),
-                final_: false,
-            })
-        };
-        let request = crate::SurfaceSendRequest::event("thread", version, &command)?;
-        let mut carrier = Carrier {
-            schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
-            content_type: "surface".into(),
-            payload_kind: PayloadKind::Event,
-            conversation_id: "thread".into(),
-            surface_id: "surface".into(),
-            message_id: request.message_id,
-            sender_principal_id: "sender".into(),
-            sender_device_id: "device-sender".into(),
-            author_principal_id: "sender".into(),
-            wire_base64: request.wire_base64,
-            signature: String::new(),
-            snapshot: None,
-        };
-        source.client.attach_surface_snapshot(&mut carrier)?;
-        carrier = source.client.sign_surface_carrier(carrier)?;
-        assert_eq!(
-            super::super::surface_transport::send(source, &carrier).await?["accepted"],
-            true
-        );
-    }
+    assert_eq!(
+        source.client.account_db()?.surface_history_page::<serde_json::Value>(
+            "dm-pair/session/",
+            "dm-pair/session/",
+            200
+        )?,
+        pair_rows
+    );
+    assert_eq!(captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 198);
+    assert_eq!(
+        source.client.account_db()?.surface_history_page::<serde_json::Value>(
+            "surface/transport/",
+            "surface/transport/",
+            100
+        )?,
+        Vec::<serde_json::Value>::new()
+    );
+    let epoch = source.client.group_state("group")?.group_epoch;
+    let before = serde_json::to_value(source.client.load_group_sender_key_state(
+        "group",
+        "device-sender",
+        epoch,
+        "send",
+    )?)?;
+    let mut pin = source
+        .client
+        .account_db()?
+        .client_record("identity", "peer-0")?
+        .ok_or_else(|| invalid("peer pin"))?;
+    pin["contact_identity_commitment"] = json!("wrong-root");
+    source.client.account_db()?.persist_client_record("identity", "peer-0", &pin)?;
+    let mut forged_route = carrier.clone();
+    forged_route.message_id = crate::new_surface_message_id()?;
+    assert!(send(source, &forged_route).await.is_err());
+    assert_eq!(
+        serde_json::to_value(source.client.load_group_sender_key_state(
+            "group",
+            "device-sender",
+            epoch,
+            "send"
+        )?)?,
+        before
+    );
     Ok(())
 }

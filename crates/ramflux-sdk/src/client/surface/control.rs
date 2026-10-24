@@ -269,12 +269,6 @@ impl RamfluxClient {
             &message,
             outcome.fallback_text.as_bytes(),
         )?;
-        if outcome.accepted
-            && carrier.payload_kind == PayloadKind::Event
-            && control.kind == ControlKind::Peer
-        {
-            self.queue_surface_forward(carrier, control.group_epoch)?;
-        }
         Ok(true)
     }
     pub(crate) fn surface_timeline_id(carrier: &Carrier) -> Result<String, SdkError> {
@@ -299,23 +293,6 @@ impl RamfluxClient {
             .client_record("device", &carrier.sender_device_id)?
             .and_then(|v| v["principal_id"].as_str().map(str::to_owned))
             .ok_or_else(|| invalid("original surface signer owner missing"))
-    }
-    pub(crate) fn queue_surface_forward(
-        &self,
-        carrier: &Carrier,
-        epoch: Option<u64>,
-    ) -> Result<(), SdkError> {
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let id = ramflux_protocol::hash_base64url(
-            "ramflux.surface.forward.v1",
-            &ramflux_protocol::canonical_json_bytes(&(
-                &local.device_id,
-                &carrier.surface_reference()?,
-                &carrier.sender_principal_id,
-                &carrier.message_id,
-            ))?,
-        );
-        self.queue_surface_logical("forward_job", &id, carrier, epoch)
     }
 }
 

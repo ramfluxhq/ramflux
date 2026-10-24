@@ -251,3 +251,20 @@ fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent
     );
     Ok(())
 }
+
+#[test]
+fn repeated_checkpoint_retains_the_original_signed_history_entry() -> TestResult {
+    let f = Fixture::new()?;
+    create(&f)?;
+    let owned = f.human.export_owned_surface_checkpoint(
+        &f.human.resolve_surface_reference("s", None, None)?.ok_or("reference")?,
+    )?;
+    let reference = owned.record.surface_id.clone();
+    let scope = f.human.resolve_surface_reference(&reference, None, None)?.ok_or("scope")?;
+    let history_key = format!("{}/{:020}", super::super::key("history", &scope), owned.version);
+    let before: Value = f.human.account_db()?.load_actor_state(&history_key)?.ok_or("history")?;
+    assert!(before["carrier"].is_object());
+    f.human.import_owned_surface_checkpoints(&[owned])?;
+    assert_eq!(f.human.account_db()?.load_actor_state::<Value>(&history_key)?, Some(before));
+    Ok(())
+}

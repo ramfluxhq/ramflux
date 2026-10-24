@@ -27,5 +27,3 @@ pub(crate) use message::*;
 pub(crate) use object::*;
 
 pub(crate) mod surface_transport;
-
-pub(super) mod surface_group;
