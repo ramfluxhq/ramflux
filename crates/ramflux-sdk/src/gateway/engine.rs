@@ -426,6 +426,9 @@ impl GatewaySessionEngine {
                 reason_code: ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken,
             } => Err(crate::ContactReason::PrincipalIdTaken.into()),
             GatewayServerFrame::IdentityRegistrationRejected {
+                reason_code: ramflux_protocol::IdentityDirectoryReason::RateLimited,
+            } => Err(crate::ContactReason::LookupRateLimited.into()),
+            GatewayServerFrame::IdentityRegistrationRejected {
                 reason_code: ramflux_protocol::IdentityDirectoryReason::DeviceIdTaken,
             } => Err(crate::ContactReason::DeviceIdTaken.into()),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),

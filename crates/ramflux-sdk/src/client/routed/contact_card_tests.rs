@@ -20,8 +20,20 @@ impl Origin {
         Self::named(directory, "contact.test").await
     }
     async fn named(directory: &Directory, node_id: &str) -> Result<Self, SdkError> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let url = format!("http://{}", listener.local_addr()?);
+        Self::bound(directory, node_id, "127.0.0.1:0", None).await
+    }
+    async fn bound(
+        directory: &Directory,
+        node_id: &str,
+        bind: &str,
+        host: Option<&str>,
+    ) -> Result<Self, SdkError> {
+        let listener = tokio::net::TcpListener::bind(bind).await?;
+        let addr = listener.local_addr()?;
+        let url = host.map_or_else(
+            || format!("http://{addr}"),
+            |host| format!("http://{host}:{}", addr.port()),
+        );
         let now = now_unix_timestamp().unsigned_abs();
         let mut record = ramflux_protocol::WellKnownClientRecord {
             schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.into(),
@@ -55,7 +67,7 @@ impl Origin {
                 observed.fetch_add(1, Ordering::SeqCst);
                 assert!(
                     String::from_utf8_lossy(&buf[..n])
-                        .starts_with("GET /.well-known/ramflux/client ")
+                        .contains("/.well-known/ramflux/client HTTP/1.1")
                 );
                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
                 stream.write_all(&body).await?;
@@ -210,3 +222,6 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
     assert!(client.account_db()?.client_record("identity", "alice")?.is_none());
     Ok(())
 }
+
+#[path = "contact_locator_tests.rs"]
+mod locator;

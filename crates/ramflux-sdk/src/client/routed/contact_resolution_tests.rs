@@ -130,6 +130,11 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
                         },
                     }
                 }
+                GatewayClientFrame::IdentityRegister { .. } => {
+                    GatewayServerFrame::IdentityRegistrationRejected {
+                        reason_code: ramflux_protocol::IdentityDirectoryReason::RateLimited,
+                    }
+                }
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
                 GatewayClientFrame::Resume { .. } => {
                     GatewayServerFrame::Resume { entries: Vec::new() }

@@ -55,7 +55,8 @@ The existing explicit federation route API remains separate.
 
 User input errors return `ValidationFailed` and `reason_code`: `unknown_principal`,
 `invalid_card`, `card_signature_invalid`, `card_expired`, `self_contact`, or
-`already_contact`. An unsupported card home node uses `invalid_card` with an explanatory
+`already_contact`, `home_insecure_transport`, `home_profile_missing`, or
+`home_profile_stale`. An unsupported card home node uses `invalid_card` with an explanatory
 message. Transient directory/transport failures return `Unavailable`, preserving the
 source error for socket diagnostics. Failed resolution creates no accepted contact.
 
@@ -119,7 +120,24 @@ Local display names and asserted-kind labels are preserved when a card is import
 
 A card's URL must exactly match the configured home profile and its fingerprint must
 match the pinned node key before any discovery request. Plain HTTP card locators are
-restricted to loopback development origins. Unsupported homes are rejected locally.
+accepted for loopback addresses (and the reserved `localhost` name), RFC 1918 IPv4
+literals (`10/8`, `172.16/12`, `192.168/16`), and IPv6 ULA (`fc00::/7`) or
+link-local literals (`fe80::/10`). RFC 6598 shared-address space (`100.64/10`),
+IPv4 link-local, public IP addresses and other hostnames require HTTPS. DNS
+resolution never exempts a hostname from this rule. Export and import use the
+same policy; a disallowed HTTP locator returns `home_insecure_transport`,
+distinct from malformed `invalid_card` input.
+
+Plain HTTP discovery lookups on a LAN are observable to that network.
+Card integrity still depends on the root signature, exact configured-home URL,
+pinned node-key fingerprint and verified manifests, followed by gateway TLS
+against the signed discovery CA. The transport allowance does not relax these
+checks or enable automatic trust of another node.
+
+Accounts without a configured home profile receive `home_profile_missing` on
+export or import. Expired, key-changed, disabled or malformed pinned profiles
+return `home_profile_stale` and require refresh/operator attention. Unsupported
+foreign homes are rejected locally.
 Malformed or unverifiable manifests return `manifest_invalid`; network and DNS failures
 return `Unavailable`. Bus consumers must handle that additive string code as retryable;
 the C ABI maps network failures to `TransportUnavailable` and quota refusals to `RateLimited`. `root_conflict` requires user attention,
@@ -154,3 +172,9 @@ one quota. Stronger anti-abuse policy is an accepted follow-up. Registration PoW
 currently binds the principal name rather than the transport source or time; source/time
 binding for challenges is also an accepted follow-up. These limitations do not bypass
 the charged source quota or the permanent ownership guard.
+
+
+Registration quota rejections preserve `Unavailable`, `reason_code:"rate_limited"`
+and the default-window `retry_after_ms:60000` hint across both authenticated
+session frames and the gateway request/response adapter. Name/device ownership
+refusals remain distinct from admission limits.

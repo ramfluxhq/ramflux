@@ -32,6 +32,15 @@ pub enum ContactReason {
     /// The input does not conform to the bounded versioned card or selector contract.
     #[error("invalid_card")]
     InvalidCard,
+    /// Plain HTTP is not permitted for this home locator.
+    #[error("home_insecure_transport")]
+    HomeInsecureTransport,
+    /// The account has no configured, pinned home profile.
+    #[error("home_profile_missing")]
+    HomeProfileMissing,
+    /// The configured home profile needs refresh or operator attention.
+    #[error("home_profile_stale")]
+    HomeProfileStale,
     /// The root signature or root commitment does not authenticate the card.
     #[error("card_signature_invalid")]
     CardSignatureInvalid,
@@ -118,14 +127,15 @@ fn validate(body: &ContactCardBody, now: i64) -> Result<(), SdkError> {
     }
     let url = reqwest::Url::parse(&body.node.url).map_err(|_| ContactReason::InvalidCard)?;
     if !matches!(url.scheme(), "http" | "https")
-        || (url.scheme() == "http"
-            && !matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost")))
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
     {
         return Err(ContactReason::InvalidCard.into());
+    }
+    if url.scheme() == "http" && !http_card_host_allowed(&url) {
+        return Err(ContactReason::HomeInsecureTransport.into());
     }
     if body.expires_at <= now {
         return Err(ContactReason::CardExpired.into());
@@ -136,6 +146,21 @@ fn validate(body: &ContactCardBody, now: i64) -> Result<(), SdkError> {
         return Err(ContactReason::CardSignatureInvalid.into());
     }
     Ok(())
+}
+
+fn http_card_host_allowed(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else { return false };
+    // Localhost is the reserved loopback name; other names never receive a DNS exemption.
+    if host == "localhost" {
+        return true;
+    }
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+        Err(_) => false,
+    }
 }
 
 /// Verifies either a text card or its link form without trusting display metadata.
@@ -211,20 +236,63 @@ mod tests {
         })
     }
     #[test]
-    fn plaintext_card_discovery_is_restricted_to_loopback_development_origins()
+    fn private_literal_http_card_locators_round_trip_but_public_cgnat_and_dns_names_do_not()
     -> Result<(), SdkError> {
-        for url in ["http://example.com", "http://192.168.1.1", "http://127.0.0.2"] {
-            let mut card = body()?;
-            card.node.url = url.into();
-            assert!(matches!(
-                encode_contact_card(card, [7; 32], 1000),
-                Err(SdkError::ContactInput(ContactReason::InvalidCard))
-            ));
+        for url in [
+            "http://192.168.42.7:8080",
+            "http://10.0.0.7",
+            "http://172.16.0.7",
+            "http://172.31.255.255",
+            "http://127.0.0.2",
+            "http://[fc00::1]",
+            "http://[fdff::1]",
+            "http://[fe80::1]",
+            "http://[::1]",
+            "http://localhost",
+            "https://example.com",
+        ] {
+            let mut body = body()?;
+            body.node.url = url.into();
+            let (card, _) = encode_contact_card(body, [7; 32], 1000)?;
+            assert_eq!(parse_contact_card(&card, 1001)?.node.url, url);
         }
-        for url in ["http://127.0.0.1:8080", "http://[::1]:8080", "https://example.com"] {
-            let mut card = body()?;
-            card.node.url = url.into();
-            encode_contact_card(card, [7; 32], 1000)?;
+        for url in [
+            "http://example.com",
+            "http://node.local",
+            "http://100.64.0.1",
+            "http://100.127.255.255",
+            "http://172.15.0.1",
+            "http://172.32.0.1",
+            "http://192.169.0.1",
+            "http://169.254.1.1",
+            "http://203.0.113.1",
+            "http://[2001:db8::1]",
+            "http://[::ffff:192.168.42.7]",
+        ] {
+            let mut body = body()?;
+            body.node.url = url.into();
+            assert!(
+                matches!(
+                    encode_contact_card(body.clone(), [7; 32], 1000),
+                    Err(SdkError::ContactInput(ContactReason::HomeInsecureTransport))
+                ),
+                "{url}"
+            );
+            let signature =
+                ramflux_crypto::sign_canonical_bytes_with_seed(&signing_bytes(&body)?, [7; 32]);
+            let card = format!(
+                "{PREFIX}{}",
+                ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(
+                    &SignedCard { body, signature }
+                )?)
+            );
+            assert!(
+                matches!(
+                    parse_contact_card(&card, 1001),
+                    Err(SdkError::ContactInput(ContactReason::HomeInsecureTransport))
+                ),
+                "{url}"
+            );
         }
         Ok(())
     }

@@ -206,6 +206,9 @@ where
             ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken => {
                 return Err(crate::ContactReason::PrincipalIdTaken.into());
             }
+            ramflux_protocol::IdentityDirectoryReason::RateLimited => {
+                return Err(crate::ContactReason::LookupRateLimited.into());
+            }
             ramflux_protocol::IdentityDirectoryReason::DeviceIdTaken => {
                 return Err(crate::ContactReason::DeviceIdTaken.into());
             }
