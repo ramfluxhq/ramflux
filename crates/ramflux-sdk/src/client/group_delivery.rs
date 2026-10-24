@@ -275,7 +275,9 @@ impl RamfluxClient {
             self.account_db()?.remove_group_pending_undecrypted(message_id)?;
             return Ok(Vec::new());
         }
-        if self.group_sender_key_counter_seen(envelope)? {
+        if self
+            .group_sender_key_counter_seen(envelope, &self.authenticated_device_identity(entry)?)?
+        {
             self.account_db()?.remove_group_pending_undecrypted(message_id)?;
             return Ok(Vec::new());
         }
@@ -333,12 +335,14 @@ impl RamfluxClient {
     pub(crate) fn group_sender_key_counter_seen(
         &self,
         envelope: &SdkGroupEncryptedEnvelope,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<bool, SdkError> {
         self.account_db()?
             .group_sender_key_counter_seen(
                 &envelope.group_id,
                 envelope.group_key_epoch,
-                &envelope.sender_id,
+                source,
+                &envelope.ciphertext.session_id,
                 envelope.ciphertext.counter,
             )
             .map_err(SdkError::from)
@@ -347,17 +351,22 @@ impl RamfluxClient {
     pub(crate) fn record_group_sender_key_counter(
         &self,
         envelope: &SdkGroupEncryptedEnvelope,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         message_id: &str,
     ) -> Result<bool, SdkError> {
         self.account_db()?
-            .record_group_sender_key_counter(&GroupSenderKeyCounterRecord {
-                group_id: envelope.group_id.clone(),
-                group_key_epoch: envelope.group_key_epoch,
-                sender_id: envelope.sender_id.clone(),
-                counter: envelope.ciphertext.counter,
-                message_id: message_id.to_owned(),
-                seen_at: now_unix_timestamp(),
-            })
+            .record_group_sender_key_counter(
+                &GroupSenderKeyCounterRecord {
+                    group_id: envelope.group_id.clone(),
+                    group_key_epoch: envelope.group_key_epoch,
+                    sender_id: envelope.sender_id.clone(),
+                    session_id: envelope.ciphertext.session_id.clone(),
+                    counter: envelope.ciphertext.counter,
+                    message_id: message_id.to_owned(),
+                    seen_at: now_unix_timestamp(),
+                },
+                source,
+            )
             .map_err(SdkError::from)
     }
 }

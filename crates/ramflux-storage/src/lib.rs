@@ -18,6 +18,7 @@ mod records;
 mod row_mappers;
 mod schema;
 mod schema_device_namespace;
+mod schema_group_sender_identity;
 mod schema_identity_keys;
 mod schema_receipt_identity;
 

@@ -198,6 +198,12 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             );
             CREATE INDEX IF NOT EXISTS idx_group_pending_undecrypted_epoch
                 ON group_pending_undecrypted(group_id, group_key_epoch, inbox_seq);
+            CREATE TABLE IF NOT EXISTS root_group_sender_key_counter_seen (
+                group_id TEXT NOT NULL, group_key_epoch INTEGER NOT NULL,
+                sender_reference TEXT NOT NULL, session_id TEXT NOT NULL, counter INTEGER NOT NULL,
+                message_id TEXT NOT NULL, seen_at INTEGER NOT NULL,
+                PRIMARY KEY(group_id,group_key_epoch,sender_reference,session_id,counter)
+            );
             CREATE TABLE IF NOT EXISTS group_sender_key_counter_seen (
                 group_id TEXT NOT NULL,
                 group_key_epoch INTEGER NOT NULL,
