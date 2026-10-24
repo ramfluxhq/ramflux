@@ -117,7 +117,11 @@ bounded to 256 KiB so an individual output cannot exhaust checkpoint space.
 Message triggers inside the configured interval are dropped with rate_limited.
 User actions and resync notifications are deferred durably and rechecked by the next
 poll after the interval ends. The queue holds at most 64 scoped references / 32 KiB,
-with no copied action values; current author/executor/actionability is read again
+with at most eight references / 4 KiB per conversation. Only the newest work in a
+conversation above its share is refused. Older checkpoints are compacted by the same
+rule on startup, keeping the oldest references. Each poll processes all due rows in
+sequence order within these bounds, with no copied action values. Current
+author/executor/actionability is read again
 before use. It survives restart and keeps the account cursor moving. Its timestamp
 records the actual recheck time. The event loop never sleeps for a conversation interval. A peer losing
 its devices, a stale executor notification, an unusable surface or an invalid provider
@@ -138,6 +142,8 @@ fallback and host-restart equivalence.
 Malformed read-model fields are permanent typed refusals, never transport retries.
 Only connection failures and explicit Unavailable/Busy/DeadlineExceeded refusals
 reconnect the host. Per-poll validation failures are recorded without abandoning the
-event stream; the first poll waits one interval. Foreign-account, non-event and
+event stream; an unchanged poll refusal does not rewrite the checkpoint. Authentication
+loss on any request stops the host. The first poll waits one interval. A connection-level
+stream gap triggers reconnect before account filtering. Foreign-account, non-event and
 unsequenced data frames are logged without consuming an account cursor. Error logs
 contain only fixed error classes and field names, never field values or reply bodies.

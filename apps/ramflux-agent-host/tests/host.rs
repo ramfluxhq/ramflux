@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 mod host {
     mod deferred_actions;
+    mod deferred_fairness;
     mod malformed_events;
+    mod poll_identity;
     mod principal_routing;
     mod recovery;
     mod resilience;

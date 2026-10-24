@@ -8,6 +8,8 @@ use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
 use serde_json::json;
 const MAX_DEFERRED: usize = 64;
 const MAX_DEFERRED_BYTES: usize = 32 * 1024;
+const MAX_PER_CONVERSATION: usize = 8;
+const MAX_CONVERSATION_BYTES: usize = MAX_DEFERRED_BYTES / 8;
 impl<E: EngineProvider> AgentHost<E> {
     pub(crate) fn defer_surface(
         &mut self,
@@ -29,6 +31,8 @@ impl<E: EngineProvider> AgentHost<E> {
                 .map_err(|_| Error::State)?,
         );
         let mut queued = self.state.deferred_surfaces.clone();
+        let conversation_id = conversation.clone();
+        let is_new = !queued.contains_key(&key);
         queued.entry(key).and_modify(|old| old.ready_at = ready_at).or_insert(DeferredSurface {
             seq,
             conversation,
@@ -36,6 +40,9 @@ impl<E: EngineProvider> AgentHost<E> {
             action,
             ready_at,
         });
+        if is_new && !conversation_fits(&queued, &conversation_id) {
+            return Err(Error::Limit);
+        }
         if queued.len() > MAX_DEFERRED
             || serde_json::to_vec(&queued).map_err(|_| Error::State)?.len() > MAX_DEFERRED_BYTES
         {
@@ -67,21 +74,25 @@ impl<E: EngineProvider> AgentHost<E> {
             if error.stops_host() || matches!(error, Error::Bus | Error::Resync) {
                 return Err(error);
             }
-            self.state.last_refusal = Some(OutputRefusal {
+            let refusal = OutputRefusal {
                 conversation_id: String::new(),
                 surface_id: None,
                 reason: crate::runner_policy::refusal(&error),
-            });
-            self.store.save(&self.state)?;
+            };
+            if self.state.last_refusal.as_ref() != Some(&refusal) {
+                self.state.last_refusal = Some(refusal);
+                self.store.save(&self.state)?;
+            }
         }
         self.recover_pending(bus).await?;
-        let due = self
+        let mut due = self
             .state
             .deferred_surfaces
             .iter()
             .filter(|(_, work)| work.ready_at <= now_ms)
             .map(|(key, work)| (key.clone(), work.clone()))
             .collect::<Vec<_>>();
+        due.sort_by_key(|(_, work)| work.seq);
         for (key, work) in due {
             let mut event = LocalBusFrame::request(
                 "deferred-surface",
@@ -124,4 +135,47 @@ pub(crate) fn valid(state: &crate::Checkpoint) -> bool {
                 .chain(work.action.as_deref())
                 .all(|id| !id.is_empty() && id.len() <= 1024)
         })
+}
+
+fn conversation_fits(
+    rows: &std::collections::BTreeMap<String, DeferredSurface>,
+    conversation: &str,
+) -> bool {
+    let owned = rows
+        .iter()
+        .filter(|(_, work)| work.conversation == conversation)
+        .collect::<std::collections::BTreeMap<_, _>>();
+    owned.len() <= MAX_PER_CONVERSATION
+        && serde_json::to_vec(&owned).is_ok_and(|bytes| bytes.len() <= MAX_CONVERSATION_BYTES)
+}
+impl<E: EngineProvider> AgentHost<E> {
+    pub(crate) fn normalize_deferred(&mut self) -> Result<()> {
+        let mut ordered = self
+            .state
+            .deferred_surfaces
+            .iter()
+            .map(|(key, work)| (key.clone(), work.clone()))
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, work)| work.seq);
+        let mut kept = std::collections::BTreeMap::new();
+        let mut rejected = None;
+        for (key, work) in ordered {
+            kept.insert(key.clone(), work.clone());
+            if !conversation_fits(&kept, &work.conversation) {
+                kept.remove(&key);
+                rejected = Some(OutputRefusal {
+                    conversation_id: work.conversation,
+                    surface_id: Some(work.reference),
+                    reason: ramflux_sdk::SurfaceRefusalCode::TooLarge,
+                });
+            }
+        }
+        if let Some(refusal) = rejected {
+            eprintln!("agent host refused newest deferred work above its conversation share");
+            self.state.deferred_surfaces = kept;
+            self.state.last_refusal = Some(refusal);
+            self.store.save(&self.state)?;
+        }
+        Ok(())
+    }
 }

@@ -59,3 +59,39 @@ async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_di
     server.await?.map_err(|error| error.to_string())?;
     Ok(())
 }
+
+#[tokio::test]
+async fn r5_authentication_loss_on_receive_and_surface_reads_stops_the_host() -> TestResult {
+    let f = Fixture::new()?;
+    let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        for code in ["Unauthenticated", "AccountLocked"] {
+            let length = socket.read_u32().await?;
+            let mut bytes = vec![0; usize::try_from(length)?];
+            socket.read_exact(&mut bytes).await?;
+            let mut frame: LocalBusFrame = serde_json::from_slice(&bytes)?;
+            frame.kind = LocalBusFrameKind::Error;
+            frame.ok = Some(false);
+            frame.body = json!(null);
+            frame.error = Some(LocalBusErrorBody {
+                code: code.into(),
+                message: "redacted".into(),
+                details: None,
+                reason_code: None,
+                retry_after_ms: None,
+                cause: None,
+            });
+            let wire = serde_json::to_vec(&frame)?;
+            socket.write_u32(u32::try_from(wire.len())?).await?;
+            socket.write_all(&wire).await?;
+        }
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let mut bus = RfdBus::connect(&f.config.socket, "agent").await?;
+    for method in ["message.receive", "surface.get"] {
+        assert!(matches!(bus.request(method, json!({}), None).await, Err(Error::IdentityLost)));
+    }
+    server.await?.map_err(|e| e.to_string())?;
+    Ok(())
+}

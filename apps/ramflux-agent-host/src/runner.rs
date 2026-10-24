@@ -50,6 +50,7 @@ impl<E: EngineProvider> AgentHost<E> {
     /// Rejects revoked/human accounts, unavailable snapshots, stream gaps and state I/O failures.
     pub async fn start(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
+        self.normalize_deferred()?;
         let topics = json!([
             "message.received",
             "group.message.received",
@@ -91,14 +92,14 @@ impl<E: EngineProvider> AgentHost<E> {
         event: LocalBusFrame,
         now_ms: u64,
     ) -> Result<()> {
+        if event.kind == LocalBusFrameKind::Event && event.method == "stream.lagged" {
+            return Err(Error::Resync);
+        }
         if event.account_id.as_deref() != Some(&self.config.account_id)
             || event.kind != LocalBusFrameKind::Event
         {
             eprintln!("agent host ignored an unscoped or non-event frame");
             return Ok(());
-        }
-        if event.method == "stream.lagged" {
-            return Err(Error::Resync);
         }
         let Some(seq) = event.seq else {
             eprintln!("agent host ignored an event without a sequence");

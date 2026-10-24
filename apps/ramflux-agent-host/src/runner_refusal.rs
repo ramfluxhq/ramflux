@@ -47,6 +47,10 @@ impl<E: EngineProvider> AgentHost<E> {
         {
             return Err(Error::Unauthorized);
         }
+        if view["executor_device_id"] != self.state.device_id || view["is_action_executor"] != true
+        {
+            return Err(Error::SurfaceRefused(Code::NotActionExecutor));
+        }
         Ok(view)
     }
     pub(crate) async fn handle_surface_refusal(

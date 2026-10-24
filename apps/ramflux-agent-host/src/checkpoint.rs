@@ -66,7 +66,7 @@ pub(crate) struct ActionWork {
     pub action_id: String,
     pub attempts: u8,
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OutputRefusal {
     pub conversation_id: String,

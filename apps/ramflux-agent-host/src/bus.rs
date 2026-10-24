@@ -90,9 +90,8 @@ impl AgentBus for RfdBus {
             }
             return Err(match error.code.as_str() {
                 "Unavailable" | "Busy" | "DeadlineExceeded" => Error::Bus,
-                "Unauthorized" | "Unauthenticated" | "AccountLocked"
-                    if matches!(method, "account.status" | "device.list") =>
-                {
+                "Unauthenticated" | "AccountLocked" => Error::IdentityLost,
+                "Unauthorized" if matches!(method, "account.status" | "device.list") => {
                     Error::IdentityLost
                 }
                 _ => Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotPermitted),
