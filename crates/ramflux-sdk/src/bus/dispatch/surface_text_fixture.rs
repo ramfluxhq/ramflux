@@ -164,46 +164,7 @@ impl GatewaySessionFrameSource for RecordingGateway {
 pub(in crate::bus::dispatch) fn manifest(
     client: &RamfluxClient,
 ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
-    let root = client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let branch = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let root_public_key =
-        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let commitment = crate::identity_root_public_key_commitment(&root_public_key)?;
-    let branch_proof = ramflux_crypto::authorize_device_branch(
-        root,
-        branch,
-        "ramflux-node",
-        vec!["device.delivery.bind".into()],
-        1_700_000_000,
-        4_000_000_000,
-    )?;
-    let identity = ramflux_crypto::X25519KeyPair::from_seed([44; 32]);
-    let signed = ramflux_crypto::X25519KeyPair::from_seed([45; 32]);
-    Ok(crate::prekey::SdkDeviceManifestResponse {
-        principal_id: branch.principal_id.clone(),
-        principal_commitment: commitment.clone(),
-        root_public_key,
-        devices: vec![crate::prekey::SdkDeviceManifestEntry {
-            principal_id: branch.principal_id.clone(),
-            principal_commitment: commitment,
-            device_id: branch.device_id.clone(),
-            device_epoch: 1,
-            branch_public_key: ramflux_protocol::encode_base64url(
-                branch.signing_key.verifying_key().to_bytes(),
-            ),
-            target_delivery_id: branch.principal_id.clone(),
-            branch_proof,
-            prekey_bundle: ramflux_crypto::create_prekey_bundle(
-                branch,
-                &identity,
-                "signed-key",
-                &signed,
-                None,
-                None,
-            )?,
-            branch_authorized_event_id: format!("device.branch_authorized:{}:1", branch.device_id),
-        }],
-    })
+    crate::client::identity_authority::test_support::public_manifest(client)
 }
 pub(in crate::bus::dispatch) async fn directory(
     root: &Path,

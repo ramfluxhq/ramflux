@@ -22,9 +22,18 @@ async fn group_surface_reaches_a_peer_sibling_only_after_its_device_joins()
     for device in &mut manifest.devices {
         device.target_delivery_id.clone_from(&device.device_id);
     }
+    crate::client::identity_authority::test_support::sign_manifest(
+        peer.peers[0].client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut manifest,
+        2,
+    )?;
     source.client.persist_identity_directory(&manifest)?;
     source.client.create_group("group", "device-sender")?;
-    source.client.add_group_member("group", "device-peer-one", "member")?;
+    source.client.add_group_member(
+        "group",
+        peer.peers[0].client.owned_device_identity()?.storage_key(),
+        "member",
+    )?;
     source.client.account_db()?.persist_client_record(
         "conversation",
         "thread",
@@ -49,7 +58,11 @@ async fn group_surface_reaches_a_peer_sibling_only_after_its_device_joins()
         "a registered peer sibling is not implicitly a group member",
     );
     captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
-    source.client.add_group_member("group", "device-peer-two", "member")?;
+    source.client.add_group_member(
+        "group",
+        peer.peers[1].client.owned_device_identity()?.storage_key(),
+        "member",
+    )?;
     let append = super::own_tests::append(&source.client, &create, 2)?;
     assert_eq!(send(&mut source, &append).await?["delivery_state"], "submitted");
     assert_eq!(

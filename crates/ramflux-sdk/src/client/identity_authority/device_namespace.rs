@@ -43,8 +43,8 @@ impl RamfluxClient {
             .map(|(root, _)| root)
             .ok_or_else(|| invalid("root-qualified device required"))
     }
-    pub(crate) fn device_revocation_key(&self, device: &str) -> Result<String, SdkError> {
-        Ok(format!("device/revoked/{}", self.device_reference(device)?))
+    pub(crate) fn device_revocation_key(device: &ramflux_crypto::RootQualifiedDeviceRef) -> String {
+        format!("device/revoked/{}", device.storage_key())
     }
     pub(crate) fn normalize_recipient(message: &mut GatewayDirectMessage) -> Result<(), SdkError> {
         if message.recipient_principal_commitment.is_none()

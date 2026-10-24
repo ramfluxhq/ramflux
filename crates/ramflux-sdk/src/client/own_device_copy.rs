@@ -34,13 +34,14 @@ pub(crate) struct OwnKeySlot {
     ciphertext: ramflux_crypto::DmCiphertext,
 }
 impl OwnKeySlot {
-    fn object_slot(&self, id: &str) -> SdkObjectKeySlot {
+    fn object_slot(&self, id: &str, root: &str) -> SdkObjectKeySlot {
         SdkObjectKeySlot {
             schema: "ramflux.sdk.object_key_slot.dm.v2".into(),
             version: 2,
             object_id: id.into(),
             conversation_id: String::new(),
             recipient_device_id: self.recipient_device_id.clone(),
+            source_principal_commitment: Some(root.into()),
             x3dh: self.x3dh.clone(),
             ciphertext: self.ciphertext.clone(),
         }
@@ -318,7 +319,7 @@ impl RamfluxClient {
         if slots.len() != 1 {
             return Err(invalid("own-device recipient slot ambiguity"));
         }
-        let slot = slots[0].object_slot(&packet.id);
+        let slot = slots[0].object_slot(&packet.id, &manifest.principal_commitment);
         if slot.ciphertext.sender_device_id_hash
             != dm_device_id_hash(&entry.envelope.source_device_id)
         {
@@ -327,7 +328,11 @@ impl RamfluxClient {
         let mut deferred = match self.decrypt_object_key_slot(&slot) {
             Ok(deferred) => deferred,
             Err(SdkError::PairRecoveryRequired) => {
-                self.begin_pair_recovery(&local.device_id, &entry.envelope.source_device_id, now)?;
+                self.begin_pair_recovery(
+                    &self.owned_device_identity()?,
+                    &self.authenticated_device_identity(entry)?,
+                    now,
+                )?;
                 return Err(SdkError::PairRecoveryRequired);
             }
             Err(error) => return Err(error),

@@ -271,7 +271,12 @@ async fn adding_a_principal_resolves_reachability_and_safety_before_the_first_dm
     let first = seal(&a, &b, message("contact-first", "contact-conversation"), b"hello after add")?;
     let opened = b.client.open_routed(&first, "bob")?;
     assert_eq!(opened.body.as_slice(), b"hello after add");
-    b.client.persist_pair("bob", "alice", &opened.bundle_hash, &opened.session)?;
+    b.client.persist_pair(
+        &opened.local_device,
+        &opened.remote_device,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
     let mut reply = message("contact-reply", "contact-conversation");
     reply.source_principal_id = "bob".into();
     reply.sender_id = "bob".into();

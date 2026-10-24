@@ -123,7 +123,10 @@ impl RamfluxClient {
                     && record["principal_commitment"].as_str()
                         == Some(&change.previous_root_commitment)
                 {
-                    self.remove_device_pair(id, "provisional_root_replaced")?;
+                    self.remove_device_pair(
+                        &self.device_identity_for_root(&change.previous_root_commitment, id)?,
+                        "provisional_root_replaced",
+                    )?;
                     db.remove_actor_state(&format!("directory/device/{id}"))?;
                     db.remove_device_directory_root(id, &change.previous_root_commitment)?;
                 }

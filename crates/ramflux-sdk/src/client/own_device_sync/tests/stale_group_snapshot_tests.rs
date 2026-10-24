@@ -12,14 +12,28 @@ fn setup(
     let (mut target, tr) =
         client_with_account(&format!("{name}-target"), "principal_sync", "target_device_sync")?;
     target.create_device_branch("principal_sync", "target_device_sync", 1, [0x53; 32]);
+    let mut own_manifest =
+        crate::client::identity_authority::test_support::public_manifest(&source)?;
+    own_manifest
+        .devices
+        .extend(crate::client::identity_authority::test_support::public_manifest(&target)?.devices);
+    crate::client::identity_authority::test_support::sign_manifest(
+        source.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut own_manifest,
+        1,
+    )?;
+    source.persist_root_verified_directory(&own_manifest)?;
+    target.persist_root_verified_directory(&own_manifest)?;
     source.create_group("g", "source_device_sync")?;
-    source.account_db()?.persist_client_record("device","bob",&serde_json::json!({"principal_id":"bob","principal_commitment":"bob-root","signing_public_key":ramflux_protocol::encode_base64url(ramflux_crypto::create_device_branch("bob","bob",1,[0x63;32]).signing_key.verifying_key().to_bytes())}))?;
-    let record = source
-        .account_db()?
-        .client_record("device", "bob")?
-        .ok_or(SdkError::IdentityRootMissing)?;
-    target.account_db()?.persist_client_record("device", "bob", &record)?;
-    source.add_group_member("g", "bob", "member")?;
+    let bob_manifest =
+        crate::client::identity_authority::test_support::remote_manifest("bob", "bob", [0x63; 32])?;
+    source.persist_root_verified_directory(&bob_manifest)?;
+    target.persist_root_verified_directory(&bob_manifest)?;
+    source.add_group_member(
+        "g",
+        RamfluxClient::device_identity_from_manifest(&bob_manifest, "bob")?.storage_key(),
+        "member",
+    )?;
     let history = source.own_device_history_bundle(
         "principal_sync",
         "source_device_sync",
@@ -49,9 +63,16 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
         &history,
     )?;
     let (mut bob, bob_root) = client_with_account("stale-member-bob", "bob", "bob")?;
+    bob.create_identity_root(
+        "bob",
+        ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &[0x63; 32]),
+    );
     bob.create_device_branch("bob", "bob", 1, [0x63; 32]);
     bob.create_group("g", "bob")?;
-    bob.add_group_member("g", "source_device_sync", "member")?;
+    bob.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&source)?,
+    )?;
+    bob.add_group_member("g", source.owned_device_identity()?.storage_key(), "member")?;
     target.import_group_sender_key_distribution(
         &bob.export_group_sender_key_distribution("g", "bob")?,
     )?;
@@ -69,7 +90,17 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
     let db = target.account_db()?;
     db.remove_group_member("g", "target_device_sync", "bob")?;
     let epoch = target.group_state("g")?.group_epoch;
-    let key = db.group_member_device_key("g", "bob")?.ok_or(SdkError::IdentityRootMissing)?;
+    let key = db
+        .group_member_device_key(
+            "g",
+            &RamfluxClient::device_identity_from_manifest(
+                &crate::client::identity_authority::test_support::remote_manifest(
+                    "bob", "bob", [0x63; 32],
+                )?,
+                "bob",
+            )?,
+        )?
+        .ok_or(SdkError::IdentityRootMissing)?;
     drop(target.active_account_db.take());
     target.unlock_account("acct", b"own-device-sync-test")?;
     target.import_own_device_history_bundle(
@@ -78,9 +109,46 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
     )?;
     assert_eq!(target.group_state("g")?.group_epoch, epoch);
     assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
-    assert!(target.account_db()?.group_member_key_binding("g", "bob")?.is_none());
-    assert_eq!(target.account_db()?.group_member_device_key("g", "bob")?, Some(key));
-    assert!(target.require_group_sender_pin("g", "bob", "bob").is_err());
+    assert!(
+        target
+            .account_db()?
+            .group_member_key_binding(
+                "g",
+                &RamfluxClient::device_identity_from_manifest(
+                    &crate::client::identity_authority::test_support::remote_manifest(
+                        "bob", "bob", [0x63; 32]
+                    )?,
+                    "bob"
+                )?
+            )?
+            .is_none()
+    );
+    assert_eq!(
+        target.account_db()?.group_member_device_key(
+            "g",
+            &RamfluxClient::device_identity_from_manifest(
+                &crate::client::identity_authority::test_support::remote_manifest(
+                    "bob", "bob", [0x63; 32]
+                )?,
+                "bob"
+            )?
+        )?,
+        Some(key)
+    );
+    assert!(
+        target
+            .require_group_sender_pin(
+                "g",
+                "bob",
+                &RamfluxClient::device_identity_from_manifest(
+                    &crate::client::identity_authority::test_support::remote_manifest(
+                        "bob", "bob", [0x63; 32]
+                    )?,
+                    "bob"
+                )?
+            )
+            .is_err()
+    );
     let after = member_packet(&bob, "after-removal", &bob_root)?;
     assert!(target.authenticated_envelope_sender(&after).is_ok());
     assert!(
@@ -122,7 +190,20 @@ fn highest_snapshot_epoch_wins_for_an_unseen_group_regardless_of_bundle_order()
         )?;
         assert_eq!(target.group_state("g")?.group_epoch, 4);
         assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
-        assert!(target.account_db()?.group_member_key_binding("g", "bob")?.is_none());
+        assert!(
+            target
+                .account_db()?
+                .group_member_key_binding(
+                    "g",
+                    &RamfluxClient::device_identity_from_manifest(
+                        &crate::client::identity_authority::test_support::remote_manifest(
+                            "bob", "bob", [0x63; 32]
+                        )?,
+                        "bob"
+                    )?
+                )?
+                .is_none()
+        );
         finish(source, sr, target, tr)?;
     }
     Ok(())
@@ -147,7 +228,20 @@ fn a_newer_snapshot_omission_retires_members_before_an_older_snapshot_can_reintr
         &history,
     )?;
     assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
-    assert!(target.account_db()?.group_member_key_binding("g", "bob")?.is_none());
+    assert!(
+        target
+            .account_db()?
+            .group_member_key_binding(
+                "g",
+                &RamfluxClient::device_identity_from_manifest(
+                    &crate::client::identity_authority::test_support::remote_manifest(
+                        "bob", "bob", [0x63; 32]
+                    )?,
+                    "bob"
+                )?
+            )?
+            .is_none()
+    );
     finish(source, sr, target, tr)
 }
 #[test]
@@ -170,7 +264,7 @@ fn snapshot_import_cannot_reactivate_a_removed_local_device() -> Result<(), SdkE
         &history,
     )?;
     assert!(db.group_member_role("g", "target_device_sync")?.is_none());
-    assert!(db.group_member_key_binding("g", "target_device_sync")?.is_none());
+    assert!(db.group_member_key_binding("g", &target.owned_device_identity()?)?.is_none());
     assert_eq!(target.group_state("g")?.group_epoch, 3);
     finish(source, sr, target, tr)
 }
@@ -235,7 +329,20 @@ fn a_member_joined_after_the_snapshot_epoch_is_not_activated_or_pinned() -> Resu
         &history,
     )?;
     assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
-    assert!(target.account_db()?.group_member_key_binding("g", "bob")?.is_none());
+    assert!(
+        target
+            .account_db()?
+            .group_member_key_binding(
+                "g",
+                &RamfluxClient::device_identity_from_manifest(
+                    &crate::client::identity_authority::test_support::remote_manifest(
+                        "bob", "bob", [0x63; 32]
+                    )?,
+                    "bob"
+                )?
+            )?
+            .is_none()
+    );
     finish(source, sr, target, tr)
 }
 #[test]
@@ -269,7 +376,6 @@ fn member_packet(
     id: &str,
     root: &Path,
 ) -> Result<GatewayInboxEntry, SdkError> {
-    let branch = bob.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
         bind_addr: "127.0.0.1:0".parse().map_err(|e| SdkError::LocalBus(format!("{e}")))?,
         gateway_addr: "127.0.0.1:1".parse().map_err(|e| SdkError::LocalBus(format!("{e}")))?,
@@ -280,7 +386,7 @@ fn member_packet(
         target_delivery_id: "target_device_sync".into(),
         prekey_http_url: None,
     })
-    .with_device_branch(branch.clone());
+    .with_account_identity(bob)?;
     let message = GatewayDirectMessage {
         conversation_id: "g".into(),
         message_id: id.into(),
@@ -288,6 +394,7 @@ fn member_packet(
         source_principal_id: "bob".into(),
         sender_id: "bob".into(),
         recipient_device_id: Some("target_device_sync".into()),
+        recipient_principal_commitment: None,
         target_delivery_id: "target_device_sync".into(),
         encrypted_body: bob.encrypt_group_message("g", "bob", b"removed member message")?,
         created_at: now_unix_timestamp(),
@@ -406,7 +513,7 @@ fn a_reused_local_device_id_ignores_foreign_self_pins_and_later_restores_group_k
     assert_eq!(
         target
             .account_db()?
-            .group_member_key_binding("g", "target_device_sync")?
+            .group_member_key_binding("g", &target.owned_device_identity()?)?
             .ok_or(SdkError::IdentityRootMissing)?
             .signing_public_key,
         own
@@ -425,7 +532,7 @@ fn a_reused_local_device_id_ignores_foreign_self_pins_and_later_restores_group_k
     assert_eq!(
         target
             .account_db()?
-            .group_member_key_binding("g", "target_device_sync")?
+            .group_member_key_binding("g", &target.owned_device_identity()?)?
             .ok_or(SdkError::IdentityRootMissing)?
             .signing_public_key,
         own

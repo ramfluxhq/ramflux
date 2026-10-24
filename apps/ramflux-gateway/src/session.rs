@@ -71,8 +71,11 @@ pub(crate) async fn handle_gateway_quic_stream(
     if let crate::ingress::Ingress::Session(frame) = first {
         handle_gateway_session_stream(send, recv, context, *frame).await?;
     } else {
-        let crate::ingress::Ingress::Request(request)=first else { anyhow::bail!("gateway ingress dispatch mismatch"); };
-        let response=dispatch_quic_json_request(&context.router,request,context.remote_addr.ip()).await?;
+        let crate::ingress::Ingress::Request(request) = first else {
+            anyhow::bail!("gateway ingress dispatch mismatch");
+        };
+        let response =
+            dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
         let write_started = Instant::now();
         ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
         ramflux_node_core::record_gateway_quic_response_write_us(elapsed_us(write_started));
@@ -100,8 +103,11 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
         handle_gateway_session_transport(Box::new(send), Box::new(recv), context, *frame).await?;
     } else {
         let mut send = Box::new(send);
-        let crate::ingress::Ingress::Request(request)=first else { anyhow::bail!("gateway ingress dispatch mismatch"); };
-        let response=dispatch_quic_json_request(&context.router,request,context.remote_addr.ip()).await?;
+        let crate::ingress::Ingress::Request(request) = first else {
+            anyhow::bail!("gateway ingress dispatch mismatch");
+        };
+        let response =
+            dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
         ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
     }
     Ok(())

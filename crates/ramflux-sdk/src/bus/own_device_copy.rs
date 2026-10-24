@@ -240,6 +240,7 @@ async fn send(
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: engine.config.device_id.clone(),
             recipient_device_id: None,
+            recipient_principal_commitment: None,
             target_delivery_id: engine.config.target_delivery_id.clone(),
             encrypted_body: packet.bytes()?,
             created_at: now_unix_timestamp(),

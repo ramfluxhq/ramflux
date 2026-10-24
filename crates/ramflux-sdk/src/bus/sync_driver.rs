@@ -190,7 +190,7 @@ async fn process(
     }
     if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
         account.client.retain_legacy_group_entry(entry)?;
-        return Ok((false,None));
+        return Ok((false, None));
     }
     if account.client.v2_blocks_legacy(&account.client.inbound_device_reference(entry)?)? {
         let db = account.client.account_db()?;

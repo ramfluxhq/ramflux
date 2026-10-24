@@ -106,8 +106,8 @@ impl RamfluxClient {
             if let Some(change) = &replacement {
                 self.clear_provisional_contact(&old, change, &own_commitment)?;
             }
-            self.persist_verified_directory_rows(&own_manifest)?;
-            self.persist_verified_directory_rows(&manifest)?;
+            self.persist_root_verified_directory(&own_manifest)?;
+            self.persist_root_verified_directory(&manifest)?;
             for device in &manifest.devices {
                 db.upsert_device_directory_entry(
                     &device.device_id,

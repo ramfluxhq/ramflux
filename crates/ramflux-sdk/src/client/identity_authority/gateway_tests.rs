@@ -112,10 +112,9 @@ async fn mismatching_revocation_ack_fences_local_traffic_and_retries_the_identic
     });
     assert!(owner.client.revoke_owned_device(&gateway, "alice").await.is_err());
     assert_eq!(
-        owner
-            .client
-            .account_db()?
-            .load_actor_state::<bool>(&owner.client.device_revocation_key("alice")?)?,
+        owner.client.account_db()?.load_actor_state::<bool>(
+            &RamfluxClient::device_revocation_key(&owner.client.owned_device_identity()?)
+        )?,
         Some(true)
     );
     assert_eq!(
@@ -253,10 +252,11 @@ async fn own_device_import_rejects_a_revoked_siblings_replayed_manifest_before_h
     assert!(
         target
             .client
-            .require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+            .device_identity(&ramflux_protocol::qualified_device_id(
                 &old.principal_commitment,
                 "one"
             )?)
+            .and_then(|identity| target.client.require_cached_root_authority(&identity))
             .is_err()
     );
     assert_eq!(

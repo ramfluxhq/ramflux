@@ -317,10 +317,16 @@ impl RamfluxClient {
         Ok(plaintext)
     }
 
-    fn catch_up_legacy_cursor(&self,conversation_id: &str,entry: &GatewayInboxEntry,target: &str) -> Result<bool,SdkError> {
-        if self.legacy_receive_checkpoint_current(conversation_id,entry)? {
-            self.account_db()?.persist_actor_state(&self.legacy_committed_key(entry)?,&conversation_id)?;
-            self.persist_gateway_receive_cursor(target,entry.inbox_seq)?;
+    fn catch_up_legacy_cursor(
+        &self,
+        conversation_id: &str,
+        entry: &GatewayInboxEntry,
+        target: &str,
+    ) -> Result<bool, SdkError> {
+        if self.legacy_receive_checkpoint_current(conversation_id, entry)? {
+            self.account_db()?
+                .persist_actor_state(&self.legacy_committed_key(entry)?, &conversation_id)?;
+            self.persist_gateway_receive_cursor(target, entry.inbox_seq)?;
             return Ok(true);
         }
         Ok(false)
@@ -365,7 +371,14 @@ impl RamfluxClient {
             )?;
             return Ok(None);
         }
-        if self.apply_receipt_event_plaintext(&body, &self.authenticated_device_identity(&entry)?,conversation_id)?.is_some() {
+        if self
+            .apply_receipt_event_plaintext(
+                &body,
+                &self.authenticated_device_identity(&entry)?,
+                conversation_id,
+            )?
+            .is_some()
+        {
             // Receipt applied: commit the advanced recv ratchet, then the cursor.
             self.commit_legacy_receive(
                 conversation_id,
@@ -503,7 +516,7 @@ impl RamfluxClient {
         target: &str,
         session: &ramflux_crypto::DmSession,
     ) -> Result<(), SdkError> {
-        let key = crate::client::routed::committed_key(entry)?;
+        let key = self.legacy_committed_key(entry)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             db.dead_letter_inbox(&key,&serde_json::to_vec(entry)?,&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"error_code":"legacy_control_rejected"}),now_unix_timestamp())?;

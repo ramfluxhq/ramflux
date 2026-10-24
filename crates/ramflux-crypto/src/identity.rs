@@ -211,8 +211,8 @@ pub fn verify_branch_proof(
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DeviceRevocationReplayGuard {
-    revoked_devices: BTreeSet<String>,
-    seen_proofs: BTreeSet<String>,
+    revoked_devices: BTreeSet<crate::RootQualifiedDeviceRef>,
+    seen_proofs: BTreeSet<(crate::RootQualifiedDeviceRef, String)>,
 }
 
 impl DeviceRevocationReplayGuard {
@@ -221,26 +221,33 @@ impl DeviceRevocationReplayGuard {
         Self { revoked_devices: BTreeSet::new(), seen_proofs: BTreeSet::new() }
     }
 
-    pub fn revoke_device(&mut self, device_id: &str) {
-        self.revoked_devices.insert(device_id.to_owned());
+    pub fn revoke_device(&mut self, device: &crate::RootQualifiedDeviceRef) {
+        self.revoked_devices.insert(device.clone());
     }
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn accept_branch_proof(
         &mut self,
+        source: &crate::RootQualifiedDeviceRef,
         root_public_key: &VerifyingKey,
         proof: &BranchProofDocument,
         audience: &str,
         required_capability: &str,
         now: i64,
     ) -> Result<(), CryptoError> {
-        if self.revoked_devices.contains(&proof.device_id) {
+        if source.root_commitment() != crate::identity_root_commitment(root_public_key)
+            || source.device_id() != proof.device_id
+        {
+            return Err(CryptoError::VerifyFailed);
+        }
+        verify_branch_proof(root_public_key, proof, audience, required_capability, now)?;
+        if self.revoked_devices.contains(source) {
             return Err(CryptoError::DeviceRevoked);
         }
-        if !self.seen_proofs.insert(proof.proof_id.clone()) {
+        if !self.seen_proofs.insert((source.clone(), proof.proof_id.clone())) {
             return Err(CryptoError::BranchProofReplay);
         }
-        verify_branch_proof(root_public_key, proof, audience, required_capability, now)
+        Ok(())
     }
 }

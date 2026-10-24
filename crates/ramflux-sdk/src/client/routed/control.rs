@@ -43,7 +43,7 @@ impl RamfluxClient {
             let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
                 ramflux_protocol::parse_i_json(body)?;
             if sync.source_device_id != entry.envelope.source_device_id
-                || sync.target_device_id != opened.local_device
+                || sync.target_device_id != opened.local_device.device_id()
                 || !self.account_db()?.actor_state_exists(&Self::own_sync_receipt_key(&sync)?)?
             {
                 return Err(invalid("own-device history has not been authenticated and imported"));
@@ -123,7 +123,8 @@ impl RamfluxClient {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("unknown control event type"))?;
-        let device = self.trusted_device(&self.inbound_device_reference(entry)?)?;
+        let device =
+            self.trusted_device(&self.device_identity(&self.inbound_device_reference(entry)?)?)?;
         let remote = [
             Some(entry.envelope.source_principal_id.as_str()),
             device.get("principal_commitment").and_then(Value::as_str),

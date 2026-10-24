@@ -85,10 +85,13 @@ async fn malformed_gateway_success_during_bootstrap_is_held_and_the_same_distrib
     };
     let conversation = group_sender_key_distribution_conversation_id("bootstrap", "alice", "bob");
     let msg = message("bootstrap-distribution", &conversation);
-    let bundle = bob.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle = bob.client.load_x3dh_private_state(&bob.client.owned_device_identity()?)?.bundle;
     let (mut session, x3dh) =
         alice.client.create_send_dm_session_from_bundle(&msg, "bob", bundle, "alice")?;
     let encrypted = SdkDmEncryptedEnvelope {
+        source_principal_commitment: Some(
+            alice.client.owned_device_identity()?.root_commitment().into(),
+        ),
         schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
         version: 1,
         x3dh,

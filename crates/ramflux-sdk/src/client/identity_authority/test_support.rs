@@ -174,3 +174,23 @@ pub(crate) fn remote_manifest(
     sign_manifest(&root, &mut manifest, 1)?;
     Ok(manifest)
 }
+
+pub(crate) fn public_manifest(
+    client: &RamfluxClient,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let branch = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let identity = client.owned_device_identity()?;
+    if client.optional_owned_private_prekey(&identity)?.is_none() {
+        client.initialize_and_publish_prekey_bundle(
+            identity.root_commitment(),
+            &branch.device_id,
+            &branch.device_id,
+            branch.signing_key.to_bytes(),
+            None,
+        )?;
+    }
+    let mut manifest = manifest(client)?;
+    manifest.devices[0].target_delivery_id.clone_from(&branch.principal_id);
+    client.record_owned_proof_published(crate::prelude::now_unix_timestamp())?;
+    Ok(manifest)
+}

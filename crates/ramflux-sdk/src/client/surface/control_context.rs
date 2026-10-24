@@ -110,8 +110,9 @@ impl RamfluxClient {
             {
                 return Err(invalid("surface message below joined epoch"));
             }
-            if !self.surface_group_device_allowed(id, device)?
-                || !self.surface_group_device_allowed(id, &local.device_id)?
+            if !self
+                .surface_group_device_allowed(id, &self.peer_device_identity(principal, device)?)?
+                || !self.surface_group_device_allowed(id, &self.owned_device_identity()?)?
             {
                 return Err(SdkError::InboundPending(
                     "surface group membership unavailable".into(),

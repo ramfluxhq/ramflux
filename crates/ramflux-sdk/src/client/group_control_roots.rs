@@ -17,7 +17,7 @@ fn rejected() -> SdkError {
 fn root(reference: &str) -> Result<String, SdkError> {
     parse_qualified_device_id(reference)?.map(|(root, _)| root).ok_or_else(pending)
 }
-fn invite_key(group: &str, member: &str) -> Result<String, SdkError> {
+fn legacy_invite_name_key(group: &str, member: &str) -> Result<String, SdkError> {
     Ok(format!(
         "group/invite-root/{}",
         ramflux_protocol::hash_base64url(
@@ -131,7 +131,7 @@ impl RamfluxClient {
     ) -> Result<String, SdkError> {
         let witness = self
             .account_db()?
-            .load_actor_state::<InviteRoot>(&invite_key(group, member)?)?
+            .load_actor_state::<InviteRoot>(&legacy_invite_name_key(group, member)?)?
             .ok_or_else(pending)?;
         if witness.ambiguous {
             return Err(pending());
@@ -164,7 +164,7 @@ impl RamfluxClient {
             return Err(rejected());
         }
         self.account_db()?.persist_actor_state(&exact, &commitment)?;
-        let key = invite_key(group, member)?;
+        let key = legacy_invite_name_key(group, member)?;
         let db = self.account_db()?;
         let old = db.load_actor_state::<InviteRoot>(&key)?;
         let ambiguous = old.as_ref().is_some_and(|old| old.ambiguous || old.root != commitment);
@@ -226,7 +226,7 @@ impl RamfluxClient {
             if self.account_db()?.client_record("device", &actor)?.is_none() {
                 return Err(pending());
             }
-            let device = self.trusted_device(&actor)?;
+            let device = self.trusted_device(&self.device_identity(&actor)?)?;
             if device["principal_id"] != event.actor_principal_id
                 || device["signing_public_key"] != public
             {

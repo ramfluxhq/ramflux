@@ -120,7 +120,7 @@ fn handle_itest_directory_request(
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response = handle_mvp1_prekey_fetch(path, router.state());
+            let response = handle_mvp1_prekey_fetch(path, router.state())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
@@ -135,7 +135,7 @@ fn handle_itest_directory_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
-            let response = handle_mvp1_device_auth_key_fetch(path, router.state());
+            let response = handle_mvp1_device_auth_key_fetch(path, router.state())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         _ => return Ok(false),
@@ -707,8 +707,11 @@ pub(crate) fn handle_mvp1_identity_register(
     store: &ramflux_node_core::RouterRedbStore,
     source_override: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut request: ramflux_node_core::IdentityRegisterRequest = ramflux_protocol::parse_i_json(body)?;
-    if let Some(source) = source_override { request.source_ip_hash=Some(source.into()); }
+    let mut request: ramflux_node_core::IdentityRegisterRequest =
+        ramflux_protocol::parse_i_json(body)?;
+    if let Some(source) = source_override {
+        request.source_ip_hash = Some(source.into());
+    }
     request.now = i64::try_from(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
     )?;

@@ -267,8 +267,13 @@ impl RamfluxClient {
             return Ok(false);
         };
         if let Some(group) = thread["group_id"].as_str() {
-            Ok(self.surface_group_device_allowed(group, &carrier.sender_device_id)?
-                && self.surface_group_device_allowed(group, &local.device_id)?)
+            Ok(self.surface_group_device_allowed(
+                group,
+                &self.peer_device_identity(
+                    &carrier.sender_principal_id,
+                    &carrier.sender_device_id,
+                )?,
+            )? && self.surface_group_device_allowed(group, &self.owned_device_identity()?)?)
         } else {
             let peers = thread["participants"]
                 .as_array()

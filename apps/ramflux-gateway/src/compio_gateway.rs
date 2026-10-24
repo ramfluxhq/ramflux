@@ -162,8 +162,16 @@ async fn handle_gateway_compio_quic_stream(
         return Ok(());
     }
 
-    let crate::ingress::Ingress::Request(request)=first else { anyhow::bail!("gateway ingress dispatch mismatch"); };
-    let response=if let Some(response)=crate::principal_directory::reject_unauthenticated(&request) { response } else { dispatch_gateway_request_blocking(context.router.clone(),request,remote_addr.ip()).await? };
+    let crate::ingress::Ingress::Request(request) = first else {
+        anyhow::bail!("gateway ingress dispatch mismatch");
+    };
+    let response = if let Some(response) =
+        crate::principal_directory::reject_unauthenticated(&request)
+    {
+        response
+    } else {
+        dispatch_gateway_request_blocking(context.router.clone(), request, remote_addr.ip()).await?
+    };
     send.write_json_message(&response).await?;
     send.finish()?;
     Ok(())

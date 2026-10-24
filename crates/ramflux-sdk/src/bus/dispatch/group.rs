@@ -981,7 +981,9 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             account.client.export_group_sender_key_distribution(group_id, &sender_id)?;
         let decoded_distribution: SdkGroupSenderKeyDistribution =
             serde_json::from_slice(&distribution)?;
-        let distribution_key = format!("group/distribution-envelope/{group_id}/{sender_id}/{recipient_device_id}/{}",decoded_distribution.group_key_epoch);
+        let sender = account.client.owned_device_identity()?;
+        let recipient = account.client.device_identity_for_root(&member_principal_commitment, recipient_device_id)?;
+        let distribution_key = crate::group::distribution_envelope_key(group_id, &sender, &recipient, decoded_distribution.group_key_epoch)?;
         let envelope_id = if let Some(id) = account.client.account_db()?.load_actor_state::<String>(&distribution_key)? { id } else {
             let id = format!("envelope_{}",ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
             account.client.account_db()?.persist_actor_state(&distribution_key,&id)?;
@@ -994,7 +996,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                 "already_submitted": true,
             })));
         }
-        let qualified=account.client.root_qualified_device_lookup(recipient_device_id)?;
+        let qualified=account.client.root_qualified_device_lookup(recipient.storage_key())?;
         let prekey = if let Some(federation) = route.federation.as_ref() {
             let prekey_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
                 SdkError::LocalBus(

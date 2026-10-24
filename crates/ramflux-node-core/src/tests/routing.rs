@@ -971,7 +971,7 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
                 "alice_device_missing",
                 1,
                 None,
-                "source_a",
+                "source_invalid",
             )?)
             .is_err()
     );
@@ -983,12 +983,23 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
                 "alice_device_bad",
                 2,
                 Some(RegistrationPowProof { nonce: 0, difficulty_bits: 0 }),
-                "source_a",
+                "source_invalid",
             )?)
             .is_err()
     );
 
-    assert!(router.mvp1_register_identity(&registration_request(&router,"valid_but_source_exhausted","valid_device",9,Some(solved_pow("valid_but_source_exhausted",POW_BITS)),"source_invalid")?).is_err());
+    assert!(
+        router
+            .mvp1_register_identity(&registration_request(
+                &router,
+                "valid_but_source_exhausted",
+                "valid_device",
+                9,
+                Some(solved_pow("valid_but_source_exhausted", POW_BITS)),
+                "source_invalid"
+            )?)
+            .is_err()
+    );
     let alice_pow = solved_pow("alice_pow_ok", POW_BITS);
     let alice = router.mvp1_register_identity(&registration_request(
         &router,

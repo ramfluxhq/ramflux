@@ -54,6 +54,23 @@ impl RamfluxClient {
             branch,
         )?)
     }
+    pub(crate) fn peer_device_identity(
+        &self,
+        principal: &str,
+        name: &str,
+    ) -> Result<RootQualifiedDeviceRef, SdkError> {
+        if self.device_branch.as_ref().is_some_and(|b| b.principal_id == principal) {
+            return self.owned_account_device_identity(name);
+        }
+        let manifest: crate::prekey::SdkDeviceManifestResponse = self
+            .account_db()?
+            .load_actor_state(&format!("identity/manifest/{principal}"))?
+            .ok_or_else(|| SdkError::InboundPending("surface peer manifest unavailable".into()))?;
+        if manifest.principal_id != principal {
+            return Err(invalid("surface peer principal mismatch"));
+        }
+        self.device_identity_for_root(&manifest.principal_commitment, name)
+    }
     pub(crate) fn device_identity(
         &self,
         reference: &str,

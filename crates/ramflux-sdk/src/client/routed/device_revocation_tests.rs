@@ -173,7 +173,7 @@ async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_r
     );
     assert!(super::review::trust(&bob, &alice).is_err());
     assert!(matches!(
-        bob.client.trusted_device(&alice.reference()?),
+        bob.client.trusted_device(&bob.client.device_identity(&alice.reference()?)?),
         Err(SdkError::InboundRejected(_))
     ));
     Ok(())

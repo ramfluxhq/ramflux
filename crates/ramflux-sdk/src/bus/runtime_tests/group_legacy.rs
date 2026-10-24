@@ -13,7 +13,7 @@ async fn a_rejected_legacy_group_entry_does_not_block_read_or_receive_of_valid_m
     bad.envelope.signed.signature = "invalid".into();
     for entry in [&bad, &good] {
         receiver.client.account_db()?.hold_unrouted(
-            &crate::client::routed::committed_key(entry)?,
+            &receiver.client.inbox_admission_key(entry)?,
             entry.inbox_seq,
             &serde_json::to_vec(entry)?,
             now_unix_timestamp(),
@@ -91,12 +91,33 @@ fn legacy_group_fixture_with_pin(
     let commitment = crate::identity_root_public_key_commitment(
         &ramflux_protocol::encode_base64url(master.signing_key.verifying_key().to_bytes()),
     )?;
-    receiver.client.account_db()?.persist_client_record("device","device-alice",&serde_json::json!({"principal_id":"alice","principal_commitment":commitment,"x25519_identity_public":sender.client.load_x3dh_private_state("device-alice")?.bundle.identity_key,"signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+    receiver.client.account_db()?.persist_client_record("device","device-alice",&serde_json::json!({"principal_id":"alice","principal_commitment":commitment,"x25519_identity_public":sender.client.load_x3dh_private_state(&sender.client.owned_device_identity()?)?.bundle.identity_key,"signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+    let sender_manifest =
+        crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    receiver.client.persist_root_verified_directory(&sender_manifest)?;
+    receiver.client.initialize_and_publish_prekey_bundle(
+        "bob",
+        "device-bob",
+        "target",
+        [0x62; 32],
+        None,
+    )?;
+    let receiver_manifest =
+        crate::client::identity_authority::test_support::manifest(&receiver.client)?;
+    sender.client.persist_root_verified_directory(&receiver_manifest)?;
     sender.client.create_group("g", "device-alice")?;
-    sender.client.add_group_member("g", "device-bob", "member")?;
+    sender.client.add_group_member(
+        "g",
+        receiver.client.owned_device_identity()?.storage_key(),
+        "member",
+    )?;
     receiver.client.create_group("g", "device-bob")?;
     if pin {
-        receiver.client.add_group_member("g", "device-alice", "member")?;
+        receiver.client.add_group_member(
+            "g",
+            sender.client.owned_device_identity()?.storage_key(),
+            "member",
+        )?;
         receiver.client.import_group_sender_key_distribution(
             &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
         )?;
@@ -126,7 +147,8 @@ fn legacy_group_fixture_with_pin(
         &root.join("sender"),
         "alice",
     ))?;
-    let config = GatewaySessionConfig::quic(manifest.gateway).with_device_branch(d.clone());
+    let config =
+        GatewaySessionConfig::quic(manifest.gateway).with_account_identity(&sender.client)?;
     let encrypted =
         sender.client.encrypt_group_message("g", "device-alice", b"valid after rejected")?;
     let message = GatewayDirectMessage {
@@ -136,6 +158,9 @@ fn legacy_group_fixture_with_pin(
         source_principal_id: "alice".into(),
         sender_id: "device-alice".into(),
         recipient_device_id: Some("device-bob".into()),
+        recipient_principal_commitment: Some(
+            receiver.client.owned_device_identity()?.root_commitment().into(),
+        ),
         target_delivery_id: "target".into(),
         encrypted_body: encrypted,
         created_at: now_unix_timestamp(),
@@ -148,7 +173,11 @@ fn legacy_group_fixture_with_pin(
     };
     receiver.client.authenticated_envelope_sender(&good)?;
     if pin {
-        receiver.client.require_group_sender_pin("g", "alice", "device-alice")?;
+        receiver.client.require_group_sender_pin(
+            "g",
+            "alice",
+            &sender.client.owned_device_identity()?,
+        )?;
     }
     assert!(receiver.client.legacy_group_binding("thread", "g", &good)?);
     Ok((root, sender, receiver, good))
@@ -526,11 +555,12 @@ fn a_legacy_failure_without_a_retry_slot_cannot_reenter_as_a_fresh_delivery() ->
     let now = now_unix_timestamp();
     for index in 0..64 {
         let key = format!("occupied-{index}");
+        let identity = receiver.client.owned_account_device_identity(&key)?;
         assert!(db.set_verified_inbox_failure_policy(
             &key,
             b"{}",
             ramflux_storage::InboxFailurePolicy {
-                verified_source: Some(&key),
+                verified_source: Some(&identity),
                 trusted: true,
                 dependency: ("none", ""),
                 at: now,

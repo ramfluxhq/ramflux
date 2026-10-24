@@ -29,11 +29,11 @@ pub struct GroupKeyEpochState {
     pub group_id: String,
     pub group_epoch: u64,
     pub group_key_epoch: u64,
-    pub members: BTreeSet<String>,
-    pub removed_members: BTreeSet<String>,
-    pub sender_key_distributed: BTreeSet<String>,
-    pub queued_sender_key_distribution: BTreeSet<String>,
-    pub readable_objects: BTreeMap<String, BTreeSet<String>>,
+    pub members: BTreeSet<ramflux_crypto::RootQualifiedDeviceRef>,
+    pub removed_members: BTreeSet<ramflux_crypto::RootQualifiedDeviceRef>,
+    pub sender_key_distributed: BTreeSet<ramflux_crypto::RootQualifiedDeviceRef>,
+    pub queued_sender_key_distribution: BTreeSet<ramflux_crypto::RootQualifiedDeviceRef>,
+    pub readable_objects: BTreeMap<String, BTreeSet<ramflux_crypto::RootQualifiedDeviceRef>>,
     pub conflict_pending: bool,
 }
 
@@ -165,7 +165,10 @@ pub struct GroupMemberJoinWrite {
 
 impl GroupKeyEpochState {
     #[must_use]
-    pub fn new(group_id: &str, members: impl IntoIterator<Item = String>) -> Self {
+    pub fn new(
+        group_id: &str,
+        members: impl IntoIterator<Item = ramflux_crypto::RootQualifiedDeviceRef>,
+    ) -> Self {
         let members = members.into_iter().collect::<BTreeSet<_>>();
         Self {
             group_id: group_id.to_owned(),
@@ -186,26 +189,29 @@ impl GroupKeyEpochState {
         Ok(ramflux_core::GroupId::new(self.group_id.clone())?)
     }
 
-    pub fn distribute_sender_key(&mut self, member: &str) {
+    pub fn distribute_sender_key(&mut self, member: &ramflux_crypto::RootQualifiedDeviceRef) {
         if self.members.contains(member) {
             self.sender_key_distributed.insert(member.to_owned());
             self.queued_sender_key_distribution.remove(member);
         }
     }
 
-    pub fn queue_sender_key_for_offline_member(&mut self, member: &str) {
+    pub fn queue_sender_key_for_offline_member(
+        &mut self,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) {
         if self.members.contains(member) {
             self.queued_sender_key_distribution.insert(member.to_owned());
         }
     }
 
-    pub fn reconnect_member(&mut self, member: &str) {
+    pub fn reconnect_member(&mut self, member: &ramflux_crypto::RootQualifiedDeviceRef) {
         if self.queued_sender_key_distribution.remove(member) {
             self.sender_key_distributed.insert(member.to_owned());
         }
     }
 
-    pub fn remove_member(&mut self, member: &str) {
+    pub fn remove_member(&mut self, member: &ramflux_crypto::RootQualifiedDeviceRef) {
         self.members.remove(member);
         self.removed_members.insert(member.to_owned());
         self.group_epoch += 1;
@@ -213,7 +219,7 @@ impl GroupKeyEpochState {
         self.sender_key_distributed.clear();
     }
 
-    pub fn add_member_no_history(&mut self, member: &str) {
+    pub fn add_member_no_history(&mut self, member: &ramflux_crypto::RootQualifiedDeviceRef) {
         self.members.insert(member.to_owned());
         self.group_epoch += 1;
         self.group_key_epoch += 1;
@@ -222,7 +228,10 @@ impl GroupKeyEpochState {
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
-    pub fn assert_can_send(&self, member: &str) -> Result<(), StorageError> {
+    pub fn assert_can_send(
+        &self,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<(), StorageError> {
         if self.members.contains(member) && self.sender_key_distributed.contains(member) {
             Ok(())
         } else {
@@ -234,13 +243,13 @@ impl GroupKeyEpochState {
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn encrypt_epoch_message_for(
         &self,
-        sender: &str,
+        sender: &ramflux_crypto::RootQualifiedDeviceRef,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, StorageError> {
         self.assert_can_send(sender)?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.group_key_epoch.to_be_bytes());
-        bytes.extend_from_slice(sender.as_bytes());
+        bytes.extend_from_slice(sender.storage_key().as_bytes());
         bytes.extend_from_slice(plaintext);
         Ok(bytes)
     }
@@ -249,7 +258,7 @@ impl GroupKeyEpochState {
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn decrypt_epoch_message_for(
         &self,
-        member: &str,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, StorageError> {
         if !self.members.contains(member) || self.removed_members.contains(member) {
@@ -263,11 +272,19 @@ impl GroupKeyEpochState {
     }
 
     #[must_use]
-    pub fn can_read_object(&self, member: &str, object_id: &str) -> bool {
+    pub fn can_read_object(
+        &self,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
+        object_id: &str,
+    ) -> bool {
         self.readable_objects.get(object_id).is_some_and(|readers| readers.contains(member))
     }
 
-    pub fn admin_shared_history_rewrap(&mut self, member: &str, object_ids: &[String]) {
+    pub fn admin_shared_history_rewrap(
+        &mut self,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
+        object_ids: &[String],
+    ) {
         for object_id in object_ids {
             self.readable_objects.entry(object_id.clone()).or_default().insert(member.to_owned());
         }

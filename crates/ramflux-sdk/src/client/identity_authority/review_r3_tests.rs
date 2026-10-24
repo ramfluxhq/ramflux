@@ -69,17 +69,15 @@ async fn tls_own_revocation_ignores_a_friends_same_name_and_retires_qualified_se
         foreign_pair.session_id
     );
     assert_eq!(
-        owner
-            .client
-            .account_db()?
-            .load_actor_state::<bool>(&owner.client.device_revocation_key(&own_ref)?)?,
+        owner.client.account_db()?.load_actor_state::<bool>(
+            &RamfluxClient::device_revocation_key(&owner.client.device_identity(&own_ref)?)
+        )?,
         Some(true)
     );
     assert_eq!(
-        owner
-            .client
-            .account_db()?
-            .load_actor_state::<bool>(&owner.client.device_revocation_key(&foreign_ref)?)?,
+        owner.client.account_db()?.load_actor_state::<bool>(
+            &RamfluxClient::device_revocation_key(&owner.client.device_identity(&foreign_ref)?)
+        )?,
         None
     );
     Ok(())
@@ -157,10 +155,10 @@ async fn own_import_checks_pending_local_fences_even_when_the_node_still_reports
     sign_set(&source, &mut manifest, 1)?;
     observe(&target.client, &manifest)?;
     let reference = ramflux_protocol::qualified_device_id(&manifest.principal_commitment, "one")?;
-    target
-        .client
-        .account_db()?
-        .persist_actor_state(&target.client.device_revocation_key(&reference)?, &true)?;
+    target.client.account_db()?.persist_actor_state(
+        &RamfluxClient::device_revocation_key(&target.client.device_identity(&reference)?),
+        &true,
+    )?;
     let mut envelope = crate::client::own_device_sync::tests::envelope("one", "two");
     envelope.principal_commitment = manifest.principal_commitment.clone();
     envelope.created_at = now_unix_timestamp();

@@ -32,7 +32,7 @@ impl RamfluxClient {
             .bundle
             .as_ref()
             .ok_or_else(|| SdkError::LocalBus("A2I target prekey missing".to_owned()))?;
-        self.verify_root_bound_prekey(&event.target_device_id, bundle)?;
+        self.verify_root_bound_prekey(&self.device_identity(&event.target_device_id)?, bundle)?;
         let target_delivery_id =
             target_delivery_id.or(prekey.target_delivery_id).ok_or_else(|| {
                 SdkError::LocalBus(format!(

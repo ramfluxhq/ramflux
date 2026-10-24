@@ -147,7 +147,8 @@ fn cache_human_manifest(f: &Fixture) -> TestResult {
     let signed = ramflux_crypto::X25519KeyPair::from_seed([45; 32]);
     let prekey_bundle =
         ramflux_crypto::create_prekey_bundle(branch, &identity, "signed-key", &signed, None, None)?;
-    let manifest = crate::prekey::SdkDeviceManifestResponse {
+    let mut manifest = crate::prekey::SdkDeviceManifestResponse {
+        signed_device_set: None,
         principal_id: "human".into(),
         principal_commitment: principal_commitment.clone(),
         root_public_key,
@@ -163,6 +164,7 @@ fn cache_human_manifest(f: &Fixture) -> TestResult {
             branch_authorized_event_id: "device.branch_authorized:human-device:1".into(),
         }],
     };
+    crate::client::identity_authority::test_support::sign_manifest(root, &mut manifest, 1)?;
     RamfluxClient::verify_device_manifest_json(
         serde_json::to_value(&manifest)?,
         &principal_commitment,

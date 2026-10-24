@@ -77,7 +77,7 @@ impl RamfluxClient {
         local: &ramflux_crypto::RootQualifiedDeviceRef,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<String, SdkError> {
-        let record = self.trusted_device(remote.storage_key())?;
+        let record = self.trusted_device(remote)?;
         let principal = record["principal_id"]
             .as_str()
             .ok_or_else(|| invalid("bootstrap principal missing"))?;

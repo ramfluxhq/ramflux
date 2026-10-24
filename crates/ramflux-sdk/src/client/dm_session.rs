@@ -52,7 +52,7 @@ impl RamfluxClient {
             engine.fetch_prekey_bundle(&lookup).await?.bundle.ok_or_else(|| {
                 SdkError::LocalBus(format!("missing prekey bundle for {recipient_device_id}"))
             })?;
-        self.verify_root_bound_prekey(&reference, &recipient_bundle)?;
+        self.verify_root_bound_prekey(&self.device_identity(&reference)?, &recipient_bundle)?;
         self.create_send_dm_session_from_bundle(
             message,
             recipient_device_id,

@@ -68,28 +68,30 @@ fn expired_sibling_proof_does_not_block_newer_signed_revocation_or_authorize_a_n
     assert_eq!(peer.client.observed_device_set(&manifest.principal_commitment)?, Some(record));
     assert!(
         peer.client
-            .require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+            .device_identity(&ramflux_protocol::qualified_device_id(
                 &manifest.principal_commitment,
                 "stolen"
             )?)
+            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
             .is_err()
     );
-    peer.client.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
-        &manifest.principal_commitment,
-        "two",
-    )?)?;
+    peer.client
+        .device_identity(&ramflux_protocol::qualified_device_id(
+            &manifest.principal_commitment,
+            "two",
+        )?)
+        .and_then(|identity| peer.client.require_cached_root_authority(&identity))?;
     assert!(
         peer.client
-            .require_fresh_device_authorization(&ramflux_protocol::qualified_device_id(
-                &manifest.principal_commitment,
-                "two"
-            )?)
+            .require_fresh_device_authorization(
+                &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?
+            )
             .is_err()
     );
     assert!(
         peer.client
             .verify_root_bound_prekey(
-                &ramflux_protocol::qualified_device_id(&manifest.principal_commitment, "two")?,
+                &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?,
                 &sibling
                     .client
                     .load_x3dh_private_state(&sibling.client.local_device_identity("two")?)?
@@ -171,8 +173,17 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
     )?);
     m.devices.clear();
     observe(&alice.client, &m)?;
-    alice.client.require_cached_root_authority(&bob_ref)?;
-    assert!(alice.client.require_cached_root_authority(&mallory_ref).is_err());
+    alice
+        .client
+        .device_identity(&bob_ref)
+        .and_then(|identity| alice.client.require_cached_root_authority(&identity))?;
+    assert!(
+        alice
+            .client
+            .device_identity(&mallory_ref)
+            .and_then(|identity| alice.client.require_cached_root_authority(&identity))
+            .is_err()
+    );
     assert_eq!(alice.client.account_db()?.group_member_device_key("group", &bob_device)?, pin);
     assert_eq!(
         alice.client.active_pair(&local, &bob_device)?.ok_or("bob pair")?.0.session_id,
@@ -183,17 +194,15 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
         RamfluxClient::pair_key(&local, &alice.client.device_identity(&mallory_ref)?)?
     );
     assert_eq!(
-        alice
-            .client
-            .account_db()?
-            .load_actor_state::<bool>(&alice.client.device_revocation_key(&mallory_ref)?)?,
+        alice.client.account_db()?.load_actor_state::<bool>(
+            &RamfluxClient::device_revocation_key(&alice.client.device_identity(&mallory_ref)?)
+        )?,
         Some(true)
     );
     assert_eq!(
-        alice
-            .client
-            .account_db()?
-            .load_actor_state::<bool>(&alice.client.device_revocation_key(&bob_ref)?)?,
+        alice.client.account_db()?.load_actor_state::<bool>(
+            &RamfluxClient::device_revocation_key(&alice.client.device_identity(&bob_ref)?)
+        )?,
         None
     );
     let addressed = GatewayDirectMessage {

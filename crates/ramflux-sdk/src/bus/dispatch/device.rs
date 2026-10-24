@@ -358,12 +358,15 @@ fn merge_manifest_device(
     mut current: LocalBusDeviceRecord,
     local_device_id: &str,
 ) -> Vec<LocalBusDeviceRecord> {
-    let mut by_device = BTreeMap::<String, LocalBusDeviceRecord>::new();
+    let mut rows = Vec::<LocalBusDeviceRecord>::new();
     for mut device in devices {
         device.is_local = device.device_id == local_device_id;
-        by_device.insert(device.device_id.clone(), device);
+        rows.retain(|row| row.device_id != device.device_id);
+        rows.push(device);
     }
     current.is_local = true;
-    by_device.insert(current.device_id.clone(), current);
-    by_device.into_values().collect()
+    rows.retain(|row| row.device_id != current.device_id);
+    rows.push(current);
+    rows.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    rows
 }

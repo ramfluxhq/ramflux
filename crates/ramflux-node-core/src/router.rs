@@ -234,7 +234,11 @@ impl RouterCore {
                     )
                 )
             };
-        let actor = control.mvp1_identities.device_auth_key(&actor_lookup).ok_or_else(|| {
+        let actor_identity = control
+            .mvp1_identities
+            .resolve_device_selector(&actor_lookup)
+            .ok_or_else(|| NodeCoreError::ItestHttp("migration actor authority missing".into()))?;
+        let actor = control.mvp1_identities.device_auth_key(&actor_identity).ok_or_else(|| {
             NodeCoreError::ItestHttp(format!(
                 "unknown migration actor device: {}",
                 proof.actor_device_id
@@ -258,7 +262,7 @@ impl RouterCore {
         if proof.identity_commitment != actor.principal_id
             && control
                 .mvp1_identities
-                .principal_commitment_for_device(&actor_lookup)
+                .principal_commitment_for_device(&actor_identity)
                 .is_none_or(|commitment| commitment != proof.identity_commitment)
         {
             return Err(NodeCoreError::ItestHttp("migration actor identity mismatch".to_owned()));
@@ -426,9 +430,12 @@ impl RouterCore {
             }
             let mut candidate = control.mvp1_identities.clone();
             candidate.authorize_root_bound_registration(request)?;
-            let registered=candidate.register_admitted_identity(request,registration_trust_tier)?;
-            if let Some(store)=store { store.record_identity_registry(&candidate)?; }
-            control.mvp1_identities=candidate;
+            let registered =
+                candidate.register_admitted_identity(request, registration_trust_tier)?;
+            if let Some(store) = store {
+                store.record_identity_registry(&candidate)?;
+            }
+            control.mvp1_identities = candidate;
             self.refresh_migration_read_snapshot_from_control(&control);
             registered
         };
@@ -498,42 +505,50 @@ impl RouterCore {
         );
         let mut control = lock_unpoisoned(&self.control);
         control.mvp1_identities.publish_prekey(request)?;
+        let identity = control
+            .mvp1_identities
+            .resolve_device_selector(&lookup)
+            .ok_or_else(|| NodeCoreError::ItestHttp("prekey authority missing".into()))?;
         Ok(PrekeyResponse {
             device_id: device_id.clone(),
-            bundle: control.mvp1_identities.prekey_bundle(&lookup).cloned(),
+            bundle: control.mvp1_identities.prekey_bundle(&identity).cloned(),
             principal_commitment: control
                 .mvp1_identities
-                .principal_commitment_for_device(&lookup)
+                .principal_commitment_for_device(&identity)
                 .unwrap_or_default()
                 .to_owned(),
             target_delivery_id: control
                 .mvp1_identities
-                .target_delivery_id_for_device(&lookup)
+                .target_delivery_id_for_device(&identity)
                 .map(str::to_owned),
         })
     }
 
-    /// Fetch keys only with a root context, except for an unambiguous pre-v2 legacy row.
+    /// Fetch keys only with an authenticated root-qualified device selector.
     /// # Errors
     /// Rejects missing, ambiguous or unqualified root-bound device lookups.
     pub fn mvp1_prekey_checked(&self, lookup: &str) -> Result<PrekeyResponse, NodeCoreError> {
         let control = lock_unpoisoned(&self.control);
         let identities = &control.mvp1_identities;
-        identities.check_device_lookup(lookup)?;
+        let identity = identities
+            .resolve_device_selector(lookup)
+            .ok_or_else(|| NodeCoreError::ItestHttp("qualified device required".into()))?;
         let record = identities
-            .device_record(lookup)
+            .device_record(&identity)
             .ok_or_else(|| NodeCoreError::ItestHttp("device not found".into()))?;
         Ok(PrekeyResponse {
             device_id: record.device_id.clone(),
-            bundle: identities.prekey_bundle(lookup).cloned(),
+            bundle: identities.prekey_bundle(&identity).cloned(),
             principal_commitment: identities
-                .principal_commitment_for_device(lookup)
+                .principal_commitment_for_device(&identity)
                 .unwrap_or_default()
                 .into(),
-            target_delivery_id: identities.target_delivery_id_for_device(lookup).map(str::to_owned),
+            target_delivery_id: identities
+                .target_delivery_id_for_device(&identity)
+                .map(str::to_owned),
         })
     }
-    /// Authenticate a root-qualified device; bare IDs are restricted to legacy rows.
+    /// Authenticate a root-qualified device selected at the wire boundary.
     /// # Errors
     /// Rejects missing, ambiguous or unqualified root-bound device lookups.
     pub fn mvp1_device_auth_key_checked(
@@ -541,10 +556,12 @@ impl RouterCore {
         lookup: &str,
     ) -> Result<Option<DeviceAuthKeyResponse>, NodeCoreError> {
         let control = lock_unpoisoned(&self.control);
-        control.mvp1_identities.check_device_lookup(lookup)?;
-        Ok(control.mvp1_identities.device_auth_key(lookup))
+        let identity = control
+            .mvp1_identities
+            .resolve_device_selector(lookup)
+            .ok_or_else(|| NodeCoreError::ItestHttp("qualified device required".into()))?;
+        Ok(control.mvp1_identities.device_auth_key(&identity))
     }
-    #[must_use]
     /// Looks up a name only for an authenticated live account session, charging node-wide quotas.
     #[must_use]
     pub fn mvp1_authenticated_principal_lookup(
@@ -567,9 +584,10 @@ impl RouterCore {
             return denied(Reason::AuthenticationRequired);
         }
         let mut control = lock_unpoisoned(&self.control);
-        let Some(account) = control
-            .mvp1_identities
-            .device_auth_key(&request.requester_device_id)
+        let identity = control.mvp1_identities.device_identity_for_session(&session);
+        let Some(account) = identity
+            .as_ref()
+            .and_then(|identity| control.mvp1_identities.device_auth_key(identity))
             .filter(|device| !device.revoked)
             .map(|device| device.principal_id)
         else {
@@ -1166,7 +1184,10 @@ impl RouterCore {
         let (registered, current) = {
             let control = lock_unpoisoned(&self.control);
             (
-                control.mvp1_identities.device_auth_key(&lookup),
+                control
+                    .mvp1_identities
+                    .resolve_device_selector(&lookup)
+                    .and_then(|identity| control.mvp1_identities.device_auth_key(&identity)),
                 control.mvp1_identities.signed_device_set(root).cloned(),
             )
         };

@@ -334,3 +334,30 @@ proof and active signed set. Old unscoped rows remain historical data. Direct-ad
 v1 joins from administrators without the signed-root extension/invite witness
 stay pending; later epoch changes may wait too. Administrators must upgrade and
 provide a root-bound join/invite to resume that group's control sequence.
+
+The device identity used by replay, control, receipt, retry, pair-session,
+private-prekey, group-pin, group-ratchet and sender-counter APIs is an opaque
+`RootQualifiedDeviceRef`. It has no string constructor or serde implementation.
+Factories require an owned account root or a complete verified signed device set.
+Naming a revoked historical device for cleanup does not authorize a live operation:
+the current set, key commitments, relationship and operation policy still apply.
+
+Registration proof replay has a separate root-qualified persistence set.
+Historical `seen_proofs` entries never satisfy a current proof lookup, even when
+an old sender chose a value that resembles a current encoded key. Opaque gateway
+delivery event IDs and group distribution retries are likewise scoped by verified
+device identities instead of caller-chosen device names or envelope IDs.
+
+Unattributable group ratchet checkpoints and name-only sender counters remain in
+legacy storage. Receivers require a fresh authenticated sender-key distribution.
+Counters additionally include the ratchet session ID, so restarting a distribution
+under the same root and group epoch cannot suppress its first message.
+Unscoped membership pins require a root-bound remove/re-add operation; importing a
+snapshot cannot supply missing root authority by selecting the first directory row.
+
+CI runs `python3 -B scripts/check-device-identity.py` and its mutation checks.
+The source gate rejects untyped device key builders, direct bare-name device
+indexes, inline device replay keys, identity-view impostors and reference
+deserialization shortcuts. Rust APIs provide the primary boundary; the source
+gate checks for accidental new bypasses. It does not prove arbitrary application
+code correct or replace signed-evidence and adversarial tests.

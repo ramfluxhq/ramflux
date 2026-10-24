@@ -845,8 +845,12 @@ impl RamfluxClient {
         joined_role: &str,
         actor_principal_commitment: &str,
     ) -> Result<ramflux_protocol::GroupEvent, SdkError> {
+        let actor = self.local_device_identity(actor_device_id)?;
+        if actor.root_commitment() != actor_principal_commitment {
+            return Err(SdkError::InboundRejected("group join actor root mismatch".into()));
+        }
         let group = self.group_state(group_id)?;
-        let Some(actor_role) = group.roles.get(actor_device_id) else {
+        let Some(actor_role) = group.roles.get(actor.device_id()) else {
             return Err(SdkError::Storage(StorageError::GroupPermissionDenied));
         };
         if actor_role != "owner" && actor_role != "admin" {
