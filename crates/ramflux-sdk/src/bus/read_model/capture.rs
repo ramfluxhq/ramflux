@@ -78,6 +78,9 @@ pub(crate) fn capture(
         if metadata.label.is_some() {
             manifest.label = metadata.label;
         }
+        if let Some(kind) = metadata.kind {
+            manifest.kind = serde_json::to_value(kind)?.as_str().map(str::to_owned);
+        }
         write_local_bus_account_manifest(root, &manifest)?;
     }
     if matches!(request.method.as_str(), "contact.safety_number" | "contact.verify")

@@ -101,10 +101,9 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
         let principal = self.authenticated_envelope_sender(entry)?;
-        let reference = self.inbound_device_reference(entry)?;
-        Ok(thread["participants"].as_array().is_some_and(|ids| {
-            ids.iter().any(|id| id.as_str() == Some(&principal) || id.as_str() == Some(&reference))
-        }))
+        Ok(thread["participants"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&principal))))
     }
 
     pub(super) fn verify_initiator_identity(

@@ -1329,11 +1329,13 @@ mod tests {
             [0x54; 32],
         )?;
         client.persist_identity_directory(&initial)?;
-        client.create_group("rotation_group", "peer_device")?;
+        let reference =
+            ramflux_protocol::qualified_device_id(&initial.principal_commitment, "peer_device")?;
+        client.create_group("rotation_group", &reference)?;
         let first = initial.devices[0].branch_public_key.clone();
         client.account_db()?.persist_group_member_device_key(
             "rotation_group",
-            "peer_device",
+            &reference,
             &first,
         )?;
         let replacement = manifest_fixture(
@@ -1348,7 +1350,7 @@ mod tests {
         assert!(
             client
                 .account_db()?
-                .persist_group_member_device_key("rotation_group", "peer_device", &new_key)
+                .persist_group_member_device_key("rotation_group", &reference, &new_key)
                 .is_err()
         );
         RamfluxClient::verify_device_manifest_json(
@@ -1357,7 +1359,7 @@ mod tests {
         )?;
         assert!(client.persist_identity_directory(&replacement).is_err());
         assert_eq!(
-            client.account_db()?.group_member_device_key("rotation_group", "peer_device")?,
+            client.account_db()?.group_member_device_key("rotation_group", &reference)?,
             Some(first)
         );
         assert_eq!(
@@ -1445,10 +1447,12 @@ mod tests {
         let initial =
             manifest_fixture("peer", "device", [0x51; 32], [0x52; 32], [0x53; 32], [0x54; 32])?;
         client.persist_identity_directory(&initial)?;
-        client.create_group("group", "device")?;
+        let reference =
+            ramflux_protocol::qualified_device_id(&initial.principal_commitment, "device")?;
+        client.create_group("group", &reference)?;
         client.account_db()?.persist_group_member_device_key(
             "group",
-            "device",
+            &reference,
             &initial.devices[0].branch_public_key,
         )?;
         let mut first = None;
