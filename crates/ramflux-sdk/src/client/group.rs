@@ -9,15 +9,20 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn create_group(&self, group_id: &str, creator_id: &str) -> Result<GroupState, SdkError> {
-        let group = self.account_db()?.create_group(group_id, creator_id)?;
-        if self.device_branch.as_ref().is_some_and(|own| own.device_id == creator_id) {
-            self.pin_local_group_member(group_id)?;
-            return Ok(group);
-        }
-        if self.account_db()?.client_record("device", creator_id)?.is_some() {
-            self.pin_joined_group_member(group_id, creator_id)?;
-        }
-        Ok(group)
+        let address = ramflux_protocol::parse_qualified_device_id(creator_id)?;
+        let raw = address.as_ref().map_or(creator_id, |(_, raw)| raw.as_str());
+        ramflux_protocol::validate_device_name(raw)?;
+        self.account_db()?.write_transaction(|| {
+            let group = self.account_db()?.create_group(group_id, raw)?;
+            if self.device_branch.as_ref().is_some_and(|own| own.device_id == raw)
+                && (address.is_none() || self.local_device_reference(raw)? == creator_id)
+            {
+                self.pin_local_group_member(group_id)?;
+            } else if address.is_some() {
+                self.pin_joined_group_member(group_id, creator_id)?;
+            }
+            Ok(group)
+        })
     }
 
     /// # Errors
@@ -46,17 +51,19 @@ impl RamfluxClient {
         role: &str,
         root: Option<&str>,
     ) -> Result<GroupState, SdkError> {
-        let reference = root
-            .map(|root| ramflux_protocol::qualified_device_id(root, member_id))
-            .transpose()?
-            .unwrap_or_else(|| member_id.into());
+        let explicit = ramflux_protocol::parse_qualified_device_id(member_id)?;
+        let raw = explicit.as_ref().map_or(member_id, |(_, raw)| raw.as_str());
+        ramflux_protocol::validate_device_name(raw)?;
+        let reference = if let Some(root) = root {
+            ramflux_protocol::qualified_device_id(root, raw)?
+        } else if explicit.is_some() {
+            member_id.to_owned()
+        } else {
+            self.group_device_reference(group_id, raw)?
+        };
         self.account_db()?.write_transaction(|| {
-            let state = self.account_db()?.add_group_member(group_id, member_id, role)?;
-            if self.device_branch.as_ref().is_some_and(|own| own.device_id == member_id)
-                || self.account_db()?.client_record("device", &reference)?.is_some()
-            {
-                self.pin_joined_group_member(group_id, &reference)?;
-            }
+            let state = self.account_db()?.add_group_member(group_id, raw, role)?;
+            self.pin_joined_group_member(group_id, &reference)?;
             Ok(state)
         })
     }
@@ -263,18 +270,7 @@ impl RamfluxClient {
                 event.actor_device_id
             )));
         }
-        let public_key =
-            if let ramflux_protocol::GroupEventBody::MemberAccepted { invite_id, .. } = &event.body
-            {
-                self.account_db()?.group_invite(group_id, invite_id)?.invitee_signing_public_key
-            } else {
-                self.account_db()?
-                    .group_member_device_key_by_name(group_id, &event.actor_device_id)?
-                    .ok_or_else(|| {
-                        StorageError::GroupControlSigningKeyMissing(event.actor_device_id.clone())
-                    })?
-            };
-        ramflux_protocol::verify_signed_fields(event, &event.signed, &public_key)?;
+        self.group_control_signer(event, group_id)?;
         Ok(())
     }
 
@@ -338,6 +334,7 @@ impl RamfluxClient {
         if joined_identity != &local.device_id {
             return Err(SdkError::LocalBus("bootstrap joined identity is not local".into()));
         }
+        self.bootstrap_group_member_reference(event)?;
         self.account_db()?.write_transaction(|| {
             let state =
                 self.account_db()?.apply_bootstrap_group_member_join(&GroupMemberJoinWrite {
@@ -355,6 +352,13 @@ impl RamfluxClient {
                     new_member_history: new_member_history.clone(),
                 })?;
             self.pin_local_group_member(group_id)?;
+            self.pin_joined_group_member(
+                group_id,
+                &ramflux_protocol::qualified_device_id(
+                    actor_principal_commitment,
+                    &event.actor_device_id,
+                )?,
+            )?;
             Ok(state)
         })
     }
@@ -375,10 +379,15 @@ impl RamfluxClient {
             ) {
                 return Err(StorageError::GroupPermissionDenied.into());
             }
-            if self.account_db()?.client_record("device", joined_identity)?.is_none()
+            let reference = self.group_event_member_reference(event)?.ok_or_else(|| {
+                SdkError::InboundPending("joined member root context absent".into())
+            })?;
+            let (root, raw) = ramflux_protocol::parse_qualified_device_id(&reference)?
+                .ok_or_else(|| SdkError::InboundPending("joined member root absent".into()))?;
+            if self.account_db()?.client_record("device", &reference)?.is_none()
                 && self.device_branch.as_ref().is_none_or(|own| own.device_id != *joined_identity)
             {
-                self.resolve_target_principal_commitment(gateway, None, joined_identity).await?;
+                self.resolve_target_principal_commitment(gateway, Some(&root), &raw).await?;
             }
         }
         Ok(())
@@ -419,6 +428,9 @@ impl RamfluxClient {
         max_members: u32,
         new_member_history: &str,
     ) -> Result<GroupState, SdkError> {
+        let reference = self
+            .group_event_member_reference(event)?
+            .ok_or_else(|| SdkError::InboundPending("joined member root unavailable".into()))?;
         self.account_db()?.write_transaction(|| {
             let state = self.account_db()?.apply_group_member_join(&GroupMemberJoinWrite {
                 group_id: group_id.to_owned(),
@@ -434,7 +446,7 @@ impl RamfluxClient {
                 max_members,
                 new_member_history: new_member_history.to_owned(),
             })?;
-            self.pin_joined_group_member(group_id, joined_identity)?;
+            self.pin_joined_group_member(group_id, &reference)?;
             Ok(state)
         })
     }
@@ -519,18 +531,22 @@ impl RamfluxClient {
         expires_at: i64,
         reason: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.apply_group_member_invite(&GroupInviteWrite {
-            group_id: group_id.to_owned(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            invite_id: invite_id.to_owned(),
-            invitee_identity: invitee_identity.to_owned(),
-            invitee_signing_public_key: invitee_signing_public_key.to_owned(),
-            invited_role: invited_role.to_owned(),
-            group_epoch,
-            expires_at,
-            reason: reason.to_owned(),
-        })?)
+        self.account_db()?.write_transaction(|| {
+            let state = self.account_db()?.apply_group_member_invite(&GroupInviteWrite {
+                group_id: group_id.to_owned(),
+                event_id: event.event_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                invite_id: invite_id.to_owned(),
+                invitee_identity: invitee_identity.to_owned(),
+                invitee_signing_public_key: invitee_signing_public_key.to_owned(),
+                invited_role: invited_role.to_owned(),
+                group_epoch,
+                expires_at,
+                reason: reason.to_owned(),
+            })?;
+            self.remember_group_invite_root(event, group_id, invitee_identity, invite_id)?;
+            Ok(state)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -544,17 +560,25 @@ impl RamfluxClient {
         invitee_identity: &str,
         accepted_role: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.apply_group_member_accept(&GroupInviteAcceptWrite {
-            group_id: group_id.to_owned(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            invite_id: invite_id.to_owned(),
-            invitee_identity: invitee_identity.to_owned(),
-            accepted_role: accepted_role.to_owned(),
-            previous_epoch,
-            new_group_epoch,
-            now: now_unix_timestamp(),
-        })?)
+        let reference = self
+            .group_event_member_reference(event)?
+            .ok_or_else(|| SdkError::InboundPending("accepted member root absent".into()))?;
+        self.account_db()?.write_transaction(|| {
+            let state = self.account_db()?.apply_group_member_accept(&GroupInviteAcceptWrite {
+                group_id: group_id.to_owned(),
+                event_id: event.event_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                invite_id: invite_id.to_owned(),
+                invitee_identity: invitee_identity.to_owned(),
+                accepted_role: accepted_role.to_owned(),
+                previous_epoch,
+                new_group_epoch,
+                now: now_unix_timestamp(),
+            })?;
+            self.pin_joined_group_member(group_id, &reference)?;
+            self.remember_group_invite_root(event, group_id, invitee_identity, invite_id)?;
+            Ok(state)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -574,7 +598,7 @@ impl RamfluxClient {
                 branch.device_id
             )));
         }
-        Ok(ramflux_protocol::GroupEvent {
+        let mut event = ramflux_protocol::GroupEvent {
             schema: "ramflux.client_event.v1".to_owned(),
             version: 1,
             domain: ramflux_protocol::domain::GROUP_EVENT.to_owned(),
@@ -589,7 +613,9 @@ impl RamfluxClient {
             created_at: now_unix_timestamp(),
             causal_prev: vec![format!("group:{group_id}:epoch:{group_epoch}")],
             body,
-        })
+        };
+        self.attach_group_device_roots(group_id, &mut event)?;
+        Ok(event)
     }
 
     fn sign_group_control_event(
@@ -768,6 +794,13 @@ impl RamfluxClient {
     ) -> Result<(ramflux_protocol::GroupEvent, GroupState), SdkError> {
         let group = self.group_state(group_id)?;
         let invite = self.account_db()?.group_invite(group_id, invite_id)?;
+        if invite.invitee_identity != actor_device_id {
+            return Err(ramflux_protocol::ProtocolError::InvalidIdentityRecord(
+                "accept actor differs from invited device",
+            )
+            .into());
+        }
+
         let new_group_epoch = group.group_epoch + 1;
         let event_id =
             group_member_accepted_event_id(group_id, actor_device_id, invite_id, new_group_epoch);
@@ -929,572 +962,5 @@ impl RamfluxClient {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_root(test_name: &str) -> PathBuf {
-        let nanos =
-            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-        std::env::temp_dir().join(format!("ramflux-sdk-group-{test_name}-{nanos}"))
-    }
-
-    fn group_client(
-        test_name: &str,
-        principal: &str,
-        device: &str,
-        device_seed: [u8; 32],
-    ) -> Result<RamfluxClient, SdkError> {
-        let root = temp_root(test_name);
-        let mut client = RamfluxClient::new();
-        client.create_identity_root(principal, [0x31; 32]);
-        client.create_device_branch(principal, device, 1, device_seed);
-        client.open_account_index(root)?;
-        client.create_account("acct", principal)?;
-        client.unlock_account("acct", b"group-control-test")?;
-        Ok(client)
-    }
-
-    fn device_public_key(principal: &str, device: &str, seed: [u8; 32]) -> String {
-        let branch = ramflux_crypto::create_device_branch(principal, device, 1, seed);
-        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
-    }
-
-    fn seed_group_named(
-        client: &RamfluxClient,
-        group_id: &str,
-        alice_key: &str,
-    ) -> Result<(), SdkError> {
-        client.create_group(group_id, "alice_device")?;
-        client.account_db()?.persist_group_member_device_key(
-            group_id,
-            "alice_device",
-            alice_key,
-        )?;
-        client.add_group_member(group_id, "bob_device", "member")?;
-        Ok(())
-    }
-
-    fn seed_group(client: &RamfluxClient, alice_key: &str) -> Result<(), SdkError> {
-        seed_group_named(client, "group_test", alice_key)?;
-        Ok(())
-    }
-
-    fn seed_member_key(
-        client: &RamfluxClient,
-        member_id: &str,
-        public_key: &str,
-    ) -> Result<(), SdkError> {
-        client.account_db()?.persist_group_member_device_key(
-            "group_test",
-            member_id,
-            public_key,
-        )?;
-        Ok(())
-    }
-
-    fn invite_id_from_event(event: &ramflux_protocol::GroupEvent) -> Result<String, SdkError> {
-        match &event.body {
-            ramflux_protocol::GroupEventBody::MemberInvitedV2 { invite_id, .. } => {
-                Ok(invite_id.clone())
-            }
-            _ => Err(SdkError::LocalBus("expected member invite event".to_owned())),
-        }
-    }
-
-    #[test]
-    fn bootstrap_member_join_requires_verified_actor_key_and_source_device() -> Result<(), SdkError>
-    {
-        let alice_seed = [0x72; 32];
-        let bob_seed = [0x73; 32];
-        let carol_seed = [0x74; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let bob_key = device_public_key("bob", "bob_device", bob_seed);
-        let carol_key = device_public_key("carol", "carol_device", carol_seed);
-        let alice = group_client("alice_join", "alice", "alice_device", alice_seed)?;
-        let bob = group_client("bob_join", "bob", "bob_device", bob_seed)?;
-        let carol = group_client("carol_join", "carol", "carol_device", carol_seed)?;
-
-        alice.create_group("group_join", "alice_device")?;
-        alice.add_group_member("group_join", "bob_device", "member")?;
-        let event = alice.create_signed_group_member_join_event(
-            "group_join",
-            "alice_device",
-            "bob_device",
-            "member",
-            "alice_commitment",
-        )?;
-
-        assert!(
-            bob.apply_bootstrap_group_member_join_event(&event, "mallory_device", &alice_key)
-                .is_err()
-        );
-        assert!(
-            carol
-                .apply_bootstrap_group_member_join_event(&event, "alice_device", &carol_key)
-                .is_err()
-        );
-
-        let state =
-            bob.apply_bootstrap_group_member_join_event(&event, "alice_device", &alice_key)?;
-        assert!(state.members.contains("bob_device"));
-        assert_eq!(state.roles.get("alice_device").map(String::as_str), Some("owner"));
-        assert_eq!(state.roles.get("bob_device").map(String::as_str), Some("member"));
-        assert_eq!(
-            bob.account_db()?.group_member_device_key_by_name("group_join", "alice_device")?,
-            Some(alice_key)
-        );
-        assert_ne!(bob_key, carol_key);
-        Ok(())
-    }
-
-    #[test]
-    fn owner_can_generate_onboard_events_for_multiple_direct_adds() -> Result<(), SdkError> {
-        let alice_seed = [0x75; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let alice = group_client("alice_multi_join", "alice", "alice_device", alice_seed)?;
-        seed_group_named(&alice, "group_multi_join", &alice_key)?;
-
-        let bob_event = alice.create_signed_group_member_join_event(
-            "group_multi_join",
-            "alice_device",
-            "bob_device",
-            "member",
-            "alice_commitment",
-        )?;
-        assert_eq!(bob_event.event_type, "group.member_joined");
-
-        alice.add_group_member("group_multi_join", "carol_device", "member")?;
-        let carol_event = alice.create_signed_group_member_join_event(
-            "group_multi_join",
-            "alice_device",
-            "carol_device",
-            "member",
-            "alice_commitment",
-        )?;
-        assert_eq!(carol_event.event_type, "group.member_joined");
-
-        assert!(matches!(
-            alice.create_signed_group_member_join_event(
-                "group_multi_join",
-                "bob_device",
-                "dave_device",
-                "member",
-                "bob_commitment"
-            ),
-            Err(SdkError::Storage(StorageError::GroupPermissionDenied))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn signed_group_role_change_rejects_forgery_epoch_mismatch_and_replay() -> Result<(), SdkError>
-    {
-        let alice_seed = [0x42; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let alice = group_client("alice", "alice", "alice_device", alice_seed)?;
-        let bob = group_client("bob", "bob", "bob_device", [0x44; 32])?;
-        seed_group(&alice, &alice_key)?;
-        seed_group(&bob, &alice_key)?;
-
-        let (event, _state) = alice.create_signed_group_role_change(
-            "group_test",
-            "alice_device",
-            "bob_device",
-            "admin",
-        )?;
-
-        let mut forged = event.clone();
-        if let ramflux_protocol::GroupEventBody::RoleChanged { new_role, .. } = &mut forged.body {
-            *new_role = "bot".to_owned();
-        }
-        assert!(bob.apply_group_role_change(&forged).is_err());
-
-        let mut wrong_epoch = event.clone();
-        if let ramflux_protocol::GroupEventBody::RoleChanged { previous_epoch, .. } =
-            &mut wrong_epoch.body
-        {
-            *previous_epoch = 99;
-        }
-        let branch = alice.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        wrong_epoch.signed.signature =
-            ramflux_crypto::sign_protocol_object_with_device_branch(branch, &wrong_epoch)?;
-        assert!(matches!(
-            bob.apply_group_role_change(&wrong_epoch),
-            Err(SdkError::Storage(StorageError::GroupControlEpochMismatch { .. }))
-        ));
-
-        bob.apply_group_role_change(&event)?;
-        assert!(matches!(
-            bob.apply_group_role_change(&event),
-            Err(SdkError::Storage(StorageError::GroupControlReplay(_)))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn signed_group_invite_accept_enforces_state_expiry_and_bound_invitee_key()
-    -> Result<(), SdkError> {
-        let alice_seed = [0x62; 32];
-        let bob_seed = [0x63; 32];
-        let carol_seed = [0x64; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let bob_key = device_public_key("bob", "bob_device", bob_seed);
-        let carol_key = device_public_key("carol", "carol_device", carol_seed);
-        let alice = group_client("alice_s46", "alice", "alice_device", alice_seed)?;
-        let bob = group_client("bob_s46", "bob", "bob_device", bob_seed)?;
-        let carol = group_client("carol_s46", "carol", "carol_device", carol_seed)?;
-        seed_group(&alice, &alice_key)?;
-        seed_group(&bob, &alice_key)?;
-        seed_group(&carol, &alice_key)?;
-        seed_member_key(&alice, "bob_device", &bob_key)?;
-        seed_member_key(&bob, "bob_device", &bob_key)?;
-        seed_member_key(&carol, "bob_device", &bob_key)?;
-
-        let (invite, _state) = alice.create_signed_group_member_invite(
-            "group_test",
-            "alice_device",
-            "carol_device",
-            &carol_key,
-            "member",
-            4_000_000_000,
-            "unit test",
-        )?;
-        let invite_id = invite_id_from_event(&invite)?;
-        bob.apply_group_control_event(&invite)?;
-        carol.apply_group_control_event(&invite)?;
-
-        assert!(matches!(
-            bob.create_signed_group_member_accept("group_test", "bob_device", &invite_id),
-            Err(SdkError::Protocol(_))
-        ));
-
-        let (accept, carol_state) =
-            carol.create_signed_group_member_accept("group_test", "carol_device", &invite_id)?;
-        assert!(carol_state.members.contains("carol_device"));
-        let alice_state = alice.apply_group_control_event(&accept)?;
-        assert!(alice_state.members.contains("carol_device"));
-        assert!(matches!(
-            carol.create_signed_group_member_accept("group_test", "carol_device", &invite_id),
-            Err(SdkError::Storage(StorageError::GroupInviteInvalidState { .. }))
-        ));
-
-        let expired_group = "group_expired";
-        seed_group_named(&alice, expired_group, &alice_key)?;
-        seed_group_named(&carol, expired_group, &alice_key)?;
-        let (expired_invite, _state) = alice.create_signed_group_member_invite(
-            expired_group,
-            "alice_device",
-            "carol_device",
-            &carol_key,
-            "member",
-            1,
-            "unit test",
-        )?;
-        let expired_invite_id = invite_id_from_event(&expired_invite)?;
-        carol.apply_group_control_event(&expired_invite)?;
-        assert!(matches!(
-            carol.create_signed_group_member_accept(
-                expired_group,
-                "carol_device",
-                &expired_invite_id
-            ),
-            Err(SdkError::Storage(StorageError::GroupInviteExpired(_)))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn signed_group_kick_ban_and_delete_apply_authoritatively() -> Result<(), SdkError> {
-        let alice_seed = [0x52; 32];
-        let bob_seed = [0x53; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let bob_key = device_public_key("bob", "bob_device", bob_seed);
-        let alice = group_client("alice_s45", "alice", "alice_device", alice_seed)?;
-        let bob = group_client("bob_s45", "bob", "bob_device", bob_seed)?;
-        seed_group(&alice, &alice_key)?;
-        seed_group(&bob, &alice_key)?;
-        seed_member_key(&alice, "bob_device", &bob_key)?;
-        seed_member_key(&bob, "bob_device", &bob_key)?;
-
-        alice.account_db()?.send_direct_message(
-            "group_test",
-            "msg_from_bob",
-            "bob_device",
-            b"ciphertext",
-        )?;
-        let epoch_before_delete = alice.group_state("group_test")?.group_epoch;
-        let (_delete, delete_state) = alice.create_signed_group_message_delete(
-            "group_test",
-            "alice_device",
-            "msg_from_bob",
-            "group_tombstone",
-            "unit test",
-        )?;
-        assert_eq!(delete_state.group_epoch, epoch_before_delete);
-
-        let (kick, _state) = alice.create_signed_group_member_kick(
-            "group_test",
-            "alice_device",
-            "bob_device",
-            "unit test",
-        )?;
-        bob.apply_group_control_event(&kick)?;
-        assert!(!bob.group_state("group_test")?.members.contains("bob_device"));
-        assert!(matches!(
-            bob.apply_group_control_event(&kick),
-            Err(SdkError::Storage(StorageError::GroupControlReplay(_)))
-        ));
-
-        let alice_ban = group_client("alice_s45_ban", "alice", "alice_device", alice_seed)?;
-        seed_group(&alice_ban, &alice_key)?;
-        seed_member_key(&alice_ban, "bob_device", &bob_key)?;
-        let (_ban, state) = alice_ban.create_signed_group_member_ban(
-            "group_test",
-            "alice_device",
-            "bob_device",
-            "unit test",
-        )?;
-        assert!(!state.members.contains("bob_device"));
-        assert!(matches!(
-            alice_ban.add_group_member("group_test", "bob_device", "member"),
-            Err(SdkError::Storage(StorageError::GroupPermissionDenied))
-        ));
-        Ok(())
-    }
-    #[test]
-    fn kicked_member_can_rejoin_and_all_members_converge() -> Result<(), SdkError> {
-        let alice_seed = [0x62; 32];
-        let bob_seed = [0x63; 32];
-        let carol_seed = [0x64; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let bob_key = device_public_key("bob", "bob_device", bob_seed);
-        let alice = group_client("rejoin_alice", "alice", "alice_device", alice_seed)?;
-        let bob = group_client("rejoin_bob", "bob", "bob_device", bob_seed)?;
-        let carol = group_client("rejoin_carol", "carol", "carol_device", carol_seed)?;
-        for client in [&alice, &bob, &carol] {
-            seed_group(client, &alice_key)?;
-            client.add_group_member("group_test", "carol_device", "member")?;
-            seed_member_key(client, "bob_device", &bob_key)?;
-        }
-        let (kick, _) = alice.create_signed_group_member_kick(
-            "group_test",
-            "alice_device",
-            "bob_device",
-            "test rejoin",
-        )?;
-        bob.apply_group_control_event(&kick)?;
-        carol.apply_group_control_event(&kick)?;
-        let (invite, _) = alice.create_signed_group_member_invite(
-            "group_test",
-            "alice_device",
-            "bob_device",
-            &bob_key,
-            "member",
-            now_unix_timestamp() + 3600,
-            "test rejoin",
-        )?;
-        let invite_id = invite_id_from_event(&invite)?;
-        bob.apply_group_control_event(&invite)?;
-        carol.apply_group_control_event(&invite)?;
-        let (accept, _) =
-            bob.create_signed_group_member_accept("group_test", "bob_device", &invite_id)?;
-        alice.apply_group_control_event(&accept)?;
-        carol.apply_group_control_event(&accept)?;
-        let state = alice.group_state("group_test")?;
-        assert!(state.members.contains("bob_device"));
-        assert_eq!(state, bob.group_state("group_test")?);
-        assert_eq!(state, carol.group_state("group_test")?);
-        for client in [&alice, &bob, &carol] {
-            assert_eq!(
-                client.account_db()?.group_member_device_key_by_name("group_test", "bob_device")?,
-                Some(bob_key.clone())
-            );
-        }
-        Ok(())
-    }
-    #[test]
-    fn an_admin_cannot_invite_the_active_owner_under_an_attackers_key() -> Result<(), SdkError> {
-        let alice_seed = [0x72; 32];
-        let bob_seed = [0x73; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let bob_key = device_public_key("bob", "bob_device", bob_seed);
-        let attacker = device_public_key("mallory", "alice_device", [0x74; 32]);
-        let alice = group_client("owner_invite_guard_alice", "alice", "alice_device", alice_seed)?;
-        let bob = group_client("owner_invite_guard_bob", "bob", "bob_device", bob_seed)?;
-        for client in [&alice, &bob] {
-            seed_group(client, &alice_key)?;
-            seed_member_key(client, "bob_device", &bob_key)?;
-        }
-        let (promotion, _) = alice.create_signed_group_role_change(
-            "group_test",
-            "alice_device",
-            "bob_device",
-            "admin",
-        )?;
-        bob.apply_group_control_event(&promotion)?;
-        let before = alice.group_state("group_test")?;
-        let event = bob.signed_group_control_base(
-            "group_test",
-            "bob_device",
-            "malicious-owner-invite".into(),
-            "group.member_invited",
-            before.group_epoch,
-            ramflux_protocol::GroupEventBody::MemberInvitedV2 {
-                group_id: "group_test".into(),
-                group_epoch: before.group_epoch,
-                invite_id: "malicious-owner-invite".into(),
-                invitee_identity: "alice_device".into(),
-                invitee_signing_public_key: attacker,
-                invited_role: "member".into(),
-                inviter_device_id: "bob_device".into(),
-                expires_at: now_unix_timestamp() + 3600,
-                reason: "active owner takeover probe".into(),
-            },
-        )?;
-        let event = bob.sign_group_control_event(event)?;
-        assert!(matches!(
-            alice.apply_group_control_event(&event),
-            Err(SdkError::Storage(StorageError::GroupPermissionDenied))
-        ));
-        assert_eq!(alice.group_state("group_test")?, before);
-        assert_eq!(
-            alice.account_db()?.group_member_device_key_by_name("group_test", "alice_device")?,
-            Some(alice_key)
-        );
-        Ok(())
-    }
-    #[test]
-    fn an_old_invite_accept_cannot_replace_a_member_who_is_now_active() -> Result<(), SdkError> {
-        let alice_seed = [0x72; 32];
-        let attacker_seed = [0x74; 32];
-        let alice_key = device_public_key("alice", "alice_device", alice_seed);
-        let attacker_key = device_public_key("mallory", "victim_device", attacker_seed);
-        let alice = group_client("accept_active_guard_alice", "alice", "alice_device", alice_seed)?;
-        let mallory =
-            group_client("accept_active_guard_mallory", "mallory", "victim_device", attacker_seed)?;
-        seed_group(&alice, &alice_key)?;
-        let (invite, _) = alice.create_signed_group_member_invite(
-            "group_test",
-            "alice_device",
-            "victim_device",
-            &attacker_key,
-            "member",
-            now_unix_timestamp() + 3600,
-            "pending before legitimate join",
-        )?;
-        let invite_id = invite_id_from_event(&invite)?;
-        let genuine = device_public_key("victim", "victim_device", [0x75; 32]);
-        seed_member_key(&alice, "victim_device", &genuine)?;
-        alice.add_group_member("group_test", "victim_device", "admin")?;
-        let before = alice.group_state("group_test")?;
-        let accept = mallory.signed_group_control_base(
-            "group_test",
-            "victim_device",
-            "malicious-old-accept".into(),
-            "group.member_accepted",
-            before.group_epoch + 1,
-            ramflux_protocol::GroupEventBody::MemberAccepted {
-                group_id: "group_test".into(),
-                previous_epoch: before.group_epoch,
-                new_group_epoch: before.group_epoch + 1,
-                invite_id,
-                invitee_identity: "victim_device".into(),
-                accepted_role: "member".into(),
-            },
-        )?;
-        let accept = mallory.sign_group_control_event(accept)?;
-        assert!(matches!(
-            alice.apply_group_control_event(&accept),
-            Err(SdkError::Storage(StorageError::GroupPermissionDenied))
-        ));
-        assert_eq!(alice.group_state("group_test")?, before);
-        assert_eq!(
-            alice.account_db()?.group_member_device_key_by_name("group_test", "victim_device")?,
-            Some(genuine)
-        );
-        Ok(())
-    }
-    #[test]
-    fn member_and_admin_join_events_cannot_promote_the_actor_or_demote_the_owner()
-    -> Result<(), SdkError> {
-        for role in ["member", "admin"] {
-            let owner = group_client("join-owner-guard", "alice", "alice_device", [71; 32])?;
-            let attacker = ramflux_crypto::create_device_branch("bob", "bob_device", 1, [72; 32]);
-            let owner_key = device_public_key("alice", "alice_device", [71; 32]);
-            seed_group(&owner, &owner_key)?;
-            if role == "admin" {
-                owner.account_db()?.upsert_group_member_snapshot(
-                    "group_test",
-                    "bob_device",
-                    "admin",
-                    2,
-                )?;
-            }
-            seed_member_key(
-                &owner,
-                "bob_device",
-                &ramflux_protocol::encode_base64url(
-                    attacker.signing_key.verifying_key().to_bytes(),
-                ),
-            )?;
-            let mut event = owner.create_signed_group_member_join_event(
-                "group_test",
-                "alice_device",
-                "bob_device",
-                "member",
-                "owner-commitment",
-            )?;
-            event.actor_device_id = "bob_device".into();
-            event.signed.signing_key_id = "device:bob_device".into();
-            if let ramflux_protocol::GroupEventBody::MemberJoined {
-                actor_role,
-                joined_identity,
-                joined_role,
-                actor_device_signing_public_key,
-                ..
-            } = &mut event.body
-            {
-                *actor_role = "owner".into();
-                *joined_identity = "alice_device".into();
-                *joined_role = "member".into();
-                *actor_device_signing_public_key = ramflux_protocol::encode_base64url(
-                    attacker.signing_key.verifying_key().to_bytes(),
-                );
-            }
-            event.signed.signature =
-                ramflux_crypto::sign_protocol_object_with_device_branch(&attacker, &event)?;
-            let before = owner.group_state("group_test")?;
-            assert!(owner.apply_group_control_event(&event).is_err());
-            assert_eq!(owner.group_state("group_test")?, before);
-        }
-        Ok(())
-    }
-    #[test]
-    fn bootstrap_join_cannot_replace_membership_of_an_already_known_group() -> Result<(), SdkError>
-    {
-        let owner = group_client("bootstrap-existing", "alice", "alice_device", [73; 32])?;
-        owner.create_group("known", "alice_device")?;
-        owner.add_group_member("known", "bob_device", "member")?;
-        let event = owner.create_signed_group_member_join_event(
-            "known",
-            "alice_device",
-            "bob_device",
-            "member",
-            "owner-commitment",
-        )?;
-        let bob = group_client("bootstrap-target", "bob", "bob_device", [74; 32])?;
-        bob.create_group("known", "bob_device")?;
-        let before = bob.group_state("known")?;
-        assert!(
-            bob.apply_bootstrap_group_member_join_event(
-                &event,
-                "alice_device",
-                &device_public_key("alice", "alice_device", [73; 32])
-            )
-            .is_err()
-        );
-        assert_eq!(bob.group_state("known")?, before);
-        Ok(())
-    }
-}
+#[path = "group_tests.rs"]
+mod tests;

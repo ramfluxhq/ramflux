@@ -250,7 +250,7 @@ impl RamfluxClient {
                 "group bootstrap manifest verification is incomplete",
             )
         })?;
-        if actor_device.branch_public_key != *actor_device_signing_public_key {
+        if actor_device.principal_id != event.actor_principal_id || actor_device.branch_public_key != *actor_device_signing_public_key {
             return Err(SdkError::LocalBus(
                 "group membership event actor key does not match verified manifest".to_owned(),
             ));

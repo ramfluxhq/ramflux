@@ -44,6 +44,9 @@ impl AccountDb {
         device: &str,
         key: &str,
     ) -> Result<(), StorageError> {
+        if ramflux_protocol::parse_qualified_device_id(device)?.is_none() {
+            return Ok(());
+        }
         if let Some(record) = self.client_record("device", device)?
             && record["signing_public_key"].as_str() == Some(key)
             && let (Some(principal), Some(commitment)) =

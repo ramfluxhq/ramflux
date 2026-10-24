@@ -170,6 +170,11 @@ impl AccountRuntime {
         };
         let result =
             tokio::time::timeout(Duration::from_secs(20), super::sync_driver::run(account)).await;
+        let reason = match &result {
+            Ok(Err(error)) => Some(local_bus_error_code(error)),
+            Err(_) => Some("SyncTimeout"),
+            _ => None,
+        };
         let (state, activity) = match result {
             Ok(Ok(count)) => (if count == 0 { "idle" } else { "running" }, count > 0),
             Ok(Err(error)) => {
@@ -178,7 +183,7 @@ impl AccountRuntime {
             }
             Err(_) => ("error", false),
         };
-        super::sync_status::record(account, state, now_unix_timestamp())?;
+        super::sync_status::record_with_reason(account, state, now_unix_timestamp(), reason)?;
         let request = LocalBusFrame::request(
             "sync",
             Some(self.id.clone()),

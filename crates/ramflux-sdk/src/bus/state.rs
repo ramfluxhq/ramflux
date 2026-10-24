@@ -218,14 +218,28 @@ impl LocalBusAccountState {
                         &manifest.target_delivery_id,
                         manifest.device_seed,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        if refresh_due && !manifest.activation_pending {
+                            SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
+                        } else {
+                            error
+                        }
+                    })?;
                 self.client
                     .cache_verified_device_manifest(
                         &self.gateway_config,
                         &manifest.principal_commitment,
                         "account.create",
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        if refresh_due && !manifest.activation_pending {
+                            SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
+                        } else {
+                            error
+                        }
+                    })?;
             }
             let target_delivery_id = self.target_delivery_id.clone();
             let last_seen_inbox_seq = self

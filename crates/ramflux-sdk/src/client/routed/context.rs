@@ -64,7 +64,7 @@ impl RamfluxClient {
         group: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
-        if self.v2_blocks_legacy(&entry.envelope.source_device_id)? {
+        if self.v2_blocks_legacy(&self.inbound_device_reference(entry)?)? {
             return Ok(false);
         }
         let Some(thread) = self.account_db()?.client_record("conversation", conversation)? else {

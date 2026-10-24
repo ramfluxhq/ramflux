@@ -22,6 +22,10 @@ pub(super) fn initialize_coordinates(db: &AccountDb) -> Result<(), SdkError> {
 }
 
 pub(super) fn record(account: &LocalBusAccountState, state: &str, at: i64) -> Result<(), SdkError> {
+    record_with_reason(account, state, at, None)
+}
+
+pub(super) fn record_with_reason(account: &LocalBusAccountState, state: &str, at: i64, reason: Option<&str>) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
     db.write_transaction(|| {
         let tick = db
@@ -34,7 +38,7 @@ pub(super) fn record(account: &LocalBusAccountState, state: &str, at: i64) -> Re
             (
                 "sync.status",
                 "sync/status",
-                json!({"state":state,"unrouted":db.unrouted_count()?,"last_run":at}),
+                json!({"state":state,"reason_code":reason,"unrouted":db.unrouted_count()?,"last_run":at}),
             ),
             (
                 "node.health",

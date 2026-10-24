@@ -308,7 +308,7 @@ impl AccountDb {
         member_id: &str,
         device_signing_public_key: &str,
     ) -> Result<(), StorageError> {
-        let (address, raw, root) = self.pin_address_for_write(member_id)?;
+        let (address, raw, root) = Self::pin_address_for_write(member_id)?;
         self.write_transaction(|| {
             let lookup=if root.is_some() {address.as_str()} else {raw.as_str()};
             let stored=self.group_pin_key(group_id,lookup)?.unwrap_or_else(||address.clone());

@@ -130,7 +130,13 @@ impl RamfluxClient {
                         self.remove_device_pair(&peer, "root_signed_revocation_pending")?;
                     }
                 } else {
-                    self.remove_device_pair(&entry.device_id, "root_signed_revocation_pending")?;
+                    self.remove_device_pair(
+                        &ramflux_protocol::qualified_device_id(
+                            &record.principal_commitment,
+                            &entry.device_id,
+                        )?,
+                        "root_signed_revocation_pending",
+                    )?;
                 }
                 db.persist_actor_state(
                     &self.device_revocation_key(&ramflux_protocol::qualified_device_id(

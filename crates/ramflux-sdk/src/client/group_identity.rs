@@ -23,7 +23,15 @@ impl RamfluxClient {
         group: &str,
         raw: &str,
     ) -> Result<String, SdkError> {
-        if let Some(binding) = self.account_db()?.group_member_key_binding_by_name(group, raw)?
+        if let Some(binding) = self
+            .account_db()?
+            .group_member_key_binding_by_name(group, raw)
+            .map_err(|error| match error {
+                StorageError::AmbiguousDeviceId(_) => {
+                    SdkError::InboundPending("ambiguous group member root".into())
+                }
+                other => other.into(),
+            })?
             && let Some(root) = binding.principal_commitment
         {
             return Ok(ramflux_protocol::qualified_device_id(&root, raw)?);
@@ -39,14 +47,7 @@ impl RamfluxClient {
         {
             return Ok(ramflux_protocol::qualified_device_id(root, raw)?);
         }
-        let row = self
-            .account_db()?
-            .client_device_record_by_name(raw)?
-            .ok_or_else(|| SdkError::InboundPending("group member root unavailable".into()))?;
-        let root = row["principal_commitment"]
-            .as_str()
-            .ok_or_else(|| SdkError::InboundPending("group member has no root context".into()))?;
-        Ok(ramflux_protocol::qualified_device_id(root, raw)?)
+        Err(SdkError::InboundPending("group member root context unavailable".into()))
     }
     pub(crate) fn require_group_payload_sender(
         &self,
@@ -157,12 +158,17 @@ impl RamfluxClient {
                 return self.pin_local_group_member(group);
             }
         }
-        let device = self.device_reference(device)?;
+        let device = if reference.is_some() {
+            device.to_owned()
+        } else {
+            self.group_device_reference(group, device)?
+        };
         let device = device.as_str();
         let db = self.account_db()?;
-        let record = db
-            .client_record("device", device)?
-            .ok_or_else(|| SdkError::InboundPending("joined member identity unavailable".into()))?;
+        if db.client_record("device", device)?.is_none() {
+            return Err(SdkError::InboundPending("joined member identity unavailable".into()));
+        }
+        let record = self.trusted_device(device)?;
         let (Some(principal), Some(commitment), Some(key)) = (
             record["principal_id"].as_str(),
             record["principal_commitment"].as_str(),

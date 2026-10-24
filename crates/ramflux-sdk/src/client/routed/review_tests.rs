@@ -203,8 +203,8 @@ async fn group_delivery_preserves_existing_titles_and_all_conversation_links()
     let mut bob = Fixture::new("bob", 150)?;
     trust(&bob, &alice)?;
     for client in [&alice.client, &bob.client] {
-        client.create_group("group", "alice")?;
-        client.add_group_member("group", "bob", "member")?;
+        fixture_group(client, "group", &alice)?;
+        fixture_member(client, "group", &bob)?;
     }
     bob.client.account_db()?.persist_client_record("group","group",&serde_json::json!({"conversation_id":null,"conversation_ids":["thread","other"],"custom":"keep"}))?;
     bob.client.account_db()?.persist_client_record(
@@ -243,7 +243,12 @@ fn a_v2_device_pair_rejects_a_bound_legacy_downgrade() -> Result<(), SdkError> {
     assert_eq!(bob.client.legacy_routing_binding("bob", &old)?, Some("thread".to_owned()));
     let entry = seal(&alice, &bob, message("v2", "thread"), b"v2")?;
     let opened = bob.client.open_routed(&entry, "bob")?;
-    bob.client.persist_pair("bob", "alice", &opened.bundle_hash, &opened.session)?;
+    bob.client.persist_pair(
+        "bob",
+        &fixture_peer_reference(&bob.client, "alice")?,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
     assert_eq!(bob.client.legacy_routing_binding("bob", &old)?, None);
     Ok(())
 }
@@ -488,7 +493,12 @@ fn a_lower_peer_session_id_cannot_displace_a_locally_initiated_session() -> Resu
     }
     let entry = inbound.ok_or_else(|| invalid("could not construct a lower peer session id"))?;
     let opened = bob.client.open_routed(&entry, "bob")?;
-    bob.client.persist_pair("bob", "alice", &opened.bundle_hash, &opened.session)?;
+    bob.client.persist_pair(
+        "bob",
+        &fixture_peer_reference(&bob.client, "alice")?,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
     let (active, _, _) = bob.client.send_pair_session_from_url("bob", &outbound, None)?;
     assert_eq!(active.session_id, local_id);
     Ok(())
@@ -555,7 +565,12 @@ async fn an_object_share_and_later_messages_keep_one_device_pair_ratchet() -> Re
     let reply = seal(&bob, &alice, reply, b"reply")?;
     let opened =
         alice.client.open_routed(&reply, "alice").map_err(|e| invalid(&format!("reply: {e}")))?;
-    alice.client.persist_pair("alice", "bob", &opened.bundle_hash, &opened.session)?;
+    alice.client.persist_pair(
+        "alice",
+        &fixture_peer_reference(&alice.client, "bob")?,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
     bob.client
         .commit_object_key_slot_session(&deferred)
         .map_err(|e| invalid(&format!("delayed slot commit: {e}")))?;
@@ -696,7 +711,7 @@ async fn a_stranger_cannot_create_group_conversations_with_pending_ciphertext()
 -> Result<(), SdkError> {
     let alice = Fixture::new("alice", 93)?;
     let mut bob = Fixture::new("bob", 113)?;
-    alice.client.create_group("untrusted-group", "alice")?;
+    fixture_group(&alice.client, "untrusted-group", &alice)?;
     let body = alice.client.encrypt_group_message("untrusted-group", "alice", b"message")?;
     let entry = seal_group(&alice, &bob, message("stranger-group", "untrusted-thread"), &body)?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
@@ -776,7 +791,7 @@ fn install_high_local_pair(
         .client
         .account_db()?
         .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
-    sender.client.persist_pair(&sender.id, &recipient.id, &hash, &session)?;
+    sender.client.persist_pair(&sender.id, &recipient.reference()?, &hash, &session)?;
     Ok(session.session_id.clone())
 }
 
@@ -785,8 +800,8 @@ fn a_legacy_group_envelope_cannot_be_released_under_a_different_group_id() -> Re
     let alice = Fixture::new("alice", 14)?;
     let bob = Fixture::new("bob", 34)?;
     for client in [&alice.client, &bob.client] {
-        client.create_group("actual-group", "alice")?;
-        client.add_group_member("actual-group", "bob", "member")?;
+        fixture_group(client, "actual-group", &alice)?;
+        fixture_member(client, "actual-group", &bob)?;
     }
     let mut msg = message("legacy-group-conflict", "requested-thread");
     msg.encrypted_body = alice.client.encrypt_group_message("actual-group", "alice", b"text")?;

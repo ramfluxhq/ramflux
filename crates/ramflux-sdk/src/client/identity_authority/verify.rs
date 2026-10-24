@@ -94,6 +94,11 @@ pub(crate) fn verify_manifest_authority(
 
 impl crate::RamfluxClient {
     pub(crate) fn require_fresh_device_authorization(&self, remote: &str) -> Result<(), SdkError> {
+        let reference = self.device_reference(remote)?;
+        let remote = reference.as_str();
+        if ramflux_protocol::parse_qualified_device_id(remote)?.is_none() {
+            return Err(invalid("root-qualified device proof required"));
+        }
         let row = self
             .account_db()?
             .client_record("device", remote)?
@@ -111,6 +116,8 @@ impl crate::RamfluxClient {
         remote: &str,
         bundle: &ramflux_crypto::PrekeyBundle,
     ) -> Result<(), SdkError> {
+        let reference = self.device_reference(remote)?;
+        let remote = reference.as_str();
         let record = {
             self.require_cached_root_authority(remote)?;
             self.account_db()?

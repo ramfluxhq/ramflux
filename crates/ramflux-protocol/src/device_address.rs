@@ -3,6 +3,21 @@
 
 //! Root-qualified device addresses use the existing gateway lookup encoding.
 use crate::ProtocolError;
+/// Reject address-shaped names at live device enrollment and group-control ingress.
+/// The address codec itself still preserves historical literal names without recursive decoding.
+/// # Errors
+/// Rejects empty, oversized, control-containing or reserved-prefix device names.
+pub fn validate_device_name(name: &str) -> Result<(), ProtocolError> {
+    if name.is_empty()
+        || name.len() > 256
+        || name.chars().any(char::is_control)
+        || name.starts_with("root~")
+        || name.starts_with("legacy~")
+    {
+        return Err(ProtocolError::InvalidIdentityRecord("invalid or reserved live device name"));
+    }
+    Ok(())
+}
 /// Encode a root plus a literal device name, including names beginning with `root~`.
 /// # Errors
 /// Rejects empty/oversized identifiers or serialization errors.

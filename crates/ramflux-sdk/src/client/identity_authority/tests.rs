@@ -108,7 +108,9 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
         dm_device_id_hash("alice-two"),
         [2; 32],
     )?;
-    peer.client.persist_pair("bob", "alice-two", &[3; 32], &pair)?;
+    let reference =
+        ramflux_protocol::qualified_device_id(&added.principal_commitment, "alice-two")?;
+    peer.client.persist_pair("bob", &reference, &[3; 32], &pair)?;
     let mut entries = added.signed_device_set.as_ref().ok_or("set")?.devices.clone();
     let entry = entries.iter_mut().find(|e| e.device_id == "alice-two").ok_or("device")?;
     entry.status = DeviceSetStatus::Revoked;
@@ -129,12 +131,12 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
         node.device_manifest(&initial.principal_commitment).ok_or("manifest")?,
     )?)?;
     observe(&peer.client, &revoked)?;
-    assert!(!peer.client.account_db()?.pair_peer_devices("bob")?.iter().any(|d| d == "alice-two"));
-    assert!(peer.client.require_cached_root_authority("alice-two").is_err());
+    assert!(!peer.client.account_db()?.pair_peer_devices("bob")?.iter().any(|d| d == &reference));
+    assert!(peer.client.require_cached_root_authority(&reference).is_err());
     peer.reopen()?;
     assert_eq!(peer.client.observed_device_set(&initial.principal_commitment)?, Some(record));
     assert!(observe(&peer.client, &added).is_err());
-    assert!(peer.client.require_cached_root_authority("alice-two").is_err());
+    assert!(peer.client.require_cached_root_authority(&reference).is_err());
     assert!(
         peer.client
             .account_db()?
@@ -197,13 +199,14 @@ fn newer_root_authorized_rotation_retires_pairs_rotates_group_pin_and_preserves_
     observe(&peer.client, &original)?;
     peer.client.establish_friend_link("friend", "bob", "alice")?;
     peer.client.create_group("group", "bob")?;
-    peer.client.add_group_member("group", "alice", "member")?;
+    let reference = ramflux_protocol::qualified_device_id(&original.principal_commitment, "alice")?;
+    peer.client.add_group_member("group", &reference, "member")?;
     let db = peer.client.account_db()?;
     let old = &original.devices[0].branch_public_key;
-    db.persist_group_member_device_key("group", "alice", old)?;
+    db.persist_group_member_device_key("group", &reference, old)?;
     db.bind_group_member_key_identity(
         "group",
-        "alice",
+        &reference,
         "alice",
         &original.principal_commitment,
         old,
@@ -214,13 +217,13 @@ fn newer_root_authorized_rotation_retires_pairs_rotates_group_pin_and_preserves_
         dm_device_id_hash("alice"),
         [2; 32],
     )?;
-    peer.client.persist_pair("bob", "alice", &[3; 32], &pair)?;
+    peer.client.persist_pair("bob", &reference, &[3; 32], &pair)?;
     let mut rotated = replacement.manifest()?;
     sign_set(&replacement, &mut rotated, 2)?;
     observe(&peer.client, &rotated)?;
-    assert!(!peer.client.account_db()?.pair_peer_devices("bob")?.iter().any(|d| d == "alice"));
+    assert!(!peer.client.account_db()?.pair_peer_devices("bob")?.iter().any(|d| d == &reference));
     assert_eq!(
-        db.group_member_device_key("group", "alice")?,
+        db.group_member_device_key("group", &reference)?,
         Some(rotated.devices[0].branch_public_key.clone())
     );
     assert!(peer.client.friend_link_peer_is_accepted("alice")?);
@@ -387,3 +390,9 @@ mod gateway;
 
 #[path = "review_r2_tests.rs"]
 mod review_r2;
+
+#[path = "review_r3_tests.rs"]
+mod review_r3;
+
+#[path = "group_review_r3_tests.rs"]
+mod group_review_r3;

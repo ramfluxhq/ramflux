@@ -66,12 +66,32 @@ fn expired_sibling_proof_does_not_block_newer_signed_revocation_or_authorize_a_n
     manifest.devices.retain(|d| d.device_id != "stolen");
     observe(&peer.client, &manifest)?;
     assert_eq!(peer.client.observed_device_set(&manifest.principal_commitment)?, Some(record));
-    assert!(peer.client.require_cached_root_authority("stolen").is_err());
-    peer.client.require_cached_root_authority("two")?;
-    assert!(peer.client.require_fresh_device_authorization("two").is_err());
     assert!(
         peer.client
-            .verify_root_bound_prekey("two", &sibling.client.load_x3dh_private_state("two")?.bundle)
+            .require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+                &manifest.principal_commitment,
+                "stolen"
+            )?)
+            .is_err()
+    );
+    peer.client.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+        &manifest.principal_commitment,
+        "two",
+    )?)?;
+    assert!(
+        peer.client
+            .require_fresh_device_authorization(&ramflux_protocol::qualified_device_id(
+                &manifest.principal_commitment,
+                "two"
+            )?)
+            .is_err()
+    );
+    assert!(
+        peer.client
+            .verify_root_bound_prekey(
+                &ramflux_protocol::qualified_device_id(&manifest.principal_commitment, "two")?,
+                &sibling.client.load_x3dh_private_state("two")?.bundle
+            )
             .is_err()
     );
     let owner_key = &owner.client.identity_root.as_ref().ok_or("root")?.signing_key.verifying_key();

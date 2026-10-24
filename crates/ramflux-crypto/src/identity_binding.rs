@@ -178,6 +178,7 @@ pub(super) fn validate_public_keys(
     Ok((public.to_bytes(), agreement))
 }
 fn validate_bound_proof(proof: &BranchProofDocument) -> Result<(), CryptoError> {
+    ramflux_protocol::validate_device_name(&proof.device_id)?;
     let binding =
         proof.key_binding.as_ref().ok_or_else(|| invalid("missing branch key binding"))?;
     if binding.version != 2

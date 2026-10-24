@@ -9,10 +9,10 @@ fn setup() -> Result<(Fixture, Fixture), SdkError> {
     let bob = Fixture::new("bob", 111)?;
     trust(&bob, &alice)?;
     trust(&alice, &bob)?;
-    alice.client.create_group("g", "alice")?;
-    alice.client.add_group_member("g", "bob", "member")?;
+    fixture_group(&alice.client, "g", &alice)?;
+    fixture_member(&alice.client, "g", &bob)?;
     bob.client.create_group("g", "bob")?;
-    bob.client.add_group_member("g", "alice", "member")?;
+    fixture_member(&bob.client, "g", &alice)?;
     bob.client.account_db()?.persist_client_record(
         "conversation",
         "thread",
@@ -56,7 +56,7 @@ fn legacy_group_current_members_cannot_claim_another_members_sender_id() -> Resu
     let (alice, bob) = setup()?;
     let carol = Fixture::new("carol", 131)?;
     trust(&bob, &carol)?;
-    bob.client.add_group_member("g", "carol", "member")?;
+    fixture_member(&bob.client, "g", &carol)?;
     let entry =
         packet(&carol, alice.client.encrypt_group_message("g", "alice", b"forged")?, "forged")?;
     assert!(
@@ -185,7 +185,7 @@ fn previously_parked_group_messages_cannot_claim_another_members_sender_id() -> 
     let (alice, bob) = setup()?;
     let carol = Fixture::new("carol", 161)?;
     trust(&bob, &carol)?;
-    bob.client.add_group_member("g", "carol", "member")?;
+    fixture_member(&bob.client, "g", &carol)?;
     let body = alice.client.encrypt_group_message("g", "alice", b"forged pending")?;
     let group: SdkGroupEncryptedEnvelope = serde_json::from_slice(&body)?;
     let entry = packet(&carol, body, "pending-forged")?;

@@ -24,8 +24,8 @@ async fn pruned_tombstones_cannot_revive_a_held_bootstrap_or_clear_manual_recove
     let current = super::session_record::active(&bob, "alice")?;
     assert!(bob.client.open_routed(&held, "bob").is_err());
     assert_eq!(super::session_record::active(&bob, "alice")?, current);
-    bob.client.mark_pair_manual("bob", "alice", now_unix_timestamp())?;
-    let pair = bob.client.pair_key("bob", "alice")?;
+    bob.client.mark_pair_manual("bob", &alice.reference()?, now_unix_timestamp())?;
+    let pair = bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?;
     let marker = db.load_actor_state::<serde_json::Value>(&format!("{pair}/manual"))?;
     for key in db.actor_state_keys("dm-pair/retired/")? {
         db.remove_actor_state(&key)?;
@@ -53,7 +53,9 @@ fn changing_the_bootstrap_sequence_without_reencrypting_is_rejected() -> Result<
         envelope: gateway_direct_message_envelope(&alice.config()?, &message, None)?,
     };
     assert!(bob.client.open_routed(&tampered, "bob").is_err());
-    assert!(bob.client.active_pair("bob", "alice")?.is_none());
+    assert!(
+        bob.client.active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?.is_none()
+    );
     Ok(())
 }
 #[tokio::test]

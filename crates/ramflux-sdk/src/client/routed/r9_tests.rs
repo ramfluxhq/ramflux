@@ -15,7 +15,7 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     let mut bob = Fixture::new("bob", 61)?;
     trust(&bob, &alice)?;
     bob.client.create_group("pinned", "bob")?;
-    bob.client.add_group_member("pinned", "alice", "member")?;
+    fixture_member(&bob.client, "pinned", &alice)?;
     let original = manifest(&alice)?;
     bob.client.account_db()?.persist_group_member_device_key(
         "pinned",
@@ -47,8 +47,8 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
         assert!(bob.client.persist_identity_directory(&advertised).is_err());
     }
     trust(&impostor, &bob)?;
-    impostor.client.create_group("pinned", "alice")?;
-    impostor.client.add_group_member("pinned", "bob", "member")?;
+    fixture_group(&impostor.client, "pinned", &alice)?;
+    fixture_member(&impostor.client, "pinned", &bob)?;
     let distribution = impostor.client.export_group_sender_key_distribution("pinned", "alice")?;
     let mut keyless: serde_json::Value = serde_json::from_slice(&distribution)?;
     keyless
@@ -158,7 +158,7 @@ fn replay_watermarks_cannot_be_poisoned_by_another_principal_reusing_a_device_id
     let alice = Fixture::new("alice", 41)?;
     let bob = Fixture::new("bob", 61)?;
     let entry = fresh(&alice, &bob, "scoped-watermark")?;
-    let pair = bob.client.pair_key("bob", "alice")?;
+    let pair = bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?;
     // Legacy ownerless marks must not be inherited by the authenticated principal namespace.
     bob.client
         .account_db()?
@@ -218,7 +218,7 @@ fn old_bootstrap(
         Route::direct(),
         SealPair {
             local: &sender.id,
-            remote: &receiver.id,
+            remote: &receiver.reference()?,
             session: &mut session,
             header: Some(header),
             bundle: hash,

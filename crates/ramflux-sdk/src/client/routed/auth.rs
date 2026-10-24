@@ -64,6 +64,9 @@ impl RamfluxClient {
     }
 
     pub(crate) fn trusted_device(&self, remote: &str) -> Result<Value, SdkError> {
+        if ramflux_protocol::parse_qualified_device_id(remote)?.is_none() {
+            return Err(SdkError::InboundPending("root-qualified trusted device required".into()));
+        }
         if self
             .account_db()?
             .load_actor_state::<bool>(&self.device_revocation_key(remote)?)?

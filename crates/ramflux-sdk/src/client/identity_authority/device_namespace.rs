@@ -33,12 +33,7 @@ impl RamfluxClient {
                 device,
             )?);
         }
-        if let Some(row) = self.account_db()?.client_record("device", device)?
-            && let Some(root) = row["principal_commitment"].as_str()
-        {
-            return Ok(ramflux_protocol::qualified_device_id(root, device)?);
-        }
-        // Historical orphan metadata is not usable for live key authority. It remains
+        // Bare names never select a directory root. Historical orphan metadata remains
         // addressable solely so lifecycle cleanup can erase it alongside current sessions.
         Ok(device.into())
     }

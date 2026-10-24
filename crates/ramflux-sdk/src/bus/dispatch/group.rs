@@ -377,19 +377,26 @@ async fn dispatch_group_invite_create_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusGroupInviteCreateRequest = serde_json::from_value(request.body.clone())?;
+    let (root, raw) = if let Some(root) = &body.invitee_principal_commitment {
+        (root.clone(), body.invitee_id.clone())
+    } else {
+        ramflux_protocol::parse_qualified_device_id(&body.invitee_id)?
+            .ok_or_else(|| SdkError::InboundPending("invitee root context required".into()))?
+    };
+    let reference = ramflux_protocol::qualified_device_id(&root, &raw)?;
     let reason = body.reason.as_deref().unwrap_or("invite");
     let (event, group) = account.client.create_signed_group_member_invite(
         &body.group_id,
         &body.actor_id,
-        &body.invitee_id,
+        &reference,
         &body.invitee_signing_public_key,
         &body.role,
         body.expires_at,
         reason,
     )?;
     let invitee_route = LocalBusGroupMemberRoute {
-        member_id: body.invitee_id.clone(),
-        member_principal_commitment: body.invitee_principal_commitment.clone(),
+        member_id: raw,
+        member_principal_commitment: Some(root),
         device_signing_public_key: Some(body.invitee_signing_public_key),
         target_delivery_id: Some(body.target_delivery_id),
         federation: body.federation,
@@ -1370,11 +1377,12 @@ mod tests {
         client.open_account_index(temp_root(test_name))?;
         client.create_account(account_id, principal)?;
         client.unlock_account(account_id, b"dispatch-group-test")?;
+        let own = client.device_root(&client.local_device_reference(device)?)?;
         Ok(LocalBusAccountState::disconnected(
             client,
             gateway_config(principal, device, &format!("target_{device}"))
                 .with_device_branch(branch),
-            principal.to_owned(),
+            own,
         ))
     }
 
@@ -1384,7 +1392,12 @@ mod tests {
             member_id: member_id.to_owned(),
             role: "member".to_owned(),
             member_signing_public_key: Some(format!("{member_id}_key")),
-            member_principal_commitment: Some(format!("{member_id}_commitment")),
+            member_principal_commitment: Some(ramflux_protocol::encode_base64url(
+                ramflux_protocol::blake3_hash_bytes(
+                    "ramflux.test.group.member.v1",
+                    member_id.as_bytes(),
+                ),
+            )),
             target_delivery_id: Some(format!("target_{member_id}")),
             federation: None,
         }
@@ -1466,7 +1479,7 @@ mod tests {
         alice.client.create_group("group_s44", "alice_device_s44")?;
 
         let bob_body = member_add_body("group_s44", "bob_device_s44");
-        let bob_group = alice.client.add_group_member(
+        let bob_group = alice.client.account_db()?.add_group_member(
             &bob_body.group_id,
             &bob_body.member_id,
             &bob_body.role,
@@ -1478,13 +1491,14 @@ mod tests {
             target_delivery_id: bob_body.target_delivery_id.clone(),
             federation: bob_body.federation.clone(),
         };
+        alice.client.persist_group_member_route("group_s44", &bob_route)?;
         let bob_event = create_group_member_onboard_event_for_authorized_local_actor(
             &alice, &bob_group, &bob_body, &bob_route,
         )?;
         assert!(bob_event.is_some());
 
         let carol_body = member_add_body("group_s44", "carol_device_s44");
-        let carol_group = alice.client.add_group_member(
+        let carol_group = alice.client.account_db()?.add_group_member(
             &carol_body.group_id,
             &carol_body.member_id,
             &carol_body.role,
@@ -1496,6 +1510,7 @@ mod tests {
             target_delivery_id: carol_body.target_delivery_id.clone(),
             federation: carol_body.federation.clone(),
         };
+        alice.client.persist_group_member_route("group_s44", &carol_route)?;
         let carol_event = create_group_member_onboard_event_for_authorized_local_actor(
             &alice,
             &carol_group,

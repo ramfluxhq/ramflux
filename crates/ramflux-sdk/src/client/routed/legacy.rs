@@ -26,7 +26,7 @@ impl RamfluxClient {
         local: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<String>, SdkError> {
-        if self.v2_blocks_legacy(&entry.envelope.source_device_id)? {
+        if self.v2_blocks_legacy(&self.inbound_device_reference(entry)?)? {
             return Ok(None);
         }
         let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
