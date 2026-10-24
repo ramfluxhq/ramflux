@@ -366,6 +366,7 @@ impl FederationRedbStore {
     /// Returns an error when the inbound replay projection cannot be read or written.
     pub fn accept_inbound_forward_once(
         &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         request: &crate::FederatedEnvelopeForwardRequest,
         now: u64,
     ) -> Result<bool, NodeCoreError> {
@@ -375,10 +376,16 @@ impl FederationRedbStore {
                 envelope_id: request.envelope.envelope_id.clone(),
             });
         }
-        let seen_key = federated_forward_replay_key(request);
+        let (authority, authenticated) =
+            crate::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+        if source != &authenticated {
+            return Err(NodeCoreError::ReplayGuard("forwarded source context mismatch".into()));
+        }
+        let seen_key = federated_forward_replay_key(source, request);
         let expired_keys = self.expired_inbound_forward_keys(now)?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        observe_forwarded_device_set(&write_txn, &authority)?;
         let accepted = {
             let mut table = write_txn
                 .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
@@ -435,12 +442,15 @@ impl FederationRedbStore {
 }
 
 #[must_use]
-pub fn federated_forward_replay_key(request: &crate::FederatedEnvelopeForwardRequest) -> String {
+pub fn federated_forward_replay_key(
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    request: &crate::FederatedEnvelopeForwardRequest,
+) -> String {
     let parts = [
-        "v1".to_owned(),
+        "v2".to_owned(),
         inbound_key_part(&request.source_node_id),
         inbound_key_part(&request.target_node_id),
-        inbound_key_part(&request.envelope.source_device_id),
+        inbound_key_part(source.storage_key()),
         inbound_key_part(&request.envelope.envelope_id),
         inbound_key_part(&request.envelope.target_delivery_id),
     ];
@@ -506,4 +516,35 @@ fn deserialize_inbound_forward_seen_record(
 ) -> Result<FederationInboundForwardSeenRecord, NodeCoreError> {
     serde_json::from_slice(bytes)
         .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
+}
+
+// The source node has authenticated delivery; retain the highest observed root-signed set
+// so an older forwarded credential cannot resurrect a revoked device after restart.
+fn observe_forwarded_device_set(
+    transaction: &redb::WriteTransaction,
+    authority: &crate::DeviceAuthKeyResponse,
+) -> Result<(), NodeCoreError> {
+    const HEADS: TableDefinition<&str, &[u8]> =
+        TableDefinition::new("federated_source_device_sets_v1");
+    let record = authority
+        .signed_device_set
+        .as_ref()
+        .ok_or_else(|| NodeCoreError::ItestHttp("forwarded signed device set missing".into()))?;
+    let mut table =
+        transaction.open_table(HEADS).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    let old: Option<ramflux_protocol::SignedDeviceSetRecord> = table
+        .get(record.principal_commitment.as_str())
+        .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+        .map(|row| serde_json::from_slice(row.value()))
+        .transpose()
+        .map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
+    if let Some(old) = old {
+        ramflux_crypto::validate_device_set_transition(&old, record)
+            .map_err(|e| NodeCoreError::ItestHttp(e.to_string()))?;
+    }
+    let bytes = serde_json::to_vec(record).map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
+    table
+        .insert(record.principal_commitment.as_str(), bytes.as_slice())
+        .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    Ok(())
 }

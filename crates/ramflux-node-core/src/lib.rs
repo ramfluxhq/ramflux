@@ -126,3 +126,4 @@ mod tests;
 mod principal_directory;
 pub use principal_directory::PrincipalLookupRequest;
 mod device_namespace;
+mod device_source;

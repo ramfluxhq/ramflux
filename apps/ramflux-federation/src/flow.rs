@@ -94,6 +94,7 @@ pub(crate) fn handle_s8_forward_envelope(
         "federation forward route and peer CA resolved"
     );
     let mut signed_request = request.clone();
+    attach_forward_source_authority(&mut signed_request.envelope, router)?;
     signed_request.source_node_id.clone_from(&discovery.node_id);
     tracing::info!(
         source_node_id = %signed_request.source_node_id,
@@ -115,6 +116,38 @@ pub(crate) fn handle_s8_forward_envelope(
         Ok(response) => Ok(response),
         Err(error) => spool_failed_forward(store, &signed_request, &error),
     }
+}
+
+pub(super) fn attach_forward_source_authority(
+    envelope: &mut ramflux_protocol::Envelope,
+    router: &RouterMeshClient,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if envelope.ext.ext.contains_key("source_device_authority") {
+        ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
+        return Ok(());
+    }
+    let root = envelope
+        .ext
+        .ext
+        .get("source_root_commitment")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+        ramflux_node_core::NodeCoreError::ItestHttp("forward source root missing".into())
+    })?;
+    let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
+        .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?;
+    let authority: Option<ramflux_node_core::DeviceAuthKeyResponse> =
+        crate::router_get_json(router, &format!("/mvp1/device-auth-key/{lookup}"))?;
+    let authority = authority.ok_or_else(|| {
+        ramflux_node_core::NodeCoreError::ItestHttp("forward source authority unavailable".into())
+    })?;
+    authority.verify_envelope_source(envelope)?;
+    envelope.ext.ext.insert(
+        "source_device_authority".into(),
+        serde_json::to_value(authority)
+            .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?,
+    );
+    Ok(())
 }
 
 struct ForwardPeer {
@@ -411,7 +444,9 @@ pub(crate) fn handle_s8_receive_envelope(
     }
     let now = now_unix_seconds()?;
     verify_inbound_federated_forward(request, state, now, observability)?;
-    let accepted_once = store.accept_inbound_forward_once(request, now)?;
+    let (_, source) =
+        ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
+    let accepted_once = store.accept_inbound_forward_once(&source, request, now)?;
     if !accepted_once {
         tracing::info!(
             source_node_id = %request.source_node_id,
