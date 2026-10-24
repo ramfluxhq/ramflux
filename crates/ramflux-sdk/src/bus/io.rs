@@ -116,7 +116,8 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::GrantInvalidated | SdkError::Sync(SyncError::GrantInvalidated) => {
             "GrantInvalidated"
         }
-        SdkError::ContactUnavailable(_)
+        SdkError::Transport(_)
+        | SdkError::ContactUnavailable(_)
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => "Unavailable",
         SdkError::SignatureVerificationFailed(_) => "SignatureVerificationFailed",
         SdkError::RemoteAppApprovalRequired => "RemoteAppApprovalRequired",
@@ -329,5 +330,33 @@ mod tests {
         let mut reader: &[u8] = &raw;
         let result = read_local_bus_frame(&mut reader).await;
         assert!(matches!(&result, Err(e) if e.to_string().contains("too large")), "{result:?}");
+    }
+}
+
+#[cfg(test)]
+mod transport_refusal_tests {
+    use super::*;
+    #[tokio::test]
+    async fn r6_a_quic_deadline_is_an_unavailable_bus_response_with_its_diagnostic_intact()
+    -> Result<(), SdkError> {
+        let request = LocalBusFrame::request(
+            "transport",
+            Some("account".into()),
+            "task",
+            "task.propose",
+            serde_json::json!({}),
+        );
+        let error = SdkError::Transport(ramflux_transport::TransportError::Quic(
+            "deadline has elapsed; detail=Elapsed(())".into(),
+        ));
+        let response = local_bus_error(&request, &error);
+        let mut wire = Vec::new();
+        write_local_bus_frame(&mut wire, &response).await?;
+        let mut read = wire.as_slice();
+        let response = read_local_bus_frame(&mut read).await?;
+        let error = response.error.ok_or_else(|| SdkError::LocalBus("missing refusal".into()))?;
+        assert_eq!(error.code, "Unavailable");
+        assert!(error.message.contains("deadline has elapsed"));
+        Ok(())
     }
 }

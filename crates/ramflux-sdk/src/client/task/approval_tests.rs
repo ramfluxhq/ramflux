@@ -188,3 +188,6 @@ fn r5_pending_resolution_names_its_step_across_restart_and_executor_timeout() ->
 
 #[path = "approval_r5_tests.rs"]
 mod r5;
+
+#[path = "approval_r6_tests.rs"]
+mod r6;

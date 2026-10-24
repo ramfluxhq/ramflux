@@ -155,11 +155,19 @@ fn queue_requests(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
                 {
                     continue;
                 }
-                account.client.account_db()?.write_transaction(|| {
+                let queued = account.client.account_db()?.write_transaction(|| {
                     account.client.queue_task_approval(&packet)?;
                     account.client.remember_task_approval_source(&packet)?;
                     Ok::<_, SdkError>(())
-                })?;
+                });
+                match queued {
+                    Ok(()) => {}
+                    Err(SdkError::TaskRefused {
+                        reason: crate::TaskRefusalCode::PeerQuotaExhausted,
+                        ..
+                    }) => continue,
+                    Err(error) => return Err(error),
+                }
                 account.mcp_pending_approvals.insert(approval.approval_id.clone(), approval);
                 made += 1;
                 if made >= 2 {

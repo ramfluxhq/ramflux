@@ -21,6 +21,37 @@ impl RamfluxClient {
         let bytes = current.values().map(|u| u.bytes).sum::<u64>();
         let events = current.values().map(|u| u.events).sum::<u64>();
         let db = self.account_db()?;
+        let (retained_bytes, retained_events, _) = db.task_aggregate_history_usage(&exclude)?;
+        if retained_bytes.saturating_add(bytes) <= MAX_BYTES
+            && retained_events.saturating_add(events) <= MAX_EVENTS
+        {
+            return Ok(());
+        }
+        let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
+        let mut candidates = Vec::new();
+        for value in db.task_lifecycle_rows(None, None, false)? {
+            let row: Lifecycle = match serde_json::from_value(value) {
+                Ok(row) => row,
+                Err(error) => {
+                    tracing::warn!(%error,"malformed task lifecycle skipped during compaction");
+                    continue;
+                }
+            };
+            if row.compacted || row.conversation_id == c.conversation_id && row.task_id == task {
+                continue;
+            }
+            let view = db
+                .load_actor_state::<serde_json::Value>(&scoped(
+                    "view",
+                    &row.conversation_id,
+                    &row.task_id,
+                )?)?
+                .unwrap_or_default();
+            if !row.terminal && (view["requester"] == *local || view["assignee"] == *local) {
+                continue;
+            }
+            candidates.push(row);
+        }
         for _ in 0..512 {
             let (retained_bytes, retained_events, largest) =
                 db.task_aggregate_history_usage(&exclude)?;
@@ -29,28 +60,7 @@ impl RamfluxClient {
             {
                 return Ok(());
             }
-            let local =
-                &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
-            let mut candidates = Vec::new();
-            for value in db.task_lifecycle_rows(None, None, false)? {
-                let row: Lifecycle = serde_json::from_value(value)?;
-                if row.compacted || row.conversation_id == c.conversation_id && row.task_id == task
-                {
-                    continue;
-                }
-                let view = db
-                    .load_actor_state::<serde_json::Value>(&scoped(
-                        "view",
-                        &row.conversation_id,
-                        &row.task_id,
-                    )?)?
-                    .unwrap_or_default();
-                if !row.terminal && (view["requester"] == *local || view["assignee"] == *local) {
-                    continue;
-                }
-                candidates.push(row);
-            }
-            let victim = candidates.into_iter().max_by_key(|row| {
+            let victim = candidates.iter().enumerate().max_by_key(|(_, row)| {
                 (
                     row.terminal,
                     largest.as_ref().is_some_and(|source| {
@@ -59,7 +69,8 @@ impl RamfluxClient {
                     row.bytes,
                 )
             });
-            let Some(victim) = victim else { break };
+            let Some((index, _)) = victim else { break };
+            let victim = candidates.swap_remove(index);
             self.compact_task(&victim, false)?;
         }
         Err(crate::task_refusal::refused(

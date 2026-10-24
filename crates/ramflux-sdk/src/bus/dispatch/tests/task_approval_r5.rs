@@ -28,21 +28,32 @@ fn open_named(
     id: &str,
     grant: &str,
 ) -> Case {
+    open_for(human, agent, id, grant, "thread")
+}
+fn open_for(
+    human: &LocalBusAccountState,
+    agent: &LocalBusAccountState,
+    id: &str,
+    grant: &str,
+    conversation: &str,
+) -> Case {
+    let human_id = human.client.device_branch.as_ref().ok_or("human")?.principal_id.clone();
+    let agent_id = agent.client.device_branch.as_ref().ok_or("agent")?.principal_id.clone();
     for (local, remote) in [(human, agent), (agent, human)] {
         let device = remote.client.device_branch.as_ref().ok_or("device")?;
         local.client.account_db()?.persist_client_record("device",&device.device_id,&json!({"principal_id":device.principal_id,"signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())}))?;
         local.client.account_db()?.persist_client_record(
             "conversation",
-            "thread",
-            &json!({"kind":"direct","participants":["human","agent"]}),
+            conversation,
+            &json!({"kind":"direct","participants":[human_id,agent_id]}),
         )?;
     }
     let bodies = [
         TaskEventBody::Start(TaskStart {
             task_id: id.into(),
-            conversation_id: "thread".into(),
-            requester: "human".into(),
-            assignee: "agent".into(),
+            conversation_id: conversation.into(),
+            requester: human_id.clone(),
+            assignee: agent_id.clone(),
             text: "Inspect".into(),
             constraints: None,
         }),
@@ -64,7 +75,7 @@ fn open_named(
         let actor = if index == 0 { human } else { agent };
         let d = actor.client.device_branch.as_ref().ok_or("device")?;
         let c = actor.client.sign_task_event(
-            TaskEvent::new("thread".into(), body, sdk_device_signed_fields(&d.device_id, ""))?,
+            TaskEvent::new(conversation.into(), body, sdk_device_signed_fields(&d.device_id, ""))?,
             format!("{id}:{index}"),
             None,
         )?;
@@ -74,7 +85,7 @@ fn open_named(
                     .client
                     .project_task_message(
                         &Delivery {
-                            conversation: "thread",
+                            conversation,
                             message: &c.message_id,
                             principal: &c.principal_id,
                             device: &c.device_id,
@@ -320,3 +331,6 @@ fn r5_an_applied_grant_keeps_the_executors_receiver_deadline_without_rewriting_i
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[path = "task_approval_r6.rs"]
+mod r6;

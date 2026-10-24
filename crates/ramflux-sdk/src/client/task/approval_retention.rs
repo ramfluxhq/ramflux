@@ -90,13 +90,13 @@ impl RamfluxClient {
         let byte_limit = if incoming_request { 384 * 1024 } else { 2 * 1024 * 1024 };
         let peer_limit = if incoming_request { 96 * 1024 } else { 512 * 1024 };
         let size = serde_json::to_vec(value)?.len();
-        if count >= 64
-            || bytes.saturating_add(size) > byte_limit
-            || peer_count >= 16
-            || peer_bytes.saturating_add(size) > peer_limit
-        {
-            return Err(SdkError::InboundPending(
-                "task approval peer or account capacity reached".into(),
+        if count >= 64 || bytes.saturating_add(size) > byte_limit {
+            return Err(SdkError::InboundPending("task approval account capacity reached".into()));
+        }
+        if peer_count >= 16 || peer_bytes.saturating_add(size) > peer_limit {
+            return Err(crate::task_refusal::refused(
+                TaskRefusalCode::PeerQuotaExhausted,
+                "task approval peer capacity reached",
             ));
         }
         db.persist_actor_state(storage, value)?;
@@ -218,11 +218,21 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let now = crate::time::now_unix_timestamp();
         let mut rows = self.approval_receipt_rows()?;
-        rows.sort_by_key(|(key, r)| (r.updated_at, key.clone()));
+        let prefix = "task/approval_decision_out/";
+        let outgoing = db
+            .task_record_page::<Value>(prefix, prefix, 101)?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<std::collections::BTreeSet<_>>();
+        let protected = |r: &Receipt| {
+            matches!(r.delivery_state, DeliveryState::Pending | DeliveryState::Failed)
+                && outgoing.contains(&key("approval_decision_out", &r.request_id))
+        };
+        rows.sort_by_key(|(key, r)| (protected(r), r.updated_at, key.clone()));
         let mut kept = std::collections::BTreeMap::new();
         for (key, row) in rows.iter().rev() {
             let count = kept.entry(row.peer.clone()).or_insert(0usize);
-            if row.expires_at <= now || *count >= 64 {
+            if !protected(row) && (row.expires_at <= now || *count >= 64) {
                 db.delete_task_state(key)?;
             } else {
                 *count += 1;
@@ -230,18 +240,20 @@ impl RamfluxClient {
         }
         rows = self.approval_receipt_rows()?;
         while rows.len() > 512 {
-            let largest = kept
-                .iter()
-                .max_by_key(|(_, n)| **n)
-                .map(|(p, _)| p.clone())
-                .ok_or_else(|| invalid("receipt peer count missing"))?;
             let victim = rows
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, r))| r.peer == largest)
-                .min_by_key(|(_, (_, r))| r.updated_at)
-                .map(|(i, _)| i)
-                .ok_or_else(|| invalid("receipt eviction candidate missing"))?;
+                .filter(|(_, (_, r))| !protected(r))
+                .min_by_key(|(_, (key, r))| {
+                    (
+                        std::cmp::Reverse(kept.get(&r.peer).copied().unwrap_or_default()),
+                        r.updated_at,
+                        key.clone(),
+                    )
+                })
+                .map(|(index, _)| index);
+            let Some(victim) = victim else { break };
+            let largest = rows[victim].1.peer.clone();
             let (key, _) = rows.remove(victim);
             db.delete_task_state(&key)?;
             if let Some(count) = kept.get_mut(&largest) {

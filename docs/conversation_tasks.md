@@ -272,6 +272,13 @@ over-cap event. This transport bound is smaller than the protocol parser's
 The approval driver currently scans at most 1,000 task histories per tick while
 pending approvals exist (L4). An indexed task-to-grant lookup remains a follow-up
 for large accounts; this bounded scan can delay discovery of later histories.
+Cleanup also verifies task history separately for rows in five courier namespaces
+(L-r5-1); a per-view-version cache or indexed intervention lookup is a follow-up.
+Peer-capacity refusals skip only that approval and continue the scan; account
+capacity and storage failures still abort admission. Pending/failed delivery
+receipts remain protected while their outgoing jobs exist, including during
+peer/account retention. Transient application failures retain decisions for
+retry; only validation failures reject them.
 The 4,096-event per-conversation signer limit can still mark that assignee's
 other tasks stalled (M-r3-2 conversation edge). Distinguishing this conversation
 limit from the account-wide assignee limit remains a follow-up; requester recovery
