@@ -44,6 +44,7 @@ pub(crate) async fn dispatch_account_bus_request(
                 "node_id": read_local_bus_account_manifest(&local_bus_account_manifest_path(&state.config.data_root, account_id))?.node_id,
                 "principal_id": account.gateway_config.principal_id,
                 "principal_commitment":account.principal_commitment,
+                "device_id": account.gateway_config.device_id,
                 "target_delivery_id": account.target_delivery_id,
                 "session_id": account.engine.as_ref().map(|engine| engine.session().session_id.clone()),
                 "active_transport_kind": account.engine.as_ref().map(|engine| engine.active_transport_kind().wire_name()),
@@ -561,6 +562,58 @@ mod tests {
         assert_eq!(restored.root_seed, manifest.root_seed);
         assert_eq!(restored.device_seed, manifest.device_seed);
         assert_eq!(decrypt_passphrase, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_status_reports_the_local_sender_device() -> Result<(), SdkError> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.as_nanos());
+        let root =
+            std::env::temp_dir().join(format!("rf-account-status-{}-{unique}", std::process::id()));
+        let manifest = backup_manifest();
+        write_local_bus_account_manifest(&root, &manifest)?;
+        let gateway = GatewaySessionConfig::quic(manifest.gateway.clone());
+        let mut state = LocalBusDaemonState {
+            account_index: None,
+            nodes: crate::node::NodeStore::default(),
+            config: LocalBusConfig::new(root.join("bus.sock"), root.clone()),
+            accounts: BTreeMap::from([(
+                "alice".to_owned(),
+                LocalBusAccountState::disconnected(
+                    RamfluxClient::new(),
+                    gateway,
+                    manifest.principal_commitment.clone(),
+                ),
+            )]),
+            active_account_id: Some("alice".to_owned()),
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        };
+        let request = LocalBusFrame {
+            bus_protocol: "ramflux.local_bus.v1".into(),
+            frame_id: "status".into(),
+            kind: LocalBusFrameKind::Request,
+            request_id: "status".into(),
+            account_id: Some("alice".into()),
+            sdk_api: "account".into(),
+            method: "account.status".into(),
+            body: serde_json::json!({}),
+            trace_id: None,
+            seq: None,
+            at: None,
+            deadline_ms: None,
+            operation_id: None,
+            ok: None,
+            error: None,
+        };
+        let status = dispatch_account_bus_request(&request, &mut state).await?.response_body;
+        // Clients build message.submit sender_id from this field.
+        assert_eq!(status["device_id"], "device_alice");
+        assert_eq!(status["principal_id"], "principal_alice");
+        assert_eq!(status["target_delivery_id"], "target_alice");
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
