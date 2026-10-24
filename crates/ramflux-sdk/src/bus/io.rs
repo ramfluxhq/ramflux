@@ -85,6 +85,8 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     match error {
+        SdkError::SurfaceDeliveryTooLarge { .. } => "SurfaceDeliveryTooLarge",
+        SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::CapabilityDenied(_) | SdkError::Sync(SyncError::CapabilityDenied) => {
             "CapabilityDenied"
         }

@@ -106,6 +106,18 @@ async fn dispatch_message_submit_request(
     let account_id = request_account_id(request)?;
     let body: LocalBusMessageSubmitRequest = serde_json::from_value(request.body.clone())?;
     let account = local_bus_account_mut(state, account_id)?;
+    submit_message(account, body).await
+}
+
+pub(super) async fn submit_message(
+    account: &mut LocalBusAccountState,
+    body: LocalBusMessageSubmitRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    if let Some(plaintext) = body.plaintext_body()?
+        && crate::client::surface::Carrier::decode(&plaintext)?.is_some()
+    {
+        crate::client::surface::check_delivery_size(plaintext.len())?;
+    }
     let entry = if let Some(plaintext) = body.plaintext_body()? {
         if !body.attachments.is_empty() {
             if body.federation.is_some() {
@@ -585,6 +597,12 @@ pub(crate) async fn dispatch_message_receive_request(
         {
             if body.auto_fetch_attachments {
                 delivery.attachments = compat_attachments(&account.client, &delivery.message_id)?;
+            }
+            if let Some((_, fallback)) =
+                account.client.surface_message_fallback(&delivery.message_id)?
+            {
+                delivery.plaintext_body_base64 =
+                    ramflux_protocol::encode_base64url(fallback.as_bytes());
             }
             plaintext.push(delivery);
         }

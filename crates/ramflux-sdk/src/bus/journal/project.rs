@@ -104,6 +104,22 @@ pub(crate) fn project(
 
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {
     let db = client.account_db()?;
+    for prefix in ["directory/surface/", "directory/surface_error/"] {
+        if let Some(id) = key.strip_prefix(prefix) {
+            let directory =
+                if prefix == "directory/surface/" { "surface" } else { "surface_error" };
+            let view = db
+                .client_record(directory, id)?
+                .unwrap_or_else(|| json!({"surface_id":id,"removed":true}));
+            events.push((
+                if directory == "surface" { "surface.changed" } else { "surface.rejected" }
+                    .to_owned(),
+                crate::client::surface::surface_metadata(&view),
+                None,
+            ));
+            return Ok(());
+        }
+    }
     for (prefix, directory, topic) in [
         ("directory/conversation/", "conversation", "conversation.changed"),
         ("directory/identity/", "identity", "contact.changed"),

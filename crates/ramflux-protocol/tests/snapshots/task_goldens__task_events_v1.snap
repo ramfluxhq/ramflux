@@ -12,25 +12,25 @@ proposal
 public_key=oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA
 jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"assignee":"agent","conversation_id":"chat","proposer":"agent","steps":[{"id":"s","state":"proposed","title":"Step s"}],"task_id":"task","title":"Research 🦀"},"type":"proposal"},"schema":"ramflux.task_event.v1","version":1}
 signature=J8wS9oc9jKbOiEpLlavNGczdGeiDSn4xm3A6gFcrKFGOsMPu3N1CR8wdgi3jEEMmPLigvCqqkgQU4NtPa1U-BA
-fallback=Signed event signer="agent" kind="proposal" content="Task task proposed by agent for agent (awaiting human acceptance): Research 🦀\ns: Step s (proposed)"
+fallback=Signed event signer="agent" kind="proposal" content="Task task proposed by agent for agent (awaiting acceptance): Research 🦀\ns: Step s (proposed)"
 
 accept
 public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
 jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"task_id":"task","version":2},"type":"accept"},"schema":"ramflux.task_event.v1","version":1}
 signature=BjAhB6kmoI2xKLBE_v78Eq63GO5f3i8wSdR4kdjjIYB7S3WBqqiZnzyM2P0B19kCyb7VYEcyFQzKz0N8CRPwDg
-fallback=Signed event signer="human" kind="accept" content="Task task accepted by a human"
+fallback=Signed event signer="human" kind="accept" content="Task task accepted (actor kind unverified)"
 
 decline
 public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
 jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"task_id":"task","version":2},"type":"decline"},"schema":"ramflux.task_event.v1","version":1}
 signature=VOIov25zetverY76KDGqvafV-0r-aWKtN6XVpIfAjDJZ-6gJ_FGF5t99_rEXrpOoJzrqFq-4oTyflrmqRUYNBg
-fallback=Signed event signer="human" kind="decline" content="Task task declined by a human"
+fallback=Signed event signer="human" kind="decline" content="Task task declined (actor kind unverified)"
 
 update
 public_key=oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA
 jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"state":"needs_me","steps":[{"id":"s","needs_me":{"grant_id":"grant","kind":"approval"},"state":"needs_me","title":"Step s"}],"task_id":"task","version":3},"type":"update"},"schema":"ramflux.task_event.v1","version":1}
 signature=B2pBQdzZTBJVbikIYGV0fwpPJJ3i0IOo8m5AOxgIlVNHufZwJ8Jt14zxVGBi0mwZLLZB-o8ds8G8y0yfeTyHBw
-fallback=Signed event signer="agent" kind="update" content="Task task: needs_me\ns: Step s (needs_me) — needs human decision at grant"
+fallback=Signed event signer="agent" kind="update" content="Task task: needs_me\ns: Step s (needs_me) — needs decision at grant"
 
 cancel
 public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
@@ -42,4 +42,4 @@ resolve
 public_key=0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc
 jcs={"conversation_id":"chat","domain":"ramflux.task_event.v1","event":{"body":{"base_revision":3,"decision":"resume","decision_id":"decision","step_id":"s","target":{"grant_id":"grant","kind":"approval"},"task_id":"task"},"type":"resolve"},"schema":"ramflux.task_event.v1","version":1}
 signature=AR-Oh42f3rHprB1u7PXbyWGi4uFLV_8cD31Tvoq8U__LbzfTBrmP5WN23SMZvlW8nSK8zP9olPDKrnwz3-WyAw
-fallback=Signed event signer="human" kind="resolve" content="Task task: human decision resume for step s at grant (decision decision)"
+fallback=Signed event signer="human" kind="resolve" content="Task task: decision (actor kind unverified) resume for step s at grant (decision decision)"

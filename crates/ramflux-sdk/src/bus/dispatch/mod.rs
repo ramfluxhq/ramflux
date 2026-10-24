@@ -13,6 +13,7 @@ pub mod group;
 pub mod message;
 pub mod node;
 pub mod object;
+pub(crate) mod surface;
 
 pub(crate) use a2i_a2ui::*;
 pub(crate) use account::*;
@@ -24,3 +25,9 @@ pub(crate) use grant_mcp::*;
 pub(crate) use group::*;
 pub(crate) use message::*;
 pub(crate) use object::*;
+
+pub(crate) mod surface_transport;
+
+pub(crate) mod task;
+mod task_group;
+pub(crate) mod task_transport;

@@ -72,7 +72,7 @@ impl GatewaySessionFrameSource for Gateway {
     }
 }
 
-fn root(name: &str) -> PathBuf {
+pub(super) fn root(name: &str) -> PathBuf {
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
     let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
@@ -81,7 +81,7 @@ fn root(name: &str) -> PathBuf {
     PathBuf::from("/tmp")
         .join(format!("ramflux-actor-{name}-{}-{sequence}-{unique}", std::process::id()))
 }
-fn account(
+pub(super) fn account(
     root: &Path,
     id: &str,
     blocked: Option<oneshot::Sender<()>>,
@@ -892,3 +892,23 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
 mod metadata;
 mod restore;
 mod stream;
+
+#[tokio::test]
+async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), SdkError> {
+    let root = root("surface-outbound-isolation");
+    let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+    account.client.account_db()?.persist_actor_state(
+        "surface/transport/00000000000000000001",
+        &serde_json::json!({"corrupt":true}),
+    )?;
+    account
+        .client
+        .account_db()?
+        .persist_actor_state("surface/forward_job/corrupt", &serde_json::json!({"corrupt":true}))?;
+    // Obsolete surface-specific queues are never decoded or scheduled.
+    assert_eq!(super::sync_driver::run(&mut account).await?, 0);
+    assert!(account.take_live_engine().await.is_ok());
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

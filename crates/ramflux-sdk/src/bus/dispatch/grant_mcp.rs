@@ -150,6 +150,10 @@ fn dispatch_mcp_approval_denied(
         .remove(&body.approval_id)
         .ok_or_else(|| SdkError::LocalBus(format!("approval not found: {}", body.approval_id)))?;
     "denied".clone_into(&mut approval.status);
+    account
+        .client
+        .account_db()?
+        .persist_actor_state(&format!("mcp/denied/{}", approval.approval_id), &approval)?;
     let event_body = mcp_approval_denied_event_body(&approval);
     mcp_emit_lifecycle_event(
         request,

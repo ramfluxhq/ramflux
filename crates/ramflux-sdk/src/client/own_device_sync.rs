@@ -159,7 +159,7 @@ impl RamfluxClient {
         self.import_own_device_history_bundle(envelope, &bundle)
     }
 
-    fn own_device_history_bundle(
+    pub(super) fn own_device_history_bundle(
         &self,
         principal_commitment: &str,
         source_device_id: &str,
@@ -171,12 +171,28 @@ impl RamfluxClient {
         for group in &groups {
             floor_by_group.insert(group.group_id.clone(), group.local_joined_epoch);
         }
-        let messages = self
-            .account_db()?
-            .all_direct_messages()?
-            .into_iter()
-            .filter(|message| Self::message_allowed_by_group_floor(message, &floor_by_group))
-            .collect::<Vec<_>>();
+        let mut messages = Vec::new();
+        let mut surface_message_epochs = BTreeMap::new();
+        for message in self.account_db()?.all_direct_messages()? {
+            // Task packets recreate verified logical messages. Copying the transport row too
+            // would duplicate a task or conflict with its canonical own-device projection.
+            if self.task_message_metadata(&message.conversation_id, &message.message_id)?.is_some()
+            {
+                continue;
+            }
+            let surface_epoch = self.surface_message_group_epoch(&message.message_id)?;
+            if !Self::message_allowed_by_group_floor(&message, &floor_by_group)
+                || surface_epoch.as_ref().is_some_and(|(group, epoch)| {
+                    floor_by_group.get(group).is_none_or(|floor| epoch < floor)
+                })
+            {
+                continue;
+            }
+            if let Some(epoch) = surface_epoch {
+                surface_message_epochs.insert(message.message_id.clone(), epoch);
+            }
+            messages.push(message);
+        }
         let mut contents = BTreeMap::new();
         for message in &messages {
             if let Some(body) = self.account_db()?.message_content(&message.message_id)? {
@@ -186,6 +202,12 @@ impl RamfluxClient {
         let dm_sessions = Vec::new();
         let sender_key_distributions_base64 =
             self.own_device_sender_key_distributions(source_device_id, &groups)?;
+        let mut surface_pages = self.own_surface_history_pages()?;
+        let surfaces = if surface_pages.is_empty() {
+            crate::client::surface::SurfaceHistoryExport::default()
+        } else {
+            surface_pages.remove(0)
+        };
         Ok(SdkOwnDeviceHistoryBundle {
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,
@@ -194,6 +216,16 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
+            task_packets: self.own_task_packets()?,
+            task_export_metadata: self
+                .account_db()?
+                .load_actor_state("task/export_metadata")?
+                .unwrap_or_default(),
+            surface_pages,
+            surface_controls: surfaces.controls,
+            surface_checkpoints: surfaces.checkpoints,
+            surface_export_metadata: surfaces.metadata,
+            surface_message_epochs,
             contents,
             dm_sessions,
             group_member_pins: self.own_device_group_member_pins(&groups)?,
@@ -202,7 +234,7 @@ impl RamfluxClient {
         })
     }
 
-    fn own_device_group_snapshots(
+    pub(crate) fn own_device_group_snapshots(
         &self,
         source_device_id: &str,
     ) -> Result<Vec<SdkOwnDeviceGroupSnapshot>, SdkError> {
@@ -345,6 +377,7 @@ impl RamfluxClient {
             &envelope.principal_commitment,
         )
         .await?;
+        self.persist_identity_directory(&manifest)?;
         let source = manifest
             .devices
             .iter()
@@ -436,11 +469,16 @@ impl RamfluxClient {
         // The authenticated own-device snapshot carries the source's existing pins. Establish
         // them before any sender-key seed is imported; a distribution never establishes a pin.
         self.restore_own_device_group_member_pins(bundle)?;
+        self.import_own_task_packets(&bundle.task_packets, &bundle.source_device_id)?;
         let mut imported_messages = 0_usize;
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
         for message in &bundle.messages {
-            if !Self::message_allowed_by_group_floor(message, &floor_by_group) {
+            if !Self::message_allowed_by_group_floor(message, &floor_by_group)
+                || bundle.surface_message_epochs.get(&message.message_id).is_some_and(
+                    |(group, epoch)| floor_by_group.get(group).is_none_or(|floor| epoch < floor),
+                )
+            {
                 return Err(SdkError::LocalBus(
                     "own-device sync message below joined epoch".to_owned(),
                 ));
@@ -471,6 +509,17 @@ impl RamfluxClient {
             self.import_group_sender_key_distribution(&distribution)?;
             imported_sender_keys = imported_sender_keys.saturating_add(1);
         }
+        if bundle.surface_pages.len() > 63
+            || serde_json::to_vec(&bundle.surface_pages)?.len() > 8 * 1024 * 1024
+        {
+            return Err(SdkError::LocalBus("surface history pages budget exceeded".into()));
+        }
+        self.import_owned_surface_checkpoints(&bundle.surface_checkpoints)?;
+        for page in &bundle.surface_pages {
+            self.import_owned_surface_checkpoints(&page.checkpoints)?;
+            self.import_own_surface_history(envelope, &page.controls)?;
+        }
+        self.import_own_surface_history(envelope, &bundle.surface_controls)?;
         Ok(SdkOwnDeviceSyncImportResponse {
             snapshot_id: bundle.snapshot_id.clone(),
             imported_messages,
@@ -707,6 +756,11 @@ mod tests {
         groups: Vec<SdkOwnDeviceGroupSnapshot>,
     ) -> SdkOwnDeviceHistoryBundle {
         SdkOwnDeviceHistoryBundle {
+            surface_controls: Vec::new(),
+            surface_pages: Vec::new(),
+            surface_checkpoints: Vec::new(),
+            surface_export_metadata: crate::client::surface::SurfaceExportMetadata::default(),
+            surface_message_epochs: BTreeMap::new(),
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,
             principal_commitment: "principal_sync".to_owned(),
@@ -717,9 +771,48 @@ mod tests {
             contents: BTreeMap::new(),
             dm_sessions: Vec::new(),
             groups,
+            task_packets: Vec::new(),
+            task_export_metadata: crate::client::task::own_history::TaskExportMetadata::default(),
             group_member_pins: Vec::new(),
             sender_key_distributions_base64: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rejected_task_history_items_do_not_abort_ordinary_message_restore() -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("task-best-effort", "principal_sync", "target_device_sync")?;
+        let message = DirectMessageRecord {
+            conversation_id: "direct".into(),
+            message_id: "safe".into(),
+            sender_id: "source_device_sync".into(),
+            encrypted_body: b"safe history".to_vec(),
+            metadata: MessageMetadata::default(),
+            deleted: false,
+            created_at: 1,
+            receipts: Vec::new(),
+        };
+        let mut history =
+            bundle("source_device_sync", "target_device_sync", vec![message], Vec::new());
+        history.task_packets.push(serde_json::from_value(serde_json::json!({
+            "context":{"conversation_id":"missing-task-thread","participants":["principal_sync","peer"],"group":null,"friend":null},
+            "history":{"events":[],"created_at":1,"updated_at":1},"manifests":[],"pins":[],"base":0,"prefix_hash":"invalid"
+        }))?);
+        let result = client.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(result.imported_messages, 1);
+        assert_eq!(
+            client
+                .direct_message_by_id("safe")?
+                .ok_or_else(|| SdkError::LocalBus("message absent".into()))?
+                .encrypted_body,
+            b"safe history"
+        );
+        assert_eq!(client.account_db()?.task_state_usage("task/import_skip/")?.0, 1);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -843,6 +936,8 @@ mod tests {
             b"approved history plaintext",
         )?;
         source.persist_dm_session("history-thread", "legacy-checkpoint", "send", &session)?;
+        source.create_group("history-group", "source_device_sync")?;
+        source.add_group_member("history-group", "target_device_sync", "member")?;
         let history = source.own_device_history_bundle(
             "principal_sync",
             "source_device_sync",
@@ -855,6 +950,16 @@ mod tests {
             &envelope("source_device_sync", "target_device_sync"),
             &history,
         )?;
+        let group_before = serde_json::to_value(target.group_state("history-group")?)?;
+        target.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(serde_json::to_value(target.group_state("history-group")?)?, group_before);
+        assert_eq!(
+            target.direct_message_by_id("history-message")?.map(|m| m.message_id),
+            Some("history-message".into())
+        );
         assert_eq!(imported.imported_dm_sessions, 0);
         assert_eq!(
             target.account_db()?.message_content("history-message")?,
@@ -881,4 +986,31 @@ mod tests {
     }
     #[path = "own_device_group_pin_tests.rs"]
     mod group_pin_tests;
+    #[test]
+    fn control_import_skip_keys_distinguish_pages_and_are_retry_idempotent() -> Result<(), SdkError>
+    {
+        let (client, root) =
+            client_with_account("surface-skip-pages", "principal_sync", "target_device_sync")?;
+        let envelope = envelope("source_device_sync", "target_device_sync");
+        let mut control = crate::client::surface::SurfaceControl {
+            kind: crate::client::surface::ControlKind::Peer,
+            carrier_base64: "page-one".into(),
+            group_epoch: None,
+            context: None,
+            manifests: Vec::new(),
+        };
+        client.import_own_surface_history(&envelope, &[control.clone()])?;
+        control.carrier_base64 = "page-two".into();
+        client.import_own_surface_history(&envelope, &[control.clone()])?;
+        client.import_own_surface_history(&envelope, &[control])?;
+        let rows = client.account_db()?.surface_history_page::<serde_json::Value>(
+            "surface/import_control_skip/",
+            "surface/import_control_skip/",
+            100,
+        )?;
+        assert_eq!(rows.len(), 2);
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
