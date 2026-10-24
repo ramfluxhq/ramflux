@@ -269,7 +269,6 @@ pub(crate) mod tests {
         let request = fanout_request("env_runtime_fanout")?;
 
         let (oracle_state, oracle_store, _oracle_path) = test_router("fanout_oracle")?;
-        register_test_device(oracle_state.as_ref(), "alice", "alice_phone", "target_phone", 1)?;
         register_test_device(oracle_state.as_ref(), "alice", "alice_laptop", "target_laptop", 2)?;
         let oracle = crate::router_engine::own_device_fanout(
             oracle_state.as_ref(),
@@ -278,7 +277,6 @@ pub(crate) mod tests {
         )?;
 
         let (handle, _handle_path) = test_handle("fanout_handle")?;
-        register_test_device(handle.state(), "alice", "alice_phone", "target_phone", 1)?;
         register_test_device(handle.state(), "alice", "alice_laptop", "target_laptop", 2)?;
         let via_handle = handle.own_device_fanout(&request)?;
 
