@@ -76,14 +76,30 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         current = source.source();
     }
     LocalBusErrorBody {
+        details: match error {
+            SdkError::ContactConfirmationRequired(change) => {
+                Some(Box::new(serde_json::json!(change)))
+            }
+            _ => None,
+        },
         reason_code: match error {
             SdkError::ContactInput(reason) => Some(reason.to_string()),
+            SdkError::ContactConfirmationRequired(_) => {
+                Some("root_replacement_confirmation_required".into())
+            }
             SdkError::ContactHomeNodeUnsupported => Some("invalid_card".into()),
             _ => None,
         },
         code: local_bus_error_code(error).to_owned(),
         message: error.to_string(),
-        retry_after_ms: None,
+        retry_after_ms: if matches!(
+            error,
+            SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
+        ) {
+            Some(60_000)
+        } else {
+            None
+        },
         cause,
     }
 }
@@ -98,7 +114,8 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::GrantInvalidated | SdkError::Sync(SyncError::GrantInvalidated) => {
             "GrantInvalidated"
         }
-        SdkError::ContactUnavailable(_) => "Unavailable",
+        SdkError::ContactUnavailable(_)
+        | SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => "Unavailable",
         SdkError::SignatureVerificationFailed(_) => "SignatureVerificationFailed",
         SdkError::RemoteAppApprovalRequired => "RemoteAppApprovalRequired",
         _ => "ValidationFailed",

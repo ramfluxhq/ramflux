@@ -177,6 +177,7 @@ pub enum GatewayClientFrame {
     IdentityRegister { request: IdentityRegisterRequest },
     PrekeyPublish { request: PrekeyPublishRequest },
     PrekeyFetch { device_id: String },
+    PrincipalManifestFetch { principal_id: String },
     RelayTokenIssue { request: RelayTokenIssueRequest },
     RelayTokenV3Issue { request: Box<GatewayRelayTokenV3IssueRequest> },
     Ack { ack: ramflux_protocol::Ack },
@@ -190,20 +191,60 @@ pub enum GatewayClientFrame {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayServerFrame {
-    SessionEstablished { session: GatewaySessionEstablishedFrame },
-    Deliver { entry: InboxEntry },
-    OwnDeviceFanout { response: GatewayOwnDeviceFanoutResponse },
-    IdentityRegistered { response: IdentityRegistrationResponse },
-    PrekeyPublished { response: PrekeyResponse },
-    Prekey { response: PrekeyResponse },
-    RelayTokenIssued { response: RelayTokenIssueResponse },
-    RelayTokenV3Issued { response: Box<GatewayRelayTokenV3IssueResponse> },
-    Ack { cursor: InboxCursorResponse },
-    Cursor { cursor: Option<InboxCursorResponse> },
-    Resume { entries: Vec<InboxEntry> },
-    Nack { reason: String },
-    Heartbeat { now: u64 },
-    Drain { session_id: String, reason: String },
-    InBandWake { target_delivery_id: String, delivery_class: ramflux_protocol::DeliveryClass },
-    Close { reason: String },
+    SessionEstablished {
+        session: GatewaySessionEstablishedFrame,
+    },
+    Deliver {
+        entry: InboxEntry,
+    },
+    OwnDeviceFanout {
+        response: GatewayOwnDeviceFanoutResponse,
+    },
+    IdentityRegistered {
+        response: IdentityRegistrationResponse,
+    },
+    PrincipalManifest {
+        response: ramflux_protocol::PrincipalLookupResponse<crate::DeviceManifestResponse>,
+    },
+    IdentityRegistrationRejected {
+        reason_code: ramflux_protocol::IdentityDirectoryReason,
+    },
+    PrekeyPublished {
+        response: PrekeyResponse,
+    },
+    Prekey {
+        response: PrekeyResponse,
+    },
+    RelayTokenIssued {
+        response: RelayTokenIssueResponse,
+    },
+    RelayTokenV3Issued {
+        response: Box<GatewayRelayTokenV3IssueResponse>,
+    },
+    Ack {
+        cursor: InboxCursorResponse,
+    },
+    Cursor {
+        cursor: Option<InboxCursorResponse>,
+    },
+    Resume {
+        entries: Vec<InboxEntry>,
+    },
+    Nack {
+        reason: String,
+    },
+    Heartbeat {
+        now: u64,
+    },
+    Drain {
+        session_id: String,
+        reason: String,
+    },
+    InBandWake {
+        target_delivery_id: String,
+        delivery_class: ramflux_protocol::DeliveryClass,
+    },
+    Close {
+        reason: String,
+    },
 }

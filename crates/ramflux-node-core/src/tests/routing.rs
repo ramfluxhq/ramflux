@@ -237,12 +237,16 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         None,
         "ip_fanout_collision_a_source",
     )?)?;
-    router.mvp1_register_identity(&registration_request(
-        "principal_fanout_collision_a",
-        "c",
+    router.mvp1_register_identity(&same_root_registration(
+        registration_request(
+            "principal_fanout_collision_a",
+            "c",
+            702,
+            None,
+            "ip_fanout_collision_a_peer",
+        )?,
+        701,
         702,
-        None,
-        "ip_fanout_collision_a_peer",
     )?)?;
     router.mvp1_register_identity(&registration_request(
         "principal_fanout_collision_b",
@@ -251,12 +255,16 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         None,
         "ip_fanout_collision_b_source",
     )?)?;
-    router.mvp1_register_identity(&registration_request(
-        "principal_fanout_collision_b",
-        "b:c",
+    router.mvp1_register_identity(&same_root_registration(
+        registration_request(
+            "principal_fanout_collision_b",
+            "b:c",
+            704,
+            None,
+            "ip_fanout_collision_b_peer",
+        )?,
+        703,
         704,
-        None,
-        "ip_fanout_collision_b_peer",
     )?)?;
 
     let first = router.mvp10_own_device_fanout(ItestMvp10OwnDeviceFanoutRequest {
@@ -456,6 +464,7 @@ fn home_node_migration_registration_guard_respects_effective_at()
         None,
         "ip_before",
     )?;
+    let before = same_root_registration(before, 811, 812)?;
     router.mvp1_register_identity(&before)?;
 
     let mut after = registration_request(
@@ -781,13 +790,14 @@ fn home_node_migration_new_home_accepts_forwarded_local_delivery()
     assert_eq!(target_delivery_id, request.target_delivery_id);
     assert_eq!(envelope_id, "env_forward_new_home");
 
-    let mut new_device = registration_request(
+    let new_device = registration_request(
         "principal_forward_new_home",
         "device_forward_new_home_after",
         846,
         None,
         "ip_forward_new_home_after",
     )?;
+    let mut new_device = same_root_registration(new_device, 845, 846)?;
     new_device.now = request.now + 4;
     assert!(router.mvp1_register_identity(&new_device).is_ok());
     Ok(())

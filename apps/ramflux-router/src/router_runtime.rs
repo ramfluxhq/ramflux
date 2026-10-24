@@ -269,8 +269,15 @@ mod tests {
         let request = fanout_request("env_runtime_fanout");
 
         let (oracle_state, oracle_store, _oracle_path) = test_router("fanout_oracle")?;
-        register_test_device(oracle_state.as_ref(), "alice", "alice_phone", "target_phone", 1)?;
-        register_test_device(oracle_state.as_ref(), "alice", "alice_laptop", "target_laptop", 2)?;
+        register_test_device(oracle_state.as_ref(), "alice", "alice_phone", "target_phone", 1, 1)?;
+        register_test_device(
+            oracle_state.as_ref(),
+            "alice",
+            "alice_laptop",
+            "target_laptop",
+            2,
+            1,
+        )?;
         let oracle = crate::router_engine::own_device_fanout(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
@@ -278,8 +285,8 @@ mod tests {
         )?;
 
         let (handle, _handle_path) = test_handle("fanout_handle")?;
-        register_test_device(handle.state(), "alice", "alice_phone", "target_phone", 1)?;
-        register_test_device(handle.state(), "alice", "alice_laptop", "target_laptop", 2)?;
+        register_test_device(handle.state(), "alice", "alice_phone", "target_phone", 1, 1)?;
+        register_test_device(handle.state(), "alice", "alice_laptop", "target_laptop", 2, 1)?;
         let via_handle = handle.own_device_fanout(&request)?;
 
         assert_eq!(via_handle, oracle);
@@ -480,8 +487,9 @@ mod tests {
         device_id: &str,
         target_delivery_id: &str,
         nonce: u64,
+        root_nonce: u64,
     ) -> anyhow::Result<()> {
-        let root_seed = seed_from_nonce(0x31, nonce);
+        let root_seed = seed_from_nonce(0x31, root_nonce);
         let device_seed = seed_from_nonce(0x41, nonce);
         let root = ramflux_crypto::create_identity_root(principal_id, root_seed);
         let device = ramflux_crypto::create_device_branch(principal_id, device_id, 1, device_seed);

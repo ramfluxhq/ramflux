@@ -4,9 +4,10 @@
 //! A card exported by one account resolves a fresh peer through signed node discovery.
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-struct Origin {
+pub(super) struct Origin {
     url: String,
     record: ramflux_protocol::WellKnownClientRecord,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
     task: tokio::task::JoinHandle<Result<(), SdkError>>,
 }
 impl Drop for Origin {
@@ -15,7 +16,7 @@ impl Drop for Origin {
     }
 }
 impl Origin {
-    async fn new(directory: &Directory) -> Result<Self, SdkError> {
+    pub(super) async fn new(directory: &Directory) -> Result<Self, SdkError> {
         Self::named(directory, "contact.test").await
     }
     async fn named(directory: &Directory, node_id: &str) -> Result<Self, SdkError> {
@@ -45,10 +46,13 @@ impl Origin {
             [91; 32],
         );
         let body = serde_json::to_vec(&record)?;
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = requests.clone();
         let task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let mut buf = [0_u8; 4096];
                 let n = stream.read(&mut buf).await?;
+                observed.fetch_add(1, Ordering::SeqCst);
                 assert!(
                     String::from_utf8_lossy(&buf[..n])
                         .starts_with("GET /.well-known/ramflux/client ")
@@ -59,9 +63,9 @@ impl Origin {
             }
             Ok(())
         });
-        Ok(Self { url, record, task })
+        Ok(Self { url, record, requests, task })
     }
-    fn configure(&self, s: &mut LocalBusDaemonState, id: &str) -> Result<(), SdkError> {
+    pub(super) fn configure(&self, s: &mut LocalBusDaemonState, id: &str) -> Result<(), SdkError> {
         let mut profile = crate::node::NodeProfile::from_record(
             self.record.clone(),
             now_unix_timestamp().unsigned_abs(),
@@ -96,6 +100,7 @@ async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_saf
     let origin = Origin::new(&directory).await?;
     let mut s = state(&mut a, &mut b, &directory)?;
     origin.configure(&mut s, "alice")?;
+    origin.configure(&mut s, "bob")?;
     let exported = call(&mut s, "alice", "contact.card.export", json!({})).await?;
     let card = exported["card"].as_str().ok_or_else(|| invalid("card"))?;
     let link = exported["link"].as_str().ok_or_else(|| invalid("link"))?;
@@ -192,6 +197,11 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
         .err()
         .ok_or_else(|| invalid("foreign home accepted"))?;
     assert!(matches!(error, SdkError::ContactHomeNodeUnsupported));
+    assert_eq!(
+        foreign.requests.load(Ordering::SeqCst),
+        0,
+        "foreign locator was contacted before rejection"
+    );
     let wire = crate::bus::io::local_bus_error_body(&error);
     assert_eq!(wire.code, "ValidationFailed");
     assert_eq!(wire.reason_code.as_deref(), Some("invalid_card"));

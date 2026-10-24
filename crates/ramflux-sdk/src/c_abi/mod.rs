@@ -840,6 +840,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::SurfaceRefused { .. }
         | SdkError::SurfaceDeliveryTooLarge { .. }
+        | SdkError::ContactConfirmationRequired(_)
         | SdkError::ContactHomeNodeUnsupported
         | SdkError::ContactInput(_)
         | SdkError::LocalBus(_)

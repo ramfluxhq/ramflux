@@ -217,6 +217,9 @@ pub(crate) struct IdentityDeviceRecord {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IdentityRegistry {
     root_public_keys: BTreeMap<String, String>,
+    // A legacy metadata purge is not a root-signed release of a registered name.
+    #[serde(default)]
+    principal_root_bindings: BTreeMap<String, String>,
     #[serde(default)]
     root_public_keys_by_commitment: BTreeMap<String, String>,
     pub(crate) devices: BTreeMap<String, IdentityDeviceRecord>,
@@ -275,12 +278,6 @@ impl IdentityRegistry {
                 ));
             }
         }
-        if !self.seen_proofs.insert(request.proof.proof_id.clone()) {
-            return Err(NodeCoreError::ItestHttp(format!(
-                "branch proof replay: {}",
-                request.proof.proof_id
-            )));
-        }
         ramflux_crypto::verify_branch_proof(
             &root_public_key,
             &request.proof,
@@ -290,6 +287,22 @@ impl IdentityRegistry {
         )
         .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
 
+        if self
+            .principal_root_bindings
+            .get(&request.proof.principal_id)
+            .or_else(|| self.root_public_keys.get(&request.proof.principal_id))
+            .is_some_and(|root| root != &request.root_public_key)
+        {
+            return Err(NodeCoreError::PrincipalIdTaken);
+        }
+        if !self.seen_proofs.insert(request.proof.proof_id.clone()) {
+            return Err(NodeCoreError::ItestHttp(format!(
+                "branch proof replay: {}",
+                request.proof.proof_id
+            )));
+        }
+        self.principal_root_bindings
+            .insert(request.proof.principal_id.clone(), request.root_public_key.clone());
         self.root_public_keys
             .insert(request.proof.principal_id.clone(), request.root_public_key.clone());
         if !request.principal_commitment.is_empty() {
@@ -522,6 +535,18 @@ impl IdentityRegistry {
     }
 
     /// Resolves one active root for a principal; ambiguous registrations fail closed.
+    pub(crate) fn principal_manifest_ambiguous(&self, principal: &str) -> bool {
+        self.devices
+            .values()
+            .filter(|device| {
+                device.principal_id == principal
+                    && !self.revoked_devices.contains(&device.device_id)
+            })
+            .map(|device| &device.principal_commitment)
+            .collect::<BTreeSet<_>>()
+            .len()
+            > 1
+    }
     #[must_use]
     pub fn principal_manifest(&self, principal_id: &str) -> Option<DeviceManifestResponse> {
         let roots = self
@@ -657,6 +682,11 @@ impl IdentityRegistry {
     }
 
     pub(crate) fn remove_principal_metadata(&mut self, principal_id: &str) -> usize {
+        if let Some(root) = self.root_public_keys.get(principal_id) {
+            self.principal_root_bindings
+                .entry(principal_id.to_owned())
+                .or_insert_with(|| root.clone());
+        }
         let before_devices = self.devices.len();
         let before_prekeys = self.prekey_bundles.len();
         let before_trust = self.registration_trust_tiers.len();

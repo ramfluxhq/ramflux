@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Verified out-of-band safety material without changing an existing contact pin.
+use crate::ContactReason;
+use crate::prelude::*;
+impl RamfluxClient {
+    pub(crate) fn commit_contact_safety(
+        &self,
+        safety: &SdkContactSafetyNumber,
+        own: &ramflux_crypto::ContactSafetyMaterial,
+        peer: &ramflux_crypto::ContactSafetyMaterial,
+        device: &str,
+    ) -> Result<(), SdkError> {
+        let hash =
+            ramflux_protocol::encode_base64url(ramflux_crypto::safety_fingerprint(own, peer));
+        let device_set =
+            ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&peer.devices));
+        if hash != safety.safety_number_hash || device_set != safety.contact_device_set_hash {
+            return Err(ContactReason::RootConflict.into());
+        }
+        self.account_db()?.mark_contact_verified(ContactVerificationUpdate {
+            contact_identity_commitment: &safety.contact_identity_commitment,
+            safety_number_hash: &hash,
+            device_set_hash: &device_set,
+            lineage_head: &safety.contact_lineage_head,
+            verified_at: now_unix_timestamp(),
+            verified_by_device_id: device,
+        })?;
+        Ok(())
+    }
+
+    pub(crate) async fn preview_contact_safety(
+        &self,
+        gateway: &GatewaySessionConfig,
+        principal: &str,
+        root: &str,
+    ) -> Result<SdkContactSafetyNumber, SdkError> {
+        let old = self
+            .account_db()?
+            .client_record("identity", principal)?
+            .ok_or(ContactReason::UnknownPrincipal)?;
+        if old["contact_identity_commitment"].as_str() != Some(root)
+            && self.contact_root_source(&old)? != crate::ContactRootSource::Lookup
+        {
+            return Err(ContactReason::RootConflict.into());
+        }
+        let own = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let own_root = identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(
+            own.signing_key.verifying_key().to_bytes(),
+        ))?;
+        let fetch = |root: String| async move {
+            let manifest: Option<SdkDeviceManifestResponse> =
+                sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
+                    .await
+                    .map_err(super::contact_resolution::lookup_failure)?;
+            let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?;
+            super::contact::verify_device_manifest(&manifest, &root)
+                .map_err(|_| SdkError::ContactInput(ContactReason::ManifestInvalid))?;
+            Ok::<_, SdkError>(manifest)
+        };
+        let peer = fetch(root.to_owned()).await?;
+        if peer.principal_id != principal {
+            return Err(ContactReason::RootConflict.into());
+        }
+        let own = fetch(own_root.clone()).await?;
+        let a = super::contact::contact_safety_material_from_manifest(&own)?;
+        let b = super::contact::contact_safety_material_from_manifest(&peer)?;
+        let fingerprint = ramflux_crypto::safety_fingerprint(&a, &b);
+        Ok(SdkContactSafetyNumber {
+            contact_identity_commitment: root.into(),
+            self_identity_commitment: own_root,
+            safety_number: ramflux_crypto::safety_number(&a, &b),
+            fingerprint_hex: super::contact::bytes_to_hex(&fingerprint),
+            safety_number_hash: ramflux_protocol::encode_base64url(fingerprint),
+            self_device_count: a.devices.len(),
+            contact_device_count: b.devices.len(),
+            contact_device_set_hash: ramflux_protocol::encode_base64url(
+                ramflux_crypto::device_set_hash(&b.devices),
+            ),
+            contact_lineage_head: ramflux_protocol::encode_base64url(&b.lineage_head),
+            verification_state: "unverified".into(),
+        })
+    }
+}

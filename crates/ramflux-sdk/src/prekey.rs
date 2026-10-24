@@ -199,6 +199,12 @@ where
             sdk_tcp_tls_gateway_request(config, &request).await?
         }
     };
+    if let Ok(error) = serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
+        response.body.clone(),
+    ) && error.error.reason_code == ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken
+    {
+        return Err(crate::ContactReason::PrincipalIdTaken.into());
+    }
     if response.status != 200 {
         return Err(SdkError::GatewaySessionRejected(format!(
             "gateway request {} {} rejected with status {}: {}",

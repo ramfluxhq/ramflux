@@ -38,6 +38,8 @@ pub(crate) struct ContactAdd {
     pub(crate) principal: Option<String>,
     #[arg(long)]
     pub(crate) card: Option<String>,
+    #[arg(long, requires = "card")]
+    pub(crate) replace_provisional_root: Option<String>,
     #[arg(long, requires_all = ["link", "requester"])]
     pub(crate) target: Option<String>,
     #[arg(long, requires = "target")]

@@ -194,3 +194,5 @@ impl AccountDb {
 const fn insecure_test_sqlite_allowed() -> bool {
     cfg!(feature = "insecure-test-sqlite")
 }
+
+mod contact_root;

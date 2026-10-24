@@ -8,6 +8,9 @@ pub(crate) async fn dispatch_quic_json_request(
     router: &RouterMeshClient,
     request: ramflux_transport::GatewayQuicRequest,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
+    if let Some(response) = crate::principal_directory::reject_unauthenticated(&request) {
+        return Ok(response);
+    }
     tracing::info!(
         method = %request.method,
         path = %request.path,
@@ -47,9 +50,16 @@ pub(crate) async fn dispatch_quic_json_request(
         ("POST", "/mvp1/identity/register") => {
             let registration: ramflux_node_core::IdentityRegisterRequest =
                 serde_json::from_value(request.body)?;
-            let response: ramflux_node_core::IdentityRegistrationResponse =
+            let response: serde_json::Value =
                 router_post_json(router, "/mvp1/identity/register", &registration)?;
-            serde_json::to_value(response)?
+            if serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
+                response.clone(),
+            )
+            .is_ok()
+            {
+                return Ok(ramflux_transport::GatewayQuicResponse { status: 409, body: response });
+            }
+            response
         }
         ("POST", "/mvp1/prekey/publish") => {
             let prekey: ramflux_node_core::PrekeyPublishRequest =
@@ -72,11 +82,6 @@ pub(crate) async fn dispatch_quic_json_request(
         }
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
             let response: ramflux_node_core::PrekeyResponse =
-                router_get_json_async(router, path).await?;
-            serde_json::to_value(response)?
-        }
-        ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
-            let response: Option<ramflux_node_core::DeviceManifestResponse> =
                 router_get_json_async(router, path).await?;
             serde_json::to_value(response)?
         }

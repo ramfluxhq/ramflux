@@ -105,6 +105,9 @@ async fn dispatch_contact_safety_number(
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if request.body.get("principal_id").is_some() {
+        return provisional_safety(request, state, account_id, false).await;
+    }
     let body = contact_safety_request(request)?;
     let account = local_bus_account_mut(state, account_id)?;
     let engine = account.take_live_engine().await?;
@@ -122,6 +125,9 @@ async fn dispatch_contact_verify(
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if request.body.get("principal_id").is_some() {
+        return provisional_safety(request, state, account_id, true).await;
+    }
     let account = local_bus_account_mut(state, account_id)?;
     let body = contact_safety_request(request)?;
     let engine = account.take_live_engine().await?;
@@ -203,4 +209,61 @@ fn contact_list(
         contacts.push(value);
     }
     Ok(local_bus_ok(serde_json::json!({ "contacts": contacts })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProvisionalSafety {
+    principal_id: String,
+    contact_identity_commitment: String,
+    replace_provisional_root: Option<String>,
+}
+async fn provisional_safety(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    id: &str,
+    verify: bool,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: ProvisionalSafety = serde_json::from_value(request.body.clone())
+        .map_err(|_| crate::ContactReason::InvalidCard)?;
+    if !verify && body.replace_provisional_root.is_some() {
+        return Err(crate::ContactReason::InvalidCard.into());
+    }
+    let account = local_bus_account_mut(state, id)?;
+    let mut engine = account.take_live_engine().await?;
+    let gateway = engine.config.clone();
+    let result = async {
+        let mut safety = account
+            .client
+            .preview_contact_safety(&gateway, &body.principal_id, &body.contact_identity_commitment)
+            .await?;
+        if verify {
+            account
+                .client
+                .resolve_contact(
+                    &gateway,
+                    &account.gateway_config,
+                    crate::client::contact_resolution::ContactResolution {
+                        selector: &body.principal_id,
+                        expected_root: Some(&body.contact_identity_commitment),
+                        card: None,
+                        link_id: crate::client::contact_roots::contact_link_id(
+                            &gateway.principal_id,
+                            &body.principal_id,
+                        )?,
+                        allow_commitment: false,
+                        requester_is_peer: false,
+                        replace_provisional_root: body.replace_provisional_root.as_deref(),
+                        verification: Some(&safety),
+                    },
+                    &mut engine,
+                )
+                .await?;
+            safety.verification_state = "verified".into();
+        }
+        Ok::<_, SdkError>(local_bus_ok(serde_json::to_value(safety)?))
+    }
+    .await;
+    account.put_engine(engine);
+    result
 }

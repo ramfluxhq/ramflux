@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 struct Add {
     principal_id: Option<String>,
     card: Option<String>,
+    replace_provisional_root: Option<String>,
 }
 
 pub(super) async fn add(
@@ -19,7 +20,7 @@ pub(super) async fn add(
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let Selection { legacy, card, selector, requester_is_peer } =
+    let Selection { legacy, card, selector, requester_is_peer, replace_provisional_root } =
         parse_selector(request, local_bus_account(state, account_id)?)?;
     let account = local_bus_account(state, account_id)?;
     let own = account.gateway_config.clone();
@@ -35,6 +36,7 @@ pub(super) async fn add(
         return Err(ContactReason::InvalidCard.into());
     }
     if legacy.is_none()
+        && card.is_none()
         && (account.client.friend_link_peer_is_accepted(&selector)?
             || account
                 .client
@@ -47,6 +49,14 @@ pub(super) async fn add(
     {
         return Err(ContactReason::AlreadyContact.into());
     }
+    if let Some(card) = &card
+        && let Some(old) = account.client.account_db()?.client_record("identity", &selector)?
+        && old["contact_identity_commitment"].as_str() == Some(&card.root_commitment)
+        && account.client.contact_root_source(&old)? != crate::ContactRootSource::Lookup
+        && account.client.friend_link_peer_is_accepted(&card.root_commitment)?
+    {
+        return Err(ContactReason::AlreadyContact.into());
+    }
     let gateway = match card.as_ref() {
         Some(card) => {
             let home = account_home(state, account_id)?;
@@ -54,20 +64,13 @@ pub(super) async fn add(
         }
         None => own.clone(),
     };
-    let link = legacy.as_ref().map_or_else(
-        || {
-            format!(
-                "contact:{}",
-                ramflux_protocol::hash_hex(
-                    "ramflux.contact.link.v1",
-                    format!("{}:{selector}", own.principal_id).as_bytes()
-                )
-            )
-        },
-        |old| old.link_id.clone(),
-    );
-    let account = local_bus_account(state, account_id)?;
-    let contact = account
+    let link = match &legacy {
+        Some(old) => old.link_id.clone(),
+        None => crate::client::contact_roots::contact_link_id(&own.principal_id, &selector)?,
+    };
+    let account = local_bus_account_mut(state, account_id)?;
+    let mut engine = account.take_live_engine().await.map_err(lookup_failure)?;
+    let result = account
         .client
         .resolve_contact(
             &gateway,
@@ -79,9 +82,14 @@ pub(super) async fn add(
                 link_id: link.clone(),
                 allow_commitment: legacy.is_some(),
                 requester_is_peer,
+                replace_provisional_root: replace_provisional_root.as_deref(),
+                verification: None,
             },
+            &mut engine,
         )
-        .await?;
+        .await;
+    account.put_engine(engine);
+    let contact = result?;
     let mut response = json!({"contact":contact});
     if legacy.is_some() {
         let record = account
@@ -103,29 +111,37 @@ async fn card_gateway(
     root: &Path,
     home: Option<&crate::NodeProfile>,
 ) -> Result<GatewaySessionConfig, SdkError> {
-    let record = crate::node::fetch_client_record(&card.node.url).await.map_err(lookup_failure)?;
+    // A self-signed locator is not authority to contact an arbitrary host.
+    let home = home.ok_or(SdkError::ContactHomeNodeUnsupported)?;
+    if home.discovery_url != card.node.url {
+        return Err(SdkError::ContactHomeNodeUnsupported);
+    }
+    if crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint {
+        return Err(ContactReason::CardSignatureInvalid.into());
+    }
+    let record = crate::node::fetch_client_record(&card.node.url).await.map_err(|e| match e {
+        SdkError::Transport(_) | SdkError::Io(_) => lookup_failure(e),
+        _ => ContactReason::ManifestInvalid.into(),
+    })?;
     if crate::contact_node_fingerprint(&record.node_public_key)? != card.node.key_fingerprint {
         return Err(ContactReason::CardSignatureInvalid.into());
     }
-    if let Some(home) = home {
-        if home.node_id != record.node_id {
-            return Err(SdkError::ContactHomeNodeUnsupported);
-        }
-        if home.node_public_key != record.node_public_key {
-            return Err(ContactReason::CardSignatureInvalid.into());
-        }
-    } else if record.gateway_server_name != own.server_name
-        || record.node_ca_cert_pem.trim() != std::fs::read_to_string(&own.ca_cert)?.trim()
-    {
+    if home.node_id != record.node_id {
         return Err(SdkError::ContactHomeNodeUnsupported);
+    }
+    if home.node_public_key != record.node_public_key {
+        return Err(ContactReason::CardSignatureInvalid.into());
     }
     let profile =
         crate::node::NodeProfile::from_record(record, now_unix_timestamp().unsigned_abs());
     let mut gateway = own.clone();
-    gateway.gateway_addr =
-        crate::node::resolve_node_addr(&profile.gateway.quic_addr).await.map_err(lookup_failure)?;
+    gateway.gateway_addr = crate::node::resolve_node_addr(&profile.gateway.quic_addr)
+        .await
+        .map_err(|e| SdkError::ContactUnavailable(Box::new(e)))?;
     gateway.tcp_gateway_addr = Some(
-        crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await.map_err(lookup_failure)?,
+        crate::node::resolve_node_addr(&profile.gateway.tcp_addr)
+            .await
+            .map_err(|e| SdkError::ContactUnavailable(Box::new(e)))?,
     );
     gateway.server_name.clone_from(&profile.gateway.server_name);
     gateway.ca_cert = profile.write_ca(&root.join("contact_nodes"))?;
@@ -195,6 +211,7 @@ struct Selection {
     card: Option<ContactCardBody>,
     selector: String,
     requester_is_peer: bool,
+    replace_provisional_root: Option<String>,
 }
 fn parse_selector(
     request: &LocalBusFrame,
@@ -235,8 +252,12 @@ fn parse_selector(
         .map(|c| crate::parse_contact_card(c, now))
         .transpose()?;
     let selector = match (&parsed, &legacy, &card) {
-        (Some(Add { principal_id: Some(id), card: None }), _, _) => id.clone(),
-        (Some(Add { principal_id: None, card: Some(_) }), _, Some(c)) => c.principal_id.clone(),
+        (
+            Some(Add { principal_id: Some(id), card: None, replace_provisional_root: None }),
+            _,
+            _,
+        ) => id.clone(),
+        (Some(Add { principal_id: None, card: Some(_), .. }), _, Some(c)) => c.principal_id.clone(),
         (_, Some(old), _) => {
             if request.method == "contact.accept"
                 && (old.target_id == account.gateway_config.principal_id
@@ -251,7 +272,8 @@ fn parse_selector(
     };
     let requester_is_peer = request.method == "contact.accept"
         && legacy.as_ref().is_none_or(|old| old.requester_id == selector);
-    Ok(Selection { legacy, card, selector, requester_is_peer })
+    let replace_provisional_root = parsed.and_then(|a| a.replace_provisional_root);
+    Ok(Selection { legacy, card, selector, requester_is_peer, replace_provisional_root })
 }
 
 fn account_home(

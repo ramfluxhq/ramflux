@@ -44,7 +44,9 @@ pub(crate) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<V
             }));
             // Gateway-fetched safety material is persisted by the verified contact path.
             let contact = client.contact_entry(id)?;
-            for field in ["reachable", "verified", "kind_asserted", "root_commitment", "node"] {
+            for field in
+                ["reachable", "verified", "kind_asserted", "root_commitment", "root_source", "node"]
+            {
                 saved[field] = contact[field].clone();
             }
             saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);

@@ -11,9 +11,11 @@ mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
 mod constants;
 mod contact_card;
+mod contact_identity;
 pub use contact_card::{
     ContactCardBody, ContactNode, ContactReason, contact_node_fingerprint, parse_contact_card,
 };
+pub use contact_identity::{ContactRootChange, ContactRootSource};
 mod dm;
 mod error;
 mod federation;

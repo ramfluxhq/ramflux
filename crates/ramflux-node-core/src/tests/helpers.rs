@@ -690,3 +690,36 @@ pub(super) fn temp_store_path(test_name: &str) -> Result<PathBuf, Box<dyn std::e
     ));
     Ok(path)
 }
+
+/// A second device of an existing account must carry that account's root proof.
+pub(super) fn same_root_registration(
+    mut request: IdentityRegisterRequest,
+    root_nonce: u64,
+    device_nonce: u64,
+) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
+    let root = ramflux_crypto::create_identity_root(
+        &request.proof.principal_id,
+        seed_from_nonce(0x31, root_nonce),
+    );
+    let device = ramflux_crypto::create_device_branch(
+        &request.proof.principal_id,
+        &request.proof.device_id,
+        request.proof.device_epoch,
+        seed_from_nonce(0x41, device_nonce),
+    );
+    request.root_public_key =
+        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
+    request.principal_commitment = ramflux_crypto::blake3_256_base64url(
+        "ramflux.identity.root_public_key.commitment.v1",
+        &root.signing_key.verifying_key().to_bytes(),
+    );
+    request.proof = ramflux_crypto::authorize_device_branch(
+        &root,
+        &device,
+        IDENTITY_BIND_AUDIENCE,
+        vec![IDENTITY_BIND_CAPABILITY.into()],
+        request.now - 1,
+        request.now + 3600,
+    )?;
+    Ok(request)
+}

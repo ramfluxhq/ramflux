@@ -52,17 +52,14 @@ impl Directory {
                 let request: ramflux_transport::GatewayQuicRequest =
                     ramflux_transport::read_gateway_session_json(&mut recv).await?;
                 assert_eq!(request.method, "GET");
-                let principal = request.path.strip_prefix("/mvp1/principal-manifest/");
+
                 let commitment = request.path.strip_prefix("/mvp1/device-manifest/");
-                assert!(principal.is_some() || commitment.is_some());
+                assert!(commitment.is_some(), "names require the authenticated frame");
                 let body = {
                     let records = observed.lock().map_err(|_| invalid("directory mutex"))?;
                     records
                         .iter()
-                        .find(|m| {
-                            principal == Some(m.principal_id.as_str())
-                                || commitment == Some(m.principal_commitment.as_str())
-                        })
+                        .find(|m| commitment == Some(m.principal_commitment.as_str()))
                         .map(serde_json::to_value)
                         .transpose()?
                         .unwrap_or(Value::Null)
@@ -90,25 +87,94 @@ impl Directory {
         Ok(c)
     }
 }
+// The bus account already owns an authenticated session. Raw TLS requests below
+// remain available only for hash-addressed manifests, never for name lookup.
+struct DirectorySession {
+    records: Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>,
+    unavailable: Arc<AtomicBool>,
+    responses: VecDeque<Vec<u8>>,
+}
+impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
+    fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
+        Ok(())
+    }
+    fn send_frame<'a>(
+        &'a mut self,
+        body: &'a [u8],
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<(), ramflux_transport::TransportError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let frame: GatewayClientFrame = serde_json::from_slice(body)?;
+            if self.unavailable.load(Ordering::SeqCst)
+                && matches!(frame, GatewayClientFrame::PrincipalManifestFetch { .. })
+            {
+                return Err(ramflux_transport::TransportError::Quic("directory offline".into()));
+            }
+            let response = match frame {
+                GatewayClientFrame::PrincipalManifestFetch { principal_id } => {
+                    let manifest = self
+                        .records
+                        .lock()
+                        .map_err(|_| {
+                            ramflux_transport::TransportError::Quic("directory mutex".into())
+                        })?
+                        .iter()
+                        .find(|m| m.principal_id == principal_id)
+                        .map(serde_json::to_value)
+                        .transpose()?;
+                    GatewayServerFrame::PrincipalManifest {
+                        response: ramflux_protocol::PrincipalLookupResponse {
+                            manifest,
+                            reason_code: None,
+                        },
+                    }
+                }
+                GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
+                GatewayClientFrame::Resume { .. } => {
+                    GatewayServerFrame::Resume { entries: Vec::new() }
+                }
+                _ => {
+                    return Err(ramflux_transport::TransportError::Quic(
+                        "unexpected directory frame".into(),
+                    ));
+                }
+            };
+            self.responses.push_back(serde_json::to_vec(&response)?);
+            Ok(())
+        })
+    }
+}
+impl ramflux_transport::GatewaySessionFrameSource for DirectorySession {
+    fn recv_frame(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<Vec<u8>, ramflux_transport::TransportError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            self.responses.pop_front().ok_or_else(|| {
+                ramflux_transport::TransportError::Quic("empty directory session".into())
+            })
+        })
+    }
+}
 fn state(a: &mut Fixture, b: &mut Fixture, d: &Directory) -> Result<LocalBusDaemonState, SdkError> {
     let mut accounts = BTreeMap::new();
-    {
-        let (f, remote) = (&mut *a, &*b);
-        let (mut engine, _) = super::session_record::Wire::engine(f, remote)?;
-        engine.config = d.config(f)?;
+    for f in [&mut *a, &mut *b] {
+        let engine = GatewaySessionEngine::with_test_transport(
+            d.config(f)?,
+            Box::new(DirectorySession {
+                records: d.records.clone(),
+                unavailable: d.unavailable.clone(),
+                responses: VecDeque::new(),
+            }),
+        );
         let commitment = super::r9::manifest(f)?.principal_commitment;
         accounts.insert(
             f.id.clone(),
             LocalBusAccountState::new(std::mem::take(&mut f.client), engine, commitment),
         );
     }
-    let (mut engine, _) = super::session_record::Wire::engine(b, b)?;
-    engine.config = d.config(b)?;
-    let commitment = super::r9::manifest(b)?.principal_commitment;
-    accounts.insert(
-        b.id.clone(),
-        LocalBusAccountState::new(std::mem::take(&mut b.client), engine, commitment),
-    );
     Ok(LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),
@@ -360,3 +426,6 @@ async fn a_legacy_commitment_selector_cannot_be_redirected_to_a_principal_with_t
     assert!(client.account_db()?.client_record("device", "bob")?.is_some());
     Ok(())
 }
+
+#[path = "contact_recovery_tests.rs"]
+mod recovery;

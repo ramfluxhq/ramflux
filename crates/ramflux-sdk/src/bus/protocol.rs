@@ -51,6 +51,8 @@ pub struct LocalBusFrame {
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct LocalBusErrorBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
     pub code: String,
     pub message: String,

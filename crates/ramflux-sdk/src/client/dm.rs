@@ -359,7 +359,7 @@ impl RamfluxClient {
         // receive cursor advances. If any downstream step fails, the local `session` is dropped
         // so the persisted ratchet snapshot and cursor stay unchanged and the same ciphertext
         // can be re-decrypted on a later `dm read`.
-        self.apply_contact_event_plaintext(&body)?;
+        self.project_legacy_contact_control(&entry, &body)?;
         if self.apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id)?.is_some() {
             // Receipt applied: commit the advanced recv ratchet, then the cursor.
             self.commit_legacy_receive(

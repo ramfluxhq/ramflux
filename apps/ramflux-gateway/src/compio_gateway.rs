@@ -164,7 +164,12 @@ async fn handle_gateway_compio_quic_stream(
     }
 
     let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-    let response = dispatch_gateway_request_blocking(context.router.clone(), request).await?;
+    let response =
+        if let Some(response) = crate::principal_directory::reject_unauthenticated(&request) {
+            response
+        } else {
+            dispatch_gateway_request_blocking(context.router.clone(), request).await?
+        };
     send.write_json_message(&response).await?;
     send.finish()?;
     Ok(())

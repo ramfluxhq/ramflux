@@ -20,8 +20,7 @@ record and device-set comparison as `identity.directory`. The directory exposes 
 contact fields and a cached safety number. Durable `contact.changed` events cover
 identity resolution and safety verification changes.
 
-Principal lookup is TOFU through the account's home node:
-`GET /mvp1/principal-manifest/PRINCIPAL` returns an active device manifest or null.
+Principal lookup is TOFU through the account's authenticated home-node session.
 The directory refuses to choose between conflicting active roots. The SDK applies its
 existing root-commitment, device manifest, branch-proof and prekey checks. A known root
 cannot be silently replaced. A card supplies the expected root rather than taking the
@@ -59,3 +58,69 @@ User input errors return `ValidationFailed` and `reason_code`: `unknown_principa
 `already_contact`. An unsupported card home node uses `invalid_card` with an explanatory
 message. Transient directory/transport failures return `Unavailable`, preserving the
 source error for socket diagnostics. Failed resolution creates no accepted contact.
+
+## Name ownership and authenticated lookup
+
+Names on a node are first-come registrations bound to one identity root. A different
+root receives typed `principal_id_taken`, including after all devices are revoked.
+The reservation survives restart and legacy metadata deletion. Legacy deletion is
+not a root-signed name release; this version offers no name-release endpoint.
+Pre-registration name squatting remains possible. A name is not proof of a real-world
+identity: use an independently exchanged card or compare safety numbers.
+
+Name queries use `principal_manifest_fetch {principal_id}` inside an account's
+Open/Auth gateway session and return `principal_manifest` with
+`{response:{manifest:<object|null>,reason_code:<string|null>}}`. Raw
+`GET /mvp1/principal-manifest/NAME` and raw `/mvp1/principal-lookup` return 401 with
+`{manifest:null,reason_code:"authentication_required"}` before consulting the router.
+The router independently checks the current live session and active registered device.
+For authenticated queries, existing and unknown names have identical outer fields;
+only the optional manifest differs. Directory membership is visible to authenticated
+accounts. A legacy ambiguous name returns `principal_id_ambiguous` rather than selecting
+one root. Hash-addressed manifests retain their previous transport contract.
+
+The node charges every admitted query, including unknown names, against 60 requests
+per account and 120 per source per 60-second window. Devices of one account share a
+quota across gateways. Each table retains at most 4096 LRU entries. IPv4-mapped IPv6
+uses the IPv4 bucket; other IPv6 sources share a /64 bucket. Quotas are in-memory
+admission state and reset on router restart. A quota error returns `Unavailable`,
+`reason_code:"rate_limited"`, and `retry_after_ms:60000`. The source is the gateway's
+socket peer, never a client-supplied body field. Known contact resolution uses its
+pinned root hash and does not repeat a name lookup.
+
+## Correcting a provisional lookup root
+
+Contact rows and identity-directory rows expose `root_source` as `lookup`, `card`, or
+`verified`. A name lookup is provisional. Importing a card pins the independently
+supplied root; manual safety verification is the existing verification record, including
+when a changed device set makes its verification stale. Card and verified roots cannot
+be replaced through provisional recovery.
+
+If a card supplies a different root for a lookup contact, `contact.add {card}` returns
+`ValidationFailed`, `reason_code:"root_replacement_confirmation_required"`, and
+`details:{principal_id,previous_root_commitment,proposed_root_commitment}`. The client
+must show both roots and obtain explicit confirmation before submitting
+`contact.add {card,replace_provisional_root:<previous_root_commitment>}`. The old value
+is a compare-and-replace guard: stale confirmations return `root_conflict`. The CLI
+exposes `--replace-provisional-root OLD_ROOT` together with `--card`.
+
+For an out-of-band safety comparison, use
+`contact.safety_number {principal_id,contact_identity_commitment:<independent root>}`
+to preview the verified manifests without changing the contact. After comparison,
+`contact.verify {principal_id,contact_identity_commitment,replace_provisional_root:OLD}`
+confirms replacement and marks the normal safety record verified. The existing
+commitment-only safety and verify requests remain available.
+
+Replacement atomically changes cached identity/device ownership, retires old device-pair
+sessions and rewrites local link aliases. It emits durable `safety.changed` with reason
+`provisional_root_replaced`, in addition to `contact.changed`. Group member pins remain
+immutable; conflicting group bindings reject publication and retain a safety observation.
+Local display names and asserted-kind labels are preserved when a card is imported.
+
+A card's URL must exactly match the configured home profile and its fingerprint must
+match the pinned node key before any discovery request. Plain HTTP card locators are
+restricted to loopback development origins. Unsupported homes are rejected locally.
+Malformed or unverifiable manifests return `manifest_invalid`; network and DNS failures
+return `Unavailable`. Bus consumers must handle that additive string code as retryable;
+the C ABI maps it to `TransportUnavailable`. `root_conflict` requires user attention,
+not an automatic retry or an automatic confirmation.

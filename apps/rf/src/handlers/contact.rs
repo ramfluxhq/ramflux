@@ -178,7 +178,11 @@ fn contact_add_body(add: &ContactAdd) -> serde_json::Value {
     if let Some(principal) = &add.principal {
         serde_json::json!({"principal_id":principal})
     } else if let Some(card) = &add.card {
-        serde_json::json!({"card":card})
+        let mut body = serde_json::json!({"card":card});
+        if let Some(root) = &add.replace_provisional_root {
+            body["replace_provisional_root"] = serde_json::json!(root);
+        }
+        body
     } else {
         serde_json::json!({"link_id":add.link,"requester_id":add.requester,"target_id":add.target})
     }

@@ -29,7 +29,18 @@ fn principal_lookup_returns_only_one_active_root_and_never_a_revoked_or_ambiguou
     let found = registry.principal_manifest("alice").ok_or("missing active identity")?;
     assert_eq!(found.principal_commitment, first.principal_commitment);
     assert_eq!(found.devices[0].device_id, "alice-one");
-    let second = register(&mut registry, "alice-two", 2)?;
+    // Exercise a legacy snapshot with conflicting registrations, without admitting
+    // a conflicting root through the current registration boundary.
+    let mut other = IdentityRegistry::default();
+    let second = register(&mut other, "alice-two", 2)?;
+    let mut saved = serde_json::to_value(&registry)?;
+    let old = serde_json::to_value(other)?;
+    for field in ["devices", "root_public_keys_by_commitment", "prekey_bundles"] {
+        if let Some(map) = old[field].as_object() {
+            saved[field].as_object_mut().ok_or("registry map missing")?.extend(map.clone());
+        }
+    }
+    registry = serde_json::from_value(saved)?;
     assert!(
         registry.principal_manifest("alice").is_none(),
         "conflicting active roots must not be selected by map order"
@@ -60,5 +71,122 @@ fn principal_lookup_returns_only_one_active_root_and_never_a_revoked_or_ambiguou
         }
     }
     assert!(registry.principal_manifest("alice").is_none());
+    Ok(())
+}
+
+#[test]
+fn a_second_root_cannot_take_a_registered_name_even_after_every_device_is_revoked()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut registry = IdentityRegistry::default();
+    let first = register(&mut registry, "alice-one", 1)?;
+    let takeover = registration_request("alice", "mallory", 2, None, "other-source")?;
+    assert!(matches!(registry.register_identity(&takeover), Err(NodeCoreError::PrincipalIdTaken)));
+    assert_eq!(
+        registry.principal_manifest("alice").ok_or("original lookup lost")?.principal_commitment,
+        first.principal_commitment
+    );
+    let revoked_at = first.now + 1;
+    let body = serde_json::json!({"device_id":first.proof.device_id,"principal_commitment":first.principal_commitment,"revoked_at":revoked_at});
+    registry.revoke_device(&DeviceRevokeRequest {
+        device_id: first.proof.device_id,
+        principal_commitment: first.principal_commitment,
+        root_public_key: first.root_public_key,
+        revoked_at,
+        signature: ramflux_crypto::sign_canonical_bytes_with_seed(
+            &ramflux_protocol::canonical_json_bytes(&body)?,
+            seed_from_nonce(0x31, 1),
+        ),
+    })?;
+    assert!(registry.principal_manifest("alice").is_none());
+    let mut restored: IdentityRegistry = serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
+    assert!(matches!(restored.register_identity(&takeover), Err(NodeCoreError::PrincipalIdTaken)));
+    // Legacy snapshots lack the reservation table; metadata purge must migrate
+    // the original binding before removing active directory records.
+    let mut legacy = serde_json::to_value(&restored)?;
+    legacy.as_object_mut().ok_or("legacy registry")?.remove("principal_root_bindings");
+    let mut restored: IdentityRegistry = serde_json::from_value(legacy)?;
+    restored.remove_principal_metadata("alice");
+    let mut restored: IdentityRegistry = serde_json::from_slice(&serde_json::to_vec(&restored)?)?;
+    assert!(matches!(restored.register_identity(&takeover), Err(NodeCoreError::PrincipalIdTaken)));
+    Ok(())
+}
+
+#[test]
+fn principal_lookup_authenticates_before_lookup_and_shares_quotas_across_an_accounts_devices()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::IdentityDirectoryReason as Reason;
+    let router = RouterCore::new();
+    let registration = registration_request("alice", "alice-one", 1, None, "test-source")?;
+    let reply = router.mvp1_register_identity(&registration)?;
+    let mut query = crate::PrincipalLookupRequest {
+        principal_id: "alice".into(),
+        session_id: "forged".into(),
+        requester_device_id: "alice-one".into(),
+        target_delivery_id: reply.target_delivery_id,
+        gateway_id: registration.gateway_id.clone(),
+        source: "127.0.0.1".parse()?,
+    };
+    let denied = router.mvp1_authenticated_principal_lookup(&query, 100);
+    assert_eq!(denied.reason_code, Some(Reason::AuthenticationRequired));
+    query.principal_id = "missing".into();
+    assert_eq!(router.mvp1_authenticated_principal_lookup(&query, 100), denied);
+    let current = router.session(&query.target_delivery_id).ok_or("session")?;
+    query.session_id = current.session_id;
+    // Register a second device with the same root using a fresh root-signed proof.
+    let mut second = registration_request("alice", "alice-two", 2, None, "test-source")?;
+    let root = ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, 1));
+    let branch =
+        ramflux_crypto::create_device_branch("alice", "alice-two", 1, seed_from_nonce(0x41, 2));
+    second.root_public_key = registration.root_public_key.clone();
+    second.principal_commitment = registration.principal_commitment.clone();
+    second.proof = ramflux_crypto::authorize_device_branch(
+        &root,
+        &branch,
+        IDENTITY_BIND_AUDIENCE,
+        vec![IDENTITY_BIND_CAPABILITY.to_owned()],
+        second.now - 1,
+        second.now + 60,
+    )?;
+    second.target_delivery_id = "target_alice-two".into();
+    second.session_id = "session_alice-two".into();
+    let second_reply = router.mvp1_register_identity(&second)?;
+    let branch =
+        ramflux_crypto::create_device_branch("alice", "alice-one", 1, seed_from_nonce(0x41, 1));
+    let identity = ramflux_crypto::X25519KeyPair::from_seed([71; 32]);
+    let prekey = ramflux_crypto::X25519KeyPair::from_seed([72; 32]);
+    router.mvp1_publish_prekey(PrekeyPublishRequest {
+        device_id: "alice-one".into(),
+        bundle: ramflux_crypto::create_prekey_bundle(
+            &branch, &identity, "prekey", &prekey, None, None,
+        )?,
+    })?;
+    query.principal_id = "alice".into();
+    let known = router.mvp1_authenticated_principal_lookup(&query, 100);
+    assert!(known.manifest.is_some());
+    assert_eq!(known.reason_code, None);
+    query.principal_id = "missing".into();
+    let unknown = router.mvp1_authenticated_principal_lookup(&query, 100);
+    assert!(unknown.manifest.is_none());
+    assert_eq!(unknown.reason_code, None);
+    assert_eq!(
+        serde_json::to_value(known)?.as_object().ok_or("known shape")?.keys().collect::<Vec<_>>(),
+        serde_json::to_value(unknown)?
+            .as_object()
+            .ok_or("unknown shape")?
+            .keys()
+            .collect::<Vec<_>>()
+    );
+    for _ in 0..58 {
+        assert_eq!(router.mvp1_authenticated_principal_lookup(&query, 100).reason_code, None);
+    }
+    query.target_delivery_id = second_reply.target_delivery_id;
+    query.requester_device_id = "alice-two".into();
+    query.session_id =
+        router.session(&query.target_delivery_id).ok_or("second session")?.session_id;
+    assert_eq!(
+        router.mvp1_authenticated_principal_lookup(&query, 100).reason_code,
+        Some(Reason::RateLimited)
+    );
+    assert_eq!(router.mvp1_authenticated_principal_lookup(&query, 160).reason_code, None);
     Ok(())
 }

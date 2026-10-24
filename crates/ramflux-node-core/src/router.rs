@@ -78,6 +78,8 @@ pub(crate) struct RouterTargetShard {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RouterControlState {
+    #[serde(skip)]
+    principal_lookup_limiter: crate::principal_directory::PrincipalLookupLimiter,
     pub(crate) mvp1_identities: IdentityRegistry,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
@@ -486,6 +488,46 @@ impl RouterCore {
                 .target_delivery_id_for_device(device_id)
                 .map(str::to_owned),
         }
+    }
+
+    /// Looks up a name only for an authenticated live account session, charging node-wide quotas.
+    #[must_use]
+    pub fn mvp1_authenticated_principal_lookup(
+        &self,
+        request: &crate::PrincipalLookupRequest,
+        now: u64,
+    ) -> ramflux_protocol::PrincipalLookupResponse<DeviceManifestResponse> {
+        use ramflux_protocol::{
+            IdentityDirectoryReason as Reason, PrincipalLookupResponse as Response,
+        };
+        let denied = |reason| Response { manifest: None, reason_code: Some(reason) };
+        let Some(session) = self.session(&request.target_delivery_id) else {
+            return denied(Reason::AuthenticationRequired);
+        };
+        if session.session_id != request.session_id
+            || session.device_id != request.requester_device_id
+            || session.gateway_id != request.gateway_id
+            || session.lifecycle != crate::SessionLifecycle::Live
+        {
+            return denied(Reason::AuthenticationRequired);
+        }
+        let mut control = lock_unpoisoned(&self.control);
+        let Some(account) = control
+            .mvp1_identities
+            .device_auth_key(&request.requester_device_id)
+            .filter(|device| !device.revoked)
+            .map(|device| device.principal_id)
+        else {
+            return denied(Reason::AuthenticationRequired);
+        };
+        if !control.principal_lookup_limiter.admit(&account, request.source, now) {
+            return denied(Reason::RateLimited);
+        }
+        if control.mvp1_identities.principal_manifest_ambiguous(&request.principal_id) {
+            return denied(Reason::PrincipalIdAmbiguous);
+        }
+        let manifest = control.mvp1_identities.principal_manifest(&request.principal_id);
+        Response { manifest, reason_code: None }
     }
 
     /// Looks up an active principal through this home node's directory.
@@ -949,6 +991,7 @@ impl RouterCore {
             .map(|_index| Mutex::new(NodeReplayGuardState::new()))
             .collect::<Vec<_>>();
         let control = RouterControlState {
+            principal_lookup_limiter: crate::principal_directory::PrincipalLookupLimiter::default(),
             mvp1_identities: snapshot.mvp1_identities,
             lifecycle_by_principal: snapshot.lifecycle_by_principal,
             lifecycle_tombstones: snapshot.lifecycle_tombstones,

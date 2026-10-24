@@ -313,12 +313,10 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
         None,
         "ip_fanout_source",
     )?)?;
-    router.mvp1_register_identity(&registration_request(
-        "principal_fanout",
-        "device_peer",
+    router.mvp1_register_identity(&same_root_registration(
+        registration_request("principal_fanout", "device_peer", 602, None, "ip_fanout_peer")?,
+        601,
         602,
-        None,
-        "ip_fanout_peer",
     )?)?;
     store.record_identity_registry(&router.mvp1_identities_snapshot())?;
     let fanout_envelope =

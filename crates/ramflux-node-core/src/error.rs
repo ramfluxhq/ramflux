@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("principal_id_taken")]
+    PrincipalIdTaken,
     #[error("--config requires a path")]
     MissingConfigPath,
     #[error("cannot read config {path}: {source}")]

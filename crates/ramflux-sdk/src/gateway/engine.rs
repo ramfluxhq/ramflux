@@ -422,6 +422,9 @@ impl GatewaySessionEngine {
         .await?;
         match self.read_non_deliver_frame().await? {
             GatewayServerFrame::IdentityRegistered { response } => Ok(response),
+            GatewayServerFrame::IdentityRegistrationRejected {
+                reason_code: ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken,
+            } => Err(crate::ContactReason::PrincipalIdTaken.into()),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected identity_registered frame, got {other:?}"
@@ -448,6 +451,39 @@ impl GatewaySessionEngine {
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected prekey_published frame, got {other:?}"
+            ))),
+        }
+    }
+
+    pub(crate) async fn fetch_principal_manifest(
+        &mut self,
+        principal: &str,
+    ) -> Result<Option<SdkDeviceManifestResponse>, SdkError> {
+        write_gateway_client_frame(
+            &mut *self.stream,
+            &GatewayClientFrame::PrincipalManifestFetch { principal_id: principal.to_owned() },
+        )
+        .await?;
+        match self.read_non_deliver_frame().await? {
+            GatewayServerFrame::PrincipalManifest { response } => {
+                if let Some(reason) = response.reason_code {
+                    return Err(match reason {
+                        ramflux_protocol::IdentityDirectoryReason::RateLimited => {
+                            crate::ContactReason::LookupRateLimited.into()
+                        }
+                        ramflux_protocol::IdentityDirectoryReason::PrincipalIdAmbiguous => {
+                            crate::ContactReason::PrincipalIdAmbiguous.into()
+                        }
+                        _ => SdkError::GatewaySessionRejected(
+                            "authenticated directory session required".into(),
+                        ),
+                    });
+                }
+                response.manifest.map(serde_json::from_value).transpose().map_err(SdkError::from)
+            }
+            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected principal_manifest frame, got {other:?}"
             ))),
         }
     }

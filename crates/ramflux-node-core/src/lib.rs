@@ -119,3 +119,6 @@ pub use signaling::*;
 
 #[cfg(test)]
 mod tests;
+
+mod principal_directory;
+pub use principal_directory::PrincipalLookupRequest;

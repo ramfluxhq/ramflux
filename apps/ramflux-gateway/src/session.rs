@@ -383,13 +383,21 @@ pub(crate) async fn run_gateway_session_loop(
             ramflux_node_core::GatewayClientFrame::IdentityRegister { mut request } => {
                 request.source_ip_hash =
                     request.source_ip_hash.or_else(|| Some(context.remote_addr.ip().to_string()));
-                let response: ramflux_node_core::IdentityRegistrationResponse =
+                let response: serde_json::Value =
                     router_post_json(&context.router, "/mvp1/identity/register", &request)?;
-                write_gateway_handle(
-                    &send,
-                    &ramflux_node_core::GatewayServerFrame::IdentityRegistered { response },
-                )
-                .await?;
+                let frame = if let Ok(error) = serde_json::from_value::<
+                    ramflux_protocol::IdentityRegistrationFailure,
+                >(response.clone())
+                {
+                    ramflux_node_core::GatewayServerFrame::IdentityRegistrationRejected {
+                        reason_code: error.error.reason_code,
+                    }
+                } else {
+                    ramflux_node_core::GatewayServerFrame::IdentityRegistered {
+                        response: serde_json::from_value(response)?,
+                    }
+                };
+                write_gateway_handle(&send, &frame).await?;
             }
             ramflux_node_core::GatewayClientFrame::PrekeyPublish { request } => {
                 let response: ramflux_node_core::PrekeyResponse =
@@ -399,6 +407,9 @@ pub(crate) async fn run_gateway_session_loop(
                     &ramflux_node_core::GatewayServerFrame::PrekeyPublished { response },
                 )
                 .await?;
+            }
+            ramflux_node_core::GatewayClientFrame::PrincipalManifestFetch { principal_id } => {
+                crate::principal_directory::fetch(&send, &context, &runtime, principal_id).await?;
             }
             ramflux_node_core::GatewayClientFrame::PrekeyFetch { device_id } => {
                 let response: ramflux_node_core::PrekeyResponse =
@@ -1709,7 +1720,7 @@ mod tests {
     }
 
     #[cfg(feature = "itest-local-mint")]
-    fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
+    pub(super) fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
         // A process-wide counter guarantees a unique redb path per context even when parallel tests
         // create contexts within the same clock tick (redb rejects opening the same file twice).
         static NEXT_DB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1771,3 +1782,7 @@ mod tests {
         })
     }
 }
+
+#[cfg(all(test, feature = "itest-local-mint"))]
+#[path = "principal_directory_session_tests.rs"]
+mod principal_directory_tests;

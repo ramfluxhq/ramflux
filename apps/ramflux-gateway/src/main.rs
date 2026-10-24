@@ -7,6 +7,7 @@ mod compio_gateway;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod object_issue;
+mod principal_directory;
 mod quic_dispatch;
 mod serve;
 mod session;

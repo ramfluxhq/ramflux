@@ -14,6 +14,16 @@ const MAX_CARD_BYTES: usize = 4096;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum ContactReason {
+    #[error("principal_id_taken")]
+    PrincipalIdTaken,
+    #[error("principal_id_ambiguous")]
+    PrincipalIdAmbiguous,
+    #[error("rate_limited")]
+    LookupRateLimited,
+    #[error("root_conflict")]
+    RootConflict,
+    #[error("manifest_invalid")]
+    ManifestInvalid,
     /// The directory has no unambiguous active identity for this principal.
     #[error("unknown_principal")]
     UnknownPrincipal,
@@ -106,6 +116,8 @@ fn validate(body: &ContactCardBody, now: i64) -> Result<(), SdkError> {
     }
     let url = reqwest::Url::parse(&body.node.url).map_err(|_| ContactReason::InvalidCard)?;
     if !matches!(url.scheme(), "http" | "https")
+        || (url.scheme() == "http"
+            && !matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost")))
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -195,6 +207,24 @@ mod tests {
             issued_at: 1000,
             expires_at: 2000,
         })
+    }
+    #[test]
+    fn plaintext_card_discovery_is_restricted_to_loopback_development_origins()
+    -> Result<(), SdkError> {
+        for url in ["http://example.com", "http://192.168.1.1", "http://127.0.0.2"] {
+            let mut card = body()?;
+            card.node.url = url.into();
+            assert!(matches!(
+                encode_contact_card(card, [7; 32], 1000),
+                Err(SdkError::ContactInput(ContactReason::InvalidCard))
+            ));
+        }
+        for url in ["http://127.0.0.1:8080", "http://[::1]:8080", "https://example.com"] {
+            let mut card = body()?;
+            card.node.url = url.into();
+            encode_contact_card(card, [7; 32], 1000)?;
+        }
+        Ok(())
     }
     #[test]
     fn text_and_link_contact_cards_authenticate_the_same_root_and_metadata() -> Result<(), SdkError>

@@ -82,7 +82,21 @@ impl RamfluxClient {
         }
         Ok(None)
     }
-    fn project_contact_control(
+    pub(crate) fn project_legacy_contact_control(
+        &self,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        if let Ok(event) = serde_json::from_slice::<Value>(body)
+            && event["type"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("friend.") || kind == "object.revoke_access")
+        {
+            self.project_contact_control(entry, &event)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn project_contact_control(
         &self,
         entry: &GatewayInboxEntry,
         event: &Value,

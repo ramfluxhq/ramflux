@@ -13,6 +13,8 @@ pub enum SdkError {
     SurfaceDeliveryTooLarge { bytes: usize, limit: usize },
     #[error("surface checkpoint does not match its owning row")]
     SurfaceCheckpointMismatch,
+    #[error("contact root replacement requires confirmation")]
+    ContactConfirmationRequired(Box<crate::ContactRootChange>),
     #[error(
         "contact card names a different home node; automatic cross-node contact routing is unavailable"
     )]

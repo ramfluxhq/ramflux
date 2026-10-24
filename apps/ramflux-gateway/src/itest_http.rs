@@ -175,10 +175,23 @@ pub(crate) fn dispatch_protected_itest_request(
                 serde_json::from_slice(&request.body)?;
             registration.source_ip_hash =
                 registration.source_ip_hash.or_else(|| request.source_ip_hash.clone());
-            let response: ramflux_node_core::IdentityRegistrationResponse =
+            let response: serde_json::Value =
                 router_post_json(router, "/mvp1/identity/register", &registration)?;
-            log_forwarded_identity_registration(&registration, &response);
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+            let rejected = serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
+                response.clone(),
+            )
+            .is_ok();
+            if !rejected {
+                log_forwarded_identity_registration(
+                    &registration,
+                    &serde_json::from_value(response.clone())?,
+                );
+            }
+            ramflux_node_core::write_itest_json_response(
+                stream,
+                if rejected { "409 Conflict" } else { "200 OK" },
+                &response,
+            )?;
         }
         ("POST", "/mvp6/registration/policy") => {
             let request: ramflux_node_core::RegistrationPolicy =
@@ -225,9 +238,16 @@ pub(crate) fn dispatch_protected_itest_request(
             write_prekey_fetch(stream, router, path)?;
         }
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
-            let response: Option<ramflux_node_core::DeviceManifestResponse> =
-                router_get_json(router, path)?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+            ramflux_node_core::write_itest_json_response(
+                stream,
+                "401 Unauthorized",
+                &ramflux_protocol::PrincipalLookupResponse::<serde_json::Value> {
+                    manifest: None,
+                    reason_code: Some(
+                        ramflux_protocol::IdentityDirectoryReason::AuthenticationRequired,
+                    ),
+                },
+            )?;
         }
         ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
             let response: Option<ramflux_node_core::DeviceManifestResponse> =

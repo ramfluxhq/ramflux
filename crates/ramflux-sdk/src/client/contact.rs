@@ -17,7 +17,7 @@ impl RamfluxClient {
         db.write_transaction(|| self.persist_verified_directory_rows(manifest))?;
         self.finish_pair_retirement()
     }
-    fn persist_verified_directory_rows(
+    pub(crate) fn persist_verified_directory_rows(
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
@@ -66,7 +66,7 @@ impl RamfluxClient {
             serde_json::Value::Null
         };
         let devices=manifest.devices.iter().map(|device|serde_json::json!({"id":device.device_id,"device_id":device.device_id,"label":null,"last_seen":null,"verified_at":now_unix_timestamp(),"target_delivery_id":device.target_delivery_id,"signing_public_key":device.branch_public_key})).collect::<Vec<_>>();
-        db.persist_client_record("identity",&manifest.principal_id,&serde_json::json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":old.get("kind"),"kind_asserted":old.get("kind_asserted"),"node":old.get("node"),"is_self":self.device_branch.as_ref().is_some_and(|branch|branch.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":device_set_hash,"safety_number":safety_number}))?;
+        db.persist_client_record("identity",&manifest.principal_id,&serde_json::json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":old.get("kind"),"root_source":old.get("root_source"),"kind_asserted":old.get("kind_asserted"),"node":old.get("node"),"is_self":self.device_branch.as_ref().is_some_and(|branch|branch.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":device_set_hash,"safety_number":safety_number}))?;
         db.persist_client_record(
             "commitment",
             &manifest.principal_commitment,
@@ -605,10 +605,8 @@ impl RamfluxClient {
         self.set_projection_checkpoint("object.revoke_access", &event_id)
     }
 
-    pub(crate) fn apply_contact_event_plaintext(
-        &mut self,
-        plaintext: &[u8],
-    ) -> Result<(), SdkError> {
+    #[cfg(test)]
+    fn apply_fixture_contact_event_plaintext(&mut self, plaintext: &[u8]) -> Result<(), SdkError> {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(plaintext) else {
             return Ok(());
         };
@@ -1000,7 +998,7 @@ fn device_safety_material(
     })
 }
 
-fn bytes_to_hex(bytes: &[u8]) -> String {
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write as _;
@@ -1352,7 +1350,7 @@ mod tests {
             "requester": "requester",
             "target": "principal_contact",
         }))?;
-        client.apply_contact_event_plaintext(&event)?;
+        client.apply_fixture_contact_event_plaintext(&event)?;
 
         let link = client
             .friend_links()?
@@ -1381,7 +1379,7 @@ mod tests {
             "effective_at": 1_000,
         }))?;
 
-        client.apply_contact_event_plaintext(&event)?;
+        client.apply_fixture_contact_event_plaintext(&event)?;
         assert!(matches!(
             client.decrypt_object("object_shared"),
             Err(SdkError::Sync(SyncError::ObjectTombstoned))
@@ -1391,7 +1389,7 @@ mod tests {
             "type": "object.revoke_access",
             "object_id": "missing_object",
         }))?;
-        client.apply_contact_event_plaintext(&missing)?;
+        client.apply_fixture_contact_event_plaintext(&missing)?;
 
         let _ = std::fs::remove_dir_all(root);
         Ok(())

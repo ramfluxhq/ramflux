@@ -8,20 +8,45 @@ use serde_json::{Value, json};
 
 pub(crate) fn lookup_failure(error: SdkError) -> SdkError {
     match error {
-        SdkError::Transport(_)
-        | SdkError::GatewaySessionRejected(_)
-        | SdkError::Io(_)
-        | SdkError::Json(_) => SdkError::ContactUnavailable(Box::new(error)),
+        SdkError::Transport(_) | SdkError::GatewaySessionRejected(_) | SdkError::Io(_) => {
+            SdkError::ContactUnavailable(Box::new(error))
+        }
+        SdkError::Json(_) => ContactReason::ManifestInvalid.into(),
         other => other,
     }
 }
 
+fn resolution_root<'a>(
+    selector: &'a str,
+    expected: Option<&'a str>,
+    cached: Option<&'a Value>,
+    allow_commitment: bool,
+) -> Option<&'a str> {
+    expected.or_else(|| cached.and_then(|row| row["contact_identity_commitment"].as_str())).or_else(
+        || {
+            (allow_commitment
+                && ramflux_protocol::decode_base64url(selector)
+                    .is_ok_and(|bytes| bytes.len() == 32))
+            .then_some(selector)
+        },
+    )
+}
+fn manifest_failure(error: SdkError) -> SdkError {
+    match error {
+        SdkError::Transport(_)
+        | SdkError::GatewaySessionRejected(_)
+        | SdkError::Io(_)
+        | SdkError::Json(_) => lookup_failure(error),
+        _ => ContactReason::ManifestInvalid.into(),
+    }
+}
 impl RamfluxClient {
     pub(crate) async fn resolve_contact(
         &self,
         gateway: &GatewaySessionConfig,
         own_gateway: &GatewaySessionConfig,
         input: ContactResolution<'_>,
+        engine: &mut GatewaySessionEngine,
     ) -> Result<Value, SdkError> {
         let ContactResolution {
             selector,
@@ -30,22 +55,21 @@ impl RamfluxClient {
             link_id,
             allow_commitment,
             requester_is_peer,
+            replace_provisional_root,
+            verification,
         } = input;
         if !crate::contact_card::valid_principal(selector) {
             return Err(ContactReason::UnknownPrincipal.into());
         }
-        let root_hint = expected_root.or_else(|| {
-            (allow_commitment
-                && ramflux_protocol::decode_base64url(selector)
-                    .is_ok_and(|bytes| bytes.len() == 32))
-            .then_some(selector)
-        });
-        let path = root_hint.map_or_else(
-            || format!("/mvp1/principal-manifest/{selector}"),
-            |root| format!("/mvp1/device-manifest/{root}"),
-        );
-        let manifest: Option<SdkDeviceManifestResponse> =
-            sdk_gateway_get_json(gateway, &path).await.map_err(lookup_failure)?;
+        let cached = self.account_db()?.client_record("identity", selector)?;
+        let root_hint = resolution_root(selector, expected_root, cached.as_ref(), allow_commitment);
+        let manifest: Option<SdkDeviceManifestResponse> = if let Some(root) = root_hint {
+            sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
+                .await
+                .map_err(lookup_failure)?
+        } else {
+            engine.fetch_principal_manifest(selector).await.map_err(lookup_failure)?
+        };
         let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?;
         let principal = &manifest.principal_id;
         if principal != selector && !(allow_commitment && manifest.principal_commitment == selector)
@@ -60,19 +84,30 @@ impl RamfluxClient {
             .or_else(|| pinned.as_ref().and_then(|r| r["contact_identity_commitment"].as_str()))
             .unwrap_or(&manifest.principal_commitment);
         // Keep first-contact verification at one boundary; lookup is TOFU only without a pin.
-        super::contact::verify_device_manifest(&manifest, expected)?;
-        let own_root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let own_commitment = identity_root_public_key_commitment(
-            &ramflux_protocol::encode_base64url(own_root.signing_key.verifying_key().to_bytes()),
-        )?;
+        super::contact::verify_device_manifest(&manifest, expected)
+            .map_err(|_| SdkError::ContactInput(ContactReason::ManifestInvalid))?;
+        let old = pinned.clone().unwrap_or_else(|| json!({}));
+        let own_commitment = self.contact_own_commitment()?;
         let own_manifest =
             super::contact::fetch_verified_device_manifest(own_gateway, &own_commitment)
                 .await
-                .map_err(lookup_failure)?;
+                .map_err(manifest_failure)?;
         let db = self.account_db()?;
-        db.write_transaction(|| {
-            self.persist_identity_directory(&own_manifest)?;
-            self.persist_identity_directory(&manifest)?;
+        // These safety observations must survive a later ownership/data transaction rejection.
+        db.write_transaction(|| self.record_pinned_group_key_changes(&own_manifest))?;
+        db.write_transaction(|| self.record_pinned_group_key_changes(&manifest))?;
+        let replacement = self.contact_replacement(
+            &old,
+            principal,
+            &manifest.principal_commitment,
+            replace_provisional_root,
+        )?;
+        let contact = db.write_transaction(|| {
+            if let Some(change) = &replacement {
+                self.clear_provisional_contact(&old, change, &own_commitment)?;
+            }
+            self.persist_verified_directory_rows(&own_manifest)?;
+            self.persist_verified_directory_rows(&manifest)?;
             for device in &manifest.devices {
                 db.upsert_device_directory_entry(
                     &device.device_id,
@@ -83,11 +118,7 @@ impl RamfluxClient {
             }
             let mut identity =
                 db.client_record("identity", principal)?.ok_or(ContactReason::UnknownPrincipal)?;
-            if let Some(card) = card {
-                identity["display_name"] = json!(card.display_name);
-                identity["kind_asserted"] = json!(card.kind_asserted);
-                identity["node"] = json!(card.node);
-            }
+            self.decorate_contact_identity(&old, &mut identity, card, replacement.is_some())?;
             db.persist_client_record("identity", principal, &identity)?;
             let (requester, target) = if requester_is_peer {
                 (&manifest.principal_commitment, &own_commitment)
@@ -101,9 +132,20 @@ impl RamfluxClient {
                 super::contact::contact_safety_material_from_manifest(&manifest)?;
             identity["safety_number"] =
                 json!(ramflux_crypto::safety_number(&own_material, &contact_material));
+            if let Some(safety) = verification {
+                self.commit_contact_safety(
+                    safety,
+                    &own_material,
+                    &contact_material,
+                    &own_gateway.device_id,
+                )?;
+            }
+
             db.persist_client_record("identity", principal, &identity)?;
             self.contact_entry(principal)
-        })
+        })?;
+        self.finish_pair_retirement()?;
+        Ok(contact)
     }
 
     pub(crate) fn contact_entry(&self, principal: &str) -> Result<Value, SdkError> {
@@ -128,7 +170,7 @@ impl RamfluxClient {
             })
             && commitment.is_some();
         Ok(
-            json!({"principal_id":principal,"display_name":identity["display_name"],"reachable":reachable,"verified":verified,"kind_asserted":identity["kind_asserted"],"root_commitment":commitment,"node":identity["node"]}),
+            json!({"principal_id":principal,"display_name":identity["display_name"],"reachable":reachable,"verified":verified,"kind_asserted":identity["kind_asserted"],"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"]}),
         )
     }
 }
@@ -140,4 +182,6 @@ pub(crate) struct ContactResolution<'a> {
     pub link_id: String,
     pub allow_commitment: bool,
     pub requester_is_peer: bool,
+    pub replace_provisional_root: Option<&'a str>,
+    pub verification: Option<&'a SdkContactSafetyNumber>,
 }
