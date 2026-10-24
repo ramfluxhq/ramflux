@@ -185,3 +185,6 @@ fn r5_pending_resolution_names_its_step_across_restart_and_executor_timeout() ->
     assert_eq!(pending["state"], "executor_timeout");
     Ok(())
 }
+
+#[path = "approval_r5_tests.rs"]
+mod r5;

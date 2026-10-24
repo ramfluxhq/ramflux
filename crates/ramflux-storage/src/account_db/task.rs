@@ -185,6 +185,8 @@ impl AccountDb {
                 | "task/ack_sent/"
                 | "task/import_skip/"
                 | "task/message/"
+                | "task/approval_applied/"
+                | "task/approval_rejected/"
         ) {
             return Err(StorageError::AuthorizationRejected);
         }

@@ -79,6 +79,11 @@ impl RamfluxClient {
         } else {
             db.surface_history_page::<Value>(&actions_prefix, &actions_prefix, 100)?
         };
+        for action in self.retained_task_surface_actions(id, action_id)? {
+            if actions.len() < 100 && !actions.iter().any(|row| row["id"] == action["id"]) {
+                actions.push(action);
+            }
+        }
         view["action_missing"] = json!(action_id.is_some() && actions.is_empty());
         for action in &mut actions {
             action["action_receipt_id"] = action["id"].clone();
@@ -98,7 +103,11 @@ impl RamfluxClient {
                 action["signature"] = carrier["signature"].take();
             }
         }
-        view["action_receipt_id"] = view["last_action_id"].clone();
+        view["action_receipt_id"] = if view["last_action_id"].is_null() {
+            actions.last().map_or(Value::Null, |row| row["action_receipt_id"].clone())
+        } else {
+            view["last_action_id"].clone()
+        };
         view["actions"] = json!(actions);
         if serde_json::to_vec(&view)?.len() > 512 * 1024 {
             return Err(invalid("surface response budget exceeded; select one action"));
