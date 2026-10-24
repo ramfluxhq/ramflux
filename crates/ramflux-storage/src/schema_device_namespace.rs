@@ -21,6 +21,7 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
     metadata(connection)?;
     directory(connection)?;
     pins(connection)?;
+    connection.execute("UPDATE group_member_projection SET principal_commitment=(SELECT MIN(k.principal_commitment) FROM group_member_device_key k WHERE k.group_id=group_member_projection.group_id AND COALESCE(k.raw_device_id,k.member_id)=group_member_projection.member_id HAVING COUNT(*)=1 AND COUNT(k.principal_commitment)=1) WHERE principal_commitment IS NULL",[])?;
     // An unscoped secret cannot be attributed to a root by guessing from a raw name.
     // Archive unscoped secrets without granting them live authority. Drop old pointers and
     // recovery work; authenticated bootstrap establishes a new scoped pair. An upgraded

@@ -38,8 +38,9 @@ impl Fixture {
         let author = client(&root.join("author"), "author", 31)?;
         let human = client(&root.join("human"), "human", 35)?;
         for (local, remote) in [(&author, &human), (&human, &author)] {
-            let device = remote.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            local.account_db()?.persist_client_record("device",&device.device_id,&json!({"principal_id":device.principal_id,"principal_commitment":remote.surface_local_root_commitment()?,"signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())}))?;
+            local.persist_root_verified_directory(
+                &crate::client::identity_authority::test_support::public_manifest(remote)?,
+            )?;
             local.account_db()?.persist_client_record(
                 "conversation",
                 "thread",
@@ -347,8 +348,8 @@ fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestR
 #[test]
 fn deferred_group_content_is_validated_before_fallback_is_published() -> TestResult {
     let f = Fixture::new()?;
-    f.human.create_group("g", "author-device")?;
-    f.human.add_group_member("g", "human-device", "member")?;
+    f.human.create_group("g", "human-device")?;
+    f.human.add_group_member("g", f.author.owned_device_identity()?.storage_key(), "member")?;
     f.human.account_db()?.persist_client_record(
         "conversation",
         "thread",

@@ -618,14 +618,11 @@ pub(crate) fn object_permission_for_chunk(
     Ok(permission)
 }
 
-/// Recipient-side domain hash of this device id, matching the uploader-embedded `grantee_device_hash`
+/// Recipient-side domain hash of this root-qualified device, matching the uploader-embedded `grantee_device_hash`
 /// in an owner-signed v3 grant.
 #[allow(dead_code)]
-pub(crate) fn recipient_device_hash(branch: &DeviceBranch) -> String {
-    ramflux_crypto::blake3_256_base64url(
-        "ramflux.object_relay.recipient_device.v1",
-        branch.device_id.as_bytes(),
-    )
+pub(crate) fn recipient_device_hash(identity: &ramflux_crypto::RootQualifiedDeviceRef) -> String {
+    identity.object_relay_grantee_hash()
 }
 
 /// Verifies an uploader-signed [`ramflux_protocol::ObjectAccessGrant`] on the RECIPIENT side before it
@@ -642,10 +639,14 @@ pub(crate) fn recipient_device_hash(branch: &DeviceBranch) -> String {
 pub(crate) fn verify_recipient_object_access_grant(
     grant: Option<&ramflux_protocol::ObjectAccessGrant>,
     branch: &DeviceBranch,
+    identity: &ramflux_crypto::RootQualifiedDeviceRef,
     object_id: &str,
     manifest_hash: &str,
     now: u64,
 ) -> Result<(), SdkError> {
+    if identity.device_id() != branch.device_id {
+        return Err(SdkError::CapabilityDenied("recipient identity does not match branch".into()));
+    }
     let grant = grant.ok_or_else(|| {
         SdkError::CapabilityDenied(
             "object access grant is required but was not provided".to_owned(),
@@ -659,7 +660,7 @@ pub(crate) fn verify_recipient_object_access_grant(
         ));
     }
     // This device must be the named grantee — the grant is not transferable to another device.
-    if grant.grantee_device_hash != recipient_device_hash(branch) {
+    if grant.grantee_device_hash != recipient_device_hash(identity) {
         return Err(SdkError::CapabilityDenied(
             "object access grant grantee does not match this device".to_owned(),
         ));
@@ -727,6 +728,7 @@ pub(crate) fn build_v3_get_token_issue_body(
     grant: Option<&ramflux_protocol::ObjectAccessGrant>,
     attachment: &SdkDmAttachmentRef,
     branch: &DeviceBranch,
+    identity: &ramflux_crypto::RootQualifiedDeviceRef,
     chunk_id: &str,
     issued_at: u64,
     expires_at: u64,
@@ -735,6 +737,7 @@ pub(crate) fn build_v3_get_token_issue_body(
     verify_recipient_object_access_grant(
         grant,
         branch,
+        identity,
         &attachment.object_id,
         &attachment.manifest_hash,
         issued_at,
@@ -770,7 +773,7 @@ pub(crate) fn build_v3_get_token_issue_body(
         ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
     Ok(SdkRelayTokenV3IssueBody {
         requester_device_id: branch.device_id.clone(),
-        requester_device_hash: recipient_device_hash(branch),
+        requester_device_hash: recipient_device_hash(identity),
         requester_public_key,
         requester_device_epoch: branch.device_epoch,
         owner_signing_key_id: grant.owner_signing_key_id.clone(),
@@ -819,6 +822,7 @@ pub(crate) fn build_v3_ack_token_issue_body(
     grant: Option<&ramflux_protocol::ObjectAccessGrant>,
     attachment: &SdkDmAttachmentRef,
     branch: &DeviceBranch,
+    identity: &ramflux_crypto::RootQualifiedDeviceRef,
     chunk_id: &str,
     issued_at: u64,
     expires_at: u64,
@@ -828,7 +832,7 @@ pub(crate) fn build_v3_ack_token_issue_body(
     // then require the received grant to explicitly authorize Ack before switching capability. The
     // grant is never re-signed here: the same A-signed bytes back both the Get and Ack tokens.
     let mut body = build_v3_get_token_issue_body(
-        grant, attachment, branch, chunk_id, issued_at, expires_at, nonce,
+        grant, attachment, branch, identity, chunk_id, issued_at, expires_at, nonce,
     )?;
     let grant = grant
         .ok_or_else(|| SdkError::CapabilityDenied("object access grant is required".to_owned()))?;
@@ -850,6 +854,7 @@ pub(crate) fn build_v3_ack_token_issue_body(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_v3_owner_session_token_issue_body(
     branch: &DeviceBranch,
+    identity: &ramflux_crypto::RootQualifiedDeviceRef,
     object: &EncryptedObject,
     chunk_id: &str,
     capability: ramflux_protocol::ObjectRelayCapability,
@@ -861,6 +866,9 @@ pub(crate) fn build_v3_owner_session_token_issue_body(
     expires_at: u64,
     nonce: &str,
 ) -> Result<SdkRelayTokenV3IssueBody, SdkError> {
+    if identity.device_id() != branch.device_id {
+        return Err(SdkError::CapabilityDenied("owner identity does not match branch".into()));
+    }
     if !matches!(
         capability,
         ramflux_protocol::ObjectRelayCapability::Put
@@ -884,7 +892,7 @@ pub(crate) fn build_v3_owner_session_token_issue_body(
     let requester_public_key = branch_v3_public_key(branch);
     Ok(SdkRelayTokenV3IssueBody {
         requester_device_id: branch.device_id.clone(),
-        requester_device_hash: recipient_device_hash(branch),
+        requester_device_hash: recipient_device_hash(identity),
         requester_public_key: requester_public_key.clone(),
         requester_device_epoch: branch.device_epoch,
         owner_signing_key_id: branch.device_id.clone(),
@@ -937,6 +945,7 @@ fn empty_v3_issuer_certificate() -> ramflux_protocol::GatewayIssuerCertificate {
 pub(crate) fn build_v3_grant_token_issue_body(
     grant: &ramflux_protocol::ObjectAccessGrant,
     branch: &DeviceBranch,
+    identity: &ramflux_crypto::RootQualifiedDeviceRef,
     object_id: &str,
     manifest_hash: &str,
     chunk_id: &str,
@@ -957,7 +966,14 @@ pub(crate) fn build_v3_grant_token_issue_body(
             "grant-backed token requires get or ack capability".to_owned(),
         ));
     }
-    verify_recipient_object_access_grant(Some(grant), branch, object_id, manifest_hash, issued_at)?;
+    verify_recipient_object_access_grant(
+        Some(grant),
+        branch,
+        identity,
+        object_id,
+        manifest_hash,
+        issued_at,
+    )?;
     if !grant.capabilities.contains(&capability)
         || owner_home_node_id.trim().is_empty()
         || owner_principal_id.trim().is_empty()
@@ -975,7 +991,7 @@ pub(crate) fn build_v3_grant_token_issue_body(
     );
     Ok(SdkRelayTokenV3IssueBody {
         requester_device_id: branch.device_id.clone(),
-        requester_device_hash: recipient_device_hash(branch),
+        requester_device_hash: recipient_device_hash(identity),
         requester_public_key,
         requester_device_epoch: branch.device_epoch,
         owner_signing_key_id: grant.owner_signing_key_id.clone(),
@@ -1041,13 +1057,92 @@ pub(crate) async fn relay_quic_health_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_recipient_identity(
+        branch: &DeviceBranch,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
+        Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
+            &ramflux_crypto::create_identity_root(
+                &branch.principal_id,
+                ramflux_crypto::blake3_256(
+                    "ramflux.test.grantee_root.v1",
+                    branch.principal_id.as_bytes(),
+                ),
+            ),
+            branch,
+        )?)
+    }
+
+    #[test]
+    fn copied_grants_cannot_cross_roots_with_the_same_device_name() -> Result<(), SdkError> {
+        let owner = ramflux_crypto::create_device_branch("owner", "owner", 1, [9; 32]);
+        let honest = ramflux_crypto::create_device_branch("honest", "shared", 1, [8; 32]);
+        let attacker = ramflux_crypto::create_device_branch("attacker", "shared", 1, [8; 32]);
+        let honest_identity = test_recipient_identity(&honest)?;
+        let attacker_identity = test_recipient_identity(&attacker)?;
+        let grant = build_signed_object_access_grant(
+            &owner,
+            "object".into(),
+            "manifest".into(),
+            recipient_device_hash(&honest_identity),
+            vec![
+                ramflux_protocol::ObjectRelayCapability::Get,
+                ramflux_protocol::ObjectRelayCapability::Ack,
+            ],
+            100,
+            300,
+        )?;
+        verify_recipient_object_access_grant(
+            Some(&grant),
+            &honest,
+            &honest_identity,
+            "object",
+            "manifest",
+            101,
+        )?;
+        assert!(
+            verify_recipient_object_access_grant(
+                Some(&grant),
+                &attacker,
+                &attacker_identity,
+                "object",
+                "manifest",
+                101
+            )
+            .is_err()
+        );
+        for capability in [
+            ramflux_protocol::ObjectRelayCapability::Get,
+            ramflux_protocol::ObjectRelayCapability::Ack,
+        ] {
+            assert!(
+                build_v3_grant_token_issue_body(
+                    &grant,
+                    &attacker,
+                    &attacker_identity,
+                    "object",
+                    "manifest",
+                    "chunk",
+                    capability,
+                    "home",
+                    "owner",
+                    1,
+                    "relay",
+                    101,
+                    200,
+                    "nonce"
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn recipient_grant_verify_present_missing_tampered() -> Result<(), SdkError> {
         let now = 1_000_000;
         let owner = ramflux_crypto::create_device_branch("owner_p", "owner_device", 1, [9u8; 32]);
         let recipient = ramflux_crypto::create_device_branch("rcpt_p", "rcpt_device", 1, [8u8; 32]);
-        let grantee = recipient_device_hash(&recipient);
+        let grantee = recipient_device_hash(&test_recipient_identity(&recipient)?);
         let grant = build_signed_object_access_grant(
             &owner,
             "object_v3".to_owned(),
@@ -1065,6 +1160,7 @@ mod tests {
         verify_recipient_object_access_grant(
             Some(&grant),
             &recipient,
+            &test_recipient_identity(&recipient)?,
             "object_v3",
             "manifest_v3",
             now,
@@ -1072,8 +1168,15 @@ mod tests {
 
         // Missing -> fail closed (an older grantless share never downgrades to open access).
         assert!(
-            verify_recipient_object_access_grant(None, &recipient, "object_v3", "manifest_v3", now)
-                .is_err()
+            verify_recipient_object_access_grant(
+                None,
+                &recipient,
+                &test_recipient_identity(&recipient)?,
+                "object_v3",
+                "manifest_v3",
+                now
+            )
+            .is_err()
         );
 
         // Tampered after signing (object_id changed) -> owner signature no longer verifies, even when
@@ -1084,6 +1187,7 @@ mod tests {
             verify_recipient_object_access_grant(
                 Some(&tampered),
                 &recipient,
+                &test_recipient_identity(&recipient)?,
                 "object_forged",
                 "manifest_v3",
                 now,
@@ -1098,6 +1202,7 @@ mod tests {
             verify_recipient_object_access_grant(
                 Some(&grant),
                 &attacker,
+                &test_recipient_identity(&attacker)?,
                 "object_v3",
                 "manifest_v3",
                 now,
@@ -1256,7 +1361,7 @@ mod tests {
             &owner,
             "object_a2".to_owned(),
             "manifest_a2".to_owned(),
-            recipient_device_hash(&recipient),
+            recipient_device_hash(&test_recipient_identity(&recipient)?),
             capabilities,
             now,
             now + 300,
@@ -1308,6 +1413,7 @@ mod tests {
             attachment.access_grant.as_ref(),
             &attachment,
             &recipient,
+            &test_recipient_identity(&recipient)?,
             chunk_id,
             now,
             now + 120,
@@ -1318,6 +1424,7 @@ mod tests {
             attachment.access_grant.as_ref(),
             &attachment,
             &recipient,
+            &test_recipient_identity(&recipient)?,
             chunk_id,
             now,
             now + 120,
@@ -1332,6 +1439,7 @@ mod tests {
                 get_only.access_grant.as_ref(),
                 &get_only,
                 &recipient,
+                &test_recipient_identity(&recipient)?,
                 chunk_id,
                 now,
                 now + 120,
@@ -1345,6 +1453,7 @@ mod tests {
                 ack_only.access_grant.as_ref(),
                 &ack_only,
                 &recipient,
+                &test_recipient_identity(&recipient)?,
                 chunk_id,
                 now,
                 now + 120,
@@ -1360,6 +1469,7 @@ mod tests {
                 None,
                 &attachment,
                 &recipient,
+                &test_recipient_identity(&recipient)?,
                 chunk_id,
                 now,
                 now + 120,
@@ -1374,6 +1484,7 @@ mod tests {
                 attachment.access_grant.as_ref(),
                 &attachment,
                 &attacker,
+                &test_recipient_identity(&attacker)?,
                 chunk_id,
                 now,
                 now + 120,
@@ -1418,6 +1529,7 @@ mod tests {
                 attachment.access_grant.as_ref(),
                 &attachment,
                 &recipient,
+                &test_recipient_identity(&recipient)?,
                 "object-relay:object_a2:manifest_a2:0",
                 now,
                 now + 120,

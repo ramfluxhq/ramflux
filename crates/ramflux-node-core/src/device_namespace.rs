@@ -6,7 +6,7 @@ use crate::{IdentityRegistry, mvp1_registry::IdentityDeviceRecord};
 use ramflux_crypto::RootQualifiedDeviceRef;
 impl IdentityRegistry {
     pub(crate) fn device_storage_key(device: &RootQualifiedDeviceRef) -> String {
-        format!("{}:{}", device.root_commitment(), device.device_id())
+        device.storage_key().to_owned()
     }
     pub(crate) fn principal_device_lookup(principal: &str, device: &str) -> String {
         format!(
@@ -89,27 +89,47 @@ impl IdentityRegistry {
             })
             .or_else(|| self.legacy_device_record(device))
     }
+    fn legacy_device_keys(identity: &RootQualifiedDeviceRef) -> [String; 2] {
+        [
+            identity.device_id().into(),
+            format!("{}:{}", identity.root_commitment(), identity.device_id()),
+        ]
+    }
     pub(crate) fn legacy_device_record(
         &self,
         device: &RootQualifiedDeviceRef,
     ) -> Option<&IdentityDeviceRecord> {
-        self.devices.get(device.device_id()).filter(|old| {
-            old.principal_commitment == device.root_commitment()
-                && old.device_id == device.device_id()
+        Self::legacy_device_keys(device).iter().find_map(|key| {
+            self.devices.get(key).filter(|old| {
+                old.principal_commitment == device.root_commitment()
+                    && old.device_id == device.device_id()
+            })
         })
     }
     pub(crate) fn legacy_remove_device_metadata(&mut self, identity: &RootQualifiedDeviceRef) {
-        if self.legacy_device_record(identity).is_some() {
-            self.devices.remove(identity.device_id());
-            self.prekey_bundles.remove(identity.device_id());
+        for key in Self::legacy_device_keys(identity) {
+            if self.devices.get(&key).is_some_and(|old| {
+                old.principal_commitment == identity.root_commitment()
+                    && old.device_id == identity.device_id()
+            }) {
+                self.devices.remove(&key);
+                self.prekey_bundles.remove(&key);
+            }
         }
     }
     pub(crate) fn legacy_prekey_bundle(
         &self,
         identity: &RootQualifiedDeviceRef,
     ) -> Option<&ramflux_crypto::PrekeyBundle> {
-        self.legacy_device_record(identity)?;
-        self.prekey_bundles.get(identity.device_id())
+        Self::legacy_device_keys(identity).iter().find_map(|key| {
+            self.devices
+                .get(key)
+                .filter(|row| {
+                    row.principal_commitment == identity.root_commitment()
+                        && row.device_id == identity.device_id()
+                })
+                .and_then(|_| self.prekey_bundles.get(key))
+        })
     }
     pub(crate) fn legacy_device_manifest(
         &self,
@@ -167,10 +187,15 @@ impl IdentityRegistry {
             || self.legacy_record_is_revoked(device)
     }
     fn legacy_record_is_revoked(&self, device: &IdentityDeviceRecord) -> bool {
-        self.revoked_devices.contains(&device.device_id)
-            && self.devices.get(&device.device_id).is_some_and(|old| {
-                old.principal_commitment == device.principal_commitment
-                    && !old.principal_commitment.is_empty()
+        [device.device_id.clone(), format!("{}:{}", device.principal_commitment, device.device_id)]
+            .iter()
+            .any(|key| {
+                self.revoked_devices.contains(key)
+                    && self.devices.get(key).is_some_and(|old| {
+                        !old.principal_commitment.is_empty()
+                            && old.principal_commitment == device.principal_commitment
+                            && old.device_id == device.device_id
+                    })
             })
     }
 }

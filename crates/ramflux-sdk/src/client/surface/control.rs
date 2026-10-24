@@ -161,6 +161,20 @@ impl RamfluxClient {
         group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
+        if !body.starts_with(CONTROL_PREFIX) {
+            return Ok(false);
+        }
+        let source = self.authenticated_device_identity(entry)?;
+        self.receive_surface_control_from(entry, &source, conversation, group, body)
+    }
+    pub(in crate::client) fn receive_surface_control_from(
+        &self,
+        entry: &GatewayInboxEntry,
+        source_identity: &ramflux_crypto::RootQualifiedDeviceRef,
+        conversation: &str,
+        group: Option<&str>,
+        body: &[u8],
+    ) -> Result<bool, SdkError> {
         let Some(raw) = body.strip_prefix(CONTROL_PREFIX) else {
             return Ok(false);
         };
@@ -176,9 +190,12 @@ impl RamfluxClient {
         if carrier.conversation_id != conversation {
             return Err(invalid("surface control conversation mismatch"));
         }
+        if source_identity.device_id() != entry.envelope.source_device_id {
+            return Err(invalid("surface source identity mismatch"));
+        }
         let source = self
             .account_db()?
-            .client_record("device", &entry.envelope.source_device_id)?
+            .client_device_record(source_identity)?
             .ok_or_else(|| invalid("surface control has no authenticated device owner"))?;
         let principal = source["principal_id"]
             .as_str()
@@ -324,13 +341,13 @@ impl RamfluxClient {
     }
     fn verified_surface_signer(&self, carrier: &Carrier) -> Result<String, SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if carrier.sender_device_id == local.device_id {
+        if carrier.sender_device_id == local.device_id
+            && carrier.sender_principal_id == local.principal_id
+        {
             return Ok(local.principal_id.clone());
         }
-        self.account_db()?
-            .client_record("device", &carrier.sender_device_id)?
-            .and_then(|v| v["principal_id"].as_str().map(str::to_owned))
-            .ok_or_else(|| invalid("original surface signer owner missing"))
+        self.surface_signer_record(&carrier.sender_principal_id, &carrier.sender_device_id)?;
+        Ok(carrier.sender_principal_id.clone())
     }
 }
 

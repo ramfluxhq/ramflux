@@ -434,3 +434,30 @@ mod review_r3;
 
 #[path = "group_review_r3_tests.rs"]
 mod group_review_r3;
+
+#[test]
+fn verify_manifest_json_rejects_swapped_branch_and_agreement_keys() -> TestResult {
+    let bob = Actor::new("bob", "bob-device", 31, 32, 1)?;
+    let attacker = Actor::new("mallory", "mallory-device", 51, 52, 1)?;
+    let honest = test_support::public_manifest(&bob.client)?;
+    let attack = test_support::public_manifest(&attacker.client)?;
+    RamfluxClient::verify_device_manifest_json(
+        serde_json::to_value(&honest)?,
+        &honest.principal_commitment,
+    )?;
+    for agreement in [false, true] {
+        let mut forged = honest.clone();
+        forged.devices[0].branch_public_key.clone_from(&attack.devices[0].branch_public_key);
+        if agreement {
+            forged.devices[0].prekey_bundle = attack.devices[0].prekey_bundle.clone();
+        }
+        assert!(
+            RamfluxClient::verify_device_manifest_json(
+                serde_json::to_value(forged)?,
+                &honest.principal_commitment
+            )
+            .is_err()
+        );
+    }
+    Ok(())
+}

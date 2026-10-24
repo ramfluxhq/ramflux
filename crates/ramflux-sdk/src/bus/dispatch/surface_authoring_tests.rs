@@ -41,8 +41,9 @@ fn non_author_send_is_typed_before_delta_hash_construction()
     let body: Send = serde_json::from_value(serde_json::to_value(&create)?)?;
     let raw = ramflux_protocol::decode_base64url(&create.wire_base64)?;
     let carrier = prepare_carrier(&author.client, &body, PayloadKind::Event, &raw, "surface")?;
-    let branch = author.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    reader.client.account_db()?.persist_client_record("device","device-author",&json!({"principal_id":"author","signing_public_key":ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())}))?;
+    reader.client.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&author.client)?,
+    )?;
     reader.client.account_db()?.persist_client_record(
         "conversation",
         "thread",

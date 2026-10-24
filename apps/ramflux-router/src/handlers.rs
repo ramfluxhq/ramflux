@@ -731,13 +731,25 @@ pub(crate) fn handle_mvp1_identity_register(
                 },
             })?);
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            tracing::warn!(%error, stage="identity_registration_admission", "router registration rejected");
+            let reason_code = match &error {
+                ramflux_node_core::NodeCoreError::Redb(_)
+                | ramflux_node_core::NodeCoreError::SnapshotSerialization(_) => {
+                    ramflux_protocol::IdentityDirectoryReason::RegistrationUnavailable
+                }
+                ramflux_node_core::NodeCoreError::ItestHttp(reason)
+                    if reason.contains("branch proof replay") =>
+                {
+                    ramflux_protocol::IdentityDirectoryReason::RegistrationReplay
+                }
+                _ => ramflux_protocol::IdentityDirectoryReason::InvalidRegistration,
+            };
+            return Ok(serde_json::to_value(ramflux_protocol::IdentityRegistrationFailure {
+                error: ramflux_protocol::IdentityRegistrationFailureBody { reason_code },
+            })?);
+        }
     };
-    state.persist_identity_registry(store)?;
-    let session = state
-        .session(&response.target_delivery_id)
-        .ok_or_else(|| anyhow::anyhow!("session missing after identity registration"))?;
-    store.record_session_entry(&session)?;
     tracing::info!(
         principal_id = %response.principal_id,
         device_id = %response.device_id,

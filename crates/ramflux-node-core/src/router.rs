@@ -414,7 +414,7 @@ impl RouterCore {
         store: Option<&crate::RouterRedbStore>,
     ) -> Result<IdentityRegistrationResponse, NodeCoreError> {
         let local_home_node_id = self.local_home_node_id();
-        let (mut session, registration_trust_tier) = {
+        let registration_trust_tier = {
             let mut control = lock_unpoisoned(&self.control);
             let registration_trust_tier =
                 control.mvp1_identities.validate_registration_policy(request)?;
@@ -430,25 +430,27 @@ impl RouterCore {
             }
             let mut candidate = control.mvp1_identities.clone();
             candidate.authorize_root_bound_registration(request)?;
-            let registered =
+            let (mut session, tier) =
                 candidate.register_admitted_identity(request, registration_trust_tier)?;
+            let mut target = self.target_shard(&session.target_delivery_id);
+            if let Some(existing) = target.registry.session(&session.target_delivery_id)
+                && existing.session_id == session.session_id
+            {
+                session.session_seq = existing.session_seq;
+                session.last_cursor.clone_from(&existing.last_cursor);
+            }
+            let mut sessions = target.registry.clone();
+            // Validate the session before consuming or persisting any proof. Stale session
+            // rejection must leave this exact signed registration available for a later retry.
+            sessions.upsert_session(session.clone())?;
             if let Some(store) = store {
-                store.record_identity_registry(&candidate)?;
+                store.record_registration_admission(&candidate, &session)?;
             }
             control.mvp1_identities = candidate;
+            target.registry = sessions;
             self.refresh_migration_read_snapshot_from_control(&control);
-            registered
+            tier
         };
-        if let Some(existing) = self
-            .target_shard(&session.target_delivery_id)
-            .registry
-            .session(&session.target_delivery_id)
-            && existing.session_id == session.session_id
-        {
-            session.session_seq = existing.session_seq;
-            session.last_cursor.clone_from(&existing.last_cursor);
-        }
-        self.upsert_session(session)?;
         Ok(IdentityRegistrationResponse {
             principal_id: request.proof.principal_id.clone(),
             device_id: request.proof.device_id.clone(),
@@ -1172,6 +1174,25 @@ impl RouterCore {
         &self,
         envelope: &ramflux_protocol::Envelope,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        self.authenticate_source_with_store(envelope, None)
+    }
+
+    /// Authenticate a source and persist its highest foreign authority before accepting delivery.
+    /// # Errors
+    /// Rejects stale or forged authority and durable storage failures.
+    pub fn authenticated_envelope_source_durable(
+        &self,
+        envelope: &ramflux_protocol::Envelope,
+        store: &crate::RouterRedbStore,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        self.authenticate_source_with_store(envelope, Some(store))
+    }
+
+    fn authenticate_source_with_store(
+        &self,
+        envelope: &ramflux_protocol::Envelope,
+        store: Option<&crate::RouterRedbStore>,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
         let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
         let root = envelope
             .ext
@@ -1181,24 +1202,34 @@ impl RouterCore {
             .ok_or_else(reject)?;
         let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
             .map_err(|_| reject())?;
-        let (registered, current) = {
-            let control = lock_unpoisoned(&self.control);
-            (
-                control
-                    .mvp1_identities
-                    .resolve_device_selector(&lookup)
-                    .and_then(|identity| control.mvp1_identities.device_auth_key(&identity)),
-                control.mvp1_identities.signed_device_set(root).cloned(),
-            )
+        let mut control = lock_unpoisoned(&self.control);
+        let registry = &mut control.mvp1_identities;
+        let registered = registry
+            .resolve_device_selector(&lookup)
+            .and_then(|identity| registry.device_auth_key(&identity));
+        let (authority, source) = if let Some(authority) = registered {
+            let source = authority.verify_envelope_source(envelope)?;
+            (authority, source)
+        } else {
+            let (authority, source) = DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
+            if registry
+                .signed_device_set(root)
+                .is_some_and(|current| authority.signed_device_set.as_ref() != Some(current))
+            {
+                return Err(reject());
+            }
+            (authority, source)
         };
-        if let Some(registered) = registered {
-            return registered.verify_envelope_source(envelope);
-        }
-        let (authority, source) = DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
-        if let Some(current) = current.as_ref()
-            && authority.signed_device_set.as_ref() != Some(current)
-        {
-            return Err(reject());
+        let record = authority.signed_device_set.as_ref().ok_or_else(reject)?;
+        if registry.foreign_device_heads.check(record)? {
+            let mut candidate = registry.clone();
+            candidate.foreign_device_heads.retain(record.clone());
+            // Persist while serialized with source admission: an older concurrent write cannot
+            // replace a newer revocation head. A failed write leaves memory unchanged.
+            if let Some(store) = store {
+                store.record_identity_registry(&candidate)?;
+            }
+            *registry = candidate;
         }
         Ok(source)
     }

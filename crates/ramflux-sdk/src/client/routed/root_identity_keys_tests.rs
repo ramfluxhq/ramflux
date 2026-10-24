@@ -201,3 +201,25 @@ fn legacy_reset_work_requires_the_root_bound_pair_key_and_preserves_attempts()
     assert_eq!(db.actor_state_keys("legacy/reset-work/")?.len(), 1);
     Ok(())
 }
+
+#[test]
+fn colliding_device_names_never_escape_inbox_failure_policy() -> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 11)?;
+    let bob = Fixture::owned("shared", "bob", 31, 32)?;
+    let mallory = Fixture::owned("shared", "mallory", 51, 52)?;
+    trust(&alice, &bob)?;
+    trust(&alice, &mallory)?;
+    alice.client.establish_friend_link("bob-link", "alice", "bob")?;
+    let entry = seal(&bob, &alice, super::r5::outgoing(&bob, &alice, "held"), b"pending")?;
+    let key = alice.client.inbox_admission_key(&entry)?;
+    assert!(crate::client::inbox_failure::defer_entry(
+        &alice.client,
+        "alice",
+        &entry,
+        &key,
+        &serde_json::to_vec(&entry)?,
+        now_unix_timestamp(),
+    )?);
+    assert_ne!(alice.client.owned_device_identity()?, bob.client.owned_device_identity()?);
+    Ok(())
+}

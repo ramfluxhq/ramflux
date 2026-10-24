@@ -192,7 +192,12 @@ pub(crate) fn dispatch_protected_itest_request(
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
             )?;
             let response: serde_json::Value =
-                router_post_json(router, "/mvp1/identity/register", &registration)?;
+                match router_post_json(router, "/mvp1/identity/register", &registration) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        crate::principal_directory::registration_forwarding_failure(&error).body
+                    }
+                };
             let rejected = serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
                 response.clone(),
             )

@@ -243,8 +243,10 @@ pub struct IdentityRegistry {
     delivery_root_bindings: BTreeMap<String, (String, String, String)>,
     // Historical unqualified proof ids are retained only for snapshot provenance.
     seen_proofs: BTreeSet<String>,
+    #[serde(default, deserialize_with = "crate::foreign_device_heads::load_proofs")]
+    root_seen_proofs: std::collections::VecDeque<String>,
     #[serde(default)]
-    root_seen_proofs: BTreeSet<String>,
+    pub(crate) foreign_device_heads: crate::foreign_device_heads::ForeignDeviceHeads,
     pub(crate) prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
     #[serde(default, deserialize_with = "load_registration_policy")]
     registration_policy: RegistrationPolicy,
@@ -405,8 +407,12 @@ impl IdentityRegistry {
             &ramflux_protocol::canonical_json_bytes(&(source.storage_key(), proof))
                 .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?,
         );
-        if !self.root_seen_proofs.insert(key) {
+        if self.root_seen_proofs.contains(&key) {
             return Err(NodeCoreError::ItestHttp("branch proof replay".into()));
+        }
+        self.root_seen_proofs.push_back(key);
+        while self.root_seen_proofs.len() > crate::foreign_device_heads::REGISTRATION_PROOF_LIMIT {
+            self.root_seen_proofs.pop_front();
         }
         Ok(())
     }
@@ -655,11 +661,15 @@ impl IdentityRegistry {
             .storage_key_for_record(device)
             .ok_or_else(|| NodeCoreError::ItestHttp("verified device authority missing".into()))?;
         self.authorize_bound_prekey(device, &request.bundle)?;
-        let branch_public_key =
-            ramflux_crypto::verifying_key_from_base64url(&device.branch_public_key)
-                .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
-        ramflux_crypto::verify_prekey_bundle(&branch_public_key, &request.bundle)
-            .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
+        let branch_public_key = ramflux_crypto::verifying_key_from_base64url(
+            &device.branch_public_key,
+        )
+        .map_err(|source| {
+            NodeCoreError::ItestHttp(format!("prekey publication signature: {source}"))
+        })?;
+        ramflux_crypto::verify_prekey_bundle(&branch_public_key, &request.bundle).map_err(
+            |source| NodeCoreError::ItestHttp(format!("prekey publication signature: {source}")),
+        )?;
         self.prekey_bundles.insert(storage_key, request.bundle);
         Ok(())
     }
@@ -884,6 +894,18 @@ impl IdentityRegistry {
                 .entry(principal_id.to_owned())
                 .or_insert_with(|| root.clone());
         }
+        // Purging metadata never releases a delivery alias to a different root.
+        for device in self.devices.values().filter(|device| device.principal_id == principal_id) {
+            let root = self
+                .root_public_keys_by_commitment
+                .get(&device.principal_commitment)
+                .or_else(|| self.root_public_keys.get(&device.principal_id))
+                .cloned()
+                .unwrap_or_default();
+            self.delivery_root_bindings
+                .entry(device.target_delivery_id.clone())
+                .or_insert_with(|| (device.principal_id.clone(), root, device.device_id.clone()));
+        }
         for set in self.signed_device_sets.values().filter(|set| set.principal_id == principal_id) {
             self.identity_authority_fences.insert(
                 set.principal_commitment.clone(),
@@ -926,5 +948,32 @@ pub const fn friend_request_budget_limit(tier: &RegistrationTrustTier) -> u32 {
         RegistrationTrustTier::InviteTrusted
         | RegistrationTrustTier::Attested
         | RegistrationTrustTier::OperatorTrusted => 16,
+    }
+}
+
+#[cfg(test)]
+mod proof_retention_tests {
+    use super::*;
+    #[test]
+    fn registration_proofs_evict_oldest_and_retain_order_after_restart()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = ramflux_crypto::create_identity_root("owner", [9; 32]);
+        let source =
+            ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "device")?;
+        let mut registry = IdentityRegistry::default();
+        for index in 0..=crate::foreign_device_heads::REGISTRATION_PROOF_LIMIT {
+            registry.admit_registration_proof(&source, &index.to_string())?;
+        }
+        assert_eq!(
+            registry.root_seen_proofs.len(),
+            crate::foreign_device_heads::REGISTRATION_PROOF_LIMIT
+        );
+        assert!(registry.admit_registration_proof(&source, "1").is_err());
+        let mut restored: IdentityRegistry =
+            serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
+        restored.admit_registration_proof(&source, "0")?;
+        assert!(restored.admit_registration_proof(&source, "2").is_err());
+        restored.admit_registration_proof(&source, "1")?;
+        Ok(())
     }
 }

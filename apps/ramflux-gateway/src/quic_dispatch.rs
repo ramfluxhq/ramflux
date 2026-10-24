@@ -42,7 +42,14 @@ pub(crate) async fn dispatch_quic_json_request(
                 serde_json::from_value(request.body)?;
             crate::principal_directory::registration_context(&mut registration, source)?;
             let response: serde_json::Value =
-                router_post_json(router, "/mvp1/identity/register", &registration)?;
+                match router_post_json(router, "/mvp1/identity/register", &registration) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return Ok(crate::principal_directory::registration_forwarding_failure(
+                            &error,
+                        ));
+                    }
+                };
             if serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
                 response.clone(),
             )

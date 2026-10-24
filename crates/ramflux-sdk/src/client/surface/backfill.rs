@@ -24,20 +24,47 @@ impl RamfluxClient {
         let device =
             row["sender_id"].as_str().ok_or_else(|| invalid("surface message sender missing"))?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let principal = if device == local.device_id {
-            local.principal_id.clone()
+        let origin = if let Some(origin) = db.load_actor_state::<Origin>(&key("origin", message))? {
+            origin
+        } else if let Some(group) = db
+            .client_record("conversation", conversation)?
+            .and_then(|thread| thread["group_id"].as_str().map(str::to_owned))
+        {
+            let source = self
+                .group_route_identity(&group, device)?
+                .ok_or_else(|| invalid("surface sender root binding unavailable"))?;
+            let record = db
+                .client_device_record(&source)?
+                .ok_or_else(|| invalid("surface sender device unavailable"))?;
+            let principal = record["principal_id"]
+                .as_str()
+                .ok_or_else(|| invalid("surface sender principal unavailable"))?
+                .to_owned();
+            Origin {
+                principal,
+                device: device.into(),
+                envelope_id: message.into(),
+                expires_at: i64::MAX,
+                group_epoch: None,
+            }
         } else {
-            db.client_record("device", device)?
-                .and_then(|v| v["principal_id"].as_str().map(str::to_owned))
-                .ok_or_else(|| invalid("surface sender has no verified device owner"))?
+            let carrier =
+                Carrier::decode(&bytes)?.ok_or_else(|| invalid("surface origin unavailable"))?;
+            self.verify_surface_carrier(
+                &carrier,
+                &carrier.sender_principal_id,
+                &carrier.sender_device_id,
+            )?;
+            Origin {
+                principal: carrier.sender_principal_id,
+                device: carrier.sender_device_id,
+                envelope_id: message.into(),
+                expires_at: i64::MAX,
+                group_epoch: None,
+            }
         };
-        let origin = db.load_actor_state::<Origin>(&key("origin", message))?.unwrap_or(Origin {
-            principal: principal.clone(),
-            device: device.into(),
-            envelope_id: message.into(),
-            expires_at: i64::MAX,
-            group_epoch: None,
-        });
+        let principal = origin.principal.clone();
+        let source = self.peer_device_identity(&principal, &origin.device)?;
         db.surface_transaction(|| {
             let sender = origin.sender();
             let outcome = if let Ok(Some(carrier)) = Carrier::decode(&bytes) {
@@ -45,10 +72,8 @@ impl RamfluxClient {
                     .client_record("conversation", conversation)?
                     .ok_or_else(|| invalid("surface conversation missing"))?;
                 let member = if let Some(group) = thread["group_id"].as_str() {
-                    let members = self.group_state(group)?.members;
-                    members.contains(device)
-                        && (members.contains(&local.device_id)
-                            || members.contains(&local.principal_id))
+                    db.group_member_role(group, &source)?.is_some()
+                        && db.group_member_role(group, &self.owned_device_identity()?)?.is_some()
                 } else {
                     thread["participants"]
                         .as_array()
@@ -65,7 +90,7 @@ impl RamfluxClient {
                         message,
                         sender,
                         &bytes,
-                        device == local.device_id,
+                        device == local.device_id && principal == local.principal_id,
                     )?
                     .ok_or_else(|| invalid("surface carrier disappeared"))?
                 } else {

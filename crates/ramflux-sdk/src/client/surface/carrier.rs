@@ -219,10 +219,7 @@ impl RamfluxClient {
         let public = if device == local.device_id && principal == local.principal_id {
             ramflux_protocol::encode_base64url(local.signing_key.verifying_key().to_bytes())
         } else {
-            let record = self
-                .account_db()?
-                .client_record("device", device)?
-                .ok_or_else(|| invalid("surface signer has no verified device record"))?;
+            let record = self.surface_signer_record(principal, device)?;
             if record["principal_id"] != principal {
                 return Err(invalid("surface signer principal mismatch"));
             }

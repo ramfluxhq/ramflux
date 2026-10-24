@@ -134,6 +134,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
         principal_id: "alice".into(),
         device_id: "alice-device".into(),
         target_delivery_id: "alice-target".into(),
+        device_epoch: 1,
         branch_public_key: "fixture-branch-key".into(),
     };
     let frames = Arc::new(Mutex::new(Vec::new()));

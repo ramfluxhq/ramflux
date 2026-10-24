@@ -30,7 +30,9 @@ set -eu
 
 # Non-login ssh shells don't source the cargo env, so cargo/rustup can be off
 # PATH. Prepend the standard rustup bin dir so the script self-heals.
-export PATH="$HOME/.cargo/bin:$PATH"
+if ! command -v cargo >/dev/null 2>&1; then
+  export PATH="$HOME/.cargo/bin:$PATH"
+fi
 
 FILTER="${1:-realnet}"
 
@@ -72,6 +74,13 @@ fi
 # (matching the reference host glibc). Default acceptance uses debug for fast
 # edit/test cycles; perf runs can opt into release with RAMFLUX_PERF_RELEASE=1.
 WORKSPACE="$WORKSPACE_DIR"
+# The compiler output and Docker staging source must name the same directory, even
+# when the caller selects an external cache or Cargo has a build.target-dir setting.
+REALNET_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
+case "$REALNET_TARGET_DIR" in
+  /*) ;;
+  *) REALNET_TARGET_DIR="$WORKSPACE/$REALNET_TARGET_DIR" ;;
+esac
 BUILD_PROFILE_FLAG=""
 BUILD_TARGET_DIR="debug"
 BUILD_TARGET_FLAG=""
@@ -103,9 +112,9 @@ case "$HOST_TRIPLE" in
 esac
 build_rust() {
   if [ "$BUILD_WITH_ZIG" -eq 1 ]; then
-    cargo $TC zigbuild "$@"
+    cargo $TC zigbuild --target-dir "$REALNET_TARGET_DIR" "$@"
   else
-    cargo $TC build "$@"
+    cargo $TC build --target-dir "$REALNET_TARGET_DIR" "$@"
   fi
 }
 printf '>> host pre-build: compiling 7 node binaries (%s; incremental host cargo cache)\n' "$BUILD_PROFILE_LABEL"
@@ -182,7 +191,7 @@ if [ -n "$DEFAULT_BIN_ARGS" ]; then
 fi
 mkdir -p "$DEPLOY_DIR/itest-bin"
 for b in gateway router notify federation relay signaling retention; do
-  cp -f "$WORKSPACE/target/$BUILD_TARGET_DIR/ramflux-$b" "$DEPLOY_DIR/itest-bin/ramflux-$b"
+  cp -f "$REALNET_TARGET_DIR/$BUILD_TARGET_DIR/ramflux-$b" "$DEPLOY_DIR/itest-bin/ramflux-$b"
   # CTRL-089 DIAGNOSTIC: keep the relay UNSTRIPPED under the dhat profiler so dhat can resolve
   # backtraces to function/type names at dump time (stripping would leave raw-address stacks).
   if [ "$b" = "relay" ] && [ "${RAMFLUX_RELAY_ALLOC_PROF:-0}" = "1" ]; then

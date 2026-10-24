@@ -12,6 +12,9 @@ pub enum IdentityDirectoryReason {
     PrincipalIdAmbiguous,
     PrincipalIdTaken,
     DeviceIdTaken,
+    InvalidRegistration,
+    RegistrationReplay,
+    RegistrationUnavailable,
 }
 /// Known and unknown directory results have the same outer shape.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

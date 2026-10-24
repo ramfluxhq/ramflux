@@ -430,7 +430,7 @@ fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
     db.persist_group_member_device_key("group", &owner, "owner-key")?;
     db.remove_group_member("group", &owner, &alice)?;
     assert!(db.persist_group_member_device_key("group", &mallory, "mallory-key").is_err());
-    assert_eq!(db.group_member_device_key("group", &alice)?.as_deref(), Some("alice-key"));
+    assert_eq!(db.group_member_device_key("group", &alice)?, None);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -862,6 +862,39 @@ fn an_invite_for_one_root_cannot_be_accepted_by_a_copied_literal_device_name()
     db.apply_group_member_accept(&accept, &bob)?;
     assert_eq!(db.group_member_role("g", &bob)?.as_deref(), Some("member"));
     assert_eq!(db.group_member_role("g", &mallory)?, None);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn removing_a_root_bound_member_allows_another_root_to_reuse_its_literal_name()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let owner = pin_source("owner", "owner")?;
+    let first = pin_source("first", "shared")?;
+    let second = pin_source("second", "shared")?;
+    db.create_group("g", "owner")?;
+    db.persist_group_member_device_key("g", &owner, "owner-key")?;
+    db.add_group_member("g", "shared", "member")?;
+    db.persist_group_member_device_key("g", &first, "first-key")?;
+    assert!(db.has_root_bound_group_membership("g", &first)?);
+    assert!(!db.has_root_bound_group_membership("g", &second)?);
+    db.remove_group_member("g", &owner, &first)?;
+    db.add_group_member("g", "shared", "member")?;
+    db.persist_group_member_device_key("g", &second, "second-key")?;
+    assert!(db.group_member_role("g", &first)?.is_none());
+    assert_eq!(db.group_member_role("g", &second)?.as_deref(), Some("member"));
+    assert!(db.group_member_key_binding("g", &first)?.is_none());
+    // Even a stale live-table pin cannot borrow the replacement member's active slot.
+    db.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,raw_device_id,principal_commitment,device_signing_public_key,verified_at) VALUES('g',?1,'shared',?2,'first-key',1)",params![first.storage_key(),first.root_commitment()])?;
+    assert!(db.group_member_key_binding("g", &first)?.is_none());
+    assert!(db.group_member_role("g", &first)?.is_none());
+    drop(db);
+    let db =
+        AccountDb::open(&AccountIndex::open(&root)?, "a", &AccountDbKey::derive("a", b"secret"))?;
+    assert!(db.group_member_role("g", &first)?.is_none());
+    assert_eq!(db.group_member_role("g", &second)?.as_deref(), Some("member"));
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

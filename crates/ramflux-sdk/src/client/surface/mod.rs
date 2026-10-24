@@ -25,6 +25,7 @@ mod read;
 mod resync_request;
 pub(crate) use resync_request::ResyncReply;
 mod scope;
+mod signer;
 mod snapshot;
 mod task_action_read;
 mod task_decision;

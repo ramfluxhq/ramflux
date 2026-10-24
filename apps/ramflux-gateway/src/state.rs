@@ -70,6 +70,7 @@ pub(crate) struct GatewaySessionRuntime {
     pub(crate) device_id: String,
     pub(crate) target_delivery_id: String,
     pub(crate) branch_public_key: String,
+    pub(crate) device_epoch: u64,
 }
 
 #[derive(Clone)]

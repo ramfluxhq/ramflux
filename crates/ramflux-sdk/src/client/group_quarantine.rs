@@ -82,23 +82,14 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
-        let cached =
-            self.account_db()?.client_record("device", &entry.envelope.source_device_id)?;
+        let Ok(source) = self.authenticated_device_identity(entry) else { return Ok(false) };
+        let cached = self.account_db()?.client_device_record(&source).ok().flatten();
         if cached.is_none_or(|record| record.get("x25519_identity_public").is_none()) {
             return Ok(false);
         }
-        match self.authenticated_envelope_sender(entry).and_then(|_| {
-            self.require_group_payload_sender(&group.group_id, &group.sender_id, entry)
-        }) {
-            Ok(()) => Ok(true),
-            Err(SdkError::Storage(error))
-                if !matches!(error, StorageError::GroupPermissionDenied) =>
-            {
-                Err(SdkError::Storage(error))
-            }
-            Err(_) => Ok(false),
-        }
+        Ok(self.require_group_payload_sender(&group.group_id, &group.sender_id, entry).is_ok())
     }
+
     pub(crate) fn isolate_legacy_group_delivery(
         &self,
         entry: &GatewayInboxEntry,

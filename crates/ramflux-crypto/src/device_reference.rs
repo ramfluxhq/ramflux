@@ -82,6 +82,14 @@ impl RootQualifiedDeviceRef {
     pub fn storage_key(&self) -> &str {
         &self.storage_key
     }
+    /// Root-bound recipient identifier used by v3 object grants and gateway-issued tokens.
+    #[must_use]
+    pub fn object_relay_grantee_hash(&self) -> String {
+        crate::blake3_256_base64url(
+            "ramflux.object_relay.recipient_device.v2",
+            self.storage_key().as_bytes(),
+        )
+    }
 }
 
 impl ramflux_protocol::RootQualifiedDeviceIdentity for RootQualifiedDeviceRef {

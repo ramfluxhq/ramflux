@@ -7,6 +7,15 @@ use crate::StorageError;
 use rusqlite::params;
 use serde_json::{Value, json};
 impl AccountDb {
+    /// Read metadata only for an identity authenticated by the caller's trust boundary.
+    /// # Errors
+    /// Returns storage or decoding errors. This never performs a bare-name lookup.
+    pub fn client_device_record(
+        &self,
+        device: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Option<Value>, StorageError> {
+        self.device_record(device.storage_key())
+    }
     pub(super) fn device_record(&self, address: &str) -> Result<Option<Value>, StorageError> {
         if let Some((root, device)) = ramflux_protocol::parse_qualified_device_id(address)? {
             if let Some(row) = self.load_actor_state(&format!("directory/device/{address}"))? {

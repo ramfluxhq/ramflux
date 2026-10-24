@@ -166,6 +166,8 @@ where
                 Err(error) => {
                     tracing::warn!(
                         error = %error,
+                        method = %request.method,
+                        path = %request.path,
                         gateway_addr = %config.gateway_addr,
                         tcp_gateway_addr = %config.tcp_gateway_addr.unwrap_or(config.gateway_addr),
                         "gateway QUIC request unavailable; falling back to TCP-TLS"

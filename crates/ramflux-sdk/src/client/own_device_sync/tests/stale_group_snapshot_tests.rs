@@ -55,7 +55,7 @@ fn finish(
     Ok(())
 }
 #[test]
-fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> Result<(), SdkError>
+fn stale_snapshot_preserves_removed_members_and_retired_pins_after_reopen() -> Result<(), SdkError>
 {
     let (source, sr, mut target, tr, history) = setup("stale-member")?;
     target.import_own_device_history_bundle(
@@ -95,8 +95,7 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
         &target.peer_device_identity("bob", "bob")?,
     )?;
     let epoch = target.group_state("g")?.group_epoch;
-    let key =
-        db.group_member_device_key("g", &bob_identity)?.ok_or(SdkError::IdentityRootMissing)?;
+    assert!(db.group_member_device_key("g", &bob_identity)?.is_none());
     drop(target.active_account_db.take());
     target.unlock_account("acct", b"own-device-sync-test")?;
     target.import_own_device_history_bundle(
@@ -106,7 +105,7 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
     assert_eq!(target.group_state("g")?.group_epoch, epoch);
     assert!(target.account_db()?.group_member_role_metadata("g", "bob")?.is_none());
     assert!(target.account_db()?.group_member_key_binding("g", &bob_identity)?.is_none());
-    assert_eq!(target.account_db()?.group_member_device_key("g", &bob_identity)?, Some(key));
+    assert_eq!(target.account_db()?.group_member_device_key("g", &bob_identity)?, None);
     assert!(target.require_group_sender_pin("g", "bob", &bob_identity).is_err());
     let after = member_packet(&bob, "after-removal", &bob_root)?;
     assert!(target.authenticated_envelope_sender(&after).is_ok());

@@ -17,7 +17,7 @@ pub(crate) fn submit_envelope(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let source = state.authenticated_envelope_source(&envelope)?;
+    let source = state.authenticated_envelope_source_durable(&envelope, store)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at
@@ -81,7 +81,7 @@ pub(crate) async fn submit_envelope_async(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let source = state.authenticated_envelope_source(&envelope)?;
+    let source = state.authenticated_envelope_source_durable(&envelope, store)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at
@@ -210,7 +210,7 @@ pub(crate) fn own_device_fanout(
         .ok_or_else(|| anyhow::anyhow!("fan-out envelope ttl overflows replay expiry"))?;
     store.record_fanout_increment(
         &ramflux_node_core::envelope_replay_tuple_key(
-            &state.authenticated_envelope_source(&request.envelope)?,
+            &state.authenticated_envelope_source_durable(&request.envelope, store)?,
             &request.envelope,
         ),
         replay_expires_at,

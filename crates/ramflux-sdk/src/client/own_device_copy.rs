@@ -351,8 +351,13 @@ impl RamfluxClient {
             now,
         )?;
         db.write_transaction(|| {
-            if !self.receive_surface_control(
+            // The packet signature and root-signed active set above authenticate this source;
+            // generic envelope signatures are not the own-device packet's signature scheme.
+            let source_identity =
+                self.device_identity_for_root(&root, &entry.envelope.source_device_id)?;
+            if !self.receive_surface_control_from(
                 entry,
+                &source_identity,
                 &context.conversation,
                 context.group.as_deref(),
                 &body,

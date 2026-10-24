@@ -62,30 +62,38 @@ pub(crate) fn set_failure_policy(
         .map(|g| g.group_id);
     let group =
         opened.as_ref().and_then(|o| o.routing.group_id.as_deref()).or(legacy_group.as_deref());
+    let db = client.account_db()?;
     let related = if let Some(group) = group {
-        client
-            .group_state(group)
-            .is_ok_and(|state| state.members.contains(&entry.envelope.source_device_id))
+        verified_source.as_ref().is_some_and(|source| {
+            db.has_root_bound_group_membership(group, source).unwrap_or(false)
+        })
     } else {
-        verified_source
-            .as_ref()
-            .map(|source| {
-                client.pair_recovery_pending(&client.local_device_identity(local)?, source)
-            })
-            .transpose()?
+        verified_source.as_ref().is_some_and(|source| {
+            client
+                .local_device_identity(local)
+                .and_then(|local| client.pair_recovery_pending(&local, source))
+                .unwrap_or(false)
+        }) || client
+            .friend_link_peer_is_accepted(&entry.envelope.source_principal_id)
             .unwrap_or(false)
-            || client.friend_link_peer_is_accepted(&entry.envelope.source_principal_id)?
             || client
                 .device_branch
                 .as_ref()
                 .is_some_and(|b| b.principal_id == entry.envelope.source_principal_id)
     };
-    let missing_manifest = client
-        .account_db()?
-        .client_record("device", &entry.envelope.source_device_id)?
+    // A failed cache lookup is a dependency miss, not a second failure that wedges the inbox.
+    let missing_manifest = verified_source
+        .as_ref()
+        .and_then(|source| db.client_device_record(source).ok().flatten())
         .is_none_or(|record| record.get("x25519_identity_public").is_none());
     let (class, subject) = if !authenticated || missing_manifest {
-        ("manifest", entry.envelope.source_device_id.as_str())
+        (
+            "manifest",
+            verified_source.as_ref().map_or(
+                entry.envelope.source_device_id.as_str(),
+                ramflux_crypto::RootQualifiedDeviceRef::storage_key,
+            ),
+        )
     } else if let Some(group) = group {
         ("group", group)
     } else {

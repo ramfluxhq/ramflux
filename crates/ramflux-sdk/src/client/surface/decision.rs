@@ -42,10 +42,8 @@ impl RamfluxClient {
         {
             return Ok(Outcome::rejected(json!({"code":"invalid_action_executor"})));
         }
-        let signer = self
-            .account_db()?
-            .client_record("device", &original.sender_device_id)?
-            .ok_or_else(|| invalid("original action signer has no verified device record"))?;
+        let signer =
+            self.surface_signer_record(&original.sender_principal_id, &original.sender_device_id)?;
         let principal = signer["principal_id"]
             .as_str()
             .ok_or_else(|| invalid("original action owner missing"))?;

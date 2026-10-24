@@ -38,6 +38,20 @@ pub(crate) async fn fetch(
     ramflux_transport::write_gateway_session_json(&mut **send, &frame).await?;
     Ok(())
 }
+pub(crate) fn registration_forwarding_failure(
+    error: &dyn std::fmt::Display,
+) -> ramflux_transport::GatewayQuicResponse {
+    tracing::warn!(%error, stage="identity_registration_forward", "gateway registration forwarding failed");
+    ramflux_transport::GatewayQuicResponse {
+        status: 503,
+        body: serde_json::json!(ramflux_protocol::IdentityRegistrationFailure {
+            error: ramflux_protocol::IdentityRegistrationFailureBody {
+                reason_code: ramflux_protocol::IdentityDirectoryReason::RegistrationUnavailable
+            }
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

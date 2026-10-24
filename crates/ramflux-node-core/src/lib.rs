@@ -10,6 +10,7 @@ mod federation_delivery;
 mod federation_state;
 mod federation_store;
 mod federation_types;
+mod foreign_device_heads;
 mod franking;
 mod gateway_auth;
 mod gateway_frames;

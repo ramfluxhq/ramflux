@@ -38,6 +38,7 @@ impl AccountDb {
         epoch: u64,
     ) -> Result<(), StorageError> {
         self.connection.execute("UPDATE group_member_projection SET active=0,removed_epoch=?3,updated_at=?4 WHERE group_id=?1 AND member_id=?2 AND active=1 AND EXISTS(SELECT 1 FROM group_projection WHERE group_id=?1 AND group_epoch=?3)",params![group,member,epoch,self.now_unix()])?;
+        self.archive_removed_group_pin(group, member)?;
         Ok(())
     }
     /// Records a skipped restore item without retaining keys or decrypted message contents.

@@ -201,6 +201,10 @@ fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> Te
     c = b1.sign_surface_carrier(c)?;
     let db = b2.account_db()?;
     let mut record = db.client_record("device", "author-device")?.ok_or("device")?;
+    db.remove_actor_state(&format!(
+        "directory/device/{}",
+        b1.owned_device_identity()?.storage_key()
+    ))?;
     record["principal_commitment"] = json!("another-root");
     db.persist_client_record("device", "author-device", &record)?;
     assert!(own_forward(b1, b2, &c).is_err());

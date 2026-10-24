@@ -640,6 +640,36 @@ impl RouterRedbStore {
         Ok(())
     }
 
+    /// Atomically commit registration authority, its replay receipt, and its bound session.
+    /// # Errors
+    /// Returns serialization or durable storage errors without a partial admission.
+    pub(crate) fn record_registration_admission(
+        &self,
+        registry: &IdentityRegistry,
+        session: &SessionDescriptor,
+    ) -> Result<(), NodeCoreError> {
+        let identity_bytes = serialize_value(registry)?;
+        let session_bytes = serialize_value(session)?;
+        let txn = self.db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        {
+            let mut snapshots = txn
+                .open_table(ROUTER_SNAPSHOT_TABLE)
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            snapshots
+                .insert(ROUTER_IDENTITY_REGISTRY_KEY, identity_bytes.as_slice())
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            let mut sessions = txn
+                .open_table(ROUTER_SESSION_ENTRY_TABLE)
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            sessions
+                .insert(session.target_delivery_id.as_str(), session_bytes.as_slice())
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        }
+        txn.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Number of successful authority snapshot writes by this store instance (diagnostics).
     #[must_use]
     pub fn identity_registry_write_count(&self) -> u64 {

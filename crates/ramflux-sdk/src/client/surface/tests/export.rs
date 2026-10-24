@@ -113,9 +113,11 @@ fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundre
         f.author.account_db()?.surface_recent_records::<Value>(&prefix, None, 129)?.len(),
         128
     );
+    // Retain root-verified key/set evidence but deliberately remove the forwardable manifest.
+    f.author.account_db()?.remove_actor_state("identity/manifest/human")?;
     let exported = f.author.own_surface_history_export(None)?;
     assert_eq!(exported.checkpoints.len(), 1);
-    // This fixture has only verified key records, without forwardable full directory manifests.
+    // The complete root proof remains cached, but this export has no forwardable directory manifest.
     // Every retained decision is examined and its explicit omission is recorded, including 101..128.
     assert_eq!(exported.metadata.skipped.get("action_attestation_unavailable"), Some(&128));
     assert!(!exported.metadata.truncated);
@@ -128,46 +130,10 @@ fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundre
 }
 
 fn cache_human_manifest(f: &Fixture) -> TestResult {
-    let root = f.human.identity_root.as_ref().ok_or("root")?;
-    let branch = f.human.device_branch.as_ref().ok_or("device")?;
-    let root_public_key =
-        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let principal_commitment = crate::identity_root_public_key_commitment(&root_public_key)?;
-    let branch_public_key =
-        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
-    let branch_proof = ramflux_crypto::authorize_device_branch(
-        root,
-        branch,
-        "ramflux-node",
-        vec!["device.delivery.bind".into()],
-        1_700_000_000,
-        4_000_000_000,
-    )?;
-    let identity = ramflux_crypto::X25519KeyPair::from_seed([44; 32]);
-    let signed = ramflux_crypto::X25519KeyPair::from_seed([45; 32]);
-    let prekey_bundle =
-        ramflux_crypto::create_prekey_bundle(branch, &identity, "signed-key", &signed, None, None)?;
-    let mut manifest = crate::prekey::SdkDeviceManifestResponse {
-        signed_device_set: None,
-        principal_id: "human".into(),
-        principal_commitment: principal_commitment.clone(),
-        root_public_key,
-        devices: vec![crate::prekey::SdkDeviceManifestEntry {
-            principal_id: "human".into(),
-            principal_commitment: principal_commitment.clone(),
-            device_id: branch.device_id.clone(),
-            device_epoch: 1,
-            branch_public_key,
-            target_delivery_id: "target-human".into(),
-            branch_proof,
-            prekey_bundle,
-            branch_authorized_event_id: "device.branch_authorized:human-device:1".into(),
-        }],
-    };
-    crate::client::identity_authority::test_support::sign_manifest(root, &mut manifest, 1)?;
+    let manifest = crate::client::identity_authority::test_support::public_manifest(&f.human)?;
     RamfluxClient::verify_device_manifest_json(
         serde_json::to_value(&manifest)?,
-        &principal_commitment,
+        &manifest.principal_commitment,
     )?;
     f.author.account_db()?.persist_actor_state("identity/manifest/human", &manifest)?;
     Ok(())

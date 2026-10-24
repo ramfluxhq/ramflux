@@ -219,3 +219,26 @@ fn retry_keeps_the_signed_snapshot_after_the_authored_version_has_advanced() -> 
     assert!(f.author.reuse_authored_surface(&candidate).is_err());
     Ok(())
 }
+
+#[test]
+fn colliding_peer_names_do_not_block_the_original_surface_signer() -> TestResult {
+    let f = Fixture::new()?;
+    let mut outsider = client(&f.root.join("outsider"), "outsider", 61)?;
+    outsider.create_device_branch("outsider", "author-device", 1, [62; 32]);
+    f.human.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&outsider)?,
+    )?;
+    let good =
+        carrier(&f.author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
+    f.human.verify_surface_carrier(&good, "author", "author-device")?;
+    assert!(project(&f.human, &good, "honest")?.accepted);
+    let other = carrier(
+        &outsider,
+        PayloadKind::Event,
+        "outsider",
+        &event(1, C::CreateSurface(snapshot()))?,
+    )?;
+    f.human.verify_surface_carrier(&other, "outsider", "author-device")?;
+    assert!(!project(&f.human, &other, "outsider")?.accepted);
+    Ok(())
+}

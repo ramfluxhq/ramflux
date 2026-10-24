@@ -392,3 +392,67 @@ fn durable_finalize_and_concurrent_publication_keep_lifecycle_authority_and_clea
     std::fs::remove_file(file)?;
     Ok(())
 }
+
+#[test]
+fn current_device_keys_cannot_overwrite_a_legacy_name_that_looks_like_the_old_composite_key()
+-> TestResult {
+    let alice = Fixture::new()?;
+    let legacy_name = format!("{}:{}", alice.request.principal_commitment, alice.device.device_id);
+    let bob = named("legacy-bob", &legacy_name, 81)?;
+    let mut registry = IdentityRegistry::new();
+    registry.register_identity(&bob.request)?;
+    let mut value = serde_json::to_value(registry)?;
+    let devices = value["devices"].as_object_mut().ok_or("devices")?;
+    let key = devices.keys().next().ok_or("bob key")?.clone();
+    let record = devices.remove(&key).ok_or("bob record")?;
+    devices.insert(legacy_name.clone(), record.clone());
+    let mut registry: IdentityRegistry = serde_json::from_value(value)?;
+    registry.register_identity(&alice.request)?;
+    assert_eq!(serde_json::to_value(registry)?["devices"][&legacy_name], record);
+    Ok(())
+}
+
+#[test]
+fn failed_registration_never_consumes_the_proof_or_commits_partial_authority() -> TestResult {
+    let f = Fixture::new()?;
+    let store_path = path()?;
+    let store = RouterRedbStore::open(&store_path)?;
+    let router = RouterCore::new();
+    let mut forged = f.request.clone();
+    forged.proof.signature = encode_base64url([0; 64]);
+    assert!(router.register_identity_durable(&forged, &store).is_err());
+    assert_eq!(store.identity_registry_write_count(), 0);
+    assert!(router.signed_device_set(&f.request.principal_commitment).is_none());
+    // A session transition can fail after the root signature was successfully verified.
+    router.upsert_session(SessionDescriptor {
+        target_delivery_id: f.request.target_delivery_id.clone(),
+        device_id: f.device.device_id.clone(),
+        gateway_id: "gateway".into(),
+        session_id: "newer-session".into(),
+        device_epoch: 1,
+        session_seq: 9,
+        last_cursor: None,
+        push_alias_hash: None,
+        lifecycle: SessionLifecycle::Live,
+    })?;
+    assert!(matches!(
+        router.register_identity_durable(&f.request, &store),
+        Err(NodeCoreError::StaleSessionUpdate { .. })
+    ));
+    assert_eq!(store.identity_registry_write_count(), 0);
+    assert!(router.signed_device_set(&f.request.principal_commitment).is_none());
+    let mut retry = f.request.clone();
+    retry.session_id = "newer-session".into();
+    router.register_identity_durable(&retry, &store)?;
+    assert_eq!(store.identity_registry_write_count(), 1);
+    drop(router);
+    drop(store);
+    let reopened = RouterRedbStore::open(&store_path)?;
+    let router = reopened.load_router()?.ok_or("missing admitted session")?;
+    assert_eq!(router.session(&retry.target_delivery_id).ok_or("session")?.session_seq, 9);
+    assert!(router.register_identity_durable(&retry, &reopened).is_err());
+    drop(router);
+    drop(reopened);
+    std::fs::remove_file(store_path)?;
+    Ok(())
+}

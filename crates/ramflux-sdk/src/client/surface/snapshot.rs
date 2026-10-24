@@ -192,10 +192,8 @@ impl RamfluxClient {
                 return Err(invalid("snapshot executor changed"));
             }
         } else if proof.author_device_id != carrier.sender_device_id {
-            let owner = self
-                .account_db()?
-                .client_record("device", &proof.author_device_id)?
-                .ok_or_else(|| invalid("snapshot executor has no verified device record"))?;
+            let owner =
+                self.surface_signer_record(&carrier.author_principal_id, &proof.author_device_id)?;
             if owner["principal_id"] != carrier.author_principal_id {
                 return Err(invalid("snapshot executor principal mismatch"));
             }

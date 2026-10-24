@@ -892,7 +892,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

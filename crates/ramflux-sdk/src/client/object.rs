@@ -164,10 +164,7 @@ impl RamfluxClient {
             owner_branch,
             object.object_id.clone(),
             object.manifest_hash.clone(),
-            ramflux_crypto::blake3_256_base64url(
-                "ramflux.object_relay.recipient_device.v1",
-                recipient_device_id.as_bytes(),
-            ),
+            recipient_device_hash(&self.device_identity(&Self::qualified_recipient(message)?)?),
             vec![
                 ramflux_protocol::ObjectRelayCapability::Get,
                 ramflux_protocol::ObjectRelayCapability::Ack,
@@ -512,6 +509,7 @@ impl RamfluxClient {
         verify_recipient_object_access_grant(
             attachment.access_grant.as_ref(),
             &branch,
+            &self.owned_device_identity()?,
             &attachment.object_id,
             &attachment.manifest_hash,
             u64::try_from(now_unix_timestamp()).unwrap_or(0),
@@ -599,6 +597,7 @@ impl RamfluxClient {
         verify_recipient_object_access_grant(
             attachment.access_grant.as_ref(),
             &branch,
+            &self.owned_device_identity()?,
             &attachment.object_id,
             &attachment.manifest_hash,
             u64::try_from(now_unix_timestamp()).unwrap_or(0),
@@ -926,6 +925,7 @@ impl RamfluxClient {
         );
         let issue_body = build_v3_owner_session_token_issue_body(
             &branch,
+            &self.owned_device_identity()?,
             &object,
             &chunk_id,
             ramflux_protocol::ObjectRelayCapability::Tombstone,
@@ -1817,6 +1817,7 @@ async fn fetch_dm_attachment_chunk_via_relay_quic(
         attachment.access_grant.as_ref(),
         attachment,
         ctx.branch,
+        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &chunk_id,
         issued_at,
         expires_at,
@@ -1892,6 +1893,7 @@ async fn ack_dm_attachment_chunk_via_relay_quic(
         attachment.access_grant.as_ref(),
         attachment,
         ctx.branch,
+        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &chunk_id,
         issued_at,
         expires_at,
@@ -2052,7 +2054,9 @@ async fn get_object_chunk_via_relay_quic(
         branch,
         object.object_id.clone(),
         object.manifest_hash.clone(),
-        recipient_device_hash(branch),
+        recipient_device_hash(
+            engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        ),
         vec![ramflux_protocol::ObjectRelayCapability::Get],
         issued_at,
         expires_at,
@@ -2060,6 +2064,7 @@ async fn get_object_chunk_via_relay_quic(
     let issue_body = build_v3_grant_token_issue_body(
         &grant,
         branch,
+        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &object.object_id,
         &object.manifest_hash,
         &chunk_id,
@@ -2147,7 +2152,9 @@ async fn ack_object_chunk_via_relay_quic(
         branch,
         object.object_id.clone(),
         object.manifest_hash.clone(),
-        recipient_device_hash(branch),
+        recipient_device_hash(
+            engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        ),
         vec![ramflux_protocol::ObjectRelayCapability::Ack],
         issued_at,
         expires_at,
@@ -2155,6 +2162,7 @@ async fn ack_object_chunk_via_relay_quic(
     let issue_body = build_v3_grant_token_issue_body(
         &grant,
         branch,
+        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &object.object_id,
         &object.manifest_hash,
         &chunk_id,
@@ -2256,6 +2264,7 @@ async fn put_object_chunk_via_relay_quic(
     );
     let issue_body = build_v3_owner_session_token_issue_body(
         branch,
+        engine.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         object,
         &chunk_id,
         ramflux_protocol::ObjectRelayCapability::Put,

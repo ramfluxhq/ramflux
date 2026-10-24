@@ -301,7 +301,10 @@ fn a_foreign_root_cannot_take_a_device_or_delivery_alias_and_revoke_its_owner()
     legacy.as_object_mut().ok_or("registry")?.remove("delivery_root_bindings");
     let mut restored: IdentityRegistry = serde_json::from_value(legacy)?;
     restored.remove_principal_metadata("alice");
-    assert!(restored.register_identity(&takeover).is_err());
+    let mut reused_alias =
+        registration_request("post-purge", "fresh-device", 11, None, "new-owner")?;
+    reused_alias.target_delivery_id.clone_from(&alice.target_delivery_id);
+    assert!(matches!(restored.register_identity(&reused_alias), Err(NodeCoreError::DeviceIdTaken)));
     assert_eq!(
         restored
             .device_manifest(&mallory.principal_commitment)

@@ -341,6 +341,7 @@ pub(crate) async fn establish_gateway_session(
         device_id: open.device_id.clone(),
         target_delivery_id: open.target_delivery_id.clone(),
         branch_public_key: registered_auth_key.branch_public_key,
+        device_epoch: registered_auth_key.device_epoch,
     })
 }
 
@@ -418,7 +419,12 @@ pub(crate) async fn run_gateway_session_loop(
                     context.remote_addr.ip(),
                 )?;
                 let response: serde_json::Value =
-                    router_post_json(&context.router, "/mvp1/identity/register", &request)?;
+                    match router_post_json(&context.router, "/mvp1/identity/register", &request) {
+                        Ok(response) => response,
+                        Err(error) => {
+                            crate::principal_directory::registration_forwarding_failure(&error).body
+                        }
+                    };
                 let frame = if let Ok(error) = serde_json::from_value::<
                     ramflux_protocol::IdentityRegistrationFailure,
                 >(response.clone())
@@ -628,9 +634,26 @@ fn issue_relay_token_v3_for_authenticated_session(
     let issuer = crate::object_issue::GatewayV3IssuerConfig { attestation_seed, certificate };
     crate::object_issue::issue_object_relay_token_v3(
         Some(&issuer),
-        request.body.clone(),
+        bind_v3_requester_to_session(runtime, request.body.clone()),
         ramflux_node_core::now_unix_seconds(),
     )
+}
+
+pub(crate) fn bind_v3_requester_to_session(
+    runtime: &GatewaySessionRuntime,
+    mut body: ramflux_node_core::RelayTokenV3IssueRequest,
+) -> ramflux_node_core::RelayTokenV3IssueRequest {
+    runtime.source_identity.device_id().clone_into(&mut body.requester_device_id);
+    body.requester_device_hash = runtime.source_identity.object_relay_grantee_hash();
+    body.requester_public_key.clone_from(&runtime.branch_public_key);
+    body.requester_device_epoch = runtime.device_epoch;
+    if body.authorization_kind == ramflux_node_core::RelayAuthorizationKind::OwnerSession {
+        body.owner_signing_key_id.clone_from(&runtime.device_id);
+        body.owner_public_key.clone_from(&runtime.branch_public_key);
+        body.owner_principal_id.clone_from(&runtime.principal_id);
+        body.owner_device_epoch = runtime.device_epoch;
+    }
+    body
 }
 
 fn load_gateway_v3_issuer_material()
@@ -1440,6 +1463,7 @@ mod tests {
             device_id: "device_a".to_owned(),
             target_delivery_id: "target_a".to_owned(),
             branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
+            device_epoch: 1,
         };
         let mut fanout = ramflux_node_core::GatewayOwnDeviceFanoutFrame {
             signed_request: test_signed_request("device_a"),
@@ -1725,6 +1749,7 @@ mod tests {
             principal_id: branch.principal_id.clone(),
             device_id: branch.device_id.clone(),
             target_delivery_id: "target_a".to_owned(),
+            device_epoch: 1,
             branch_public_key: ramflux_protocol::encode_base64url(
                 branch.signing_key.verifying_key().to_bytes(),
             ),

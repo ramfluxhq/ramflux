@@ -62,6 +62,16 @@ impl RamfluxClient {
         if self.device_branch.as_ref().is_some_and(|b| b.principal_id == principal) {
             return self.owned_account_device_identity(name);
         }
+        if let Some(root) = self
+            .account_db()?
+            .client_record("identity", principal)?
+            .and_then(|record| record["contact_identity_commitment"].as_str().map(str::to_owned))
+        {
+            if self.observed_device_set(&root)?.is_none_or(|set| set.principal_id != principal) {
+                return Err(invalid("peer signed-set principal mismatch"));
+            }
+            return self.device_identity_for_root(&root, name);
+        }
         let manifest: crate::prekey::SdkDeviceManifestResponse = self
             .account_db()?
             .load_actor_state(&format!("identity/manifest/{principal}"))?

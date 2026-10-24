@@ -122,6 +122,49 @@ mod tests {
     }
 
     #[test]
+    fn requester_claims_are_derived_from_the_authenticated_root_and_branch() -> anyhow::Result<()> {
+        let now = 1_000_000;
+        let config = issuer_config(now)?;
+        let honest_root = ramflux_crypto::create_identity_root("honest", [1; 32]);
+        let attacker_root = ramflux_crypto::create_identity_root("attacker", [2; 32]);
+        let honest = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            &honest_root,
+            "shared",
+        )?;
+        let attacker = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            &attacker_root,
+            "shared",
+        )?;
+        let runtime = crate::GatewaySessionRuntime {
+            source_identity: attacker.clone(),
+            session_id: "session".into(),
+            resume_token: "resume".into(),
+            principal_id: "attacker".into(),
+            device_id: "shared".into(),
+            target_delivery_id: "delivery".into(),
+            branch_public_key: ramflux_crypto::public_key_base64url_from_seed([3; 32]),
+            device_epoch: 7,
+        };
+        let mut request = issue_request(
+            now,
+            ramflux_node_core::ObjectRelayCapability::Get,
+            ramflux_node_core::RelayAuthorizationKind::OwnerGrant,
+            config.certificate.clone(),
+        );
+        request.requester_device_id = "shared".into();
+        request.requester_device_hash = honest.object_relay_grantee_hash();
+        request.requester_public_key = "forged".into();
+        request.requester_device_epoch = 999;
+        let bound = crate::session::bind_v3_requester_to_session(&runtime, request);
+        let token = issue_object_relay_token_v3(Some(&config), bound, now)?;
+        assert_eq!(token.requester_device_hash, attacker.object_relay_grantee_hash());
+        assert_ne!(token.requester_device_hash, honest.object_relay_grantee_hash());
+        assert_eq!(token.requester_public_key, runtime.branch_public_key);
+        assert_eq!(token.requester_device_epoch, 7);
+        Ok(())
+    }
+
+    #[test]
     fn adapter_issues_valid_token_and_forces_gateway_identity() -> anyhow::Result<()> {
         let now = 1_000_000;
         let config = issuer_config(now)?;

@@ -36,4 +36,47 @@ impl AccountDb {
         self.connection.execute("DELETE FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 AND principal_commitment IS NULL",params![group,name])?;
         Ok(())
     }
+    /// Whether a verified roster binds this exact root/device, for retry relationship budgets.
+    /// This does not authenticate a signature or substitute for a pinned member key.
+    /// # Errors
+    /// Returns database errors.
+    pub fn has_root_bound_group_membership(
+        &self,
+        group: &str,
+        device: &RootQualifiedDeviceRef,
+    ) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND principal_commitment=?3 AND active=1)",params![group,device.device_id(),device.root_commitment()],|row|row.get(0))?)
+    }
+    /// Import membership provenance from an authenticated roster, without installing a device key.
+    /// # Errors
+    /// Rejects an existing slot bound to a different root and returns storage errors.
+    pub fn upsert_root_bound_group_member_snapshot(
+        &self,
+        group: &str,
+        device: &RootQualifiedDeviceRef,
+        role: &str,
+        epoch: u64,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            let conflict:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1 AND principal_commitment IS NOT NULL AND principal_commitment<>?3)",params![group,device.device_id(),device.root_commitment()],|row|row.get(0))?;
+            if conflict { return Err(StorageError::GroupPermissionDenied); }
+            self.upsert_group_member_snapshot(group,device.device_id(),role,epoch)?;
+            self.connection.execute("UPDATE group_member_projection SET principal_commitment=?3 WHERE group_id=?1 AND member_id=?2",params![group,device.device_id(),device.root_commitment()])?;
+            Ok(())
+        })
+    }
+    pub(super) fn archive_removed_group_pin(
+        &self,
+        group: &str,
+        name: &str,
+    ) -> Result<(), StorageError> {
+        self.connection.execute_batch("CREATE TABLE IF NOT EXISTS legacy_group_member_device_key AS SELECT * FROM group_member_device_key WHERE 0")?;
+        let predicate = "group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 AND EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=?1 AND m.member_id=?2 AND m.active=0 AND m.principal_commitment=group_member_device_key.principal_commitment)";
+        self.connection.execute(&format!("INSERT INTO legacy_group_member_device_key SELECT * FROM group_member_device_key WHERE {predicate}"),params![group,name])?;
+        self.connection.execute(
+            &format!("DELETE FROM group_member_device_key WHERE {predicate}"),
+            params![group, name],
+        )?;
+        Ok(())
+    }
 }

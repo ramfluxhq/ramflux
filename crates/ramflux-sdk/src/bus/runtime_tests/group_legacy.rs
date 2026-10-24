@@ -639,7 +639,12 @@ fn prepare_legacy_group_membership(
             "owner",
             1,
         )?;
-        receiver.account_db()?.upsert_group_member_snapshot("g", "device-alice", "member", 2)?;
+        receiver.account_db()?.upsert_root_bound_group_member_snapshot(
+            "g",
+            &sender.owned_device_identity()?,
+            "member",
+            2,
+        )?;
     }
 
     Ok(())

@@ -794,6 +794,14 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
         notes: "literal member names indexed beside root-qualified key pins",
         sql: "ALTER TABLE group_member_device_key ADD COLUMN raw_device_id TEXT; UPDATE group_member_device_key SET raw_device_id=member_id; CREATE INDEX idx_group_device_raw ON group_member_device_key(group_id,raw_device_id);",
     },
+    AccountMigration {
+        schema_version: 10,
+        app_version: "v1-root-membership",
+        checksum: "2026-10-25-root-qualified-membership-v1",
+        notes: "membership and key pins must agree on the principal root",
+        sql: "ALTER TABLE group_member_projection ADD COLUMN principal_commitment TEXT;
+            UPDATE group_member_projection SET principal_commitment=(SELECT MIN(k.principal_commitment) FROM group_member_device_key k WHERE k.group_id=group_member_projection.group_id AND COALESCE(k.raw_device_id,k.member_id)=group_member_projection.member_id HAVING COUNT(*)=1 AND COUNT(k.principal_commitment)=1);",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {
@@ -808,6 +816,14 @@ pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageE
         );",
     )?;
     for migration in ACCOUNT_MIGRATIONS {
+        if migration.schema_version == 10 {
+            ensure_column(
+                connection,
+                "group_member_device_key",
+                "principal_commitment",
+                "principal_commitment TEXT",
+            )?;
+        }
         apply_account_migration(connection, migration)?;
     }
     ensure_legacy_columns(connection)?;

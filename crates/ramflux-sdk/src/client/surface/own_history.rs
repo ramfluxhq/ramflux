@@ -222,9 +222,11 @@ impl RamfluxClient {
                     .context
                     .as_ref()
                     .ok_or_else(|| invalid("own history context missing"))?;
+                let source_identity =
+                    self.owned_account_device_identity(&envelope.source_device_id)?;
                 let source = self
                     .account_db()?
-                    .client_record("device", &envelope.source_device_id)?
+                    .client_device_record(&source_identity)?
                     .ok_or_else(|| invalid("own history source missing"))?;
                 let principal = source["principal_id"]
                     .as_str()
@@ -254,8 +256,9 @@ impl RamfluxClient {
                         payload_hash: String::new(),
                     },
                 };
-                self.receive_surface_control(
+                self.receive_surface_control_from(
                     &entry,
+                    &source_identity,
                     &context.conversation_id,
                     context.group.as_ref().map(|g| g.group_id.as_str()),
                     &control.bytes()?,

@@ -220,8 +220,9 @@ impl IdentityRegistry {
         let binding = request.proof.key_binding.as_ref().ok_or_else(|| {
             reject("legacy branch proof is read-only; root-bound authorization required")
         })?;
-        let root = ramflux_crypto::verifying_key_from_base64url(&request.root_public_key)
-            .map_err(|error| crypto(&error))?;
+        let root = ramflux_crypto::verifying_key_from_base64url(&request.root_public_key).map_err(
+            |error| NodeCoreError::ItestHttp(format!("registration branch authorization: {error}")),
+        )?;
         let expected = DeviceKeyBinding {
             version: 2,
             principal_kind: binding.principal_kind,
@@ -245,6 +246,9 @@ impl IdentityRegistry {
             self.apply_signed_device_set(&DeviceSetPublishRequest {
                 root_public_key: request.root_public_key.clone(),
                 record: record.clone(),
+            })
+            .map_err(|error| {
+                NodeCoreError::ItestHttp(format!("registration device set: {error}"))
             })?;
         }
         let set = self
