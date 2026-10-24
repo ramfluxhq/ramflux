@@ -18,7 +18,19 @@ pub(crate) fn submit_envelope(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let source = state.authenticated_envelope_source_from(&envelope, Some(store), origin)?;
+    let source = match state.authenticated_envelope_source_from(&envelope, Some(store), origin) {
+        Ok(source) => source,
+        Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
+            return Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                outcome: "rejected_capacity".into(),
+                target_delivery_id: envelope.target_delivery_id,
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at
@@ -83,7 +95,19 @@ pub(crate) async fn submit_envelope_async(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let source = state.authenticated_envelope_source_from(&envelope, Some(store), origin)?;
+    let source = match state.authenticated_envelope_source_from(&envelope, Some(store), origin) {
+        Ok(source) => source,
+        Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
+            return Ok(ramflux_node_core::EnvelopeSubmitResponse {
+                outcome: "rejected_capacity".into(),
+                target_delivery_id: envelope.target_delivery_id,
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at

@@ -824,7 +824,9 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::Storage(_)
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
-        SdkError::IdentityRootMissing | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,
+        SdkError::IdentityRootMissing | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => {
+            RamfluxErrorCode::AuthFailed
+        }
         SdkError::Transport(error) => match crate::error_policy::transport_code(error) {
             "Unavailable" => RamfluxErrorCode::TransportUnavailable,
             "Unauthenticated" | "TransportSecurity" => RamfluxErrorCode::AuthFailed,

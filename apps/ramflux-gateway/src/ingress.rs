@@ -4,9 +4,34 @@
 //! One bounded, strict and authenticated-admission entry for every gateway framed runtime.
 pub(crate) enum Ingress {
     Session(Box<ramflux_node_core::GatewayClientFrame>),
+    Rejected(serde_json::Value),
     Request(ramflux_transport::GatewayQuicRequest),
 }
 pub(crate) fn parse(bytes: &[u8], source: std::net::IpAddr) -> anyhow::Result<Ingress> {
+    match parse_inner(bytes, source) {
+        Ok(ingress) => Ok(ingress),
+        Err(error) => registration_rejection(bytes)
+            .map_or(Err(error), |response| Ok(Ingress::Rejected(response))),
+    }
+}
+/// Lenient decoding classifies a rejected frame only; it can never admit any request.
+pub(crate) fn registration_rejection(bytes: &[u8]) -> Option<serde_json::Value> {
+    if bytes.len() > 1024 * 1024 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let reason_code = ramflux_protocol::IdentityDirectoryReason::InvalidRegistration;
+    if value["frame_type"] == "identity_register" {
+        return Some(serde_json::json!(
+            ramflux_node_core::GatewayServerFrame::IdentityRegistrationRejected { reason_code }
+        ));
+    }
+    if value["method"] == "POST" && value["path"] == "/mvp1/identity/register" {
+        return Some(serde_json::json!(crate::registration::rejected(reason_code)));
+    }
+    None
+}
+fn parse_inner(bytes: &[u8], source: std::net::IpAddr) -> anyhow::Result<Ingress> {
     if bytes.len() > 1024 * 1024 {
         anyhow::bail!("gateway frame exceeds byte budget");
     }

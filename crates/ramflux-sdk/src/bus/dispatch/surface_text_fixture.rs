@@ -16,6 +16,7 @@ pub(in crate::bus::dispatch) struct RecordingGateway {
     pub fail_after: Option<usize>,
     pub fail_target: Option<String>,
     pub fail_own_ack: bool,
+    pub prekeys: BTreeMap<String, crate::prekey::SdkPrekeyResponse>,
     pub own: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
     pub frame_lengths: Arc<Mutex<Vec<usize>>>,
     pub delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
@@ -61,6 +62,7 @@ impl RecordingGateway {
             fail_after: None,
             fail_target: None,
             fail_own_ack: false,
+            prekeys: BTreeMap::new(),
             own: Arc::default(),
             frame_lengths: Arc::default(),
             delivered,
@@ -129,14 +131,16 @@ impl GatewaySessionFrameSource for RecordingGateway {
                     self.own_response(fanout)?
                 }
                 Some(GatewayClientFrame::PrekeyFetch { device_id }) => GatewayServerFrame::Prekey {
-                    response: crate::prekey::SdkPrekeyResponse {
-                        target_delivery_id: Some(
-                            device_id.trim_start_matches("device-").to_owned(),
-                        ),
-                        device_id,
-                        bundle: None,
-                        principal_commitment: String::new(),
-                    },
+                    response: self.prekeys.get(&device_id).cloned().unwrap_or_else(|| {
+                        crate::prekey::SdkPrekeyResponse {
+                            target_delivery_id: Some(
+                                device_id.trim_start_matches("device-").to_owned(),
+                            ),
+                            device_id,
+                            bundle: None,
+                            principal_commitment: String::new(),
+                        }
+                    }),
                 },
                 Some(GatewayClientFrame::Resume { .. }) => {
                     GatewayServerFrame::Resume { entries: std::mem::take(&mut self.inbox) }

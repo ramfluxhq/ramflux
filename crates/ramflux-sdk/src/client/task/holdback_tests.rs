@@ -27,8 +27,7 @@ fn four_colluding_peers_cannot_exclude_an_honest_peer_or_the_local_requesters_re
     for index in 0..4u8 {
         let id = format!("peer-{index}");
         let peer = client(&f.root.join(&id), &id, 90 + index * 2)?;
-        let device = peer.device_branch.as_ref().ok_or("device")?;
-        f.human.account_db()?.persist_client_record("device", &device.device_id, &json!({"principal_id":id,"signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())}))?;
+        f.human.persist_identity_directory(&super::own::manifest(&peer)?)?;
         f.human.account_db()?.persist_client_record(
             "conversation",
             &id,

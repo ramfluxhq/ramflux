@@ -27,6 +27,7 @@ pub mod identity_authority;
 pub(crate) mod inbox_failure;
 pub mod mcp_a2ui;
 pub mod object;
+mod own_contact;
 pub(crate) mod own_device_copy;
 mod own_device_group_pins;
 mod own_device_group_restore;

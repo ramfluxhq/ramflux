@@ -185,33 +185,16 @@ pub(crate) fn dispatch_protected_itest_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp1/identity/register") => {
-            let mut registration: ramflux_node_core::IdentityRegisterRequest =
-                serde_json::from_slice(&request.body)?;
-            registration.source_ip_hash.clone_from(&request.source_ip_hash);
-            registration.now = i64::try_from(
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
-            )?;
-            let response: serde_json::Value =
-                match router_post_json(router, "/mvp1/identity/register", &registration) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        crate::principal_directory::registration_forwarding_failure(&error).body
-                    }
-                };
-            let rejected = serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
-                response.clone(),
-            )
-            .is_ok();
-            if !rejected {
-                log_forwarded_identity_registration(
-                    &registration,
-                    &serde_json::from_value(response.clone())?,
-                );
-            }
+            let response = match ramflux_protocol::parse_i_json(&request.body) {
+                Ok(body) => crate::registration::forward(router, body, stream.peer_addr()?.ip()),
+                Err(_) => crate::registration::rejected(
+                    ramflux_protocol::IdentityDirectoryReason::InvalidRegistration,
+                ),
+            };
             ramflux_node_core::write_itest_json_response(
                 stream,
-                if rejected { "409 Conflict" } else { "200 OK" },
-                &response,
+                if response.status == 200 { "200 OK" } else { "409 Conflict" },
+                &response.body,
             )?;
         }
         ("POST", "/mvp6/registration/policy") => {
@@ -319,20 +302,6 @@ fn log_forwarded_envelope(
         target_delivery_id = %envelope.target_delivery_id,
         outcome = %response.outcome,
         "gateway HTTP forwarded envelope to router"
-    );
-}
-
-#[cfg(feature = "itest-http")]
-fn log_forwarded_identity_registration(
-    registration: &ramflux_node_core::IdentityRegisterRequest,
-    response: &ramflux_node_core::IdentityRegistrationResponse,
-) {
-    tracing::info!(
-        principal_id = %registration.proof.principal_id,
-        device_id = %registration.proof.device_id,
-        target_delivery_id = %registration.target_delivery_id,
-        session_bound = response.session_bound,
-        "gateway HTTP forwarded identity registration to router"
     );
 }
 

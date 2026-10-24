@@ -115,7 +115,8 @@ fn account_with_counter(
 ) -> Result<LocalBusAccountState, SdkError> {
     let mut client = RamfluxClient::new();
     client.account_index = index;
-    client.create_identity_root(id, [0x61; 32]);
+    let root_seed = ramflux_crypto::blake3_256("ramflux.test.account.root.v1", id.as_bytes());
+    client.create_identity_root(id, root_seed);
     client.create_device_branch(id, &format!("device-{id}"), 1, [0x62; 32]);
     client.open_account_index(root)?;
     if matches!(client.account_index()?.account(id), Err(StorageError::AccountNotFound(_))) {
@@ -153,7 +154,7 @@ fn account_with_counter(
             device_id: format!("device-{id}"),
             target_delivery_id: "target".to_owned(),
             account_secret: "actor-test-secret".to_owned(),
-            root_seed: [0x61; 32],
+            root_seed,
             device_seed: [0x62; 32],
             client_mode: LocalBusClientMode::AttendedCli,
             gateway: endpoint.clone(),

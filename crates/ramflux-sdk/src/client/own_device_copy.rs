@@ -275,6 +275,26 @@ impl RamfluxClient {
         packet.bytes()?;
         Ok(Some(packet))
     }
+    fn apply_own_device_control(
+        &self,
+        entry: &GatewayInboxEntry,
+        source_identity: &ramflux_crypto::RootQualifiedDeviceRef,
+        context: &PrivateContext,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        if !self.receive_own_contact(body)?
+            && !self.receive_surface_control_from(
+                entry,
+                source_identity,
+                &context.conversation,
+                context.group.as_deref(),
+                body,
+            )?
+        {
+            return Err(invalid("unsupported own-device control"));
+        }
+        Ok(())
+    }
     pub(crate) async fn receive_own_device_message(
         &self,
         gateway: &GatewaySessionConfig,
@@ -355,15 +375,7 @@ impl RamfluxClient {
             // generic envelope signatures are not the own-device packet's signature scheme.
             let source_identity =
                 self.device_identity_for_root(&root, &entry.envelope.source_device_id)?;
-            if !self.receive_surface_control_from(
-                entry,
-                &source_identity,
-                &context.conversation,
-                context.group.as_deref(),
-                &body,
-            )? {
-                return Err(invalid("unsupported own-device control"));
-            }
+            self.apply_own_device_control(entry, &source_identity, &context, &body)?;
             self.commit_inline_pair_key_slot(&slot, &key)?;
             db.persist_actor_state(
                 &receipt_key,

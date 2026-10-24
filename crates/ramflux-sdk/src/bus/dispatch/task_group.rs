@@ -32,7 +32,11 @@ pub(super) async fn plan(
             .ok_or_else(|| invalid("task group member root missing"))?;
         if commitment == account.principal_commitment {
             let own = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            account.client.require_group_sender_pin(group, &own.principal_id, &route.member_id)?;
+            account.client.require_group_sender_pin(
+                group,
+                &own.principal_id,
+                &account.client.device_identity_for_root(commitment, &route.member_id)?,
+            )?;
             continue;
         }
         let verified = if let Some(federation) = &route.federation {
@@ -59,9 +63,10 @@ pub(super) async fn plan(
         account.client.require_group_sender_pin(
             group,
             &verified.principal_id,
-            &verified.device_id,
+            &account.client.device_identity_for_root(commitment, &verified.device_id)?,
         )?;
         targets.push(Target {
+            identity: account.client.device_identity_for_root(commitment, &verified.device_id)?,
             device: verified.device_id,
             delivery: verified.target_delivery_id,
             federation: route.federation,

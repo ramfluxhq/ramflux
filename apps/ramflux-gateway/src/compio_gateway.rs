@@ -142,6 +142,11 @@ async fn handle_gateway_compio_quic_stream(
     let (mut send, mut recv) = stream.split();
     let first_raw = recv.read_frame().await?;
     let first = crate::ingress::parse(&first_raw, remote_addr.ip())?;
+    if let crate::ingress::Ingress::Rejected(response) = first {
+        send.write_json_message(&response).await?;
+        send.finish()?;
+        return Ok(());
+    }
     if let crate::ingress::Ingress::Session(frame) = first {
         let (write_sender, write_receiver) =
             tokio::sync::mpsc::channel(GATEWAY_COMPIO_WRITE_CHANNEL_CAPACITY);

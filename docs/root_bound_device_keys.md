@@ -23,7 +23,7 @@ shape plus `key_binding`; the domain is added by the signing-body encoder.
 `verify_root_bound_branch_proof` compares both advertised keys and the expected
 kind with that binding, then verifies the root signature, audience, capability
 and validity interval. Future issuance is accepted within the documented
-`BRANCH_PROOF_CLOCK_SKEW_SECONDS = 300` second bound; expiry is still enforced. Callers must obtain the expected keys from the bundle and
+`BRANCH_PROOF_CLOCK_SKEW_SECONDS = 300` second bound; expiry is still enforced. New live registrations reject proofs whose signed lifetime exceeds 30 days. Callers must obtain the expected keys from the bundle and
 compare them, rather than treating a generic proof-signature check as key
 validation. The node performs this comparison for registration and prekey writes.
 
@@ -369,3 +369,51 @@ Unattributed legacy invitations need a fresh root-bound invitation unless their
 original persisted root witness can be recovered. A cached manifest is also saved
 under its verified root so replacing a provisional principal alias does not
 reassign historical device references to the alias's new owner.
+
+## Forwarded authority and durable admission bounds
+
+Gateway submissions bind the envelope's principal, literal device and signed root
+claim to the authenticated session. The gateway replaces client-supplied
+`source_device_authority` with its verified session authority. Routers accept
+forwarded authority for an unregistered foreign sender only from an authenticated
+federation mesh peer. A gateway cannot use that fallback to introduce a foreign
+identity.
+
+Router and federation stores retain a permanent compact fence per root: the
+highest observed epoch and a 32-byte hash of the complete signed record. These
+fences are never evicted. Complete signed sets are capped at 1024 roots; admitting
+a new complete set at capacity returns a typed `capacity` rejection. Even a
+capacity-refused root retains its compact fence. Each changed root writes only
+its own fence/set rows. Exact retransmission performs no authority write. The
+compact fence tables grow with the number of authenticated foreign roots;
+upgrades preserve all available legacy heads but cannot reconstruct heads an
+older version already discarded.
+
+Registration replay receipts retain the root-qualified proof key and its signed
+expiry. Only expired receipts are removed. A full collection of 4096 live
+receipts refuses new admission with `capacity`, rather than evicting a live
+receipt. Expiry-less legacy receipts receive a persisted conservative cutover
+deadline of 30 days plus five minutes at first load. The new proof lifetime cap
+prevents a longer-lived old proof from becoming admissible after that deadline.
+Malformed registration bodies, admission failures and invalid upstream replies
+produce typed registration rejections on framed transports and test HTTP.
+
+Literal recipient names remain accepted by SDK and local-bus clients. They are
+resolved within a conversation's pinned relationship or the active signed sets
+of accepted contacts; multiple matching accepted roots require an explicit
+qualified address. Attachment grants use that same resolved device identity.
+Own-device history grants hash the target's root-qualified reference, matching
+the sibling's token requests.
+
+Accepted contact roots are copied to active siblings through the existing
+bounded encrypted own-device queue. Only an authenticated active sibling may
+supply such a relationship, and the peer manifest must verify under its stated
+root. A copied contact cannot replace an existing root pin or reactivate a local
+removed, blocked or revoked relationship. This lets newly activated devices
+receive direct text and surface deliveries under the same account's accepted
+relationships without treating an unsolicited sender's root hint as authority.
+
+The group-pin schema upgrade archives and deletes pins for inactive membership
+or a different membership root. Re-adding a literal name under another root
+requires its newly authenticated pin; an inactive or archived pin cannot supply
+the new membership's root.

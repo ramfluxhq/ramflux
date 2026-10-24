@@ -28,23 +28,20 @@ pub(crate) struct TaskOwnPacket {
 }
 impl RamfluxClient {
     fn check_task_own_group_fence(&self, context: &OwnContext) -> Result<(), SdkError> {
-        if let Some(group) = &context.group {
-            let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            if self.group_state(&group.group_id).is_ok() {
-                if self
-                    .account_db()?
-                    .group_member_role(&group.group_id, &local.device_id)?
-                    .is_none()
-                {
-                    return Err(invalid(
-                        "own task snapshot cannot restore removed local membership",
-                    ));
-                }
-                if self.group_state(&group.group_id)?.group_epoch < group.group_epoch {
-                    return Err(SdkError::InboundPending(
-                        "task snapshot awaits authenticated membership changes".into(),
-                    ));
-                }
+        if let Some(group) = &context.group
+            && self.group_state(&group.group_id).is_ok()
+        {
+            if self
+                .account_db()?
+                .group_member_role(&group.group_id, &self.owned_device_identity()?)?
+                .is_none()
+            {
+                return Err(invalid("own task snapshot cannot restore removed local membership"));
+            }
+            if self.group_state(&group.group_id)?.group_epoch < group.group_epoch {
+                return Err(SdkError::InboundPending(
+                    "task snapshot awaits authenticated membership changes".into(),
+                ));
             }
         }
         Ok(())
@@ -162,7 +159,7 @@ impl RamfluxClient {
         }
         let source = self
             .account_db()?
-            .client_record("device", &entry.envelope.source_device_id)?
+            .client_device_record(&self.authenticated_device_identity(entry)?)?
             .ok_or_else(|| invalid("own task source missing"))?;
         if source["principal_id"] != entry.envelope.source_principal_id {
             return Err(invalid("own task source owner mismatch"));
@@ -210,7 +207,10 @@ impl RamfluxClient {
             self.import_surface_context(&packet.context, source_device)?;
             let mut active_pins = Vec::new();
             for pin in &packet.pins {
-                if self.account_db()?.group_member_role(&pin.group_id, &pin.device_id)?.is_some() {
+                if let Some(root) = &pin.principal_commitment
+                    && let Ok(identity) = self.device_identity_for_root(root, &pin.device_id)
+                    && self.account_db()?.group_member_role(&pin.group_id, &identity)?.is_some()
+                {
                     active_pins.push(pin.clone());
                 }
             }

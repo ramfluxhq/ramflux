@@ -10,7 +10,7 @@ fn r5_no_role_group_updates_from_the_named_assignee_are_dropped_without_holdback
     let other = register(&f, "other", 81)?;
     f.human.create_group("group", "human-device")?;
     for id in ["agent-device", "other-device"] {
-        f.human.add_group_member("group", id, "member")?;
+        f.human.add_group_member("group", &member(&f.human, id)?, "member")?;
     }
     f.human.account_db()?.persist_client_record(
         "conversation",

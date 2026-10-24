@@ -55,6 +55,15 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     assert_eq!(before, 2);
     let mut engine = source.take_live_engine().await?;
     let target = super::Target {
+        identity: source.client.device_identity_for_root(
+            &source
+                .client
+                .account_db()?
+                .client_record("identity", "peer-0")?
+                .and_then(|r| r["contact_identity_commitment"].as_str().map(str::to_owned))
+                .ok_or(SdkError::IdentityRootMissing)?,
+            "device-peer-0",
+        )?,
         device: "device-peer-0".into(),
         delivery: "peer-0".into(),
         federation: None,

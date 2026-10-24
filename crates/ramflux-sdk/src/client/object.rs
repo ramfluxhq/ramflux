@@ -86,7 +86,7 @@ impl RamfluxClient {
             created_at: now_unix_timestamp(),
             ttl: 3_600,
         };
-        Self::normalize_recipient(&mut message)?;
+        self.resolve_message_recipient(&engine.config, &mut message).await?;
         let key_slot = self
             .make_pair_object_slot(
                 engine,
@@ -114,6 +114,9 @@ impl RamfluxClient {
         attachment: &LocalBusMessageAttachmentInput,
         plaintext: &[u8],
     ) -> Result<SdkDmAttachmentRef, SdkError> {
+        let mut message = message.clone();
+        self.resolve_message_recipient(&engine.config, &mut message).await?;
+        let message = &message;
         let relay_options = self
             .relay_transfer_options(
                 Some(attachment.relay_endpoint.clone()),

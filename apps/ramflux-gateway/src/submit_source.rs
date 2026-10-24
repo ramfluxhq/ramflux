@@ -23,7 +23,11 @@ pub(crate) fn bind_source(
     }
     let mut envelope = envelope.clone();
     envelope.ext.ext.remove("source_device_authority");
-    runtime.source_authority.verify_envelope_source(&envelope)?;
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+        &envelope.signed.signature,
+        &runtime.branch_public_key,
+    )?;
     envelope
         .ext
         .ext
@@ -123,10 +127,10 @@ pub(crate) mod tests {
             "source_root_commitment".into(),
             serde_json::json!(runtime.source_identity.root_commitment()),
         );
-        envelope.signed.signature = ramflux_crypto::sign_with_device_branch(
-            &branch,
+        envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
             &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
-        )?;
+            &branch,
+        );
         envelope
             .ext
             .ext

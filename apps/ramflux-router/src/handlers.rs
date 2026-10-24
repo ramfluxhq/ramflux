@@ -608,6 +608,7 @@ fn write_mesh_value_response(
     Ok(())
 }
 
+#[cfg(feature = "itest-http")]
 fn handle_mvp0_envelope(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
@@ -730,13 +731,33 @@ pub(crate) fn handle_mvp1_identity_register(
     source_override: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let mut request: ramflux_node_core::IdentityRegisterRequest =
-        ramflux_protocol::parse_i_json(body)?;
+        match ramflux_protocol::parse_i_json(body) {
+            Ok(request) => request,
+            Err(_) => {
+                return Ok(serde_json::json!(ramflux_protocol::IdentityRegistrationFailure {
+                    error: ramflux_protocol::IdentityRegistrationFailureBody {
+                        reason_code: ramflux_protocol::IdentityDirectoryReason::InvalidRegistration
+                    }
+                }));
+            }
+        };
     if let Some(source) = source_override {
         request.source_ip_hash = Some(source.into());
     }
-    request.now = i64::try_from(
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
-    )?;
+    request.now = match std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+    {
+        Some(now) => now,
+        None => {
+            return Ok(serde_json::json!(ramflux_protocol::IdentityRegistrationFailure {
+                error: ramflux_protocol::IdentityRegistrationFailureBody {
+                    reason_code: ramflux_protocol::IdentityDirectoryReason::RegistrationUnavailable
+                }
+            }));
+        }
+    };
     tracing::info!(
         principal_id = %request.proof.principal_id,
         device_id = %request.proof.device_id,
@@ -763,6 +784,9 @@ pub(crate) fn handle_mvp1_identity_register(
         Err(error) => {
             tracing::warn!(%error, stage="identity_registration_admission", "router registration rejected");
             let reason_code = match &error {
+                ramflux_node_core::NodeCoreError::Capacity { .. } => {
+                    ramflux_protocol::IdentityDirectoryReason::Capacity
+                }
                 ramflux_node_core::NodeCoreError::Redb(_)
                 | ramflux_node_core::NodeCoreError::SnapshotSerialization(_) => {
                     ramflux_protocol::IdentityDirectoryReason::RegistrationUnavailable

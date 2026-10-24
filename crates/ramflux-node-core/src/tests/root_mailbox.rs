@@ -23,7 +23,11 @@ fn populated_mailbox() -> Result<Mailbox, Box<dyn std::error::Error>> {
         forward.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes(
             &ramflux_protocol::envelope_sender_signed_bytes(&forward.envelope)?,
         );
-        let source = router.authenticated_envelope_source(&forward.envelope)?;
+        let source = router.authenticated_envelope_source_from(
+            &forward.envelope,
+            Some(&store),
+            crate::RouterEnvelopeOrigin::Federation,
+        )?;
         let key = envelope_replay_tuple_key(&source, &forward.envelope);
         let expiry = forward.envelope.created_at + i64::from(forward.envelope.ttl);
         let outcome = router.submit_envelope_at(

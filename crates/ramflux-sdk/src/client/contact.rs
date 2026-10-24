@@ -176,7 +176,112 @@ impl RamfluxClient {
                 .await?;
             return Ok(root);
         }
-        Err(SdkError::LocalBus("recipient root context required; supply recipient_principal_commitment or a root-qualified device address".into()))
+        let root = self.trusted_recipient_root(device_id)?;
+        self.assert_manifest_active_device_cached(gateway, &root, device_id, "contact_recipient")
+            .await?;
+        Ok(root)
+    }
+
+    /// Literal names may select a target only within owned or accepted-contact roots.
+    /// Multiple authenticated contacts with that name require an explicit root.
+    pub(crate) fn trusted_recipient_root(&self, device: &str) -> Result<String, SdkError> {
+        let mut roots = std::collections::BTreeSet::new();
+        let own = self.owned_device_identity()?;
+        if self.observed_device_set(own.root_commitment())?.is_some_and(|r| {
+            r.devices.iter().any(|d| {
+                d.device_id == device && d.status == ramflux_protocol::DeviceSetStatus::Active
+            })
+        }) {
+            roots.insert(own.root_commitment().to_owned());
+        }
+        let db = self.account_db()?;
+        let mut after = String::new();
+        loop {
+            let ids = db.client_directory_ids("identity", &after, 128)?;
+            if ids.is_empty() {
+                break;
+            }
+            for principal in &ids {
+                let Some(identity) = db.client_record("identity", principal)? else {
+                    continue;
+                };
+                let Some(root) = identity["contact_identity_commitment"].as_str() else {
+                    continue;
+                };
+                if !self.friend_link_peer_is_accepted(principal)?
+                    && !self.friend_link_peer_is_accepted(root)?
+                {
+                    continue;
+                }
+                if let Some(record) = self.observed_device_set(root)?
+                    && record.principal_id == *principal
+                    && record.devices.iter().any(|d| {
+                        d.device_id == device
+                            && d.status == ramflux_protocol::DeviceSetStatus::Active
+                    })
+                {
+                    roots.insert(root.to_owned());
+                }
+            }
+            after = ids.last().cloned().ok_or(SdkError::IdentityRootMissing)?;
+        }
+        if roots.len() != 1 {
+            return Err(SdkError::LocalBus("recipient root unavailable or ambiguous in accepted contacts; use a qualified address".into()));
+        }
+        roots.into_iter().next().ok_or(SdkError::IdentityRootMissing)
+    }
+    pub(crate) fn recipient_root_for_conversation(
+        &self,
+        conversation: &str,
+        device: &str,
+    ) -> Result<String, SdkError> {
+        let own = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if let Some(thread) = self.account_db()?.client_record("conversation", conversation)? {
+            if let Some(group) = thread["group_id"].as_str() {
+                return self.device_root(&self.group_device_reference(group, device)?);
+            }
+            if thread["kind"] == "direct"
+                && let Some(ids) = thread["participants"].as_array()
+            {
+                let peers = ids
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|p| *p != own.principal_id)
+                    .collect::<std::collections::BTreeSet<_>>();
+                if !ids.is_empty() && peers.is_empty() {
+                    return Ok(self.owned_device_identity()?.root_commitment().into());
+                }
+                if peers.len() == 1
+                    && let Some(peer) = peers.first()
+                    && let Some(identity) = self.account_db()?.client_record("identity", peer)?
+                    && let Some(root) = identity["contact_identity_commitment"].as_str()
+                    && (self.friend_link_peer_is_accepted(peer)?
+                        || self.friend_link_peer_is_accepted(root)?)
+                {
+                    return Ok(root.to_owned());
+                }
+            }
+        }
+        self.trusted_recipient_root(device)
+    }
+    pub(crate) async fn resolve_message_recipient(
+        &self,
+        gateway: &GatewaySessionConfig,
+        message: &mut GatewayDirectMessage,
+    ) -> Result<(), SdkError> {
+        Self::normalize_recipient(message)?;
+        let device = message.recipient_device_id.as_deref().ok_or(SdkError::IdentityRootMissing)?;
+        if message.recipient_principal_commitment.as_ref().is_none_or(String::is_empty) {
+            message.recipient_principal_commitment = Some(
+                self.resolve_target_principal_commitment(
+                    gateway,
+                    Some(&self.recipient_root_for_conversation(&message.conversation_id, device)?),
+                    device,
+                )
+                .await?,
+            );
+        }
+        Ok(())
     }
 
     /// Resolve and verify the recipient principal commitment for a federated (cross-node) send.

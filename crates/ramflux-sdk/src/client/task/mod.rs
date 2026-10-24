@@ -72,7 +72,7 @@ pub(crate) fn timeline_id(carrier: &carrier::Carrier) -> Result<String, SdkError
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Conservative budget for nested encrypted JSON frames, including bootstrap overhead.
 pub(crate) const MAX_DELIVERY_BYTES: usize =

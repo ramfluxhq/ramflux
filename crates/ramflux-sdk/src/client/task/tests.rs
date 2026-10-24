@@ -24,6 +24,17 @@ fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, S
     c.unlock_account(id, b"task-test-secret")?;
     Ok(c)
 }
+fn member(client: &RamfluxClient, name: &str) -> Result<String, SdkError> {
+    if client.device_branch.as_ref().is_some_and(|d| d.device_id == name) {
+        return Ok(client.owned_device_identity()?.storage_key().into());
+    }
+    let row = client
+        .account_db()?
+        .client_record("device", name)?
+        .ok_or_else(|| invalid("fixture member"))?;
+    let root = row["principal_commitment"].as_str().ok_or(SdkError::IdentityRootMissing)?;
+    Ok(client.device_identity_for_root(root, name)?.storage_key().into())
+}
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -41,6 +52,7 @@ impl Fixture {
                 &ramflux_protocol::encode_base64url(r.signing_key.verifying_key().to_bytes()),
             )?;
             local.account_db()?.persist_client_record("device",&d.device_id,&json!({"principal_id":d.principal_id,"principal_commitment":commitment,"signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+            local.persist_identity_directory(&own::manifest(remote)?)?;
             local.account_db()?.persist_client_record(
                 "conversation",
                 "thread",
@@ -354,16 +366,11 @@ fn proposal_acceptance_requires_a_member_distinct_from_both_proposer_and_assigne
     let f = Fixture::new()?;
     let third = client(&f.root.join("third"), "third", 81)?;
     for remote in [&f.human, &f.agent] {
-        let d = remote.device_branch.as_ref().ok_or("device")?;
-        let root = remote.identity_root.as_ref().ok_or("root")?;
-        let commitment = crate::identity_root_public_key_commitment(
-            &ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()),
-        )?;
-        third.account_db()?.persist_client_record("device",&d.device_id,&json!({"principal_id":d.principal_id,"principal_commitment":commitment,"signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+        third.persist_identity_directory(&own::manifest(remote)?)?;
     }
     third.create_group("group", "third-device")?;
-    third.add_group_member("group", "human-device", "member")?;
-    third.add_group_member("group", "agent-device", "member")?;
+    third.add_group_member("group", &member(&third, "human-device")?, "member")?;
+    third.add_group_member("group", &member(&third, "agent-device")?, "member")?;
     third.account_db()?.persist_client_record(
         "conversation",
         "group-thread",
@@ -399,7 +406,7 @@ fn proposal_acceptance_requires_a_member_distinct_from_both_proposer_and_assigne
 mod surfaces;
 
 #[path = "own_tests.rs"]
-mod own;
+pub(crate) mod own;
 
 #[path = "control_tests.rs"]
 mod controls;

@@ -8,6 +8,7 @@ pub(super) struct Destination {
     pub conversation_id: String,
     pub message_id: String,
     pub device_id: String,
+    pub recipient_root: String,
 }
 pub(super) struct Delivery {
     pub envelope: ramflux_protocol::Envelope,
@@ -52,6 +53,7 @@ async fn submit(
                         source_principal_id: envelope.source_principal_id.clone(),
                         sender_id: envelope.source_device_id.clone(),
                         recipient_device_id: Some(destination.device_id.clone()),
+                        recipient_principal_commitment: Some(destination.recipient_root.clone()),
                         target_delivery_id: envelope.target_delivery_id.clone(),
                         encrypted_body,
                         created_at: envelope.created_at,

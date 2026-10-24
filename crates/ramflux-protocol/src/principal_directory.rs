@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum IdentityDirectoryReason {
     AuthenticationRequired,
     RateLimited,
+    Capacity,
     PrincipalIdAmbiguous,
     PrincipalIdTaken,
     DeviceIdTaken,

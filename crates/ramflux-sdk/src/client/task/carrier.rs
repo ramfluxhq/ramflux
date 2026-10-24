@@ -113,16 +113,11 @@ impl RamfluxClient {
                 local.signing_key.verifying_key().to_bytes(),
             ));
         }
-        if self
-            .account_db()?
-            .load_actor_state::<bool>(&format!("device/revoked/{device}"))?
-            .unwrap_or(false)
-        {
-            return Err(invalid("task signer device is revoked"));
-        }
+        let identity = self.peer_device_identity(principal, device)?;
+        self.require_cached_root_authority(&identity)?;
         let record = self
             .account_db()?
-            .client_record("device", device)?
+            .client_device_record(&identity)?
             .ok_or_else(|| invalid("task signer has no verified device"))?;
         if record["principal_id"] != principal {
             return Err(invalid("task signer principal mismatch"));

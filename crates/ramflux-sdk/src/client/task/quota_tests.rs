@@ -6,8 +6,7 @@ use super::*;
 use ramflux_protocol::TaskCancel;
 fn register(f: &Fixture, id: &str, seed: u8) -> Result<RamfluxClient, SdkError> {
     let peer = client(&f.root.join(id), id, seed)?;
-    let branch = peer.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    f.human.account_db()?.persist_client_record("device", &branch.device_id, &json!({"principal_id":id,"principal_commitment":crate::identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(peer.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.verifying_key().to_bytes()))?,"signing_public_key":ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())}))?;
+    f.human.persist_identity_directory(&super::own::manifest(&peer)?)?;
     Ok(peer)
 }
 fn peer_start(id: &str, conversation: &str, source: &str, assignee: &str) -> TaskEventBody {
@@ -297,7 +296,7 @@ fn thirty_two_single_hold_pairs_cannot_exclude_a_new_honest_sender() -> TestResu
 fn rejected_no_role_group_tasks_never_hold_their_followup_events() -> TestResult {
     let f = Fixture::new()?;
     f.human.create_group("group", "human-device")?;
-    f.human.add_group_member("group", "agent-device", "member")?;
+    f.human.add_group_member("group", &member(&f.human, "agent-device")?, "member")?;
     f.human.account_db()?.persist_client_record(
         "conversation",
         "group-thread",

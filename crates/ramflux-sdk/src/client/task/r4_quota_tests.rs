@@ -78,8 +78,8 @@ fn a_no_role_tombstone_does_not_squat_on_a_different_signers_legitimate_task() -
     let f = Fixture::new()?;
     let other = register(&f, "other", 81)?;
     f.human.create_group("group", "human-device")?;
-    f.human.add_group_member("group", "agent-device", "member")?;
-    f.human.add_group_member("group", "other-device", "member")?;
+    f.human.add_group_member("group", &member(&f.human, "agent-device")?, "member")?;
+    f.human.add_group_member("group", &member(&f.human, "other-device")?, "member")?;
     f.human.account_db()?.persist_client_record(
         "conversation",
         "group-thread",
@@ -108,7 +108,7 @@ fn stale_snapshot_membership_cannot_wedge_task_ingress_local_mutations_or_verifi
     for path in ["start", "cancel", "add", "remove", "kick", "ban"] {
         let f = Fixture::new()?;
         f.human.create_group("group", "human-device")?;
-        f.human.add_group_member("group", "agent-device", "member")?;
+        f.human.add_group_member("group", &member(&f.human, "agent-device")?, "member")?;
         f.human.create_signed_group_role_change(
             "group",
             "human-device",
@@ -145,9 +145,12 @@ fn stale_snapshot_membership_cannot_wedge_task_ingress_local_mutations_or_verifi
                 }
             }
             "add" => {
+                let mut newcomer = client(&f.root.join("newcomer"), "newcomer", 91)?;
+                newcomer.create_device_branch("newcomer", "new-member", 1, [93; 32]);
+                f.human.persist_identity_directory(&super::super::own::manifest(&newcomer)?)?;
                 assert!(
                     f.human
-                        .add_group_member("group", "new-member", "member")?
+                        .add_group_member("group", &member(&f.human, "new-member")?, "member")?
                         .members
                         .contains("new-member")
                 );

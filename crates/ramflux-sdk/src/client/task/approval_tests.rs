@@ -70,8 +70,15 @@ fn a_requesters_second_device_reads_the_remote_approval_and_returns_a_task_bound
     )?;
     let reply = &jobs[0].1.packet;
     let d = sibling.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let mut manifest = super::own::manifest(&f.human)?;
+    manifest.devices.extend(super::own::manifest(&sibling)?.devices);
+    crate::client::identity_authority::test_support::sign_manifest(
+        f.human.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut manifest,
+        2,
+    )?;
     for local in [&f.agent, &f.human] {
-        local.account_db()?.persist_client_record("device",&d.device_id,&json!({"principal_id":"human","signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+        local.persist_identity_directory(&manifest)?;
         local.accept_task_approval(reply)?;
         local.accept_task_approval(reply)?;
     }

@@ -40,7 +40,8 @@ impl RamfluxClient {
         if let Some(group) = thread["group_id"].as_str() {
             let state = self.group_state(group)?;
             for member in &self.task_current_roster(&state) {
-                let record = db.client_record("device", member)?;
+                let reference = self.group_device_reference(group, member)?;
+                let record = db.client_record("device", &reference)?;
                 let owner = record.as_ref().and_then(|v| v["principal_id"].as_str());
                 let local = self.device_branch.as_ref().filter(|d| d.device_id == *member);
                 if (owner == Some(principal) || local.is_some_and(|d| d.principal_id == principal))
@@ -49,7 +50,11 @@ impl RamfluxClient {
                     if local.is_some_and(|d| d.principal_id == principal) {
                         self.pin_local_group_member(group)?;
                     } else {
-                        self.require_group_sender_pin(group, principal, member)?;
+                        self.require_group_sender_pin(
+                            group,
+                            principal,
+                            &self.device_identity(&reference)?,
+                        )?;
                     }
                     return Ok(());
                 }

@@ -699,32 +699,9 @@ fn foreign_epoch_fences_survive_capacity_and_restart_and_gateway_cannot_assert_a
         crate::RouterEnvelopeOrigin::Federation,
     )?;
     federation_store.accept_inbound_forward_once(&live_source, &latest, 1_760_000_010)?;
-    for i in 0..=crate::foreign_device_heads::FOREIGN_HEAD_LIMIT {
-        let seed = ramflux_crypto::blake3_256("ramflux.test.foreign.root.v1", &i.to_be_bytes());
-        let fresh = ramflux_crypto::create_identity_root(&format!("foreign-{i}"), seed);
-        let forward = root_bound_forward(&fresh, "device", None, &format!("new-{i}"))?;
-        let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
-        let router_result = router.authenticated_envelope_source_from(
-            &forward.envelope,
-            Some(&router_store),
-            crate::RouterEnvelopeOrigin::Federation,
-        );
-        let federation_result =
-            federation_store.accept_inbound_forward_once(&source, &forward, 1_760_000_011);
-        if i + 1 < crate::foreign_device_heads::FOREIGN_HEAD_LIMIT {
-            router_result?;
-            assert!(federation_result?);
-        } else {
-            assert!(matches!(
-                router_result,
-                Err(NodeCoreError::Capacity { resource: "foreign_device_sets" })
-            ));
-            assert!(matches!(
-                federation_result,
-                Err(NodeCoreError::Capacity { resource: "foreign_device_sets" })
-            ));
-        }
-    }
+    flood_foreign_authority_cache(&router, &router_store, &federation_store)?;
+    let (refused_old, refused_source) =
+        refuse_new_root_with_permanent_fence(&router, &router_store, &federation_store)?;
     assert!(
         router
             .authenticated_envelope_source_from(
@@ -754,6 +731,18 @@ fn foreign_epoch_fences_survive_capacity_and_restart_and_gateway_cannot_assert_a
     let router_store = crate::RouterRedbStore::open(&router_path)?;
     let router = router_store.load_router()?.ok_or("router")?;
     let federation_store = FederationRedbStore::open(&federation_path)?;
+    assert!(matches!(
+        router.authenticated_envelope_source_from(
+            &refused_old.envelope,
+            Some(&router_store),
+            crate::RouterEnvelopeOrigin::Federation
+        ),
+        Err(NodeCoreError::ItestHttp(_))
+    ));
+    assert!(matches!(
+        federation_store.accept_inbound_forward_once(&refused_source, &refused_old, 1_760_000_014),
+        Err(NodeCoreError::ItestHttp(_))
+    ));
     assert!(
         router
             .authenticated_envelope_source_from(
@@ -767,4 +756,92 @@ fn foreign_epoch_fences_survive_capacity_and_restart_and_gateway_cannot_assert_a
         federation_store.accept_inbound_forward_once(&old_source, &old, 1_760_000_014).is_err()
     );
     Ok(())
+}
+
+fn flood_foreign_authority_cache(
+    router: &RouterCore,
+    router_store: &RouterRedbStore,
+    federation_store: &FederationRedbStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for i in 0..=crate::foreign_device_heads::FOREIGN_HEAD_LIMIT {
+        let seed = ramflux_crypto::blake3_256("ramflux.test.foreign.root.v1", &i.to_be_bytes());
+        let fresh = ramflux_crypto::create_identity_root(&format!("foreign-{i}"), seed);
+        let forward = root_bound_forward(&fresh, "device", None, &format!("new-{i}"))?;
+        let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
+        let router_result = router.authenticated_envelope_source_from(
+            &forward.envelope,
+            Some(router_store),
+            crate::RouterEnvelopeOrigin::Federation,
+        );
+        let federation_result =
+            federation_store.accept_inbound_forward_once(&source, &forward, 1_760_000_011);
+        if i + 1 < crate::foreign_device_heads::FOREIGN_HEAD_LIMIT {
+            router_result?;
+            assert!(federation_result?);
+        } else {
+            assert!(matches!(
+                router_result,
+                Err(NodeCoreError::Capacity { resource: "foreign_device_sets" })
+            ));
+            assert!(matches!(
+                federation_result,
+                Err(NodeCoreError::Capacity { resource: "foreign_device_sets" })
+            ));
+        }
+    }
+    Ok(())
+}
+fn refuse_new_root_with_permanent_fence(
+    router: &RouterCore,
+    router_store: &RouterRedbStore,
+    federation_store: &FederationRedbStore,
+) -> Result<
+    (FederatedEnvelopeForwardRequest, ramflux_crypto::RootQualifiedDeviceRef),
+    Box<dyn std::error::Error>,
+> {
+    // An over-capacity root still leaves its compact highest-epoch fence behind.
+    let refused_root = ramflux_crypto::create_identity_root("refused-root", [0xc1; 32]);
+    let refused_old = root_bound_forward(&refused_root, "device", None, "refused-old")?;
+    let (refused_authority, refused_source) =
+        DeviceAuthKeyResponse::forwarded_envelope_source(&refused_old.envelope)?;
+    let mut next_set = refused_authority.signed_device_set.ok_or("set")?;
+    next_set.device_set_epoch = 2;
+    let refused_new = root_bound_forward(
+        &refused_root,
+        "device",
+        Some(ramflux_crypto::sign_device_set(
+            &refused_root,
+            ramflux_crypto::DeviceSetSigningInput {
+                principal_kind: next_set.principal_kind,
+                device_set_epoch: 2,
+                devices: next_set.devices,
+            },
+        )?),
+        "refused-new",
+    )?;
+    assert!(matches!(
+        router.authenticated_envelope_source_from(
+            &refused_new.envelope,
+            Some(router_store),
+            crate::RouterEnvelopeOrigin::Federation
+        ),
+        Err(NodeCoreError::Capacity { .. })
+    ));
+    assert!(matches!(
+        federation_store.accept_inbound_forward_once(&refused_source, &refused_new, 1_760_000_012),
+        Err(NodeCoreError::Capacity { .. })
+    ));
+    assert!(matches!(
+        router.authenticated_envelope_source_from(
+            &refused_old.envelope,
+            Some(router_store),
+            crate::RouterEnvelopeOrigin::Federation
+        ),
+        Err(NodeCoreError::ItestHttp(_))
+    ));
+    assert!(matches!(
+        federation_store.accept_inbound_forward_once(&refused_source, &refused_old, 1_760_000_012),
+        Err(NodeCoreError::ItestHttp(_))
+    ));
+    Ok((refused_old, refused_source))
 }

@@ -68,6 +68,10 @@ pub(crate) async fn handle_gateway_quic_stream(
     let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv).await?;
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     ramflux_node_core::record_gateway_quic_request_read_us(elapsed_us(read_started));
+    if let crate::ingress::Ingress::Rejected(response) = first {
+        ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
+        return Ok(());
+    }
     if let crate::ingress::Ingress::Session(frame) = first {
         handle_gateway_session_stream(send, recv, context, *frame).await?;
     } else {
@@ -99,6 +103,11 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
     let (mut recv, send) = tokio::io::split(stream);
     let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv).await?;
     let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
+    if let crate::ingress::Ingress::Rejected(response) = first {
+        let mut send = Box::new(send);
+        ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
+        return Ok(());
+    }
     if let crate::ingress::Ingress::Session(frame) = first {
         handle_gateway_session_transport(Box::new(send), Box::new(recv), context, *frame).await?;
     } else {
@@ -119,6 +128,16 @@ pub(crate) async fn handle_gateway_session_transport(
     context: GatewayQuicContext,
     first_frame: ramflux_node_core::GatewayClientFrame,
 ) -> anyhow::Result<()> {
+    if matches!(first_frame, ramflux_node_core::GatewayClientFrame::IdentityRegister { .. }) {
+        write_gateway_frame(
+            &mut *send,
+            &ramflux_node_core::GatewayServerFrame::IdentityRegistrationRejected {
+                reason_code: ramflux_protocol::IdentityDirectoryReason::AuthenticationRequired,
+            },
+        )
+        .await?;
+        return Ok(());
+    }
     let ramflux_node_core::GatewayClientFrame::Open { open } = first_frame else {
         write_gateway_frame(
             &mut *send,
@@ -243,28 +262,47 @@ pub(crate) async fn read_gateway_auth_frame(
     context: &GatewayQuicContext,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayAuthFrame>> {
     let read_timeout = gateway_state(&context.state)?.pre_auth_read_timeout();
-    match tokio::time::timeout(
-        read_timeout,
-        ramflux_transport::read_gateway_session_json::<ramflux_node_core::GatewayClientFrame>(recv),
-    )
-    .await
-    {
-        Ok(Ok(ramflux_node_core::GatewayClientFrame::Auth { auth })) => Ok(Some(auth)),
-        Ok(Ok(_other)) => {
+    let bytes = match tokio::time::timeout(read_timeout, recv.recv_frame()).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_elapsed) => {
+            let mut gateway = gateway_state(&context.state)?;
+            gateway.record_slowloris_timeout();
+            context.store.save_state(&gateway)?;
+            return Ok(None);
+        }
+    };
+    let frame =
+        match ramflux_protocol::parse_i_json::<ramflux_node_core::GatewayClientFrame>(&bytes) {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Some(response) = crate::ingress::registration_rejection(&bytes) {
+                    ramflux_transport::write_gateway_session_json(send, &response).await?;
+                    return Ok(None);
+                }
+                return Err(error.into());
+            }
+        };
+    match frame {
+        ramflux_node_core::GatewayClientFrame::Auth { auth } => Ok(Some(auth)),
+        ramflux_node_core::GatewayClientFrame::IdentityRegister { .. } => {
             write_gateway_frame(
                 send,
-                &ramflux_node_core::GatewayServerFrame::Nack {
-                    reason: "second gateway frame must be auth".to_owned(),
+                &ramflux_node_core::GatewayServerFrame::IdentityRegistrationRejected {
+                    reason_code: ramflux_protocol::IdentityDirectoryReason::AuthenticationRequired,
                 },
             )
             .await?;
             Ok(None)
         }
-        Ok(Err(error)) => Err(error.into()),
-        Err(_elapsed) => {
-            let mut gateway = gateway_state(&context.state)?;
-            gateway.record_slowloris_timeout();
-            context.store.save_state(&gateway)?;
+        _ => {
+            write_gateway_frame(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: "second gateway frame must be auth".into(),
+                },
+            )
+            .await?;
             Ok(None)
         }
     }
@@ -396,17 +434,26 @@ pub(crate) async fn run_gateway_session_loop(
     runtime: GatewaySessionRuntime,
 ) -> anyhow::Result<()> {
     loop {
-        let frame = match ramflux_transport::read_gateway_session_json::<
-            ramflux_node_core::GatewayClientFrame,
-        >(&mut *recv)
-        .await
-        {
-            Ok(frame) => frame,
+        let bytes = match recv.recv_frame().await {
+            Ok(bytes) => bytes,
             Err(error) => {
                 tracing::debug!(%error, "gateway session read ended");
                 return Ok(());
             }
         };
+        let frame =
+            match ramflux_protocol::parse_i_json::<ramflux_node_core::GatewayClientFrame>(&bytes) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    if let Some(response) = crate::ingress::registration_rejection(&bytes) {
+                        let mut sink = send.lock().await;
+                        ramflux_transport::write_gateway_session_json(&mut **sink, &response)
+                            .await?;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            };
         match frame {
             ramflux_node_core::GatewayClientFrame::Submit { submit } => {
                 handle_gateway_submit(&send, &context, &runtime, &submit).await?;
@@ -414,31 +461,14 @@ pub(crate) async fn run_gateway_session_loop(
             ramflux_node_core::GatewayClientFrame::OwnDeviceFanout { fanout } => {
                 handle_gateway_own_device_fanout(&send, &context, &runtime, &fanout).await?;
             }
-            ramflux_node_core::GatewayClientFrame::IdentityRegister { mut request } => {
-                crate::principal_directory::registration_context(
-                    &mut request,
+            ramflux_node_core::GatewayClientFrame::IdentityRegister { request } => {
+                let response = crate::registration::forward(
+                    &context.router,
+                    serde_json::json!(request),
                     context.remote_addr.ip(),
-                )?;
-                let response: serde_json::Value =
-                    match router_post_json(&context.router, "/mvp1/identity/register", &request) {
-                        Ok(response) => response,
-                        Err(error) => {
-                            crate::principal_directory::registration_forwarding_failure(&error).body
-                        }
-                    };
-                let frame = if let Ok(error) = serde_json::from_value::<
-                    ramflux_protocol::IdentityRegistrationFailure,
-                >(response.clone())
-                {
-                    ramflux_node_core::GatewayServerFrame::IdentityRegistrationRejected {
-                        reason_code: error.error.reason_code,
-                    }
-                } else {
-                    ramflux_node_core::GatewayServerFrame::IdentityRegistered {
-                        response: serde_json::from_value(response)?,
-                    }
-                };
-                write_gateway_handle(&send, &frame).await?;
+                );
+                write_gateway_handle(&send, &crate::registration::session_response(response))
+                    .await?;
             }
             ramflux_node_core::GatewayClientFrame::PrekeyPublish { request } => {
                 let response: ramflux_node_core::PrekeyResponse =

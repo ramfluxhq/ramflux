@@ -112,13 +112,14 @@ async fn dispatch_message_submit_request(
 
 pub(super) async fn submit_message(
     account: &mut LocalBusAccountState,
-    body: LocalBusMessageSubmitRequest,
+    mut body: LocalBusMessageSubmitRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     if let Some(plaintext) = body.plaintext_body()?
         && crate::client::surface::Carrier::decode(&plaintext)?.is_some()
     {
         crate::client::surface::check_delivery_size(plaintext.len())?;
     }
+    normalize_message_recipient(&account.client, &mut body)?;
     let entry = if let Some(plaintext) = body.plaintext_body()? {
         if !body.attachments.is_empty() {
             if body.federation.is_some() {
@@ -209,6 +210,24 @@ pub(super) async fn submit_message(
         result?
     };
     Ok(local_bus_ok(serde_json::to_value(entry)?))
+}
+
+fn normalize_message_recipient(
+    client: &RamfluxClient,
+    body: &mut LocalBusMessageSubmitRequest,
+) -> Result<(), SdkError> {
+    if body.recipient_principal_commitment.as_ref().is_none_or(String::is_empty)
+        && let Some(device) = body.recipient_device_id.as_deref()
+    {
+        body.recipient_principal_commitment =
+            Some(match ramflux_protocol::parse_qualified_device_id(device)? {
+                Some((root, _)) => root,
+                None => client.recipient_root_for_conversation(&body.conversation_id, device)?,
+            });
+        body.recipient_device_id =
+            Some(crate::client::identity_authority::device_namespace::wire_device_id(device)?);
+    }
+    Ok(())
 }
 
 async fn resolve_local_message_recipient_principal_commitment(

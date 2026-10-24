@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 #[derive(Clone)]
 pub(super) struct Target {
     pub device: String,
+    pub identity: ramflux_crypto::RootQualifiedDeviceRef,
     pub delivery: String,
     pub federation: Option<LocalBusFederationRoute>,
     pub own: bool,
@@ -261,6 +262,7 @@ pub(super) async fn seal(
             .device_id
             .clone(),
         recipient_device_id: Some(target.device.clone()),
+        recipient_principal_commitment: Some(target.identity.root_commitment().into()),
         target_delivery_id: target.delivery.clone(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
@@ -282,6 +284,7 @@ pub(super) async fn seal(
     Ok(SealedDelivery {
         envelope,
         federation: target.federation.clone().map(|route| Destination {
+            recipient_root: target.identity.root_commitment().into(),
             route,
             conversation_id: conversation.into(),
             message_id: message.message_id,
@@ -430,16 +433,19 @@ pub(super) async fn direct_targets(
     if manifest.principal_id != peers_ids[0] {
         return Err(invalid("task peer principal changed"));
     }
-    Ok(manifest
+    manifest
         .devices
         .into_iter()
-        .map(|d| Target {
-            device: d.device_id,
-            delivery: d.target_delivery_id,
-            federation: federation.clone(),
-            own: false,
+        .map(|d| {
+            Ok(Target {
+                identity: client.device_identity_for_root(&d.principal_commitment, &d.device_id)?,
+                device: d.device_id,
+                delivery: d.target_delivery_id,
+                federation: federation.clone(),
+                own: false,
+            })
         })
-        .collect())
+        .collect::<Result<_, SdkError>>()
 }
 
 pub(super) async fn own_targets(
@@ -454,17 +460,19 @@ pub(super) async fn own_targets(
     if !own.devices.iter().any(|d| d.device_id == local.device_id) {
         return Err(invalid("task source device is not in the active manifest"));
     }
-    Ok(own
-        .devices
+    own.devices
         .into_iter()
         .filter(|d| d.device_id != local.device_id)
-        .map(|d| Target {
-            device: d.device_id,
-            delivery: d.target_delivery_id,
-            federation: None,
-            own: true,
+        .map(|d| {
+            Ok(Target {
+                identity: client.device_identity_for_root(&d.principal_commitment, &d.device_id)?,
+                device: d.device_id,
+                delivery: d.target_delivery_id,
+                federation: None,
+                own: true,
+            })
         })
-        .collect())
+        .collect::<Result<_, SdkError>>()
 }
 
 #[cfg(test)]

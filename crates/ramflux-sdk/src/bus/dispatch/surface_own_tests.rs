@@ -15,6 +15,16 @@ pub(super) async fn sibling_fixture(
     (LocalBusAccountState, GatewaySessionConfig, GatewaySessionConfig, tokio::task::JoinHandle<()>),
     Box<dyn std::error::Error>,
 > {
+    sibling_fixture_inner(root, source, true).await
+}
+async fn sibling_fixture_inner(
+    root: &Path,
+    source: &mut LocalBusAccountState,
+    preseed: bool,
+) -> Result<
+    (LocalBusAccountState, GatewaySessionConfig, GatewaySessionConfig, tokio::task::JoinHandle<()>),
+    Box<dyn std::error::Error>,
+> {
     let peer = super::dm_tests::peer_fixture(root, source).await?;
     peer.directory.abort();
     let mut sibling = runtime_tests::account(
@@ -61,18 +71,20 @@ pub(super) async fn sibling_fixture(
         dm_device_id_hash("device-sender"),
         [3; 32],
     )?;
-    source.client.persist_pair(
-        &source.client.owned_device_identity()?,
-        &sibling.client.owned_device_identity()?,
-        &[4; 32],
-        &send,
-    )?;
-    sibling.client.persist_pair(
-        &sibling.client.owned_device_identity()?,
-        &source.client.owned_device_identity()?,
-        &[4; 32],
-        &recv,
-    )?;
+    if preseed {
+        source.client.persist_pair(
+            &source.client.owned_device_identity()?,
+            &sibling.client.owned_device_identity()?,
+            &[4; 32],
+            &send,
+        )?;
+        sibling.client.persist_pair(
+            &sibling.client.owned_device_identity()?,
+            &source.client.owned_device_identity()?,
+            &[4; 32],
+            &recv,
+        )?;
+    }
     let mut config = peer.config;
     config.gateway_addr = address;
     config.tcp_gateway_addr = Some(address);
@@ -538,6 +550,42 @@ async fn an_oversized_prepared_copy_is_terminal_after_one_ratchet_step() -> Test
     directory.abort();
     drop(sibling);
     drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pair() -> TestResult {
+    let root = runtime_tests::root("surface-own-fresh-bootstrap");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let (sibling, config, receiver, directory) =
+        sibling_fixture_inner(&root, &mut source, false).await?;
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    let own = Arc::clone(&gateway.own);
+    let identity = sibling.client.owned_device_identity()?;
+    gateway.prekeys.insert(
+        source.client.root_qualified_device_lookup(identity.storage_key())?,
+        crate::prekey::SdkPrekeyResponse {
+            principal_commitment: identity.root_commitment().into(),
+            device_id: identity.device_id().into(),
+            target_delivery_id: Some("sibling".into()),
+            bundle: Some(sibling.client.load_x3dh_private_state(&identity)?.bundle),
+        },
+    );
+    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    let create = super::dm_tests::create_carrier(&source.client)?;
+    assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
+    let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
+    assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 1);
+    directory.abort();
+    drop(source);
+    drop(sibling);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

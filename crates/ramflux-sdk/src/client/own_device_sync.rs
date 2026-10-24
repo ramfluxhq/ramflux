@@ -131,7 +131,7 @@ impl RamfluxClient {
                 relay_endpoint,
                 &relay_options,
                 &source_branch,
-                target_device_id,
+                &self.device_identity_for_root(principal_commitment, target_device_id)?,
                 slot_conversation_id,
                 x3dh,
                 ciphertext,
@@ -609,7 +609,7 @@ pub(crate) fn own_device_history_ref(
     relay_endpoint: &str,
     relay_options: &RelayTransferOptions,
     source_branch: &DeviceBranch,
-    target_device_id: &str,
+    target: &ramflux_crypto::RootQualifiedDeviceRef,
     slot_conversation_id: String,
     x3dh: Option<SdkDmX3dhHeader>,
     ciphertext: ramflux_crypto::DmCiphertext,
@@ -633,10 +633,7 @@ pub(crate) fn own_device_history_ref(
             source_branch,
             object.object_id.clone(),
             object.manifest_hash.clone(),
-            ramflux_crypto::blake3_256_base64url(
-                "ramflux.object_relay.recipient_device.v1",
-                target_device_id.as_bytes(),
-            ),
+            recipient_device_hash(target),
             vec![
                 ramflux_protocol::ObjectRelayCapability::Get,
                 ramflux_protocol::ObjectRelayCapability::Ack,
@@ -649,8 +646,8 @@ pub(crate) fn own_device_history_ref(
             version: 1,
             object_id: object.object_id.clone(),
             conversation_id: slot_conversation_id,
-            recipient_device_id: target_device_id.to_owned(),
-            source_principal_commitment: None,
+            recipient_device_id: target.device_id().to_owned(),
+            source_principal_commitment: Some(target.root_commitment().into()),
             x3dh,
             ciphertext,
         },
@@ -703,7 +700,10 @@ pub(crate) mod tests {
             "http://127.0.0.1:2",
             &relay_options,
             &source,
-            "target_own_device",
+            &ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+                &ramflux_crypto::create_identity_root("own_principal", [9; 32]),
+                "target_own_device",
+            )?,
             "slot_own".to_owned(),
             None,
             ciphertext,
@@ -728,9 +728,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             grant.grantee_device_hash,
-            ramflux_crypto::blake3_256_base64url(
-                "ramflux.object_relay.recipient_device.v1",
-                "target_own_device".as_bytes(),
+            recipient_device_hash(
+                &ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+                    &ramflux_crypto::create_identity_root("own_principal", [9; 32]),
+                    "target_own_device"
+                )?
             )
         );
         Ok(())

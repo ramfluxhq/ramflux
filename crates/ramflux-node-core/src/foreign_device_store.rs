@@ -9,18 +9,15 @@ use crate::{
 use ramflux_protocol::SignedDeviceSetRecord;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
+type ForeignTable = TableDefinition<'static, &'static str, &'static [u8]>;
+
 #[derive(Clone, Copy)]
 pub(crate) enum Namespace {
     Router,
     Federation,
 }
 impl Namespace {
-    fn tables(
-        self,
-    ) -> (
-        TableDefinition<'static, &'static str, &'static [u8]>,
-        TableDefinition<'static, &'static str, &'static [u8]>,
-    ) {
+    fn tables(self) -> (ForeignTable, ForeignTable) {
         match self {
             Self::Router => (
                 TableDefinition::new("router_foreign_set_fences_v1"),
@@ -196,4 +193,32 @@ pub(crate) fn observe(
     drop(sets);
     txn.commit().map_err(error)?;
     Ok(observation)
+}
+
+/// Explicit checkpoint import also preserves roots refused full-set admission.
+pub(crate) fn save_fences(
+    db: &redb::Database,
+    namespace: Namespace,
+    heads: &ForeignDeviceHeads,
+) -> Result<(), NodeCoreError> {
+    let (table, _) = namespace.tables();
+    let txn = db.begin_write().map_err(error)?;
+    let mut fences = txn.open_table(table).map_err(error)?;
+    let mut changed = false;
+    for (root, next) in &heads.fences {
+        let previous =
+            fences.get(root.as_str()).map_err(error)?.map(|r| decode(r.value())).transpose()?;
+        if let Some(previous) = previous {
+            previous.check(*next)?;
+        }
+        if previous != Some(*next) {
+            fences.insert(root.as_str(), encode(*next).as_slice()).map_err(error)?;
+            changed = true;
+        }
+    }
+    drop(fences);
+    if changed {
+        txn.commit().map_err(error)?;
+    }
+    Ok(())
 }

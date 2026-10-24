@@ -51,8 +51,7 @@ fn attacker_request(
     attacker: &RamfluxClient,
     original: &Packet,
 ) -> Result<Request, Box<dyn std::error::Error>> {
-    let d = attacker.device_branch.as_ref().ok_or("device")?;
-    f.agent.account_db()?.persist_client_record("device",&d.device_id,&json!({"principal_id":"attacker","signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+    f.agent.persist_identity_directory(&super::super::own::manifest(attacker)?)?;
     f.agent.account_db()?.persist_client_record(
         "conversation",
         "attack-thread",

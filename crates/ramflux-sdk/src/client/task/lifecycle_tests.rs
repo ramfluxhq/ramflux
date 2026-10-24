@@ -158,7 +158,7 @@ fn terminal_count_retention_compacts_old_bodies_and_fully_prunes_older_projectio
 fn a_requester_can_cancel_after_its_assignee_leaves_the_group() -> TestResult {
     let f = Fixture::new()?;
     f.human.create_group("group", "human-device")?;
-    f.human.add_group_member("group", "agent-device", "member")?;
+    f.human.add_group_member("group", &member(&f.human, "agent-device")?, "member")?;
     f.human.account_db()?.persist_client_record(
         "conversation",
         "group-thread",

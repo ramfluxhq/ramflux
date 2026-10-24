@@ -3,52 +3,15 @@
 
 //! Same-root task replicas retain exact carriers, pins, and committed single-use decisions.
 use super::*;
-use crate::prekey::{SdkDeviceManifestEntry, SdkDeviceManifestResponse};
-fn manifest(c: &RamfluxClient) -> Result<SdkDeviceManifestResponse, SdkError> {
-    let root = c.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let d = c.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let public = ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let commitment = crate::identity_root_public_key_commitment(&public)?;
-    Ok(SdkDeviceManifestResponse {
-        principal_id: d.principal_id.clone(),
-        principal_commitment: commitment.clone(),
-        root_public_key: public,
-        devices: vec![SdkDeviceManifestEntry {
-            principal_id: d.principal_id.clone(),
-            principal_commitment: commitment,
-            device_id: d.device_id.clone(),
-            device_epoch: d.device_epoch,
-            branch_public_key: ramflux_protocol::encode_base64url(
-                d.signing_key.verifying_key().to_bytes(),
-            ),
-            target_delivery_id: d.device_id.clone(),
-            branch_proof: ramflux_crypto::authorize_device_branch(
-                root,
-                d,
-                "ramflux-node",
-                vec!["device.delivery.bind".into()],
-                1_700_000_000,
-                4_000_000_000,
-            )?,
-            prekey_bundle: ramflux_crypto::create_prekey_bundle(
-                d,
-                &ramflux_crypto::X25519KeyPair::from_seed([21; 32]),
-                "signed",
-                &ramflux_crypto::X25519KeyPair::from_seed([22; 32]),
-                None,
-                None,
-            )?,
-            branch_authorized_event_id: "authorized".into(),
-        }],
-    })
+use crate::prekey::SdkDeviceManifestResponse;
+pub(crate) fn manifest(c: &RamfluxClient) -> Result<SdkDeviceManifestResponse, SdkError> {
+    crate::client::identity_authority::test_support::public_manifest(c)
 }
 pub(super) fn manifests(f: &Fixture) -> Result<(), SdkError> {
     for owner in [&f.human, &f.agent] {
         let m = manifest(owner)?;
         for local in [&f.human, &f.agent] {
-            local
-                .account_db()?
-                .persist_actor_state(&format!("identity/manifest/{}", m.principal_id), &m)?;
+            local.persist_identity_directory(&m)?;
         }
     }
     Ok(())
@@ -256,7 +219,7 @@ fn departed_group_participants_remain_valid_in_witnessed_history_without_regaini
     let f = Fixture::new()?;
     manifests(&f)?;
     f.agent.create_group("group", "agent-device")?;
-    f.agent.add_group_member("group", "human-device", "member")?;
+    f.agent.add_group_member("group", &member(&f.agent, "human-device")?, "member")?;
     f.agent.account_db()?.persist_client_record(
         "conversation",
         "group-thread",
@@ -271,8 +234,18 @@ fn departed_group_participants_remain_valid_in_witnessed_history_without_regaini
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
     sibling.import_own_task_packets(&packets, "agent-device")?;
     assert_eq!(sibling.task_get(Some("group-thread"), "task")?["requester"], "human");
-    assert!(sibling.account_db()?.group_member_role("group", "human-device")?.is_none());
-    assert!(sibling.account_db()?.group_member_key_binding("group", "human-device")?.is_none());
+    assert!(
+        sibling
+            .account_db()?
+            .group_member_role("group", &f.human.owned_device_identity()?)?
+            .is_none()
+    );
+    assert!(
+        sibling
+            .account_db()?
+            .group_member_key_binding("group", &f.human.owned_device_identity()?)?
+            .is_none()
+    );
     assert!(
         project(
             &sibling,
@@ -417,15 +390,17 @@ fn a_bundle_cannot_claim_membership_at_an_epoch_the_receiver_validated_without_t
 -> TestResult {
     let f = Fixture::new()?;
     manifests(&f)?;
+    let excluded = client(&f.root.join("excluded"), "excluded", 81)?;
+    f.agent.persist_identity_directory(&manifest(&excluded)?)?;
     f.agent.create_group("group", "agent-device")?;
-    f.agent.add_group_member("group", "excluded-device", "member")?;
+    f.agent.add_group_member("group", &member(&f.agent, "excluded-device")?, "member")?;
     f.agent.create_signed_group_member_kick(
         "group",
         "agent-device",
         "excluded-device",
         "leave before human",
     )?;
-    f.agent.add_group_member("group", "human-device", "member")?;
+    f.agent.add_group_member("group", &member(&f.agent, "human-device")?, "member")?;
     f.agent.account_db()?.persist_client_record(
         "conversation",
         "group-thread",
@@ -445,15 +420,16 @@ fn a_bundle_cannot_claim_membership_at_an_epoch_the_receiver_validated_without_t
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
     sibling.persist_identity_directory(&manifest(&f.human)?)?;
+    sibling.persist_identity_directory(&manifest(&excluded)?)?;
     sibling.create_group("group", "agent2-device")?;
-    sibling.add_group_member("group", "excluded-device", "member")?;
+    sibling.add_group_member("group", &member(&sibling, "excluded-device")?, "member")?;
     sibling.create_signed_group_member_kick(
         "group",
         "agent2-device",
         "excluded-device",
         "leave before human",
     )?;
-    sibling.add_group_member("group", "human-device", "member")?;
+    sibling.add_group_member("group", &member(&sibling, "human-device")?, "member")?;
     sibling.import_own_task_packets(&[packet], "agent-device")?;
     assert!(sibling.task_get(Some("group-thread"), "task")?.is_null());
     assert_eq!(sibling.account_db()?.task_state_usage("task/import_skip/")?.0, 1);

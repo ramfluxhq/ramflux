@@ -707,3 +707,6 @@ mod root_identity_keys;
 
 #[path = "root_ack_tests.rs"]
 mod root_ack;
+
+#[path = "recipient_context_tests.rs"]
+mod recipient_context;

@@ -123,8 +123,11 @@ impl RamfluxClient {
                 return Ok(());
             }
             if self
-                .account_db()?
-                .client_record("device", device)?
+                .peer_device_identity(assignee, device)
+                .ok()
+                .and_then(|identity| {
+                    self.account_db().ok()?.client_device_record(&identity).ok().flatten()
+                })
                 .is_some_and(|r| r["principal_id"] == assignee)
             {
                 return Ok(());

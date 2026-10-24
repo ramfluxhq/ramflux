@@ -362,6 +362,11 @@ impl RouterRedbStore {
         for record in &snapshot.foreign_device_heads.records {
             self.observe_foreign_device_set(record)?.admitted()?;
         }
+        crate::foreign_device_store::save_fences(
+            &self.db,
+            crate::foreign_device_store::Namespace::Router,
+            &snapshot.foreign_device_heads,
+        )?;
         save_snapshot(
             &self.db,
             ROUTER_SNAPSHOT_TABLE,
@@ -905,18 +910,11 @@ impl RouterRedbStore {
         for (key, expires_at) in incremental_replay_tuples {
             replay_guard_state.restore_accepted(key, expires_at);
         }
-        let mut mvp1_identities: IdentityRegistry =
-            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
-                .unwrap_or_default();
-        if mvp1_identities.migrate_legacy_registration_receipts(now) {
-            self.record_identity_registry(&mvp1_identities)?;
-        }
+        let mvp1_identities = self.load_identity_registry(now)?;
         let foreign_device_heads = crate::foreign_device_store::load(
             &self.db,
             crate::foreign_device_store::Namespace::Router,
         )?;
-        mvp1_identities.foreign_device_heads =
-            crate::foreign_device_heads::ForeignDeviceHeads::default();
         let lifecycle_by_principal = self.load_lifecycle_records()?;
         let lifecycle_tombstones = self.load_lifecycle_tombstones()?;
         let deactivated_delivery_targets = self.load_target_marker_set(
@@ -976,6 +974,18 @@ impl RouterRedbStore {
             identity_lineage_events,
             identity_lineage_heads,
         })))
+    }
+
+    fn load_identity_registry(&self, now: i64) -> Result<IdentityRegistry, NodeCoreError> {
+        let mut mvp1_identities: IdentityRegistry =
+            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
+                .unwrap_or_default();
+        if mvp1_identities.migrate_legacy_registration_receipts(now) {
+            self.record_identity_registry(&mvp1_identities)?;
+        }
+        mvp1_identities.foreign_device_heads =
+            crate::foreign_device_heads::ForeignDeviceHeads::default();
+        Ok(mvp1_identities)
     }
 
     fn merge_wal_submissions(

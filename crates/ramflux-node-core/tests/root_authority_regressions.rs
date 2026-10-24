@@ -456,3 +456,20 @@ fn failed_registration_never_consumes_the_proof_or_commits_partial_authority() -
     std::fs::remove_file(store_path)?;
     Ok(())
 }
+
+#[test]
+fn registration_rejects_a_root_signed_proof_over_thirty_days_without_burning_the_valid_proof()
+-> TestResult {
+    let fixture = Fixture::new()?;
+    let mut long = fixture.request.clone();
+    long.proof.expires_at = long.proof.issued_at + MAX_BRANCH_PROOF_LIFETIME_SECONDS + 1;
+    long.proof.signature = sign_canonical_bytes_with_seed(
+        &branch_proof_signing_bytes(&long.proof)?,
+        fixture.root.signing_key.to_bytes(),
+    );
+    let router = RouterCore::new();
+    assert!(router.mvp1_register_identity(&long).is_err());
+    assert!(router.signed_device_set(&long.principal_commitment).is_none());
+    router.mvp1_register_identity(&fixture.request)?;
+    Ok(())
+}

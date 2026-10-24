@@ -143,6 +143,7 @@ impl RamfluxClient {
             }
 
             db.persist_client_record("identity", principal, &identity)?;
+            self.stage_own_contact(&manifest, &link_id)?;
             self.contact_entry(principal)
         })?;
         self.finish_pair_retirement()?;

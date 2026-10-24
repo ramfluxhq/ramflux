@@ -10,6 +10,7 @@ mod itest_http;
 mod object_issue;
 mod principal_directory;
 mod quic_dispatch;
+mod registration;
 #[cfg(test)]
 mod registration_forward_tests;
 mod serve;

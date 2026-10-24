@@ -40,8 +40,9 @@ fn open_for(
     let human_id = human.client.device_branch.as_ref().ok_or("human")?.principal_id.clone();
     let agent_id = agent.client.device_branch.as_ref().ok_or("agent")?.principal_id.clone();
     for (local, remote) in [(human, agent), (agent, human)] {
-        let device = remote.client.device_branch.as_ref().ok_or("device")?;
-        local.client.account_db()?.persist_client_record("device",&device.device_id,&json!({"principal_id":device.principal_id,"signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())}))?;
+        local.client.persist_identity_directory(
+            &crate::client::identity_authority::test_support::public_manifest(&remote.client)?,
+        )?;
         local.client.account_db()?.persist_client_record(
             "conversation",
             conversation,

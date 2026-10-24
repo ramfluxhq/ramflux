@@ -119,8 +119,9 @@ fn open_task(
     agent: &LocalBusAccountState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (local, remote) in [(agent, human), (human, agent)] {
-        let d = remote.client.device_branch.as_ref().ok_or("device")?;
-        local.client.account_db()?.persist_client_record("device",&d.device_id,&json!({"principal_id":d.principal_id,"signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+        local.client.persist_identity_directory(&crate::client::task::tests::own::manifest(
+            &remote.client,
+        )?)?;
         local.client.account_db()?.persist_client_record(
             "conversation",
             "thread",

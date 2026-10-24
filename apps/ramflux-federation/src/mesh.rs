@@ -427,8 +427,21 @@ fn handle_s8_inbound_envelope_request(
                 error = %body,
                 "federation inbound envelope rejected"
             );
-            ramflux_transport::write_mesh_text_response(stream, "500 Internal Server Error", &body)
+            if matches!(error, ramflux_node_core::NodeCoreError::Capacity { .. }) {
+                ramflux_transport::write_mesh_json_response(
+                    stream,
+                    "429 Too Many Requests",
+                    &inbound_failure_response(&error).body,
+                )
                 .map_err(|error| mesh_transport_error(&error))?;
+            } else {
+                ramflux_transport::write_mesh_text_response(
+                    stream,
+                    "500 Internal Server Error",
+                    &body,
+                )
+                .map_err(|error| mesh_transport_error(&error))?;
+            }
         }
     }
     Ok(())
@@ -487,7 +500,7 @@ async fn handle_mesh_quic_request(
             inbound_transport: MeshInboundTransport::Quic,
         },
     )?;
-    if (200..300).contains(&response.status) {
+    if (200..300).contains(&response.status) || response.body["reason_code"] == "capacity" {
         accepted
             .write_json_response(response.status, &response.body)
             .await
@@ -547,7 +560,7 @@ async fn handle_mesh_compio_quic_request(
             inbound_transport: MeshInboundTransport::Quic,
         },
     )?;
-    if (200..300).contains(&response.status) {
+    if (200..300).contains(&response.status) || response.body["reason_code"] == "capacity" {
         accepted
             .write_json_response(response.status, &response.body)
             .await
@@ -609,7 +622,7 @@ fn handle_federation_mesh_quic_request(
                         ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                     })?,
                 }),
-                Err(error) => Ok(text_quic_response(500, &error.to_string())),
+                Err(error) => Ok(inbound_failure_response(&error)),
             }
         }
         ("POST", RETENTION_GC_SWEEP_PATH) => {
@@ -637,6 +650,19 @@ fn mesh_peer_service_id(peer_spiffe_uri: Option<&str>) -> Option<String> {
         .map(|peer| peer.service_id)
 }
 
+fn inbound_failure_response(
+    error: &ramflux_node_core::NodeCoreError,
+) -> ramflux_transport::GatewayQuicResponse {
+    match error {
+        ramflux_node_core::NodeCoreError::Capacity { resource } => {
+            ramflux_transport::GatewayQuicResponse {
+                status: 429,
+                body: serde_json::json!({"error":"capacity","reason_code":"capacity","resource":resource}),
+            }
+        }
+        other => text_quic_response(500, &other.to_string()),
+    }
+}
 fn text_quic_response(status: u16, body: &str) -> ramflux_transport::GatewayQuicResponse {
     ramflux_transport::GatewayQuicResponse { status, body: serde_json::json!({ "error": body }) }
 }

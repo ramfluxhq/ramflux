@@ -90,6 +90,9 @@ pub(super) async fn add(
         .await;
     account.put_engine(engine);
     let contact = result?;
+    if let Err(error) = super::super::own_device_copy::flush(account).await {
+        tracing::warn!(%error, "accepted contact copy deferred to account sync");
+    }
     let mut response = json!({"contact":contact});
     if legacy.is_some() {
         let record = account

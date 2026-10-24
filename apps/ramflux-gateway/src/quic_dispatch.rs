@@ -38,26 +38,7 @@ pub(crate) async fn dispatch_quic_json_request(
             serde_json::to_value(response)?
         }
         ("POST", "/mvp1/identity/register") => {
-            let mut registration: ramflux_node_core::IdentityRegisterRequest =
-                serde_json::from_value(request.body)?;
-            crate::principal_directory::registration_context(&mut registration, source)?;
-            let response: serde_json::Value =
-                match router_post_json(router, "/mvp1/identity/register", &registration) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        return Ok(crate::principal_directory::registration_forwarding_failure(
-                            &error,
-                        ));
-                    }
-                };
-            if serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
-                response.clone(),
-            )
-            .is_ok()
-            {
-                return Ok(ramflux_transport::GatewayQuicResponse { status: 409, body: response });
-            }
-            response
+            return Ok(crate::registration::forward(router, request.body, source));
         }
         ("POST", "/mvp1/prekey/publish") => {
             let prekey: ramflux_node_core::PrekeyPublishRequest =
