@@ -106,18 +106,7 @@ fn exercise(input: bool, read_only: bool) -> TestResult {
     let view = f.agent.surface_get("form", 0, None)?;
     let decision_id = view["actions"][0]["id"].as_str().ok_or("decision id")?;
     if read_only {
-        let key = format!(
-            "{}/{}",
-            crate::client::surface::key("actions", &action.surface_reference()?),
-            decision_id
-        );
-        let mut row = f
-            .agent
-            .account_db()?
-            .load_actor_state::<serde_json::Value>(&key)?
-            .ok_or("stored action")?;
-        row["actionable"] = json!(false);
-        f.agent.account_db()?.persist_actor_state(&key, &row)?;
+        mark_read_only(&f.agent, &action, decision_id)?;
     }
 
     let resolution = TaskResolve {
@@ -169,4 +158,23 @@ fn input_resolution_uses_a_creator_validated_surface_action_without_exporting_va
 fn a_read_only_creator_receipt_confirms_the_task_without_executing_a_surface_action() -> TestResult
 {
     exercise(true, true)
+}
+
+fn mark_read_only(
+    client: &RamfluxClient,
+    action: &SurfaceCarrier,
+    decision_id: &str,
+) -> Result<(), SdkError> {
+    let key = format!(
+        "{}/{}",
+        crate::client::surface::key("actions", &action.surface_reference()?),
+        decision_id
+    );
+    let mut row = client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&key)?
+        .ok_or_else(|| invalid("stored action missing"))?;
+    row["actionable"] = json!(false);
+    client.account_db()?.persist_actor_state(&key, &row)?;
+    Ok(())
 }
