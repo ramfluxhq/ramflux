@@ -9,6 +9,18 @@ struct Fixture {
 }
 impl Fixture {
     fn new(id: &str, seed: u8) -> Result<Self, SdkError> {
+        Self::owned(id, id, seed, seed + 1)
+    }
+    fn owned(id: &str, principal: &str, root_seed: u8, device_seed: u8) -> Result<Self, SdkError> {
+        Self::owned_epoch(id, principal, root_seed, device_seed, 1)
+    }
+    fn owned_epoch(
+        id: &str,
+        principal: &str,
+        root_seed: u8,
+        device_seed: u8,
+        epoch: u64,
+    ) -> Result<Self, SdkError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
@@ -17,12 +29,12 @@ impl Fixture {
             std::process::id()
         ));
         let mut client = RamfluxClient::new();
-        client.create_identity_root(id, [seed; 32]);
-        client.create_device_branch(id, id, 1, [seed + 1; 32]);
+        client.create_identity_root(principal, [root_seed; 32]);
+        client.create_device_branch(principal, id, epoch, [device_seed; 32]);
         client.open_account_index(&root)?;
         client.create_account(id, id)?;
         client.unlock_account(id, b"routed-test")?;
-        client.initialize_and_publish_prekey_bundle(id, id, id, [seed + 1; 32], None)?;
+        client.initialize_and_publish_prekey_bundle(principal, id, id, [device_seed; 32], None)?;
         Ok(Self { root, client, id: id.to_owned() })
     }
     fn config(&self) -> Result<GatewaySessionConfig, SdkError> {
@@ -31,7 +43,13 @@ impl Fixture {
             gateway_addr: "127.0.0.1:1".parse().map_err(|_| invalid("address"))?,
             server_name: "test".to_owned(),
             ca_cert: self.root.join("ca.pem"),
-            principal_id: self.id.clone(),
+            principal_id: self
+                .client
+                .device_branch
+                .as_ref()
+                .ok_or(SdkError::IdentityRootMissing)?
+                .principal_id
+                .clone(),
             device_id: self.id.clone(),
             target_delivery_id: self.id.clone(),
             prekey_http_url: None,
@@ -78,6 +96,9 @@ fn seal_as(
 ) -> Result<GatewayInboxEntry, SdkError> {
     if receiver.client.account_db()?.client_record("device", &sender.id)?.is_none() {
         review::trust(receiver, sender)?;
+    }
+    if sender.client.account_db()?.client_record("device", &receiver.id)?.is_none() {
+        review::trust(sender, receiver)?;
     }
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
     let hash = prekey_bundle_hash(&bundle)?;

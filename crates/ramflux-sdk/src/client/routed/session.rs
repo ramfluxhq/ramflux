@@ -134,11 +134,13 @@ impl RamfluxClient {
             .client_record("device", recipient)?
             .as_ref()
             .is_none_or(|record| record.get("x25519_identity_public").is_none())
+            || self.require_cached_root_authority(recipient).is_err()
         {
             self.resolve_target_principal_commitment(&engine.config, None, recipient).await?;
         }
+        let lookup = self.root_qualified_device_lookup(recipient)?;
         let bundle = engine
-            .fetch_prekey_bundle(recipient)
+            .fetch_prekey_bundle(&lookup)
             .await?
             .bundle
             .ok_or_else(|| invalid("recipient prekey missing"))?;
@@ -158,10 +160,12 @@ impl RamfluxClient {
         if let Some(pair) = self.sendable_pair(local, remote)? {
             return Ok(pair);
         }
-        let bundle =
-            sdk_fetch_prekey_bundle(url.ok_or_else(|| invalid("prekey url missing"))?, remote)?
-                .bundle
-                .ok_or_else(|| invalid("recipient prekey missing"))?;
+        let bundle = sdk_fetch_prekey_bundle(
+            url.ok_or_else(|| invalid("prekey url missing"))?,
+            &self.root_qualified_device_lookup(remote)?,
+        )?
+        .bundle
+        .ok_or_else(|| invalid("recipient prekey missing"))?;
         self.new_send_pair(local, message, bundle)
     }
     pub(super) fn new_send_pair(
@@ -181,7 +185,13 @@ impl RamfluxClient {
                 .cloned()
                 .ok_or_else(|| invalid("recipient identity missing"))?,
         )?;
-        if bundle.device_id != remote || bundle.identity_key != identity {
+        if bundle.device_id != remote
+            || bundle.identity_key != identity
+            || bundle.device_agreement_x25519_public != identity
+            || record["device_epoch"] != bundle.device_epoch
+            || record["principal_id"] != bundle.identity_commitment
+            || record["signing_public_key"] != bundle.device_identity_ed25519_public
+        {
             return Err(invalid("recipient prekey differs from verified device identity"));
         }
         let key = record

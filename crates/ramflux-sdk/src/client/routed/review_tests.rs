@@ -5,7 +5,43 @@
 use super::*;
 
 pub(super) fn trust(receiver: &Fixture, sender: &Fixture) -> Result<(), SdkError> {
-    let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    let mut manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    if let Some(target) = receiver
+        .client
+        .account_db()?
+        .client_record("device", &sender.id)?
+        .and_then(|v| v["target_delivery_id"].as_str().map(str::to_owned))
+    {
+        manifest.devices[0].target_delivery_id = target;
+    }
+    if receiver.client.identity_root.as_ref().is_some_and(|r| {
+        ramflux_crypto::identity_root_commitment(&r.signing_key.verifying_key())
+            == manifest.principal_commitment
+    }) && receiver.id != sender.id
+    {
+        manifest.devices.extend(
+            crate::client::identity_authority::test_support::manifest(&receiver.client)?.devices,
+        );
+        crate::client::identity_authority::test_support::sign_manifest(
+            sender.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &mut manifest,
+            1,
+        )?;
+    }
+    if let Some(alias) =
+        receiver.client.account_db()?.client_record("identity", &manifest.principal_id)?.and_then(
+            |v| {
+                v["devices"]
+                    .as_array()
+                    .and_then(|d| d.iter().find(|d| d["device_id"] == sender.id))
+                    .and_then(|d| d["target_delivery_id"].as_str())
+                    .map(str::to_owned)
+            },
+        )
+        && let Some(device) = manifest.devices.iter_mut().find(|d| d.device_id == sender.id)
+    {
+        device.target_delivery_id = alias;
+    }
     receiver.client.persist_identity_directory(&manifest)?;
     Ok(())
 }
@@ -811,12 +847,10 @@ async fn an_authenticated_alias_still_honors_a_block_on_its_root_commitment() ->
 {
     let alice = Fixture::new("alice", 17)?;
     let mut bob = Fixture::new("bob", 37)?;
-    bob.client.account_db()?.persist_client_record(
-        "identity",
-        "alice",
-        &serde_json::json!({"contact_identity_commitment":"alice-root"}),
-    )?;
-    bob.client.establish_friend_link("blocked-root", "bob", "alice-root")?;
+    trust(&bob, &alice)?;
+    let commitment = crate::client::identity_authority::test_support::manifest(&alice.client)?
+        .principal_commitment;
+    bob.client.establish_friend_link("blocked-root", "bob", &commitment)?;
     bob.client.block_friend_link("blocked-root")?;
     let entry = seal(&alice, &bob, message("blocked-alias", "thread"), b"blocked message")?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
@@ -889,13 +923,8 @@ async fn root_commitment_submit_remains_readable_after_autonomous_receive_ack()
 #[tokio::test]
 async fn unfiltered_receive_decrypts_own_device_delivery_after_background_ack()
 -> Result<(), SdkError> {
-    let mut bob_a = Fixture::new("bob-a", 41)?;
-    let mut bob_b = Fixture::new("bob-b", 61)?;
-    for fixture in [&mut bob_a, &mut bob_b] {
-        let seed = if fixture.id == "bob-a" { 42 } else { 62 };
-        fixture.client.create_identity_root("bob", [41; 32]);
-        fixture.client.create_device_branch("bob", &fixture.id, 1, [seed; 32]);
-    }
+    let bob_a = Fixture::owned("bob-a", "bob", 41, 42)?;
+    let mut bob_b = Fixture::owned("bob-b", "bob", 41, 62)?;
     trust(&bob_b, &bob_a)?;
     let mut device = bob_b
         .client
@@ -969,5 +998,32 @@ async fn unfiltered_receive_decrypts_own_device_delivery_after_background_ack()
         ramflux_protocol::encode_base64url(b"s35 encrypted own-device sync")
     );
     assert_eq!(result.response_body["entries"].as_array().map(Vec::len), Some(1));
+    Ok(())
+}
+
+#[test]
+fn live_pair_bootstrap_rejects_a_signed_prekey_from_an_older_device_epoch() -> Result<(), SdkError>
+{
+    let old = Fixture::new("bob", 61)?;
+    let current = Fixture::owned_epoch("bob", "bob", 61, 62, 2)?;
+    let sender = Fixture::new("alice", 41)?;
+    trust(&sender, &current)?;
+    let bundle = old.client.load_x3dh_private_state("bob")?.bundle;
+    ramflux_crypto::verify_prekey_bundle(
+        &current
+            .client
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_key
+            .verifying_key(),
+        &bundle,
+    )?;
+    assert!(
+        sender
+            .client
+            .new_send_pair("alice", &message("old-device-epoch", "thread"), bundle)
+            .is_err()
+    );
     Ok(())
 }

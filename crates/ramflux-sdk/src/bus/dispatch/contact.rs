@@ -137,14 +137,11 @@ async fn dispatch_contact_verify(
         .await;
     account.put_engine(engine);
     let safety = safety?;
-    let record = account.client.account_db()?.mark_contact_verified(ContactVerificationUpdate {
-        contact_identity_commitment: &body.contact_identity_commitment,
-        safety_number_hash: &safety.safety_number_hash,
-        device_set_hash: &safety.contact_device_set_hash,
-        lineage_head: &safety.contact_lineage_head,
-        verified_at: now_unix_timestamp(),
-        verified_by_device_id: &account.gateway_config.device_id,
-    })?;
+    let record = account.client.record_contact_safety_verified(
+        &body.contact_identity_commitment,
+        &account.gateway_config.device_id,
+        &safety,
+    )?;
     Ok(local_bus_ok(serde_json::json!({
         "contact_identity_commitment": record.contact_identity_commitment,
         "verification_state": record.verification_state,

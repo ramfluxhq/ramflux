@@ -148,9 +148,20 @@ agreement-key binding, root commitment, principal kind, signed-set membership an
 highest accepted epoch. It must expose safety changes and stop using revoked or
 rotated devices. A server may withhold a newer record; monotonic storage prevents
 rollback after observation but is not a transparency log or freshness oracle.
-The current SDK path has not been switched over, so client registration with its
-old proof builder fails against this node write policy until that integration is
-completed. Roll out the compatible client/node chain together.
+The SDK now verifies that chain before caching live key material. It pins roots by
+commitment, persists the highest signed record, rejects same-epoch conflicts and
+rollback, and retires device-pair/reset work after signed revocation or rotation.
+Group pins change only under an ownership-bound compare-and-swap authorized by a
+newer signed set. A root change under an existing principal label is a hard safety
+failure. Prekey lookups retain the expected root through qualified lookup tokens.
+An unsigned omission from the ready-device list never implies revocation.
+
+Registration/prekey writes use v2 proofs and a complete signed set. A pending root
+proposal is persisted before network submission and retried unchanged; a differing
+unacknowledged proposal requires reconciliation instead of signing a conflicting
+epoch. Observed signed revocations are retained even if local reenrollment fails.
+Standalone revocation publishes a newer signed set and requires an exact record
+acknowledgement. Upgrade the compatible client/node chain together.
 
 The design follows the authenticated key hierarchy principle in
 [Matrix cross-signing](https://spec.matrix.org/v1.16/client-server-api/#cross-signing),
@@ -161,3 +172,44 @@ hierarchy rather than adopting Matrix's wire format or extra signing-key tiers.
 also makes the identity authentication boundary explicit: a valid prekey signature
 alone does not authenticate a human identity. Root trust/fingerprint comparison
 and the subsequent client safety policy remain necessary.
+
+
+## Client migration and verification interfaces
+
+For a single legacy device, migration binds its locally held signing/agreement
+keys. For multiple devices, collect a v2 root-signed authorization independently
+from each device; the SDK never upgrades server-advertised v1 keys by signing them.
+The complete set includes remote directory devices, independently supplied
+authorizations and known local account devices. Missing authorizations fail
+closed. Devices remain fenced between publication and matching v2 registration /
+prekey installation; each legacy sibling must migrate with its own private keys.
+A complete root-signed set already observed remains authoritative after restart.
+
+```sh
+rf --socket /path/to/device-two.sock device authorize --account account > device-two.json
+rf --socket /path/to/device-one.sock device migrate --account account --authorization-file device-two.json
+rf --socket /path/to/device-one.sock device refresh --account account --principal-commitment ROOT_COMMITMENT
+rf --socket /path/to/device-one.sock device revoke --account account --device DEVICE_ID
+```
+
+The generic C ABI JSON request interface uses the same `device.authorize`,
+`device.migrate {authorizations:[...]}`, `device.refresh {principal_commitment}` and
+`device.revoke {device_id}` methods; no C struct layout or exported symbol changes
+are required. Revocation responses include `device_set_epoch`; the TUI verifies
+the matching device/result/epoch before reporting success.
+
+`root_asserted_principal_kind` exposes authenticated immutable root assertions.
+`verified_principal_kind` additionally requires user verification of the contact's
+current safety material and complete signed device set. Identity-directory rows
+and refresh responses distinguish `kind_asserted` from `kind_verified`. A signed
+`human` assertion is not proof that the holder is human. The headless account
+creation path rejects a human kind; headless/bot/workflow kinds can be explicit.
+Contact verification uses authenticated manifest key material and binds the
+verification to the complete signed set. Missing active-device key material
+prevents safety verification; device-set changes require verification again.
+Old unbound state remains readable but cannot authorize live key use.
+
+The SDK accessor is the integration boundary for task actors on branches that
+carry task projection support: `actor_kind_verified` must use
+`verified_principal_kind`, never a display label, client mode or root assertion
+alone. Local source, restore and peer paths must retain that distinction.
