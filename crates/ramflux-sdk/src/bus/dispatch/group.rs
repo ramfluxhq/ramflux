@@ -1254,16 +1254,7 @@ pub(crate) async fn dispatch_group_receive_request(
             }
         }
         for entry in &gateway_entries {
-            let device = engine.config.device_id.clone();
-            account
-                .client
-                .ack_gateway_delivery(
-                    &mut engine,
-                    &entry.envelope.envelope_id,
-                    &device,
-                    now_unix_timestamp(),
-                )
-                .await?;
+            account.client.ack_gateway_entry(&mut engine, entry, now_unix_timestamp()).await?;
             account
                 .client
                 .account_db()?
@@ -1373,17 +1364,14 @@ mod tests {
     ) -> Result<LocalBusAccountState, SdkError> {
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal, [0x31; 32]);
-        let branch = client.create_device_branch(principal, device, 1, seed);
+        client.create_device_branch(principal, device, 1, seed);
         client.open_account_index(temp_root(test_name))?;
         client.create_account(account_id, principal)?;
         client.unlock_account(account_id, b"dispatch-group-test")?;
         let own = client.device_root(&client.local_device_reference(device)?)?;
-        Ok(LocalBusAccountState::disconnected(
-            client,
-            gateway_config(principal, device, &format!("target_{device}"))
-                .with_device_branch(branch),
-            own,
-        ))
+        let gateway = gateway_config(principal, device, &format!("target_{device}"))
+            .with_account_identity(&client)?;
+        Ok(LocalBusAccountState::disconnected(client, gateway, own))
     }
 
     fn member_add_body(group_id: &str, member_id: &str) -> LocalBusGroupMemberAddRequest {

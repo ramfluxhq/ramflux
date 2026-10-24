@@ -22,15 +22,16 @@ pub(crate) async fn dispatch_message_bus_request(
             let account_id = request_account_id(request)?;
             let body: LocalBusMessageAckRequest = serde_json::from_value(request.body.clone())?;
             let account = local_bus_account_mut(state, account_id)?;
+            let receiver = account.client.owned_device_identity()?;
+            if receiver.device_id() != body.receiver_device_id {
+                return Err(SdkError::InboundRejected(
+                    "ACK receiver differs from owned account".into(),
+                ));
+            }
             let mut engine = account.take_live_engine().await?;
             let result = account
                 .client
-                .ack_gateway_delivery(
-                    &mut engine,
-                    &body.envelope_id,
-                    &body.receiver_device_id,
-                    body.received_at,
-                )
+                .ack_gateway_delivery(&mut engine, &body.envelope_id, &receiver, body.received_at)
                 .await;
             account.put_engine(engine);
             let cursor = result?;
@@ -746,16 +747,7 @@ async fn receive_bound_legacy(
                     },
                 )
                 .await?;
-            let device = engine.config.device_id.clone();
-            account
-                .client
-                .ack_gateway_delivery(
-                    &mut engine,
-                    &entry.envelope.envelope_id,
-                    &device,
-                    now_unix_timestamp(),
-                )
-                .await?;
+            account.client.ack_gateway_entry(&mut engine, &entry, now_unix_timestamp()).await?;
             account
                 .client
                 .account_db()?

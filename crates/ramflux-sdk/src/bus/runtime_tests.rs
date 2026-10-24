@@ -160,8 +160,7 @@ fn account_with_counter(
             devices: Vec::new(),
         },
     )?;
-    let config = GatewaySessionConfig::quic(endpoint)
-        .with_device_branch(client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?);
+    let config = GatewaySessionConfig::quic(endpoint).with_account_identity(&client)?;
     let engine = GatewaySessionEngine::with_test_transport(
         config,
         Box::new(Gateway { last: None, pending_cursor: None, blocked, cancelled, submits }),

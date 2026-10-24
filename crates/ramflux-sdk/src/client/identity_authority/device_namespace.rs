@@ -76,23 +76,22 @@ impl RamfluxClient {
         let hint = super::super::routed::decode(&entry.envelope)
             .ok()
             .and_then(|packet| packet.source_principal_commitment);
-        let signed_hint = entry
-            .envelope
-            .ext
-            .ext
-            .get("source_root_commitment")
-            .and_then(serde_json::Value::as_str);
+        let signed_hint = match entry.envelope.ext.ext.get("source_root_commitment") {
+            Some(serde_json::Value::String(root)) => Some(root.as_str()),
+            Some(_) => return Err(invalid("invalid sender root hint")),
+            None => None,
+        };
+        for root in hint.as_deref().into_iter().chain(signed_hint) {
+            let bytes = ramflux_protocol::decode_base64url(root)
+                .map_err(|_| invalid("invalid sender root hint"))?;
+            if bytes.len() != 32 || ramflux_protocol::encode_base64url(&bytes) != root {
+                return Err(invalid("invalid sender root hint"));
+            }
+        }
         if hint.as_deref().zip(signed_hint).is_some_and(|(body, envelope)| body != envelope) {
             return Err(invalid("sender root claims disagree"));
         }
         let hint = hint.or_else(|| signed_hint.map(str::to_owned));
-        if let Some(root) = &hint {
-            let bytes = ramflux_protocol::decode_base64url(root)
-                .map_err(|_| invalid("invalid sender root hint"))?;
-            if bytes.len() != 32 || ramflux_protocol::encode_base64url(&bytes) != *root {
-                return Err(invalid("invalid sender root hint"));
-            }
-        }
         let pinned = self
             .account_db()?
             .client_record("identity", owner)?

@@ -195,6 +195,19 @@ impl GatewaySessionConfig {
         self.auth_expires_at = self.now.saturating_add(GATEWAY_SESSION_AUTH_TTL_SECONDS);
     }
 
+    /// Configure gateway authentication from this account's owned root and device.
+    /// # Errors
+    /// Rejects missing or inconsistent account identity state.
+    pub fn with_account_identity(
+        self,
+        client: &crate::RamfluxClient,
+    ) -> Result<Self, crate::SdkError> {
+        self.with_owned_device(
+            client.identity_root.as_ref().ok_or(crate::SdkError::IdentityRootMissing)?,
+            client.device_branch.as_ref().ok_or(crate::SdkError::IdentityRootMissing)?.clone(),
+        )
+    }
+
     /// Bind gateway attribution to a device under the account's owned root.
     /// # Errors
     /// Rejects a root/branch mismatch or an invalid device name.
@@ -211,7 +224,7 @@ impl GatewaySessionConfig {
     }
 
     #[must_use]
-    pub fn with_device_branch(mut self, branch: ramflux_crypto::DeviceBranch) -> Self {
+    fn with_device_branch(mut self, branch: ramflux_crypto::DeviceBranch) -> Self {
         self.source_identity = None;
         self.principal_id.clone_from(&branch.principal_id);
         self.device_id.clone_from(&branch.device_id);

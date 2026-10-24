@@ -631,16 +631,43 @@ impl RamfluxClient {
         }))
     }
 
+    /// Acknowledge one exact delivery under the account's authenticated device identity.
+    /// # Errors
+    /// Rejects a foreign mailbox/engine identity, or a failed ACK/cursor commit.
+    pub async fn ack_gateway_entry(
+        &self,
+        engine: &mut GatewaySessionEngine,
+        entry: &GatewayInboxEntry,
+        received_at: i64,
+    ) -> Result<GatewayCursor, SdkError> {
+        let receiver = self.owned_device_identity()?;
+        if engine.config.source_identity.as_ref() != Some(&receiver)
+            || entry.target_delivery_id != engine.target_delivery_id()
+        {
+            return Err(SdkError::InboundRejected("ACK mailbox identity mismatch".into()));
+        }
+        let mut ack = gateway_ack(&entry.envelope.envelope_id, &receiver, received_at);
+        ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(entry.inbox_seq));
+        let cursor = engine.ack(ack).await?;
+        self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
+        Ok(cursor)
+    }
+
     /// # Errors
     /// Returns an error when the gateway ack fails or the durable cursor cannot be persisted.
     pub async fn ack_gateway_delivery(
         &self,
         engine: &mut GatewaySessionEngine,
         envelope_id: &str,
-        receiver_device_id: &str,
+        receiver: &ramflux_crypto::RootQualifiedDeviceRef,
         received_at: i64,
     ) -> Result<GatewayCursor, SdkError> {
-        let ack = gateway_ack(envelope_id, receiver_device_id, received_at)?;
+        if self.owned_device_identity()? != *receiver
+            || engine.config.source_identity.as_ref() != Some(receiver)
+        {
+            return Err(SdkError::InboundRejected("ACK receiver context mismatch".into()));
+        }
+        let ack = gateway_ack(envelope_id, receiver, received_at);
         let cursor = engine.ack(ack).await?;
         self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
         Ok(cursor)

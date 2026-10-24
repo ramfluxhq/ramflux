@@ -107,13 +107,7 @@ impl RamfluxClient {
                         }
                     }
                 }
-                self.ack_gateway_delivery(
-                    engine,
-                    &entry.envelope.envelope_id,
-                    &engine.config.device_id.clone(),
-                    now_unix_timestamp(),
-                )
-                .await?;
+                self.ack_gateway_entry(engine, &entry, now_unix_timestamp()).await?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
             }
@@ -208,13 +202,7 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        self.ack_gateway_delivery(
-            engine,
-            &entry.envelope.envelope_id,
-            &engine.config.device_id.clone(),
-            now_unix_timestamp(),
-        )
-        .await?;
+        self.ack_gateway_entry(engine, entry, now_unix_timestamp()).await?;
         self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)
     }
 }

@@ -332,7 +332,26 @@ impl GatewaySessionEngine {
 
     /// # Errors
     /// Returns an error when the gateway rejects the ack or returns an unexpected frame.
-    pub async fn ack(&mut self, ack: ramflux_protocol::Ack) -> Result<GatewayCursor, SdkError> {
+    pub async fn ack(&mut self, mut ack: ramflux_protocol::Ack) -> Result<GatewayCursor, SdkError> {
+        let receiver = self.config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if ack.receiver_device_id != receiver.device_id()
+            || ack
+                .ext
+                .ext
+                .get("receiver_root_commitment")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|root| root != receiver.root_commitment())
+        {
+            return Err(SdkError::InboundRejected("ACK receiver identity mismatch".into()));
+        }
+        ack.ext.ext.insert(
+            "receiver_root_commitment".into(),
+            serde_json::json!(receiver.root_commitment()),
+        );
+        let branch = self.config.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        ack.signed = sdk_device_signed_fields(receiver.device_id(), "");
+        ack.signed.signature =
+            ramflux_crypto::sign_protocol_object_with_device_branch(branch.as_ref(), &ack)?;
         write_gateway_client_frame(&mut *self.stream, &GatewayClientFrame::Ack { ack }).await?;
         let ack_cursor = match self.read_non_deliver_frame().await? {
             GatewayServerFrame::Ack { cursor } => {

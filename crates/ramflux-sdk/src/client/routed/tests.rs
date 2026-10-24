@@ -41,7 +41,7 @@ impl Fixture {
         self.client.local_device_reference(&self.id)
     }
     fn config(&self) -> Result<GatewaySessionConfig, SdkError> {
-        Ok(GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+        GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("address"))?,
             gateway_addr: "127.0.0.1:1".parse().map_err(|_| invalid("address"))?,
             server_name: "test".to_owned(),
@@ -57,9 +57,7 @@ impl Fixture {
             target_delivery_id: self.id.clone(),
             prekey_http_url: None,
         })
-        .with_device_branch(
-            self.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?,
-        ))
+        .with_account_identity(&self.client)
     }
 }
 impl Drop for Fixture {
@@ -683,3 +681,6 @@ mod participants;
 
 #[path = "root_identity_keys_tests.rs"]
 mod root_identity_keys;
+
+#[path = "root_ack_tests.rs"]
+mod root_ack;

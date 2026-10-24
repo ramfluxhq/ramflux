@@ -26,6 +26,10 @@ pub struct CursorAckState {
     pub inbox_seq: u64,
     pub last_envelope_id: Option<String>,
     pub acked_envelope_ids: BTreeSet<String>,
+    #[serde(default)]
+    pub acked_inbox_seqs: BTreeSet<u64>,
+    #[serde(default)]
+    pub last_acknowledged_inbox_seq: Option<u64>,
     pub nacked_envelope_ids: BTreeMap<String, ramflux_protocol::NackReason>,
 }
 
@@ -137,18 +141,60 @@ impl OpaqueDeviceInbox {
             }
             return Err(NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()));
         };
-        let entry_seq = self
-            .seq_for_envelope(&target_delivery_id, &ack.envelope_id)
-            .ok_or_else(|| NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()))?;
-        let cursor = self.cursors.entry(target_delivery_id.clone()).or_insert(CursorAckState {
-            target_delivery_id: target_delivery_id.clone(),
+        self.apply_ack_for_target(&target_delivery_id, ack)
+    }
+
+    /// A server-assigned sequence selects one delivery even when sender-chosen IDs collide.
+    /// # Errors
+    /// Rejects missing deliveries, mismatched IDs, and ambiguous legacy selectors.
+    pub fn apply_ack_for_target(
+        &mut self,
+        target: &str,
+        ack: &ramflux_protocol::Ack,
+    ) -> Result<CursorAckState, NodeCoreError> {
+        let entry_seq = match ack.ext.ext.get("inbox_seq") {
+            Some(value) => value
+                .as_u64()
+                .filter(|seq| *seq > 0)
+                .ok_or_else(|| NodeCoreError::ItestHttp("invalid ACK inbox sequence".into()))?,
+            None => self
+                .legacy_seq_for_envelope(target, &ack.envelope_id)?
+                .ok_or_else(|| NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()))?,
+        };
+        if !ack.ext.ext.contains_key("inbox_seq")
+            && self.cursors.get(target).is_some_and(|cursor| {
+                cursor.acked_envelope_ids.contains(&ack.envelope_id)
+                    && !cursor.acked_inbox_seqs.contains(&entry_seq)
+            })
+        {
+            return Err(NodeCoreError::AmbiguousEnvelopeId(ack.envelope_id.clone()));
+        }
+        let pending = self
+            .pending
+            .get(target)
+            .and_then(|entries| entries.iter().find(|entry| entry.inbox_seq == entry_seq));
+        if let Some(entry) = pending {
+            if entry.envelope.envelope_id != ack.envelope_id {
+                return Err(NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()));
+            }
+        } else if !self
+            .cursors
+            .get(target)
+            .is_some_and(|cursor| cursor.acked_inbox_seqs.contains(&entry_seq))
+        {
+            return Err(NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()));
+        }
+        let cursor = self.cursors.entry(target.into()).or_insert(CursorAckState {
+            target_delivery_id: target.into(),
             ..CursorAckState::default()
         });
         cursor.inbox_seq = cursor.inbox_seq.max(entry_seq);
         cursor.last_envelope_id = Some(ack.envelope_id.clone());
+        cursor.last_acknowledged_inbox_seq = Some(entry_seq);
         cursor.acked_envelope_ids.insert(ack.envelope_id.clone());
-        if let Some(entries) = self.pending.get_mut(&target_delivery_id) {
-            entries.retain(|entry| entry.envelope.envelope_id != ack.envelope_id);
+        cursor.acked_inbox_seqs.insert(entry_seq);
+        if let Some(entries) = self.pending.get_mut(target) {
+            entries.retain(|entry| entry.inbox_seq != entry_seq);
         }
         Ok(cursor.clone())
     }
@@ -201,10 +247,7 @@ impl OpaqueDeviceInbox {
         let next_seq = self.next_seq.entry(entry.target_delivery_id.clone()).or_insert(1);
         *next_seq = (*next_seq).max(entry.inbox_seq.saturating_add(1));
         let entries = self.pending.entry(entry.target_delivery_id.clone()).or_default();
-        if !entries
-            .iter()
-            .any(|existing| existing.envelope.envelope_id == entry.envelope.envelope_id)
-        {
+        if !entries.iter().any(|existing| existing.inbox_seq == entry.inbox_seq) {
             entries.push(entry);
             entries.sort_by_key(|entry| entry.inbox_seq);
         }
@@ -242,13 +285,20 @@ impl OpaqueDeviceInbox {
         })
     }
 
-    fn seq_for_envelope(&self, target_delivery_id: &str, envelope_id: &str) -> Option<u64> {
-        self.pending.get(target_delivery_id).and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.envelope.envelope_id == envelope_id)
-                .map(|entry| entry.inbox_seq)
-        })
+    fn legacy_seq_for_envelope(
+        &self,
+        target: &str,
+        id: &str,
+    ) -> Result<Option<u64>, NodeCoreError> {
+        let Some(entries) = self.pending.get(target) else {
+            return Ok(None);
+        };
+        let mut matching = entries.iter().filter(|entry| entry.envelope.envelope_id == id);
+        let first = matching.next().map(|entry| entry.inbox_seq);
+        if matching.next().is_some() {
+            return Err(NodeCoreError::AmbiguousEnvelopeId(id.into()));
+        }
+        Ok(first)
     }
 }
 

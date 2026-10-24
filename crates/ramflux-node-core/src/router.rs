@@ -951,17 +951,20 @@ impl RouterCore {
         target_delivery_id: &str,
         ack: &ramflux_protocol::Ack,
     ) -> Result<CursorAckState, NodeCoreError> {
-        let actual_target_delivery_id = self
-            .indexed_target_for_envelope(&ack.envelope_id)
-            .ok_or_else(|| NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()))?;
-        if actual_target_delivery_id != target_delivery_id {
-            return Err(NodeCoreError::EnvelopeTargetMismatch {
-                envelope_id: ack.envelope_id.clone(),
-                expected_target_delivery_id: target_delivery_id.to_owned(),
-                actual_target_delivery_id,
-            });
+        if !ack.ext.ext.contains_key("inbox_seq") {
+            let actual_target_delivery_id = self
+                .indexed_target_for_envelope(&ack.envelope_id)
+                .ok_or_else(|| NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()))?;
+            if actual_target_delivery_id != target_delivery_id {
+                return Err(NodeCoreError::EnvelopeTargetMismatch {
+                    envelope_id: ack.envelope_id.clone(),
+                    expected_target_delivery_id: target_delivery_id.into(),
+                    actual_target_delivery_id,
+                });
+            }
         }
-        self.apply_ack(ack)
+        crate::record_router_ack();
+        self.target_shard(target_delivery_id).inbox.apply_ack_for_target(target_delivery_id, ack)
     }
 
     /// # Errors
