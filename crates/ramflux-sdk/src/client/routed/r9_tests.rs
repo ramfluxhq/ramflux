@@ -10,6 +10,41 @@ use serde_json::json;
 pub(super) fn manifest(f: &Fixture) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
     crate::client::identity_authority::test_support::manifest(&f.client)
 }
+fn forged_group_traffic(sender: &Fixture) -> Result<(Vec<u8>, Vec<u8>), SdkError> {
+    let group = "pinned";
+    let epoch = sender.client.group_state(group)?.group_epoch;
+    let seed = [0x91; 32];
+    let mut session = ramflux_crypto::DmSession::initiator(
+        seed,
+        crate::group::group_sender_device_hash(group, "alice", "local"),
+        crate::group::group_sender_device_hash(group, "alice", "remote"),
+        crate::group::group_sender_transcript_hash(group, "alice", epoch),
+    )?;
+    let ciphertext = session.encrypt(
+        b"forged group content",
+        &crate::group::group_associated_data(group, "alice", epoch),
+    )?;
+    let distribution = crate::group::SdkGroupSenderKeyDistribution {
+        schema: "ramflux.sdk.group_sender_key.distribution.v2".into(),
+        version: 2,
+        group_id: group.into(),
+        sender_id: "alice".into(),
+        group_key_epoch: epoch,
+        sender_key_seed: seed,
+        sender_device_signing_public_key: Some(
+            manifest(sender)?.devices[0].branch_public_key.clone(),
+        ),
+    };
+    let body = crate::group::SdkGroupEncryptedEnvelope {
+        schema: "ramflux.sdk.group_sender_key.message.v1".into(),
+        version: 1,
+        group_id: group.into(),
+        sender_id: "alice".into(),
+        group_key_epoch: epoch,
+        ciphertext,
+    };
+    Ok((serde_json::to_vec(&distribution)?, serde_json::to_vec(&body)?))
+}
 async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     let alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
@@ -53,7 +88,8 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     trust(&impostor, &bob)?;
     fixture_group(&impostor.client, "pinned", &alice)?;
     fixture_member(&impostor.client, "pinned", &bob)?;
-    let distribution = impostor.client.export_group_sender_key_distribution("pinned", "alice")?;
+    // A malicious sender bypasses the SDK's new local root/pin guard and constructs wire data.
+    let (distribution, forged_body) = forged_group_traffic(&impostor)?;
     let mut keyless: serde_json::Value = serde_json::from_slice(&distribution)?;
     keyless
         .as_object_mut()
@@ -74,7 +110,7 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     let keyless_rejected =
         bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err();
-    let body = impostor.client.encrypt_group_message("pinned", "alice", b"forged group content")?;
+    let body = forged_body;
     let mut msg = outgoing(&impostor, &bob, "forged-group-data");
     msg.source_principal_id = principal.into();
     msg.sender_id = principal.into();

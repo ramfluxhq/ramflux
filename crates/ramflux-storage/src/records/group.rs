@@ -54,6 +54,8 @@ pub struct GroupSenderKeyCounterRecord {
     pub group_id: String,
     pub group_key_epoch: u64,
     pub sender_id: String,
+    #[serde(default)]
+    pub session_id: String,
     pub counter: u64,
     pub message_id: String,
     pub seen_at: i64,

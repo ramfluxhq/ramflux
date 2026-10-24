@@ -276,7 +276,7 @@ impl RamfluxClient {
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
                 return Ok(Vec::new());
             }
-            if self.group_sender_key_counter_seen(envelope)? {
+            if self.group_sender_key_counter_seen(envelope, &self.authenticated_device_identity(entry)?)? {
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
                 return Ok(Vec::new());
 

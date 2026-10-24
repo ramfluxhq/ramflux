@@ -83,6 +83,7 @@ impl AccountDb {
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;
         crate::schema_receipt_identity::upgrade(&db.connection)?;
+        crate::schema_group_sender_identity::upgrade(&db.connection)?;
         Ok(db)
     }
 

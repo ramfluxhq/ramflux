@@ -971,20 +971,22 @@ fn group_pending_undecrypted_is_bounded_per_group() -> Result<(), StorageError> 
 #[test]
 fn group_sender_key_counter_seen_rejects_replay() -> Result<(), StorageError> {
     let (root, db) = test_db("sender-counter")?;
+    let actor = receipt_actor("alice")?;
     let record = GroupSenderKeyCounterRecord {
         group_id: "group_a".to_owned(),
         group_key_epoch: 7,
         sender_id: "alice".to_owned(),
+        session_id: "session".to_owned(),
         counter: 42,
         message_id: "msg_first".to_owned(),
         seen_at: 1_760_000_000,
     };
 
-    assert!(!db.group_sender_key_counter_seen("group_a", 7, "alice", 42)?);
-    assert!(db.record_group_sender_key_counter(&record)?);
-    assert!(db.group_sender_key_counter_seen("group_a", 7, "alice", 42)?);
+    assert!(!db.group_sender_key_counter_seen("group_a", 7, &actor, "session", 42)?);
+    assert!(db.record_group_sender_key_counter(&record, &actor)?);
+    assert!(db.group_sender_key_counter_seen("group_a", 7, &actor, "session", 42)?);
     let replay = GroupSenderKeyCounterRecord { message_id: "msg_replay".to_owned(), ..record };
-    assert!(!db.record_group_sender_key_counter(&replay)?);
+    assert!(!db.record_group_sender_key_counter(&replay, &actor)?);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

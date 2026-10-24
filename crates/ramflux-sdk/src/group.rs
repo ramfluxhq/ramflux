@@ -30,6 +30,8 @@ pub(crate) struct SdkGroupSenderKeyDistributionEnvelope {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkGroupSenderKeyState {
+    #[serde(default)]
+    pub(crate) principal_commitment: Option<String>,
     pub(crate) group_id: String,
     pub(crate) sender_id: String,
     pub(crate) group_key_epoch: u64,
@@ -66,12 +68,23 @@ pub(crate) struct SdkGroupPendingPlaintext {
 }
 
 pub(crate) fn group_sender_key_checkpoint_name(
-    group_id: &str,
-    sender_id: &str,
+    group: &str,
+    sender: &ramflux_crypto::RootQualifiedDeviceRef,
     epoch: u64,
     direction: &str,
-) -> String {
-    format!("group_sender_key:{group_id}:{sender_id}:{epoch}:{direction}")
+) -> Result<String, crate::SdkError> {
+    Ok(format!(
+        "group_sender_key:v2/{}",
+        ramflux_protocol::hash_base64url(
+            "ramflux.sdk.group.sender.state.v2",
+            &ramflux_protocol::canonical_json_bytes(&(
+                group,
+                sender.storage_key(),
+                epoch,
+                direction
+            ))?
+        )
+    ))
 }
 
 pub(crate) fn group_sender_session_id(group_id: &str, sender_id: &str, epoch: u64) -> String {

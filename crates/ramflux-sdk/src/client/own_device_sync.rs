@@ -350,7 +350,9 @@ impl RamfluxClient {
                 }
                 if let Ok(state) = self.load_group_sender_key_state(
                     &group.group_id,
-                    member_id,
+                    &self.device_identity(
+                        &self.group_device_reference(&group.group_id, member_id)?,
+                    )?,
                     group.group_epoch,
                     "recv",
                 ) {
