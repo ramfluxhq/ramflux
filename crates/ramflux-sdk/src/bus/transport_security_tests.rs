@@ -273,3 +273,27 @@ async fn r8_a_real_interrupted_http_response_body_is_retryable() -> TestResult {
     server.await??;
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn r8_gateway_stream_preserves_a_tls_client_auth_rejection() -> TestResult {
+    use ramflux_transport::GatewaySessionFrameSource;
+    let server = Certificates::new("stream-auth-server")?;
+    let (endpoint, task) = server.mesh(server.ca_pem.clone())?;
+    // The server is trusted, but requires a client certificate. Client-side QUIC
+    // readiness can precede the server's rejection of the empty certificate flight.
+    let client = ramflux_transport::QuicGatewayClient::connect(
+        "127.0.0.1:0".parse()?,
+        endpoint.parse()?,
+        "localhost",
+        &server.tls.ca_cert,
+        Duration::from_secs(3),
+    )
+    .await?;
+    let mut stream = client.open_bidi_stream().await?;
+    let error =
+        stream.recv_frame().await.err().ok_or("client authentication unexpectedly succeeded")?;
+    assert_security(error);
+    task.abort();
+    let _ = task.await;
+    Ok(())
+}

@@ -28,3 +28,28 @@ pub(crate) fn connect(error: quinn::ConnectError) -> TransportError {
 pub(crate) fn wire(message: impl Into<String>) -> TransportError {
     TransportError::Protocol(ramflux_protocol::ProtocolError::TransportProtocol(message.into()))
 }
+
+pub(crate) fn read(error: &quinn::ReadError) -> TransportError {
+    if let quinn::ReadError::ConnectionLost(cause) = error
+        && let TransportError::Tls(message) = connection(cause)
+    {
+        return TransportError::Tls(message);
+    }
+    TransportError::Quic(format!("{error}; detail={error:?}"))
+}
+pub(crate) fn write(error: &quinn::WriteError) -> TransportError {
+    if let quinn::WriteError::ConnectionLost(cause) = error
+        && let TransportError::Tls(message) = connection(cause)
+    {
+        return TransportError::Tls(message);
+    }
+    TransportError::Quic(format!("{error}; detail={error:?}"))
+}
+pub(crate) fn read_to_end(error: &quinn::ReadToEndError) -> TransportError {
+    if let quinn::ReadToEndError::Read(cause) = error
+        && let TransportError::Tls(message) = read(cause)
+    {
+        return TransportError::Tls(message);
+    }
+    TransportError::Quic(error.to_string())
+}

@@ -265,7 +265,7 @@ impl QuicGatewayClient {
         let (send, recv) = tokio::time::timeout(self.timeout, self.connection.open_bi())
             .await
             .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?
-            .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
+            .map_err(|error| crate::quic_errors::connection(&error))?;
         Ok(QuicGatewayBidiStream { send, recv, timeout: self.timeout })
     }
 
@@ -599,12 +599,8 @@ pub(crate) async fn write_quic_raw_frame(
 ) -> Result<(), TransportError> {
     let len = u32::try_from(frame.len())
         .map_err(|_error| TransportError::FrameTooLarge { len: frame.len() })?;
-    send.write_all(&len.to_be_bytes())
-        .await
-        .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
-    send.write_all(frame)
-        .await
-        .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
+    send.write_all(&len.to_be_bytes()).await.map_err(|error| crate::quic_errors::write(&error))?;
+    send.write_all(frame).await.map_err(|error| crate::quic_errors::write(&error))?;
     Ok(())
 }
 
@@ -614,9 +610,7 @@ pub(crate) async fn read_quic_raw_frame(
     tracing::trace!("quinn QUIC reading JSON frame length");
     let mut len_bytes = [0_u8; 4];
     recv.read_exact(&mut len_bytes).await.map_err(|error| match error {
-        quinn::ReadExactError::ReadError(error) => {
-            TransportError::Quic(format!("{error}; detail={error:?}"))
-        }
+        quinn::ReadExactError::ReadError(error) => crate::quic_errors::read(&error),
         quinn::ReadExactError::FinishedEarly(size) => TransportError::Io(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             format!("gateway frame ended after {size} bytes"),
@@ -629,9 +623,7 @@ pub(crate) async fn read_quic_raw_frame(
     tracing::trace!(len, "quinn QUIC reading JSON frame body");
     let mut body = vec![0_u8; len];
     recv.read_exact(&mut body).await.map_err(|error| match error {
-        quinn::ReadExactError::ReadError(error) => {
-            TransportError::Quic(format!("{error}; detail={error:?}"))
-        }
+        quinn::ReadExactError::ReadError(error) => crate::quic_errors::read(&error),
         quinn::ReadExactError::FinishedEarly(size) => TransportError::Io(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             format!("gateway frame ended after {size} of {len} bytes"),

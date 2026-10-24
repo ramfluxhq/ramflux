@@ -1319,7 +1319,7 @@ async fn drain_quic_recv_to_fin(recv: &mut quinn::RecvStream) -> Result<(), Tran
         .await
         .map_err(|error| TransportError::Quic(error.to_string()))?
         .map(|_trailing| ())
-        .map_err(|error| TransportError::Quic(error.to_string()))
+        .map_err(|error| crate::quic_errors::read_to_end(&error))
 }
 
 fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, TransportError> {
