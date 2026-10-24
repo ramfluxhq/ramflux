@@ -3,6 +3,7 @@
 
 //! Old same-root snapshots cannot undo membership removals or revive their pins.
 use super::*;
+use crate::own_device_sync::SdkOwnDeviceGroupMemberPin;
 fn setup(
     name: &str,
 ) -> Result<(RamfluxClient, PathBuf, RamfluxClient, PathBuf, SdkOwnDeviceHistoryBundle), SdkError> {
@@ -297,4 +298,137 @@ fn member_packet(
         target_delivery_id: "target_device_sync".into(),
         envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,
     })
+}
+
+fn snapshot_message(
+    source: &RamfluxClient,
+    id: &str,
+    epoch: u64,
+) -> Result<DirectMessageRecord, SdkError> {
+    let bytes = source.encrypt_group_message("g", "source_device_sync", id.as_bytes())?;
+    let mut encrypted: SdkGroupEncryptedEnvelope = serde_json::from_slice(&bytes)?;
+    encrypted.group_key_epoch = epoch;
+    Ok(DirectMessageRecord {
+        conversation_id: "group-thread".into(),
+        message_id: id.into(),
+        sender_id: "source_device_sync".into(),
+        encrypted_body: serde_json::to_vec(&encrypted)?,
+        metadata: MessageMetadata::default(),
+        deleted: false,
+        created_at: 1,
+        receipts: Vec::new(),
+    })
+}
+fn direct_history(id: &str) -> DirectMessageRecord {
+    DirectMessageRecord {
+        conversation_id: "direct-thread".into(),
+        message_id: id.into(),
+        sender_id: "source_device_sync".into(),
+        encrypted_body: b"direct history".to_vec(),
+        metadata: MessageMetadata::default(),
+        deleted: false,
+        created_at: 2,
+        receipts: Vec::new(),
+    }
+}
+#[test]
+fn a_target_joining_after_the_source_skips_older_group_messages_without_rolling_back_direct_history()
+-> Result<(), SdkError> {
+    let (source, sr, target, tr, mut history) = setup("later-target-floor")?;
+    history.groups[0].group_epoch = 4;
+    history.groups[0].local_joined_epoch = 1;
+    history.groups[0].members.push(SdkOwnDeviceGroupMemberSnapshot {
+        member_id: "target_device_sync".into(),
+        role: "member".into(),
+        joined_epoch: 3,
+    });
+    history.messages = vec![
+        snapshot_message(&source, "before-target-join", 1)?,
+        direct_history("direct-safe"),
+        snapshot_message(&source, "after-target-join", 3)?,
+    ];
+    history
+        .contents
+        .insert("before-target-join".into(), zeroize::Zeroizing::new(b"not entitled".to_vec()));
+    let result = target.import_own_device_history_bundle(
+        &envelope("source_device_sync", "target_device_sync"),
+        &history,
+    )?;
+    assert_eq!(result.imported_messages, 2);
+    assert!(target.direct_message_by_id("before-target-join")?.is_none());
+    assert!(target.account_db()?.message_content("before-target-join")?.is_none());
+    assert!(target.direct_message_by_id("direct-safe")?.is_some());
+    assert!(target.direct_message_by_id("after-target-join")?.is_some());
+    assert_eq!(target.account_db()?.group_member_joined_epoch("g", "target_device_sync")?, Some(3));
+    assert!(
+        target
+            .account_db()?
+            .list_actor_states::<serde_json::Value>("own-device/restore-skip/")?
+            .iter()
+            .any(|r| r["item"] == "before-target-join"
+                && r["reason"] == "group_message_below_join_floor")
+    );
+    finish(source, sr, target, tr)
+}
+#[test]
+fn a_reused_local_device_id_ignores_foreign_self_pins_and_later_restores_group_keys_and_history()
+-> Result<(), SdkError> {
+    let (source, sr, target, tr, mut history) = setup("foreign-self-pin")?;
+    history.groups[0].members.push(SdkOwnDeviceGroupMemberSnapshot {
+        member_id: "target_device_sync".into(),
+        role: "member".into(),
+        joined_epoch: 2,
+    });
+    history.group_member_pins.push(SdkOwnDeviceGroupMemberPin {
+        group_id: "g".into(),
+        device_id: "target_device_sync".into(),
+        signing_public_key: ramflux_protocol::encode_base64url([7; 32]),
+        principal_id: None,
+        principal_commitment: None,
+    });
+    history.messages =
+        vec![snapshot_message(&source, "first-group", 2)?, direct_history("direct-safe")];
+    let own = ramflux_protocol::encode_base64url(
+        target
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_key
+            .verifying_key()
+            .to_bytes(),
+    );
+    let result = target.import_own_device_history_bundle(
+        &envelope("source_device_sync", "target_device_sync"),
+        &history,
+    )?;
+    assert_eq!(result.imported_sender_keys, 1);
+    assert_eq!(result.imported_messages, 2);
+    assert_eq!(
+        target
+            .account_db()?
+            .group_member_key_binding("g", "target_device_sync")?
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_public_key,
+        own
+    );
+    history.group_member_pins.last_mut().ok_or(SdkError::IdentityRootMissing)?.signing_public_key =
+        own.clone();
+    history.messages = vec![snapshot_message(&source, "later-group", 2)?];
+    let result = target.import_own_device_history_bundle(
+        &envelope("source_device_sync", "target_device_sync"),
+        &history,
+    )?;
+    assert_eq!(result.imported_sender_keys, 1);
+    assert_eq!(result.imported_messages, 1);
+    assert!(target.direct_message_by_id("first-group")?.is_some());
+    assert!(target.direct_message_by_id("later-group")?.is_some());
+    assert_eq!(
+        target
+            .account_db()?
+            .group_member_key_binding("g", "target_device_sync")?
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_public_key,
+        own
+    );
+    finish(source, sr, target, tr)
 }

@@ -37,9 +37,10 @@ impl RamfluxClient {
         floors: &BTreeMap<String, u64>,
     ) -> Result<BTreeSet<(String, String)>, SdkError> {
         let db = self.account_db()?;
+        let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
         let mut blocked = BTreeSet::new();
         let mut unique = BTreeMap::new();
-        for pin in &bundle.group_member_pins {
+        for pin in bundle.group_member_pins.iter().filter(|pin| pin.device_id != *local) {
             let id = (pin.group_id.clone(), pin.device_id.clone());
             let encoded = serde_json::to_vec(pin)?;
             if unique.insert(id.clone(), encoded.clone()).is_some_and(|old| old != encoded) {
@@ -47,7 +48,7 @@ impl RamfluxClient {
             }
         }
         let mut seen = BTreeSet::new();
-        for pin in &bundle.group_member_pins {
+        for pin in bundle.group_member_pins.iter().filter(|pin| pin.device_id != *local) {
             let id = (pin.group_id.clone(), pin.device_id.clone());
             if !seen.insert(id.clone()) {
                 continue;

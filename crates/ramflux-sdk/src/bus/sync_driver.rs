@@ -75,20 +75,19 @@ async fn receive(
             Ok(true) => true,
             Err(error) => {
                 let bytes = serde_json::to_vec(&entry)?;
-                let code = if let Some(code) = deterministic(&error) {
+                let code = if let Some(code) = crate::client::inbox_failure::deterministic(&error) {
                     code
                 } else if bytes.len() > 1024 * 1024 {
                     "oversized_retry"
                 } else {
-                    set_failure_policy(
+                    if crate::client::inbox_failure::defer_entry(
                         &account.client,
                         &engine.config.device_id,
                         &entry,
                         &key,
                         &bytes,
                         now,
-                    )?;
-                    if account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)? != 0 {
+                    )? {
                         account.client.persist_gateway_receive_cursor(
                             engine.target_delivery_id(),
                             entry.inbox_seq,
@@ -161,6 +160,13 @@ async fn process(
     {
         return Err(SdkError::InboundRejected("unsupported envelope schema or version".to_owned()));
     }
+    if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
+        let key = crate::client::group_quarantine::legacy_key(entry)?;
+        let db = account.client.account_db()?;
+        db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
+        db.retain_legacy_inbox(&key)?;
+        return Ok(false);
+    }
     if account.client.v2_blocks_legacy(&entry.envelope.source_device_id)? {
         let db = account.client.account_db()?;
         db.hold_unrouted(
@@ -196,21 +202,6 @@ async fn process(
     Ok(false)
 }
 
-fn deterministic(error: &SdkError) -> Option<&'static str> {
-    match error {
-        SdkError::Crypto(
-            ramflux_crypto::CryptoError::VerifyFailed
-            | ramflux_crypto::CryptoError::InvalidSignatureLength(_)
-            | ramflux_crypto::CryptoError::AeadFailed
-            | ramflux_crypto::CryptoError::KeyCommitmentMismatch
-            | ramflux_crypto::CryptoError::CommitmentMismatch,
-        ) => Some("authentication_failed"),
-        SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),
-        SdkError::InboundRejected(_) => Some("routing_rejected"),
-        _ => None,
-    }
-}
-
 fn redrive_if_state_changed(client: &RamfluxClient) -> Result<(), SdkError> {
     let db = client.account_db()?;
     let revision = db.inbox_recovery_revision()?;
@@ -243,45 +234,5 @@ fn append_pending_entries(
             entries.push(entry);
         }
     }
-    Ok(())
-}
-
-fn set_failure_policy(
-    client: &RamfluxClient,
-    local: &str,
-    entry: &GatewayInboxEntry,
-    key: &str,
-    bytes: &[u8],
-    at: i64,
-) -> Result<(), SdkError> {
-    let authenticated = client.authenticated_envelope_sender(entry).is_ok();
-    let opened = if authenticated { client.open_routed(entry, local).ok() } else { None };
-    let group = opened.as_ref().and_then(|o| o.routing.group_id.as_deref());
-    let related = if let Some(group) = group {
-        client
-            .group_state(group)
-            .is_ok_and(|state| state.members.contains(&entry.envelope.source_device_id))
-    } else {
-        client.pair_recovery_pending(local, &entry.envelope.source_device_id)?
-            || client.friend_link_peer_is_accepted(&entry.envelope.source_principal_id)?
-            || client
-                .device_branch
-                .as_ref()
-                .is_some_and(|b| b.principal_id == entry.envelope.source_principal_id)
-    };
-    let (class, subject) = if let Some(group) = group {
-        ("group", group)
-    } else if !authenticated {
-        ("manifest", entry.envelope.source_device_id.as_str())
-    } else {
-        ("none", "")
-    };
-    client.account_db()?.set_inbox_failure_policy(
-        key,
-        bytes,
-        authenticated && related,
-        (class, subject),
-        at,
-    )?;
     Ok(())
 }

@@ -1036,17 +1036,20 @@ pub(crate) async fn dispatch_group_receive_request(
                 continue;
             }
             let message_id = entry.envelope.envelope_id.clone();
-            let Some(delivery) =
-                legacy_receive::apply(&account.client, &engine.config, &body, &entry).await?
-            else {
-                if !account
-                    .client
-                    .account_db()?
-                    .has_inbox_retry(&crate::client::routed::committed_key(&entry)?)?
-                {
+            let delivery = match legacy_receive::apply(
+                &account.client,
+                &engine.config,
+                &body,
+                &entry,
+            )
+            .await?
+            {
+                crate::client::group_quarantine::LegacyGroupDelivery::Applied(delivery) => delivery,
+                crate::client::group_quarantine::LegacyGroupDelivery::Held => continue,
+                crate::client::group_quarantine::LegacyGroupDelivery::Rejected => {
                     gateway_entries.push(entry);
+                    continue;
                 }
-                continue;
             };
             match delivery {
                 GroupGatewayDeliveryResult::SenderKeyDistribution(distribution) => {
@@ -1079,17 +1082,20 @@ pub(crate) async fn dispatch_group_receive_request(
         }
         for entry in message_entries {
             let message_id = entry.envelope.envelope_id.clone();
-            let Some(delivery) =
-                legacy_receive::apply(&account.client, &engine.config, &body, &entry).await?
-            else {
-                if !account
-                    .client
-                    .account_db()?
-                    .has_inbox_retry(&crate::client::routed::committed_key(&entry)?)?
-                {
+            let delivery = match legacy_receive::apply(
+                &account.client,
+                &engine.config,
+                &body,
+                &entry,
+            )
+            .await?
+            {
+                crate::client::group_quarantine::LegacyGroupDelivery::Applied(delivery) => delivery,
+                crate::client::group_quarantine::LegacyGroupDelivery::Held => continue,
+                crate::client::group_quarantine::LegacyGroupDelivery::Rejected => {
                     gateway_entries.push(entry);
+                    continue;
                 }
-                continue;
             };
             if let GroupGatewayDeliveryResult::Message(plaintext) = delivery {
                 account
@@ -1134,6 +1140,10 @@ pub(crate) async fn dispatch_group_receive_request(
                 .account_db()?
                 .remove_unrouted(&crate::client::routed::committed_key(entry)?)?;
             account.client.account_db()?.remove_unrouted(&entry.envelope.envelope_id)?;
+            account
+                .client
+                .account_db()?
+                .remove_unrouted(&crate::client::group_quarantine::legacy_key(entry)?)?;
         }
         Ok::<_, SdkError>((gateway_entries, decrypted, sender_key_distributions))
     }

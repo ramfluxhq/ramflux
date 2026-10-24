@@ -415,13 +415,13 @@ impl RamfluxClient {
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
         for message in &bundle.messages {
-            if serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
-                .is_ok_and(|group| floor_by_group.contains_key(&group.group_id))
-                && !Self::message_allowed_by_group_floor(message, &floor_by_group)
-            {
-                return Err(SdkError::LocalBus(
-                    "own-device sync message below joined epoch".into(),
-                ));
+            if !Self::message_allowed_by_group_floor(message, &floor_by_group) {
+                self.account_db()?.record_own_device_restore_skip(
+                    &bundle.snapshot_id,
+                    &message.message_id,
+                    "group_message_below_join_floor",
+                )?;
+                continue;
             }
             if let Ok(group) =
                 serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
@@ -439,11 +439,6 @@ impl RamfluxClient {
                     "group_message_unavailable",
                 )?;
                 continue;
-            }
-            if !Self::message_allowed_by_group_floor(message, &floor_by_group) {
-                return Err(SdkError::LocalBus(
-                    "own-device sync message below joined epoch".to_owned(),
-                ));
             }
             self.account_db()?.import_direct_message_projection(DirectMessageWrite {
                 conversation_id: &message.conversation_id,
@@ -747,8 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn own_device_history_import_rejects_group_message_below_joined_epoch() -> Result<(), SdkError>
-    {
+    fn own_device_history_import_skips_group_message_below_joined_epoch() -> Result<(), SdkError> {
         let (client, root) =
             client_with_account("joined-epoch", "principal_sync", "target_device_sync")?;
         let old_group_message = DirectMessageRecord {
@@ -799,7 +793,7 @@ mod tests {
             }],
             routes: Vec::new(),
         };
-        let Err(error) = client.import_own_device_history_bundle(
+        let result = client.import_own_device_history_bundle(
             &envelope("source_device_sync", "target_device_sync"),
             &bundle(
                 "source_device_sync",
@@ -807,10 +801,15 @@ mod tests {
                 vec![old_group_message],
                 vec![group],
             ),
-        ) else {
-            return Err(SdkError::LocalBus("old group message imported".to_owned()));
-        };
-        assert!(error.to_string().contains("below joined epoch"));
+        )?;
+        assert_eq!(result.imported_messages, 0);
+        assert!(
+            client
+                .account_db()?
+                .list_actor_states::<serde_json::Value>("own-device/restore-skip/")?
+                .iter()
+                .any(|row| row["reason"] == "group_message_below_join_floor")
+        );
         assert!(client.direct_message_by_id("msg_sync_before_join")?.is_none());
         std::fs::remove_dir_all(root)?;
         Ok(())

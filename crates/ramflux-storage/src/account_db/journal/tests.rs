@@ -382,3 +382,93 @@ fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn unverified_device_claims_cannot_spend_a_verified_senders_failure_quota()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let packet = serde_json::to_vec(
+        &serde_json::json!({"envelope":{"source_device_id":"friend","created_at":100,"ttl":3600}}),
+    )?;
+    for index in 0..16 {
+        let id = format!("forged-{index}");
+        assert_ne!(db.defer_inbox_entry(&id, &packet, 100)?, 0);
+    }
+    assert!(db.set_verified_inbox_failure_policy(
+        "genuine",
+        &packet,
+        InboxFailurePolicy {
+            verified_source: Some("principal-and-device"),
+            trusted: true,
+            dependency: ("group", "g"),
+            at: 100,
+        }
+    )?);
+    assert_eq!(db.defer_inbox_entry("genuine", &packet, 100)?, 1);
+    assert!(db.has_inbox_retry("genuine")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn authenticated_policy_promotion_wakes_backoff_without_resetting_attempts_or_first_seen()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let packet = serde_json::to_vec(
+        &serde_json::json!({"envelope":{"source_device_id":"friend","created_at":100,"ttl":3600}}),
+    )?;
+    assert_eq!(db.defer_inbox_entry("pending", &packet, 100)?, 1);
+    assert!(!db.inbox_retry_ready("pending", 101)?);
+    assert!(db.set_verified_inbox_failure_policy(
+        "pending",
+        &packet,
+        InboxFailurePolicy {
+            verified_source: Some("verified-root-and-device"),
+            trusted: true,
+            dependency: ("group", "g"),
+            at: 101,
+        }
+    )?);
+    assert!(db.inbox_retry_ready("pending", 101)?);
+    assert_eq!(db.defer_inbox_entry("pending", &packet, 101)?, 2);
+    let position: (i64,i64,u32) = db.connection.query_row("SELECT first_seen,expires_at,attempts FROM runtime_inbox_policy WHERE envelope_key='pending'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    assert_eq!(position, (100, 700, 2));
+    for time in 102..108 {
+        assert_ne!(db.defer_inbox_entry("pending", &packet, time)?, 0);
+    }
+    assert_eq!(db.defer_inbox_entry("pending", &packet, 108)?, 0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn legacy_budget_expiry_parks_ciphertext_until_the_original_quarantine_retention_expires()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let packet = serde_json::to_vec(
+        &serde_json::json!({"envelope":{"source_device_id":"friend","created_at":100,"ttl":3600}}),
+    )?;
+    db.hold_unrouted("legacy-key", 1, &packet, 100)?;
+    db.retain_legacy_inbox("legacy-key")?;
+    assert_eq!(db.load_actor_state::<bool>("inbox/legacy-held/legacy-key")?, Some(true));
+    db.set_inbox_failure_policy("legacy-key", &packet, true, ("group", "g"), 100)?;
+    db.defer_inbox_entry("legacy-key", &packet, 100)?;
+    db.expire_inbox_holds(701)?;
+    assert_eq!(db.unrouted_count()?, 1);
+    assert!(db.has_inbox_retry("legacy-key")?);
+    assert_eq!(db.due_inbox_retries(702)?, Vec::<Vec<u8>>::new());
+    assert_eq!(db.journal_after(0, 64)?, Vec::<JournalEvent>::new());
+    db.hold_unrouted("legacy-key", 1, &packet, 1000)?;
+    let received: i64 = db.connection.query_row(
+        "SELECT received_at FROM runtime_unrouted WHERE envelope_id='legacy-key'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(received, 100);
+    db.expire_inbox_holds(101 + 7 * 24 * 60 * 60)?;
+    assert_eq!(db.unrouted_count()?, 0);
+    assert_eq!(db.load_actor_state::<bool>("inbox/legacy-held/legacy-key")?, None);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

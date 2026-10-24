@@ -9,12 +9,14 @@ impl AccountDb {
     /// Returns SQLite or journal serialization errors.
     pub fn expire_inbox_holds(&self, at: i64) -> Result<(), StorageError> {
         self.write_transaction(|| {
-            let mut q=self.connection.prepare("SELECT r.envelope_key,r.entry_json FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE p.expires_at<=?1")?;
+            let mut q=self.connection.prepare("SELECT r.envelope_key,r.entry_json FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE p.expires_at<=?1 AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind='inbox/legacy-held/'||p.envelope_key)")?;
             let rows=q.query_map(params![at],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             drop(q);
             for (key,entry) in rows { self.insert_inbox_dead_letter(&key,&entry,&serde_json::json!({"retry_key":key,"error_code":"retry_expired"}),at)?; }
+            self.connection.execute("UPDATE runtime_inbox_retry SET next_at=?2 WHERE envelope_key IN (SELECT envelope_key FROM runtime_inbox_policy p WHERE expires_at<=?1 AND EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind='inbox/legacy-held/'||p.envelope_key))",params![at,i64::MAX])?;
             self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key IN (SELECT envelope_key FROM runtime_inbox_policy WHERE expires_at<=?1)",params![at])?;
             self.connection.execute("DELETE FROM runtime_unrouted WHERE received_at<?1",params![at.saturating_sub(7 * 24 * 60 * 60)])?;
+            self.cleanup_legacy_inbox_holds()?;
             self.cleanup_inbox_policy()
         })
     }
