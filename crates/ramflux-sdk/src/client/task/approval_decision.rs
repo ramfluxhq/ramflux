@@ -20,7 +20,7 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("invalid task approval id"))?;
         let db = self.account_db()?;
         if let Some(receipt) = self.task_approval_receipt(id)? {
-            return self.retry_task_approval(id, approved, receipt);
+            return self.retry_task_approval(id, approved, &receipt);
         }
         let packet = db
             .load_actor_state::<Packet>(&key("approval_in", id))?
@@ -57,7 +57,7 @@ impl RamfluxClient {
         &self,
         id: &str,
         approved: bool,
-        receipt: Receipt,
+        receipt: &Receipt,
     ) -> Result<Value, SdkError> {
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if device.principal_id != receipt.binding.requester {

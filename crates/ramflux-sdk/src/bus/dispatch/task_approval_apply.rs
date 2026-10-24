@@ -76,6 +76,7 @@ fn apply_one(account: &mut LocalBusAccountState, packet: &Packet) -> Result<bool
         return Err(invalid("approval decision expected"));
     };
     let trusted = Packet {
+        local_expires_at: Some(packet.deadline().min(original.deadline())),
         payload: Payload::Decision {
             request: Box::new(original.request().clone()),
             approved: *approved,
@@ -131,7 +132,7 @@ fn accept_grant(account: &mut LocalBusAccountState, packet: &Packet) -> Result<(
     let body = &request.grant_body;
     let signature =
         grant_signature.as_deref().ok_or_else(|| invalid("task grant signature missing"))?;
-    if let Some(stored) =
+    if let Some(mut stored) =
         account.client.account_db()?.load_mcp_grant::<LocalMcpGrantRecord>(&body.grant_id)?
     {
         if stored.signature != signature
@@ -139,6 +140,10 @@ fn accept_grant(account: &mut LocalBusAccountState, packet: &Packet) -> Result<(
                 != ramflux_protocol::canonical_json_bytes(body)?
         {
             return Err(invalid("task approval conflicts with an existing grant"));
+        }
+        if stored.state.expires_at > packet.deadline() {
+            stored.state.expires_at = packet.deadline();
+            super::super::grant_mcp::persist_mcp_grant(account, &stored)?;
         }
         account.mcp_grants.insert(stored.grant_id.clone(), stored);
         return Ok(());
@@ -162,6 +167,7 @@ fn accept_grant(account: &mut LocalBusAccountState, packet: &Packet) -> Result<(
             signer_public_key: public,
             signature: signature.into(),
         },
+        Some(packet.deadline()),
     )?;
     Ok(())
 }

@@ -107,7 +107,7 @@ fn dispatch_mcp_approval_granted(
             account.mcp_pending_approvals.get(&body.approval_id).cloned().ok_or_else(|| {
                 SdkError::LocalBus(format!("approval not found: {}", body.approval_id))
             })?;
-        let grant = mcp_remote_grant_from_approval(account, approval.clone(), body)?;
+        let grant = mcp_remote_grant_from_approval(account, approval.clone(), body, None)?;
         let event_body = mcp_approval_granted_event_body(&approval, &grant);
         mcp_emit_lifecycle_event(
             request,
@@ -1180,13 +1180,20 @@ fn mcp_local_grant_from_approval(
     let signature = ramflux_crypto::sign_with_device_branch(&device, &body)?;
     let public_key =
         ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes());
-    mcp_store_grant(account, approval, body, device.device_id.clone(), public_key, signature)
+    let signed = LocalBusMcpApprovalGrantRequest {
+        approval_id: approval.approval_id.clone(),
+        signed_by_device_id: device.device_id.clone(),
+        signer_public_key: public_key,
+        signature,
+    };
+    mcp_store_grant(account, approval, body, signed, None)
 }
 
 pub(super) fn mcp_remote_grant_from_approval(
     account: &mut LocalBusAccountState,
     approval: LocalMcpApprovalRecord,
     signed: LocalBusMcpApprovalGrantRequest,
+    expires_cap: Option<i64>,
 ) -> Result<LocalMcpGrantRecord, SdkError> {
     let body = mcp_grant_signing_body(account, &approval)?;
     ramflux_crypto::verify_device_branch_signature(
@@ -1195,14 +1202,7 @@ pub(super) fn mcp_remote_grant_from_approval(
         &signed.signature,
     )
     .map_err(|source| SdkError::SignatureVerificationFailed(source.to_string()))?;
-    mcp_store_grant(
-        account,
-        approval,
-        body,
-        signed.signed_by_device_id,
-        signed.signer_public_key,
-        signed.signature,
-    )
+    mcp_store_grant(account, approval, body, signed, expires_cap)
 }
 
 pub(super) fn mcp_grant_signing_body(
@@ -1261,9 +1261,8 @@ fn mcp_store_grant(
     account: &mut LocalBusAccountState,
     mut approval: LocalMcpApprovalRecord,
     body: LocalMcpGrantSigningBody,
-    signed_by_device_id: String,
-    signer_public_key: String,
-    signature: String,
+    signed: LocalBusMcpApprovalGrantRequest,
+    expires_cap: Option<i64>,
 ) -> Result<LocalMcpGrantRecord, SdkError> {
     "approved".clone_into(&mut approval.status);
     let record = LocalMcpGrantRecord {
@@ -1277,11 +1276,11 @@ fn mcp_store_grant(
             full_delegation: body.full_delegation,
             allowed_capabilities: BTreeSet::from([approval.capability]),
             revoked: false,
-            expires_at: body.expires_at,
+            expires_at: body.expires_at.min(expires_cap.unwrap_or(body.expires_at)),
         },
-        signed_by_device_id,
-        signer_public_key,
-        signature,
+        signed_by_device_id: signed.signed_by_device_id,
+        signer_public_key: signed.signer_public_key,
+        signature: signed.signature,
         signing_body: body,
         confirmation_mode: approval.confirmation_mode,
     };
@@ -1290,7 +1289,7 @@ fn mcp_store_grant(
     Ok(record)
 }
 
-fn persist_mcp_grant(
+pub(super) fn persist_mcp_grant(
     account: &LocalBusAccountState,
     record: &LocalMcpGrantRecord,
 ) -> Result<(), SdkError> {
@@ -1302,7 +1301,7 @@ fn persist_mcp_grant(
         risk_level: ramflux_sync::risk_wire_name(&record.signing_body.capability.default_risk()),
         registry_hash: &record.state.registry_hash,
         tool_manifest_set_hash: &record.state.tool_manifest_set_hash,
-        expires_at: record.signing_body.expires_at,
+        expires_at: record.signing_body.expires_at.min(record.state.expires_at),
         signature: &record.signature,
         created_at: now_unix_timestamp(),
         revoked: record.state.revoked,

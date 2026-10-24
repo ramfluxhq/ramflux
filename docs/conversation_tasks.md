@@ -100,17 +100,49 @@ exponential backoff), with expiry and bounded encrypted storage. Request and
 decision queues have separate budgets; a peer cannot consume the requester's
 decision-return headroom. Incoming requests allow 64 rows / 384 KiB overall and
 16 rows / 96 KiB per assignee, keeping the new list projection below a bus frame.
-Other courier queues allow 64 rows / 2 MiB each. Decided request rows are retired;
-the signed decision retains the ID mapping and restart evidence. Decisions are sent before new requests, and request admission failure
-does not stop the decision courier. Expiry cleanup pages all six namespaces. Tool execution
-still uses the existing argument-bound single-use MCP gate.
+Other courier queues allow 64 rows / 2 MiB each and 16 rows / 512 KiB per peer.
+Decisions without a matching executor-owned request are rejected before storage.
+The executor compares requests using RFC 8785 canonical bytes and applies its own
+stored request. A malformed row is rejected independently of other decisions,
+cleanup and new-request admission.
+
+Each receiver assigns a local expiry no later than receipt time plus 24 hours
+(the MCP grant lifetime), without changing signed bytes or request identity.
+The executor also caps the installed grant's effective expiry. Full courier rows
+retire on application, transport acknowledgement or intervention closure. Compact
+replay/delivery receipts expire at the receiver deadline, with at most 64 per
+peer and 512 per account; they contain binding metadata and a decision hash,
+not tool arguments. A retired receipt preserves the scoped approval-ID mapping.
+Approval display retains hash-bound arguments, immutable grant fields and safe
+labels; arbitrary unsigned details are omitted and confirmation mode/risk are
+locally derived.
+
+Decision rows in the approval list and `task.get.approval_decisions` expose
+`delivery_state` (`pending`, `submitted`, `applied`, `rejected`, `failed`) and
+an optional typed `reason_code` (`transport_unavailable`, `retry_exhausted`,
+`intervention_closed`, `invalid_decision`). After eight failed transport attempts,
+the row becomes `failed`, rather than remaining pending. Calling the same
+`grant.approve` or `grant.deny` again retries that signed decision unchanged;
+a conflicting choice is refused. Successful transport acknowledgement retires
+the outgoing full row. Decisions are sent before new requests; request admission
+failure never stops decision delivery. Tool execution still uses the existing
+argument-bound single-use MCP gate.
 
 Choice/input refers to an accepted surface action at the current surface
 version/hash with validated arguments and deduplication. That action's values
 must contain `decision: "resume"` or `decision: "deny"` matching the resolution.
 `decision_id` is `surface.get.actions[].action_receipt_id` (also
 `surface.get.action_receipt_id` for the latest action). `receipt_verified:true`
-on the action means its creator receipt is available; wait for it before resolving.
+on the action means its creator receipt is available at that device.
+The referenced `surface_id` belongs to the task's assignee, not the requester.
+A task action's signed wire includes `taskBinding: {"task_id":"task","step_id":"step"}`;
+the creator receipt embeds that same signed action. `surface.get.actions[].task_binding`
+exposes it without interpreting form values. The requester retains its own signed
+outgoing action and delivery receipt ID across restart: those read rows are
+`receipt_verified:false`, `actionable:false` until a creator attestation is available.
+They allow a restarted requester to send a resolution intent before a creator
+receipt arrives; the executor still requires its own creator-validated action,
+and the requester commits only after the executor's authenticated certificate.
 This is the delivery receipt ID, distinct from the action name `action_id`.
 A read-only replica may verify a creator-signed receipt; task confirmation never
 makes that surface action executable on the replica.
@@ -200,10 +232,13 @@ oldest entry. Rejected no-role Starts leave bounded tombstones (64 per signer,
 holdback while its tombstone is retained.
 
 Retained regular event history has an aggregate cap of 32 MiB / 32,768 events
-across all signers. Admission reclaims a history from the largest signer first,
-retaining a local checkpoint; requester Cancel/Resolve keep recovery headroom.
-No-role tombstones include the authenticated signer, so another principal can
-legitimately use the same task ID.
+across all signers. Admission prefers terminal histories, then eligible histories of the largest
+signer, retaining a local checkpoint. It never compacts an active task where the
+local account is requester or assignee; admission is refused if no eligible
+history can free capacity; requester Cancel/Resolve keep recovery headroom.
+No-role tombstones are keyed by conversation/task and record starter, requester
+and assignee. Follow-ups from named parties are dropped immediately. Only a fresh
+Start from another signer can bypass the tombstone and establish a local role.
 
 Offline export scans bounded history pages with a persisted continuation cursor
 per target device.
@@ -222,11 +257,22 @@ Both message methods expose `task_id`. Reads include `result_ref` and
 `result_summary` (at most 4,096 safe text characters, signed, terminal updates
 only), per-actor `actors.{requester,assignee,acceptor}.{principal_id,actor_kind_verified}`,
 and restart-durable `pending_resolution` metadata (`awaiting_executor` or
-`executor_timeout`). Compaction retains the summary. Clients without task rendering can display the fallback. `task.changed` contains
-IDs, version and status metadata, including `compacted`/`removed` lifecycle notices, never task text, constraints or form values.
+`executor_timeout`), including `step_id`. Compaction retains the summary. Clients without task rendering can display the fallback. `task.changed` contains
+IDs, version and status metadata, including typed `kind:"compacted"` / `kind:"removed"` lifecycle notices, never task text, constraints or form values.
 
 Delivery admits at most 30 KiB including the signed carrier or history page,
 using a measured conservative budget for nested JSON and E2EE framing under
 the 1 MiB gateway frame. `TaskDeliveryTooLarge` is returned before sealing an
 over-cap event. This transport bound is smaller than the protocol parser's
 65,536-byte event bound; callers must shorten or split large task updates.
+
+
+## Bounded follow-ups
+
+The approval driver currently scans at most 1,000 task histories per tick while
+pending approvals exist (L4). An indexed task-to-grant lookup remains a follow-up
+for large accounts; this bounded scan can delay discovery of later histories.
+The 4,096-event per-conversation signer limit can still mark that assignee's
+other tasks stalled (M-r3-2 conversation edge). Distinguishing this conversation
+limit from the account-wide assignee limit remains a follow-up; requester recovery
+controls retain their separate admission budgets.

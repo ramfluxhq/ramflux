@@ -30,6 +30,7 @@ pub(crate) enum DeliveryReason {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Receipt {
+    pub request_id: String,
     pub peer: String,
     pub binding: TaskApprovalBinding,
     pub approval_id: String,
@@ -137,6 +138,7 @@ impl RamfluxClient {
         let changed =
             old.as_ref().is_none_or(|r| r.delivery_state != state || r.reason_code != reason);
         let row = Receipt {
+            request_id: id.clone(),
             peer: self.task_approval_peer(packet)?,
             binding: packet.request().binding.clone(),
             approval_id: packet.request().approval.approval_id.clone(),
@@ -192,7 +194,7 @@ impl RamfluxClient {
             .approval_receipt_rows()?
             .into_iter()
             .filter(|(_, r)| r.expires_at > now)
-            .map(|(key, r)| r.row(key.rsplit('/').next().unwrap_or_default()))
+            .map(|(_, r)| r.row(&r.request_id))
             .collect())
     }
     fn approval_receipt_rows(&self) -> Result<Vec<(String, Receipt)>, SdkError> {
