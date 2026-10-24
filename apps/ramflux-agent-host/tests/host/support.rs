@@ -30,10 +30,11 @@ impl Fixture {
                 state_file: root.join("cursor.json"),
                 account_id: "agent".into(),
                 rules: vec![
-                    Rule { pattern: "@agent ping".into(), reply: "pong".into() },
+                    Rule { pattern: "@agent ping".into(), reply: "pong".into(), surface: None },
                     Rule {
                         pattern: "@agent summarize".into(),
                         reply: "Summary\n- deterministic\n- complete".into(),
+                        surface: None,
                     },
                 ],
                 poll_interval_ms: 250,

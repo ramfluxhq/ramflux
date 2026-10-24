@@ -3,7 +3,8 @@
 `ramflux-agent-host` is an ordinary headless participant using an existing unlocked
 rfd account. rfd retains its keys and performs normal authenticated message delivery.
 The host accepts no root seeds, device seeds, passphrases, human credentials or grant
-confirmations. Rules match trimmed whole messages exactly and return one text reply.
+confirmations. Rules match trimmed whole messages exactly and return one text reply or one bounded
+surface batch.
 
 Provision the account with `rf account create --client-mode headless_ai` using the
 normal account setup options. Add its principal as a contact and group member through
@@ -11,7 +12,8 @@ normal rfd flows. The host verifies both persisted `client_mode` and self identi
 kind before acting. Persisted local-device authorization is checked independently of
 the display device list, which always includes the active device. Conversation
 membership and device authorization are checked again
-before every reply. No surface, task or tool methods are sent by this version.
+before every output. Surface output uses only `surface.send` and typed protocol
+builders; the host sends no task/tool/approval operations.
 
 Copy `example.json` and set the socket, account and durable state paths. Create the
 state directory with mode 0700. Use persistent local storage for the state path when
@@ -31,9 +33,10 @@ An exclusive lock prevents two hosts sharing one checkpoint.
 
 The checkpoint is atomically replaced, fsynced and written mode 0600. It contains an
 account/device binding, applied journal sequence, bounded rate counters and at most
-one prepared reply. A prepared reply includes plaintext output: protect the directory.
-The host stores it before sending with a stable operation ID, so a lost response can
-reuse rfd's durable receipt. After successful delivery it checkpoints the cursor and
+one prepared output batch. A batch includes plaintext output: protect the directory.
+The host stores the entire batch before sending with stable operation/message IDs,
+so a lost response can reuse rfd's durable receipt. Each completed step is checkpointed
+before the next begins. After successful delivery it checkpoints the cursor and
 clears that output. A revoked membership discards pending output rather than sending.
 A changed group binding also invalidates pending output.
 
@@ -51,12 +54,45 @@ at 1 MiB and rows at the configured conversation bound (identity scans: 1024 row
 Config is capped at 64 KiB, rules at 64, input/reply text at 16 KiB, and checkpoint at
 512 KiB. The SDK bounds individual wire frames and its event queue.
 
-`EngineProvider` receives approved conversation text and returns typed `Intent`s.
-`Intent` is non-exhaustive for future protocol extensions; this host executes at most
-one `ReplyText` per input. Future providers must honor that bound. Normal input content
-is never logged. CLI errors omit rfd response bodies and message data.
+`EngineProvider` receives approved conversation text and returns typed `Intent`s:
+`ReplyText`, `CreateSurface`, `StreamAppend`, `PatchSurface`, and `CloseSurface`.
+All protocol events are encoded with `SurfaceSendRequest` and the existing A2UI
+commands; version/hash checks and signed transport remain in rfd. A surface batch
+has at most 96 outputs with one surface identity. Plain text remains one reply.
+Normal input content and rfd response bodies are never logged.
+
+A rule may add a `surface` object (see `example.json`). `chunk_bytes` is 256–4096
+(default 512); UTF-8 boundaries are preserved, with at most 64 chunks and exactly
+one final chunk. The final fallback is patched using the authoritative protocol
+BLAKE3 hash. A plain streamed reply closes when complete. Up to 16 `choices` declare
+normal surface action IDs/labels. They are conversational choices, never grants.
+
+On `surface.changed`, the host explicitly reads the selected accepted action and
+current snapshot. It requires the account to be the recorded author and creator
+executor, and the action to be `actionable`. Replica terminals never execute mirrored
+actions. The rule patches a result block and fallback, clears actions and optionally
+closes (default `close_on_action: true`). It never appends to a finalized reply block.
+The host trusts rfd's accepted action provenance; it still parses original action
+bytes through `from_wire_bytes` and checks surface/conversation bindings.
+
+A conflicting result is rebuilt from a fresh `surface.get` with a new request ID;
+the old patch/hash is not resent. At most two rebuilds are allowed. Persistent
+conflicts leave a terminal bounded-error checkpoint requiring operator review;
+restart does not submit that rejected result again. An interrupted successful batch
+reuses its exact pending bytes. A conflicting ordinary stream is explicitly re-read
+and abandoned, without synthesizing missing content or replaying old patches.
+
+Handled action IDs are scoped and persisted, capped at 2048 without eviction. Action
+output observes the conversation interval; the sequential host waits until that
+interval is due and rechecks authorization before each send. Long configured
+intervals therefore delay other work too. Message triggers inside the interval are
+skipped as before. Fresh/gap startup does not synthesize commands from old snapshots;
+only already prepared work resumes. This deterministic skeleton has no automatic
+executor takeover, task engine, provider networking or approval capability.
 
 Run unit/fake-bus tests with `cargo test -p ramflux-agent-host`. The companion integration
 suite provides `k5a_realnet_agent_replies_in_dm_and_group`, covering authenticated DM
 and group replies and host restart without duplicate replies. The QA controller runs
 that gated slice on a container host; unit tests do not claim realnet acceptance.
+`k5a2_realnet_agent_surface` adds a group checklist, streaming, human choice, result
+fallback and host-restart equivalence.

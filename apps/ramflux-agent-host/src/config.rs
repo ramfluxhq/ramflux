@@ -12,6 +12,42 @@ pub const MAX_CONFIG_BYTES: u64 = 65_536;
 pub struct Rule {
     pub pattern: String,
     pub reply: String,
+    #[serde(default)]
+    pub surface: Option<SurfaceRule>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Choice {
+    pub id: String,
+    pub label: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceRule {
+    #[serde(default = "chunk_bytes")]
+    pub chunk_bytes: usize,
+    #[serde(default)]
+    pub choices: Vec<Choice>,
+    #[serde(default = "close_on_action")]
+    pub close_on_action: bool,
+}
+const fn chunk_bytes() -> usize {
+    512
+}
+const fn close_on_action() -> bool {
+    true
+}
+impl SurfaceRule {
+    fn valid(&self, reply: &str) -> bool {
+        (256..=4096).contains(&self.chunk_bytes)
+            && self.choices.len() <= 16
+            && crate::engine::chunks(reply, self.chunk_bytes).len() <= 64
+            && self.choices.iter().all(|c| {
+                !c.id.is_empty() && c.id.len() <= 128 && !c.label.is_empty() && c.label.len() <= 256
+            })
+            && self.choices.iter().map(|c| &c.id).collect::<std::collections::BTreeSet<_>>().len()
+                == self.choices.len()
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +102,7 @@ impl Config {
                     || r.pattern.len() > 1024
                     || r.reply.is_empty()
                     || r.reply.len() > MAX_TEXT_BYTES
+                    || r.surface.as_ref().is_some_and(|surface| !surface.valid(&r.reply))
             })
         {
             return Err(Error::Config);
