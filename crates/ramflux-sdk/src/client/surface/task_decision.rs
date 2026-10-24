@@ -19,7 +19,7 @@ impl RamfluxClient {
             .account_db()?
             .load_actor_state::<Value>(&format!("{}/{decision_id}", key("actions", &reference)))?
             .ok_or_else(|| SdkError::InboundPending("task surface action not found".into()))?;
-        if row["actionable"] != true {
+        if row["attestation"].is_null() {
             return Err(SdkError::InboundPending(
                 "task surface action awaits its creator receipt".into(),
             ));

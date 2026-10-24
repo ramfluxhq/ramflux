@@ -47,7 +47,7 @@ fn surface_project(
         )?
         .ok_or_else(|| invalid("surface absent"))
 }
-fn exercise(input: bool) -> TestResult {
+fn exercise(input: bool, read_only: bool) -> TestResult {
     let f = Fixture::new()?;
     let command = ramflux_protocol::A2uiConversationCommand::CreateSurface(
         ramflux_protocol::CreateSurfaceCommand {
@@ -105,6 +105,18 @@ fn exercise(input: bool) -> TestResult {
     assert!(surface_project(&f.agent, &action)?.accepted);
     let view = f.agent.surface_get("form", 0, None)?;
     let decision_id = view["actions"][0]["id"].as_str().ok_or("decision id")?;
+    if read_only {
+        let rows = f.agent.account_db()?.surface_history_page::<serde_json::Value>(
+            "surface/actions/",
+            "surface/actions/",
+            100,
+        )?;
+        let (key, mut row) =
+            rows.into_iter().find(|(_, row)| row["id"] == decision_id).ok_or("stored action")?;
+        row["actionable"] = json!(false);
+        f.agent.account_db()?.persist_actor_state(&key, &row)?;
+    }
+
     let resolution = TaskResolve {
         task_id: "task".into(),
         base_revision: 2,
@@ -134,15 +146,24 @@ fn exercise(input: bool) -> TestResult {
     assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 3);
     let replay = sign(&f.human, "thread", "replay-form", TaskEventBody::Resolve(resolution))?;
     assert!(!project(&f.agent, &replay)?.accepted);
+    if read_only {
+        assert_eq!(f.agent.surface_get("form", 0, None)?["actions"][0]["actionable"], false);
+    }
     Ok(())
 }
 #[test]
 fn choice_resolution_uses_a_creator_validated_surface_action_without_exporting_values() -> TestResult
 {
-    exercise(false)
+    exercise(false, false)
 }
 #[test]
 fn input_resolution_uses_a_creator_validated_surface_action_without_exporting_values() -> TestResult
 {
-    exercise(true)
+    exercise(true, false)
+}
+
+#[test]
+fn a_read_only_creator_receipt_confirms_the_task_without_executing_a_surface_action() -> TestResult
+{
+    exercise(true, true)
 }

@@ -55,6 +55,8 @@ Choice/input refers to an accepted surface action at the current surface
 version/hash with validated arguments and deduplication. That action's values
 must contain `decision: "resume"` or `decision: "deny"` matching the resolution.
 `decision_id` is the surface action receipt ID returned by `surface.get`.
+A read-only replica may verify a creator-signed receipt; task confirmation never
+makes that surface action executable on the replica.
 
 A requester sends a resolution intent. Its local result is `pending:true`
 until the assignee device that opened the intervention verifies its stored
