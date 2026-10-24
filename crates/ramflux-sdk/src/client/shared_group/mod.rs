@@ -47,6 +47,27 @@ pub(crate) fn decode_packet(bytes: &[u8]) -> Result<Option<VerifiedGroupState>, 
     Ok(Some(verify_group_state_snapshot(GroupStateSnapshot::from_wire_bytes(&bytes)?)?))
 }
 impl RamfluxClient {
+    pub(crate) async fn prepare_shared_group_receive(
+        &self,
+        engine: &GatewaySessionEngine,
+        opened: &crate::client::routed::Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<Option<VerifiedGroupState>, SdkError> {
+        if opened.routing.kind != crate::client::routed::Kind::GroupControl {
+            return Ok(None);
+        }
+        let state = decode_packet(body)?;
+        if let Some(shared) = &state {
+            if opened.routing.group_id.as_deref() != Some(shared.view().group_id.as_str())
+                || opened.routing.conversation_id != shared.view().conversation_id
+            {
+                return Err(invalid("group state routing mismatch"));
+            }
+            self.verify_shared_group_source(&engine.config, shared, entry).await?;
+        }
+        Ok(state)
+    }
     pub(crate) fn owned_group_actor(&self, target: &str) -> Result<GroupStateActor, SdkError> {
         Ok(certify_group_state_actor(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,

@@ -15,6 +15,11 @@ pub(crate) struct Delivery {
     pub plaintext: Option<GatewayPlaintextDelivery>,
 }
 
+struct PreparedGroupControls {
+    legacy: Option<(ramflux_protocol::GroupEvent, String)>,
+    shared: Option<ramflux_crypto::VerifiedGroupState>,
+}
+
 struct Commit<'a> {
     opened: &'a Opened,
     entry: &'a GatewayInboxEntry,
@@ -150,31 +155,14 @@ impl RamfluxClient {
             }
             references.push((attachment, prepared));
         }
-        let shared_group = if opened.routing.kind == Kind::GroupControl {
-            crate::client::shared_group::decode_packet(&body)?
-        } else {
-            None
-        };
-        if let Some(shared) = &shared_group {
-            if opened.routing.group_id.as_deref() != Some(shared.view().group_id.as_str())
-                || opened.routing.conversation_id != shared.view().conversation_id
-            {
-                return Err(invalid("group state routing mismatch"));
-            }
-            self.verify_shared_group_source(&engine.config, shared, entry).await?;
-        }
-        let membership = if opened.routing.kind == Kind::GroupControl && shared_group.is_none() {
-            self.prepare_routed_group_control(engine, &opened, entry).await?
-        } else {
-            None
-        };
+        let groups = self.prepare_routed_group_controls(engine, &opened, entry, &body).await?;
         let plaintext = self.commit_routed_projection(Commit {
             opened: &opened,
             entry,
             body: &body,
             metadata: metadata.as_ref(),
-            membership: membership.as_ref(),
-            shared_group: shared_group.as_ref(),
+            membership: groups.legacy.as_ref(),
+            shared_group: groups.shared.as_ref(),
             local_target: &engine.config.target_delivery_id,
             slots: &consumed_slots,
             references,
@@ -301,6 +289,21 @@ impl RamfluxClient {
         Ok(())
     }
 
+    async fn prepare_routed_group_controls(
+        &self,
+        engine: &GatewaySessionEngine,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<PreparedGroupControls, SdkError> {
+        let shared = self.prepare_shared_group_receive(engine, opened, entry, body).await?;
+        let legacy = if opened.routing.kind == Kind::GroupControl && shared.is_none() {
+            self.prepare_routed_group_control(engine, opened, entry).await?
+        } else {
+            None
+        };
+        Ok(PreparedGroupControls { legacy, shared })
+    }
     async fn prepare_routed_group_control(
         &self,
         engine: &GatewaySessionEngine,
