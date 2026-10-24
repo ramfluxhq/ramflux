@@ -20,9 +20,6 @@ impl AccountDb {
         limit: u32,
     ) -> Result<Vec<String>, StorageError> {
         let sql = match directory {
-            "surface" => {
-                "SELECT substr(state_kind,19) AS id FROM runtime_actor_state WHERE state_kind GLOB 'directory/surface/*'"
-            }
             "device" => {
                 "SELECT substr(state_kind,18) AS id FROM runtime_actor_state WHERE state_kind GLOB 'directory/device/*'"
             }

@@ -254,22 +254,3 @@ pub enum SurfaceReject {
     #[error("canonical encoding failed")]
     Encoding,
 }
-
-/// Encodes locally authored typed commands for signing. This is an egress builder: never use it
-/// to re-encode remote JSON before ingress validation. Remote events still enter exclusively via
-/// `A2uiConversationEvent::from_wire_bytes` on their original bytes.
-/// # Errors
-/// Rejects values that cannot be represented as canonical I-JSON.
-pub fn encode_a2ui_conversation_event(
-    conversation_id: &str,
-    version: u64,
-    command: &A2uiConversationCommand,
-) -> Result<Vec<u8>, ProtocolError> {
-    let event = EventFields {
-        schema: A2uiConversationSchema::V2,
-        conversation_id: conversation_id.into(),
-        version,
-        command: command.clone(),
-    };
-    crate::canonical_json_bytes(&event)
-}

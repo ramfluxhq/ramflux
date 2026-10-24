@@ -35,16 +35,7 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     let mut engine = account.take_live_engine().await?;
     let result = receive(account, &mut engine).await;
     account.put_engine(engine);
-    let received = result?;
-    let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
-    let task_sent = match super::dispatch::task_transport::drain_confirmations(account).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error,"task confirmation deferred");
-            0
-        }
-    };
-    Ok(received + task_sent + tasks_applied)
+    result
 }
 
 async fn receive(

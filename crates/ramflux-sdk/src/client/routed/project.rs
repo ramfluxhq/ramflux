@@ -50,48 +50,11 @@ impl RamfluxClient {
         }
         let mut projection = entry.clone();
         projection.envelope.envelope_id.clone_from(&route.message_id);
-        let surface = self.project_surface_message(
-            &route.conversation_id,
-            &route.message_id,
-            crate::client::surface::SurfaceSender {
-                principal: &entry.envelope.source_principal_id,
-                device: &entry.envelope.source_device_id,
-                envelope_id: &entry.envelope.envelope_id,
-                expires_at: Some(
-                    entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
-                ),
-                group_epoch: None,
-            },
-            body,
-            false,
-        )?;
-        if self.account_db()?.client_record("conversation", &route.conversation_id)?.is_none() {
-            self.account_db()?.persist_client_record("conversation",&route.conversation_id,&serde_json::json!({"kind":"direct","participants":[self.device_branch.as_ref().map(|b|&b.principal_id),Some(&entry.envelope.source_principal_id)]}))?;
-        }
-        let task = self.project_task_message(
-            &crate::client::task::Delivery {
-                conversation: &route.conversation_id,
-                message: &route.message_id,
-                principal: &entry.envelope.source_principal_id,
-                device: &entry.envelope.source_device_id,
-                at: entry.envelope.created_at,
-            },
-            body,
-        )?;
-        let display = task.as_ref().map_or_else(
-            || surface.as_ref().map_or(body, |result| result.fallback_text.as_bytes()),
-            |result| result.fallback_text.as_bytes(),
-        );
-        self.append_plaintext_projection_once(
-            &route.conversation_id,
-            &projection,
-            display,
-            metadata,
-        )?;
+        self.append_plaintext_projection_once(&route.conversation_id, &projection, body, metadata)?;
         if self.account_db()?.client_record("conversation", &route.conversation_id)?.is_none() {
             self.account_db()?.persist_client_record("conversation",&route.conversation_id,&serde_json::json!({"kind":"direct","title":null,"group_id":null,"participants":[self.device_branch.as_ref().map(|branch|&branch.principal_id),Some(&entry.envelope.source_principal_id)],"direct_route":null}))?;
         }
-        Ok(Some(display.to_vec()))
+        Ok(Some(body.to_vec()))
     }
     fn project_routed_group_control(
         &self,
@@ -152,7 +115,6 @@ impl RamfluxClient {
         }
         let mut inner = entry.clone();
         inner.envelope.encrypted_payload = ramflux_protocol::encode_base64url(body);
-        self.record_surface_origin(&route.message_id, entry, Some(group.group_key_epoch))?;
         let plaintext = self.append_or_pending_group_message(
             &route.conversation_id,
             &route.message_id,
@@ -164,49 +126,12 @@ impl RamfluxClient {
             self.merge_routed_group_link(&group.group_id, &route.conversation_id)?;
         }
         if self.direct_message_by_id(&route.message_id)?.is_some() {
-            let surface = self.project_surface_message(
-                &route.conversation_id,
-                &route.message_id,
-                crate::client::surface::SurfaceSender {
-                    principal: &entry.envelope.source_principal_id,
-                    device: &entry.envelope.source_device_id,
-                    envelope_id: &entry.envelope.envelope_id,
-                    expires_at: Some(
-                        entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
-                    ),
-                    group_epoch: Some(group.group_key_epoch),
-                },
-                &plaintext,
-                false,
-            )?;
-            let task = self.project_task_message(
-                &crate::client::task::Delivery {
-                    conversation: &route.conversation_id,
-                    message: &route.message_id,
-                    principal: &entry.envelope.source_principal_id,
-                    device: &entry.envelope.source_device_id,
-                    at: entry.envelope.created_at,
-                },
-                &plaintext,
-            )?;
-            let is_surface = surface.is_some() || task.is_some();
-            let display = task.map_or_else(
-                || surface.map_or(plaintext, |result| result.fallback_text.into_bytes()),
-                |result| result.fallback_text.into_bytes(),
-            );
-            if is_surface {
-                self.account_db()?.replace_surface_message_content(
-                    &route.conversation_id,
-                    &route.message_id,
-                    &display,
-                )?;
-            }
             self.account_db()?.store_message_content(
                 &route.conversation_id,
                 &route.message_id,
-                &display,
+                &plaintext,
             )?;
-            Ok(Some(display))
+            Ok(Some(plaintext))
         } else {
             Ok(None)
         }

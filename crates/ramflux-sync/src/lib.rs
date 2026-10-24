@@ -14,9 +14,8 @@ mod object_store;
 
 pub use a2ui::{
     A2UI_ACTION_SIGNING_BODY_SCHEMA, A2iControlEvent, A2uiAction, A2uiActionSigningBody,
-    A2uiComponent, A2uiSurface, RenderedSurface, a2ui_action_signing_body,
-    legacy_a2ui_render_profile_hash, render_a2ui_surface, verify_a2ui_action,
-    verify_a2ui_action_signature,
+    A2uiComponent, A2uiSurface, RenderedSurface, a2ui_action_signing_body, a2ui_surface_hash,
+    render_a2ui_surface, verify_a2ui_action, verify_a2ui_action_signature,
 };
 pub use bot::{
     BotInstallGrantSigningBody, BotManifestSigningBody, BotRevocationRegistry,

@@ -83,9 +83,6 @@ pub const fn crate_name() -> &'static str {
     CRATE_NAME
 }
 
-/// Maximum serialized gateway frame length, shared by sender admission and wire codecs.
-pub const MAX_GATEWAY_FRAME_BYTES: usize = 1024 * 1024;
-
 #[cfg(test)]
 mod tests {
     use rustls::{ClientConfig, ServerConfig};

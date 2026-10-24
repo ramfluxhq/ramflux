@@ -89,18 +89,13 @@ pub fn render_a2ui_surface(
         verify_component_permission(component, granted_permissions)?;
     }
     let semantic_snapshot = serde_json::to_string(surface)?;
-    let surface_hash = legacy_a2ui_render_profile_hash(surface)?;
+    let surface_hash = a2ui_surface_hash(surface)?;
     Ok(RenderedSurface { semantic_snapshot, fallback_used, surface_hash })
 }
 
 /// # Errors
-/// Returns an error when canonical render-profile encoding fails.
-///
-/// This legacy v1 object has `snake_case` profile fields and recursive component permissions,
-/// with no fallback text, data model or conversation snapshot. Its historical control-domain
-/// digest remains wire-compatible for legacy action signatures. Conversation snapshots must
-/// use `ramflux_protocol::surface_snapshot_hash` instead.
-pub fn legacy_a2ui_render_profile_hash(surface: &A2uiSurface) -> Result<String, SyncError> {
+/// Returns an error when canonical surface encoding fails.
+pub fn a2ui_surface_hash(surface: &A2uiSurface) -> Result<String, SyncError> {
     Ok(ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::A2I_CONTROL,
         &ramflux_protocol::canonical_json_bytes(surface)?,
@@ -110,8 +105,7 @@ pub fn legacy_a2ui_render_profile_hash(surface: &A2uiSurface) -> Result<String, 
 /// # Errors
 /// Returns an error when the action does not match the surface hash, component, or permission.
 pub fn verify_a2ui_action(surface: &A2uiSurface, action: &A2uiAction) -> Result<(), SyncError> {
-    if action.surface_id != surface.surface_id
-        || action.surface_hash != legacy_a2ui_render_profile_hash(surface)?
+    if action.surface_id != surface.surface_id || action.surface_hash != a2ui_surface_hash(surface)?
     {
         return Err(SyncError::A2uiRejected);
     }
@@ -240,7 +234,7 @@ mod tests {
     ) -> Result<A2uiAction, SyncError> {
         let mut action = A2uiAction {
             surface_id: surface.surface_id.clone(),
-            surface_hash: legacy_a2ui_render_profile_hash(surface)?,
+            surface_hash: a2ui_surface_hash(surface)?,
             component_id: "approve".to_owned(),
             permission: "mcp.approve".to_owned(),
             source_device_id: device.device_id.clone(),

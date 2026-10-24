@@ -21,9 +21,7 @@ mod keychain;
 mod mcp;
 mod node;
 mod object;
-mod surface;
 pub(crate) use node::*;
-pub(crate) use surface::*;
 
 pub(crate) use a2i_a2ui::*;
 pub(crate) use account::*;
@@ -65,7 +63,6 @@ pub(crate) enum Command {
     Keychain(KeychainCommand),
     A2i(A2iCommand),
     A2ui(A2uiCommand),
-    Surface(SurfaceCommand),
     Admin(AdminCommand),
 }
 

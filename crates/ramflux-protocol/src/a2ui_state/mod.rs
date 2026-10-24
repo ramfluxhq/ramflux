@@ -5,7 +5,6 @@
 //! Create consumes version 1; every subsequent mutation consumes the next version. Decisions
 //! validate without changing content. `DeleteSurface` is terminal close. All updates are atomic.
 //! Signatures, author permissions, encryption, routing and persistence are the carrier's job.
-mod checkpoint;
 mod limits;
 mod snapshot;
 mod state;

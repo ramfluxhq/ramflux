@@ -48,20 +48,6 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
     pub(crate) snapshot_id: String,
     pub(crate) messages: Vec<DirectMessageRecord>,
     #[serde(default)]
-    pub(crate) task_packets: Vec<crate::client::task::own_history::TaskOwnPacket>,
-    #[serde(default)]
-    pub(crate) task_export_metadata: crate::client::task::own_history::TaskExportMetadata,
-    #[serde(default)]
-    pub(crate) surface_pages: Vec<crate::client::surface::SurfaceHistoryExport>,
-    #[serde(default)]
-    pub(crate) surface_controls: Vec<crate::client::surface::SurfaceControl>,
-    #[serde(default)]
-    pub(crate) surface_checkpoints: Vec<crate::client::surface::OwnedSurfaceCheckpoint>,
-    #[serde(default)]
-    pub(crate) surface_export_metadata: crate::client::surface::SurfaceExportMetadata,
-    #[serde(default)]
-    pub(crate) surface_message_epochs: BTreeMap<String, (String, u64)>,
-    #[serde(default)]
     pub(crate) contents: BTreeMap<String, zeroize::Zeroizing<Vec<u8>>>,
     pub(crate) dm_sessions: Vec<SdkOwnDeviceDmSessionSnapshot>,
     pub(crate) groups: Vec<SdkOwnDeviceGroupSnapshot>,

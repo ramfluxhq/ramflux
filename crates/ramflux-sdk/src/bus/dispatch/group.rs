@@ -622,7 +622,7 @@ pub(crate) async fn dispatch_group_send_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusGroupSendRequest = serde_json::from_value(request.body.clone())?;
-    let mut fanout_routes = if body.envelope_id.is_some()
+    let fanout_routes = if body.envelope_id.is_some()
         && body.source_principal_id.is_some()
         && body.target_delivery_id.is_some()
     {
@@ -634,58 +634,8 @@ pub(crate) async fn dispatch_group_send_request(
         body.plaintext_body_base64.as_deref().unwrap_or(&body.encrypted_body_base64);
     let plaintext_body = ramflux_protocol::decode_base64url(plaintext_body_base64)
         .map_err(|error| SdkError::LocalBus(format!("invalid group body: {error}")))?;
-    if let Some(carrier) = crate::client::surface::Carrier::decode(&plaintext_body)? {
-        crate::client::surface::check_delivery_size(plaintext_body.len())?;
-        if carrier.payload_kind == crate::client::surface::PayloadKind::Action {
-            let directory =
-                super::super::group_delivery::directory(&account.client, &body.group_id)?;
-            if let Some(routes) = fanout_routes.as_mut() {
-                routes.retain(|route| {
-                    directory.iter().any(|row| {
-                        row["member_id"] == route.member_id
-                            && row["principal_id"] == carrier.author_principal_id
-                    })
-                });
-                if routes.is_empty() {
-                    return Err(SdkError::LocalBus(
-                        "surface author group route unavailable".into(),
-                    ));
-                }
-            }
-        }
-    }
-    if let Some(routes) = &fanout_routes {
-        let engine = account.take_live_engine().await?;
-        let checked = async {
-            for route in routes {
-                resolve_group_route_principal_commitment(
-                    &account.client,
-                    &engine.config,
-                    route,
-                    &route.member_id,
-                )
-                .await?;
-            }
-            Ok::<_, SdkError>(())
-        }
-        .await;
-        account.put_engine(engine);
-        checked?;
-    }
-    let existing = account.client.direct_message_by_id(&body.message_id)?;
-    let encrypted_body = if let Some(existing) = existing {
-        if account.client.account_db()?.message_content(&body.message_id)?.as_deref()
-            != Some(plaintext_body.as_slice())
-        {
-            return Err(SdkError::LocalBus(format!(
-                "group message id collision for {}",
-                body.message_id
-            )));
-        }
-        existing.encrypted_body
-    } else {
-        account.client.encrypt_group_message(&body.group_id, &body.sender_id, &plaintext_body)?
-    };
+    let encrypted_body =
+        account.client.encrypt_group_message(&body.group_id, &body.sender_id, &plaintext_body)?;
     let mut response = serde_json::json!({
         "group_id": body.group_id,
         "conversation_id": body.conversation_id,
@@ -1005,7 +955,7 @@ async fn send_group_sender_key_distribution_message(
     Ok(serde_json::to_value(entry)?)
 }
 
-pub(super) async fn resolve_group_route_principal_commitment(
+async fn resolve_group_route_principal_commitment(
     client: &RamfluxClient,
     gateway: &GatewaySessionConfig,
     route: &LocalBusGroupMemberRoute,

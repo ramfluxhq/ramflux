@@ -63,21 +63,6 @@ impl AccountDb {
         Ok(())
     }
 
-    /// Loads one existing MCP grant without scanning the account's full grant ledger.
-    /// # Errors
-    /// Returns database or decoding failures.
-    pub fn load_mcp_grant<T: DeserializeOwned>(&self, id: &str) -> Result<Option<T>, StorageError> {
-        use rusqlite::OptionalExtension;
-        let body: Option<Vec<u8>> = self
-            .connection
-            .query_row(
-                "SELECT grant_body FROM mcp_grant WHERE grant_id=?1 AND grant_body IS NOT NULL",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        body.map(|bytes| serde_json::from_slice(&bytes).map_err(StorageError::from)).transpose()
-    }
     pub fn load_mcp_grants<T>(&self) -> Result<BTreeMap<String, T>, StorageError>
     where
         T: DeserializeOwned,

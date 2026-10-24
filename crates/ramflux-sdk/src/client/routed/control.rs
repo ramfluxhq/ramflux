@@ -11,30 +11,6 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, SdkError> {
-        if self.receive_task_control(
-            entry,
-            &opened.routing.conversation_id,
-            opened.routing.group_id.as_deref(),
-            body,
-        )? {
-            return Ok(None);
-        }
-        if self.receive_task_own(
-            entry,
-            &opened.routing.conversation_id,
-            opened.routing.group_id.as_deref(),
-            body,
-        )? {
-            return Ok(None);
-        }
-        if self.receive_surface_control(
-            entry,
-            &opened.routing.conversation_id,
-            opened.routing.group_id.as_deref(),
-            body,
-        )? {
-            return Ok(None);
-        }
         if let Ok(mut event) = serde_json::from_slice::<A2iControlEvent>(body) {
             if event.source_device_id != opened.remote_device
                 || event.target_device_id != opened.local_device
@@ -178,11 +154,6 @@ impl RamfluxClient {
         opened: &Opened,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if body.starts_with(crate::client::task::own_history::PREFIX)
-            || body.starts_with(crate::client::task::control::PREFIX)
-        {
-            return Ok(());
-        }
         if opened.routing.kind == Kind::Control {
             let value: Value = serde_json::from_slice(body)?;
             if value["type"] == "object.revoke_access"

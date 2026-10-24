@@ -820,10 +820,9 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
             RamfluxErrorCode::CryptoFailed
         }
-        SdkError::SurfaceCheckpointMismatch
-        | SdkError::Storage(_)
-        | SdkError::AccountIndexNotOpen
-        | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
+        SdkError::Storage(_) | SdkError::AccountIndexNotOpen | SdkError::AccountDbNotUnlocked => {
+            RamfluxErrorCode::StorageFailed
+        }
         SdkError::IdentityRootMissing => RamfluxErrorCode::AuthFailed,
         SdkError::Transport(_)
         | SdkError::GatewaySessionRejected(_)
@@ -837,9 +836,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
-        SdkError::TaskDeliveryTooLarge { .. }
-        | SdkError::SurfaceDeliveryTooLarge { .. }
-        | SdkError::LocalBus(_)
+        SdkError::LocalBus(_)
         | SdkError::InboundRejected(_)
         | SdkError::InboundPending(_)
         | SdkError::PairRecoveryRequired => RamfluxErrorCode::InvalidArgument,

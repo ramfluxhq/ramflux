@@ -7,12 +7,6 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
-    #[error("task delivery payload is too large: {bytes} bytes (limit {limit})")]
-    TaskDeliveryTooLarge { bytes: usize, limit: usize },
-    #[error("surface delivery too large: {bytes} bytes exceeds {limit}")]
-    SurfaceDeliveryTooLarge { bytes: usize, limit: usize },
-    #[error("surface checkpoint does not match its owning row")]
-    SurfaceCheckpointMismatch,
     #[error("authenticated device pair requires a fresh bootstrap")]
     PairRecoveryRequired,
     #[error("inbound envelope rejected: {0}")]
