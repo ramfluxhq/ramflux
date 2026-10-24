@@ -159,7 +159,7 @@ impl RamfluxClient {
         self.import_own_device_history_bundle(envelope, &bundle)
     }
 
-    fn own_device_history_bundle(
+    pub(super) fn own_device_history_bundle(
         &self,
         principal_commitment: &str,
         source_device_id: &str,
@@ -174,6 +174,12 @@ impl RamfluxClient {
         let mut messages = Vec::new();
         let mut surface_message_epochs = BTreeMap::new();
         for message in self.account_db()?.all_direct_messages()? {
+            // Task packets recreate verified logical messages. Copying the transport row too
+            // would duplicate a task or conflict with its canonical own-device projection.
+            if self.task_message_metadata(&message.conversation_id, &message.message_id)?.is_some()
+            {
+                continue;
+            }
             let surface_epoch = self.surface_message_group_epoch(&message.message_id)?;
             if !Self::message_allowed_by_group_floor(&message, &floor_by_group)
                 || surface_epoch.as_ref().is_some_and(|(group, epoch)| {

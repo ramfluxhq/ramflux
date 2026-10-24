@@ -186,3 +186,39 @@ fn importing_old_verified_history_does_not_charge_eighty_events_as_new_peer_traf
     drop(sibling);
     Ok(())
 }
+
+#[test]
+fn own_device_snapshot_exports_task_packets_without_duplicate_transport_message_rows() -> TestResult
+{
+    let f = Fixture::new()?;
+    manifests(&f)?;
+    let c = sign(&f.human, "thread", "task-logical", start("task", "thread"))?;
+    f.agent.send_direct_message("thread", "transport-row", "human-device", b"ciphertext")?;
+    let outcome = f
+        .agent
+        .project_task_message(
+            &Delivery {
+                conversation: "thread",
+                message: "transport-row",
+                principal: "human",
+                device: "human-device",
+                at: 1,
+            },
+            &c.bytes()?,
+        )?
+        .ok_or("projection")?;
+    assert!(outcome.accepted);
+    f.agent.send_direct_message("thread", "ordinary-row", "human-device", b"ordinary")?;
+    let commitment = manifest(&f.agent)?.principal_commitment;
+    let bundle = f.agent.own_device_history_bundle(
+        &commitment,
+        "agent-device",
+        "agent2-device",
+        "snapshot",
+    )?;
+    assert_eq!(bundle.messages.len(), 1);
+    assert_eq!(bundle.messages[0].message_id, "ordinary-row");
+    assert_eq!(bundle.task_packets.len(), 1);
+    assert!(!bundle.contents.contains_key("transport-row"));
+    Ok(())
+}
