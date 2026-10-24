@@ -318,6 +318,8 @@ pub struct SdkDmX3dhHeader {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkX3dhPrivateState {
+    #[serde(default)]
+    pub(crate) principal_commitment: Option<String>,
     pub(crate) device_id: String,
     pub(crate) identity_seed: [u8; 32],
     pub(crate) signed_prekey_id: String,
@@ -391,7 +393,12 @@ pub(crate) fn dm_attachment_slot_conversation_id(
 pub(crate) fn dm_device_id_hash(device_id: &str) -> [u8; 32] {
     ramflux_crypto::blake3_256(ramflux_protocol::domain::DEVICE_PROOF, device_id.as_bytes())
 }
-pub(crate) fn x3dh_private_checkpoint_name(device_id: &str) -> String {
+pub(crate) fn x3dh_private_checkpoint_name(
+    device: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> String {
+    format!("x3dh_private:v2/{}", device.storage_key())
+}
+pub(crate) fn legacy_x3dh_private_checkpoint_name(device_id: &str) -> String {
     format!("x3dh_private:{device_id}")
 }
 

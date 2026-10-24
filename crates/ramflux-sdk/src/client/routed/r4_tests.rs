@@ -28,7 +28,10 @@ fn bootstrap(
     trust(sender, receiver)?;
     trust(receiver, sender)?;
     let mut msg = from(sender, receiver, id, "simultaneous");
-    let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
+    let bundle = receiver
+        .client
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
+        .bundle;
     let (mut session, header, bundle) = sender.client.new_send_pair(
         &sender.client.local_device_identity(&sender.id)?,
         &msg,
@@ -293,7 +296,7 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
     let (mut sending, header) = alice.client.create_send_dm_session_from_bundle(
         &msg,
         "bob",
-        bob.client.load_x3dh_private_state("bob")?.bundle,
+        bob.client.load_x3dh_private_state(&bob.client.local_device_identity("bob")?)?.bundle,
         "alice",
     )?;
     let receiving = bob.client.load_or_create_recv_dm_session(&conversation, header.as_ref())?;

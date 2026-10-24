@@ -28,7 +28,10 @@ pub(super) fn fresh(
     trust(sender, receiver)?;
     trust(receiver, sender)?;
     let mut msg = outgoing(sender, receiver, id);
-    let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
+    let bundle = receiver
+        .client
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
+        .bundle;
     let (mut session, header, bundle) = sender.client.new_send_pair(
         &sender.client.local_device_identity(&sender.id)?,
         &msg,
@@ -224,7 +227,10 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
     ));
     let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let wire = ResetWire {
-        bundle: alice.client.load_x3dh_private_state("alice")?.bundle,
+        bundle: alice
+            .client
+            .load_x3dh_private_state(&alice.client.local_device_identity("alice")?)?
+            .bundle,
         responses: VecDeque::new(),
         sent: sent.clone(),
     };
@@ -397,11 +403,7 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
 #[test]
 fn an_address_shaped_device_name_is_rejected_at_live_enrollment() -> Result<(), SdkError> {
     let literal = ramflux_protocol::qualified_device_id("unrelated-root", "phone")?;
-    let fixture = Fixture::new(&literal, 41)?;
-    assert!(matches!(
-        crate::client::identity_authority::test_support::manifest(&fixture.client),
-        Err(SdkError::Crypto(_))
-    ));
+    assert!(matches!(Fixture::new(&literal, 41), Err(SdkError::Crypto(_))));
     // The address codec still preserves historical literal names without aliasing.
     let historical = ramflux_protocol::qualified_device_id("actual-root", &literal)?;
     assert_eq!(

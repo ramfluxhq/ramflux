@@ -85,7 +85,8 @@ impl RamfluxClient {
         own_device_id: &str,
         aad: Option<&[u8]>,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
-        let own_state = self.load_x3dh_private_state(own_device_id)?;
+        let own_state =
+            self.load_x3dh_private_state(&self.local_device_identity(own_device_id)?)?;
         let own_identity = X25519KeyPair::from_seed(own_state.identity_seed);
         let ephemeral = X25519KeyPair::random()?;
         let bundle_hash = prekey_bundle_hash(&recipient_bundle)?;
@@ -158,7 +159,8 @@ impl RamfluxClient {
         header: &SdkDmX3dhHeader,
         aad: &[u8],
     ) -> Result<ramflux_crypto::DmSession, SdkError> {
-        let own_state = self.load_x3dh_private_state(&header.recipient_device_id)?;
+        let own_state = self
+            .load_x3dh_private_state(&self.local_device_identity(&header.recipient_device_id)?)?;
         if own_state.signed_prekey_id != header.recipient_signed_prekey_id {
             return Err(SdkError::LocalBus(format!(
                 "signed prekey id mismatch for {}",
@@ -276,20 +278,6 @@ impl RamfluxClient {
         let expected = dm_session_event_id(conversation_id, "recv", envelope_id);
         Ok(self.projection_checkpoint(&dm_session_checkpoint_name(conversation_id, "recv"))?
             == Some(expected))
-    }
-
-    pub(crate) fn load_x3dh_private_state(
-        &self,
-        device_id: &str,
-    ) -> Result<SdkX3dhPrivateState, SdkError> {
-        let checkpoint = x3dh_private_checkpoint_name(device_id);
-        let event_id = self.projection_checkpoint(&checkpoint)?.ok_or_else(|| {
-            SdkError::LocalBus(format!("missing X3DH private state for {device_id}"))
-        })?;
-        let bytes = self
-            .event_body(&event_id)?
-            .ok_or_else(|| SdkError::LocalBus(format!("missing X3DH private event {event_id}")))?;
-        Ok(serde_json::from_slice(&bytes)?)
     }
 }
 
