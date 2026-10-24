@@ -144,3 +144,28 @@ impl AccountDb {
             .collect()
     }
 }
+
+impl super::AccountDb {
+    /// Reads recent surface rows in insertion order; updates preserve the row's original order.
+    /// A `before` cursor pages towards older rows. Exporters reverse each page for oldest-first output.
+    /// # Errors
+    /// Rejects unrelated namespaces and returns database or decoding errors.
+    pub fn surface_recent_records<T: serde::de::DeserializeOwned>(
+        &self,
+        prefix: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<(i64, T)>, crate::StorageError> {
+        if !(prefix.starts_with("surface/") || prefix == "directory/surface/") {
+            return Err(crate::StorageError::AuthorizationRejected);
+        }
+        let mut query=self.connection.prepare("SELECT rowid,state_json FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 AND rowid<?2 ORDER BY rowid DESC LIMIT ?3")?;
+        let rows = query
+            .query_map(
+                rusqlite::params![prefix, before.unwrap_or(i64::MAX), limit.min(129)],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(|(id, bytes)| Ok((id, serde_json::from_slice(&bytes)?))).collect()
+    }
+}

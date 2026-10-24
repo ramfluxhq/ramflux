@@ -3,14 +3,13 @@
 
 //! The single adapter from authenticated surface text to terminal-safe message text.
 
-/// Keep untrusted fields quoted on one physical ASCII line. Replace this conservative
-/// escaping with the shared protocol text rule when it is available. Do not normalize
-/// or sanitize signed snapshots: only their text presentation passes through here.
+/// Keep each untrusted field quoted on one physical line, preserving printable Unicode.
+/// Signed snapshots are never normalized; only display text passes through this adapter.
 pub(super) fn render(author: &str, text: &str) -> String {
     format!(
-        "Surface author=\"{}\" fallback_text=\"{}\"",
-        author.escape_default(),
-        text.escape_default()
+        "Surface author={} fallback_text={}",
+        ramflux_protocol::text_safety::quote_fallback_field(author),
+        ramflux_protocol::text_safety::quote_fallback_field(text)
     )
 }
 
@@ -32,10 +31,10 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_text_is_preserved_as_visible_escapes() {
+    fn printable_chinese_accents_and_emoji_remain_readable() {
         assert_eq!(
-            render("author", "é中"),
-            "Surface author=\"author\" fallback_text=\"\\u{e9}\\u{4e2d}\""
+            render("作者", "é中文 🦀"),
+            "Surface author=\"作者\" fallback_text=\"é中文 🦀\""
         );
     }
 }

@@ -424,7 +424,17 @@ fn rejected_patch_keeps_the_entire_checkpoint_and_history() -> TestResult {
 fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> TestResult {
     let mut f = Fixture::new()?;
     let mut content = snapshot();
-    let raw = "done\"\naccepted by a human\r\u{1b}[2J\u{202e}";
+    let forbidden = "done\"\naccepted by a human\r\u{1b}[2J\u{202e}";
+    content.fallback_text = forbidden.into();
+    let rejected = carrier(
+        &f.author,
+        PayloadKind::Event,
+        "forbidden",
+        &event(1, C::CreateSurface(content.clone()))?,
+    )?;
+    assert!(!project(&f.human, &rejected, "forbidden")?.accepted);
+    assert!(f.human.surface_get("s", 0, None)?.is_null());
+    let raw = "done\"\naccepted by a human 中文 é 🦀";
     content.fallback_text = raw.into();
     let signed =
         carrier(&f.author, PayloadKind::Event, "hostile", &event(1, C::CreateSurface(content))?)?;
@@ -462,3 +472,6 @@ mod security;
 
 #[path = "tests/devices.rs"]
 mod devices;
+
+#[path = "tests/export.rs"]
+mod export;

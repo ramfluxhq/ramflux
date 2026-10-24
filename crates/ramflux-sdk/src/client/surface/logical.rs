@@ -46,7 +46,8 @@ impl RamfluxClient {
             }
         }
         if count >= 64 || bytes > 8 * 1024 * 1024 {
-            return Err(SdkError::InboundPending("surface forwarding backpressure".into()));
+            db.append_journal(&format!("surface-forward-deferred:{record}"), "surface.forward_deferred", &serde_json::json!({"surface_ref":carrier.surface_reference()?,"message_id":carrier.message_id,"reason":"forwarding_capacity","recovery":"own_device_history"}), crate::prelude::now_unix_timestamp(), None)?;
+            return Ok(());
         }
         db.persist_actor_state(&record, &job)?;
         Ok(())
