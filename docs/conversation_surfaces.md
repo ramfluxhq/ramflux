@@ -37,15 +37,30 @@ notifications never contain snapshots, fallback text or action arguments.
 
 ## All-terminal delivery and action decisions
 
-Events fan out to every active verified peer device and the author's own sibling
-devices. Group routing preserves membership epochs and join floors; sibling
-membership follows the same verified identity root. Own forwarding is permitted
-only from the same verified root, preserves the original signed carrier, and
-never copies DM ratchet state. Existing blocked/revoked contacts are preserved.
-The existing own-device history bundle includes bounded signed surface proofs and
-decision attestations, with group-epoch filtering for surface messages. Historical
-signer manifests must still pass current verification; unavailable/expired trust
-material fails explicitly rather than granting stale authority.
+DM events fan out to every active verified peer device and the author's own
+siblings. Group publications use the same sender-key ciphertext, distribution
+controls and verified member routes as group text. Physical delivery wraps that
+ciphertext for each member; it does not encrypt separate peer surface controls.
+Group actions are private direct returns to the author, rather than broadcasts
+of the human's arguments. Group members forward accepted events to their own
+siblings. Own forwarding requires the same verified identity root, preserves the
+original signed carrier, and never copies DM ratchet state. Existing
+blocked/revoked contacts are preserved.
+
+The authenticated own-device history bundle exports at most 64 recent surfaces,
+128 retained actions per surface, and 8 MiB of surface data. It selects the newest
+bounded window and emits it oldest-first. `surface_export_metadata` exposes
+`truncated`, an optional older-window `next_before` cursor, and counted `skipped`
+reasons; the same metadata is recorded locally. A peer cannot abort the bundle by
+omitting a full-state proof or exceeding a count budget. Normal signed proofs are
+forwarded when usable. Otherwise the last locally validated checkpoint is copied
+as private account state inside the authenticated same-root snapshot, with scope,
+version, hash, executor, finality and membership-floor checks on restore. This
+checkpoint grants no peer signing authority and is never accepted as a peer
+carrier. Pending stubs and unavailable decision attestations are explicitly
+omitted. Peers may continue sending valid events without optional full-state
+proofs; every accepted state has a checkpoint representation. Historical peer
+manifests on signed forwarding controls still require current verification.
 
 Actions fan out to all verified author devices. The surface's creator device is
 the sole decision executor, pinned when the surface is created. It consumes a
@@ -63,10 +78,18 @@ requires a newly authored surface. There is no distributed executor lease or
 automatic handoff in this version.
 
 Prepared ciphertext envelopes are committed before transport submission and
-reused unchanged on retries. The account transport queue holds at most 64 jobs /
-32 MiB; fanout backpressure rejects admission before local acceptance. Logical
-own-forward/decision jobs hold at most 64 entries / 8 MiB. Retries are bounded by
-8 attempts, the original envelope expiry and a 600-second window.
+reused unchanged on retries. Count and conservative byte admission run before
+pair or group encryption. The account transport queue holds at most 64 logical
+jobs / 32 MiB. A group publication occupies one job containing its member delivery
+envelopes, so 100 devices do not exhaust the job-count limit. A very large payload
+or group can still hit the byte bound. Own-forward/decision preparation holds at
+most 64 entries / 8 MiB. Preparation congestion records
+`surface.forward_deferred`, with own-device history as the recovery path. Retries
+are bounded by 8 attempts per recipient and the original 600-second expiry. A
+recipient waiting for retry does not block other group members; its distribution
+stays ahead of its messages. Inbound receive/commit/ACK runs first, followed by at
+most two outbound submissions with two-second local submit timeouts; outbound
+queue/preparation errors are logged and deferred without aborting receive.
 
 ## Ordering, integrity and retention
 
@@ -79,9 +102,10 @@ a victim's logical ID. All private keys, receipts, decisions and events are scop
 by the full surface identity. Checkpoint/row disagreement is a typed storage error.
 
 Future versions are held durably and replayed in order when the gap fills. The
-holdback is capped at 32 entries / 1 MiB per surface, 64 entries / 4 MiB per account,
+holdback is capped at 32 entries / 1 MiB per surface, 64 entries / 4 MiB per authenticated author,
 and 64 versions of lookahead. TTL is 600 seconds, capped by original envelope
-expiry. Future events do not receive permanent rejection receipts. Expiry or
+expiry. Aggregate storage scales with the number of authorized authors; expiry
+sweeps inspect at most 65 rows per tick with a persisted cursor. Future events do not receive permanent rejection receipts. Expiry or
 backpressure marks `out_of_sync`; the next author-signed full snapshot can recover
 it while preserving known stream-finality commitments. Until that snapshot arrives,
 the last valid snapshot remains visible. There is no active resync request.
@@ -101,10 +125,12 @@ receipts, decisions and outbox writes so failures cannot leave partial transitio
 
 Text clients receive `content_type: "surface"` and a fixed single-line body:
 `Surface author="..." fallback_text="..."`. The verified author's label and
-untrusted text are quoted, with controls and non-ASCII escaped. Embedded status
-lines, terminal escapes and bidi controls therefore cannot forge terminal output.
-The original text remains in the structured snapshot and signed hash. One SDK
-adapter is the integration point for the shared protocol sanitizer.
+untrusted text use the shared protocol `text_safety::quote_fallback_field` adapter:
+controls/format characters, line separators, quotes and backslashes are escaped,
+while printable Chinese, accents and emoji remain readable. Embedded status lines,
+terminal escapes and bidi controls cannot forge terminal output. Protocol ingress
+also applies its shared free-text policy. The original accepted text remains in
+the structured snapshot and signed hash.
 
 This pre-merge revision changes private checkpoint/storage scoping; use fresh
 prototype account roots rather than importing unscoped development databases.

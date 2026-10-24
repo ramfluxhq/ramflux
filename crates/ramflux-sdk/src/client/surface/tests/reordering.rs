@@ -200,3 +200,50 @@ fn holdback_byte_budget_and_original_envelope_expiry_are_enforced() -> TestResul
     assert!(f.human.surface_delivery_receipt(&expired)?.is_none());
     Ok(())
 }
+
+#[test]
+fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResult {
+    let f = Fixture::new()?;
+    for surface in ["s", "second"] {
+        for version in 3..=34 {
+            let mut signed = stream(&f.author, &format!("{surface}-{version}"), version, "x")?;
+            signed.surface_id = surface.into();
+            let wire = event(
+                version,
+                C::StreamAppend(StreamAppendCommand {
+                    surface_id: surface.into(),
+                    component_id: "stream".into(),
+                    text_delta: "x".into(),
+                    final_: false,
+                }),
+            )?;
+            signed.wire_base64 = ramflux_protocol::encode_base64url(wire);
+            signed = f.author.sign_surface_carrier(signed)?;
+            assert!(project(&f.human, &signed, &signed.message_id)?.queued);
+        }
+    }
+    assert_eq!(pending_count(&f.human)?, 64);
+    let mut first = carrier(
+        &f.human,
+        PayloadKind::Event,
+        "other-create",
+        &event(1, C::CreateSurface(snapshot()))?,
+    )?;
+    first.author_principal_id = "human".into();
+    first = f.human.sign_surface_carrier(first)?;
+    assert!(project(&f.human, &first, "other-create")?.accepted);
+    let mut third = stream(&f.human, "other-v3", 3, "three")?;
+    third.author_principal_id = "human".into();
+    third = f.human.sign_surface_carrier(third)?;
+    assert!(project(&f.human, &third, "other-v3")?.queued);
+    let mut second = stream(&f.human, "other-v2", 2, "two")?;
+    second.author_principal_id = "human".into();
+    second = f.human.sign_surface_carrier(second)?;
+    assert!(project(&f.human, &second, "other-v2")?.accepted);
+    let reference = first.surface_reference()?;
+    let view = f.human.surface_get_ref(&reference, 0, None)?;
+    assert_eq!(view["version"], 3);
+    assert_eq!(view["out_of_sync"], false);
+    assert_eq!(view["snapshot"]["components"][0]["text"], "twothree");
+    Ok(())
+}

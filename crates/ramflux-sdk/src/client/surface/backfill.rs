@@ -78,6 +78,13 @@ impl RamfluxClient {
                 self.surface_error(conversation, message, sender, None, &error)?;
                 Outcome::rejected(error)
             };
+            if outcome.accepted
+                && device != local.device_id
+                && let Ok(Some(carrier)) = Carrier::decode(&bytes)
+                && carrier.payload_kind == super::PayloadKind::Event
+            {
+                self.queue_surface_forward(&carrier, origin.group_epoch)?;
+            }
             db.replace_surface_message_content(
                 conversation,
                 message,

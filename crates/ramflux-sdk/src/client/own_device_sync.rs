@@ -196,6 +196,7 @@ impl RamfluxClient {
         let dm_sessions = Vec::new();
         let sender_key_distributions_base64 =
             self.own_device_sender_key_distributions(source_device_id, &groups)?;
+        let surfaces = self.own_surface_history_export(None)?;
         Ok(SdkOwnDeviceHistoryBundle {
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,
@@ -204,7 +205,9 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
-            surface_controls: self.own_surface_history_controls()?,
+            surface_controls: surfaces.controls,
+            surface_checkpoints: surfaces.checkpoints,
+            surface_export_metadata: surfaces.metadata,
             surface_message_epochs,
             contents,
             dm_sessions,
@@ -476,6 +479,7 @@ impl RamfluxClient {
             self.import_group_sender_key_distribution(&distribution)?;
             imported_sender_keys = imported_sender_keys.saturating_add(1);
         }
+        self.import_owned_surface_checkpoints(&bundle.surface_checkpoints)?;
         self.import_own_surface_history(envelope, &bundle.surface_controls)?;
         Ok(SdkOwnDeviceSyncImportResponse {
             snapshot_id: bundle.snapshot_id.clone(),
@@ -714,6 +718,8 @@ mod tests {
     ) -> SdkOwnDeviceHistoryBundle {
         SdkOwnDeviceHistoryBundle {
             surface_controls: Vec::new(),
+            surface_checkpoints: Vec::new(),
+            surface_export_metadata: crate::client::surface::SurfaceExportMetadata::default(),
             surface_message_epochs: BTreeMap::new(),
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,

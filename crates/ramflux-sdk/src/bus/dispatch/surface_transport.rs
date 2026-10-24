@@ -24,7 +24,14 @@ pub(crate) async fn send(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
 ) -> Result<Value, SdkError> {
-    let prepared = prepare(account, carrier, false, None).await?;
+    let group = super::surface_group::plan(account, carrier)?;
+    let reservation = group.as_ref().map_or((0, 0), |plan| (1, plan.bytes));
+    let prepared = prepare(account, carrier, group.is_some(), None, reservation).await?;
+    let group_deliveries = if let Some(plan) = group {
+        super::surface_group::prepare(account, carrier, plan).await?
+    } else {
+        Vec::new()
+    };
     let timeline = RamfluxClient::surface_timeline_id(carrier)?;
     let result = account.client.account_db()?.surface_transaction(|| {
         super::super::surface_jobs::admit(account, prepared.envelopes.len(), 0)?;
@@ -66,6 +73,7 @@ pub(crate) async fn send(
                 result.fallback_text.as_bytes(),
             )?;
             super::super::surface_jobs::enqueue(account, prepared.envelopes)?;
+            super::super::surface_jobs::enqueue_group(account, group_deliveries)?;
         }
         let mut response = serde_json::to_value(result)?;
         response["surface_id"] = json!(carrier.surface_id);
@@ -99,7 +107,7 @@ pub(crate) async fn drain_forwarding(
         if job.next_at > now {
             continue;
         }
-        if let Ok(prepared) = prepare(account, &job.carrier, true, job.group_epoch).await {
+        if let Ok(prepared) = prepare(account, &job.carrier, true, job.group_epoch, (0, 0)).await {
             account.client.account_db()?.surface_transaction(|| {
                 super::super::surface_jobs::enqueue(account, prepared.envelopes)?;
                 account.client.account_db()?.delete_surface_state(&key)?;
@@ -121,9 +129,11 @@ async fn prepare(
     carrier: &Carrier,
     own_only: bool,
     epoch: Option<u64>,
+    reservation: (usize, usize),
 ) -> Result<Prepared, SdkError> {
     let mut engine = account.take_live_engine().await?;
-    let result = prepare_with_engine(account, &mut engine, carrier, own_only, epoch).await;
+    let result =
+        prepare_with_engine(account, &mut engine, carrier, own_only, epoch, reservation).await;
     account.put_engine(engine);
     result
 }
@@ -133,19 +143,10 @@ async fn prepare_with_engine(
     carrier: &Carrier,
     own_only: bool,
     epoch: Option<u64>,
+    reservation: (usize, usize),
 ) -> Result<Prepared, SdkError> {
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let own = client
-        .cache_verified_device_manifest(
-            &engine.config,
-            &account.principal_commitment,
-            "surface_own",
-        )
-        .await?;
-    if !own.devices.iter().any(|d| d.device_id == local.device_id) {
-        return Err(invalid("surface source device is not authorized"));
-    }
     let thread = client
         .account_db()?
         .client_record("conversation", &carrier.conversation_id)?
@@ -156,16 +157,7 @@ async fn prepare_with_engine(
     } else {
         None
     };
-    let mut targets = own
-        .devices
-        .iter()
-        .filter(|d| d.device_id != local.device_id)
-        .map(|d| Target {
-            device: d.device_id.clone(),
-            delivery: d.target_delivery_id.clone(),
-            own: true,
-        })
-        .collect::<Vec<_>>();
+    let mut targets = own_targets(account, engine).await?;
     if !own_only {
         let peers = peer_commitments(account, carrier, &thread)?;
         for (commitment, principal) in peers {
@@ -196,11 +188,31 @@ async fn prepare_with_engine(
     }
     targets.sort_by(|a, b| a.device.cmp(&b.device));
     targets.dedup_by(|a, b| a.device == b.device);
-    super::super::surface_jobs::admit(account, targets.len(), 0)?;
+    let payloads = targets
+        .into_iter()
+        .map(|target| {
+            let kind = if target.own { ControlKind::Own } else { ControlKind::Peer };
+            let body = client.surface_control_packet(carrier, kind, group_epoch)?.bytes()?;
+            Ok::<_, SdkError>((target, body))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let route_bytes = serde_json::to_vec(&group_id)?.len().saturating_mul(8);
+    let bytes = payloads.iter().try_fold(reservation.1, |sum, (target, body)| {
+        let ids = serde_json::to_vec(&(&target.device, &target.delivery))?.len().saturating_mul(8);
+        Ok::<_, SdkError>(
+            sum.saturating_add(body.len().saturating_mul(4))
+                .saturating_add(ids)
+                .saturating_add(route_bytes)
+                .saturating_add(64 * 1024),
+        )
+    })?;
+    super::super::surface_jobs::admit(
+        account,
+        payloads.len().saturating_add(reservation.0),
+        bytes,
+    )?;
     let mut envelopes = Vec::new();
-    for target in targets {
-        let kind = if target.own { ControlKind::Own } else { ControlKind::Peer };
-        let body = client.surface_control_packet(carrier, kind, group_epoch)?.bytes()?;
+    for (target, body) in payloads {
         let id = crate::new_surface_message_id()?;
         let mut message = GatewayDirectMessage {
             conversation_id: carrier.conversation_id.clone(),
@@ -295,4 +307,28 @@ fn peer_commitments(
         }
     }
     Ok(peers)
+}
+
+async fn own_targets(
+    account: &LocalBusAccountState,
+    engine: &GatewaySessionEngine,
+) -> Result<Vec<Target>, SdkError> {
+    let client = &account.client;
+    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let own = client
+        .cache_verified_device_manifest(
+            &engine.config,
+            &account.principal_commitment,
+            "surface_own",
+        )
+        .await?;
+    if !own.devices.iter().any(|d| d.device_id == local.device_id) {
+        return Err(invalid("surface source device is not authorized"));
+    }
+    Ok(own
+        .devices
+        .into_iter()
+        .filter(|d| d.device_id != local.device_id)
+        .map(|d| Target { device: d.device_id, delivery: d.target_delivery_id, own: true })
+        .collect())
 }
