@@ -2,10 +2,27 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded surface proofs in the existing authenticated own-device history snapshot.
-use super::{Carrier, ControlKind, SurfaceControl, invalid, key};
+use super::{Carrier, ControlKind, OwnedSurfaceCheckpoint, SurfaceControl, invalid, key};
 use crate::own_device_sync::SdkOwnDeviceSyncEnvelope;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct SurfaceExportMetadata {
+    pub truncated: bool,
+    pub next_before: Option<i64>,
+    pub skipped: std::collections::BTreeMap<String, u32>,
+}
+pub(crate) struct SurfaceHistoryExport {
+    pub controls: Vec<SurfaceControl>,
+    pub checkpoints: Vec<OwnedSurfaceCheckpoint>,
+    pub metadata: SurfaceExportMetadata,
+}
+impl SurfaceExportMetadata {
+    fn skip(&mut self, reason: &str) {
+        *self.skipped.entry(reason.into()).or_default() += 1;
+    }
+}
 impl RamfluxClient {
     pub(crate) fn surface_message_group_epoch(
         &self,
@@ -25,66 +42,135 @@ impl RamfluxClient {
             Ok(None)
         }
     }
+    #[cfg(test)]
     pub(crate) fn own_surface_history_controls(&self) -> Result<Vec<SurfaceControl>, SdkError> {
+        Ok(self.own_surface_history_export(None)?.controls)
+    }
+    pub(crate) fn own_surface_history_export(
+        &self,
+        before: Option<i64>,
+    ) -> Result<SurfaceHistoryExport, SdkError> {
         let db = self.account_db()?;
-        let ids = db.client_directory_ids("surface", "", 65)?;
-        if ids.len() > 64 {
-            return Err(invalid("own surface history count budget exceeded"));
-        }
-        let mut controls = Vec::new();
-        for reference in ids {
-            let Some((record, state)) = self.surface_state_ref(&reference)? else { continue };
-            let prefix = key("history", &reference) + "/";
-            let history: Value = db
-                .load_actor_state(&format!("{prefix}{:020}", state.version()))?
-                .ok_or_else(|| invalid("surface history proof missing"))?;
-            let latest: Carrier = serde_json::from_value(history["carrier"].clone())?;
-            if latest.snapshot.is_none() {
-                return Err(invalid("surface history requires an author snapshot"));
+        let mut rows = db.surface_recent_records::<Value>("directory/surface/", before, 65)?;
+        let mut result = SurfaceHistoryExport {
+            controls: Vec::new(),
+            checkpoints: Vec::new(),
+            metadata: SurfaceExportMetadata::default(),
+        };
+        result.metadata.truncated = rows.len() > 64;
+        rows.truncate(64);
+        result.metadata.next_before =
+            if result.metadata.truncated { rows.last().map(|(order, _)| *order) } else { None };
+        let mut bytes = 0usize;
+        let mut blocks = Vec::new();
+        // Select the newest bounded window, dropping older items first. Import each selected
+        // surface/checkpoint before its decisions; metadata makes every omission explicit.
+        for (_, view) in rows {
+            let mut block = Vec::new();
+            let Some(reference) = view["surface_ref"].as_str() else {
+                result.metadata.skip("invalid_view");
+                continue;
+            };
+            let Ok(checkpoint) = self.export_owned_surface_checkpoint(reference) else {
+                result.metadata.skip("checkpoint_unavailable_or_below_floor");
+                continue;
+            };
+            let prefix = key("history", reference) + "/";
+            let normal = db
+                .load_actor_state::<Value>(&format!(
+                    "{prefix}{:020}",
+                    view["version"].as_u64().unwrap_or(0)
+                ))?
+                .and_then(|history| {
+                    serde_json::from_value::<Carrier>(history["carrier"].clone()).ok()
+                })
+                .filter(|carrier| carrier.snapshot.is_some())
+                .and_then(|carrier| {
+                    self.surface_control_packet(&carrier, ControlKind::Own, checkpoint.group_epoch)
+                        .ok()
+                })
+                .filter(|control| control.bytes().is_ok());
+            let size = if let Some(control) = &normal {
+                serde_json::to_vec(control)?.len()
+            } else {
+                serde_json::to_vec(&checkpoint)?.len()
+            };
+            if bytes + size > 8 * 1024 * 1024 {
+                result.metadata.truncated = true;
+                result.metadata.skip("surface_byte_budget");
+                continue;
             }
-            let thread = db
-                .client_record("conversation", &record.conversation_id)?
-                .ok_or_else(|| invalid("surface conversation missing"))?;
-            let group_epoch = db.load_actor_state::<u64>(&key("group_epoch", &reference))?;
-            if thread["group_id"].is_string() && group_epoch.is_none() {
-                return Err(invalid("surface group history epoch missing"));
-            }
-            let mut floor = None;
-            if let Some(group) = thread["group_id"].as_str() {
+            bytes += size;
+            let epoch = checkpoint.group_epoch;
+            let floor = if let Some(group) = checkpoint.conversation["group_id"].as_str() {
                 let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-                if !self.group_state(group)?.roles.contains_key(&local.device_id) {
-                    continue;
-                }
-                floor = db.group_member_joined_epoch(group, &local.device_id)?;
-                if floor.is_none_or(|f| group_epoch.is_none_or(|epoch| epoch < f)) {
-                    continue;
-                }
+                db.group_member_joined_epoch(group, &local.device_id)?
+            } else {
+                None
+            };
+            if let Some(control) = normal {
+                block.push(control);
+            } else {
+                result.checkpoints.push(checkpoint);
             }
-            controls.push(self.surface_control_packet(&latest, ControlKind::Own, group_epoch)?);
-            let prefix = key("actions", &reference) + "/";
-            let actions: Vec<Value> = db.surface_history_page(&prefix, &prefix, 101)?;
-            if actions.len() > 100 {
-                return Err(invalid("own surface action history count budget exceeded"));
+            block.extend(self.surface_export_decisions(
+                reference,
+                floor,
+                epoch,
+                &mut bytes,
+                &mut result.metadata,
+            )?);
+            blocks.push(block);
+        }
+        result.checkpoints.reverse();
+        result.controls = blocks.into_iter().rev().flatten().collect();
+        db.persist_actor_state("surface/export_metadata", &result.metadata)?;
+        Ok(result)
+    }
+    fn surface_export_decisions(
+        &self,
+        reference: &str,
+        floor: Option<u64>,
+        epoch: Option<u64>,
+        bytes: &mut usize,
+        metadata: &mut SurfaceExportMetadata,
+    ) -> Result<Vec<SurfaceControl>, SdkError> {
+        let prefix = key("actions", reference) + "/";
+        let mut actions = self.account_db()?.surface_recent_records::<Value>(&prefix, None, 129)?;
+        metadata.truncated |= actions.len() > 128;
+        actions.truncate(128);
+        let mut controls = Vec::new();
+        for (_, action) in actions {
+            if floor.is_some_and(|floor| {
+                action["group_epoch"].as_u64().is_none_or(|epoch| epoch < floor)
+            }) {
+                metadata.skip("action_below_join_floor");
+                continue;
             }
-            for action in actions {
-                if floor.is_some_and(|floor| {
-                    action["group_epoch"].as_u64().is_none_or(|epoch| epoch < floor)
-                }) {
-                    continue;
-                }
-                if action["attestation"].is_object() {
-                    let receipt: Carrier = serde_json::from_value(action["attestation"].clone())?;
-                    controls.push(self.surface_control_packet(
+            let control = serde_json::from_value::<Carrier>(action["attestation"].clone())
+                .ok()
+                .and_then(|receipt| {
+                    self.surface_control_packet(
                         &receipt,
                         ControlKind::Own,
-                        action["group_epoch"].as_u64(),
-                    )?);
-                }
+                        action["group_epoch"].as_u64().or(epoch),
+                    )
+                    .ok()
+                });
+            let Some(control) = control.filter(|control| control.bytes().is_ok()) else {
+                metadata.skip("action_attestation_unavailable");
+                continue;
+            };
+            let size = serde_json::to_vec(&control)?.len();
+            if *bytes + size > 8 * 1024 * 1024 {
+                metadata.truncated = true;
+                metadata.skip("action_byte_budget");
+                continue;
             }
-            if serde_json::to_vec(&controls)?.len() > 8 * 1024 * 1024 {
-                return Err(invalid("own surface history byte budget exceeded"));
-            }
+            *bytes += size;
+            controls.push(control);
         }
+        controls.reverse();
         Ok(controls)
     }
     pub(crate) fn import_own_surface_history(
@@ -92,7 +178,7 @@ impl RamfluxClient {
         envelope: &SdkOwnDeviceSyncEnvelope,
         controls: &[SurfaceControl],
     ) -> Result<(), SdkError> {
-        if controls.len() > 6464 || serde_json::to_vec(controls)?.len() > 8 * 1024 * 1024 {
+        if controls.len() > 64 * 129 || serde_json::to_vec(controls)?.len() > 8 * 1024 * 1024 {
             return Err(invalid("own surface history budget exceeded"));
         }
         self.account_db()?.surface_transaction(|| {

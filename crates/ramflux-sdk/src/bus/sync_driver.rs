@@ -32,13 +32,33 @@ impl Schedule {
 }
 
 pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    let sent = super::surface_jobs::run(account).await?;
-    let task_sent = super::task_jobs::run(account).await?;
-    let forwarded = super::dispatch::surface_transport::drain_forwarding(account).await?;
     let mut engine = account.take_live_engine().await?;
     let result = receive(account, &mut engine).await;
     account.put_engine(engine);
-    result.map(|count| count + sent + forwarded + task_sent)
+    let received = result?;
+    // Inbound receive and its commit/ACK must not depend on outbound queue health.
+    let sent = match super::surface_jobs::run(account).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, "surface outbox deferred");
+            0
+        }
+    };
+    let forwarded = match super::dispatch::surface_transport::drain_forwarding(account).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, "surface forwarding deferred");
+            0
+        }
+    };
+    let task_sent = match super::task_jobs::run(account).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error,"task outbox deferred");
+            0
+        }
+    };
+    Ok(received + sent + forwarded + task_sent)
 }
 
 async fn receive(
