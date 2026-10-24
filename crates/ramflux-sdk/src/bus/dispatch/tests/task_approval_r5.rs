@@ -278,6 +278,11 @@ fn r5_more_than_sixty_four_honest_approvals_apply_within_one_day_without_retaini
                 )?
                 .ok_or("completion")?;
             assert!(result.accepted, "completion {n} rejected");
+            // Model the independent own-device worker draining its per-task forward job.
+            local
+                .client
+                .account_db()?
+                .delete_task_state(&crate::client::task::scoped("forward", "thread", &task)?)?;
         }
     }
     assert_eq!(agent.mcp_grants.len(), 65);
