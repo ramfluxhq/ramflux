@@ -243,9 +243,9 @@ pub struct IdentityRegistry {
     delivery_root_bindings: BTreeMap<String, (String, String, String)>,
     // Historical unqualified proof ids are retained only for snapshot provenance.
     seen_proofs: BTreeSet<String>,
-    #[serde(default, deserialize_with = "crate::foreign_device_heads::load_proofs")]
-    root_seen_proofs: std::collections::VecDeque<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::registration_receipts::load_receipts")]
+    root_seen_proofs: std::collections::VecDeque<crate::registration_receipts::RegistrationReceipt>,
+    #[serde(default, skip_serializing)]
     pub(crate) foreign_device_heads: crate::foreign_device_heads::ForeignDeviceHeads,
     pub(crate) prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
     #[serde(default, deserialize_with = "load_registration_policy")]
@@ -347,7 +347,12 @@ impl IdentityRegistry {
         let identity = self
             .device_identity_for_root(&request.principal_commitment, &request.proof.device_id)
             .ok_or_else(|| NodeCoreError::ItestHttp("registration authority missing".into()))?;
-        self.admit_registration_proof(&identity, &request.proof.proof_id)?;
+        self.admit_registration_proof(
+            &identity,
+            &request.proof.proof_id,
+            request.proof.expires_at,
+            request.now,
+        )?;
         self.principal_root_bindings
             .insert(request.proof.principal_id.clone(), request.root_public_key.clone());
         self.root_public_keys
@@ -401,20 +406,41 @@ impl IdentityRegistry {
         &mut self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         proof: &str,
+        expires_at: i64,
+        now: i64,
     ) -> Result<(), NodeCoreError> {
         let key = ramflux_crypto::blake3_256_base64url(
             "ramflux.node.registration_proof.v2",
             &ramflux_protocol::canonical_json_bytes(&(source.storage_key(), proof))
                 .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?,
         );
-        if self.root_seen_proofs.contains(&key) {
+        self.migrate_legacy_registration_receipts(now);
+        self.root_seen_proofs
+            .retain(|receipt| receipt.expires_at.is_none_or(|expires| expires >= now));
+        if self.root_seen_proofs.iter().any(|receipt| receipt.key == key) {
             return Err(NodeCoreError::ItestHttp("branch proof replay".into()));
         }
-        self.root_seen_proofs.push_back(key);
-        while self.root_seen_proofs.len() > crate::foreign_device_heads::REGISTRATION_PROOF_LIMIT {
-            self.root_seen_proofs.pop_front();
+        if self.root_seen_proofs.len() >= crate::registration_receipts::REGISTRATION_PROOF_LIMIT {
+            return Err(NodeCoreError::Capacity { resource: "registration_proofs" });
         }
+        self.root_seen_proofs.push_back(crate::registration_receipts::RegistrationReceipt {
+            key,
+            expires_at: Some(expires_at),
+        });
         Ok(())
+    }
+    pub(crate) fn migrate_legacy_registration_receipts(&mut self, now: i64) -> bool {
+        let deadline = now
+            .saturating_add(ramflux_crypto::MAX_BRANCH_PROOF_LIFETIME_SECONDS)
+            .saturating_add(ramflux_crypto::BRANCH_PROOF_CLOCK_SKEW_SECONDS);
+        let mut changed = false;
+        for receipt in &mut self.root_seen_proofs {
+            if receipt.expires_at.is_none() {
+                receipt.expires_at = Some(deadline);
+                changed = true;
+            }
+        }
+        changed
     }
     pub fn set_registration_policy(&mut self, policy: RegistrationPolicy) {
         self.registration_policy = normalize_registration_policy(policy);
@@ -468,6 +494,7 @@ impl IdentityRegistry {
         &mut self,
         request: &IdentityRegisterRequest,
     ) -> Result<RegistrationTrustTier, NodeCoreError> {
+        self.migrate_legacy_registration_receipts(request.now);
         self.check_source_registration_budget(request)?;
         match self.registration_policy.challenge_policy {
             RegistrationChallengePolicy::None => Ok(RegistrationTrustTier::New),
@@ -955,25 +982,25 @@ pub const fn friend_request_budget_limit(tier: &RegistrationTrustTier) -> u32 {
 mod proof_retention_tests {
     use super::*;
     #[test]
-    fn registration_proofs_evict_oldest_and_retain_order_after_restart()
+    fn live_registration_receipts_refuse_capacity_and_only_expired_receipts_are_removed()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = ramflux_crypto::create_identity_root("owner", [9; 32]);
         let source =
             ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "device")?;
-        let mut registry = IdentityRegistry::default();
-        for index in 0..=crate::foreign_device_heads::REGISTRATION_PROOF_LIMIT {
-            registry.admit_registration_proof(&source, &index.to_string())?;
+        let mut registry = IdentityRegistry::new();
+        for index in 0..crate::registration_receipts::REGISTRATION_PROOF_LIMIT {
+            registry.admit_registration_proof(&source, &index.to_string(), 2000, 1000)?;
         }
-        assert_eq!(
-            registry.root_seen_proofs.len(),
-            crate::foreign_device_heads::REGISTRATION_PROOF_LIMIT
-        );
-        assert!(registry.admit_registration_proof(&source, "1").is_err());
+        assert!(matches!(
+            registry.admit_registration_proof(&source, "overflow", 2000, 1000),
+            Err(NodeCoreError::Capacity { resource: "registration_proofs" })
+        ));
+        assert!(registry.admit_registration_proof(&source, "0", 2000, 1000).is_err());
         let mut restored: IdentityRegistry =
             serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
-        restored.admit_registration_proof(&source, "0")?;
-        assert!(restored.admit_registration_proof(&source, "2").is_err());
-        restored.admit_registration_proof(&source, "1")?;
+        assert!(restored.admit_registration_proof(&source, "0", 2000, 2000).is_err());
+        restored.admit_registration_proof(&source, "fresh", 3000, 2001)?;
+        assert_eq!(restored.root_seen_proofs.len(), 1);
         Ok(())
     }
 }

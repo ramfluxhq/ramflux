@@ -22,6 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct FederationRedbStore {
     db: redb::Database,
+    foreign_authority_writes: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -47,6 +48,11 @@ pub struct FederationInboundForwardSeenRecord {
 }
 
 impl FederationRedbStore {
+    /// Successful per-root authority transactions; unchanged forwards do not rewrite a head.
+    #[must_use]
+    pub fn foreign_authority_write_count(&self) -> u64 {
+        self.foreign_authority_writes.load(std::sync::atomic::Ordering::Relaxed)
+    }
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
@@ -64,7 +70,12 @@ impl FederationRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(Self { db })
+        crate::foreign_device_store::initialize(
+            &db,
+            crate::foreign_device_store::Namespace::Federation,
+            None,
+        )?;
+        Ok(Self { db, foreign_authority_writes: std::sync::atomic::AtomicU64::new(0) })
     }
 
     /// # Errors
@@ -383,9 +394,22 @@ impl FederationRedbStore {
         }
         let seen_key = federated_forward_replay_key(source, request);
         let expired_keys = self.expired_inbound_forward_keys(now)?;
+        let record = authority
+            .signed_device_set
+            .as_ref()
+            .ok_or_else(|| NodeCoreError::ItestHttp("forwarded set missing".into()))?;
+        let observation = crate::foreign_device_store::observe(
+            &self.db,
+            crate::foreign_device_store::Namespace::Federation,
+            record,
+        )?;
+        if observation.changed() {
+            self.foreign_authority_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        observation.admitted()?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        observe_forwarded_device_set(&write_txn, &authority)?;
+
         let accepted = {
             let mut table = write_txn
                 .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
@@ -516,50 +540,4 @@ fn deserialize_inbound_forward_seen_record(
 ) -> Result<FederationInboundForwardSeenRecord, NodeCoreError> {
     serde_json::from_slice(bytes)
         .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
-}
-
-// The source node has authenticated delivery; retain the highest observed root-signed set
-// so an older forwarded credential cannot resurrect a revoked device after restart.
-fn observe_forwarded_device_set(
-    transaction: &redb::WriteTransaction,
-    authority: &crate::DeviceAuthKeyResponse,
-) -> Result<(), NodeCoreError> {
-    const HEADS: TableDefinition<&str, &[u8]> =
-        TableDefinition::new("federated_source_device_sets_v1");
-    const CACHE: TableDefinition<&str, &[u8]> =
-        TableDefinition::new("bounded_foreign_device_heads_v1");
-    let record = authority
-        .signed_device_set
-        .as_ref()
-        .ok_or_else(|| NodeCoreError::ItestHttp("forwarded signed device set missing".into()))?;
-    let mut cache =
-        transaction.open_table(CACHE).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-    let bytes = cache
-        .get("heads")
-        .map_err(|e| NodeCoreError::Redb(e.to_string()))?
-        .map(|row| row.value().to_vec());
-    let mut heads: crate::foreign_device_heads::ForeignDeviceHeads = if let Some(bytes) = bytes {
-        serde_json::from_slice(&bytes).map_err(|e| NodeCoreError::ItestJson(e.to_string()))?
-    } else {
-        let mut heads = crate::foreign_device_heads::ForeignDeviceHeads::default();
-        // Legacy rows have no observation times. Migrate once in deterministic key order.
-        let table =
-            transaction.open_table(HEADS).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        for entry in table.iter().map_err(|e| NodeCoreError::Redb(e.to_string()))? {
-            let (_, value) = entry.map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-            heads.retain(
-                serde_json::from_slice(value.value())
-                    .map_err(|e| NodeCoreError::ItestJson(e.to_string()))?,
-            );
-        }
-        drop(table);
-        transaction.delete_table(HEADS).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        heads
-    };
-    if heads.check(record)? {
-        heads.retain(record.clone());
-    }
-    let bytes = serde_json::to_vec(&heads).map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
-    cache.insert("heads", bytes.as_slice()).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-    Ok(())
 }

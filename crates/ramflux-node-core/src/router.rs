@@ -38,6 +38,13 @@ pub fn mvp10_fanout_envelope_id(base_envelope_id: &str, device_id: &str) -> Stri
     format!("{}:{}{}:{}", base_envelope_id.len(), base_envelope_id, device_id.len(), device_id)
 }
 
+/// Source trust supplied by the server's authenticated transport peer, never an envelope field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouterEnvelopeOrigin {
+    Gateway,
+    Federation,
+}
+
 #[derive(Debug)]
 pub struct RouterCore {
     pub(crate) target_shards: Vec<Mutex<RouterTargetShard>>,
@@ -81,6 +88,8 @@ pub(crate) struct RouterControlState {
     #[serde(skip)]
     principal_lookup_limiter: crate::principal_directory::PrincipalLookupLimiter,
     pub(crate) mvp1_identities: IdentityRegistry,
+    #[serde(default)]
+    pub(crate) foreign_device_heads: crate::foreign_device_heads::ForeignDeviceHeads,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
     pub(crate) identity_lineage_events: BTreeMap<String, Vec<IdentityLineageEventRecord>>,
@@ -122,6 +131,8 @@ pub(crate) struct RouterCoreSnapshot {
     pub(crate) registry: SessionRegistry,
     pub(crate) inbox: OpaqueDeviceInbox,
     pub(crate) mvp1_identities: IdentityRegistry,
+    #[serde(default)]
+    pub(crate) foreign_device_heads: crate::foreign_device_heads::ForeignDeviceHeads,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
     pub(crate) identity_lineage_events: BTreeMap<String, Vec<IdentityLineageEventRecord>>,
@@ -1040,6 +1051,7 @@ impl RouterCore {
         {
             let control = lock_unpoisoned(&self.control);
             snapshot.mvp1_identities = control.mvp1_identities.clone();
+            snapshot.foreign_device_heads = control.foreign_device_heads.clone();
             snapshot.lifecycle_by_principal = control.lifecycle_by_principal.clone();
             snapshot.lifecycle_tombstones = control.lifecycle_tombstones.clone();
             snapshot.identity_lineage_events = control.identity_lineage_events.clone();
@@ -1076,6 +1088,7 @@ impl RouterCore {
         let control = RouterControlState {
             principal_lookup_limiter: crate::principal_directory::PrincipalLookupLimiter::default(),
             mvp1_identities: snapshot.mvp1_identities,
+            foreign_device_heads: snapshot.foreign_device_heads,
             lifecycle_by_principal: snapshot.lifecycle_by_principal,
             lifecycle_tombstones: snapshot.lifecycle_tombstones,
             identity_lineage_events: snapshot.identity_lineage_events,
@@ -1174,7 +1187,7 @@ impl RouterCore {
         &self,
         envelope: &ramflux_protocol::Envelope,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
-        self.authenticate_source_with_store(envelope, None)
+        self.authenticated_envelope_source_from(envelope, None, RouterEnvelopeOrigin::Gateway)
     }
 
     /// Authenticate a source and persist its highest foreign authority before accepting delivery.
@@ -1185,13 +1198,21 @@ impl RouterCore {
         envelope: &ramflux_protocol::Envelope,
         store: &crate::RouterRedbStore,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
-        self.authenticate_source_with_store(envelope, Some(store))
+        self.authenticated_envelope_source_from(
+            envelope,
+            Some(store),
+            RouterEnvelopeOrigin::Gateway,
+        )
     }
 
-    fn authenticate_source_with_store(
+    /// Authenticate an envelope using provenance from an already authenticated mesh peer.
+    /// # Errors
+    /// Rejects forged, stale, over-capacity or gateway-supplied foreign authority.
+    pub fn authenticated_envelope_source_from(
         &self,
         envelope: &ramflux_protocol::Envelope,
         store: Option<&crate::RouterRedbStore>,
+        origin: RouterEnvelopeOrigin,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
         let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
         let root = envelope
@@ -1207,10 +1228,16 @@ impl RouterCore {
         let registered = registry
             .resolve_device_selector(&lookup)
             .and_then(|identity| registry.device_auth_key(&identity));
+        let local_registration = registered.is_some();
         let (authority, source) = if let Some(authority) = registered {
             let source = authority.verify_envelope_source(envelope)?;
             (authority, source)
         } else {
+            if origin != RouterEnvelopeOrigin::Federation {
+                return Err(NodeCoreError::Unauthorized(
+                    "foreign authority requires an authenticated federation peer".into(),
+                ));
+            }
             let (authority, source) = DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
             if registry
                 .signed_device_set(root)
@@ -1221,16 +1248,20 @@ impl RouterCore {
             (authority, source)
         };
         let record = authority.signed_device_set.as_ref().ok_or_else(reject)?;
-        if registry.foreign_device_heads.check(record)? {
-            let mut candidate = registry.clone();
-            candidate.foreign_device_heads.retain(record.clone());
-            // Persist while serialized with source admission: an older concurrent write cannot
-            // replace a newer revocation head. A failed write leaves memory unchanged.
-            if let Some(store) = store {
-                store.record_identity_registry(&candidate)?;
+        if local_registration {
+            if let Some(fence) = control.foreign_device_heads.fences.get(root) {
+                fence.check(crate::foreign_device_heads::EpochFence::of(record)?)?;
             }
-            *registry = candidate;
+            return Ok(source);
         }
+
+        let observation = if let Some(store) = store {
+            store.observe_foreign_device_set(record)?
+        } else {
+            control.foreign_device_heads.prepare(record)?
+        };
+        control.foreign_device_heads.apply(record, observation);
+        observation.admitted()?;
         Ok(source)
     }
 

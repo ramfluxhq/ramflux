@@ -899,3 +899,40 @@ fn removing_a_root_bound_member_allows_another_root_to_reuse_its_literal_name()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn migrating_a_removed_r5_member_does_not_reactivate_its_pin() -> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let owner = pin_source("owner", "owner")?;
+    let old = pin_source("old", "shared")?;
+    let new = pin_source("new", "shared")?;
+    db.create_group("g", "owner")?;
+    db.persist_group_member_device_key("g", &owner, "owner-key")?;
+    db.add_group_member("g", "shared", "member")?;
+    db.persist_group_member_device_key("g", &old, "old-key")?;
+    // Reproduce the r5 on-disk removal: the inactive row still has a live key pin.
+    db.connection.execute(
+        "UPDATE group_member_projection SET active=0 WHERE group_id='g' AND member_id='shared'",
+        [],
+    )?;
+    let triggers = {
+        let mut query=db.connection.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='group_member_projection'")?;
+        query.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for trigger in triggers {
+        db.connection
+            .execute_batch(&format!("DROP TRIGGER \"{}\"", trigger.replace('"', "\"\"")))?;
+    }
+    db.connection.execute_batch("ALTER TABLE group_member_projection DROP COLUMN principal_commitment; DELETE FROM schema_migration WHERE schema_version>=10;")?;
+    drop(db);
+    let db =
+        AccountDb::open(&AccountIndex::open(&root)?, "a", &AccountDbKey::derive("a", b"secret"))?;
+    assert_eq!(db.group_member_device_key("g", &old)?, None);
+    db.add_group_member("g", "shared", "member")?;
+    db.persist_group_member_device_key("g", &new, "new-key")?;
+    assert_eq!(db.group_member_role("g", &new)?.as_deref(), Some("member"));
+    assert_eq!(db.group_member_key_binding("g", &old)?, None);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

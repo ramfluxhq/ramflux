@@ -802,6 +802,15 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
         sql: "ALTER TABLE group_member_projection ADD COLUMN principal_commitment TEXT;
             UPDATE group_member_projection SET principal_commitment=(SELECT MIN(k.principal_commitment) FROM group_member_device_key k WHERE k.group_id=group_member_projection.group_id AND COALESCE(k.raw_device_id,k.member_id)=group_member_projection.member_id HAVING COUNT(*)=1 AND COUNT(k.principal_commitment)=1);",
     },
+    AccountMigration {
+        schema_version: 11,
+        app_version: "v1-retired-group-pins",
+        checksum: "2026-10-25-archive-inactive-or-mismatched-group-pins-v1",
+        notes: "retired or mismatched pins cannot bind a reused membership slot",
+        sql: "CREATE TABLE IF NOT EXISTS legacy_group_member_device_key AS SELECT * FROM group_member_device_key WHERE 0;
+            INSERT INTO legacy_group_member_device_key SELECT k.* FROM group_member_device_key k WHERE EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND (m.active=0 OR m.principal_commitment IS NOT k.principal_commitment));
+            DELETE FROM group_member_device_key WHERE EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=group_member_device_key.group_id AND m.member_id=COALESCE(group_member_device_key.raw_device_id,group_member_device_key.member_id) AND (m.active=0 OR m.principal_commitment IS NOT group_member_device_key.principal_commitment));",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {
@@ -816,6 +825,14 @@ pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageE
         );",
     )?;
     for migration in ACCOUNT_MIGRATIONS {
+        if migration.schema_version == 11 {
+            ensure_column(
+                connection,
+                "group_member_device_key",
+                "member_principal_id",
+                "member_principal_id TEXT",
+            )?;
+        }
         if migration.schema_version == 10 {
             ensure_column(
                 connection,

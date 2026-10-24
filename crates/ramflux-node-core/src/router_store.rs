@@ -44,6 +44,7 @@ pub struct RouterRedbStore {
     commit_writer: Option<RouterCommitWriter>,
     submission_wal: Option<RouterWalStore>,
     identity_registry_writes: std::sync::atomic::AtomicU64,
+    foreign_authority_writes: std::sync::atomic::AtomicU64,
 }
 
 struct RouterCommitWriter {
@@ -313,6 +314,14 @@ impl RouterRedbStore {
         }
         mailbox_keys::upgrade(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let legacy_registry: IdentityRegistry =
+            load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
+                .unwrap_or_default();
+        crate::foreign_device_store::initialize(
+            &db,
+            crate::foreign_device_store::Namespace::Router,
+            Some(&legacy_registry.foreign_device_heads),
+        )?;
         let commit_writer = if router_group_commit_enabled() {
             Some(RouterCommitWriter::start(Arc::clone(&db))?)
         } else {
@@ -325,6 +334,7 @@ impl RouterRedbStore {
             commit_writer,
             submission_wal,
             identity_registry_writes: std::sync::atomic::AtomicU64::new(0),
+            foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -349,6 +359,9 @@ impl RouterRedbStore {
         self.replace_incremental_router_tables(&snapshot)?;
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
         router.persist_identity_registry(self)?;
+        for record in &snapshot.foreign_device_heads.records {
+            self.observe_foreign_device_set(record)?.admitted()?;
+        }
         save_snapshot(
             &self.db,
             ROUTER_SNAPSHOT_TABLE,
@@ -670,6 +683,25 @@ impl RouterRedbStore {
         Ok(())
     }
 
+    pub(crate) fn observe_foreign_device_set(
+        &self,
+        record: &ramflux_protocol::SignedDeviceSetRecord,
+    ) -> Result<crate::foreign_device_heads::HeadObservation, NodeCoreError> {
+        let observation = crate::foreign_device_store::observe(
+            &self.db,
+            crate::foreign_device_store::Namespace::Router,
+            record,
+        )?;
+        if observation.changed() {
+            self.foreign_authority_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(observation)
+    }
+    /// Successful per-root authority transactions, excluding unchanged observations and migration.
+    #[must_use]
+    pub fn foreign_authority_write_count(&self) -> u64 {
+        self.foreign_authority_writes.load(std::sync::atomic::Ordering::Relaxed)
+    }
     /// Number of successful authority snapshot writes by this store instance (diagnostics).
     #[must_use]
     pub fn identity_registry_write_count(&self) -> u64 {
@@ -873,9 +905,18 @@ impl RouterRedbStore {
         for (key, expires_at) in incremental_replay_tuples {
             replay_guard_state.restore_accepted(key, expires_at);
         }
-        let mvp1_identities =
+        let mut mvp1_identities: IdentityRegistry =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
+        if mvp1_identities.migrate_legacy_registration_receipts(now) {
+            self.record_identity_registry(&mvp1_identities)?;
+        }
+        let foreign_device_heads = crate::foreign_device_store::load(
+            &self.db,
+            crate::foreign_device_store::Namespace::Router,
+        )?;
+        mvp1_identities.foreign_device_heads =
+            crate::foreign_device_heads::ForeignDeviceHeads::default();
         let lifecycle_by_principal = self.load_lifecycle_records()?;
         let lifecycle_tombstones = self.load_lifecycle_tombstones()?;
         let deactivated_delivery_targets = self.load_target_marker_set(
@@ -904,6 +945,7 @@ impl RouterRedbStore {
         if registry == SessionRegistry::default()
             && inbox == OpaqueDeviceInbox::default()
             && mvp1_identities == IdentityRegistry::default()
+            && foreign_device_heads.is_empty()
             && lifecycle_by_principal.is_empty()
             && lifecycle_tombstones.is_empty()
             && identity_lineage_events.is_empty()
@@ -918,6 +960,7 @@ impl RouterRedbStore {
             return Ok(None);
         }
         Ok(Some(RouterCore::from_snapshot(crate::RouterCoreSnapshot {
+            foreign_device_heads,
             registry,
             inbox,
             mvp1_identities,

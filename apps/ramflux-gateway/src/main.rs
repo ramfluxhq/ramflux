@@ -15,6 +15,7 @@ mod registration_forward_tests;
 mod serve;
 mod session;
 mod state;
+mod submit_source;
 
 use std::sync::{Arc, Mutex};
 

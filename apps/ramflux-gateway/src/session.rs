@@ -334,6 +334,7 @@ pub(crate) async fn establish_gateway_session(
     )
     .await?;
     Ok(GatewaySessionRuntime {
+        source_authority: registered_auth_key.clone(),
         source_identity,
         session_id,
         resume_token,
@@ -802,23 +803,31 @@ pub(crate) async fn handle_gateway_submit(
     runtime: &GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> anyhow::Result<()> {
-    let submit_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
-    let replay_rejection = {
-        let mut gateway = gateway_state(&context.state)?;
-        let result = gateway.replay_guard_state_mut().check_signed_request(
-            &runtime.source_identity,
+    let validated = (|| -> anyhow::Result<ramflux_protocol::Envelope> {
+        let envelope = crate::submit_source::bind_source(runtime, &submit.envelope)?;
+        validate_gateway_session_signed_request(
+            context,
+            runtime,
             &submit.signed_request,
-            submit_now,
-        );
-        let rejection = result.err().map(|error| format!("submit replay rejected: {error}"));
-        context.store.save_state(&gateway)?;
-        rejection
+            "POST",
+            "/gateway/session/submit",
+            &submit.envelope,
+        )?;
+        Ok(envelope)
+    })();
+    let mut envelope = match validated {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: format!("submit source rejected: {error}"),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
     };
-    if let Some(reason) = replay_rejection {
-        write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;
-        return Ok(());
-    }
-    let mut envelope = submit.envelope.clone();
     let accepted_at_unix_ms = now_unix_millis();
     if let Err(error) = attach_franking_node_tag(
         &mut envelope,
@@ -1453,6 +1462,13 @@ mod tests {
     #[test]
     fn own_device_fanout_session_rejects_cross_principal_or_source_device() -> anyhow::Result<()> {
         let runtime = crate::GatewaySessionRuntime {
+            source_authority: crate::submit_source::tests::authority(
+                "principal_a",
+                "device_a",
+                1,
+                ramflux_crypto::fixture_public_key_base64url(),
+                1,
+            )?,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root("principal_a", [1; 32]),
                 &ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [2; 32]),
@@ -1740,6 +1756,13 @@ mod tests {
         branch: &ramflux_crypto::DeviceBranch,
     ) -> anyhow::Result<crate::GatewaySessionRuntime> {
         Ok(crate::GatewaySessionRuntime {
+            source_authority: crate::submit_source::tests::authority(
+                &branch.principal_id,
+                &branch.device_id,
+                0x91,
+                ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes()),
+                branch.device_epoch,
+            )?,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root(&branch.principal_id, [0x91; 32]),
                 branch,

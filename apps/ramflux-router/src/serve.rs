@@ -636,6 +636,7 @@ impl RouterSubmitBridge {
         &self,
         body: Vec<u8>,
         total_started: std::time::Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
         let (sender, receiver) =
             bridge_reply_channel::<ramflux_node_core::EnvelopeSubmitResponse>();
@@ -643,7 +644,7 @@ impl RouterSubmitBridge {
         self.tokio.spawn(async move {
             let result = async move {
                 let envelope = serde_json::from_slice::<ramflux_protocol::Envelope>(&body)?;
-                router.submit_envelope_async(envelope, total_started).await
+                router.submit_envelope_async_from(envelope, total_started, origin).await
             }
             .await;
             sender.send(result);
@@ -842,7 +843,8 @@ async fn handle_router_async_mesh_quic_request(
             }
         }
         ramflux_transport::MeshQuicAcceptedWireRequest::Postcard(accepted) => {
-            let response = handle_router_postcard_mesh_quic_request(accepted, &router).await;
+            let response =
+                handle_router_postcard_mesh_quic_request(accepted, &router, peer_service_id).await;
             if let Err(error) = response {
                 tracing::warn!(%error, "router async postcard request failed");
             }
@@ -854,9 +856,16 @@ async fn handle_router_async_mesh_quic_request(
 async fn handle_router_postcard_mesh_quic_request(
     accepted: ramflux_transport::MeshQuicPostcardAcceptedRequest,
     router: &crate::router_runtime::RouterHandle,
+    peer_service_id: &str,
 ) -> anyhow::Result<()> {
     if (accepted.method.as_str(), accepted.path.as_str()) == ("POST", "/mvp0/envelope") {
-        match crate::handlers::handle_mvp0_envelope_async(&accepted.body, router).await {
+        match crate::handlers::handle_mvp0_envelope_async_from(
+            &accepted.body,
+            router,
+            crate::handlers::envelope_origin_for_peer(peer_service_id)?,
+        )
+        .await
+        {
             Ok(response) => {
                 accepted.write_postcard_response(200, &response).await?;
             }
@@ -928,7 +937,8 @@ async fn handle_router_async_compio_mesh_quic_request(
             }
         }
         ramflux_transport::CompioMeshQuicAcceptedWireRequest::Postcard(accepted) => {
-            handle_router_compio_postcard_mesh_quic_request(accepted, &bridge).await?;
+            handle_router_compio_postcard_mesh_quic_request(accepted, &bridge, peer_service_id)
+                .await?;
         }
     }
     Ok(())
@@ -938,10 +948,18 @@ async fn handle_router_async_compio_mesh_quic_request(
 async fn handle_router_compio_postcard_mesh_quic_request(
     mut accepted: ramflux_transport::CompioMeshQuicPostcardAcceptedRequest,
     bridge: &RouterSubmitBridge,
+    peer_service_id: &str,
 ) -> anyhow::Result<()> {
     if (accepted.method.as_str(), accepted.path.as_str()) == ("POST", "/mvp0/envelope") {
         let body = std::mem::take(&mut accepted.body);
-        match bridge.submit_raw_envelope(body, std::time::Instant::now()).await {
+        match bridge
+            .submit_raw_envelope(
+                body,
+                std::time::Instant::now(),
+                crate::handlers::envelope_origin_for_peer(peer_service_id)?,
+            )
+            .await
+        {
             Ok(response) => {
                 accepted.write_postcard_response(200, &response).await?;
             }

@@ -125,6 +125,13 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
         }),
     };
     let runtime = crate::GatewaySessionRuntime {
+        source_authority: crate::submit_source::tests::authority(
+            "alice",
+            "alice-device",
+            1,
+            ramflux_crypto::public_key_base64url_from_seed([2; 32]),
+            1,
+        )?,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
             &ramflux_crypto::create_identity_root("alice", [1; 32]),
             &ramflux_crypto::create_device_branch("alice", "alice-device", 1, [2; 32]),

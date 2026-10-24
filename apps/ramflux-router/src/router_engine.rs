@@ -9,6 +9,7 @@ pub(crate) fn submit_envelope(
     home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
     envelope: ramflux_protocol::Envelope,
     total_started: Instant,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     ramflux_node_core::record_router_submit_started();
     tracing::info!(
@@ -17,7 +18,7 @@ pub(crate) fn submit_envelope(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let source = state.authenticated_envelope_source_durable(&envelope, store)?;
+    let source = state.authenticated_envelope_source_from(&envelope, Some(store), origin)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at
@@ -73,6 +74,7 @@ pub(crate) async fn submit_envelope_async(
     home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
     envelope: ramflux_protocol::Envelope,
     total_started: Instant,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     ramflux_node_core::record_router_submit_started();
     tracing::info!(
@@ -81,7 +83,7 @@ pub(crate) async fn submit_envelope_async(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let source = state.authenticated_envelope_source_durable(&envelope, store)?;
+    let source = state.authenticated_envelope_source_from(&envelope, Some(store), origin)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at

@@ -70,10 +70,11 @@ impl RouterHandle {
         }
     }
 
-    pub(crate) fn submit_envelope(
+    pub(crate) fn submit_envelope_from(
         &self,
         envelope: ramflux_protocol::Envelope,
         total_started: Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
         match self {
             Self::Tokio(runtime) => crate::router_engine::submit_envelope(
@@ -82,14 +83,16 @@ impl RouterHandle {
                 runtime.home_node_forward.as_ref(),
                 envelope,
                 total_started,
+                origin,
             ),
         }
     }
 
-    pub(crate) async fn submit_envelope_async(
+    pub(crate) async fn submit_envelope_async_from(
         &self,
         envelope: ramflux_protocol::Envelope,
         total_started: Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
         match self {
             Self::Tokio(runtime) => {
@@ -99,6 +102,7 @@ impl RouterHandle {
                     runtime.home_node_forward.as_ref(),
                     envelope,
                     total_started,
+                    origin,
                 )
                 .await
             }
@@ -194,13 +198,22 @@ pub(crate) mod tests {
             None,
             envelope.clone(),
             Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         )?;
 
         let (handle, _handle_path) = test_handle("submit_handle")?;
-        let via_handle = handle.submit_envelope(envelope.clone(), Instant::now())?;
+        let via_handle = handle.submit_envelope_from(
+            envelope.clone(),
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        )?;
         assert_eq!(via_handle, oracle);
 
-        let replay = handle.submit_envelope(envelope, Instant::now())?;
+        let replay = handle.submit_envelope_from(
+            envelope,
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        )?;
         assert!(replay.outcome.starts_with("rejected_security:"));
         assert!(replay.outcome.contains("replay:"));
         Ok(())
@@ -211,11 +224,18 @@ pub(crate) mod tests {
         let envelope = current_envelope("env_runtime_async_submit", "target_runtime_async_submit")?;
         let (handle, _handle_path) = test_handle("async_submit_handle")?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        let via_handle =
-            runtime.block_on(handle.submit_envelope_async(envelope.clone(), Instant::now()))?;
+        let via_handle = runtime.block_on(handle.submit_envelope_async_from(
+            envelope.clone(),
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        ))?;
         assert_eq!(via_handle.outcome, "offline_queued");
 
-        let replay = runtime.block_on(handle.submit_envelope_async(envelope, Instant::now()))?;
+        let replay = runtime.block_on(handle.submit_envelope_async_from(
+            envelope,
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        ))?;
         assert!(replay.outcome.starts_with("rejected_security:"));
         assert!(replay.outcome.contains("replay:"));
         Ok(())
@@ -232,6 +252,7 @@ pub(crate) mod tests {
             None,
             envelope.clone(),
             Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         )?;
         let ack = ack("env_runtime_ack");
         let ack_request = ramflux_node_core::TargetAckRequest {
@@ -245,7 +266,11 @@ pub(crate) mod tests {
         )?;
 
         let (handle, _handle_path) = test_handle("ack_handle")?;
-        let _submitted = handle.submit_envelope(envelope, Instant::now())?;
+        let _submitted = handle.submit_envelope_from(
+            envelope,
+            Instant::now(),
+            ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+        )?;
         let handle_ack = handle.apply_bound_ack(&ack_request)?;
         assert_eq!(handle_ack, oracle_ack);
 

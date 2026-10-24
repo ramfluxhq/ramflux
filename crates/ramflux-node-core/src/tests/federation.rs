@@ -550,13 +550,28 @@ fn federated_replay_is_root_scoped_even_for_copied_device_and_branch_keys()
     assert!(store.accept_inbound_forward_once(&bob_source, &bob, 1_760_000_010)?);
     assert!(!store.accept_inbound_forward_once(&bob_source, &bob, 1_760_000_011)?);
     let target = RouterCore::new();
-    assert_eq!(target.authenticated_envelope_source(&bob.envelope)?, bob_source);
+    assert_eq!(
+        target.authenticated_envelope_source_from(
+            &bob.envelope,
+            None,
+            crate::RouterEnvelopeOrigin::Federation
+        )?,
+        bob_source
+    );
     let mut forged = bob.envelope.clone();
     forged.ext.ext.insert(
         "source_device_authority".into(),
         mallory.envelope.ext.ext.get("source_device_authority").ok_or("authority")?.clone(),
     );
-    assert!(target.authenticated_envelope_source(&forged).is_err());
+    assert!(
+        target
+            .authenticated_envelope_source_from(
+                &forged,
+                None,
+                crate::RouterEnvelopeOrigin::Federation
+            )
+            .is_err()
+    );
     drop(store);
     let reopened = FederationRedbStore::open(&path)?;
     assert!(!reopened.accept_inbound_forward_once(&bob_source, &bob, 1_760_000_012)?);
@@ -591,23 +606,165 @@ fn forwarded_old_authority_cannot_resurrect_a_revoked_device_after_restart()
     let latest = root_bound_forward(&root, "phone", Some(record), "phone-envelope")?;
     let (_, phone_source) = DeviceAuthKeyResponse::forwarded_envelope_source(&latest.envelope)?;
     let router = RouterCore::new();
-    router.authenticated_envelope_source(&latest.envelope)?;
-    assert!(router.authenticated_envelope_source(&old.envelope).is_err());
+    router.authenticated_envelope_source_from(
+        &latest.envelope,
+        None,
+        crate::RouterEnvelopeOrigin::Federation,
+    )?;
+    assert!(
+        router
+            .authenticated_envelope_source_from(
+                &old.envelope,
+                None,
+                crate::RouterEnvelopeOrigin::Federation
+            )
+            .is_err()
+    );
     let router_path = temp_store_path("router-forwarded-root-head")?;
     let router_store = crate::RouterRedbStore::open(&router_path)?;
     let durable_router = RouterCore::new();
-    durable_router.authenticated_envelope_source_durable(&latest.envelope, &router_store)?;
-    durable_router.authenticated_envelope_source_durable(&latest.envelope, &router_store)?;
-    assert_eq!(router_store.identity_registry_write_count(), 1);
+    durable_router.authenticated_envelope_source_from(
+        &latest.envelope,
+        Some(&router_store),
+        crate::RouterEnvelopeOrigin::Federation,
+    )?;
+    durable_router.authenticated_envelope_source_from(
+        &latest.envelope,
+        Some(&router_store),
+        crate::RouterEnvelopeOrigin::Federation,
+    )?;
+    assert_eq!(router_store.identity_registry_write_count(), 0);
+    assert_eq!(router_store.foreign_authority_write_count(), 1);
     drop(durable_router);
     drop(router_store);
     let router_store = crate::RouterRedbStore::open(&router_path)?;
     let restored = router_store.load_router()?.ok_or("router snapshot missing")?;
-    assert!(restored.authenticated_envelope_source_durable(&old.envelope, &router_store).is_err());
+    assert!(
+        restored
+            .authenticated_envelope_source_from(
+                &old.envelope,
+                Some(&router_store),
+                crate::RouterEnvelopeOrigin::Federation
+            )
+            .is_err()
+    );
     assert!(store.accept_inbound_forward_once(&phone_source, &latest, 1_760_000_010)?);
     assert!(store.accept_inbound_forward_once(&source, &old, 1_760_000_011).is_err());
     drop(store);
     let reopened = FederationRedbStore::open(&path)?;
     assert!(reopened.accept_inbound_forward_once(&source, &old, 1_760_000_012).is_err());
+    Ok(())
+}
+
+#[test]
+fn foreign_epoch_fences_survive_capacity_and_restart_and_gateway_cannot_assert_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = ramflux_crypto::create_identity_root("victim", [0xa1; 32]);
+    let old = root_bound_forward(&root, "victim", None, "victim-old")?;
+    let (authority, old_source) = DeviceAuthKeyResponse::forwarded_envelope_source(&old.envelope)?;
+    let mut devices = authority.signed_device_set.ok_or("set")?.devices;
+    devices[0].status = ramflux_protocol::DeviceSetStatus::Revoked;
+    devices[0].revoked_at = Some(1_760_000_005);
+    let mut live = devices[0].clone();
+    live.device_id = "phone".into();
+    live.status = ramflux_protocol::DeviceSetStatus::Active;
+    live.revoked_at = None;
+    devices.push(live);
+    let latest = root_bound_forward(
+        &root,
+        "phone",
+        Some(ramflux_crypto::sign_device_set(
+            &root,
+            ramflux_crypto::DeviceSetSigningInput {
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                device_set_epoch: 2,
+                devices,
+            },
+        )?),
+        "victim-new",
+    )?;
+    let (_, live_source) = DeviceAuthKeyResponse::forwarded_envelope_source(&latest.envelope)?;
+    let router_path = temp_store_path("foreign-capacity-router")?;
+    let federation_path = temp_store_path("foreign-capacity-federation")?;
+    let router_store = crate::RouterRedbStore::open(&router_path)?;
+    let federation_store = FederationRedbStore::open(&federation_path)?;
+    let router = RouterCore::new();
+    assert!(matches!(
+        router.authenticated_envelope_source_durable(&latest.envelope, &router_store),
+        Err(NodeCoreError::Unauthorized(_))
+    ));
+    router.authenticated_envelope_source_from(
+        &latest.envelope,
+        Some(&router_store),
+        crate::RouterEnvelopeOrigin::Federation,
+    )?;
+    federation_store.accept_inbound_forward_once(&live_source, &latest, 1_760_000_010)?;
+    for i in 0..=crate::foreign_device_heads::FOREIGN_HEAD_LIMIT {
+        let seed = ramflux_crypto::blake3_256("ramflux.test.foreign.root.v1", &i.to_be_bytes());
+        let fresh = ramflux_crypto::create_identity_root(&format!("foreign-{i}"), seed);
+        let forward = root_bound_forward(&fresh, "device", None, &format!("new-{i}"))?;
+        let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
+        let router_result = router.authenticated_envelope_source_from(
+            &forward.envelope,
+            Some(&router_store),
+            crate::RouterEnvelopeOrigin::Federation,
+        );
+        let federation_result =
+            federation_store.accept_inbound_forward_once(&source, &forward, 1_760_000_011);
+        if i + 1 < crate::foreign_device_heads::FOREIGN_HEAD_LIMIT {
+            router_result?;
+            assert!(federation_result?);
+        } else {
+            assert!(matches!(
+                router_result,
+                Err(NodeCoreError::Capacity { resource: "foreign_device_sets" })
+            ));
+            assert!(matches!(
+                federation_result,
+                Err(NodeCoreError::Capacity { resource: "foreign_device_sets" })
+            ));
+        }
+    }
+    assert!(
+        router
+            .authenticated_envelope_source_from(
+                &old.envelope,
+                Some(&router_store),
+                crate::RouterEnvelopeOrigin::Federation
+            )
+            .is_err()
+    );
+    assert!(
+        federation_store.accept_inbound_forward_once(&old_source, &old, 1_760_000_012).is_err()
+    );
+    let router_writes = router_store.foreign_authority_write_count();
+    let federation_writes = federation_store.foreign_authority_write_count();
+    router.authenticated_envelope_source_from(
+        &latest.envelope,
+        Some(&router_store),
+        crate::RouterEnvelopeOrigin::Federation,
+    )?;
+    assert!(!federation_store.accept_inbound_forward_once(&live_source, &latest, 1_760_000_013)?);
+    assert_eq!(router_store.foreign_authority_write_count(), router_writes);
+    assert_eq!(federation_store.foreign_authority_write_count(), federation_writes);
+    assert_eq!(router_store.identity_registry_write_count(), 0);
+    drop(router);
+    drop(router_store);
+    drop(federation_store);
+    let router_store = crate::RouterRedbStore::open(&router_path)?;
+    let router = router_store.load_router()?.ok_or("router")?;
+    let federation_store = FederationRedbStore::open(&federation_path)?;
+    assert!(
+        router
+            .authenticated_envelope_source_from(
+                &old.envelope,
+                Some(&router_store),
+                crate::RouterEnvelopeOrigin::Federation
+            )
+            .is_err()
+    );
+    assert!(
+        federation_store.accept_inbound_forward_once(&old_source, &old, 1_760_000_014).is_err()
+    );
     Ok(())
 }

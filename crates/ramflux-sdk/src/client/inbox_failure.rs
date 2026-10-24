@@ -63,6 +63,12 @@ pub(crate) fn set_failure_policy(
     let group =
         opened.as_ref().and_then(|o| o.routing.group_id.as_deref()).or(legacy_group.as_deref());
     let db = client.account_db()?;
+    let source_record =
+        verified_source.as_ref().and_then(|source| db.client_device_record(source).ok().flatten());
+    let verified_principal = source_record
+        .as_ref()
+        .and_then(|record| record["principal_id"].as_str())
+        .filter(|principal| *principal == entry.envelope.source_principal_id);
     let related = if let Some(group) = group {
         verified_source.as_ref().is_some_and(|source| {
             db.has_root_bound_group_membership(group, source).unwrap_or(false)
@@ -73,19 +79,17 @@ pub(crate) fn set_failure_policy(
                 .local_device_identity(local)
                 .and_then(|local| client.pair_recovery_pending(&local, source))
                 .unwrap_or(false)
-        }) || client
-            .friend_link_peer_is_accepted(&entry.envelope.source_principal_id)
-            .unwrap_or(false)
-            || client
-                .device_branch
-                .as_ref()
-                .is_some_and(|b| b.principal_id == entry.envelope.source_principal_id)
+        }) || verified_principal.is_some_and(|principal| {
+            client.friend_link_peer_is_accepted(principal).unwrap_or(false)
+                || client
+                    .device_branch
+                    .as_ref()
+                    .is_some_and(|branch| branch.principal_id == principal)
+        })
     };
     // A failed cache lookup is a dependency miss, not a second failure that wedges the inbox.
-    let missing_manifest = verified_source
-        .as_ref()
-        .and_then(|source| db.client_device_record(source).ok().flatten())
-        .is_none_or(|record| record.get("x25519_identity_public").is_none());
+    let missing_manifest =
+        source_record.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none());
     let (class, subject) = if !authenticated || missing_manifest {
         (
             "manifest",

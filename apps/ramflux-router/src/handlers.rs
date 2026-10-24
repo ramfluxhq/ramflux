@@ -330,7 +330,9 @@ pub(crate) fn handle_mesh_request_value(
     if let Some(response) = handle_mesh_retention_value(&method, &path, &body, peer_service_id)? {
         return Ok(response);
     }
-    if let Some(response) = handle_mesh_fast_path_value(&method, &path, &body, router)? {
+    if let Some(response) =
+        handle_mesh_fast_path_value(&method, &path, &body, router, peer_service_id)?
+    {
         return Ok(response);
     }
     if let Some(response) = handle_mesh_mvp0_value(&method, &path, &body, router)? {
@@ -346,7 +348,12 @@ pub(crate) async fn handle_mesh_quic_request_value(
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
     let body = serde_json::to_vec(&request.body)?;
     if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp0/envelope") {
-        let response = handle_mvp0_envelope_async(&body, router).await?;
+        let response = handle_mvp0_envelope_async_from(
+            &body,
+            router,
+            envelope_origin_for_peer(peer_service_id)?,
+        )
+        .await?;
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
             body: serde_json::to_value(response)?,
@@ -401,6 +408,7 @@ fn handle_mesh_fast_path_value(
     path: &str,
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
+    peer_service_id: &str,
 ) -> anyhow::Result<Option<MeshResponse>> {
     match (method, path) {
         ("POST", "/s1/session/upsert") => {
@@ -425,7 +433,11 @@ fn handle_mesh_fast_path_value(
         )
         .into()),
         ("POST", "/mvp0/envelope") => {
-            let response = handle_mvp0_envelope(body, router)?;
+            let response = handle_mvp0_envelope_from(
+                body,
+                router,
+                envelope_origin_for_peer(peer_service_id)?,
+            )?;
             tracing::info!(
                 target_delivery_id = %response.target_delivery_id,
                 outcome = %response.outcome,
@@ -600,22 +612,39 @@ fn handle_mvp0_envelope(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    let total_started = Instant::now();
-    let decode_started = Instant::now();
-    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
-    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
-    router.submit_envelope(envelope, total_started)
+    handle_mvp0_envelope_from(body, router, ramflux_node_core::RouterEnvelopeOrigin::Gateway)
 }
-
-pub(crate) async fn handle_mvp0_envelope_async(
+pub(crate) fn envelope_origin_for_peer(
+    peer_service_id: &str,
+) -> anyhow::Result<ramflux_node_core::RouterEnvelopeOrigin> {
+    match peer_service_id {
+        "ramflux-federation" => Ok(ramflux_node_core::RouterEnvelopeOrigin::Federation),
+        "ramflux-gateway" => Ok(ramflux_node_core::RouterEnvelopeOrigin::Gateway),
+        _ => anyhow::bail!("mesh peer cannot submit envelopes"),
+    }
+}
+fn handle_mvp0_envelope_from(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     let total_started = Instant::now();
     let decode_started = Instant::now();
     let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
     ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
-    router.submit_envelope_async(envelope, total_started).await
+    router.submit_envelope_from(envelope, total_started, origin)
+}
+
+pub(crate) async fn handle_mvp0_envelope_async_from(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    let total_started = Instant::now();
+    let decode_started = Instant::now();
+    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
+    router.submit_envelope_async_from(envelope, total_started, origin).await
 }
 
 fn mesh_response_status_code(status: &str) -> u16 {

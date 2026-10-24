@@ -27,7 +27,7 @@ impl AccountDb {
         self.connection.execute(
             "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at, principal_commitment)
-             VALUES (?1, ?2, ?2, 'owner', 1, 1, ?3, COALESCE((SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1),(SELECT MIN(principal_commitment) FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 HAVING COUNT(*)=1 AND COUNT(principal_commitment)=1)))",
+             VALUES (?1, ?2, ?2, 'owner', 1, 1, ?3, (SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1))",
             params![group_id, creator_id, now],
         )?;
         self.group_state(group_id)
@@ -65,7 +65,7 @@ impl AccountDb {
             self.connection.execute(
                 "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at, principal_commitment)
-             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, COALESCE((SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1),(SELECT MIN(principal_commitment) FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 HAVING COUNT(*)=1 AND COUNT(principal_commitment)=1)))",
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, (SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1))",
                 params![group_id, member_id, role, new_epoch, self.now_unix()],
             )?;
             self.group_state(group_id)
@@ -196,7 +196,7 @@ impl AccountDb {
             self.connection.execute(
                 "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at, principal_commitment)
-             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, COALESCE((SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1),(SELECT MIN(principal_commitment) FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 HAVING COUNT(*)=1 AND COUNT(principal_commitment)=1)))",
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, (SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1))",
                 params![
                     join.group_id,
                     join.actor_device_id,
@@ -206,11 +206,12 @@ impl AccountDb {
                     applied_at
                 ],
             )?;
+            self.connection.execute("UPDATE group_member_projection SET principal_commitment=?3 WHERE group_id=?1 AND member_id=?2",params![join.group_id,actor.device_id(),actor.root_commitment()])?;
         }
         self.connection.execute(
             "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at, principal_commitment)
-             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, COALESCE((SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1),(SELECT MIN(principal_commitment) FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 HAVING COUNT(*)=1 AND COUNT(principal_commitment)=1)))",
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, (SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1))",
             params![
                 join.group_id,
                 join.joined_identity,
@@ -257,7 +258,7 @@ impl AccountDb {
         self.connection.execute(
             "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at, principal_commitment)
-             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, COALESCE((SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1),(SELECT MIN(principal_commitment) FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 HAVING COUNT(*)=1 AND COUNT(principal_commitment)=1)))",
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, (SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1))",
             params![group_id, local_member_id, local_role, joined_epoch_i64, now],
         )?;
         self.group_state(group_id)
@@ -278,7 +279,7 @@ impl AccountDb {
         self.connection.execute(
             "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at, principal_commitment)
-             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, COALESCE((SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1),(SELECT MIN(principal_commitment) FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 HAVING COUNT(*)=1 AND COUNT(principal_commitment)=1)))",
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, (SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1))",
             params![group_id, member_id, role, joined_epoch_i64, self.now_unix()],
         )?;
         Ok(())
@@ -718,15 +719,10 @@ impl AccountDb {
                 params![accept.group_id, accept.new_group_epoch, applied_at],
             )?;
             self.legacy_archive_group_pin(&accept.group_id, actor.device_id())?;
-            self.persist_group_member_device_key(
-                &accept.group_id,
-                actor,
-                &invite.invitee_signing_public_key,
-            )?;
             self.connection.execute(
                 "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at, principal_commitment)
-             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, COALESCE((SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1),(SELECT MIN(principal_commitment) FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 HAVING COUNT(*)=1 AND COUNT(principal_commitment)=1)))",
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5, (SELECT principal_commitment FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND active=1))",
                 params![
                     accept.group_id,
                     accept.invitee_identity,
@@ -734,6 +730,12 @@ impl AccountDb {
                     accept.new_group_epoch,
                     applied_at
                 ],
+            )?;
+            self.connection.execute("UPDATE group_member_projection SET principal_commitment=?3 WHERE group_id=?1 AND member_id=?2",params![accept.group_id,actor.device_id(),actor.root_commitment()])?;
+            self.persist_group_member_device_key(
+                &accept.group_id,
+                actor,
+                &invite.invitee_signing_public_key,
             )?;
             self.connection.execute(
                 "UPDATE group_invite_projection

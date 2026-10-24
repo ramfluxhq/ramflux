@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("capacity: {resource}")]
+    Capacity { resource: &'static str },
     #[error("principal_id_taken")]
     PrincipalIdTaken,
     #[error("device_id_taken")]

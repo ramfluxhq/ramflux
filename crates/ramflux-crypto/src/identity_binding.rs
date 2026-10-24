@@ -10,6 +10,8 @@ use ramflux_protocol::{DeviceKeyBinding, PrincipalKind, decode_base64url, encode
 use serde::Serialize;
 /// Maximum accepted forward clock skew for root authorizations (five minutes).
 pub const BRANCH_PROOF_CLOCK_SKEW_SECONDS: i64 = 300;
+/// Maximum lifetime of a root-signed proof admitted for a new live registration (30 days).
+pub const MAX_BRANCH_PROOF_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// Local root-owned inputs; no key or kind is inferred from a server response.
 pub struct BranchAuthorization<'a> {
@@ -119,6 +121,9 @@ pub fn verify_root_bound_branch_proof(
     now: i64,
 ) -> Result<(), CryptoError> {
     verify_root_bound_key_authorization(root, proof, expected, audience, capability, now)?;
+    if proof.expires_at.saturating_sub(proof.issued_at) > MAX_BRANCH_PROOF_LIFETIME_SECONDS {
+        return Err(invalid("device session proof lifetime exceeds 30 days"));
+    }
     if proof.expires_at < now {
         return Err(invalid("expired device session proof"));
     }
