@@ -49,7 +49,7 @@ class DeviceIdentityGateTests(unittest.TestCase):
         ))
 
     def test_inbound_paths_cannot_reintroduce_ambiguous_device_metadata_reads(self):
-        for path in ["crates/ramflux-sdk/src/client/inbox_failure.rs", "crates/ramflux-sdk/src/client/group_quarantine.rs", "crates/ramflux-sdk/src/client/surface/signer.rs"]:
+        for path in ["crates/ramflux-sdk/src/client/inbox_failure.rs", "crates/ramflux-sdk/src/client/group_quarantine.rs", "crates/ramflux-sdk/src/client/surface/signer.rs", "crates/ramflux-sdk/src/bus/dispatch/task_approval_transport.rs"]:
             self.assertTrue(GATE.violations('fn receive(entry: &Envelope) { db.client_record("device", &entry.source_device_id)?; }', path))
             self.assertTrue(GATE.violations('fn receive(entry: &Envelope) { db.client_device_record_by_name(&entry.source_device_id)?; }', path))
             self.assertFalse(GATE.violations('fn receive(source: &RootQualifiedDeviceRef) { db.client_device_record(source)?; }', path))

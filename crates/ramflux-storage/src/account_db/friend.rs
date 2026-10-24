@@ -191,6 +191,21 @@ impl AccountDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
     }
 
+    /// Read a bounded page for own-device contact backfill, ordered by stable link ID.
+    /// # Errors
+    /// Returns storage errors while loading the page.
+    pub fn friend_link_page(
+        &self,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<FriendLinkRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT link_id, requester_id, target_id, state, remove_scope, blocked, capability_revoked_at
+             FROM friend_link_projection WHERE link_id > ?1 ORDER BY link_id LIMIT ?2")?;
+        let rows = statement.query_map(params![after, limit.min(64)], friend_link_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn reject_inbox_message(

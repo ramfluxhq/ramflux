@@ -195,6 +195,10 @@ fn handle_itest_mvp0_request(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/mvp1/envelope-authority") => {
+            let response = refresh_forward_authority(&request.body, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
         ("POST", "/mvp0/envelope") => {
             let response = handle_mvp0_envelope(&request.body, router)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
@@ -327,6 +331,13 @@ pub(crate) fn handle_mesh_request_value(
     peer_service_id: &str,
 ) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
+    if method == "POST" && path == "/mvp1/envelope-authority" {
+        if peer_service_id != "ramflux-federation" {
+            anyhow::bail!("source authority refresh requires federation peer");
+        }
+        let response = refresh_forward_authority(&body, router)?;
+        return Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?));
+    }
     if let Some(response) = handle_mesh_retention_value(&method, &path, &body, peer_service_id)? {
         return Ok(response);
     }
@@ -997,6 +1008,20 @@ fn authenticated_principal_mesh_response(
     Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
 }
 
+fn refresh_forward_authority(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<ramflux_protocol::Envelope> {
+    let mut envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    router.state().authenticated_envelope_source_from(
+        &envelope,
+        Some(router.store()),
+        ramflux_node_core::RouterEnvelopeOrigin::Federation,
+    )?;
+    router.state().refresh_registered_envelope_authority(&mut envelope)?;
+    Ok(envelope)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1004,6 +1029,43 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn authority_refresh_requires_federation_mesh_and_replaces_attached_authority()
+    -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let (state, store, path) = crate::router_runtime::tests::test_router("authority-refresh")?;
+        let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
+        let mut envelope =
+            crate::router_runtime::tests::current_envelope("refresh-authority", "peer")?;
+        envelope
+            .ext
+            .ext
+            .insert("source_device_authority".into(), serde_json::json!({"obsolete":true}));
+        let request = ramflux_transport::GatewayQuicRequest {
+            method: "POST".into(),
+            path: "/mvp1/envelope-authority".into(),
+            body: serde_json::to_value(envelope)?,
+        };
+        assert!(
+            runtime
+                .block_on(handle_mesh_quic_request_value(&request, &handle, "ramflux-gateway"))
+                .is_err()
+        );
+        let response = runtime.block_on(handle_mesh_quic_request_value(
+            &request,
+            &handle,
+            "ramflux-federation",
+        ))?;
+        assert_eq!(response.status, 200);
+        let refreshed: ramflux_protocol::Envelope = serde_json::from_value(response.body)?;
+        let (authority, _) =
+            ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&refreshed)?;
+        assert!(authority.signed_device_set.is_some());
+        drop(handle);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
 
     #[test]
     fn mesh_quic_request_submit_uses_async_router_path() -> anyhow::Result<()> {

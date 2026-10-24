@@ -1265,6 +1265,37 @@ impl RouterCore {
         Ok(source)
     }
 
+    /// Refresh locally registered authority before delivery or forwarding.
+    /// # Errors
+    /// Rejects a revoked sender or a signature that no longer matches the current branch.
+    pub fn refresh_registered_envelope_authority(
+        &self,
+        envelope: &mut ramflux_protocol::Envelope,
+    ) -> Result<(), NodeCoreError> {
+        let root = envelope
+            .ext
+            .ext
+            .get("source_root_commitment")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| NodeCoreError::Unauthorized("source root missing".into()))?;
+        let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
+            .map_err(|e| NodeCoreError::Unauthorized(e.to_string()))?;
+        let control = lock_unpoisoned(&self.control);
+        let registry = &control.mvp1_identities;
+        if let Some(identity) = registry.resolve_device_selector(&lookup) {
+            let authority = registry.device_auth_key(&identity).ok_or_else(|| {
+                NodeCoreError::Unauthorized("registered source authority unavailable".into())
+            })?;
+            authority.verify_envelope_source(envelope)?;
+            envelope.ext.ext.insert(
+                "source_device_authority".into(),
+                serde_json::to_value(authority)
+                    .map_err(|e| NodeCoreError::ItestJson(e.to_string()))?,
+            );
+        }
+        Ok(())
+    }
+
     fn check_envelope_replay_once(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,

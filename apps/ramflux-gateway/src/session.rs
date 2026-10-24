@@ -372,7 +372,6 @@ pub(crate) async fn establish_gateway_session(
     )
     .await?;
     Ok(GatewaySessionRuntime {
-        source_authority: registered_auth_key.clone(),
         source_identity,
         session_id,
         resume_token,
@@ -1492,13 +1491,6 @@ mod tests {
     #[test]
     fn own_device_fanout_session_rejects_cross_principal_or_source_device() -> anyhow::Result<()> {
         let runtime = crate::GatewaySessionRuntime {
-            source_authority: crate::submit_source::tests::authority(
-                "principal_a",
-                "device_a",
-                1,
-                ramflux_crypto::fixture_public_key_base64url(),
-                1,
-            )?,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root("principal_a", [1; 32]),
                 &ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [2; 32]),
@@ -1786,13 +1778,6 @@ mod tests {
         branch: &ramflux_crypto::DeviceBranch,
     ) -> anyhow::Result<crate::GatewaySessionRuntime> {
         Ok(crate::GatewaySessionRuntime {
-            source_authority: crate::submit_source::tests::authority(
-                &branch.principal_id,
-                &branch.device_id,
-                0x91,
-                ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes()),
-                branch.device_epoch,
-            )?,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root(&branch.principal_id, [0x91; 32]),
                 branch,

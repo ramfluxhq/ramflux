@@ -638,3 +638,75 @@ fn skipped_group_surface_history_preserves_direct_history_and_records_each_skip(
     }
     Ok(())
 }
+
+#[test]
+fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_offline_decryption()
+-> Result<(), SdkError> {
+    let (source, sr, target, tr, _) = setup("fresh-sibling-authority")?;
+    let (mut bob, br) = client_with_account("fresh-sibling-bob", "bob", "bob")?;
+    bob.create_identity_root(
+        "bob",
+        ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &[0x63; 32]),
+    );
+    bob.create_device_branch("bob", "bob", 1, [0x63; 32]);
+    bob.create_group("g", "bob")?;
+    bob.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&source)?,
+    )?;
+    bob.add_group_member("g", source.owned_device_identity()?.storage_key(), "member")?;
+    source.import_group_sender_key_distribution(
+        &bob.export_group_sender_key_distribution("g", "bob")?,
+    )?;
+    let ciphertext =
+        bob.encrypt_group_message("g", "bob", b"history from authenticated remote root")?;
+    source.send_direct_message("g", "fresh-history", "bob", &ciphertext)?;
+    let history = source.own_device_history_bundle(
+        "principal_sync",
+        "source_device_sync",
+        "target_device_sync",
+        "snapshot_sync",
+    )?;
+    let commitment = bob.owned_device_identity()?.root_commitment().to_owned();
+    let db = target.account_db()?;
+    db.remove_actor_state(&crate::client::identity_authority::record_key(&commitment))?;
+    db.remove_actor_state(&format!("identity/manifest-root/{commitment}"))?;
+    db.remove_actor_state("identity/manifest/bob")?;
+    assert!(matches!(
+        target.device_identity_for_root(&commitment, "bob"),
+        Err(SdkError::InboundPending(_))
+    ));
+    let mut forged = history.clone();
+    let foreign = forged
+        .device_manifests
+        .iter_mut()
+        .find(|m| m.principal_commitment == commitment)
+        .ok_or(SdkError::IdentityRootMissing)?;
+    foreign.devices[0].branch_public_key = ramflux_crypto::public_key_base64url_from_seed([99; 32]);
+    assert!(
+        target
+            .import_own_device_history_bundle(
+                &envelope("source_device_sync", "target_device_sync"),
+                &forged
+            )
+            .is_err()
+    );
+    assert!(target.observed_device_set(&commitment)?.is_none());
+    target.import_own_device_history_bundle(
+        &envelope("source_device_sync", "target_device_sync"),
+        &history,
+    )?;
+    target.require_cached_root_authority(&target.device_identity_for_root(&commitment, "bob")?)?;
+    drop(target);
+    let mut reader = RamfluxClient::new();
+    reader.open_account_index(&tr)?;
+    reader.unlock_account("acct", b"own-device-sync-test")?;
+    assert_eq!(
+        reader.decrypt_group_message("g", "fresh-history")?,
+        b"history from authenticated remote root"
+    );
+    drop((source, bob, reader));
+    std::fs::remove_dir_all(sr)?;
+    std::fs::remove_dir_all(tr)?;
+    std::fs::remove_dir_all(br)?;
+    Ok(())
+}

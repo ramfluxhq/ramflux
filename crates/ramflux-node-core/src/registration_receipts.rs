@@ -6,10 +6,16 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::VecDeque;
 
 pub(crate) const REGISTRATION_PROOF_LIMIT: usize = 4096;
+pub(crate) const REGISTRATION_ROOT_LIMIT: usize = 128;
+pub(crate) const REGISTRATION_SOURCE_LIMIT: usize = 256;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RegistrationReceipt {
     pub(crate) key: String,
     pub(crate) expires_at: Option<i64>,
+    #[serde(default)]
+    pub(crate) root: Option<String>,
+    #[serde(default)]
+    pub(crate) source: Option<String>,
 }
 pub(crate) fn load_receipts<'de, D: Deserializer<'de>>(
     de: D,
@@ -26,7 +32,9 @@ pub(crate) fn load_receipts<'de, D: Deserializer<'de>>(
         .into_iter()
         .map(|receipt| match receipt {
             Stored::Current(receipt) => receipt,
-            Stored::Legacy(key) => RegistrationReceipt { key, expires_at: None },
+            Stored::Legacy(key) => {
+                RegistrationReceipt { key, expires_at: None, root: None, source: None }
+            }
         })
         .collect())
 }

@@ -349,6 +349,7 @@ impl IdentityRegistry {
             .ok_or_else(|| NodeCoreError::ItestHttp("registration authority missing".into()))?;
         self.admit_registration_proof(
             &identity,
+            request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip"),
             &request.proof.proof_id,
             request.proof.expires_at,
             request.now,
@@ -405,6 +406,7 @@ impl IdentityRegistry {
     fn admit_registration_proof(
         &mut self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
+        source_bucket: &str,
         proof: &str,
         expires_at: i64,
         now: i64,
@@ -420,12 +422,32 @@ impl IdentityRegistry {
         if self.root_seen_proofs.iter().any(|receipt| receipt.key == key) {
             return Err(NodeCoreError::ItestHttp("branch proof replay".into()));
         }
+        if self
+            .root_seen_proofs
+            .iter()
+            .filter(|r| r.root.as_deref() == Some(source.root_commitment()))
+            .count()
+            >= crate::registration_receipts::REGISTRATION_ROOT_LIMIT
+        {
+            return Err(NodeCoreError::Capacity { resource: "registration_proofs_per_root" });
+        }
+        if self
+            .root_seen_proofs
+            .iter()
+            .filter(|r| r.source.as_deref() == Some(source_bucket))
+            .count()
+            >= crate::registration_receipts::REGISTRATION_SOURCE_LIMIT
+        {
+            return Err(NodeCoreError::Capacity { resource: "registration_proofs_per_source" });
+        }
         if self.root_seen_proofs.len() >= crate::registration_receipts::REGISTRATION_PROOF_LIMIT {
             return Err(NodeCoreError::Capacity { resource: "registration_proofs" });
         }
         self.root_seen_proofs.push_back(crate::registration_receipts::RegistrationReceipt {
             key,
             expires_at: Some(expires_at),
+            root: Some(source.root_commitment().to_owned()),
+            source: Some(source_bucket.to_owned()),
         });
         Ok(())
     }
@@ -988,19 +1010,90 @@ mod proof_retention_tests {
         let source =
             ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "device")?;
         let mut registry = IdentityRegistry::new();
-        for index in 0..crate::registration_receipts::REGISTRATION_PROOF_LIMIT {
-            registry.admit_registration_proof(&source, &index.to_string(), 2000, 1000)?;
+        for index in 0..crate::registration_receipts::REGISTRATION_ROOT_LIMIT {
+            registry.admit_registration_proof(
+                &source,
+                "test-source",
+                &index.to_string(),
+                2000,
+                1000,
+            )?;
         }
         assert!(matches!(
-            registry.admit_registration_proof(&source, "overflow", 2000, 1000),
-            Err(NodeCoreError::Capacity { resource: "registration_proofs" })
+            registry.admit_registration_proof(&source, "test-source", "overflow", 2000, 1000),
+            Err(NodeCoreError::Capacity { resource: "registration_proofs_per_root" })
         ));
-        assert!(registry.admit_registration_proof(&source, "0", 2000, 1000).is_err());
+        assert!(
+            registry.admit_registration_proof(&source, "test-source", "0", 2000, 1000).is_err()
+        );
         let mut restored: IdentityRegistry =
             serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
-        assert!(restored.admit_registration_proof(&source, "0", 2000, 2000).is_err());
-        restored.admit_registration_proof(&source, "fresh", 3000, 2001)?;
+        assert!(
+            restored.admit_registration_proof(&source, "test-source", "0", 2000, 2000).is_err()
+        );
+        restored.admit_registration_proof(&source, "test-source", "fresh", 3000, 2001)?;
         assert_eq!(restored.root_seen_proofs.len(), 1);
+        Ok(())
+    }
+    #[test]
+    fn registration_receipts_isolate_root_source_and_global_capacity_across_restart()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = IdentityRegistry::new();
+        let identity = |number: u64| {
+            let root = ramflux_crypto::create_identity_root(
+                &format!("root-{number}"),
+                ramflux_crypto::blake3_256("ramflux.test.receipt-budget.v1", &number.to_be_bytes()),
+            );
+            ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "device")
+        };
+        for root in 0..2 {
+            let source = identity(root)?;
+            for proof in 0..crate::registration_receipts::REGISTRATION_ROOT_LIMIT {
+                registry.admit_registration_proof(
+                    &source,
+                    "same-prefix",
+                    &proof.to_string(),
+                    2000,
+                    1000,
+                )?;
+            }
+        }
+        let source = identity(2)?;
+        assert!(matches!(
+            registry.admit_registration_proof(&source, "same-prefix", "new", 2000, 1000),
+            Err(NodeCoreError::Capacity { resource: "registration_proofs_per_source" })
+        ));
+        registry.admit_registration_proof(&source, "independent-prefix", "new", 2000, 1000)?;
+        let mut registry: IdentityRegistry =
+            serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
+        assert!(matches!(
+            registry.admit_registration_proof(&source, "same-prefix", "another", 2000, 1000),
+            Err(NodeCoreError::Capacity { resource: "registration_proofs_per_source" })
+        ));
+        for root in 2..32 {
+            let source = identity(root)?;
+            let bucket = format!("source-{root}");
+            let start = usize::from(root == 2);
+            for proof in start..crate::registration_receipts::REGISTRATION_ROOT_LIMIT {
+                registry.admit_registration_proof(
+                    &source,
+                    &bucket,
+                    &proof.to_string(),
+                    2000,
+                    1000,
+                )?;
+            }
+        }
+        assert_eq!(
+            registry.root_seen_proofs.len(),
+            crate::registration_receipts::REGISTRATION_PROOF_LIMIT
+        );
+        assert!(matches!(
+            registry.admit_registration_proof(&identity(32)?, "fresh-source", "new", 2000, 1000),
+            Err(NodeCoreError::Capacity { resource: "registration_proofs" })
+        ));
+        registry.admit_registration_proof(&identity(32)?, "fresh-source", "new", 3000, 2001)?;
+        assert_eq!(registry.root_seen_proofs.len(), 1);
         Ok(())
     }
 }

@@ -93,3 +93,5 @@ impl RamfluxClient {
         self.vault_secret_source.as_deref().ok_or(SdkError::AccountIndexNotOpen)
     }
 }
+
+mod own_device_history_authority;

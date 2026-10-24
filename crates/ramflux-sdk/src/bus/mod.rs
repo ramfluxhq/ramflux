@@ -42,3 +42,5 @@ mod task_delivery;
 
 #[cfg(test)]
 mod transport_security_tests;
+
+mod own_contact_backfill;

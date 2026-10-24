@@ -163,6 +163,22 @@ pub(crate) fn observe(
     namespace: Namespace,
     record: &SignedDeviceSetRecord,
 ) -> Result<HeadObservation, NodeCoreError> {
+    observe_inner(db, namespace, record, None)
+}
+pub(crate) fn observe_for_peer(
+    db: &redb::Database,
+    record: &SignedDeviceSetRecord,
+    peer: &str,
+    now: u64,
+) -> Result<HeadObservation, NodeCoreError> {
+    observe_inner(db, Namespace::Federation, record, Some((peer, now)))
+}
+fn observe_inner(
+    db: &redb::Database,
+    namespace: Namespace,
+    record: &SignedDeviceSetRecord,
+    peer: Option<(&str, u64)>,
+) -> Result<HeadObservation, NodeCoreError> {
     let (fence_table, set_table) = namespace.tables();
     let txn = db.begin_write().map_err(error)?;
     let mut fences = txn.open_table(fence_table).map_err(error)?;
@@ -179,6 +195,11 @@ pub(crate) fn observe(
     let observation = ForeignDeviceHeads::inspect(record, old_fence, old_set.as_ref(), count)?;
     if !observation.changed() {
         return Ok(observation);
+    }
+    if old_fence.is_none()
+        && let Some((peer, now)) = peer
+    {
+        charge_peer_new_root(&txn, peer, now)?;
     }
     if observation.fence_changed {
         let bytes = encode(observation.fence);
@@ -220,5 +241,46 @@ pub(crate) fn save_fences(
     if changed {
         txn.commit().map_err(error)?;
     }
+    Ok(())
+}
+
+// Checked and committed in the same write transaction as the first permanent fence.
+fn charge_peer_new_root(
+    txn: &redb::WriteTransaction,
+    peer: &str,
+    now: u64,
+) -> Result<(), NodeCoreError> {
+    const TABLE: TableDefinition<&str, &[u8]> =
+        TableDefinition::new("federation_new_root_budget_v1");
+    let mut table = txn.open_table(TABLE).map_err(error)?;
+    let previous: Option<(u64, u64)> = table
+        .get(peer)
+        .map_err(error)?
+        .map(|r| serde_json::from_slice(r.value()))
+        .transpose()
+        .map_err(error)?;
+    let (start, count) =
+        previous.filter(|(start, _)| now.saturating_sub(*start) < 60).unwrap_or((now, 0));
+    if count >= 64 {
+        return Err(NodeCoreError::Capacity { resource: "foreign_roots_per_peer" });
+    }
+    if previous.is_none() && table.len().map_err(error)? >= 4096 {
+        let mut expired = Vec::new();
+        for row in table.iter().map_err(error)? {
+            let (key, value) = row.map_err(error)?;
+            let (start, _): (u64, u64) = serde_json::from_slice(value.value()).map_err(error)?;
+            if now.saturating_sub(start) >= 60 {
+                expired.push(key.value().to_owned());
+            }
+        }
+        for key in expired {
+            table.remove(key.as_str()).map_err(error)?;
+        }
+        if table.len().map_err(error)? >= 4096 {
+            return Err(NodeCoreError::Capacity { resource: "federation_peer_budgets" });
+        }
+    }
+    let bytes = serde_json::to_vec(&(start, count + 1)).map_err(error)?;
+    table.insert(peer, bytes.as_slice()).map_err(error)?;
     Ok(())
 }

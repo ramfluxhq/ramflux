@@ -67,6 +67,10 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
     pub(crate) groups: Vec<SdkOwnDeviceGroupSnapshot>,
     #[serde(default)]
     pub(crate) group_member_pins: Vec<SdkOwnDeviceGroupMemberPin>,
+    #[serde(default)]
+    pub(crate) device_manifests: Vec<crate::prekey::SdkDeviceManifestResponse>,
+    #[serde(default)]
+    pub(crate) accepted_contacts: Vec<String>,
     pub(crate) sender_key_distributions_base64: Vec<String>,
 }
 

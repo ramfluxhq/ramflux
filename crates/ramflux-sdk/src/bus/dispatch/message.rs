@@ -696,31 +696,33 @@ pub(crate) async fn dispatch_message_receive_request(
         .await?;
     }
     let mut plaintext = Vec::new();
+    let mut rejected = BTreeSet::new();
     for entry in &account.pending_deliveries {
         if plaintext.len() >= body.limit.min(64) {
             break;
         }
-        let Some((conversation, _)) = account.client.committed_direct_context(entry)? else {
-            continue;
-        };
-        if body.conversation_id.as_deref().is_some_and(|requested| requested != conversation) {
-            continue;
-        }
-        if let Some(mut delivery) =
-            account.client.plaintext_projection_delivery(&conversation, entry)?
-        {
-            if body.auto_fetch_attachments {
-                delivery.attachments = compat_attachments(&account.client, &delivery.message_id)?;
+        match project_received_entry(&account.client, entry, &body) {
+            Ok(Some(delivery)) => plaintext.push(delivery),
+            Ok(None) => {}
+            Err(error) => {
+                let key = account.client.inbox_admission_key(entry)?;
+                if super::super::sync_driver::quarantine_failure(
+                    &account.client,
+                    &account.gateway_config.device_id,
+                    entry,
+                    &key,
+                    &error,
+                    now_unix_timestamp(),
+                )? {
+                    rejected.insert((entry.target_delivery_id.clone(), entry.inbox_seq));
+                }
             }
-            if let Some((_, fallback)) =
-                account.client.surface_message_fallback(&delivery.message_id)?
-            {
-                delivery.plaintext_body_base64 =
-                    ramflux_protocol::encode_base64url(fallback.as_bytes());
-            }
-            plaintext.push(delivery);
         }
     }
+    account
+        .pending_deliveries
+        .retain(|entry| !rejected.contains(&(entry.target_delivery_id.clone(), entry.inbox_seq)));
+
     let fresh = account
         .pending_deliveries
         .iter()
@@ -740,6 +742,27 @@ pub(crate) async fn dispatch_message_receive_request(
         response_body: serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext}),
         event,
     })
+}
+
+fn project_received_entry(
+    client: &RamfluxClient,
+    entry: &GatewayInboxEntry,
+    request: &LocalBusMessageReceiveRequest,
+) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
+    let Some((conversation, _)) = client.committed_direct_context(entry)? else { return Ok(None) };
+    if request.conversation_id.as_deref().is_some_and(|id| id != conversation) {
+        return Ok(None);
+    }
+    let Some(mut delivery) = client.plaintext_projection_delivery(&conversation, entry)? else {
+        return Ok(None);
+    };
+    if request.auto_fetch_attachments {
+        delivery.attachments = compat_attachments(client, &delivery.message_id)?;
+    }
+    if let Some((_, fallback)) = client.surface_message_fallback(&delivery.message_id)? {
+        delivery.plaintext_body_base64 = ramflux_protocol::encode_base64url(fallback.as_bytes());
+    }
+    Ok(Some(delivery))
 }
 
 async fn receive_bound_legacy(

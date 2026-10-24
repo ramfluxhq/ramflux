@@ -100,15 +100,17 @@ async fn receive(
         } else {
             process(account, engine, &pool, &entry).await
         };
+        let mut project_message = false;
         let accepted = match outcome {
-            Ok((false, _)) => {
+            Ok(Processed { consumed: false, .. }) => {
                 account
                     .client
                     .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
             }
-            Ok((true, reply)) => {
+            Ok(Processed { reply, publish, .. }) => {
                 replies.extend(reply);
+                project_message = publish;
                 true
             }
             Err(error) => {
@@ -148,6 +150,9 @@ async fn receive(
             .client
             .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
         if accepted {
+            applied += 1;
+        }
+        if project_message {
             let pending_keys = account
                 .pending_deliveries
                 .iter()
@@ -159,11 +164,27 @@ async fn receive(
                     account.pending_deliveries.remove(0);
                 }
             }
-            applied += 1;
         }
     }
     account.client.retry_pair_resets(engine, now).await?;
     Ok((applied, replies))
+}
+
+struct Processed {
+    consumed: bool,
+    publish: bool,
+    reply: Option<crate::client::surface::ResyncReply>,
+}
+impl Processed {
+    fn message(reply: Option<crate::client::surface::ResyncReply>) -> Self {
+        Self { consumed: true, publish: true, reply }
+    }
+    fn control() -> Self {
+        Self { consumed: true, publish: false, reply: None }
+    }
+    fn held() -> Self {
+        Self { consumed: false, publish: false, reply: None }
+    }
 }
 
 async fn process(
@@ -171,14 +192,14 @@ async fn process(
     engine: &mut GatewaySessionEngine,
     pool: &ramflux_transport::RelayQuicPool,
     entry: &GatewayInboxEntry,
-) -> Result<(bool, Option<crate::client::surface::ResyncReply>), SdkError> {
+) -> Result<Processed, SdkError> {
     if account.client.receive_own_device_message(&engine.config, entry).await? {
-        return Ok((true, None));
+        return Ok(Processed::control());
     }
     if crate::client::routed::decode(&entry.envelope).is_ok() {
         account.client.apply_routed_entry(engine, pool, entry, false).await?;
         let reply = account.client.take_surface_resync_answer(entry)?;
-        return Ok((true, reply));
+        return Ok(Processed::message(reply));
     }
     let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .map_err(|_| SdkError::InboundRejected("invalid payload encoding".to_owned()))?;
@@ -192,7 +213,7 @@ async fn process(
     }
     if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
         account.client.retain_legacy_group_entry(entry)?;
-        return Ok((false, None));
+        return Ok(Processed::held());
     }
     if account.client.v2_blocks_legacy(&account.client.inbound_device_reference(entry)?)? {
         let db = account.client.account_db()?;
@@ -202,7 +223,7 @@ async fn process(
             &serde_json::to_vec(entry)?,
             now_unix_timestamp(),
         )?;
-        return Ok((false, None));
+        return Ok(Processed::held());
     }
     if let Some(conversation) =
         account.client.legacy_routing_binding(&engine.config.device_id, entry)?
@@ -220,16 +241,16 @@ async fn process(
                 },
             )
             .await?;
-        return Ok((true, None));
+        return Ok(Processed::message(None));
     }
     let db = account.client.account_db()?;
     let key = account.client.inbox_admission_key(entry)?;
     db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
     db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"inbox_seq":entry.inbox_seq}),now_unix_timestamp(),None)?;
-    Ok((false, None))
+    Ok(Processed::held())
 }
 
-fn quarantine_failure(
+pub(super) fn quarantine_failure(
     client: &RamfluxClient,
     device: &str,
     entry: &GatewayInboxEntry,

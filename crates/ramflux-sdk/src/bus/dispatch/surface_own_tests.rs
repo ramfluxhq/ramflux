@@ -25,7 +25,25 @@ async fn sibling_fixture_inner(
     (LocalBusAccountState, GatewaySessionConfig, GatewaySessionConfig, tokio::task::JoinHandle<()>),
     Box<dyn std::error::Error>,
 > {
-    let peer = super::dm_tests::peer_fixture(root, source).await?;
+    let (sibling, config, receiver, directory, _) =
+        sibling_fixture_with_peer(root, source, preseed).await?;
+    Ok((sibling, config, receiver, directory))
+}
+async fn sibling_fixture_with_peer(
+    root: &Path,
+    source: &mut LocalBusAccountState,
+    preseed: bool,
+) -> Result<
+    (
+        LocalBusAccountState,
+        GatewaySessionConfig,
+        GatewaySessionConfig,
+        tokio::task::JoinHandle<()>,
+        LocalBusAccountState,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut peer = super::dm_tests::peer_fixture(root, source).await?;
     peer.directory.abort();
     let mut sibling = runtime_tests::account(
         &root.join("sibling"),
@@ -91,7 +109,8 @@ async fn sibling_fixture_inner(
     let mut receiver = config.clone();
     receiver.device_id = "device-sibling".into();
     receiver = receiver.with_account_identity(&sibling.client)?;
-    Ok((sibling, config, receiver, directory))
+    peer.peers[0].client.persist_root_verified_directory(&own)?;
+    Ok((sibling, config, receiver, directory, peer.peers.remove(0)))
 }
 fn entry(envelope: ramflux_protocol::Envelope, sequence: u64) -> GatewayInboxEntry {
     // The node changes the outer routing identity, retaining the immutable signed inner body.
@@ -586,6 +605,199 @@ async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pai
     directory.abort();
     drop(source);
     drop(sibling);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn empty_engine(config: GatewaySessionConfig) -> GatewaySessionEngine {
+    GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
+    )
+}
+
+fn receiving_state(root: &Path, sibling: LocalBusAccountState) -> LocalBusDaemonState {
+    LocalBusDaemonState {
+        config: LocalBusConfig::new(root.join("bus.sock"), root),
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        accounts: BTreeMap::from([("sender".into(), sibling)]),
+        active_account_id: Some("sender".into()),
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    }
+}
+
+fn fresh_sibling_gateway(
+    sender: &RamfluxClient,
+    sibling: &RamfluxClient,
+) -> Result<super::fixture::RecordingGateway, SdkError> {
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    let identity = sibling.owned_device_identity()?;
+    gateway.prekeys.insert(
+        sender.root_qualified_device_lookup(identity.storage_key())?,
+        crate::prekey::SdkPrekeyResponse {
+            principal_commitment: identity.root_commitment().into(),
+            device_id: identity.device_id().into(),
+            target_delivery_id: Some("sender".into()),
+            bundle: Some(sibling.load_x3dh_private_state(&identity)?.bundle),
+        },
+    );
+    Ok(gateway)
+}
+
+#[tokio::test]
+async fn sibling_control_is_applied_and_acked_without_entering_message_receive_projection()
+-> TestResult {
+    let root = runtime_tests::root("own-control-receive");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let (mut sibling, config, receiver, directory) =
+        sibling_fixture_inner(&root, &mut source, false).await?;
+    let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
+    let own = Arc::clone(&gateway.own);
+    source.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    let carrier = super::dm_tests::create_carrier(&source.client)?;
+    send(&mut source, &carrier).await?;
+    let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    let mut incoming = entry(envelope, 1);
+    incoming.target_delivery_id.clone_from(&receiver.target_delivery_id);
+    incoming.envelope.target_delivery_id.clone_from(&receiver.target_delivery_id);
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    gateway.inbox.push(incoming);
+    sibling.put_engine(GatewaySessionEngine::with_test_transport(receiver, Box::new(gateway)));
+    assert_eq!(crate::bus::sync_driver::run(&mut sibling).await?, 1);
+    assert!(
+        sibling.pending_deliveries.is_empty(),
+        "authenticated controls have no ordinary DM projection"
+    );
+    assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 1);
+    let mut state = receiving_state(&root, sibling);
+    let (outbound, _) = tokio::sync::mpsc::channel(16);
+    let connection = LocalBusConnectionState::new(1, outbound);
+    let request = LocalBusFrame::request(
+        "receive",
+        Some("sender".into()),
+        "message",
+        "message.receive",
+        json!({"limit":64}),
+    );
+    let response =
+        super::super::message::dispatch_message_receive_request(&request, &mut state, &connection)
+            .await?;
+    assert_eq!(response.response_body["decrypted_messages"], json!([]));
+    directory.abort();
+    drop((state, source));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer_bootstrap()
+-> TestResult {
+    let root = runtime_tests::root("restored-contact-dm");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let (mut sibling, config, receiver, directory, peer) =
+        sibling_fixture_with_peer(&root, &mut source, false).await?;
+    let peer_root = peer.client.owned_device_identity()?.root_commitment().to_owned();
+    let own_root = source.client.owned_device_identity()?.root_commitment().to_owned();
+    let db = sibling.client.account_db()?;
+    db.remove_actor_state(&crate::client::identity_authority::record_key(&peer_root))?;
+    db.remove_actor_state(&format!("identity/manifest-root/{peer_root}"))?;
+    db.remove_actor_state("identity/manifest/peer")?;
+    assert!(sibling.client.device_identity_for_root(&peer_root, "device-peer-one").is_err());
+    source.client.establish_friend_link("accepted-before-restore", &own_root, &peer_root)?;
+    let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
+    let own = Arc::clone(&gateway.own);
+    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
+    assert_eq!(source.client.stage_contact_backfill_batch()?, 1);
+    assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
+    let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
+    sibling.client.require_cached_root_authority(
+        &sibling.client.device_identity_for_root(&peer_root, "device-peer-one")?,
+    )?;
+    let mut peer_config = config;
+    peer_config.principal_id = "peer".into();
+    peer_config.device_id = "device-peer-one".into();
+    peer_config = peer_config.with_account_identity(&peer.client)?;
+    let mut engine = GatewaySessionEngine::with_test_transport(
+        peer_config,
+        Box::new(fresh_sibling_gateway(&peer.client, &sibling.client)?),
+    );
+    let target = super::super::task_transport::Target {
+        device: "device-sibling".into(),
+        identity: sibling.client.owned_device_identity()?,
+        delivery: receiver.target_delivery_id.clone(),
+        federation: None,
+        own: false,
+    };
+    let sealed = super::super::task_transport::seal(
+        &peer,
+        &mut engine,
+        &target,
+        "new-after-restore",
+        b"peer to restored device",
+        crate::client::routed::Route::direct(),
+    )
+    .await?;
+    let incoming = GatewayInboxEntry {
+        inbox_seq: 2,
+        target_delivery_id: sealed.envelope.target_delivery_id.clone(),
+        envelope: sealed.envelope,
+    };
+    let pool = ramflux_transport::RelayQuicPool::new(
+        ramflux_transport::RelayQuicPoolConfig::functional_default()?,
+    );
+    let mut receiver_engine = empty_engine(receiver);
+    let delivery =
+        sibling.client.apply_routed_entry(&mut receiver_engine, &pool, &incoming, false).await?;
+    assert_eq!(
+        ramflux_protocol::decode_base64url(
+            &delivery.plaintext.ok_or("plaintext")?.plaintext_body_base64
+        )?,
+        b"peer to restored device"
+    );
+    // A stale/forged pending row cannot abort projection of the valid next DM.
+    let mut bad = incoming.clone();
+    bad.inbox_seq = 3;
+    bad.envelope.envelope_id = "bad-pending-signature".into();
+    bad.envelope.signed.signature = ramflux_protocol::encode_base64url([0_u8; 64]);
+    sibling.pending_deliveries = vec![bad, incoming];
+    sibling.put_engine(receiver_engine);
+    let mut state = receiving_state(&root, sibling);
+    let (outbound, _) = tokio::sync::mpsc::channel(16);
+    let connection = LocalBusConnectionState::new(1, outbound);
+    let request = LocalBusFrame::request(
+        "receive",
+        Some("sender".into()),
+        "message",
+        "message.receive",
+        json!({"limit":64}),
+    );
+    let response =
+        super::super::message::dispatch_message_receive_request(&request, &mut state, &connection)
+            .await?;
+    let rows = response.response_body["decrypted_messages"].as_array().ok_or("rows")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        ramflux_protocol::decode_base64url(
+            rows[0]["plaintext_body_base64"].as_str().ok_or("body")?
+        )?,
+        b"peer to restored device"
+    );
+    assert_eq!(state.accounts["sender"].pending_deliveries.len(), 1);
+    directory.abort();
+    drop((source, state, peer));
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

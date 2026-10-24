@@ -255,6 +255,10 @@ impl RamfluxClient {
         } else {
             surface_pages.remove(0)
         };
+        let group_member_pins = self.own_device_group_member_pins(&groups)?;
+        let device_manifests = self.own_history_device_manifests(&group_member_pins)?;
+        let accepted_contacts = self.own_history_contacts()?;
+        Self::check_own_history_authority_budget(&device_manifests, &accepted_contacts)?;
         Ok(SdkOwnDeviceHistoryBundle {
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,
@@ -275,7 +279,9 @@ impl RamfluxClient {
             surface_message_epochs,
             contents,
             dm_sessions,
-            group_member_pins: self.own_device_group_member_pins(&groups)?,
+            group_member_pins,
+            device_manifests,
+            accepted_contacts,
             groups,
             sender_key_distributions_base64,
         })
@@ -506,6 +512,7 @@ impl RamfluxClient {
         if bundle.target_device_id != local_device_id {
             return Err(SdkError::LocalBus("own-device sync bundle target mismatch".to_owned()));
         }
+        self.restore_own_history_authority(bundle)?;
         let floor_by_group = self.restore_own_groups(bundle)?;
         let blocked = self.restore_own_device_group_member_pins(bundle, &floor_by_group)?;
         self.import_own_task_packets(&bundle.task_packets, &bundle.source_device_id)?;
@@ -846,6 +853,8 @@ pub(crate) mod tests {
             dm_sessions: Vec::new(),
             groups,
             group_member_pins: Vec::new(),
+            device_manifests: Vec::new(),
+            accepted_contacts: Vec::new(),
             sender_key_distributions_base64: Vec::new(),
         }
     }

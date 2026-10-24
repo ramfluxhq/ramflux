@@ -63,7 +63,6 @@ pub(crate) struct GatewayQuicContext {
 }
 
 pub(crate) struct GatewaySessionRuntime {
-    pub(crate) source_authority: ramflux_node_core::DeviceAuthKeyResponse,
     pub(crate) source_identity: ramflux_crypto::RootQualifiedDeviceRef,
     pub(crate) session_id: String,
     pub(crate) resume_token: String,

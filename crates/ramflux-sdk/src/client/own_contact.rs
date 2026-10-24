@@ -12,6 +12,12 @@ struct Contact {
     manifest: SdkDeviceManifestResponse,
     link: ramflux_storage::FriendLinkRecord,
 }
+#[derive(Default, Serialize, Deserialize)]
+struct Backfill {
+    epoch: u64,
+    cursor: String,
+    complete: bool,
+}
 impl RamfluxClient {
     pub(crate) fn stage_own_contact(
         &self,
@@ -31,7 +37,11 @@ impl RamfluxClient {
         let link = self.account_db()?.friend_link(link)?;
         let mut body = PREFIX.to_vec();
         body.extend(serde_json::to_vec(&Contact { manifest: manifest.clone(), link })?);
-        let id = ramflux_protocol::hash_base64url("ramflux.sdk.own_contact.copy.v1", &body);
+        let set = self.observed_device_set(own.root_commitment())?;
+        let id = ramflux_protocol::hash_base64url(
+            "ramflux.sdk.own_contact.copy.v2",
+            &ramflux_protocol::canonical_json_bytes(&(&body, set))?,
+        );
         crate::bus::own_device_copy::stage(
             self,
             crate::client::own_device_copy::OwnMessageInput {
@@ -43,6 +53,94 @@ impl RamfluxClient {
             },
             None,
         )
+    }
+    pub(super) fn own_history_contacts(&self) -> Result<Vec<String>, SdkError> {
+        let own = self.owned_device_identity()?;
+        let db = self.account_db()?;
+        let mut after = String::new();
+        let mut result = Vec::new();
+        loop {
+            let page = db.friend_link_page(&after, 64)?;
+            for link in &page {
+                after.clone_from(&link.link_id);
+                if link.state != "accepted" || link.blocked || link.capability_revoked_at.is_some()
+                {
+                    continue;
+                }
+                let peer = if link.requester_id == own.root_commitment() {
+                    &link.target_id
+                } else if link.target_id == own.root_commitment() {
+                    &link.requester_id
+                } else {
+                    continue;
+                };
+                if let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(
+                    &format!("identity/manifest-root/{peer}"),
+                )? {
+                    let mut body = PREFIX.to_vec();
+                    body.extend(serde_json::to_vec(&Contact { manifest, link: link.clone() })?);
+                    result.push(ramflux_protocol::encode_base64url(body));
+                    if result.len() > 512 {
+                        return Err(SdkError::InboundPending(
+                            "own contact history capacity exceeded".into(),
+                        ));
+                    }
+                }
+            }
+            if page.len() < 64 {
+                return Ok(result);
+            }
+        }
+    }
+    pub(crate) fn stage_contact_backfill_batch(&self) -> Result<usize, SdkError> {
+        let own = self.owned_device_identity()?;
+        let Some(set) = self.observed_device_set(own.root_commitment())? else { return Ok(0) };
+        if set
+            .devices
+            .iter()
+            .filter(|d| d.status == ramflux_protocol::DeviceSetStatus::Active)
+            .count()
+            < 2
+        {
+            return Ok(0);
+        }
+        let db = self.account_db()?;
+        let mut progress =
+            db.load_actor_state::<Backfill>("own-contact/backfill")?.unwrap_or_default();
+        if progress.epoch != set.device_set_epoch {
+            progress = Backfill { epoch: set.device_set_epoch, ..Backfill::default() };
+        }
+        if progress.complete {
+            return Ok(0);
+        }
+        let links = db.friend_link_page(&progress.cursor, 4)?;
+        let mut count = 0;
+        for link in &links {
+            if link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none() {
+                let peer = if link.requester_id == own.root_commitment() {
+                    &link.target_id
+                } else if link.target_id == own.root_commitment() {
+                    &link.requester_id
+                } else {
+                    progress.cursor.clone_from(&link.link_id);
+                    db.persist_actor_state("own-contact/backfill", &progress)?;
+                    continue;
+                };
+                if let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(
+                    &format!("identity/manifest-root/{peer}"),
+                )? {
+                    self.stage_own_contact(&manifest, &link.link_id)?;
+                    count += 1;
+                }
+            }
+            progress.cursor.clone_from(&link.link_id);
+            db.persist_actor_state("own-contact/backfill", &progress)?;
+        }
+        if links.len() < 4 {
+            progress.complete = true;
+            db.persist_actor_state("own-contact/backfill", &progress)?;
+        }
+        Ok(count)
     }
     /// The caller must first verify the packet's active sibling signature and owned root.
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
@@ -61,6 +159,13 @@ impl RamfluxClient {
                 || (link.target_id == own.root_commitment() && link.requester_id == *peer))
         {
             return Err(SdkError::InboundRejected("own contact relationship root mismatch".into()));
+        }
+        if self.account_db()?.find_friend_link(&link.link_id)?.is_some_and(|existing| {
+            existing.requester_id != link.requester_id || existing.target_id != link.target_id
+        }) {
+            return Err(SdkError::InboundRejected(
+                "own contact link id belongs to another relationship".into(),
+            ));
         }
         crate::client::contact::verify_device_manifest(&contact.manifest, peer)?;
         let existing = self
@@ -138,6 +243,71 @@ mod tests {
         own.receive_own_contact(&packet(manifest, link)?)?;
         assert!(own.account_db()?.friend_link("accepted")?.blocked);
         drop((own, peer, impostor));
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+    #[test]
+    fn sibling_link_id_collision_cannot_replace_a_different_blocked_relationship() -> TestResult {
+        let path = std::env::temp_dir().join(format!(
+            "rf-contact-collision-{}",
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ));
+        let own = client(&path.join("own"), "bob", 1)?;
+        let peer = client(&path.join("peer"), "alice", 3)?;
+        let other = client(&path.join("other"), "carol", 5)?;
+        let manifest = crate::client::identity_authority::test_support::public_manifest(&peer)?;
+        let other_manifest =
+            crate::client::identity_authority::test_support::public_manifest(&other)?;
+        let own_root = own.owned_device_identity()?.root_commitment().to_owned();
+        own.establish_friend_link("collision", &own_root, &other_manifest.principal_commitment)?;
+        own.block_friend_link("collision")?;
+        let before = own.account_db()?.friend_link("collision")?;
+        let mut link = before.clone();
+        link.target_id.clone_from(&manifest.principal_commitment);
+        link.blocked = false;
+        link.state = "accepted".into();
+        link.capability_revoked_at = None;
+        let mut packet = PREFIX.to_vec();
+        packet.extend(serde_json::to_vec(&Contact { manifest, link })?);
+        assert!(own.receive_own_contact(&packet).is_err());
+        assert_eq!(own.account_db()?.friend_link("collision")?, before);
+        drop((own, peer, other));
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+    #[test]
+    fn contacts_accepted_before_activation_are_backfilled_once_per_own_set() -> TestResult {
+        let path = std::env::temp_dir().join(format!(
+            "rf-contact-backfill-{}",
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ));
+        let own = client(&path.join("own"), "bob", 1)?;
+        let peer = client(&path.join("peer"), "alice", 3)?;
+        let mut sibling = client(&path.join("sibling"), "bob", 1)?;
+        sibling.create_device_branch("bob", "second", 1, [8; 32]);
+        let manifest = crate::client::identity_authority::test_support::public_manifest(&peer)?;
+        let mut set = crate::client::identity_authority::test_support::public_manifest(&own)?;
+        own.persist_identity_directory(&set)?;
+        own.persist_identity_directory(&manifest)?;
+        let own_root = own.owned_device_identity()?.root_commitment().to_owned();
+        own.establish_friend_link("before-activation", &own_root, &manifest.principal_commitment)?;
+        own.stage_own_contact(&manifest, "before-activation")?;
+        assert_eq!(own.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
+        // A second signed active entry becomes visible after the contact was accepted.
+        let second = crate::client::identity_authority::test_support::public_manifest(&sibling)?
+            .devices
+            .remove(0);
+        set.devices.push(second);
+        crate::client::identity_authority::test_support::sign_manifest(
+            own.identity_root.as_ref().ok_or("root")?,
+            &mut set,
+            2,
+        )?;
+        own.persist_identity_directory(&set)?;
+        assert_eq!(own.stage_contact_backfill_batch()?, 1);
+        assert_eq!(own.stage_contact_backfill_batch()?, 0);
+        assert_eq!(own.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
+        drop((own, peer, sibling));
         std::fs::remove_dir_all(path)?;
         Ok(())
     }

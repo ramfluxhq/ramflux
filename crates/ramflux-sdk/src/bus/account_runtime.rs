@@ -171,8 +171,13 @@ impl AccountRuntime {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
-        let result =
-            tokio::time::timeout(Duration::from_secs(20), super::sync_driver::run(account)).await;
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            if let Err(error) = super::own_contact_backfill::drive(account).await {
+                tracing::debug!(%error, "own-device contact backfill deferred");
+            }
+            super::sync_driver::run(account).await
+        })
+        .await;
         let reason = match &result {
             Ok(Err(error)) => Some(local_bus_error_code(error)),
             Err(_) => Some("SyncTimeout"),

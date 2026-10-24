@@ -398,10 +398,11 @@ impl FederationRedbStore {
             .signed_device_set
             .as_ref()
             .ok_or_else(|| NodeCoreError::ItestHttp("forwarded set missing".into()))?;
-        let observation = crate::foreign_device_store::observe(
+        let observation = crate::foreign_device_store::observe_for_peer(
             &self.db,
-            crate::foreign_device_store::Namespace::Federation,
             record,
+            &request.source_node_id,
+            now,
         )?;
         if observation.changed() {
             self.foreign_authority_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

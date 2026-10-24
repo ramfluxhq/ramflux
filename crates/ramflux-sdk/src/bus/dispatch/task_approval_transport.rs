@@ -87,10 +87,48 @@ fn endpoint_targets(
 ) -> Result<Vec<Target>, SdkError> {
     let mut result = Vec::new();
     for target in targets {
-        let record = client.account_db()?.client_record("device", &target.device)?;
+        let record = client.account_db()?.client_device_record(&target.identity)?;
         if record.as_ref().is_some_and(|r| r["principal_id"].as_str() == Some(recipient)) {
             result.push(target);
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn approval_endpoint_uses_root_qualified_identity_with_ambiguous_literal_names()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::bus::runtime_tests::root("approval-root-lookup");
+        let account = crate::bus::runtime_tests::account(
+            &root,
+            "owner",
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        let db = account.client.account_db()?;
+        let mut targets = Vec::new();
+        for (principal, seed) in [("bob", 21), ("mallory", 22)] {
+            let root = ramflux_crypto::create_identity_root(principal, [seed; 32]);
+            let identity =
+                ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "shared")?;
+            db.persist_client_record("device",identity.storage_key(),&serde_json::json!({
+                "device_id":"shared","principal_id":principal,"principal_commitment":identity.root_commitment()}))?;
+            targets.push(Target {
+                device: "shared".into(),
+                identity,
+                delivery: principal.into(),
+                federation: None,
+                own: false,
+            });
+        }
+        let selected = endpoint_targets(&account.client, targets, "bob")?;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].delivery, "bob");
+        drop(account);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

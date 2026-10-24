@@ -136,13 +136,6 @@ mod tests {
             "shared",
         )?;
         let runtime = crate::GatewaySessionRuntime {
-            source_authority: crate::submit_source::tests::authority(
-                "attacker",
-                "shared",
-                2,
-                ramflux_crypto::public_key_base64url_from_seed([3; 32]),
-                7,
-            )?,
             source_identity: attacker.clone(),
             session_id: "session".into(),
             resume_token: "resume".into(),

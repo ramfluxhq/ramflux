@@ -122,31 +122,7 @@ pub(super) fn attach_forward_source_authority(
     envelope: &mut ramflux_protocol::Envelope,
     router: &RouterMeshClient,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    if envelope.ext.ext.contains_key("source_device_authority") {
-        ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
-        return Ok(());
-    }
-    let root = envelope
-        .ext
-        .ext
-        .get("source_root_commitment")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-        ramflux_node_core::NodeCoreError::ItestHttp("forward source root missing".into())
-    })?;
-    let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
-        .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?;
-    let authority: Option<ramflux_node_core::DeviceAuthKeyResponse> =
-        crate::router_get_json(router, &format!("/mvp1/device-auth-key/{lookup}"))?;
-    let authority = authority.ok_or_else(|| {
-        ramflux_node_core::NodeCoreError::ItestHttp("forward source authority unavailable".into())
-    })?;
-    authority.verify_envelope_source(envelope)?;
-    envelope.ext.ext.insert(
-        "source_device_authority".into(),
-        serde_json::to_value(authority)
-            .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?,
-    );
+    *envelope = router_post_json(router, "/mvp1/envelope-authority", envelope)?;
     Ok(())
 }
 
@@ -310,7 +286,10 @@ pub(crate) fn retry_outbound_spool_once(
                 continue;
             }
         };
-        match send_signed_forward_to_peer(router, &peer, &entry.forward) {
+        let refreshed = refresh_spooled_forward(&entry.forward, state, |envelope| {
+            attach_forward_source_authority(envelope, router)
+        });
+        match refreshed.and_then(|forward| send_signed_forward_to_peer(router, &peer, &forward)) {
             Ok(response) => {
                 store.mark_outbound_delivered(&entry.peer_node_id, entry.seq)?;
                 tracing::info!(
@@ -333,6 +312,22 @@ pub(crate) fn retry_outbound_spool_once(
         }
     }
     Ok(())
+}
+
+fn refresh_spooled_forward(
+    retained: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    state: &crate::SharedFederationTrustState,
+    refresh: impl FnOnce(
+        &mut ramflux_protocol::Envelope,
+    ) -> Result<(), ramflux_node_core::NodeCoreError>,
+) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, ramflux_node_core::NodeCoreError> {
+    let seed = state.snapshot()?.node_signing_seed().ok_or_else(|| {
+        ramflux_node_core::NodeCoreError::Unauthorized("federation signing key unavailable".into())
+    })?;
+    let mut current = retained.clone();
+    refresh(&mut current.envelope)?;
+    ramflux_node_core::sign_federated_envelope_forward(&mut current, seed)?;
+    Ok(current)
 }
 
 fn spool_failed_forward(
@@ -571,6 +566,49 @@ pub(crate) fn ensure_receive_target_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spool_retry_refreshes_authority_before_resigning_and_refuses_revoked_sources()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ramflux_node_core::FederationTrustState::new();
+        state.set_node_signing_seed([9; 32]);
+        let state = crate::SharedFederationTrustState::new(state);
+        let request: ramflux_node_core::FederatedEnvelopeForwardRequest = serde_json::from_value(
+            serde_json::json!({
+                "admin_token":"", "source_node_id":"node-a.example", "target_node_id":"node-b.example",
+                "delivery_class":"opaque_event", "required_capability":"opaque_delivery",
+                "signing_key_id":"node-a.example","signature_alg":"ed25519","signature":"",
+                "envelope": {
+                    "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+                    "ext":{"source_device_authority":{"epoch":1}},
+                    "signing_key_id":"device","signature_alg":"ed25519","signature":"retained-device-signature",
+                    "envelope_id":"retained","source_principal_id":"alice","source_device_id":"first",
+                    "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event",
+                    "priority":"normal","ttl":600,"created_at":1_760_000_000,"encrypted_payload":"opaque","payload_hash":"hash"
+                }
+            }),
+        )?;
+        let refreshed = refresh_spooled_forward(&request, &state, |envelope| {
+            envelope
+                .ext
+                .ext
+                .insert("source_device_authority".into(), serde_json::json!({"epoch":2}));
+            Ok(())
+        })?;
+        assert_eq!(refreshed.envelope.ext.ext["source_device_authority"]["epoch"], 2);
+        assert_eq!(refreshed.envelope.signed, request.envelope.signed);
+        ramflux_node_core::verify_federated_envelope_forward(
+            &refreshed,
+            &ramflux_crypto::public_key_base64url_from_seed([9; 32]),
+        )?;
+        assert!(
+            refresh_spooled_forward(&request, &state, |_| Err(
+                ramflux_node_core::NodeCoreError::Unauthorized("revoked".into())
+            ))
+            .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn receive_target_node_must_match_local_node() {

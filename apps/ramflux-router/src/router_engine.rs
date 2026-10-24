@@ -7,7 +7,7 @@ pub(crate) fn submit_envelope(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
-    envelope: ramflux_protocol::Envelope,
+    mut envelope: ramflux_protocol::Envelope,
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
@@ -31,6 +31,7 @@ pub(crate) fn submit_envelope(
         }
         Err(error) => return Err(error.into()),
     };
+    state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at
@@ -84,7 +85,7 @@ pub(crate) async fn submit_envelope_async(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     home_node_forward: Option<&crate::router_runtime::LocalFederationForwardClient>,
-    envelope: ramflux_protocol::Envelope,
+    mut envelope: ramflux_protocol::Envelope,
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
@@ -108,6 +109,7 @@ pub(crate) async fn submit_envelope_async(
         }
         Err(error) => return Err(error.into()),
     };
+    state.refresh_registered_envelope_authority(&mut envelope)?;
     let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at

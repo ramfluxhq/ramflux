@@ -14,13 +14,6 @@ pub(crate) fn bind_source(
     {
         anyhow::bail!("submit source differs from authenticated session");
     }
-    if runtime.source_authority.principal_id != runtime.principal_id
-        || runtime.source_authority.branch_public_key != runtime.branch_public_key
-        || runtime.source_authority.device_epoch != runtime.device_epoch
-        || runtime.source_authority.authenticated_device_identity()? != runtime.source_identity
-    {
-        anyhow::bail!("authenticated session authority mismatch");
-    }
     let mut envelope = envelope.clone();
     envelope.ext.ext.remove("source_device_authority");
     ramflux_crypto::verify_canonical_signature(
@@ -28,10 +21,8 @@ pub(crate) fn bind_source(
         &envelope.signed.signature,
         &runtime.branch_public_key,
     )?;
-    envelope
-        .ext
-        .ext
-        .insert("source_device_authority".into(), serde_json::to_value(&runtime.source_authority)?);
+    // The router resolves the current signed set for every submission.
+    // A session-open snapshot must never be propagated as current authority.
     Ok(envelope)
 }
 
@@ -80,7 +71,7 @@ pub(crate) mod tests {
         })
     }
     #[test]
-    fn submit_binds_principal_device_root_signature_and_replaces_client_authority()
+    fn submit_binds_principal_device_root_signature_and_strips_client_authority()
     -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("alice", "shared", 1, [2; 32]);
         let authority = authority(
@@ -92,7 +83,6 @@ pub(crate) mod tests {
         )?;
         let runtime = GatewaySessionRuntime {
             source_identity: authority.authenticated_device_identity()?,
-            source_authority: authority.clone(),
             session_id: "session".into(),
             resume_token: "resume".into(),
             principal_id: "alice".into(),
@@ -135,10 +125,7 @@ pub(crate) mod tests {
             .ext
             .ext
             .insert("source_device_authority".into(), serde_json::json!({"forged":true}));
-        assert_eq!(
-            bind_source(&runtime, &envelope)?.ext.ext["source_device_authority"],
-            serde_json::to_value(authority)?
-        );
+        assert!(!bind_source(&runtime, &envelope)?.ext.ext.contains_key("source_device_authority"));
         let mut forged = envelope.clone();
         forged.source_principal_id = "mallory".into();
         assert!(bind_source(&runtime, &forged).is_err());

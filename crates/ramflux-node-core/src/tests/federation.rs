@@ -766,7 +766,8 @@ fn flood_foreign_authority_cache(
     for i in 0..=crate::foreign_device_heads::FOREIGN_HEAD_LIMIT {
         let seed = ramflux_crypto::blake3_256("ramflux.test.foreign.root.v1", &i.to_be_bytes());
         let fresh = ramflux_crypto::create_identity_root(&format!("foreign-{i}"), seed);
-        let forward = root_bound_forward(&fresh, "device", None, &format!("new-{i}"))?;
+        let mut forward = root_bound_forward(&fresh, "device", None, &format!("new-{i}"))?;
+        forward.source_node_id = format!("flood-peer-{}", i / 64);
         let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
         let router_result = router.authenticated_envelope_source_from(
             &forward.envelope,
