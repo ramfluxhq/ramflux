@@ -568,3 +568,6 @@ mod retirement_guard;
 
 #[path = "r9_tests.rs"]
 mod r9;
+
+#[path = "legacy_group_auth_tests.rs"]
+mod legacy_group_auth;

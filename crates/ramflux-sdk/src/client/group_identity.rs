@@ -4,6 +4,30 @@
 //! Group membership binds principal, commitment and device to an immutable signing-key pin.
 use crate::prelude::*;
 impl RamfluxClient {
+    pub(crate) fn require_group_payload_sender(
+        &self,
+        group: &str,
+        claimed_sender: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        if claimed_sender != entry.envelope.source_device_id {
+            return Err(SdkError::InboundRejected(
+                "group payload sender differs from authenticated source device".into(),
+            ));
+        }
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if !self.group_state(group)?.members.contains(&local.device_id) {
+            return Err(SdkError::InboundRejected(
+                "local device is not a current group member".into(),
+            ));
+        }
+        self.require_group_sender_pin(
+            group,
+            &entry.envelope.source_principal_id,
+            &entry.envelope.source_device_id,
+        )
+    }
+
     pub(crate) fn require_group_sender_pin(
         &self,
         group: &str,
