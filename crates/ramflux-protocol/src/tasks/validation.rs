@@ -159,6 +159,9 @@ impl TaskEvent {
                 steps(&v.steps)?;
                 if let Some(summary) = &v.result_summary {
                     free_text(summary, "result_summary")?;
+                    if summary.chars().count() > 4096 {
+                        return Err(TaskReject::InvalidField("result_summary"));
+                    }
                 }
                 if let Some(reference) = &v.result_ref {
                     field(reference, "result_ref", 256)?;

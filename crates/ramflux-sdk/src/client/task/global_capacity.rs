@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-wide retained event budgets reclaim history from its largest authenticated signer.
-use super::{TaskHistory, carrier::Carrier, lifecycle::Lifecycle, quota::history_usage, scoped};
+use super::{carrier::Carrier, lifecycle::Lifecycle, quota::Usage, scoped};
 use crate::{RamfluxClient, SdkError, TaskRefusalCode};
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_EVENTS: u64 = 32768;
@@ -10,23 +10,14 @@ impl RamfluxClient {
     pub(super) fn admit_global_task_history(
         &self,
         c: &Carrier,
-        history: &TaskHistory,
+        current: &std::collections::BTreeMap<String, Usage>,
+        control: bool,
     ) -> Result<(), SdkError> {
-        if Self::is_requester_task_control(c, history)? {
+        if control {
             return Ok(());
         }
         let task = c.event()?.event().task_id().to_owned();
         let exclude = scoped("lifecycle", &c.conversation_id, &task)?;
-        let mut current = history_usage(history)?;
-        if !history.events.iter().any(|e| {
-            e.carrier.principal_id == c.principal_id && e.carrier.message_id == c.message_id
-        }) {
-            current.entry(c.principal_id.clone()).or_default().charge(
-                c,
-                u64::try_from(c.bytes()?.len()).unwrap_or(u64::MAX),
-                None,
-            )?;
-        }
         let bytes = current.values().map(|u| u.bytes).sum::<u64>();
         let events = current.values().map(|u| u.events).sum::<u64>();
         let db = self.account_db()?;
