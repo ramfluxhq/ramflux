@@ -251,9 +251,12 @@ qualified `root~` address. Names inside an address are decoded exactly once.
 Bare ambiguous names return an error. Historical unsigned metadata and orphan
 sessions cannot supply live key authority. Account opening atomically migrates
 metadata and pins into separate scoped and legacy storage namespaces; it does
-not endorse old unsigned keys. Unscoped pair secrets are retired instead of
-guessing their root ownership; authenticated automatic bootstrap/recovery creates
-a fresh pair. Scoped pair pointers use a separate hash domain and records carry
+not endorse old unsigned keys. Unscoped pair secrets move to a separate read-only
+legacy archive instead of guessing their root ownership. Old active pointers and
+recovery work are removed; authenticated automatic bootstrap/recovery creates a
+fresh live pair. The archive grants no live authority. Historical deferred slots
+that lack verified root context can require a verified resend; the migration
+preserves the original encrypted-at-rest secret records for explicit recovery. Scoped pair pointers use a separate hash domain and records carry
 an explicit root-addressed marker. Unsolicited root hints cannot establish contacts:
 an accepted relationship naming that root and a verified envelope signature must
 precede first-contact persistence.
