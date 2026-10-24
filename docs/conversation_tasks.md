@@ -84,6 +84,12 @@ The requester calls `grant.approve {approval_id}` or `grant.deny {approval_id}`.
 Its attended daemon signs the immutable grant body and queues the decision
 back to the executor and its own siblings. The response's `decision_id` is the
 ID to pass to `task.resolve`; the scoped UI approval ID is not a grant ID.
+For existing clients, `task.resolve.decision_id` also accepts that scoped UI
+approval ID: the requester daemon checks its task/step binding and canonicalizes
+it to the original MCP decision ID before signing. Remote approval rows populate
+`details.requested_grant_id`, including requests whose assignee used a generated
+grant ID. Notifications use the existing `mcp.approval.request`,
+`mcp.approval.granted` and `mcp.approval.denied` topics (metadata only).
 The executor revalidates the installed MCP registry and original request before
 accepting the grant. The grant signature also binds the task intervention;
 a changed task or opening revision cannot reuse it. Pending requests and

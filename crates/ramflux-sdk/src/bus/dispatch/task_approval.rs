@@ -232,7 +232,7 @@ fn apply_decisions(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
             .persist_actor_state(&applied, &json!({"expires_at":approval.expires_at}))?;
         account.client.account_db()?.append_journal(
             &format!("task-approval-applied:{id}"),
-            "grant.changed",
+            if *approved { "mcp.approval.granted" } else { "mcp.approval.denied" },
             &json!({"grant_id":request.grant_body.grant_id,"task_id":request.binding.task_id}),
             now_unix_timestamp(),
             None,

@@ -60,6 +60,15 @@ async fn dispatch_task_inner(
         .as_str()
         .map_or_else(crate::new_surface_message_id, |id| Ok(id.to_owned()))?;
     object.insert("task_id".into(), json!(task_id));
+    if request.method == "task.resolve" {
+        let decision = account.client.canonical_task_approval_decision(
+            required(&body, "decision_id")?,
+            &conversation,
+            &task_id,
+            required(&body, "step_id")?,
+        )?;
+        body["decision_id"] = json!(decision);
+    }
     let event = build_event(request, &principal, body)?;
     let event =
         TaskEvent::new(conversation, event, sdk_device_signed_fields(&device.device_id, ""))

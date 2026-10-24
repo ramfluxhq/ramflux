@@ -65,7 +65,10 @@ impl RamfluxClient {
             || resolution.base_revision < opened
             || resolution.base_revision > task.version
         {
-            return Err(invalid("only task assignee can attest an external decision"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::NotAssignee,
+                "only task assignee can attest an external decision",
+            ));
         }
         let mut proof = DecisionProof {
             conversation_id: conversation.into(),
@@ -81,7 +84,10 @@ impl RamfluxClient {
             let decision_key = self.verify_task_evidence(&proof, task, true)?;
             let reservation = key("decision_reserved", &decision_key);
             if self.account_db()?.load_actor_state::<serde_json::Value>(&decision_key)?.is_some() {
-                return Err(invalid("task external decision already consumed"));
+                return Err(crate::task_refusal::refused(
+                    crate::TaskRefusalCode::DecisionConsumed,
+                    "task external decision already consumed",
+                ));
             }
             if let Some(previous) =
                 self.account_db()?.load_actor_state::<DecisionProof>(&reservation)?
@@ -90,7 +96,8 @@ impl RamfluxClient {
                     || !same_decision(&previous.resolution, &proof.resolution)
                     || previous.issuer_device != proof.issuer_device
                 {
-                    return Err(invalid(
+                    return Err(crate::task_refusal::refused(
+                        crate::TaskRefusalCode::DecisionConsumed,
                         "external decision already reserved for another task intervention",
                     ));
                 }

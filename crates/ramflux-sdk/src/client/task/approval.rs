@@ -233,7 +233,7 @@ impl RamfluxClient {
             if let Some(old)=db.load_actor_state::<Packet>(&storage)? {
                 // The first human decision wins across all requester devices.
                 if serde_json::to_vec(&old.payload)?!=serde_json::to_vec(&packet.payload)? {
-                    return Err(invalid("task approval already decided"));
+                    return Err(crate::task_refusal::refused(crate::TaskRefusalCode::DecisionConsumed,"task approval already decided"));
                 }
                 return Ok(());
             }
@@ -242,7 +242,7 @@ impl RamfluxClient {
                 return Err(SdkError::InboundPending("task approval sender inbox capacity reached".into()));
             }
             self.bounded_task_approval_store(&storage,packet)?;
-            db.append_journal(&format!("task-approval:{phase}:{id}"),"grant.changed",&json!({"approval_id":format!("task_approval_{id}"),"task_id":b.task_id,"conversation_id":b.conversation_id}),crate::time::now_unix_timestamp(),None)?;
+            db.append_journal(&format!("task-approval:{phase}:{id}"),match &packet.payload {Payload::Request {..}=>"mcp.approval.request",Payload::Decision {approved:true,..}=>"mcp.approval.granted",Payload::Decision {approved:false,..}=>"mcp.approval.denied"},&json!({"approval_id":format!("task_approval_{id}"),"task_id":b.task_id,"conversation_id":b.conversation_id}),crate::time::now_unix_timestamp(),None)?;
             Ok(())
         })
     }
@@ -279,9 +279,35 @@ impl RamfluxClient {
             value["decision_id"] = json!(request.approval.approval_id);
             value["task_binding"] = serde_json::to_value(&request.binding)?;
             value["grant_id"] = json!(request.grant_body.grant_id);
+            value["details"]["requested_grant_id"] = json!(request.grant_body.grant_id);
             result.push(value);
         }
         Ok(result)
+    }
+    pub(crate) fn canonical_task_approval_decision(
+        &self,
+        id: &str,
+        conversation: &str,
+        task: &str,
+        step: &str,
+    ) -> Result<String, SdkError> {
+        let Some(scoped) = id.strip_prefix("task_approval_") else { return Ok(id.into()) };
+        let packet = self
+            .account_db()?
+            .load_actor_state::<Packet>(&key("approval_in", scoped))?
+            .ok_or_else(|| invalid("task approval not found"))?;
+        let b = &packet.request().binding;
+        if b.conversation_id != conversation || b.task_id != task || b.step_id != step {
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::DecisionMismatch,
+                "approval belongs to another task intervention",
+            ));
+        }
+        let target = NeedsMe::Approval { grant_id: packet.request().grant_body.grant_id.clone() };
+        if self.task_approval_binding(conversation, task, step, &target)? != *b {
+            return Err(invalid("task approval intervention changed"));
+        }
+        Ok(packet.request().approval.approval_id.clone())
     }
     pub(crate) fn decide_task_approval(&self, id: &str, approved: bool) -> Result<Value, SdkError> {
         let id =

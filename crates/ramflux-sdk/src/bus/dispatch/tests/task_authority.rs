@@ -115,6 +115,14 @@ fn task_accept_has_one_shape_and_refusal_codes_do_not_depend_on_display_text()
         };
         assert_eq!(reason.as_str(), code);
     }
+    for (reason, code) in [
+        (crate::TaskRefusalCode::TaskQuotaExhausted, "quota_exhausted"),
+        (crate::TaskRefusalCode::NotRequester, "not_requester"),
+        (crate::TaskRefusalCode::DecisionConsumed, "decision_consumed"),
+    ] {
+        let error = crate::task_refusal::refused(reason, "arbitrary display text");
+        assert_eq!(crate::bus::io::local_bus_error_code(&error), code);
+    }
     Ok(())
 }
 

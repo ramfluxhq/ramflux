@@ -49,6 +49,15 @@ fn a_requesters_second_device_reads_the_remote_approval_and_returns_a_task_bound
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["task_binding"]["task_id"], "task");
     let id = rows[0]["approval_id"].as_str().ok_or("approval id")?;
+    assert_eq!(sibling.canonical_task_approval_decision(id, "thread", "task", "step")?, "approval");
+    assert!(sibling.canonical_task_approval_decision(id, "thread", "other", "step").is_err());
+    assert!(
+        sibling
+            .account_db()?
+            .journal_after(0, 128)?
+            .iter()
+            .any(|row| row.topic == "mcp.approval.request")
+    );
     let decision = sibling.decide_task_approval(id, true)?;
     assert_eq!(decision["decision_id"], "approval");
     assert_eq!(sibling.task_remote_approvals()?, Vec::<Value>::new());

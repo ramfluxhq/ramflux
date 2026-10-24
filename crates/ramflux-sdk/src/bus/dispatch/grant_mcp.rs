@@ -1134,7 +1134,7 @@ fn mcp_create_approval(
         "approval_{}_{}_{}",
         manifest.server_id,
         manifest.tool_name,
-        account.mcp_pending_approvals.len().saturating_add(1)
+        crate::new_surface_message_id()?
     );
     let expires_at = now_unix_timestamp().saturating_add(MCP_GRANT_TTL_SECONDS);
     let single_use = risk_requires_explicit_approval(&manifest.effective_risk());
@@ -2464,3 +2464,7 @@ mod tests {
         assert!(mcp_verify_grant_signature(&grant).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/mcp_approval_ids.rs"]
+mod approval_ids;
