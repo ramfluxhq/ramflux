@@ -3,6 +3,8 @@
 
 //! Minimal MVP-0 cryptographic helpers for protocol fixtures.
 
+mod device_reference;
+pub use device_reference::RootQualifiedDeviceRef;
 mod double_ratchet;
 mod error;
 mod franking;

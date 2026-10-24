@@ -141,7 +141,7 @@ fn validate(record: &SignedDeviceSetRecord) -> Result<(), CryptoError> {
         return Err(invalid("device set must be sorted and unique"));
     }
     for entry in &record.devices {
-        identifier(&entry.device_id)?;
+        ramflux_protocol::validate_device_name(&entry.device_id)?;
         digest(&entry.signing_key_commitment)?;
         digest(&entry.agreement_key_commitment)?;
         if entry.device_epoch == 0 || entry.device_epoch > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
