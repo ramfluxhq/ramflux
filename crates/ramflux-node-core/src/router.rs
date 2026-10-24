@@ -219,13 +219,27 @@ impl RouterCore {
         now: i64,
     ) -> Result<HomeNodeMigrationRecord, NodeCoreError> {
         let mut control = lock_unpoisoned(&self.control);
-        let actor =
-            control.mvp1_identities.device_auth_key(&proof.actor_device_id).ok_or_else(|| {
-                NodeCoreError::ItestHttp(format!(
-                    "unknown migration actor device: {}",
-                    proof.actor_device_id
-                ))
-            })?;
+        let actor_lookup =
+            if control.mvp1_identities.root_public_keys.contains_key(&proof.identity_commitment) {
+                IdentityRegistry::principal_device_lookup(
+                    &proof.identity_commitment,
+                    &proof.actor_device_id,
+                )
+            } else {
+                format!(
+                    "root~{}",
+                    ramflux_protocol::encode_base64url(
+                        serde_json::to_vec(&(&proof.identity_commitment, &proof.actor_device_id))
+                            .map_err(|e| NodeCoreError::ItestHttp(e.to_string()))?
+                    )
+                )
+            };
+        let actor = control.mvp1_identities.device_auth_key(&actor_lookup).ok_or_else(|| {
+            NodeCoreError::ItestHttp(format!(
+                "unknown migration actor device: {}",
+                proof.actor_device_id
+            ))
+        })?;
         if actor.revoked {
             return Err(NodeCoreError::ItestHttp(format!(
                 "migration actor device revoked: {}",
@@ -244,7 +258,7 @@ impl RouterCore {
         if proof.identity_commitment != actor.principal_id
             && control
                 .mvp1_identities
-                .principal_commitment_for_device(&proof.actor_device_id)
+                .principal_commitment_for_device(&actor_lookup)
                 .is_none_or(|commitment| commitment != proof.identity_commitment)
         {
             return Err(NodeCoreError::ItestHttp("migration actor identity mismatch".to_owned()));
@@ -478,19 +492,23 @@ impl RouterCore {
         request: PrekeyPublishRequest,
     ) -> Result<PrekeyResponse, NodeCoreError> {
         let device_id = request.device_id.clone();
+        let lookup = IdentityRegistry::principal_device_lookup(
+            &request.bundle.identity_commitment,
+            &device_id,
+        );
         let mut control = lock_unpoisoned(&self.control);
         control.mvp1_identities.publish_prekey(request)?;
         Ok(PrekeyResponse {
             device_id: device_id.clone(),
-            bundle: control.mvp1_identities.prekey_bundle(&device_id).cloned(),
+            bundle: control.mvp1_identities.prekey_bundle(&lookup).cloned(),
             principal_commitment: control
                 .mvp1_identities
-                .principal_commitment_for_device(&device_id)
+                .principal_commitment_for_device(&lookup)
                 .unwrap_or_default()
                 .to_owned(),
             target_delivery_id: control
                 .mvp1_identities
-                .target_delivery_id_for_device(&device_id)
+                .target_delivery_id_for_device(&lookup)
                 .map(str::to_owned),
         })
     }
@@ -704,9 +722,11 @@ impl RouterCore {
         let control = lock_unpoisoned(&self.control);
         if control
             .mvp1_identities
-            .devices
-            .get(&request.source_device_id)
-            .is_none_or(|device| device.principal_id != request.principal_id)
+            .device_record_for_principal(&request.principal_id, &request.source_device_id)
+            .is_none_or(|device| {
+                device.principal_id != request.principal_id
+                    || !control.mvp1_identities.device_record_is_usable(device)
+            })
         {
             return Err(NodeCoreError::ItestHttp(format!(
                 "source device is not registered for principal: {}",
