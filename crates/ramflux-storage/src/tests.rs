@@ -38,6 +38,13 @@ fn signed_test_db(
     Ok((root, db, device))
 }
 
+fn receipt_actor(name: &str) -> Result<ramflux_crypto::RootQualifiedDeviceRef, StorageError> {
+    Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+        &ramflux_crypto::create_identity_root("storage-test", [0xb1; 32]),
+        name,
+    )?)
+}
+
 #[cfg(not(feature = "sqlcipher"))]
 #[test]
 fn account_db_open_fails_closed_without_sqlcipher() -> Result<(), StorageError> {
@@ -615,7 +622,7 @@ fn dm_receipts_are_idempotent_monotonic_and_read_wins() -> Result<(), StorageErr
         conversation_id: "conv_receipts",
         message_id: "msg_2",
         receipt_type: "read",
-        actor_device_id: "bob_device",
+        actor: &receipt_actor("bob_device")?,
         created_at: 1_900_000_310,
     })?);
     assert!(!db.record_receipt_event_once(ReceiptEventWrite {
@@ -623,16 +630,16 @@ fn dm_receipts_are_idempotent_monotonic_and_read_wins() -> Result<(), StorageErr
         conversation_id: "conv_receipts",
         message_id: "msg_2",
         receipt_type: "read",
-        actor_device_id: "bob_device",
+        actor: &receipt_actor("bob_device")?,
         created_at: 1_900_000_311,
     })?);
-    db.mark_read("conv_receipts", "bob_device", "msg_2")?;
+    db.mark_read("conv_receipts", &receipt_actor("bob_device")?, "msg_2")?;
     assert!(matches!(
-        db.mark_read("conv_receipts", "bob_device", "msg_1"),
+        db.mark_read("conv_receipts", &receipt_actor("bob_device")?, "msg_1"),
         Err(StorageError::AuthorizationRejected)
     ));
 
-    db.mark_delivered("conv_receipts", "bob_device", "msg_1", 1_900_000_320, 300)?;
+    db.mark_delivered("conv_receipts", &receipt_actor("bob_device")?, "msg_1", 1_900_000_320, 300)?;
     let messages = db.direct_messages("conv_receipts")?;
     let msg_1_receipt = messages[0]
         .receipts

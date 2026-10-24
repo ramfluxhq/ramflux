@@ -48,6 +48,7 @@ pub struct ConversationListState {
 pub struct DeliveryReceiptRecord {
     pub conversation_id: String,
     pub receiver_device_id: String,
+    pub receiver_principal_commitment: String,
     pub delivered_through_message_id: String,
     pub delivered_at: i64,
     pub ttl_seconds: i64,

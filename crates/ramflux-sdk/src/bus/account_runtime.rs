@@ -92,7 +92,7 @@ impl AccountRuntime {
                 now_unix_timestamp(),
                 None,
             )?;
-            let pool = AccountReaders::start(db)?;
+            let pool = AccountReaders::start(db, account.client.owned_device_identity().ok())?;
             *self.readers.lock().map_err(|_| stopped())? = Some(pool);
         }
         Ok(())
@@ -107,6 +107,9 @@ impl AccountRuntime {
 
     async fn publish(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
         if let Some(account) = self.state.accounts.get(&self.id) {
+            if let Some(pool) = self.readers.lock().map_err(|_| stopped())?.as_ref() {
+                pool.set_identity(account.client.owned_device_identity().ok())?;
+            }
             super::events::publish(&account.client, &self.id, request, &self.events).await?;
         }
         Ok(())

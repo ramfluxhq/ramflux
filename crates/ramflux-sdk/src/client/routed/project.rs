@@ -22,7 +22,7 @@ impl RamfluxClient {
                 self.authorize_routed_receipt(opened, entry, body)?;
                 self.apply_receipt_event_plaintext(
                     body,
-                    &self.inbound_device_reference(entry)?,
+                    &self.authenticated_device_identity(entry)?,
                     &opened.routing.conversation_id,
                 )?
                 .ok_or_else(|| invalid("invalid routed receipt"))?;

@@ -17,6 +17,30 @@ impl RamfluxClient {
             branch,
         )?)
     }
+    pub(crate) fn read_device_identity(&self) -> Result<Option<RootQualifiedDeviceRef>, SdkError> {
+        if self.identity_root.is_some() && self.device_branch.is_some() {
+            return self.owned_device_identity().map(Some);
+        }
+        Ok(self.reader_device_identity.clone())
+    }
+    pub(crate) fn owned_account_device_identity(
+        &self,
+        selector: &str,
+    ) -> Result<RootQualifiedDeviceRef, SdkError> {
+        let owner = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let device = if let Some((root, name)) =
+            ramflux_protocol::parse_qualified_device_id(selector)?
+        {
+            if root != ramflux_crypto::identity_root_commitment(&owner.signing_key.verifying_key())
+            {
+                return Err(invalid("own account device root mismatch"));
+            }
+            name
+        } else {
+            selector.to_owned()
+        };
+        Ok(RootQualifiedDeviceRef::for_owned_account_device(owner, &device)?)
+    }
     pub(crate) fn local_device_identity(
         &self,
         device: &str,

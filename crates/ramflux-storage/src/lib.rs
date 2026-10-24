@@ -19,6 +19,7 @@ mod row_mappers;
 mod schema;
 mod schema_device_namespace;
 mod schema_identity_keys;
+mod schema_receipt_identity;
 
 pub use account_db::AccountDb;
 pub use account_db::journal::{InboxFailurePolicy,InboxFailureSource,JournalBounds,JournalEvent};

@@ -81,6 +81,7 @@ impl AccountDb {
         db.enable_runtime()?;
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;
+        crate::schema_receipt_identity::upgrade(&db.connection)?;
         Ok(db)
     }
 
@@ -200,3 +201,5 @@ const fn insecure_test_sqlite_allowed() -> bool {
 }
 
 mod contact_root;
+#[cfg(test)]
+mod receipt_identity_tests;

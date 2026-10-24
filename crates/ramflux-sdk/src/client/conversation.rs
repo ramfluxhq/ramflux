@@ -285,10 +285,10 @@ impl RamfluxClient {
     pub fn mark_read(
         &self,
         conversation_id: &str,
-        reader_id: &str,
+        reader: &ramflux_crypto::RootQualifiedDeviceRef,
         message_id: &str,
     ) -> Result<(), SdkError> {
-        Ok(self.account_db()?.mark_read(conversation_id, reader_id, message_id)?)
+        Ok(self.account_db()?.mark_read(conversation_id, reader, message_id)?)
     }
 
     /// # Errors
@@ -296,14 +296,14 @@ impl RamfluxClient {
     pub fn mark_delivered(
         &self,
         conversation_id: &str,
-        receiver_device_id: &str,
+        receiver: &ramflux_crypto::RootQualifiedDeviceRef,
         message_id: &str,
         delivered_at: i64,
         ttl_seconds: i64,
     ) -> Result<DeliveryReceiptRecord, SdkError> {
         Ok(self.account_db()?.mark_delivered(
             conversation_id,
-            receiver_device_id,
+            receiver,
             message_id,
             delivered_at,
             ttl_seconds,
@@ -315,13 +315,13 @@ impl RamfluxClient {
     pub fn set_unread_marker(
         &self,
         conversation_id: &str,
-        marker_owner: &str,
+        owner: &ramflux_crypto::RootQualifiedDeviceRef,
         message_id: &str,
         marker_epoch: u64,
     ) -> Result<(), SdkError> {
         Ok(self.account_db()?.set_unread_marker(
             conversation_id,
-            marker_owner,
+            owner,
             message_id,
             marker_epoch,
         )?)
@@ -332,10 +332,10 @@ impl RamfluxClient {
     pub fn clear_unread_marker(
         &self,
         conversation_id: &str,
-        marker_owner: &str,
+        owner: &ramflux_crypto::RootQualifiedDeviceRef,
         marker_epoch: u64,
     ) -> Result<(), SdkError> {
-        Ok(self.account_db()?.clear_unread_marker(conversation_id, marker_owner, marker_epoch)?)
+        Ok(self.account_db()?.clear_unread_marker(conversation_id, owner, marker_epoch)?)
     }
 
     /// # Errors
@@ -343,9 +343,9 @@ impl RamfluxClient {
     pub fn conversation_projection(
         &self,
         conversation_id: &str,
-        reader_id: &str,
+        reader: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<ConversationProjection, SdkError> {
-        Ok(self.account_db()?.conversation_projection(conversation_id, reader_id)?)
+        Ok(self.account_db()?.conversation_projection(conversation_id, Some(reader))?)
     }
 }
 

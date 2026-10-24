@@ -20,6 +20,7 @@ impl AccountDb {
              );
              CREATE INDEX IF NOT EXISTS runtime_outbox_pending ON runtime_outbox(sequence) WHERE published=0;
              CREATE TABLE IF NOT EXISTS runtime_ack (envelope_id TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS runtime_scoped_ack (receiver TEXT NOT NULL,target TEXT NOT NULL,inbox_seq INTEGER NOT NULL,PRIMARY KEY(receiver,target,inbox_seq));
              CREATE TABLE IF NOT EXISTS runtime_actor_state (state_kind TEXT PRIMARY KEY, state_json BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS runtime_operation (
                 operation_id TEXT PRIMARY KEY,

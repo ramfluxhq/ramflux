@@ -74,6 +74,8 @@ pub struct ForwardedFromMetadata {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MessageReceiptState {
     pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_commitment: Option<String>,
     pub state: String,
     pub delivered_at: Option<i64>,
     pub read_at: Option<i64>,
@@ -85,7 +87,7 @@ pub struct ReceiptEventWrite<'a> {
     pub conversation_id: &'a str,
     pub message_id: &'a str,
     pub receipt_type: &'a str,
-    pub actor_device_id: &'a str,
+    pub actor: &'a ramflux_crypto::RootQualifiedDeviceRef,
     pub created_at: i64,
 }
 

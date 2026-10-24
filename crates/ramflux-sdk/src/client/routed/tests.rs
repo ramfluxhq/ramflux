@@ -420,7 +420,11 @@ fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(
     assert_eq!(b.client.legacy_routing_binding("bob", &entry)?, None);
     b.client.account_db()?.hold_unrouted("legacy-envelope", 1, &serde_json::to_vec(&entry)?, 1)?;
     assert_eq!(b.client.account_db()?.unrouted_count()?, 1);
-    assert!(!b.client.account_db()?.has_gateway_ack("legacy-envelope")?);
+    assert!(!b.client.account_db()?.has_gateway_ack(
+        &b.client.owned_device_identity()?,
+        "bob",
+        1
+    )?);
     // Explicit prior session state, rather than a caller/driver guessing from local conversations.
     let receiving =
         b.client.load_or_create_recv_dm_session("legacy-conversation", header.as_ref())?;
