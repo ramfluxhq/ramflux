@@ -59,6 +59,8 @@ impl AgentBus for RfdBus {
                 | "bus.subscribe"
                 | "message.submit"
                 | "group.send"
+                | "surface.send"
+                | "surface.get"
         ) {
             return Err(Error::Unauthorized);
         }

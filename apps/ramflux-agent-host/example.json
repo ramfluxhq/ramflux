@@ -6,7 +6,31 @@
   "per_conversation_interval_ms": 1000,
   "max_conversations": 128,
   "rules": [
-    { "pattern": "@agent ping", "reply": "pong" },
-    { "pattern": "@agent summarize", "reply": "Summary\n- Request received.\n- Deterministic rule engine completed." }
+    {
+      "pattern": "@agent ping",
+      "reply": "pong"
+    },
+    {
+      "pattern": "@agent summarize",
+      "reply": "Summary\n- Request received.\n- Deterministic rule engine completed."
+    },
+    {
+      "pattern": "@agent checklist",
+      "reply": "Checklist\n- Verify protocol behavior.\n- Verify the result fallback.",
+      "surface": {
+        "chunk_bytes": 512,
+        "choices": [
+          {
+            "id": "thu",
+            "label": "Thursday"
+          },
+          {
+            "id": "mon",
+            "label": "Monday"
+          }
+        ],
+        "close_on_action": true
+      }
+    }
   ]
 }

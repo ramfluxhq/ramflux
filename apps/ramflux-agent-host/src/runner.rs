@@ -10,10 +10,10 @@ use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
 use serde_json::json;
 
 pub struct AgentHost<E> {
-    config: Config,
-    engine: E,
-    store: CheckpointStore,
-    state: Checkpoint,
+    pub(crate) config: Config,
+    pub(crate) engine: E,
+    pub(crate) store: CheckpointStore,
+    pub(crate) state: Checkpoint,
 }
 impl<E: EngineProvider> AgentHost<E> {
     /// # Errors
@@ -22,9 +22,14 @@ impl<E: EngineProvider> AgentHost<E> {
         config.validate()?;
         let store = CheckpointStore::new(config.state_file.clone())?;
         let state = store.load()?;
-        if state.last_reply_ms.len() > config.max_conversations
+        if state.handled_actions.len() > 2048
+            || state.last_reply_ms.len() > config.max_conversations
             || state.pending.as_ref().is_some_and(|p| {
-                !matches!(p.method.as_str(), "message.submit" | "group.send")
+                !matches!(p.method.as_str(), "message.submit" | "group.send" | "surface.send")
+                    || p.remaining.len() > 95
+                    || p.remaining.iter().any(|o| {
+                        o.method != "surface.send" || o.body["conversation_id"] != p.conversation_id
+                    })
                     || p.body["conversation_id"] != p.conversation_id
             })
         {
@@ -49,6 +54,7 @@ impl<E: EngineProvider> AgentHost<E> {
             "group.changed",
             "device.changed",
             "identity.device_branch.revoked",
+            "surface.changed",
             "account.locked"
         ]);
         let subscription = bus
@@ -115,6 +121,9 @@ impl<E: EngineProvider> AgentHost<E> {
         if matches!(event.method.as_str(), "message.received" | "group.message.received") {
             self.message(bus, &event, seq, now_ms).await?;
         }
+        if event.method == "surface.changed" {
+            self.surface_action(bus, &event, seq, now_ms).await?;
+        }
         self.state.cursor = Some(seq);
         self.store.save(&self.state)
     }
@@ -170,56 +179,36 @@ impl<E: EngineProvider> AgentHost<E> {
         };
         let intents =
             self.engine.intents(&ConversationInput { conversation_id, message_id, text })?;
-        if intents.len() > 1 {
-            return Err(Error::Limit);
+        if intents.is_empty() {
+            return Ok(());
         }
-        if let Some(Intent::ReplyText(text)) = intents.first() {
+        let mut outputs = if let [Intent::ReplyText(text)] = intents.as_slice() {
             if text.is_empty() || text.len() > crate::config::MAX_TEXT_BYTES {
                 return Err(Error::Limit);
             }
             let (method, operation_id, body) =
                 participant::reply_body(bus, &self.state, &conversation, message, text, 0).await?;
-            self.state.pending = Some(Pending {
-                seq,
-                conversation_id: conversation_id.into(),
-                method,
-                operation_id,
-                body,
-            });
-            self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
-            self.store.save(&self.state)?;
-            self.recover_pending(bus).await?;
-        }
-        Ok(())
-    }
-    async fn recover_pending(&mut self, bus: &mut impl AgentBus) -> Result<()> {
-        let Some(pending) = self.state.pending.clone() else {
-            return Ok(());
+            vec![crate::checkpoint::Output { method, operation_id, body }]
+        } else {
+            if !matches!(intents.first(), Some(Intent::CreateSurface(_))) {
+                return Err(Error::State);
+            }
+            crate::runner_output::surface_outputs(conversation_id, &intents, 1)?
         };
-        participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        if let Some(current) = participant::conversation(
-            bus,
-            &self.state,
-            &pending.conversation_id,
-            self.config.max_conversations,
-        )
-        .await?
-        {
-            if pending.body["sender_id"] != self.state.device_id {
-                return Err(Error::Unauthorized);
-            }
-            let same_context = if pending.method == "group.send" {
-                current["group_id"] == pending.body["group_id"]
-            } else {
-                current["group_id"].is_null()
-            };
-            if same_context {
-                bus.request(&pending.method, pending.body, Some(&pending.operation_id)).await?;
-            }
-        }
-        self.state.cursor = Some(self.state.cursor.unwrap_or(0).max(pending.seq));
-        self.state.pending = None;
-        self.store.save(&self.state)
+        let first = outputs.remove(0);
+        self.state.pending = Some(Pending {
+            seq,
+            conversation_id: conversation_id.into(),
+            method: first.method,
+            operation_id: first.operation_id,
+            body: first.body,
+            remaining: outputs,
+            action: None,
+        });
+        self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
+        self.store.save(&self.state)?;
+        self.recover_pending(bus).await?;
+        Ok(())
     }
     /// Receive metadata events and periodically ask rfd to drain its authenticated inbox.
     /// # Errors

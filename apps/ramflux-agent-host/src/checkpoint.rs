@@ -19,6 +19,8 @@ pub struct Checkpoint {
     pub cursor: Option<u64>,
     pub last_reply_ms: BTreeMap<String, u64>,
     pub(crate) pending: Option<Pending>,
+    #[serde(default)]
+    pub(crate) handled_actions: Vec<String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +30,24 @@ pub(crate) struct Pending {
     pub method: String,
     pub operation_id: String,
     pub body: Value,
+    #[serde(default)]
+    pub remaining: Vec<Output>,
+    #[serde(default)]
+    pub action: Option<ActionWork>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Output {
+    pub method: String,
+    pub operation_id: String,
+    pub body: Value,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActionWork {
+    pub surface_ref: String,
+    pub action_id: String,
+    pub attempts: u8,
 }
 pub struct CheckpointStore {
     path: PathBuf,

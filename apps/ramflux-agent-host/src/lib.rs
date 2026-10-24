@@ -8,10 +8,12 @@ mod config;
 mod engine;
 mod participant;
 mod runner;
+mod runner_output;
+mod runner_surface;
 pub use bus::{AgentBus, RfdBus};
 pub use checkpoint::{Checkpoint, CheckpointStore};
-pub use config::{Config, Rule};
-pub use engine::{ConversationInput, EngineProvider, Intent, RuleEngine};
+pub use config::{Choice, Config, Rule, SurfaceRule};
+pub use engine::{ActionInput, ConversationInput, EngineProvider, Intent, RuleEngine};
 pub use runner::AgentHost;
 
 pub type Result<T> = std::result::Result<T, Error>;

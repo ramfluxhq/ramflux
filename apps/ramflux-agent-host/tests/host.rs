@@ -4,4 +4,6 @@ mod host {
     mod recovery;
     mod safety;
     mod support;
+    mod surface_bus;
+    mod surfaces;
 }
