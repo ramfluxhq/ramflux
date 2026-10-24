@@ -172,3 +172,23 @@ fn r5_one_assignees_unacknowledged_decisions_have_a_peer_bound_in_the_requesters
     assert_eq!(f.human.account_db()?.task_state_usage("task/approval_decision_out/")?.0, 16);
     Ok(())
 }
+
+#[test]
+fn r5_an_expired_receiver_deadline_cannot_authorize_task_resolution_with_a_longer_signed_grant()
+-> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let mut grant = grant(&f)?;
+    grant.state.expires_at = crate::time::now_unix_timestamp() - 1;
+    super::super::decisions::store(&f, &grant)?;
+    assert!(
+        f.agent
+            .witness_task_decision(
+                "thread",
+                resolution("task", TaskDecision::Resume),
+                crate::client::task::decision::Evidence::Grant { record: Box::new(grant) }
+            )
+            .is_err()
+    );
+    Ok(())
+}
