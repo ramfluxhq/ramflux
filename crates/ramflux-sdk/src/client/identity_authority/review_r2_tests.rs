@@ -139,6 +139,8 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
         "member",
         &b.principal_commitment,
     )?;
+    let local = alice.client.local_device_identity("alice")?;
+    let bob_device = alice.client.device_identity(&bob_ref)?;
     let pin = alice.client.account_db()?.group_member_device_key("group", &bob_ref)?;
     let pair = ramflux_crypto::DmSession::initiator(
         [1; 32],
@@ -146,7 +148,7 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
         dm_device_id_hash("shared"),
         [2; 32],
     )?;
-    alice.client.persist_pair("alice", &bob_ref, &[3; 32], &pair)?;
+    alice.client.persist_pair(&local, &bob_device, &[3; 32], &pair)?;
     observe(&alice.client, &m)?;
     assert!(alice.client.account_db()?.client_record("device", "shared").is_err());
     assert_eq!(
@@ -170,18 +172,12 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
     assert!(alice.client.require_cached_root_authority(&mallory_ref).is_err());
     assert_eq!(alice.client.account_db()?.group_member_device_key("group", &bob_ref)?, pin);
     assert_eq!(
-        alice.client.active_pair("alice", &bob_ref)?.ok_or("bob pair")?.0.session_id,
+        alice.client.active_pair(&local, &bob_device)?.ok_or("bob pair")?.0.session_id,
         pair.session_id
     );
     assert_ne!(
-        RamfluxClient::pair_key(
-            &alice.client.local_device_identity("alice")?,
-            &alice.client.device_identity(&bob_ref)?
-        )?,
-        RamfluxClient::pair_key(
-            &alice.client.local_device_identity("alice")?,
-            &alice.client.device_identity(&mallory_ref)?
-        )?
+        RamfluxClient::pair_key(&local, &bob_device)?,
+        RamfluxClient::pair_key(&local, &alice.client.device_identity(&mallory_ref)?)?
     );
     assert_eq!(
         alice
@@ -211,7 +207,7 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
         ttl: 300,
     };
     assert_eq!(
-        alice.client.send_pair_session_from_url("alice", &addressed, None)?.0.session_id,
+        alice.client.send_pair_session_from_url(&local, &addressed, None)?.0.session_id,
         pair.session_id
     );
     Ok(())

@@ -29,7 +29,11 @@ pub(super) fn fresh(
     trust(receiver, sender)?;
     let mut msg = outgoing(sender, receiver, id);
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
-    let (mut session, header, bundle) = sender.client.new_send_pair(&sender.id, &msg, bundle)?;
+    let (mut session, header, bundle) = sender.client.new_send_pair(
+        &sender.client.local_device_identity(&sender.id)?,
+        &msg,
+        bundle,
+    )?;
     let encrypted = sender.client.seal_routed_with_route(
         &msg,
         b"fresh",
@@ -67,7 +71,10 @@ async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair() -> Resul
     settle(&mut alice, &mut bob).await?;
     let old = alice
         .client
-        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .active_pair(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
@@ -81,7 +88,10 @@ async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair() -> Resul
     alice.client.apply_routed_entry(&mut ae, &pool()?, &entry, false).await?;
     let active = alice
         .client
-        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .active_pair(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
@@ -98,7 +108,10 @@ async fn unverified_fresh_bootstrap_cannot_displace_a_settled_pair() -> Result<(
     settle(&mut alice, &mut bob).await?;
     let old = alice
         .client
-        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .active_pair(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
@@ -109,7 +122,10 @@ async fn unverified_fresh_bootstrap_cannot_displace_a_settled_pair() -> Result<(
     assert_eq!(
         alice
             .client
-            .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+            .active_pair(
+                &alice.client.local_device_identity("alice")?,
+                &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?
+            )?
             .ok_or_else(|| invalid("pair"))?
             .0
             .session_id,
@@ -187,14 +203,17 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
     settle(&mut alice, &mut bob).await?;
     let (mut session, bundle) = alice
         .client
-        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .active_pair(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?;
     for _ in 0..1001 {
         session.encrypt(b"lost", b"discarded")?;
     }
     alice.client.persist_pair(
-        "alice",
-        &fixture_peer_reference(&alice.client, "bob")?,
+        &alice.client.local_device_identity("alice")?,
+        &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
         &bundle,
         &session,
     )?;
@@ -249,7 +268,10 @@ fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), Sd
     let before = opened.session.clone();
     let (mut send, bundle) = alice
         .client
-        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .active_pair(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?;
     for _ in 0..3 {
         send.encrypt(b"lost", b"discarded")?;
@@ -266,8 +288,8 @@ fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), Sd
         ciphertext,
     };
     bob.client.persist_pair(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         &bundle,
         &opened.session,
     )?;
@@ -283,7 +305,10 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
     settle(&mut alice, &mut bob).await?;
     let old = alice
         .client
-        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .active_pair(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
@@ -297,7 +322,10 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
     bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await?;
     assert_eq!(
         bob.client
-            .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .active_pair(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
             .ok_or_else(|| invalid("pair"))?
             .0
             .session_id,
@@ -305,7 +333,10 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
     );
     assert!(
         bob.client
-            .archived_pairs("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .archived_pairs(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
             .contains(&old)
     );
     assert!(
@@ -337,7 +368,10 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
     let incoming = decode(&reset.envelope)?.ciphertext.session_id;
     assert_eq!(
         bob.client
-            .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .active_pair(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
             .ok_or_else(|| invalid("pair"))?
             .0
             .session_id,
@@ -345,7 +379,10 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
     );
     assert!(
         bob.client
-            .archived_pairs("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .archived_pairs(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
             .contains(&old.clone().max(incoming))
     );
     assert!(

@@ -9,21 +9,23 @@ pub(super) const MAX_PAIR_ARCHIVE: usize = 8;
 impl RamfluxClient {
     pub(super) fn archived_pairs(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Vec<String>, SdkError> {
         Ok(self
             .account_db()?
             .load_actor_state::<Vec<String>>(&format!(
                 "{}/archive",
-                RamfluxClient::pair_key(
-                    &self.local_device_identity(local)?,
-                    &self.device_identity(remote)?
-                )?
+                RamfluxClient::pair_key(local, remote)?
             ))?
             .unwrap_or_default())
     }
-    pub(super) fn archive_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
+    pub(super) fn archive_pair(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+        id: &str,
+    ) -> Result<(), SdkError> {
         let mut archive = self.archived_pairs(local, remote)?;
         if archive.iter().any(|old| old == id) {
             return Ok(());
@@ -35,23 +37,19 @@ impl RamfluxClient {
             }
         }
         self.account_db()?.persist_actor_state(
-            &format!(
-                "{}/archive",
-                RamfluxClient::pair_key(
-                    &self.local_device_identity(local)?,
-                    &self.device_identity(remote)?
-                )?
-            ),
+            &format!("{}/archive", RamfluxClient::pair_key(local, remote)?),
             &archive,
         )?;
         Ok(())
     }
-    pub(super) fn promote_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
+    pub(super) fn promote_pair(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+        id: &str,
+    ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let key = RamfluxClient::pair_key(
-            &self.local_device_identity(local)?,
-            &self.device_identity(remote)?,
-        )?;
+        let key = RamfluxClient::pair_key(local, remote)?;
         if let Some(old) = db.load_actor_state::<String>(&key)?
             && old != id
         {
@@ -67,8 +65,8 @@ impl RamfluxClient {
     }
     pub(super) fn confirm_pair_record(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
         session: &ramflux_crypto::DmSession,
         reset: bool,
         bootstrap: bool,
@@ -78,10 +76,7 @@ impl RamfluxClient {
         let archived = self.archived_pairs(local, remote)?.contains(id);
         let fresh =
             !db.load_actor_state::<bool>(&format!("dm-pair/confirmed/{id}"))?.unwrap_or(false);
-        let key = RamfluxClient::pair_key(
-            &self.local_device_identity(local)?,
-            &self.device_identity(remote)?,
-        )?;
+        let key = RamfluxClient::pair_key(local, remote)?;
         let current = db.load_actor_state::<String>(&key)?;
         let current_confirmed = current
             .as_ref()
@@ -108,7 +103,7 @@ impl RamfluxClient {
             db.append_journal(
                 &format!("pair-promoted:{id}"),
                 "session.reset",
-                &serde_json::json!({"device_id": remote, "reason": if reset {"verified_reset_archived_previous"} else {"verified_bootstrap_archived_previous"}}),
+                &serde_json::json!({"device_id": remote.storage_key(), "reason": if reset {"verified_reset_archived_previous"} else {"verified_bootstrap_archived_previous"}}),
                 now_unix_timestamp(),
                 None,
             )?;
@@ -122,7 +117,7 @@ impl RamfluxClient {
                 db.append_journal(
                     &format!("pair-manual-restored:{id}"),
                     "session.reset",
-                    &serde_json::json!({"device_id":remote,"state":"healthy"}),
+                    &serde_json::json!({"device_id":remote.storage_key(),"state":"healthy"}),
                     now_unix_timestamp(),
                     None,
                 )?;
@@ -130,10 +125,7 @@ impl RamfluxClient {
             db.remove_actor_state(&format!("{key}/reset-pending"))?;
             db.remove_actor_state(&format!(
                 "dm-pair/reset-work/{}",
-                RamfluxClient::pair_key(
-                    &self.local_device_identity(local)?,
-                    &self.device_identity(remote)?
-                )?
+                RamfluxClient::pair_key(local, remote)?
             ))?;
         }
         Ok(())

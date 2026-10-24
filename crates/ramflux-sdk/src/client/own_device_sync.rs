@@ -997,7 +997,12 @@ pub(crate) mod tests {
             source.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             "remote_device",
         )?;
-        source.persist_pair("source_device_sync", remote.storage_key(), &[3; 32], &session)?;
+        source.persist_pair(
+            &source.local_device_identity("source_device_sync")?,
+            &source.device_identity(remote.storage_key())?,
+            &[3; 32],
+            &session,
+        )?;
         source.send_direct_message(
             "history-thread",
             "history-message",

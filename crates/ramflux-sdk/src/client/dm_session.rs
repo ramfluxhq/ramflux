@@ -92,7 +92,7 @@ impl RamfluxClient {
         let initiator_device_id_hash = dm_device_id_hash(own_device_id);
         let recipient_device_id_hash = dm_device_id_hash(recipient_device_id);
         let bootstrap_sequence = if aad.is_some() {
-            Some(self.allocate_bootstrap_sequence(own_device_id)?)
+            Some(self.allocate_bootstrap_sequence(&self.local_device_identity(own_device_id)?)?)
         } else {
             None
         };

@@ -4,6 +4,9 @@
 //! Durable sender allocation and authenticated receive high-water marks survive secret erasure.
 use super::{RamfluxClient, SdkDmX3dhHeader, SdkError, invalid};
 const MAX_SEQUENCE: u64 = 9_007_199_254_740_991;
+pub(crate) fn bootstrap_sequence_key(local: &ramflux_crypto::RootQualifiedDeviceRef) -> String {
+    format!("dm-pair/bootstrap-sequence/{}", local.storage_key())
+}
 pub(crate) fn bootstrap_aad(
     aad: &[u8],
     sequence: Option<u64>,
@@ -29,10 +32,13 @@ pub(crate) fn bootstrap_aad(
     }
 }
 impl RamfluxClient {
-    pub(crate) fn allocate_bootstrap_sequence(&self, local: &str) -> Result<u64, SdkError> {
+    pub(crate) fn allocate_bootstrap_sequence(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<u64, SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| {
-            let key = format!("dm-pair/bootstrap-sequence/{local}");
+            let key = bootstrap_sequence_key(local);
             let sequence = db
                 .load_actor_state::<u64>(&key)?
                 .unwrap_or(0)
@@ -46,8 +52,8 @@ impl RamfluxClient {
     }
     pub(super) fn check_bootstrap_sequence(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
         header: &SdkDmX3dhHeader,
     ) -> Result<u64, SdkError> {
         if header.bootstrap_ordering_version != Some(2) {
@@ -68,29 +74,32 @@ impl RamfluxClient {
     }
     pub(super) fn bootstrap_high_water_key(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<String, SdkError> {
-        let remote = self.device_reference(remote)?;
-        let remote = remote.as_str();
-        let record = self.trusted_device(remote)?;
+        let record = self.trusted_device(remote.storage_key())?;
         let principal = record["principal_id"]
             .as_str()
             .ok_or_else(|| invalid("bootstrap principal missing"))?;
         let commitment = record["principal_commitment"]
             .as_str()
             .ok_or_else(|| invalid("bootstrap commitment missing"))?;
-        let pair = RamfluxClient::pair_key(
-            &self.local_device_identity(local)?,
-            &self.device_identity(remote)?,
-        )?;
+        let pair = RamfluxClient::pair_key(local, remote)?;
         let hash = ramflux_protocol::hash_base64url(
             "ramflux.sdk.bootstrap.owner.v2",
-            &ramflux_protocol::canonical_json_bytes(&(principal, commitment, remote))?,
+            &ramflux_protocol::canonical_json_bytes(&(
+                principal,
+                commitment,
+                remote.storage_key(),
+            ))?,
         );
         Ok(format!("{pair}/bootstrap-high-water/{hash}"))
     }
-    pub(super) fn bootstrap_high_water(&self, local: &str, remote: &str) -> Result<u64, SdkError> {
+    pub(super) fn bootstrap_high_water(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<u64, SdkError> {
         Ok(self
             .account_db()?
             .load_actor_state(&self.bootstrap_high_water_key(local, remote)?)?
@@ -99,8 +108,8 @@ impl RamfluxClient {
     /// Called only after authenticated decryption, in the same transaction as new session commit.
     pub(super) fn commit_bootstrap_sequence(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
         header: Option<&SdkDmX3dhHeader>,
         id: &str,
     ) -> Result<(), SdkError> {

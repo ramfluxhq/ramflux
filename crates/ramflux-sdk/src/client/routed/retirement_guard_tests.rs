@@ -24,7 +24,11 @@ async fn pruned_tombstones_cannot_revive_a_held_bootstrap_or_clear_manual_recove
     let current = super::session_record::active(&bob, "alice")?;
     assert!(bob.client.open_routed(&held, "bob").is_err());
     assert_eq!(super::session_record::active(&bob, "alice")?, current);
-    bob.client.mark_pair_manual("bob", &alice.reference()?, now_unix_timestamp())?;
+    bob.client.mark_pair_manual(
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&alice.reference()?)?,
+        now_unix_timestamp(),
+    )?;
     let pair = RamfluxClient::pair_key(
         &bob.client.local_device_identity("bob")?,
         &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
@@ -57,7 +61,12 @@ fn changing_the_bootstrap_sequence_without_reencrypting_is_rejected() -> Result<
     };
     assert!(bob.client.open_routed(&tampered, "bob").is_err());
     assert!(
-        bob.client.active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?.is_none()
+        bob.client
+            .active_pair(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
+            .is_none()
     );
     Ok(())
 }

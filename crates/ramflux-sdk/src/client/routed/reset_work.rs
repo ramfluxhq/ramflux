@@ -10,12 +10,15 @@ impl RamfluxClient {
     pub(super) async fn send_pair_reset(
         &self,
         engine: &mut GatewaySessionEngine,
-        remote: &str,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
         self.send_pair_control(engine, remote, "pair.session.reset.v1").await
     }
-    fn pair_delivery_id(&self, remote: &str) -> Result<String, SdkError> {
-        let record = self.trusted_device(remote)?;
+    fn pair_delivery_id(
+        &self,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<String, SdkError> {
+        let record = self.trusted_device(remote.storage_key())?;
         if let Some(target) = record.get("target_delivery_id").and_then(serde_json::Value::as_str) {
             return Ok(target.to_owned());
         }
@@ -27,28 +30,29 @@ impl RamfluxClient {
                 .and_then(serde_json::Value::as_array)
                 .into_iter()
                 .flatten()
-                .find(|device| device["device_id"] == remote || device["id"] == remote)
+                .find(|device| {
+                    device["device_id"] == remote.device_id() || device["id"] == remote.device_id()
+                })
                 .and_then(|device| device.get("target_delivery_id"))
                 .and_then(serde_json::Value::as_str)
         {
             return Ok(target.to_owned());
         }
-        Ok(remote.to_owned())
+        Ok(remote.device_id().to_owned())
     }
     async fn send_pair_control(
         &self,
         engine: &mut GatewaySessionEngine,
-        remote: &str,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
         kind: &str,
     ) -> Result<(), SdkError> {
         let id = format!(
             "pair-control-{}",
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         );
-        let reference = self.device_reference(remote)?;
-        let (root, wire_remote) = ramflux_protocol::parse_qualified_device_id(&reference)?
-            .ok_or_else(|| super::invalid("reset requires a root-qualified peer"))?;
-        let target_delivery_id = self.pair_delivery_id(&reference)?;
+        let root = remote.root_commitment().to_owned();
+        let wire_remote = remote.device_id().to_owned();
+        let target_delivery_id = self.pair_delivery_id(remote)?;
         let mut message = GatewayDirectMessage {
             conversation_id: id.clone(),
             message_id: id.clone(),
@@ -66,7 +70,7 @@ impl RamfluxClient {
             .seal_routed_as(
                 engine,
                 &message,
-                &serde_json::to_vec(&serde_json::json!({"type":kind,"rejected_bootstrap_floor":if kind=="pair.session.reset.v1"{self.bootstrap_high_water(&engine.config.device_id,remote)?}else{0}}))?,
+                &serde_json::to_vec(&serde_json::json!({"type":kind,"rejected_bootstrap_floor":if kind=="pair.session.reset.v1"{self.bootstrap_high_water(&self.local_device_identity(&engine.config.device_id)?,remote)?}else{0}}))?,
                 Route::control(),
             )
             .await?;
@@ -87,28 +91,68 @@ impl RamfluxClient {
         // Submission is transport acceptance, not peer confirmation. Work remains durable.
         Ok(())
     }
+    pub(super) fn legacy_upgrade_reset_work(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Vec<ResetWork>, SdkError> {
+        let db = self.account_db()?;
+        db.write_transaction(|| -> Result<Vec<ResetWork>, SdkError> {
+            let mut retained = Vec::new();
+            for key in db.actor_state_keys("dm-pair/reset-work/")? {
+                let Some(mut item) = db.load_actor_state::<ResetWork>(&key)? else { continue };
+                let remote = self.device_identity(&item.remote).ok();
+                let bound = remote
+                    .as_ref()
+                    .map(|remote| Self::reset_work_key(local, remote))
+                    .transpose()?;
+                if bound.as_deref() == Some(&key)
+                    && (item.local == local.storage_key() || item.local == local.device_id())
+                {
+                    // The existing pair key proves the root context; spelling alone never does.
+                    local.storage_key().clone_into(&mut item.local);
+                    if let Some(remote) = &remote {
+                        remote.storage_key().clone_into(&mut item.remote);
+                    }
+                    db.persist_actor_state(&key, &item)?;
+                    retained.push(item);
+                } else if item.local == local.device_id() || item.local == local.storage_key() {
+                    db.persist_actor_state(
+                        &format!(
+                            "legacy/reset-work/{}",
+                            ramflux_protocol::encode_base64url(key.as_bytes())
+                        ),
+                        &item,
+                    )?;
+                    db.remove_actor_state(&key)?;
+                }
+            }
+            Ok(retained)
+        })
+    }
+
     pub(crate) async fn retry_pair_resets(
         &self,
         engine: &mut GatewaySessionEngine,
         at: i64,
     ) -> Result<(), SdkError> {
-        let work = self.account_db()?.list_actor_states::<ResetWork>("dm-pair/reset-work/")?;
-        let local = engine.config.device_id.clone();
+        let local = self.local_device_identity(&engine.config.device_id)?;
+        let work = self.legacy_upgrade_reset_work(&local)?;
         let mut attempted = false;
-        for mut item in work.into_iter().filter(|work| work.local == local) {
-            if !self.pair_recovery_allowed(&item.local, &item.remote)? {
-                self.remove_device_pair(&item.remote, "retry_relationship_ended")?;
+        for mut item in work.into_iter().filter(|work| work.local == local.storage_key()) {
+            let remote = self.device_identity(&item.remote)?;
+            if !self.pair_recovery_allowed(&local, &remote)? {
+                self.remove_device_pair(&remote, "retry_relationship_ended")?;
                 continue;
             }
             let first = self.normalize_reset_work(&mut item)?;
             if at >= first.saturating_add(MAX_RESET_LIFETIME) {
-                self.mark_pair_manual(&item.local, &item.remote, at)?;
+                self.mark_pair_manual(&local, &remote, at)?;
                 continue;
             }
             if !attempted && item.next_at <= at {
                 attempted = true;
-                if self.begin_pair_recovery(&item.local, &item.remote, at)?
-                    && let Err(error) = self.send_pair_reset(engine, &item.remote).await
+                if self.begin_pair_recovery(&local, &remote, at)?
+                    && let Err(error) = self.send_pair_reset(engine, &remote).await
                 {
                     tracing::debug!(%error,"device pair reset remains pending");
                 }

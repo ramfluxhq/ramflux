@@ -24,6 +24,9 @@ async fn tls_own_revocation_ignores_a_friends_same_name_and_retires_qualified_se
     ));
     let own_ref = ramflux_protocol::qualified_device_id(&own.principal_commitment, "two")?;
     let foreign_ref = ramflux_protocol::qualified_device_id(&foreign.principal_commitment, "two")?;
+    let local = owner.client.local_device_identity("one")?;
+    let own_device = owner.client.device_identity(&own_ref)?;
+    let foreign_device = owner.client.device_identity(&foreign_ref)?;
     let own_pair = ramflux_crypto::DmSession::initiator(
         [1; 32],
         dm_device_id_hash("one"),
@@ -36,10 +39,10 @@ async fn tls_own_revocation_ignores_a_friends_same_name_and_retires_qualified_se
         dm_device_id_hash("two"),
         [4; 32],
     )?;
-    owner.client.persist_pair("one", &own_ref, &[5; 32], &own_pair)?;
-    owner.client.persist_pair("one", &foreign_ref, &[6; 32], &foreign_pair)?;
+    owner.client.persist_pair(&local, &own_device, &[5; 32], &own_pair)?;
+    owner.client.persist_pair(&local, &foreign_device, &[6; 32], &foreign_pair)?;
     assert_eq!(
-        owner.client.account_db()?.pair_session_ids("one", &own_ref)?,
+        owner.client.account_db()?.pair_session_ids(&local, &own_device)?,
         vec![own_pair.session_id.clone()]
     );
     let (gateway, server) =
@@ -50,16 +53,19 @@ async fn tls_own_revocation_ignores_a_friends_same_name_and_retires_qualified_se
     assert!(
         record.devices.iter().any(|d| d.device_id == "two" && d.status == DeviceSetStatus::Revoked)
     );
-    assert_eq!(owner.client.account_db()?.pair_session_ids("one", &own_ref)?, Vec::<String>::new());
+    assert_eq!(
+        owner.client.account_db()?.pair_session_ids(&local, &own_device)?,
+        Vec::<String>::new()
+    );
     assert!(
         !owner
             .client
             .account_db()?
             .actor_state_exists(&format!("dm-pair/session/{}", own_pair.session_id))?
     );
-    assert!(owner.client.active_pair("one", &own_ref)?.is_none());
+    assert!(owner.client.active_pair(&local, &own_device)?.is_none());
     assert_eq!(
-        owner.client.active_pair("one", &foreign_ref)?.ok_or("foreign pair")?.0.session_id,
+        owner.client.active_pair(&local, &foreign_device)?.ok_or("foreign pair")?.0.session_id,
         foreign_pair.session_id
     );
     assert_eq!(

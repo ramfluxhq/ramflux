@@ -50,21 +50,21 @@ async fn reset_attempts_never_exceed_ten_in_a_rolling_day() -> Result<(), SdkErr
     let at = now_unix_timestamp();
     for n in 0..10 {
         assert!(bob.client.begin_pair_recovery(
-            "bob",
-            &fixture_peer_reference(&bob.client, "alice")?,
+            &bob.client.local_device_identity("bob")?,
+            &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
             at + n * 301
         )?);
     }
     assert!(!bob.client.begin_pair_recovery(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         at + 3010
     )?);
     let events = bob.client.account_db()?.journal_after(0, 128)?;
     assert!(events.iter().any(|event| event.body["reason"] == "daily_budget"));
     assert!(bob.client.begin_pair_recovery(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         at + 86400
     )?);
     Ok(())
@@ -91,7 +91,12 @@ async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_witho
     bob.client.retry_pair_resets(&mut be, now).await?;
     assert!(!has_work(&bob)?);
     assert!(
-        bob.client.active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?.is_none()
+        bob.client
+            .active_pair(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
+            .is_none()
     );
     assert_eq!(
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?.len(),
@@ -112,8 +117,8 @@ async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_witho
                 && event.body["state"] == "needs_manual_recovery")
     );
     assert!(!bob.client.begin_pair_recovery(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         now + 8 * 86400
     )?);
     assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
@@ -135,7 +140,12 @@ async fn relationship_end(block: bool) -> Result<(), SdkError> {
     }
     assert!(!has_work(&bob)?);
     assert!(
-        bob.client.active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?.is_none()
+        bob.client
+            .active_pair(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
+            .is_none()
     );
     assert_eq!(
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?.len(),
@@ -239,8 +249,8 @@ async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends() ->
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
     assert!(alice.client.begin_pair_recovery(
-        "alice",
-        &fixture_peer_reference(&alice.client, "bob")?,
+        &alice.client.local_device_identity("alice")?,
+        &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
         now_unix_timestamp()
     )?);
     let (reset, plain) = {
@@ -336,8 +346,8 @@ async fn upgrading_legacy_work_uses_its_original_attempt_instead_of_renewing_fro
         settle(&mut alice, &mut bob).await?;
         let now = now_unix_timestamp();
         assert!(bob.client.begin_pair_recovery(
-            "bob",
-            &fixture_peer_reference(&bob.client, "alice")?,
+            &bob.client.local_device_identity("bob")?,
+            &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
             now
         )?);
         let db = bob.client.account_db()?;

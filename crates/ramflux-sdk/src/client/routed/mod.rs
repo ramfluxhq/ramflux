@@ -56,8 +56,8 @@ pub(crate) struct Opened {
     pub decrypted: zeroize::Zeroizing<ramflux_crypto::DmDecryptionOutput>,
     pub session: ramflux_crypto::DmSession,
     pub bundle_hash: [u8; 32],
-    pub local_device: String,
-    pub remote_device: String,
+    pub local_device: ramflux_crypto::RootQualifiedDeviceRef,
+    pub remote_device: ramflux_crypto::RootQualifiedDeviceRef,
 }
 
 pub(crate) fn associated_data(
@@ -154,8 +154,9 @@ impl RamfluxClient {
         route: Route,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
         let recipient = Self::qualified_recipient(message)?;
-        let (mut session, header, bundle) =
-            self.send_pair_session_from_url(&engine.config.device_id, message, url)?;
+        let (mut session, header, bundle) = self.send_pair_session_from_url(
+            &self.local_device_identity(&engine.config.device_id)?, message, url,
+        )?;
         self.bind_outgoing_delivery(&engine.config.device_id, message, &route.kind)?;
         self.seal_routed_with_route(
             message,
@@ -202,7 +203,12 @@ impl RamfluxClient {
             self.account_db()?
                 .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
         }
-        self.persist_pair(local, &remote, &bundle, session)?;
+        self.persist_pair(
+            &self.local_device_identity(local)?,
+            &self.device_identity(&remote)?,
+            &bundle,
+            session,
+        )?;
         self.finish_pair_retirement()?;
 
         Ok(SdkDmEncryptedEnvelope {
@@ -223,9 +229,12 @@ impl RamfluxClient {
     ) -> Result<Opened, SdkError> {
         self.authenticated_envelope_sender(entry)?;
         let envelope = decode(&entry.envelope)?;
-        let remote = self.inbound_device_reference(entry)?;
-        let (mut session, bundle) =
-            self.recv_pair_session(local, &remote, &entry.envelope.envelope_id, &envelope)?;
+        let (mut session, bundle) = self.recv_pair_session(
+            &self.local_device_identity(local)?,
+            &self.authenticated_device_identity(entry)?,
+            &entry.envelope.envelope_id,
+            &envelope,
+        )?;
         let aad = associated_data(
             &entry.envelope.envelope_id,
             &entry.envelope.source_device_id,
@@ -257,8 +266,8 @@ impl RamfluxClient {
             decrypted,
             session,
             bundle_hash: bundle,
-            local_device: local.to_owned(),
-            remote_device: remote.clone(),
+            local_device: self.local_device_identity(local)?,
+            remote_device: self.authenticated_device_identity(entry)?,
         })
     }
 }

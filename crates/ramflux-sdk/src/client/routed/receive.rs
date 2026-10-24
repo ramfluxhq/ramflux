@@ -113,7 +113,7 @@ impl RamfluxClient {
         let aad = associated_data(
             &entry.envelope.envelope_id,
             &entry.envelope.source_device_id,
-            &opened.local_device,
+            opened.local_device.device_id(),
             &opened.bundle_hash,
         )?;
         self.import_routed_own_history(engine, pool, entry, &opened, &body).await?;

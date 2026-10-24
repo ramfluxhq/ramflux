@@ -29,7 +29,11 @@ fn bootstrap(
     trust(receiver, sender)?;
     let mut msg = from(sender, receiver, id, "simultaneous");
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
-    let (mut session, header, bundle) = sender.client.new_send_pair(&sender.id, &msg, bundle)?;
+    let (mut session, header, bundle) = sender.client.new_send_pair(
+        &sender.client.local_device_identity(&sender.id)?,
+        &msg,
+        bundle,
+    )?;
     let sealed = sender.client.seal_routed_with_route(
         &msg,
         b"bootstrap",
@@ -65,13 +69,19 @@ async fn simultaneous_verified_bootstraps_converge_and_retire_x3dh_after_peer_co
     bob.client.apply_routed_entry(&mut be, &pool()?, &a, false).await?;
     let active_a = alice
         .client
-        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .active_pair(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
     let active_b = bob
         .client
-        .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        .active_pair(
+            &bob.client.local_device_identity("bob")?,
+            &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
@@ -85,13 +95,16 @@ async fn simultaneous_verified_bootstraps_converge_and_retire_x3dh_after_peer_co
     assert!(decode(&next.envelope)?.ciphertext.ratchet_public_key.is_some());
     bob.client.apply_routed_entry(&mut be, &pool()?, &next, false).await?;
     let (_, _, _) = bob.client.send_pair_session_from_url(
-        "bob",
+        &bob.client.local_device_identity("bob")?,
         &from(&bob, &alice, "next", "simultaneous"),
         None,
     )?;
     let snapshot = serde_json::to_value(
         bob.client
-            .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .active_pair(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
+            )?
             .ok_or_else(|| invalid("pair"))?
             .0
             .snapshot(),
@@ -195,8 +208,8 @@ async fn legacy_quarantine_survives_v2_upgrade_without_ack_or_dead_letter() -> R
     let entry = seal(&alice, &bob, message("v2", "new-thread"), b"new")?;
     let opened = bob.client.open_routed(&entry, "bob")?;
     bob.client.persist_pair(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         &opened.bundle_hash,
         &opened.session,
     )?;
