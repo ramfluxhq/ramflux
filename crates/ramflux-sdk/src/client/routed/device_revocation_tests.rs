@@ -81,6 +81,8 @@ async fn revoked_fixture(target: &str) -> Result<(Fixture, Fixture), SdkError> {
     let commitment = crate::prekey::identity_root_public_key_commitment(&public)?;
     let (gateway, server) = revoke_endpoint(&bob.root, public).await?;
     let body = LocalBusAccountCreateRequest {
+        label: None,
+        kind: None,
         node_id: None,
         local_account_id: "bob".into(),
         principal_id: "bob".into(),
