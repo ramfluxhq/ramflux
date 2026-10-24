@@ -43,6 +43,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         recipient_device_id: &str,
     ) -> Result<GroupGatewayDeliveryResult, SdkError> {
+        self.authenticated_envelope_sender(entry)?;
         self.append_gateway_delivery(entry)?;
         let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
@@ -95,6 +96,8 @@ impl RamfluxClient {
             .map_err(|error| {
                 SdkError::LocalBus(format!("invalid sender key distribution payload: {error}"))
             })?;
+        let parsed: SdkGroupSenderKeyDistribution = serde_json::from_slice(&distribution)?;
+        self.require_group_payload_sender(&parsed.group_id, &parsed.sender_id, entry)?;
         self.import_group_sender_key_distribution_inner(&distribution, false)
             .map(|(distribution, _pending)| distribution)
             .map(GroupGatewayDeliveryResult::SenderKeyDistribution)
@@ -110,6 +113,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         recipient_device_id: &str,
     ) -> Result<GroupGatewayDeliveryResult, SdkError> {
+        self.authenticated_envelope_sender(entry)?;
         self.append_gateway_delivery(entry)?;
         let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
@@ -159,6 +163,8 @@ impl RamfluxClient {
             .map_err(|error| {
                 SdkError::LocalBus(format!("invalid sender key distribution payload: {error}"))
             })?;
+        let parsed: SdkGroupSenderKeyDistribution = serde_json::from_slice(&distribution)?;
+        self.require_group_payload_sender(&parsed.group_id, &parsed.sender_id, entry)?;
         self.import_group_sender_key_distribution_inner(&distribution, false)
             .map(|(distribution, _pending)| distribution)
             .map(GroupGatewayDeliveryResult::SenderKeyDistribution)
@@ -247,6 +253,7 @@ impl RamfluxClient {
         encrypted_body: &[u8],
         envelope: &SdkGroupEncryptedEnvelope,
     ) -> Result<Vec<u8>, SdkError> {
+        self.require_group_payload_sender(&envelope.group_id, &envelope.sender_id, entry)?;
         if self
             .direct_messages(conversation_id)?
             .iter()

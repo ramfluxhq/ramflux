@@ -239,6 +239,17 @@ impl RamfluxClient {
                     |error| SdkError::LocalBus(format!("invalid pending group payload: {error}")),
                 )?;
             let envelope: SdkGroupEncryptedEnvelope = serde_json::from_slice(&encrypted_body)?;
+            if envelope.group_id != group_id || envelope.group_key_epoch != group_key_epoch {
+                continue;
+            }
+            if let Err(error) =
+                self.require_group_payload_sender(group_id, &envelope.sender_id, &entry)
+            {
+                if matches!(error, SdkError::InboundPending(_) | SdkError::InboundRejected(_)) {
+                    continue;
+                }
+                return Err(error);
+            }
             if self.group_sender_key_counter_seen(&envelope)? {
                 self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
                 continue;

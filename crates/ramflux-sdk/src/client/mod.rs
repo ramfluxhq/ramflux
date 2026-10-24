@@ -17,6 +17,7 @@ pub mod group_session;
 pub mod identity;
 pub mod mcp_a2ui;
 pub mod object;
+mod own_device_group_pins;
 pub mod own_device_sync;
 pub mod recovery;
 pub(crate) mod routed;

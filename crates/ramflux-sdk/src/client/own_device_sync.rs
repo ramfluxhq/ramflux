@@ -196,6 +196,7 @@ impl RamfluxClient {
             messages,
             contents,
             dm_sessions,
+            group_member_pins: self.own_device_group_member_pins(&groups)?,
             groups,
             sender_key_distributions_base64,
         })
@@ -424,6 +425,9 @@ impl RamfluxClient {
             }
             floor_by_group.insert(group.group_id.clone(), group.local_joined_epoch);
         }
+        // The authenticated own-device snapshot carries the source's existing pins. Establish
+        // them before any sender-key seed is imported; a distribution never establishes a pin.
+        self.restore_own_device_group_member_pins(bundle)?;
         let mut imported_messages = 0_usize;
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
@@ -705,6 +709,7 @@ mod tests {
             contents: BTreeMap::new(),
             dm_sessions: Vec::new(),
             groups,
+            group_member_pins: Vec::new(),
             sender_key_distributions_base64: Vec::new(),
         }
     }
@@ -866,4 +871,6 @@ mod tests {
         std::fs::remove_dir_all(target_root)?;
         Ok(())
     }
+    #[path = "own_device_group_pin_tests.rs"]
+    mod group_pin_tests;
 }

@@ -51,6 +51,8 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
     pub(crate) contents: BTreeMap<String, zeroize::Zeroizing<Vec<u8>>>,
     pub(crate) dm_sessions: Vec<SdkOwnDeviceDmSessionSnapshot>,
     pub(crate) groups: Vec<SdkOwnDeviceGroupSnapshot>,
+    #[serde(default)]
+    pub(crate) group_member_pins: Vec<SdkOwnDeviceGroupMemberPin>,
     pub(crate) sender_key_distributions_base64: Vec<String>,
 }
 
@@ -71,6 +73,17 @@ pub(crate) struct SdkOwnDeviceGroupSnapshot {
     pub(crate) local_joined_epoch: u64,
     pub(crate) members: Vec<SdkOwnDeviceGroupMemberSnapshot>,
     pub(crate) routes: Vec<LocalBusGroupMemberRoute>,
+}
+
+/// Existing pins attested by the authenticated same-root history source, never a distribution.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SdkOwnDeviceGroupMemberPin {
+    pub(crate) group_id: String,
+    pub(crate) device_id: String,
+    pub(crate) signing_public_key: String,
+    pub(crate) principal_id: Option<String>,
+    pub(crate) principal_commitment: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
