@@ -65,8 +65,11 @@ pub const KEY_VERIFICATION_DEVICE_SET: &str = "ramflux.device_set.v1";
 pub const REGISTRATION_POW: &str = "ramflux.registration_pow.v1";
 pub const REGISTRATION_TRUST_TIER: &str = "ramflux.registration_trust_tier.v1";
 
-pub const ALL: [&str; 59] = [
+pub const TASK_EVENT: &str = "ramflux.task_event.v1";
+
+pub const ALL: [&str; 60] = [
     EVENT,
+    TASK_EVENT,
     ENVELOPE,
     OBJECT,
     CHUNK_PLAIN,

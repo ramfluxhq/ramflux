@@ -34,6 +34,9 @@ pub(super) fn validated_hash(content: &CreateSurfaceCommand) -> Result<String, S
     if content.fallback_text.trim().is_empty() {
         return Err(SurfaceReject::MissingFallback);
     }
+    if !crate::text_safety::free_text_is_safe(&content.fallback_text) {
+        return Err(SurfaceReject::UnsafeFallback);
+    }
     let mut ids = BTreeSet::new();
     for component in &content.components {
         if !ids.insert(component_id(component)?) {
