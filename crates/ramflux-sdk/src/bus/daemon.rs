@@ -221,6 +221,9 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("account.") => {
             dispatch_account_bus_request(request, state).await
         }
+        "surface.send" | "surface.action" => {
+            crate::bus::dispatch::surface::dispatch_surface(request, state, connection).await
+        }
         method if method.starts_with("message.") => {
             Box::pin(dispatch_message_bus_request(request, state, connection)).await
         }
