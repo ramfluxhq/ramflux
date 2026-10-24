@@ -351,6 +351,7 @@ impl RamfluxClient {
             || body.full_delegation
             || body.arguments_hash.as_deref().is_none_or(str::is_empty)
             || body.expires_at < proof.issued_at
+            || record.state.expires_at < proof.issued_at
             || record.state.revoked
         {
             return Err(invalid("task approval requires a live single-use bound grant decision"));
