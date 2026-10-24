@@ -14,6 +14,13 @@ async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_ch
     let staging = Fixture::new("bob", 101)?;
     let receiver = Fixture::new("bob", 101)?;
     let entry = seal(&sender, &staging, message("first-root-hint", "new-thread"), b"hello")?;
+    let mut malformed = entry.clone();
+    let mut wrapper = decode(&malformed.envelope)?;
+    wrapper.source_principal_commitment = Some("../../admin".into());
+    malformed.envelope.encrypted_payload =
+        ramflux_protocol::encode_base64url(serde_json::to_vec(&wrapper)?);
+    assert!(matches!(receiver.client.ensure_inbound_device(&receiver.config()?, &malformed).await,
+        Err(SdkError::InboundRejected(reason)) if reason == "invalid sender Root hint"));
     let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
     let expected_path = format!("/mvp1/device-manifest/{}", manifest.principal_commitment);
     assert_eq!(

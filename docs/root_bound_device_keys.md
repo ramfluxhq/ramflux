@@ -1,10 +1,11 @@
 # Root-bound device keys
 
-The protocol and node authority layer bind a device's exact signing and agreement
-keys to its identity root. SDK verification, safety notifications, peer revocation
-cleanup and actor-kind projection are a separate integration step. Existing SDK
-clients do not yet consume this authority chain or produce the new registration
-inputs. This change alone is not an end-to-end client security fix.
+The protocol, node authority and SDK bind a device's exact signing/agreement
+keys to its identity root and complete signed device set. SDK enrollment emits
+v2 proofs; live key use verifies the chain and preserves the highest observed
+set across restart. Signed revocation and authorized rotation retire obsolete
+pair state and produce safety changes. This implementation still requires
+independent review and cross-service acceptance before deployment.
 
 ## Authority chain
 
@@ -78,8 +79,9 @@ the registry. Gateway publication admission is bounded by both the actual source
 IP and principal commitment. Per-minute defaults are 60 per principal and 120 per
 source, with separate bounded source and root tables, each holding at most 4096 buckets. Signatures and root commitments are
 verified before charging root quotas; malformed claims never spend a victim's
-root allowance. Already observed signed epochs do not consume mutation quota on
-replay. Source admission still applies to every decoded publication. IPv4 sources
+root allowance. Within an admission window, replayed epochs at or below its
+highest observed epoch do not consume mutation quota. Ascending replay of distinct
+historical epochs in a new window remains a documented quota limitation. Source admission still applies to every decoded publication. IPv4 sources
 use addresses (including mapped IPv4); IPv6 sources aggregate by /64. Saturated
 admission state evicts least recently used entries within its own table instead of denying all new
 publishers. Root churn cannot evict source quotas. Signature verification holds neither bucket
@@ -165,6 +167,19 @@ Group pins change only under an ownership-bound compare-and-swap authorized by a
 newer signed set. A root change under an existing principal label is a hard safety
 failure. Prekey lookups retain the expected root through qualified lookup tokens.
 An unsigned omission from the ready-device list never implies revocation.
+
+Outgoing prekey discovery requires an explicit recipient Root commitment or a
+previously authenticated directory entry; bare device IDs are never used to
+obtain a Root from the server. New routed ciphertext wrappers carry an optional
+`source_principal_commitment` hint covered by the sender's outer signature. A
+first-contact receiver fetches that Root's manifest and verifies the complete
+chain before accepting the sender. The hint is lookup context, not an identity
+attestation, and cannot override a pinned Root. Historical wrappers without a
+hint require existing Root context. All live prekey paths, including A2I and
+own-device history key slots, use qualified lookups and exact bundle checks.
+Own-device key-slot exports create fresh X3DH sessions rather than reusing a
+conversation checkpoint after remote key rotation.
+
 
 Registration/prekey writes use v2 proofs and a complete signed set. A pending root
 proposal is persisted before network submission and retried unchanged; a differing
