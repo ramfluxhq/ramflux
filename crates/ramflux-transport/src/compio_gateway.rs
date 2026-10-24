@@ -133,7 +133,7 @@ impl CompioGatewayRecvStream {
         T: DeserializeOwned,
     {
         let body = self.read_frame().await?;
-        Ok(serde_json::from_slice(&body)?)
+        Ok(ramflux_protocol::parse_i_json(&body)?)
     }
 }
 

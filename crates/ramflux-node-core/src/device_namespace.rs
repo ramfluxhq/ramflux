@@ -54,7 +54,29 @@ impl IdentityRegistry {
         }
         let mut candidates = self.devices.values().filter(|d| d.device_id == lookup);
         let only = candidates.next()?;
-        candidates.next().is_none().then_some(only)
+        (candidates.next().is_none() && only.branch_proof.key_binding.is_none()).then_some(only)
+    }
+    pub(crate) fn check_device_lookup(&self, lookup: &str) -> Result<(), crate::NodeCoreError> {
+        if lookup.starts_with("root~") || lookup.starts_with("principal~") {
+            return self.device_record(lookup).map(|_| ()).ok_or_else(|| {
+                crate::NodeCoreError::ItestHttp("qualified device not found".into())
+            });
+        }
+        let mut matches = self.devices.values().filter(|d| d.device_id == lookup);
+        let Some(device) = matches.next() else {
+            return Err(crate::NodeCoreError::ItestHttp("device not found".into()));
+        };
+        if matches.next().is_some() {
+            return Err(crate::NodeCoreError::ItestHttp(
+                "ambiguous device ID: root-qualified lookup required".into(),
+            ));
+        }
+        if device.branch_proof.key_binding.is_some() {
+            return Err(crate::NodeCoreError::ItestHttp(
+                "root-bound device requires root-qualified lookup".into(),
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn record_is_revoked(&self, device: &IdentityDeviceRecord) -> bool {
         self.revoked_devices.contains(&self.storage_key_for_record(device))

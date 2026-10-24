@@ -245,3 +245,110 @@ fn deletion_cleanup_cannot_persist_a_snapshot_older_than_a_concurrent_publicatio
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn copying_an_existing_device_label_cannot_change_qualified_prekey_or_auth_lookup() -> TestResult {
+    let victim = Fixture::new()?;
+    let attacker = other()?;
+    let file = path()?;
+    let store = RouterRedbStore::open(&file)?;
+    let router = RouterCore::new();
+    router.register_identity_durable(&victim.request, &store)?;
+    router.mvp1_publish_prekey(PrekeyPublishRequest {
+        device_id: victim.device.device_id.clone(),
+        bundle: victim.bundle()?,
+    })?;
+    let expected = router.mvp1_prekey_checked(&lookup(&victim)?)?;
+    assert!(expected.bundle.is_some());
+    assert!(router.mvp1_prekey_checked(&victim.device.device_id).is_err());
+    router.register_identity_durable(&attacker.request, &store)?;
+    router.mvp1_publish_prekey(PrekeyPublishRequest {
+        device_id: attacker.device.device_id.clone(),
+        bundle: attacker.bundle()?,
+    })?;
+    assert_eq!(router.mvp1_prekey_checked(&lookup(&victim)?)?, expected);
+    assert_eq!(
+        router.mvp1_prekey_checked(&lookup(&attacker)?)?.principal_commitment,
+        attacker.request.principal_commitment
+    );
+    let error =
+        router.mvp1_prekey_checked(&victim.device.device_id).err().ok_or("bare lookup accepted")?;
+    assert!(error.to_string().contains("ambiguous"));
+    assert!(router.mvp1_device_auth_key_checked(&victim.device.device_id).is_err());
+    assert_eq!(
+        router.mvp1_device_auth_key_checked(&lookup(&victim)?)?.ok_or("victim")?.branch_public_key,
+        victim.request.branch_public_key
+    );
+    drop(router);
+    drop(store);
+    std::fs::remove_file(file)?;
+    Ok(())
+}
+#[test]
+fn durable_finalize_and_concurrent_publication_keep_lifecycle_authority_and_cleanup_together()
+-> TestResult {
+    use std::sync::{Arc, Barrier};
+    let victim = Fixture::new()?;
+    let other = other()?;
+    let file = path()?;
+    let store = Arc::new(RouterRedbStore::open(&file)?);
+    let router = Arc::new(RouterCore::new());
+    router.register_identity_durable(&victim.request, &store)?;
+    router.register_identity_durable(&other.request, &store)?;
+    router.mvp7_apply_lifecycle_event(&LifecycleEventRequest {
+        principal_id: "alice".into(),
+        event_id: "atomic-delete".into(),
+        event_type: "identity.deleted".into(),
+        actor_device_id: victim.device.device_id.clone(),
+        lifecycle_epoch: 1,
+        now: 1200,
+        reason_code: "user_requested".into(),
+        timelock_seconds: Some(1),
+        recovery_quorum: None,
+        recovery_quorum_proof: None,
+    })?;
+    store.save_router(&router)?;
+    let barrier = Barrier::new(2);
+    std::thread::scope(|scope| {
+        let publication = scope.spawn(|| {
+            barrier.wait();
+            router
+                .publish_signed_device_set(
+                    &other.publish(
+                        other.record(2, DeviceSetStatus::Revoked).map_err(|e| e.to_string())?,
+                    ),
+                    &store,
+                )
+                .map_err(|e| e.to_string())
+        });
+        barrier.wait();
+        let response = router.mvp7_finalize_delete_durable(
+            &LifecycleFinalizeRequest { principal_id: "alice".into(), now: 1202 },
+            &store,
+        )?;
+        assert_eq!(response.record.state, AccountLifecycleState::Deleted);
+        publication.join().map_err(|_| "publication thread")??;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })?;
+    drop(router);
+    drop(store);
+    let store = RouterRedbStore::open(&file)?;
+    let restored = store.load_router()?.ok_or("router")?;
+    assert_eq!(
+        restored.mvp7_lifecycle("alice").ok_or("lifecycle")?.state,
+        AccountLifecycleState::Deleted
+    );
+    assert!(!restored.mvp7_metadata_summary("alice").metadata_present);
+    assert_eq!(
+        restored
+            .signed_device_set(&other.request.principal_commitment)
+            .ok_or("set")?
+            .device_set_epoch,
+        2
+    );
+    assert!(restored.mvp1_device_auth_key_checked(&lookup(&other)?)?.ok_or("device")?.revoked);
+    drop(restored);
+    drop(store);
+    std::fs::remove_file(file)?;
+    Ok(())
+}

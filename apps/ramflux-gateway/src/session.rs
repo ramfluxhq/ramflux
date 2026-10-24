@@ -65,14 +65,13 @@ pub(crate) async fn handle_gateway_quic_stream(
     context: GatewayQuicContext,
 ) -> anyhow::Result<()> {
     let read_started = Instant::now();
-    let first_frame: serde_json::Value = ramflux_transport::read_quic_json_frame(&mut recv).await?;
+    let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv).await?;
+    let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
     ramflux_node_core::record_gateway_quic_request_read_us(elapsed_us(read_started));
-    if first_frame.get("frame_type").is_some() {
-        let frame: ramflux_node_core::GatewayClientFrame = serde_json::from_value(first_frame)?;
-        handle_gateway_session_stream(send, recv, context, frame).await?;
+    if let crate::ingress::Ingress::Session(frame) = first {
+        handle_gateway_session_stream(send, recv, context, *frame).await?;
     } else {
-        let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-        crate::device_set_limit::admit_request(&request, context.remote_addr.ip())?;
+        let crate::ingress::Ingress::Request(request)=first else { anyhow::bail!("gateway ingress dispatch mismatch"); };
         let response=dispatch_quic_json_request(&context.router,request,context.remote_addr.ip()).await?;
         let write_started = Instant::now();
         ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
@@ -95,15 +94,13 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
     context: GatewayQuicContext,
 ) -> anyhow::Result<()> {
     let (mut recv, send) = tokio::io::split(stream);
-    let first_frame: serde_json::Value =
-        ramflux_transport::read_gateway_session_json(&mut recv).await?;
-    if first_frame.get("frame_type").is_some() {
-        let frame: ramflux_node_core::GatewayClientFrame = serde_json::from_value(first_frame)?;
-        handle_gateway_session_transport(Box::new(send), Box::new(recv), context, frame).await?;
+    let bytes = ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut recv).await?;
+    let first = crate::ingress::parse(&bytes, context.remote_addr.ip())?;
+    if let crate::ingress::Ingress::Session(frame) = first {
+        handle_gateway_session_transport(Box::new(send), Box::new(recv), context, *frame).await?;
     } else {
         let mut send = Box::new(send);
-        let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-        crate::device_set_limit::admit_request(&request, context.remote_addr.ip())?;
+        let crate::ingress::Ingress::Request(request)=first else { anyhow::bail!("gateway ingress dispatch mismatch"); };
         let response=dispatch_quic_json_request(&context.router,request,context.remote_addr.ip()).await?;
         ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
     }
@@ -422,9 +419,24 @@ pub(crate) async fn run_gateway_session_loop(
                 crate::principal_directory::fetch(&send, &context, &runtime, principal_id).await?;
             }
             ramflux_node_core::GatewayClientFrame::PrekeyFetch { device_id } => {
-                let response: ramflux_node_core::PrekeyResponse =
-                    router_get_json_async(&context.router, &format!("/mvp1/prekey/{device_id}"))
+                let response: ramflux_node_core::PrekeyResponse = match router_get_json_async(
+                    &context.router,
+                    &format!("/mvp1/prekey/{device_id}"),
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        write_gateway_handle(
+                            &send,
+                            &ramflux_node_core::GatewayServerFrame::Nack {
+                                reason: error.to_string(),
+                            },
+                        )
                         .await?;
+                        continue;
+                    }
+                };
                 write_gateway_handle(
                     &send,
                     &ramflux_node_core::GatewayServerFrame::Prekey { response },
