@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-authenticated group writers, signed history and monotonic snapshot proofs.
+mod checkpoint;
 mod transition;
 use crate::{CryptoError, DeviceBranch, IdentityRoot};
+pub use checkpoint::{advance_group_state, compact_group_state};
 use ed25519_dalek::Signer;
 use ramflux_protocol::{
     canonical_json_bytes, encode_base64url,
@@ -20,7 +22,7 @@ use serde_json::{Value, json};
 pub struct VerifiedGroupState {
     snapshot: GroupStateSnapshot,
     view: SharedGroupState,
-    heads: Vec<String>,
+    heads: std::collections::BTreeMap<u64, String>,
 }
 impl VerifiedGroupState {
     #[must_use]
@@ -33,11 +35,7 @@ impl VerifiedGroupState {
     }
     #[must_use]
     pub fn contains_head(&self, epoch: u64, hash: &str) -> bool {
-        epoch
-            .checked_sub(1)
-            .and_then(|i| usize::try_from(i).ok())
-            .and_then(|i| self.heads.get(i))
-            .is_some_and(|known| known == hash)
+        self.heads.get(&epoch).is_some_and(|known| known == hash)
     }
 }
 pub(super) fn invalid(reason: &'static str) -> CryptoError {
@@ -72,7 +70,7 @@ fn operation_body(operation: &GroupStateOperation) -> Value {
     json!({"domain":GROUP_STATE_OPERATION_DOMAIN,"schema":operation.schema,"group_id":operation.group_id,"epoch":operation.epoch,"previous_hash":operation.previous_hash,"actor":operation.actor,"change":operation.change})
 }
 fn snapshot_body(snapshot: &GroupStateSnapshot) -> Value {
-    json!({"domain":GROUP_STATE_SNAPSHOT_DOMAIN,"schema":snapshot.schema,"group_id":snapshot.group_id,"epoch":snapshot.epoch,"state_hash":snapshot.state_hash,"operations":snapshot.operations,"issuer":snapshot.issuer})
+    json!({"domain":GROUP_STATE_SNAPSHOT_DOMAIN,"schema":snapshot.schema,"group_id":snapshot.group_id,"epoch":snapshot.epoch,"state_hash":snapshot.state_hash,"checkpoint":snapshot.checkpoint,"operations":snapshot.operations,"issuer":snapshot.issuer})
 }
 /// Root-sign an exact local branch key for group state. Roles are never part of this certificate.
 /// # Errors
@@ -175,9 +173,17 @@ fn check_issuer(
 ) -> Result<(), CryptoError> {
     let identity = &issuer.identity;
     let role = view.effective_role(&identity.root_commitment, &identity.device_id);
-    let last = operations.last().ok_or_else(|| invalid("empty group history"))?;
-    let completed_writer = last.actor.identity.root_commitment == identity.root_commitment
-        && last.actor.identity.device_id == identity.device_id;
+    if view.members.iter().any(|member| {
+        member.identity.root_commitment == identity.root_commitment
+            && member.identity.device_id == identity.device_id
+            && member.identity.signing_public_key != identity.signing_public_key
+    }) {
+        return Err(invalid("issuer key differs from the group pin"));
+    }
+    let completed_writer = operations.last().is_some_and(|last| {
+        last.actor.identity.root_commitment == identity.root_commitment
+            && last.actor.identity.device_id == identity.device_id
+    });
     if role.is_none() && !completed_writer {
         return Err(invalid("snapshot issuer is not an authorized member"));
     }
@@ -197,7 +203,16 @@ pub fn sign_group_state_snapshot(
     operations: Vec<GroupStateOperation>,
 ) -> Result<VerifiedGroupState, CryptoError> {
     branch_matches(branch, actor)?;
-    let (view, heads) = transition::derive(&operations)?;
+    sign_snapshot_parts(branch, actor, operations, None)
+}
+fn sign_snapshot_parts(
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    operations: Vec<GroupStateOperation>,
+    checkpoint: Option<ramflux_protocol::group_state::GroupStateCheckpoint>,
+) -> Result<VerifiedGroupState, CryptoError> {
+    branch_matches(branch, actor)?;
+    let (view, heads) = transition::derive(&operations, checkpoint.as_ref())?;
     check_issuer(&view, &operations, actor)?;
     let mut snapshot = GroupStateSnapshot {
         schema: GROUP_STATE_SNAPSHOT_DOMAIN.into(),
@@ -207,6 +222,7 @@ pub fn sign_group_state_snapshot(
             "ramflux.group_state.content.v1",
             &canonical_json_bytes(&view)?,
         ),
+        checkpoint,
         operations,
         issuer: actor.clone(),
         signature: String::new(),
@@ -229,7 +245,7 @@ pub fn verify_group_state_snapshot(
         return Err(invalid("invalid snapshot header or budget"));
     }
     verify_group_state_actor(&snapshot.issuer)?;
-    let (view, heads) = transition::derive(&snapshot.operations)?;
+    let (view, heads) = transition::derive(&snapshot.operations, snapshot.checkpoint.as_ref())?;
     if snapshot.group_id != view.group_id
         || snapshot.epoch != view.epoch
         || snapshot.state_hash

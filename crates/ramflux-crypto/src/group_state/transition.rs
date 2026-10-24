@@ -13,7 +13,7 @@ use ramflux_protocol::group_permissions::{
     can_change_group_member_role, can_invite_group_member, can_remove_group_member,
     is_group_admin_role,
 };
-fn name_valid(name: &str) -> Result<(), CryptoError> {
+pub(super) fn name_valid(name: &str) -> Result<(), CryptoError> {
     if name.trim().is_empty()
         || name.len() > MAX_GROUP_NAME_BYTES
         || !ramflux_protocol::text_safety::single_line_is_safe(name)
@@ -32,12 +32,20 @@ fn actor_role(
     }) {
         return Err(invalid("actor principal mismatch"));
     }
+    if state.members.iter().any(|member| {
+        member.identity.root_commitment == actor.identity.root_commitment
+            && member.identity.device_id == actor.identity.device_id
+            && member.identity.signing_public_key != actor.identity.signing_public_key
+    }) {
+        return Err(invalid("actor key differs from the group pin"));
+    }
     state
         .effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
         .ok_or_else(|| invalid("actor is not a member"))
 }
 fn initial(operation: &GroupStateOperation) -> Result<SharedGroupState, CryptoError> {
-    let GroupStateChange::Create { max_members, new_member_history, name } = &operation.change
+    let GroupStateChange::Create { conversation_id, max_members, new_member_history, name } =
+        &operation.change
     else {
         return Err(invalid("group history must begin with creation"));
     };
@@ -46,7 +54,10 @@ fn initial(operation: &GroupStateOperation) -> Result<SharedGroupState, CryptoEr
         || *max_members == 0
         || usize::try_from(*max_members).map_err(|_| invalid("member limit"))?
             > MAX_GROUP_STATE_MEMBERS
-        || new_member_history.len() > 64
+        || conversation_id.trim().is_empty()
+        || conversation_id.len() > 256
+        || !ramflux_protocol::text_safety::single_line_is_safe(conversation_id)
+        || !matches!(new_member_history.as_str(), "no_history" | "none" | "all_history")
     {
         return Err(invalid("invalid group creation"));
     }
@@ -55,6 +66,7 @@ fn initial(operation: &GroupStateOperation) -> Result<SharedGroupState, CryptoEr
     }
     Ok(SharedGroupState {
         group_id: operation.group_id.clone(),
+        conversation_id: conversation_id.clone(),
         epoch: 1,
         max_members: *max_members,
         new_member_history: new_member_history.clone(),
@@ -172,18 +184,22 @@ fn apply(state: &mut SharedGroupState, operation: &GroupStateOperation) -> Resul
 }
 pub(super) fn derive(
     operations: &[GroupStateOperation],
-) -> Result<(SharedGroupState, Vec<String>), CryptoError> {
-    if operations.is_empty() || operations.len() > MAX_GROUP_STATE_STEPS {
+    checkpoint: Option<&ramflux_protocol::group_state::GroupStateCheckpoint>,
+) -> Result<(SharedGroupState, std::collections::BTreeMap<u64, String>), CryptoError> {
+    if (operations.is_empty() && checkpoint.is_none()) || operations.len() > MAX_GROUP_STATE_STEPS {
         return Err(invalid("group history step budget exceeded"));
     }
-    let mut state = None;
-    let mut heads = Vec::new();
-    for (index, operation) in operations.iter().enumerate() {
+    let mut state = checkpoint.map(super::checkpoint::verify_checkpoint).transpose()?;
+    let mut heads = std::collections::BTreeMap::new();
+    if let Some(current) = state.as_ref() {
+        heads.insert(current.epoch, current.head_hash.clone());
+    }
+    for operation in operations {
         if operation.schema != GROUP_STATE_OPERATION_DOMAIN
             || operation.group_id.trim().is_empty()
             || operation.group_id.len() > 256
             || !ramflux_protocol::text_safety::single_line_is_safe(&operation.group_id)
-            || operation.epoch != u64::try_from(index).map_err(|_| invalid("epoch bound"))? + 1
+            || operation.epoch != state.as_ref().map_or(1, |s| s.epoch.saturating_add(1))
             || operation.epoch > ramflux_protocol::MAX_SAFE_JSON_INTEGER
         {
             return Err(invalid("invalid group operation header or epoch"));
@@ -214,7 +230,7 @@ pub(super) fn derive(
             (&a.root_commitment, &a.device_id).cmp(&(&b.root_commitment, &b.device_id))
         });
         current.head_hash = group_state_head_hash(operation)?;
-        heads.push(current.head_hash.clone());
+        heads.insert(current.epoch, current.head_hash.clone());
     }
     Ok((state.ok_or_else(|| invalid("empty history"))?, heads))
 }

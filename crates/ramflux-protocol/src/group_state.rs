@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 pub const GROUP_STATE_OPERATION_DOMAIN: &str = "ramflux.group_state.operation.v1";
 pub const GROUP_STATE_SNAPSHOT_DOMAIN: &str = "ramflux.group_state.snapshot.v1";
+pub const GROUP_STATE_CHECKPOINT_DOMAIN: &str = "ramflux.group_state.checkpoint.v1";
 pub const GROUP_STATE_ACTOR_DOMAIN: &str = "ramflux.group_state.actor.v1";
 pub const MAX_GROUP_STATE_STEPS: usize = 512;
 pub const MAX_GROUP_STATE_BYTES: usize = 524_288;
@@ -63,11 +64,28 @@ pub struct GroupStateActor {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GroupStateChange {
-    Create { max_members: u32, new_member_history: String, name: Option<String> },
-    Add { member: GroupMemberIdentity, role: SharedGroupRole },
-    Remove { root_commitment: String, device_id: String },
-    SetRole { root_commitment: String, device_id: String, role: SharedGroupRole },
-    SetName { name: String },
+    Create {
+        conversation_id: String,
+        max_members: u32,
+        new_member_history: String,
+        name: Option<String>,
+    },
+    Add {
+        member: GroupMemberIdentity,
+        role: SharedGroupRole,
+    },
+    Remove {
+        root_commitment: String,
+        device_id: String,
+    },
+    SetRole {
+        root_commitment: String,
+        device_id: String,
+        role: SharedGroupRole,
+    },
+    SetName {
+        name: String,
+    },
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +105,8 @@ pub struct GroupStateSnapshot {
     pub group_id: String,
     pub epoch: u64,
     pub state_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<GroupStateCheckpoint>,
     pub operations: Vec<GroupStateOperation>,
     pub issuer: GroupStateActor,
     pub signature: String,
@@ -116,9 +136,11 @@ pub struct GroupDeviceExclusion {
     pub device_id: String,
     pub removed_epoch: u64,
 }
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SharedGroupState {
     pub group_id: String,
+    pub conversation_id: String,
     pub epoch: u64,
     pub max_members: u32,
     pub new_member_history: String,
@@ -153,4 +175,15 @@ impl SharedGroupState {
                 SharedGroupRole::Bot => 3,
             })
     }
+}
+
+/// The immutable creator root can compact verified history without granting that power to an admin.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupStateCheckpoint {
+    pub schema: String,
+    pub genesis: GroupStateOperation,
+    pub state: SharedGroupState,
+    pub owner: GroupStateActor,
+    pub signature: String,
 }

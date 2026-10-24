@@ -26,6 +26,7 @@ fn create(owner: &Person) -> Result<VerifiedGroupState, CryptoError> {
         1,
         None,
         GroupStateChange::Create {
+            conversation_id: "group-thread".into(),
             max_members: 1000,
             new_member_history: "no_history".into(),
             name: Some("Checklist".into()),
@@ -242,5 +243,74 @@ fn forks_tampered_snapshots_and_unsafe_names_do_not_advance_a_known_head() -> Re
     let bytes = vec![b' '; MAX_GROUP_STATE_BYTES + 1];
     assert!(GroupStateSnapshot::from_wire_bytes(&bytes).is_err());
     assert!(GroupStateSnapshot::from_wire_bytes(br#"{"schema":"a","schema":"b"}"#).is_err());
+    Ok(())
+}
+
+#[test]
+fn creator_checkpoints_bound_replay_without_resetting_epochs_or_names() -> Result<(), CryptoError> {
+    let owner = person("owner", "owner", 11, 12)?;
+    let initial = create(&owner)?;
+    let mut current = initial.clone();
+    for index in 0..70 {
+        current = advance_group_state(
+            &owner.branch,
+            &owner.actor,
+            &current,
+            GroupStateChange::SetName { name: format!("name-{index}") },
+        )?;
+    }
+    assert_eq!(current.view().epoch, 71);
+    assert_eq!(current.view().name.as_deref(), Some("name-69"));
+    assert!(current.snapshot().operations.len() < 32);
+    assert!(current.extends(&initial));
+    let restored = verify_group_state_snapshot(GroupStateSnapshot::from_wire_bytes(
+        &canonical_json_bytes(current.snapshot())?,
+    )?)?;
+    assert_eq!(restored.view(), current.view());
+    let compact = compact_group_state(&owner.branch, &owner.actor, &current)?;
+    assert_eq!(compact.snapshot().operations, Vec::<GroupStateOperation>::new());
+    assert!(compact.extends(&current));
+    assert_eq!(compact.view(), current.view());
+    let advanced = advance_group_state(
+        &owner.branch,
+        &owner.actor,
+        &compact,
+        GroupStateChange::SetName { name: "next".into() },
+    )?;
+    assert_eq!(advanced.view().epoch, 72);
+    assert!(advanced.extends(&compact));
+    let mut tampered = advanced.snapshot().clone();
+    tampered.checkpoint.as_mut().ok_or_else(|| invalid("missing checkpoint"))?.state.name =
+        Some("forged".into());
+    assert!(verify_group_state_snapshot(tampered).is_err());
+    Ok(())
+}
+
+#[test]
+fn admin_cannot_rewrite_or_compact_an_authenticated_roster() -> Result<(), CryptoError> {
+    let owner = person("owner", "owner", 11, 12)?;
+    let peer = person("peer", "peer", 21, 22)?;
+    let initial = create(&owner)?;
+    let joined = advance_group_state(
+        &owner.branch,
+        &owner.actor,
+        &initial,
+        GroupStateChange::Add { member: peer.actor.identity.clone(), role: SharedGroupRole::Admin },
+    )?;
+    assert!(compact_group_state(&peer.branch, &peer.actor, &joined).is_err());
+    let compact = compact_group_state(&owner.branch, &owner.actor, &joined)?;
+    let renamed = advance_group_state(
+        &peer.branch,
+        &peer.actor,
+        &compact,
+        GroupStateChange::SetName { name: "admin rename".into() },
+    )?;
+    assert!(renamed.extends(&joined));
+    let mut forged = compact.snapshot().clone();
+    let checkpoint = forged.checkpoint.as_mut().ok_or_else(|| invalid("checkpoint"))?;
+    checkpoint.owner = peer.actor.clone();
+    checkpoint.signature =
+        crate::sign_with_device_branch(&peer.branch, &super::checkpoint::body(checkpoint))?;
+    assert!(verify_group_state_snapshot(forged).is_err());
     Ok(())
 }
