@@ -1,0 +1,52 @@
+[
+  {
+    "canonical": "{\"allowedActions\":[{\"name\":\"approve\"}],\"catalog\":\"ramflux.basic.v1\",\"catalogVersion\":\"1.0.0\",\"components\":[{\"id\":\"progress\",\"kind\":\"progress\",\"value\":1}],\"fallbackText\":\"Working\",\"surfaceId\":\"s\",\"surfaceType\":\"status_panel\"}",
+    "hash": "q3tqtfO2raFPH0DkRP4qR8-QmivVbJ2N6COn-EmTmlk",
+    "name": "progress",
+    "snapshot": {
+      "allowedActions": [
+        {
+          "name": "approve"
+        }
+      ],
+      "catalog": "ramflux.basic.v1",
+      "catalogVersion": "1.0.0",
+      "components": [
+        {
+          "id": "progress",
+          "kind": "progress",
+          "value": 1.0
+        }
+      ],
+      "fallbackText": "Working",
+      "surfaceId": "s",
+      "surfaceType": "status_panel"
+    }
+  },
+  {
+    "canonical": "{\"allowedActions\":[{\"name\":\"approve\"}],\"catalog\":\"ramflux.basic.v1\",\"catalogVersion\":\"1.0.0\",\"components\":[{\"data\":{\"𐀀\":1,\"\":0},\"id\":\"unicode\"}],\"fallbackText\":\"Working\",\"surfaceId\":\"s\",\"surfaceType\":\"status_panel\"}",
+    "hash": "TPn4um9tMima8UDi4AA6lXJ1yYIpkckoQtzJbuK_DCk",
+    "name": "utf16",
+    "snapshot": {
+      "allowedActions": [
+        {
+          "name": "approve"
+        }
+      ],
+      "catalog": "ramflux.basic.v1",
+      "catalogVersion": "1.0.0",
+      "components": [
+        {
+          "data": {
+            "": 0,
+            "𐀀": 1
+          },
+          "id": "unicode"
+        }
+      ],
+      "fallbackText": "Working",
+      "surfaceId": "s",
+      "surfaceType": "status_panel"
+    }
+  }
+]
