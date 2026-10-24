@@ -13,7 +13,7 @@ pub(crate) async fn handle_contact(
     match command.action {
         ContactAction::Add(add) => {
             let body = contact_add_body(&add);
-            print_json(&bus.request(Some(add.account), "contact", "contact.add", body).await?)
+            contact_add_response(&bus, add.account, body).await
         }
         ContactAction::Card(selector) => print_json(
             &bus.request(
@@ -186,4 +186,26 @@ fn contact_add_body(add: &ContactAdd) -> serde_json::Value {
     } else {
         serde_json::json!({"link_id":add.link,"requester_id":add.requester,"target_id":add.target})
     }
+}
+
+async fn contact_add_response(
+    bus: &LocalBusClient,
+    account: String,
+    body: serde_json::Value,
+) -> Result<(), RfError> {
+    let frame = ramflux_sdk::LocalBusFrame::request(
+        "rf-contact-add",
+        Some(account),
+        "contact",
+        "contact.add",
+        body,
+    );
+    let response = bus.request_frame_response(frame).await?;
+    if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
+        let error = response
+            .error
+            .ok_or_else(|| ramflux_sdk::SdkError::LocalBus("contact error body missing".into()))?;
+        return Err(ramflux_sdk::SdkError::LocalBus(serde_json::to_string(&error)?).into());
+    }
+    print_json(&response.body)
 }

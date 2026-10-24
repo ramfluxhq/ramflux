@@ -122,5 +122,13 @@ match the pinned node key before any discovery request. Plain HTTP card locators
 restricted to loopback development origins. Unsupported homes are rejected locally.
 Malformed or unverifiable manifests return `manifest_invalid`; network and DNS failures
 return `Unavailable`. Bus consumers must handle that additive string code as retryable;
-the C ABI maps it to `TransportUnavailable`. `root_conflict` requires user attention,
+the C ABI maps network failures to `TransportUnavailable` and quota refusals to `RateLimited`. `root_conflict` requires user attention,
 not an automatic retry or an automatic confirmation.
+
+SDK consumers that need confirmation data should call
+`LocalBusClient::request_frame_response(frame)`: it returns the complete response frame,
+including daemon `Error` frames with `error.reason_code`, `error.details` and retry hints.
+The existing `request`/`request_frame` convenience methods retain their text-error API.
+The contact-add CLI prints the structured error body on failure so both compared roots
+remain available. Desktop adapters should preserve those fields when presenting a
+replacement confirmation rather than parsing the convenience method's error string.

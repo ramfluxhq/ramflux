@@ -164,10 +164,42 @@ impl LocalBusClient {
         async move { self.request_owned_frame(frame).await }
     }
 
+    /// Returns the complete daemon response, including typed error details and retry hints.
+    ///
+    /// Transport failures remain errors; daemon refusals are returned as error frames. Use
+    /// this method when an explicit user decision depends on `reason_code` or `details`.
+    /// Secret request bodies receive the same erasure protection as `request_frame`.
+    ///
+    /// # Errors
+    /// Rejects duplicate request IDs, excess concurrency, deadlines and connection failures.
+    pub fn request_frame_response(
+        &self,
+        frame: LocalBusFrame,
+    ) -> impl Future<Output = Result<LocalBusFrame, SdkError>> + '_ {
+        let frame = SecretFrame(frame);
+        async move { self.request_owned_response(frame).await }
+    }
+
     async fn request_owned_frame(
         &self,
-        mut protected: SecretFrame,
+        protected: SecretFrame,
     ) -> Result<serde_json::Value, SdkError> {
+        let response = self.request_owned_response(protected).await?;
+        if response.kind == LocalBusFrameKind::Error {
+            let message = response.error.map_or_else(
+                || "unknown local bus error".to_owned(),
+                |error| format!("{}: {}", error.code, error.message),
+            );
+            Err(SdkError::LocalBus(message))
+        } else {
+            Ok(response.body)
+        }
+    }
+
+    async fn request_owned_response(
+        &self,
+        mut protected: SecretFrame,
+    ) -> Result<LocalBusFrame, SdkError> {
         let deadline = super::requests::deadline(&protected.0);
         let encoded = encode_owned_body(&mut protected.0);
         let deadline = deadline?;
@@ -204,15 +236,7 @@ impl LocalBusClient {
         } else {
             wait.await?
         };
-        if response.kind == LocalBusFrameKind::Error {
-            let message = response.error.map_or_else(
-                || "unknown local bus error".to_owned(),
-                |error| format!("{}: {}", error.code, error.message),
-            );
-            Err(SdkError::LocalBus(message))
-        } else {
-            Ok(response.body)
-        }
+        Ok(response)
     }
 
     /// # Errors
@@ -382,3 +406,7 @@ mod stream_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "contact_error_client_tests.rs"]
+mod contact_error_tests;

@@ -113,7 +113,12 @@ async fn card_gateway(
 ) -> Result<GatewaySessionConfig, SdkError> {
     // A self-signed locator is not authority to contact an arbitrary host.
     let home = home.ok_or(SdkError::ContactHomeNodeUnsupported)?;
-    if home.discovery_url != card.node.url {
+    let home_origin = if home.discovery_url.is_empty() {
+        format!("https://{}", home.node_id)
+    } else {
+        home.discovery_url.clone()
+    };
+    if home_origin != card.node.url {
         return Err(SdkError::ContactHomeNodeUnsupported);
     }
     if crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint {
