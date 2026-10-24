@@ -244,3 +244,7 @@ mod resync_tests;
 #[cfg(test)]
 #[path = "surface_history_import_tests.rs"]
 mod history_import_tests;
+
+#[cfg(test)]
+#[path = "surface_group_membership_tests.rs"]
+mod membership_tests;
