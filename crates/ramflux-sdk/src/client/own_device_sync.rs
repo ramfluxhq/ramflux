@@ -388,6 +388,14 @@ impl RamfluxClient {
         envelope: &SdkOwnDeviceSyncEnvelope,
         bundle: &SdkOwnDeviceHistoryBundle,
     ) -> Result<SdkOwnDeviceSyncImportResponse, SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.import_own_device_history_bundle_inner(envelope, bundle))
+    }
+    fn import_own_device_history_bundle_inner(
+        &self,
+        envelope: &SdkOwnDeviceSyncEnvelope,
+        bundle: &SdkOwnDeviceHistoryBundle,
+    ) -> Result<SdkOwnDeviceSyncImportResponse, SdkError> {
         if bundle.schema != "ramflux.sdk.own_device_history_bundle.v1"
             || bundle.principal_commitment != envelope.principal_commitment
             || bundle.source_device_id != envelope.source_device_id
