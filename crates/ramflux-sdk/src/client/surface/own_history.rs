@@ -49,6 +49,17 @@ impl RamfluxClient {
             if thread["group_id"].is_string() && group_epoch.is_none() {
                 return Err(invalid("surface group history epoch missing"));
             }
+            let mut floor = None;
+            if let Some(group) = thread["group_id"].as_str() {
+                let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+                if !self.group_state(group)?.roles.contains_key(&local.device_id) {
+                    continue;
+                }
+                floor = db.group_member_joined_epoch(group, &local.device_id)?;
+                if floor.is_none_or(|f| group_epoch.is_none_or(|epoch| epoch < f)) {
+                    continue;
+                }
+            }
             controls.push(self.surface_control_packet(&latest, ControlKind::Own, group_epoch)?);
             let prefix = key("actions", &reference) + "/";
             let actions: Vec<Value> = db.surface_history_page(&prefix, &prefix, 101)?;
@@ -56,12 +67,17 @@ impl RamfluxClient {
                 return Err(invalid("own surface action history count budget exceeded"));
             }
             for action in actions {
+                if floor.is_some_and(|floor| {
+                    action["group_epoch"].as_u64().is_none_or(|epoch| epoch < floor)
+                }) {
+                    continue;
+                }
                 if action["attestation"].is_object() {
                     let receipt: Carrier = serde_json::from_value(action["attestation"].clone())?;
                     controls.push(self.surface_control_packet(
                         &receipt,
                         ControlKind::Own,
-                        group_epoch,
+                        action["group_epoch"].as_u64(),
                     )?);
                 }
             }
