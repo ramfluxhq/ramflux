@@ -33,11 +33,12 @@ impl Schedule {
 
 pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let sent = super::surface_jobs::run(account).await?;
+    let task_sent = super::task_jobs::run(account).await?;
     let forwarded = super::dispatch::surface_transport::drain_forwarding(account).await?;
     let mut engine = account.take_live_engine().await?;
     let result = receive(account, &mut engine).await;
     account.put_engine(engine);
-    result.map(|count| count + sent + forwarded)
+    result.map(|count| count + sent + forwarded + task_sent)
 }
 
 async fn receive(

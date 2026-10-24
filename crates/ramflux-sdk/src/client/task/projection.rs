@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Transactional task state replay, durable receipts and metadata-only change events.
-use super::{AcceptedEvent, TaskHistory, carrier::Carrier, invalid, key};
+//! Transactional task reduction with scoped replay receipts and metadata-only journal rows.
+use super::{AcceptedEvent, TaskHistory, carrier::Carrier, invalid, scoped};
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::{Task, TaskState};
+use ramflux_protocol::{Task, TaskEvent, TaskEventBody, TaskState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[derive(Clone, Serialize, Deserialize)]
@@ -27,59 +27,65 @@ pub(crate) struct Delivery<'a> {
 }
 impl TaskHistory {
     pub(crate) fn state(&self) -> Result<TaskState, SdkError> {
+        if self.events.len() > 256 {
+            return Err(invalid("task event history limit reached"));
+        }
         let mut state = TaskState::default();
         for accepted in &self.events {
             let event = accepted.carrier.verify(&accepted.public_key)?;
             state
-                .apply(&event, &accepted.carrier.signer(&accepted.public_key))
+                .apply(&event, &accepted.carrier.signer(&accepted.public_key)?)
                 .map_err(|e| invalid(e.to_string()))?;
         }
         Ok(state)
     }
 }
+struct Applied {
+    history: TaskHistory,
+    event: TaskEvent,
+    public: String,
+    task: Task,
+    decision_key: Option<String>,
+}
 impl RamfluxClient {
-    pub(crate) fn task_history(&self, id: &str) -> Result<TaskHistory, SdkError> {
-        Ok(self.account_db()?.load_actor_state(&key("history", id))?.unwrap_or_default())
-    }
-    pub(crate) fn task_get(&self, id: &str) -> Result<Value, SdkError> {
-        let history = self.task_history(id)?;
-        let state = history.state()?;
-        let task = state.task().ok_or_else(|| invalid("task not found"))?;
-        let mut value = serde_json::to_value(task)?;
-        value["id"] = json!(task.task_id);
-        value["created_at"] = json!(history.created_at);
-        value["updated_at"] = json!(history.updated_at);
-        Ok(value)
-    }
-    pub(crate) fn task_list(
+    pub(crate) fn task_history(
         &self,
         conversation: &str,
-        filter: Option<&str>,
-    ) -> Result<Vec<Value>, SdkError> {
-        let mut rows = Vec::new();
-        for history in self.account_db()?.list_actor_states::<TaskHistory>("task/history/")? {
-            let state = history.state()?;
-            if let Some(task) = state.task()
-                && task.conversation_id == conversation
-            {
-                let value = serde_json::to_value(task)?;
-                if filter.is_none_or(|status| value["state"] == status) {
-                    let mut row = value;
-                    row["id"] = json!(task.task_id);
-                    row["created_at"] = json!(history.created_at);
-                    row["updated_at"] = json!(history.updated_at);
-                    rows.push(row);
-                }
-            }
-        }
-        Ok(rows)
+        id: &str,
+    ) -> Result<TaskHistory, SdkError> {
+        Ok(self
+            .account_db()?
+            .load_actor_state(&scoped("history", conversation, id)?)?
+            .unwrap_or_default())
     }
-    pub(crate) fn preflight_task(&self, carrier: &Carrier) -> Result<Task, SdkError> {
+    fn evaluate_task(&self, carrier: &Carrier) -> Result<Applied, SdkError> {
         let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
         let event = carrier.verify(&public)?;
-        let mut state = self.task_history(event.event.task_id())?.state()?;
-        state.apply(&event, &carrier.signer(&public)).map_err(|e| invalid(e.to_string()))?;
-        state.task().cloned().ok_or_else(|| invalid("task missing after apply"))
+        let history = self.task_history(&carrier.conversation_id, event.event().task_id())?;
+        if history.events.len() >= 256 {
+            return Err(invalid("task event history limit reached"));
+        }
+        let mut state = history.state()?;
+        self.authorize_task_relations(carrier, state.task())?;
+        let decision_key = if let TaskEventBody::Resolve(resolution) = event.event() {
+            let task = state.task().ok_or_else(|| invalid("task not found"))?;
+            let key = self.verify_task_decision(carrier, task, resolution)?;
+            if self.account_db()?.load_actor_state::<Value>(&key)?.is_some() {
+                return Err(invalid("external task decision has already been consumed"));
+            }
+            Some(key)
+        } else {
+            if carrier.decision_proof_base64.is_some() {
+                return Err(invalid("unexpected task decision proof"));
+            }
+            None
+        };
+        state.apply(&event, &carrier.signer(&public)?).map_err(|e| invalid(e.to_string()))?;
+        let task = state.task().cloned().ok_or_else(|| invalid("task missing after apply"))?;
+        Ok(Applied { history, event, public, task, decision_key })
+    }
+    pub(crate) fn preflight_task(&self, carrier: &Carrier) -> Result<Task, SdkError> {
+        Ok(self.evaluate_task(carrier)?.task)
     }
     pub(crate) fn project_task_message(
         &self,
@@ -89,47 +95,110 @@ impl RamfluxClient {
         if !body.starts_with(super::carrier::PREFIX) {
             return Ok(None);
         }
-        self.account_db()?.task_transaction(||{
-            let parsed=Carrier::decode(body);
-            let fingerprint=ramflux_protocol::hash_base64url("ramflux.task.delivery.v1",body);
-            let receipt_key=key("receipt",&serde_json::to_string(&(delivery.principal,delivery.message))?);
-            if let Some(old)=self.account_db()?.load_actor_state::<Receipt>(&receipt_key)?{
-                if old.fingerprint==fingerprint{return Ok(Some(old.outcome));}
-                return Ok(Some(Outcome{accepted:false,fallback_text:"[Task rejected]".into(),reject:Some("task message id collision".into())}));
-            }
-            let checked=(||->Result<_,SdkError>{
-                let carrier=parsed?.ok_or_else(||invalid("task carrier missing"))?;
-                if carrier.conversation_id!=delivery.conversation||carrier.principal_id!=delivery.principal||carrier.device_id!=delivery.device{return Err(invalid("task source or conversation mismatch"));}
-                let public=self.task_signer_key(delivery.principal,delivery.device)?;
-                let event=carrier.verify(&public)?;
-                let mut history=self.task_history(event.event.task_id())?;
-                let mut state=history.state()?;
-                state.apply(&event,&carrier.signer(&public)).map_err(|e|invalid(e.to_string()))?;
-                let task=state.task().cloned().ok_or_else(||invalid("task missing after apply"))?;
-                Ok((carrier,public,event,task,history))
-            })();
-            let outcome=match checked {
-                Ok((carrier,public,event,task,mut history))=>{
-                    let fallback=event.fallback_text();
-                    if history.events.is_empty(){history.created_at=delivery.at;}
-                    history.updated_at=delivery.at;
-                    history.events.push(AcceptedEvent{carrier,public_key:public});
-                    self.account_db()?.persist_actor_state(&key("history",&task.task_id),&history)?;
-                    self.account_db()?.append_journal(&format!("task:{}:{}",task.task_id,task.version),"task.changed",&json!({"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state}),delivery.at,None)?;
-                    Outcome{accepted:true,fallback_text:fallback,reject:None}
-                }
-                Err(error)=>{
-                    let reason=error.to_string();
-                    self.account_db()?.persist_actor_state(&key("reject",&fingerprint),&json!({"conversation_id":delivery.conversation,"message_id":delivery.message,"reason":reason,"at":delivery.at}))?;
-                    Outcome{accepted:false,fallback_text:"[Task rejected]".into(),reject:Some(reason)}
-                }
-            };
-            self.account_db()?.persist_actor_state(&receipt_key,&Receipt{fingerprint,outcome:outcome.clone()})?;
-            self.account_db()?.persist_actor_state(&key("message",delivery.message),&json!({"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject}))?;
-            Ok(Some(outcome))
-        })
+        self.account_db()?.task_transaction(|| self.apply_task_message(delivery, body).map(Some))
     }
-    pub(crate) fn task_message_metadata(&self, message: &str) -> Result<Option<Value>, SdkError> {
-        Ok(self.account_db()?.load_actor_state(&key("message", message))?)
+    fn apply_task_message(
+        &self,
+        delivery: &Delivery<'_>,
+        body: &[u8],
+    ) -> Result<Outcome, SdkError> {
+        let carrier = Carrier::decode(body)?.ok_or_else(|| invalid("task carrier missing"))?;
+        if carrier.conversation_id != delivery.conversation
+            || carrier.principal_id != delivery.principal
+            || carrier.device_id != delivery.device
+        {
+            return Err(invalid("task source or conversation mismatch"));
+        }
+        let public = self.task_signer_key(delivery.principal, delivery.device)?;
+        carrier.verify(&public)?;
+        let db = self.account_db()?;
+        let receipt_key = scoped(
+            "receipt",
+            delivery.conversation,
+            &serde_json::to_string(&(delivery.principal, &carrier.message_id))?,
+        )?;
+        let fingerprint = ramflux_protocol::hash_base64url("ramflux.task.delivery.v1", body);
+        if let Some(receipt) = db.load_actor_state::<Receipt>(&receipt_key)? {
+            if receipt.fingerprint != fingerprint {
+                return Err(invalid("task message id collision"));
+            }
+            self.store_task_message_metadata(delivery, &receipt.outcome)?;
+            return Ok(receipt.outcome);
+        }
+        self.admit_task_event(&carrier, delivery.at)?;
+        let outcome = match self.evaluate_task(&carrier) {
+            Ok(Applied { mut history, event, public, task, decision_key }) => {
+                if history.events.is_empty() {
+                    history.created_at = delivery.at;
+                }
+                history.updated_at = delivery.at;
+                let fallback = event.fallback_text();
+                history.events.push(AcceptedEvent { carrier, public_key: public });
+                if serde_json::to_vec(&history)?.len() > 2 * 1024 * 1024 {
+                    return Err(invalid("task history byte budget exceeded"));
+                }
+                db.persist_actor_state(
+                    &scoped("history", &task.conversation_id, &task.task_id)?,
+                    &history,
+                )?;
+                if let Some(key) = decision_key {
+                    db.persist_actor_state(&key,&json!({"conversation_id":task.conversation_id,"task_id":task.task_id,"version":task.version}))?;
+                }
+                let mut view = serde_json::to_value(&task)?;
+                view["id"] = json!(task.task_id);
+                view["actor_kind_verified"] = json!(false);
+                view["created_at"] = json!(history.created_at);
+                view["updated_at"] = json!(history.updated_at);
+                db.persist_actor_state(
+                    &scoped("view", &task.conversation_id, &task.task_id)?,
+                    &view,
+                )?;
+                db.append_journal(&format!("task:{}:{}",scoped("event",&task.conversation_id,&task.task_id)?,task.version),"task.changed",&json!({"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state,"actor_kind_verified":false}),delivery.at,None)?;
+                Outcome { accepted: true, fallback_text: fallback, reject: None }
+            }
+            Err(error) => Outcome {
+                accepted: false,
+                fallback_text: "[Task rejected]".into(),
+                reject: Some(error.to_string()),
+            },
+        };
+        db.persist_actor_state(&receipt_key, &Receipt { fingerprint, outcome: outcome.clone() })?;
+        self.store_task_message_metadata(delivery, &outcome)?;
+        Ok(outcome)
+    }
+    fn admit_task_event(&self, carrier: &Carrier, now: i64) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let id = scoped(
+            "rate",
+            &carrier.conversation_id,
+            &serde_json::to_string(&(carrier.event()?.event().task_id(), &carrier.principal_id))?,
+        )?;
+        let mut rate =
+            db.load_actor_state::<Value>(&id)?.unwrap_or_else(|| json!({"start":now,"count":0}));
+        if now.saturating_sub(rate["start"].as_i64().unwrap_or(now)) >= 60 {
+            rate = json!({"start":now,"count":0});
+        }
+        let count = rate["count"].as_u64().unwrap_or(0);
+        if count >= 32 {
+            return Err(invalid("task sender rate exceeded"));
+        }
+        rate["count"] = json!(count + 1);
+        db.persist_actor_state(&id, &rate)?;
+        Ok(())
+    }
+    fn store_task_message_metadata(
+        &self,
+        delivery: &Delivery<'_>,
+        outcome: &Outcome,
+    ) -> Result<(), SdkError> {
+        self.account_db()?.persist_actor_state(&scoped("message",delivery.conversation,delivery.message)?,&json!({"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"actor_kind_verified":false}))?;
+        Ok(())
+    }
+    pub(crate) fn task_message_metadata(
+        &self,
+        conversation: &str,
+        message: &str,
+    ) -> Result<Option<Value>, SdkError> {
+        Ok(self.account_db()?.load_actor_state(&scoped("message", conversation, message)?)?)
     }
 }

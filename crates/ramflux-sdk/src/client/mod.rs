@@ -22,6 +22,7 @@ pub mod recovery;
 pub(crate) mod routed;
 pub mod storage;
 pub(crate) mod surface;
+pub(crate) mod task;
 
 use crate::prelude::*;
 

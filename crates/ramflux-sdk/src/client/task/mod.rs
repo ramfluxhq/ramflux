@@ -2,9 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Signed task carriers and account-owned task projections in encrypted conversations.
+mod authority;
 pub(crate) mod carrier;
+pub(crate) mod decision;
 mod projection;
+pub(crate) use authority::require_local_human;
+pub(crate) mod own_history;
+mod read;
 use crate::SdkError;
+pub(crate) use projection::Delivery;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct AcceptedEvent {
@@ -25,4 +31,16 @@ pub(crate) fn key(kind: &str, id: &str) -> String {
 }
 pub(crate) fn invalid(message: impl Into<String>) -> SdkError {
     SdkError::LocalBus(message.into())
+}
+
+pub(crate) fn scoped(kind: &str, conversation: &str, id: &str) -> Result<String, SdkError> {
+    Ok(key(kind, &serde_json::to_string(&(conversation, id))?))
+}
+
+pub(crate) fn timeline_id(carrier: &carrier::Carrier) -> Result<String, SdkError> {
+    Ok(scoped(
+        "timeline",
+        &carrier.conversation_id,
+        &serde_json::to_string(&(&carrier.principal_id, &carrier.message_id))?,
+    )?)
 }

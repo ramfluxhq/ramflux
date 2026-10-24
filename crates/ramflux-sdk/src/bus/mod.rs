@@ -35,3 +35,5 @@ pub use protocol::*;
 mod runtime_tests;
 
 mod surface_jobs;
+
+mod task_jobs;

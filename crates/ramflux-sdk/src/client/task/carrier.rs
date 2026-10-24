@@ -4,10 +4,10 @@
 //! Exact signed task wire bytes with signed conversation, sender and content bindings.
 use super::invalid;
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::{ActorType, TaskEvent, TaskSigner};
+use ramflux_protocol::{TaskEvent, TaskSigner};
 use serde::{Deserialize, Serialize};
 pub(crate) const PREFIX: &[u8] = b"ramflux.task.v1\n";
-const MAX_CARRIER: usize = 131_072;
+const MAX_CARRIER: usize = 512 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Carrier {
@@ -16,9 +16,10 @@ pub(crate) struct Carrier {
     pub message_id: String,
     pub principal_id: String,
     pub device_id: String,
-    pub actor_type: ActorType,
     pub wire_base64: String,
     pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_proof_base64: Option<String>,
 }
 impl Carrier {
     fn signing_bytes(&self) -> Result<Vec<u8>, SdkError> {
@@ -29,8 +30,8 @@ impl Carrier {
             &self.message_id,
             &self.principal_id,
             &self.device_id,
-            &self.actor_type,
             &self.wire_base64,
+            &self.decision_proof_base64,
         ))?)
     }
     pub(crate) fn event(&self) -> Result<TaskEvent, SdkError> {
@@ -40,15 +41,14 @@ impl Carrier {
             return Err(invalid("task wire too large"));
         }
         // Parse the original authenticated bytes. Never accept an already-decoded map as ingress.
-        let event: TaskEvent = ramflux_protocol::parse_i_json(&wire)?;
+        let event = TaskEvent::from_wire_bytes(&wire).map_err(|e| invalid(e.to_string()))?;
         if self.content_type != "task"
-            || event.conversation_id != self.conversation_id
+            || event.conversation_id() != self.conversation_id
             || self.message_id.is_empty()
             || self.message_id.len() > 256
         {
             return Err(invalid("invalid task carrier binding"));
         }
-        event.validate().map_err(|error| invalid(error.to_string()))?;
         Ok(event)
     }
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
@@ -66,13 +66,13 @@ impl Carrier {
         }
         Ok(Some(ramflux_protocol::parse_i_json(json)?))
     }
-    pub(crate) fn signer<'a>(&'a self, public: &'a str) -> TaskSigner<'a> {
-        TaskSigner {
+    pub(crate) fn signer<'a>(&'a self, public: &'a str) -> Result<TaskSigner<'a>, SdkError> {
+        Ok(TaskSigner {
             principal_id: &self.principal_id,
-            actor_type: self.actor_type.clone(),
+            actor_type: super::authority::relation_role(self.event()?.event()),
             signing_key_id: &self.device_id,
             public_key_base64url: public,
-        }
+        })
     }
     pub(crate) fn verify(&self, public: &str) -> Result<TaskEvent, SdkError> {
         ramflux_crypto::verify_canonical_signature(
@@ -81,7 +81,7 @@ impl Carrier {
             public,
         )?;
         let event = self.event()?;
-        event.verify(&self.signer(public)).map_err(|error| invalid(error.to_string()))?;
+        event.verify(&self.signer(public)?).map_err(|error| invalid(error.to_string()))?;
         Ok(event)
     }
 }
@@ -99,6 +99,13 @@ impl RamfluxClient {
                 local.signing_key.verifying_key().to_bytes(),
             ));
         }
+        if self
+            .account_db()?
+            .load_actor_state::<bool>(&format!("device/revoked/{device}"))?
+            .unwrap_or(false)
+        {
+            return Err(invalid("task signer device is revoked"));
+        }
         let record = self
             .account_db()?
             .client_record("device", device)?
@@ -114,24 +121,27 @@ impl RamfluxClient {
     pub(crate) fn sign_task_event(
         &self,
         mut event: TaskEvent,
-        role: ActorType,
         message: String,
+        decision_proof_base64: Option<String>,
     ) -> Result<Carrier, SdkError> {
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        event.signed.signing_key_id.clone_from(&device.device_id);
-        event.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
-            &event.signing_bytes().map_err(|error| invalid(error.to_string()))?,
+        if event.signed().signing_key_id != device.device_id {
+            return Err(invalid("task signing key must be the local device"));
+        }
+        let signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &event.signing_bytes().map_err(|e| invalid(e.to_string()))?,
             device,
         );
+        event = event.with_signature(signature).map_err(|e| invalid(e.to_string()))?;
         let mut carrier = Carrier {
             content_type: "task".into(),
-            conversation_id: event.conversation_id.clone(),
+            conversation_id: event.conversation_id().to_owned(),
             message_id: message,
             principal_id: device.principal_id.clone(),
             device_id: device.device_id.clone(),
-            actor_type: role,
             wire_base64: ramflux_protocol::encode_base64url(serde_json::to_vec(&event)?),
             signature: String::new(),
+            decision_proof_base64,
         };
         carrier.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
             &carrier.signing_bytes()?,

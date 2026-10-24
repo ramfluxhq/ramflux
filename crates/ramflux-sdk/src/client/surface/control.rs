@@ -27,10 +27,10 @@ pub(crate) struct SurfaceControl {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OwnContext {
-    pub(super) conversation_id: String,
-    pub(super) participants: Vec<String>,
-    pub(super) group: Option<SdkOwnDeviceGroupSnapshot>,
-    pub(super) friend: Option<ramflux_storage::FriendLinkRecord>,
+    pub(crate) conversation_id: String,
+    pub(crate) participants: Vec<String>,
+    pub(crate) group: Option<SdkOwnDeviceGroupSnapshot>,
+    pub(crate) friend: Option<ramflux_storage::FriendLinkRecord>,
 }
 impl SurfaceControl {
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
