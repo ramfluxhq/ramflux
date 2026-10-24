@@ -100,6 +100,30 @@ fn cancel_on(
     );
     Ok(())
 }
+fn verify_independent_requester_capacity(
+    f: &Fixture,
+) -> Result<RamfluxClient, Box<dyn std::error::Error>> {
+    let other = register(f, "other", 81)?;
+    f.human.account_db()?.persist_client_record(
+        "conversation",
+        "other-thread",
+        &json!({"kind":"direct","participants":["human","other"]}),
+    )?;
+    for index in 0..4 {
+        let id = format!("fresh-{index}");
+        let mut body = peer_start(&id, "other-thread", "human", "other");
+        if let TaskEventBody::Start(start) = &mut body {
+            start.text = "f".repeat(16_384);
+        }
+        let c = sign(&f.human, "other-thread", &id, body)?;
+        check_delivery_size(c.bytes()?.len())?;
+        assert!(
+            project(&f.human, &c)?.accepted,
+            "an assignee cannot consume the requester's transport-sized requests to another executor"
+        );
+    }
+    Ok(other)
+}
 #[test]
 fn an_assignees_one_hundred_sixty_updates_cannot_spend_the_requesters_quota_or_prevent_cancellation()
 -> TestResult {
@@ -139,19 +163,7 @@ fn an_assignees_one_hundred_sixty_updates_cannot_spend_the_requesters_quota_or_p
         }
     }
     assert!(rejected > 0, "the assignee must exhaust its own bounded history budget");
-    let other = register(&f, "other", 81)?;
-    f.human.account_db()?.persist_client_record(
-        "conversation",
-        "other-thread",
-        &json!({"kind":"direct","participants":["human","other"]}),
-    )?;
-    let c = sign(
-        &f.human,
-        "other-thread",
-        "fresh",
-        peer_start("fresh", "other-thread", "human", "other"),
-    )?;
-    assert!(project(&f.human, &c)?.accepted, "a different executor remains usable");
+    let other = verify_independent_requester_capacity(&f)?;
     let revision =
         f.human.task_get(Some("thread"), "task-0")?["version"].as_u64().ok_or("revision")?;
     assert!(
