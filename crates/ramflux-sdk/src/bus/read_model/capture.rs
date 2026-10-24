@@ -261,6 +261,11 @@ fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Res
                 principals.insert(principal.to_owned());
             }
         }
+        if let Some(state) = db.shared_group_state(group)? {
+            principals.extend(
+                state.view().members.iter().map(|member| member.identity.principal_id.clone()),
+            );
+        }
         let old = db.client_record("group", group)?.unwrap_or_else(|| json!({}));
         let mut links = old
             .get("conversation_ids")
@@ -275,12 +280,24 @@ fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Res
         }
         links.insert(conversation.to_owned());
         let single = if links.len() == 1 { Some(conversation) } else { None };
-        db.persist_client_record(
-            "group",
-            group,
-            &json!({"conversation_id":single,"conversation_ids":links}),
-        )?;
-        db.persist_client_record("conversation",conversation,&json!({"kind":"group","group_id":group,"title":body.get("title"),"participants":principals,"direct_route":null}))?;
+        let mut group_metadata = old;
+        group_metadata["conversation_id"] = json!(single);
+        group_metadata["conversation_ids"] = json!(links);
+        db.persist_client_record("group", group, &group_metadata)?;
+        let mut metadata = db
+            .client_record("conversation", conversation)?
+            .unwrap_or_else(|| json!({"title":null,"direct_route":null}));
+        metadata["kind"] = json!("group");
+        metadata["group_id"] = json!(group);
+        metadata["participants"] = json!(principals);
+        // Signed name updates own the shared group's title; reads and sends only refresh its link.
+        if request.method == "group.create"
+            && db.shared_group_state(group)?.is_none()
+            && let Some(title) = body.get("title").filter(|value| !value.is_null())
+        {
+            metadata["title"] = title.clone();
+        }
+        db.persist_client_record("conversation", conversation, &metadata)?;
     }
     Ok(())
 }

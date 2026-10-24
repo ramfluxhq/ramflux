@@ -61,6 +61,9 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
+    if let Err(error) = super::shared_group_sync::flush(account).await {
+        tracing::warn!(%error, "group state delivery deferred");
+    }
     let approvals = match super::dispatch::task_approval::drive(account).await {
         Ok(n) => n,
         Err(error) => {

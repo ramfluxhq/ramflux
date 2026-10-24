@@ -11,6 +11,14 @@ pub(crate) async fn dispatch_group_bus_request(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
+    if let Some(response) = super::super::shared_group_sync::dispatch(
+        request,
+        local_bus_account_mut(state, account_id)?,
+    )
+    .await?
+    {
+        return Ok(local_bus_ok(response));
+    }
     match request.method.as_str() {
         "group.create" => {
             let account = local_bus_account_mut(state, account_id)?;
@@ -80,7 +88,11 @@ pub(crate) async fn dispatch_group_bus_request(
         "group.members" => {
             let account = local_bus_account(state, account_id)?;
             let body: LocalBusGroupRequest = serde_json::from_value(request.body.clone())?;
-            Ok(local_bus_ok(serde_json::to_value(account.client.group_state(&body.group_id)?)?))
+            let metadata = match account.client.shared_group_metadata(&body.group_id)? {
+                Some(value) => value,
+                None => serde_json::to_value(account.client.group_state(&body.group_id)?)?,
+            };
+            Ok(local_bus_ok(metadata))
         }
         "group.list" => {
             let account = local_bus_account(state, account_id)?;

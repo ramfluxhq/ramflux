@@ -157,12 +157,12 @@ impl RamfluxClient {
             members.insert(member.identity.device_id.clone());
             roles.insert(member.identity.device_id.clone(), member.role.as_str().into());
         }
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let actor = self.owned_group_actor("local-display")?;
-        if let Some(role) = state.effective_role(&actor.identity.root_commitment, &local.device_id)
-        {
-            members.insert(local.device_id.clone());
-            roles.insert(local.device_id.clone(), role.as_str().into());
+        if let Some(local) = self.account_db()?.client_record("group-local", group)? {
+            let local: GroupMemberIdentity = serde_json::from_value(local)?;
+            if let Some(role) = state.effective_role(&local.root_commitment, &local.device_id) {
+                members.insert(local.device_id.clone());
+                roles.insert(local.device_id, role.as_str().into());
+            }
         }
         Ok(Some(GroupState {
             group_id: state.group_id.clone(),
@@ -198,4 +198,52 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("shared group absent"))?;
         state.member_storage_key(identity)?.ok_or_else(|| invalid("device is not a group member"))
     }
+    pub(crate) fn group_member_storage_id(
+        &self,
+        group: &str,
+        device: &str,
+    ) -> Result<String, SdkError> {
+        let Some(state) = self.account_db()?.shared_group_state(group)? else {
+            return Ok(device.into());
+        };
+        if self.device_branch.as_ref().is_some_and(|branch| branch.device_id == device) {
+            return self
+                .shared_group_storage_member(group, &self.owned_group_actor("local")?.identity);
+        }
+        let matches = state
+            .view()
+            .members
+            .iter()
+            .filter(|member| member.identity.device_id == device)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(invalid("ambiguous device name requires a root-qualified identity"));
+        }
+        if let Some(member) = matches.first() {
+            return self.shared_group_storage_member(group, &member.identity);
+        }
+        let record = self
+            .account_db()?
+            .client_record("device", device)?
+            .ok_or_else(|| invalid("group sender identity is unavailable"))?;
+        let required = |field: &str| {
+            record[field]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("group sender identity is incomplete"))
+        };
+        self.shared_group_storage_member(
+            group,
+            &GroupMemberIdentity {
+                principal_id: required("principal_id")?,
+                root_commitment: required("principal_commitment")?,
+                device_id: device.into(),
+                signing_public_key: required("signing_public_key")?,
+                target_delivery_id: required("target_delivery_id")?,
+            },
+        )
+    }
 }
+
+#[cfg(test)]
+mod tests;

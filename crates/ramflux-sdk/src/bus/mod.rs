@@ -25,6 +25,7 @@ pub(crate) mod read_model;
 mod readers;
 mod requests;
 mod secrets;
+mod shared_group_sync;
 mod socket;
 pub mod state;
 mod subscription;

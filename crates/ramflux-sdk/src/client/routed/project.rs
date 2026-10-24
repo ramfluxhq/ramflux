@@ -133,6 +133,12 @@ impl RamfluxClient {
     ) -> Result<Option<Vec<u8>>, SdkError> {
         let route = &opened.routing;
 
+        if serde_json::from_slice::<serde_json::Value>(body)
+            .is_ok_and(|header| header["schema"] == crate::client::shared_group::PACKET_SCHEMA)
+        {
+            // The signed full state was verified before and atomically applied by the commit path.
+            return Ok(None);
+        }
         self.require_routed_group_member(
             route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?,
             entry,

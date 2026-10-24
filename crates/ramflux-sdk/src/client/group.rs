@@ -958,13 +958,20 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when no account DB is unlocked or group state cannot be read.
     pub fn group_state(&self, group_id: &str) -> Result<GroupState, SdkError> {
+        if let Some(state) = self.shared_group_display(group_id)? {
+            return Ok(state);
+        }
         Ok(self.account_db()?.group_state(group_id)?)
     }
 
     /// # Errors
     /// Returns an error when no account DB is unlocked or groups cannot be read.
     pub fn groups(&self) -> Result<Vec<GroupState>, SdkError> {
-        Ok(self.account_db()?.groups()?)
+        self.account_db()?
+            .groups()?
+            .into_iter()
+            .map(|state| self.group_state(&state.group_id))
+            .collect()
     }
 
     /// # Errors

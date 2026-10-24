@@ -21,6 +21,8 @@ struct Commit<'a> {
     body: &'a [u8],
     metadata: Option<&'a MessageMetadata>,
     membership: Option<&'a (ramflux_protocol::GroupEvent, String)>,
+    shared_group: Option<&'a ramflux_crypto::VerifiedGroupState>,
+    local_target: &'a str,
     slots: &'a [crate::SdkObjectKeySlot],
     references: Vec<(
         &'a crate::dm::SdkDmAttachmentRef,
@@ -148,7 +150,20 @@ impl RamfluxClient {
             }
             references.push((attachment, prepared));
         }
-        let membership = if opened.routing.kind == Kind::GroupControl {
+        let shared_group = if opened.routing.kind == Kind::GroupControl {
+            crate::client::shared_group::decode_packet(&body)?
+        } else {
+            None
+        };
+        if let Some(shared) = &shared_group {
+            if opened.routing.group_id.as_deref() != Some(shared.view().group_id.as_str())
+                || opened.routing.conversation_id != shared.view().conversation_id
+            {
+                return Err(invalid("group state routing mismatch"));
+            }
+            self.verify_shared_group_source(&engine.config, shared, entry).await?;
+        }
+        let membership = if opened.routing.kind == Kind::GroupControl && shared_group.is_none() {
             self.prepare_routed_group_control(engine, &opened, entry).await?
         } else {
             None
@@ -159,6 +174,8 @@ impl RamfluxClient {
             body: &body,
             metadata: metadata.as_ref(),
             membership: membership.as_ref(),
+            shared_group: shared_group.as_ref(),
+            local_target: &engine.config.target_delivery_id,
             slots: &consumed_slots,
             references,
             receipt: &commit,
@@ -376,9 +393,22 @@ impl RamfluxClient {
         })
     }
     fn commit_routed_projection(&self, context: Commit<'_>) -> Result<Option<Vec<u8>>, SdkError> {
-        let Commit { opened, entry, body, metadata, membership, slots, receipt, references } =
-            context;
+        let Commit {
+            opened,
+            entry,
+            body,
+            metadata,
+            membership,
+            shared_group,
+            local_target,
+            slots,
+            receipt,
+            references,
+        } = context;
         self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
+            if let Some(shared) = shared_group {
+                self.accept_shared_group_state(shared, local_target)?;
+            }
             if let Some((event, key)) = membership {
                 self.apply_bootstrap_group_member_join_event(
                     event,

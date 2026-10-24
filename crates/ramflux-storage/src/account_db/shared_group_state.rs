@@ -67,6 +67,7 @@ impl AccountDb {
                     .map(|member| member.joined_epoch).min().ok_or(StorageError::GroupPermissionDenied)?;
                 self.project_shared_group_member(verified, &local.identity, joined)?;
             }
+            self.persist_client_record("group-local", &state.group_id, &json!(local.identity))?;
             self.project_shared_group_link(verified)?;
             self.persist_actor_state(&state_key(&state.group_id), verified.snapshot())?;
             self.persist_client_record("group-name", &state.group_id,

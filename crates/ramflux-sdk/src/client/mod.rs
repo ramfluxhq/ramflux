@@ -42,6 +42,7 @@ mod private_prekeys;
 mod receipt_bindings;
 pub mod recovery;
 pub(crate) mod routed;
+pub(crate) mod shared_group;
 pub mod storage;
 pub(crate) mod surface;
 pub(crate) mod task;
