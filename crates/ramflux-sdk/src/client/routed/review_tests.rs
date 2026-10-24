@@ -386,7 +386,18 @@ async fn mixed_a2i_batch_commits_and_acks_control_without_losing_direct_messages
     control.inbox_seq = 2;
     let (mut engine, writes) = Inbox::engine(bob.config()?, vec![first, control.clone()])?;
     let events = bob.client.receive_a2i_control_events(&mut engine, 10).await?;
-    assert_eq!(events, vec![event]);
+    let mut expected = event;
+    expected.source_principal_id = Some(alice.id.clone());
+    expected.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
+        &alice
+            .client
+            .identity_root
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_key
+            .verifying_key(),
+    ));
+    assert_eq!(events, vec![expected]);
     assert_eq!(bob.client.direct_messages("thread")?.len(), 1);
     assert_eq!(bob.client.gateway_receive_cursor("bob")?, 2);
     assert_eq!(

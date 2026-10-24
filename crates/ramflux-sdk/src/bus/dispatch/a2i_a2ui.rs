@@ -91,7 +91,7 @@ pub(crate) async fn dispatch_a2i_bus_request(
             acknowledged.acknowledged = true;
             account.client.account_db()?.persist_actor_state(
                 &crate::client::routed::control::a2i_key(
-                    &account.client.a2i_event_identity(&event)?,
+                    &account.client.a2i_event_identity(event)?,
                     &event.event_id,
                 )?,
                 &acknowledged,
