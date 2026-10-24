@@ -18,54 +18,58 @@ pub(super) fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
     ] {
         let prefix = format!("task/{namespace}/");
         for (storage, mut row) in db.task_record_page::<Value>(&prefix, &prefix, 101)? {
-            let nested = row.get("packet").is_some();
-            let value = if nested { row["packet"].clone() } else { row.clone() };
-            let Ok(mut packet) = serde_json::from_value::<Packet>(value) else {
-                db.delete_task_state(&storage)?;
-                continue;
-            };
-            if packet.local_expires_at.is_none() {
-                packet = packet.received();
-                if nested {
-                    row["packet"] = serde_json::to_value(&packet)?;
-                } else {
-                    row = serde_json::to_value(&packet)?;
+            let result = (|| {
+                let nested = row.get("packet").is_some();
+                let value = if nested { row["packet"].clone() } else { row.clone() };
+                let Ok(mut packet) = serde_json::from_value::<Packet>(value) else {
+                    db.delete_task_state(&storage)?;
+                    return Ok(());
+                };
+                if packet.local_expires_at.is_none() {
+                    packet = packet.received();
+                    if nested {
+                        row["packet"] = serde_json::to_value(&packet)?;
+                    } else {
+                        row = serde_json::to_value(&packet)?;
+                    }
+                    db.persist_actor_state(&storage, &row)?;
                 }
-                db.persist_actor_state(&storage, &row)?;
-            }
-            let request = packet.request();
-            let closed = match account.client.task_approval_binding(
-                &request.binding.conversation_id,
-                &request.binding.task_id,
-                &request.binding.step_id,
-                &ramflux_protocol::NeedsMe::Approval {
-                    grant_id: request.grant_body.grant_id.clone(),
-                },
-            ) {
-                Ok(binding) => binding != request.binding,
-                Err(
-                    SdkError::TaskRefused { .. }
-                    | SdkError::InboundRejected(_)
-                    | SdkError::LocalBus(_),
-                ) => true,
-                Err(error) => return Err(error),
-            };
-            if packet.deadline() <= now || closed {
-                if closed
-                    && packet.deadline() > now
-                    && matches!(
-                        packet.payload,
-                        crate::client::task::approval::Payload::Decision { .. }
-                    )
-                {
-                    account.client.retire_task_approval(
-                        &packet,
-                        DeliveryState::Rejected,
-                        Some(DeliveryReason::InterventionClosed),
-                    )?;
+                let request = packet.request();
+                let closed = match account.client.task_approval_binding(
+                    &request.binding.conversation_id,
+                    &request.binding.task_id,
+                    &request.binding.step_id,
+                    &ramflux_protocol::NeedsMe::Approval {
+                        grant_id: request.grant_body.grant_id.clone(),
+                    },
+                ) {
+                    Ok(binding) => binding != request.binding,
+                    Err(
+                        SdkError::TaskRefused { .. }
+                        | SdkError::InboundRejected(_)
+                        | SdkError::LocalBus(_),
+                    ) => true,
+                    Err(error) => return Err(error),
+                };
+                if packet.deadline() <= now || closed {
+                    if closed
+                        && packet.deadline() > now
+                        && matches!(
+                            packet.payload,
+                            crate::client::task::approval::Payload::Decision { .. }
+                        )
+                    {
+                        account.client.retire_task_approval(
+                            &packet,
+                            DeliveryState::Rejected,
+                            Some(DeliveryReason::InterventionClosed),
+                        )?;
+                    }
+                    db.delete_task_state(&storage)?;
                 }
-                db.delete_task_state(&storage)?;
-            }
+                Ok::<_, SdkError>(())
+            })();
+            crate::error_policy::task_scan(result)?;
         }
     }
     for namespace in ["approval_applied", "approval_rejected"] {

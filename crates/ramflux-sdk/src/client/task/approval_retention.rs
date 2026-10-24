@@ -91,7 +91,10 @@ impl RamfluxClient {
         let peer_limit = if incoming_request { 96 * 1024 } else { 512 * 1024 };
         let size = serde_json::to_vec(value)?.len();
         if count >= 64 || bytes.saturating_add(size) > byte_limit {
-            return Err(SdkError::InboundPending("task approval account capacity reached".into()));
+            return Err(crate::task_refusal::refused(
+                TaskRefusalCode::AccountQuotaExhausted,
+                "task approval account capacity reached",
+            ));
         }
         if peer_count >= 16 || peer_bytes.saturating_add(size) > peer_limit {
             return Err(crate::task_refusal::refused(

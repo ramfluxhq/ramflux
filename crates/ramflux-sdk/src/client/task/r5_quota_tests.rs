@@ -178,3 +178,23 @@ fn r6_a_malformed_lifecycle_row_does_not_block_compaction_of_valid_terminal_hist
     assert_eq!(f.human.task_get(Some("thread"), "old")?["compacted"], true);
     Ok(())
 }
+
+#[test]
+fn r7_one_invalid_history_does_not_block_other_eligible_tasks_from_compacting() -> TestResult {
+    let f = Fixture::new()?;
+    for id in ["bad", "good"] {
+        assert!(project(&f.human, &sign(&f.human, "thread", id, start(id, "thread"))?)?.accepted);
+        let storage = scoped("lifecycle", "thread", id)?;
+        let mut row: super::super::lifecycle::Lifecycle =
+            f.human.account_db()?.load_actor_state(&storage)?.ok_or("lifecycle")?;
+        row.compaction_eligible = true;
+        f.human.account_db()?.persist_actor_state(&storage, &row)?;
+    }
+    let mut history = f.human.task_history("thread", "bad")?;
+    history.events.first_mut().ok_or("history")?.carrier.signature = "invalid".into();
+    f.human.account_db()?.persist_actor_state(&scoped("history", "thread", "bad")?, &history)?;
+    f.human.maintain_task_lifecycle(crate::time::now_unix_timestamp())?;
+    assert_eq!(f.human.task_get(Some("thread"), "good")?["compacted"], true);
+    assert_ne!(f.human.task_get(Some("thread"), "bad")?["compacted"], true);
+    Ok(())
+}

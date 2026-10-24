@@ -37,7 +37,7 @@ pub(super) fn apply_using(
         };
         match result {
             Ok(applied) => accepted += usize::from(applied),
-            Err(error) if !validation_failure(&error) => {
+            Err(error) if crate::error_policy::approval_retryable(&error) => {
                 tracing::warn!(%error,"task approval deferred for retry");
             }
             Err(error) => {
@@ -55,9 +55,13 @@ pub(super) fn apply_using(
 }
 fn reject_row(account: &LocalBusAccountState, storage: &str) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
-    let id = storage.rsplit('/').next().ok_or_else(|| invalid("decision row id missing"))?;
+    let suffix = storage
+        .strip_prefix("task/approval_decision_in/")
+        .filter(|suffix| !suffix.is_empty())
+        .ok_or_else(|| invalid("decision row id missing"))?;
+    let rejected = format!("task/approval_rejected/{suffix}");
     db.write_transaction(|| {
-        db.persist_actor_state(&key("approval_rejected",id),&json!({"expires_at":now_unix_timestamp().saturating_add(crate::client::task::approval_retention::TTL),"reason_code":DeliveryReason::InvalidDecision}))?;
+        db.persist_actor_state(&rejected,&json!({"expires_at":now_unix_timestamp().saturating_add(crate::client::task::approval_retention::TTL),"reason_code":DeliveryReason::InvalidDecision}))?;
         db.prune_task_diagnostics("task/approval_rejected/",128)?;
         db.delete_task_state(storage)?;
         Ok(())
@@ -117,7 +121,7 @@ pub(super) fn apply_one(
         Ok::<_, SdkError>(())
     })();
     if let Err(error) = validation {
-        if !validation_failure(&error) {
+        if crate::error_policy::approval_retryable(&error) {
             return Err(error);
         }
         tracing::warn!(%error,"task approval rejected by MCP validation");
@@ -179,29 +183,4 @@ fn accept_grant(account: &mut LocalBusAccountState, packet: &Packet) -> Result<(
         Some(packet.deadline()),
     )?;
     Ok(())
-}
-
-fn validation_failure(error: &SdkError) -> bool {
-    use crate::TaskRefusalCode as R;
-    crate::client::inbox_failure::deterministic(error).is_some()
-        || matches!(
-            error,
-            SdkError::SignatureVerificationFailed(_)
-                | SdkError::GrantInvalidated
-                | SdkError::CapabilityDenied(_)
-                | SdkError::TaskRefused {
-                    reason: R::InvalidRequest
-                        | R::InvalidEvent
-                        | R::NotRequester
-                        | R::NotAssignee
-                        | R::NotMember
-                        | R::NotEligibleAcceptor
-                        | R::HumanRequired
-                        | R::Terminal
-                        | R::NoLocalRole
-                        | R::DecisionConsumed
-                        | R::DecisionMismatch,
-                    ..
-                }
-        )
 }
