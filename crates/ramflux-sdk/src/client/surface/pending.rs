@@ -22,21 +22,36 @@ struct Pending {
     group_epoch: Option<u64>,
 }
 pub(super) fn pending_key(carrier: &Carrier) -> Result<String, SdkError> {
-    Ok(key(
-        "pending",
-        &serde_json::to_string(&(
-            &carrier.surface_reference()?,
-            &carrier.sender_principal_id,
-            &carrier.message_id,
-        ))?,
+    Ok(format!(
+        "{}{}/{}",
+        "surface/pending/",
+        ramflux_protocol::hash_base64url(
+            "ramflux.surface.pending_author.v1",
+            carrier.author_principal_id.as_bytes()
+        ),
+        ramflux_protocol::hash_base64url(
+            "ramflux.surface.pending_delivery.v1",
+            &ramflux_protocol::canonical_json_bytes(&(
+                &carrier.surface_reference()?,
+                &carrier.sender_principal_id,
+                &carrier.message_id
+            ))?
+        )
     ))
 }
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 impl RamfluxClient {
-    fn surface_pending(&self) -> Result<Vec<Pending>, SdkError> {
-        Ok(self.account_db()?.surface_history_page("surface/pending/", "surface/pending/", 65)?)
+    fn surface_pending(&self, author: &str) -> Result<Vec<Pending>, SdkError> {
+        let prefix = format!(
+            "surface/pending/{}/",
+            ramflux_protocol::hash_base64url(
+                "ramflux.surface.pending_author.v1",
+                author.as_bytes()
+            )
+        );
+        Ok(self.account_db()?.surface_history_page(&prefix, &prefix, 65)?)
     }
     pub(super) fn surface_pending_id_matches(&self, carrier: &Carrier) -> Result<bool, SdkError> {
         let existing = self.account_db()?.load_actor_state::<Pending>(&pending_key(carrier)?)?;
@@ -52,7 +67,7 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let reference = carrier.surface_reference()?;
         let mut retained = Vec::new();
-        for pending in self.surface_pending()? {
+        for pending in self.surface_pending(&carrier.author_principal_id)? {
             if pending.expires_at <= now() {
                 if pending.carrier.payload_kind == super::PayloadKind::Event {
                     self.mark_surface_out_of_sync(&pending.carrier, pending.version)?;
@@ -113,11 +128,17 @@ impl RamfluxClient {
     }
     pub(super) fn drain_surface_pending(&self, reference: &str) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        // Every successful iteration deletes one of at most 64 account-owned records.
+        let view = db
+            .client_record("surface", reference)?
+            .ok_or_else(|| invalid("pending surface view missing"))?;
+        let author = view["author_principal_id"]
+            .as_str()
+            .ok_or_else(|| invalid("pending author missing"))?;
+        // Every successful iteration deletes one of at most 64 records for this author.
         for _ in 0..MAX_PENDING {
             let current = self.surface_state_ref(reference)?.map_or(0, |(_, s)| s.version());
             let mut ready = self
-                .surface_pending()?
+                .surface_pending(author)?
                 .into_iter()
                 .filter(|p| {
                     p.surface_ref == reference
@@ -191,6 +212,10 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let reference = carrier.surface_reference()?;
         let db = self.account_db()?;
+        if self.surface_state_ref(&reference)?.is_some_and(|(_, state)| state.version() >= missing)
+        {
+            return Ok(());
+        }
         let missing =
             missing.max(db.load_actor_state::<u64>(&key("out_of_sync", &reference))?.unwrap_or(0));
         db.persist_actor_state(&key("out_of_sync", &reference), &missing)?;
@@ -202,14 +227,25 @@ impl RamfluxClient {
     }
     pub(crate) fn expire_surface_pending(&self) -> Result<(), SdkError> {
         self.account_db()?.surface_transaction(|| {
-            for entry in self.surface_pending()? {
+            let db = self.account_db()?;
+            let cursor = db
+                .load_actor_state::<String>("surface/pending_expiry_cursor")?
+                .unwrap_or_else(|| "surface/pending/".into());
+            let rows = db.surface_record_page::<Pending>("surface/pending/", &cursor, 65)?;
+            let next = if rows.len() == 65 {
+                rows.last().map(|(key, _)| key.clone()).unwrap_or_default()
+            } else {
+                "surface/pending/".into()
+            };
+            for (key, entry) in rows {
                 if entry.expires_at <= now() {
                     if entry.carrier.payload_kind == super::PayloadKind::Event {
                         self.mark_surface_out_of_sync(&entry.carrier, entry.version)?;
                     }
-                    self.account_db()?.delete_surface_state(&pending_key(&entry.carrier)?)?;
+                    db.delete_surface_state(&key)?;
                 }
             }
+            db.persist_actor_state("surface/pending_expiry_cursor", &next)?;
             Ok(())
         })
     }

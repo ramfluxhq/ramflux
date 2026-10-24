@@ -50,6 +50,10 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
     #[serde(default)]
     pub(crate) surface_controls: Vec<crate::client::surface::SurfaceControl>,
     #[serde(default)]
+    pub(crate) surface_checkpoints: Vec<crate::client::surface::OwnedSurfaceCheckpoint>,
+    #[serde(default)]
+    pub(crate) surface_export_metadata: crate::client::surface::SurfaceExportMetadata,
+    #[serde(default)]
     pub(crate) surface_message_epochs: BTreeMap<String, (String, u64)>,
     #[serde(default)]
     pub(crate) contents: BTreeMap<String, zeroize::Zeroizing<Vec<u8>>>,

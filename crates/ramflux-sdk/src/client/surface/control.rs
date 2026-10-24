@@ -300,7 +300,7 @@ impl RamfluxClient {
             .and_then(|v| v["principal_id"].as_str().map(str::to_owned))
             .ok_or_else(|| invalid("original surface signer owner missing"))
     }
-    pub(super) fn queue_surface_forward(
+    pub(crate) fn queue_surface_forward(
         &self,
         carrier: &Carrier,
         epoch: Option<u64>,
