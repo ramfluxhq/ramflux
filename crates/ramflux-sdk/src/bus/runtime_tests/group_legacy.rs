@@ -186,6 +186,7 @@ async fn repeated_group_receives_respect_backoff_and_a_new_pin_redrives_the_genu
     let db = receiver.client.account_db()?;
     assert!(db.has_inbox_retry(&legacy_key(&good)?)?);
     assert_eq!(db.due_inbox_retries(start + 1)?, Vec::<Vec<u8>>::new());
+    assert_eq!(db.due_inbox_retries(start + 10)?.len(), 1);
     assert!(receiver.client.direct_message_by_id("valid")?.is_none());
     assert!(!db.journal_after(0, 64)?.iter().any(|e| e.topic == "message.undeliverable"));
     receiver.client.pin_joined_group_member("g", "device-alice")?;
@@ -408,6 +409,94 @@ async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_t
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     server.abort();
     let _ = server.await;
+    drop(sender);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_legacy_delivery_can_complete_even_when_its_sources_retry_slots_are_full()
+-> Result<(), SdkError> {
+    let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
+    for index in 0..8 {
+        let mut held = good.clone();
+        held.inbox_seq = 10 + index;
+        held.envelope.envelope_id = format!("held-{index}");
+        held.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &ramflux_protocol::signed_bytes(&held.envelope)?,
+            sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        );
+        let result = receiver.client.append_group_gateway_delivery_for_recipient(
+            "thread",
+            "g",
+            &held.envelope.envelope_id,
+            &held,
+            "device-bob",
+        );
+        assert!(matches!(
+            receiver.client.isolate_legacy_group_delivery(&held, result)?,
+            LegacyGroupDelivery::Held
+        ));
+    }
+    receiver.client.pin_joined_group_member("g", "device-alice")?;
+    receiver.client.import_group_sender_key_distribution(
+        &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
+    )?;
+    receiver.client.retain_legacy_group_entry(&good)?;
+    let request = LocalBusFrame::request(
+        "receive",
+        Some("bob".into()),
+        "group",
+        "group.receive",
+        serde_json::json!({"group_id":"g","conversation_id":"thread","limit":32}),
+    );
+    crate::bus::dispatch::group::dispatch_group_receive_request(&request, &mut receiver).await?;
+    assert!(receiver.client.direct_message_by_id("valid")?.is_some());
+    drop(sender);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_verified_pin_arrival_repairs_legacy_delivery_after_its_network_retry_budget_is_exhausted()
+-> Result<(), SdkError> {
+    let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
+    let pending = receiver.client.append_group_gateway_delivery_for_recipient(
+        "thread",
+        "g",
+        "valid",
+        &good,
+        "device-bob",
+    );
+    assert!(matches!(
+        receiver.client.isolate_legacy_group_delivery(&good, pending)?,
+        LegacyGroupDelivery::Held
+    ));
+    let key = legacy_key(&good)?;
+    let now = now_unix_timestamp();
+    let bytes = serde_json::to_vec(&good)?;
+    for retry in 1..8 {
+        assert_ne!(
+            receiver.client.account_db()?.defer_inbox_entry(&key, &bytes, now + retry * 64)?,
+            0
+        );
+    }
+    receiver.client.account_db()?.park_legacy_inbox_retry(&key)?;
+    receiver.client.pin_joined_group_member("g", "device-alice")?;
+    receiver.client.import_group_sender_key_distribution(
+        &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
+    )?;
+    let request = LocalBusFrame::request(
+        "receive",
+        Some("bob".into()),
+        "group",
+        "group.receive",
+        serde_json::json!({"group_id":"g","conversation_id":"thread","limit":32}),
+    );
+    crate::bus::dispatch::group::dispatch_group_receive_request(&request, &mut receiver).await?;
+    assert!(receiver.client.direct_message_by_id("valid")?.is_some());
+    assert!(!receiver.client.account_db()?.has_inbox_retry(&key)?);
     drop(sender);
     drop(receiver);
     std::fs::remove_dir_all(root)?;

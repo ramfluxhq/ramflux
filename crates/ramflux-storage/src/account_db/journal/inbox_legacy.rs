@@ -14,6 +14,33 @@ impl AccountDb {
         )?;
         self.cleanup_legacy_inbox_holds()
     }
+    /// Remembers why a bounded legacy hold is parked, without retaining any plaintext.
+    /// # Errors
+    /// Returns database or serialization errors.
+    pub fn record_legacy_inbox_failure(
+        &self,
+        key: &str,
+        lookup_recoverable: bool,
+        quota_blocked: bool,
+    ) -> Result<(), StorageError> {
+        self.persist_actor_state(&format!("inbox/legacy-held/{key}"), &serde_json::json!({"lookup_recoverable":lookup_recoverable,"quota_blocked":quota_blocked}))
+    }
+    /// Reports whether a hold awaits retry capacity rather than a fresh delivery attempt.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn legacy_inbox_quota_blocked(&self, key: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .load_actor_state::<serde_json::Value>(&format!("inbox/legacy-held/{key}"))?
+            .is_some_and(|value| value["quota_blocked"] == true))
+    }
+    /// Reports whether verified local cache repair can finish a held lookup without network work.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn legacy_inbox_lookup_recoverable(&self, key: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .load_actor_state::<serde_json::Value>(&format!("inbox/legacy-held/{key}"))?
+            .is_some_and(|value| value["lookup_recoverable"] == true))
+    }
     /// Parks an exhausted legacy retry without acknowledging or dropping its ciphertext.
     /// # Errors
     /// Returns database errors.
@@ -25,6 +52,8 @@ impl AccountDb {
         Ok(())
     }
     pub(super) fn cleanup_legacy_inbox_holds(&self) -> Result<(), StorageError> {
+        self.connection.execute("DELETE FROM runtime_inbox_retry WHERE envelope_key IN (SELECT substr(state_kind,19) FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted))", [])?;
+        self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key IN (SELECT substr(state_kind,19) FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted)) AND envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_dead_letter)", [])?;
         self.connection.execute("DELETE FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted)", [])?;
         Ok(())
     }

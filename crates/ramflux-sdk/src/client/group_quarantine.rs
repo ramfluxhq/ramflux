@@ -45,18 +45,49 @@ impl RamfluxClient {
         let key = legacy_key(entry)?;
         let db = self.account_db()?;
         db.redrive_inbox_changes(now)?;
+        let retrying = db.has_inbox_retry(&key)?;
+        if !retrying && !db.legacy_inbox_quota_blocked(&key)? {
+            return Ok(true);
+        }
         let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
-        if !super::inbox_failure::set_failure_policy(
+        let admitted = super::inbox_failure::set_failure_policy(
             self,
             local,
             entry,
             &key,
             &serde_json::to_vec(entry)?,
             now,
-        )? {
+        )?;
+        if admitted && db.inbox_retry_ready(&key, now)? {
+            return Ok(true);
+        }
+        Ok(db.legacy_inbox_lookup_recoverable(&key)? && self.cached_legacy_group_ready(entry)?)
+    }
+    fn cached_legacy_group_ready(&self, entry: &GatewayInboxEntry) -> Result<bool, SdkError> {
+        let parsed = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&bytes).ok());
+        let Some(group) = parsed
+            .filter(|g| g.schema == "ramflux.sdk.group_sender_key.message.v1" && g.version == 1)
+        else {
+            return Ok(false);
+        };
+        let cached =
+            self.account_db()?.client_record("device", &entry.envelope.source_device_id)?;
+        if cached.is_none_or(|record| record.get("x25519_identity_public").is_none()) {
             return Ok(false);
         }
-        Ok(db.inbox_retry_ready(&key, now)?)
+        match self.authenticated_envelope_sender(entry).and_then(|_| {
+            self.require_group_payload_sender(&group.group_id, &group.sender_id, entry)
+        }) {
+            Ok(()) => Ok(true),
+            Err(SdkError::Storage(error))
+                if !matches!(error, StorageError::GroupPermissionDenied) =>
+            {
+                Err(SdkError::Storage(error))
+            }
+            Err(_) => Ok(false),
+        }
     }
     pub(crate) fn isolate_legacy_group_delivery(
         &self,
@@ -93,6 +124,17 @@ impl RamfluxClient {
                     &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
                 let admitted = super::inbox_failure::set_failure_policy(
                     self, local, entry, &key, &bytes, now,
+                )?;
+                db.record_legacy_inbox_failure(
+                    &key,
+                    matches!(
+                        error,
+                        SdkError::InboundPending(_)
+                            | SdkError::GatewaySessionRejected(_)
+                            | SdkError::Transport(_)
+                            | SdkError::LocalBus(_)
+                    ),
+                    !admitted,
                 )?;
                 if admitted
                     && db.inbox_retry_ready(&key, now)?
