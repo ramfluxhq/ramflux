@@ -40,19 +40,15 @@ impl RamfluxClient {
                 let record = db.client_record("device", member)?;
                 let owner = record.as_ref().and_then(|v| v["principal_id"].as_str());
                 let local = self.device_branch.as_ref().filter(|d| d.device_id == *member);
-                if owner == Some(principal) || local.is_some_and(|d| d.principal_id == principal) {
-                    if device.is_none_or(|id| id == member) {
-                        if let Some(device) = device {
-                            if local.is_some_and(|d| {
-                                d.device_id == device && d.principal_id == principal
-                            }) {
-                                self.pin_local_group_member(group)?;
-                            } else {
-                                self.require_group_sender_pin(group, principal, device)?;
-                            }
-                        }
-                        return Ok(());
+                if (owner == Some(principal) || local.is_some_and(|d| d.principal_id == principal))
+                    && device.is_none_or(|id| id == member)
+                {
+                    if local.is_some_and(|d| d.principal_id == principal) {
+                        self.pin_local_group_member(group)?;
+                    } else {
+                        self.require_group_sender_pin(group, principal, member)?;
                     }
+                    return Ok(());
                 }
             }
             return Err(invalid("task actor is not a current pinned group member"));

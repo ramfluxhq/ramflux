@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 pub(super) struct Pending {
     pub carrier: Carrier,
     conversation: String,
-    message: String,
-    at: i64,
+    pub(super) message: String,
+    pub(super) at: i64,
     expires_at: i64,
 }
 pub(super) fn pending_key(c: &Carrier) -> Result<String, SdkError> {
@@ -41,6 +41,18 @@ impl RamfluxClient {
                 | SdkError::InboundRejected(_) => Ok(false),
                 other => Err(other),
             };
+        }
+        if let Some(base) = event.event().base_revision()
+            && base > task.version
+        {
+            return Ok(true);
+        }
+        if let TaskEventBody::Resolve(resolution) = event.event() {
+            match self.task_decision_is_waiting(c, task, resolution) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(_) => return Ok(false),
+            }
         }
         Ok(if let Some(base) = event.event().base_revision() {
             base > task.version
@@ -78,7 +90,12 @@ impl RamfluxClient {
         let outcome = Outcome {
             accepted: false,
             pending: true,
-            fallback_text: "[Task waiting for earlier revisions]".into(),
+            fallback_text: if matches!(c.event()?.event(), TaskEventBody::Resolve(_)) {
+                "[Task decision awaiting approval confirmation]"
+            } else {
+                "[Task waiting for earlier revisions]"
+            }
+            .into(),
             reject: None,
         };
         self.store_task_message_metadata(delivery, &outcome)?;

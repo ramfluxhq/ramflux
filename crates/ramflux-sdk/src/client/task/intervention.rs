@@ -6,7 +6,7 @@ use super::{TaskHistory, invalid};
 use crate::SdkError;
 use ramflux_protocol::{NeedsMe, TaskState};
 impl TaskHistory {
-    pub(super) fn intervention_source(
+    pub(crate) fn intervention_source(
         &self,
         step: &str,
         target: &NeedsMe,
@@ -20,7 +20,7 @@ impl TaskHistory {
                 .and_then(|s| s.needs_me.clone());
             let event = accepted.carrier.verify(&accepted.public_key)?;
             let task = state
-                .apply(&event, &accepted.carrier.signer(&accepted.public_key, &event)?)
+                .apply(&event, &accepted.carrier.signer(&accepted.public_key, &event))
                 .map_err(|e| invalid(e.to_string()))?;
             let current =
                 task.steps.iter().find(|s| s.id == step).and_then(|s| s.needs_me.as_ref());

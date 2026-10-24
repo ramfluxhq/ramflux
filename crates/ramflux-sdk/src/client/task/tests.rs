@@ -123,7 +123,7 @@ fn task_carriers_preserve_exact_event_bytes_and_reject_duplicate_json_members() 
     assert_eq!(ramflux_protocol::decode_base64url(&decoded.wire_base64)?, original);
     decoded.verify(&f.agent.task_signer_key("human", "human-device")?)?;
     let mut duplicate = c;
-    let raw = String::from_utf8(original)?.replacen("{", "{\"conversation_id\":\"other\",", 1);
+    let raw = String::from_utf8(original)?.replacen('{', "{\"conversation_id\":\"other\",", 1);
     duplicate.wire_base64 = ramflux_protocol::encode_base64url(raw);
     assert!(duplicate.event().is_err());
     Ok(())
@@ -340,3 +340,55 @@ fn an_envelope_clock_or_random_task_ids_cannot_bypass_principal_admission_limits
     assert!(f.agent.account_db()?.task_state_usage("task/rejected/")?.0 <= 256);
     Ok(())
 }
+
+#[test]
+fn proposal_acceptance_requires_a_member_distinct_from_both_proposer_and_assignee() -> TestResult {
+    let f = Fixture::new()?;
+    let third = client(&f.root.join("third"), "third", 81)?;
+    for remote in [&f.human, &f.agent] {
+        let d = remote.device_branch.as_ref().ok_or("device")?;
+        let root = remote.identity_root.as_ref().ok_or("root")?;
+        let commitment = crate::identity_root_public_key_commitment(
+            &ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()),
+        )?;
+        third.account_db()?.persist_client_record("device",&d.device_id,&json!({"principal_id":d.principal_id,"principal_commitment":commitment,"signing_public_key":ramflux_protocol::encode_base64url(d.signing_key.verifying_key().to_bytes())}))?;
+    }
+    third.create_group("group", "third-device")?;
+    third.add_group_member("group", "human-device", "member")?;
+    third.add_group_member("group", "agent-device", "member")?;
+    third.account_db()?.persist_client_record(
+        "conversation",
+        "group-thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    let TaskEventBody::Proposal(mut proposal) = proposal() else { return Err("proposal".into()) };
+    proposal.conversation_id = "group-thread".into();
+    proposal.assignee = "human".into();
+    let proposed = sign(&f.agent, "group-thread", "proposed", TaskEventBody::Proposal(proposal))?;
+    assert!(project(&third, &proposed)?.accepted);
+    for actor in [&f.agent, &f.human] {
+        let accept = sign(
+            actor,
+            "group-thread",
+            &format!("accept-{}", actor.device_branch.as_ref().ok_or("device")?.principal_id),
+            TaskEventBody::Accept(TaskAccept { task_id: "proposal".into(), version: 2 }),
+        )?;
+        assert!(!project(&third, &accept)?.accepted);
+    }
+    let accept = sign(
+        &third,
+        "group-thread",
+        "third-accept",
+        TaskEventBody::Accept(TaskAccept { task_id: "proposal".into(), version: 2 }),
+    )?;
+    assert!(project(&third, &accept)?.accepted);
+    assert_eq!(third.task_get(Some("group-thread"), "proposal")?["requester"], "third");
+    drop(third);
+    Ok(())
+}
+
+#[path = "surface_tests.rs"]
+mod surfaces;
+
+#[path = "own_tests.rs"]
+mod own;

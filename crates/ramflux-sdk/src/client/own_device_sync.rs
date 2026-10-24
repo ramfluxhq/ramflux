@@ -210,6 +210,7 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
+            task_packets: self.own_task_packets()?,
             surface_pages,
             surface_controls: surfaces.controls,
             surface_checkpoints: surfaces.checkpoints,
@@ -458,6 +459,7 @@ impl RamfluxClient {
         // The authenticated own-device snapshot carries the source's existing pins. Establish
         // them before any sender-key seed is imported; a distribution never establishes a pin.
         self.restore_own_device_group_member_pins(bundle)?;
+        self.import_own_task_packets(&bundle.task_packets, &bundle.source_device_id)?;
         let mut imported_messages = 0_usize;
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
@@ -759,6 +761,7 @@ mod tests {
             contents: BTreeMap::new(),
             dm_sessions: Vec::new(),
             groups,
+            task_packets: Vec::new(),
             group_member_pins: Vec::new(),
             sender_key_distributions_base64: Vec::new(),
         }

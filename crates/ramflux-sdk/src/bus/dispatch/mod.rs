@@ -30,5 +30,5 @@ pub(crate) mod surface_transport;
 
 pub(super) mod surface_group;
 pub(crate) mod task;
-pub(crate) mod task_transport;
 mod task_group;
+pub(crate) mod task_transport;

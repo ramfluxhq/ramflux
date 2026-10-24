@@ -35,13 +35,20 @@ impl RamfluxClient {
         &self,
         bundle: &SdkOwnDeviceHistoryBundle,
     ) -> Result<(), SdkError> {
+        self.restore_own_group_pins(&bundle.groups, &bundle.group_member_pins)
+    }
+    pub(crate) fn restore_own_group_pins(
+        &self,
+        groups: &[SdkOwnDeviceGroupSnapshot],
+        pins: &[SdkOwnDeviceGroupMemberPin],
+    ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         // Validate the entire incoming pin set before writing any keys. Existing active pins
         // always win; a sibling device gets its own key rather than replacing the source key.
         let mut seen = BTreeSet::new();
-        for pin in &bundle.group_member_pins {
+        for pin in pins {
             if !seen.insert((&pin.group_id, &pin.device_id))
-                || !bundle.groups.iter().any(|group| {
+                || !groups.iter().any(|group| {
                     group.group_id == pin.group_id
                         && group.members.iter().any(|m| m.member_id == pin.device_id)
                 })
@@ -76,7 +83,7 @@ impl RamfluxClient {
                 ));
             }
         }
-        for pin in &bundle.group_member_pins {
+        for pin in pins {
             db.persist_group_member_device_key(
                 &pin.group_id,
                 &pin.device_id,
@@ -94,7 +101,7 @@ impl RamfluxClient {
                 )?;
             }
         }
-        for group in &bundle.groups {
+        for group in groups {
             self.pin_local_group_member(&group.group_id)?;
         }
         Ok(())

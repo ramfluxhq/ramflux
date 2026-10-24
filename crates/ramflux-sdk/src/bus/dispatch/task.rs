@@ -21,29 +21,20 @@ pub(crate) async fn dispatch_task(
     if request.method == "task.decision.prove" {
         return prove_decision(request, state);
     }
-    let human = matches!(
-        request.method.as_str(),
-        "task.start" | "task.accept" | "task.decline" | "task.resolve" | "task.cancel"
-    );
-    if human {
-        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-            &state.config.data_root,
-            id,
-        ))?;
-        let default_kind = if manifest.client_mode == LocalBusClientMode::HeadlessAi {
-            "headless_ai"
-        } else {
-            "human"
-        };
-        require_local_human(
-            &manifest.client_mode,
-            manifest.kind.as_deref().or(Some(default_kind)),
-        )?;
-    }
+    authorize_local_task_sender(request, state, id)?;
     let account = local_bus_account_mut(state, id)?;
     let device = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let principal = device.principal_id.clone();
-    let conversation = required(&request.body, "conversation_id")?.to_owned();
+    let conversation = if let Some(conversation) = request.body["conversation_id"].as_str() {
+        conversation.to_owned()
+    } else if request.method == "task.cancel" {
+        account.client.task_get(None, required(&request.body, "task_id")?)?["conversation_id"]
+            .as_str()
+            .ok_or_else(|| invalid("task not found"))?
+            .to_owned()
+    } else {
+        return Err(invalid("task conversation_id required"));
+    };
     let task_id = request.body["task_id"]
         .as_str()
         .map_or_else(crate::new_surface_message_id, |id| Ok(id.to_owned()))?;
@@ -56,58 +47,7 @@ pub(crate) async fn dispatch_task(
         .as_str()
         .map_or_else(crate::new_surface_message_id, |id| Ok(id.to_owned()))?;
     object.insert("task_id".into(), json!(task_id));
-    let event = match request.method.as_str() {
-        "task.start" if request.body["proposal_id"].is_string() => {
-            let proposal = required(&request.body, "proposal_id")?;
-            let current = account.client.task_get(Some(&conversation), proposal)?;
-            if current.is_null()
-                || current["assignee"] != request.body["assignee"]
-                || request.body["constraints"].is_string()
-                || request.body["text"].as_str().is_some_and(|v| !v.is_empty())
-            {
-                return Err(invalid(
-                    "proposal acceptance requires unchanged proposal; use task.accept without text or constraints",
-                ));
-            }
-            TaskEventBody::Accept(TaskAccept {
-                task_id: proposal.into(),
-                version: current["version"]
-                    .as_u64()
-                    .ok_or_else(|| invalid("proposal revision missing"))?
-                    + 1,
-            })
-        }
-        "task.start" => {
-            object.insert("requester".into(), json!(principal));
-            TaskEventBody::Start(serde_json::from_value::<TaskStart>(body)?)
-        }
-        "task.propose" => {
-            object.insert("proposer".into(), json!(principal));
-            TaskEventBody::Proposal(serde_json::from_value::<TaskProposal>(body)?)
-        }
-        method => {
-            object.remove("conversation_id");
-            match method {
-                "task.accept" => TaskEventBody::Accept(serde_json::from_value::<TaskAccept>(body)?),
-                "task.decline" => {
-                    TaskEventBody::Decline(serde_json::from_value::<TaskDecline>(body)?)
-                }
-                "task.update" => TaskEventBody::Update(serde_json::from_value::<TaskUpdate>(body)?),
-                "task.cancel" => {
-                    if let Some(version) = object.remove("version") {
-                        if object.insert("base_revision".into(), version).is_some() {
-                            return Err(invalid("specify version or base_revision, not both"));
-                        }
-                    }
-                    TaskEventBody::Cancel(serde_json::from_value::<TaskCancel>(body)?)
-                }
-                "task.resolve" => {
-                    TaskEventBody::Resolve(serde_json::from_value::<TaskResolve>(body)?)
-                }
-                _ => return Err(invalid("unsupported task method")),
-            }
-        }
-    };
+    let event = build_event(request, account, &conversation, &principal, body)?;
     let event =
         TaskEvent::new(conversation, event, sdk_device_signed_fields(&device.device_id, ""))
             .map_err(|e| invalid(e.to_string()))?;
@@ -117,7 +57,11 @@ pub(crate) async fn dispatch_task(
         request.body["decision_proof_base64"].as_str().map(str::to_owned),
     )?;
     if account.client.task_delivery_receipt(&carrier)?.is_none() {
-        account.client.preflight_task(&carrier)?;
+        if matches!(carrier.event()?.event(), TaskEventBody::Resolve(_)) {
+            account.client.preflight_task_intent(&carrier)?;
+        } else {
+            account.client.preflight_task(&carrier)?;
+        }
     }
     let response = super::task_transport::send(account, &carrier).await?;
     Ok(local_bus_ok(response))
@@ -202,3 +146,106 @@ fn prove_decision(
     let proof = account.client.witness_task_decision(conversation, resolution, evidence)?;
     Ok(local_bus_ok(json!({"decision_proof_base64":proof.encoded()?})))
 }
+
+fn authorize_local_task_sender(
+    request: &LocalBusFrame,
+    state: &LocalBusDaemonState,
+    id: &str,
+) -> Result<(), SdkError> {
+    let human = matches!(
+        request.method.as_str(),
+        "task.start" | "task.accept" | "task.decline" | "task.resolve" | "task.cancel"
+    );
+    if human || request.method == "task.propose" {
+        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
+            &state.config.data_root,
+            id,
+        ))?;
+        let default_kind = if manifest.client_mode == LocalBusClientMode::HeadlessAi {
+            "headless_ai"
+        } else {
+            "human"
+        };
+        if request.method == "task.propose" {
+            if manifest.client_mode != LocalBusClientMode::HeadlessAi
+                || manifest.kind.as_deref().unwrap_or(default_kind) != "headless_ai"
+            {
+                return Err(invalid("task proposal requires a headless AI account"));
+            }
+        } else {
+            require_local_human(
+                &manifest.client_mode,
+                manifest.kind.as_deref().or(Some(default_kind)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn build_event(
+    request: &LocalBusFrame,
+    account: &LocalBusAccountState,
+    conversation: &str,
+    principal: &str,
+    mut body: Value,
+) -> Result<TaskEventBody, SdkError> {
+    let object = body.as_object_mut().ok_or_else(|| invalid("task request must be an object"))?;
+    Ok(match request.method.as_str() {
+        "task.start" if request.body["proposal_id"].is_string() => {
+            let proposal = required(&request.body, "proposal_id")?;
+            let current = account.client.task_get(Some(conversation), proposal)?;
+            if current.is_null()
+                || current["assignee"] != request.body["assignee"]
+                || request.body["constraints"].as_str().is_some_and(|v| !v.is_empty())
+                || request.body["text"]
+                    .as_str()
+                    .is_some_and(|v| !v.is_empty() && current["title"].as_str() != Some(v))
+            {
+                return Err(invalid(
+                    "proposal acceptance requires unchanged proposal; use task.accept without text or constraints",
+                ));
+            }
+            TaskEventBody::Accept(TaskAccept {
+                task_id: proposal.into(),
+                version: current["version"]
+                    .as_u64()
+                    .ok_or_else(|| invalid("proposal revision missing"))?
+                    + 1,
+            })
+        }
+        "task.start" => {
+            object.insert("requester".into(), json!(principal));
+            TaskEventBody::Start(serde_json::from_value::<TaskStart>(body)?)
+        }
+        "task.propose" => {
+            object.insert("proposer".into(), json!(principal));
+            TaskEventBody::Proposal(serde_json::from_value::<TaskProposal>(body)?)
+        }
+        method => {
+            object.remove("conversation_id");
+            match method {
+                "task.accept" => TaskEventBody::Accept(serde_json::from_value::<TaskAccept>(body)?),
+                "task.decline" => {
+                    TaskEventBody::Decline(serde_json::from_value::<TaskDecline>(body)?)
+                }
+                "task.update" => TaskEventBody::Update(serde_json::from_value::<TaskUpdate>(body)?),
+                "task.cancel" => {
+                    if let Some(version) = object.remove("version")
+                        && object.insert("base_revision".into(), version).is_some()
+                    {
+                        return Err(invalid("specify version or base_revision, not both"));
+                    }
+                    TaskEventBody::Cancel(serde_json::from_value::<TaskCancel>(body)?)
+                }
+                "task.resolve" => {
+                    TaskEventBody::Resolve(serde_json::from_value::<TaskResolve>(body)?)
+                }
+                _ => return Err(invalid("unsupported task method")),
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+#[path = "tests/task_authority.rs"]
+mod tests;

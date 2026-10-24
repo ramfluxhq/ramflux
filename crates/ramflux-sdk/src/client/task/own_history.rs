@@ -15,9 +15,34 @@ pub(crate) struct TaskOwnPacket {
     context: OwnContext,
     history: TaskHistory,
     manifests: Vec<SdkDeviceManifestResponse>,
+    pins: Vec<crate::own_device_sync::SdkOwnDeviceGroupMemberPin>,
+    base: usize,
+    prefix_hash: String,
 }
 impl RamfluxClient {
-    pub(crate) fn task_own_packet(&self, carrier: &Carrier) -> Result<Vec<u8>, SdkError> {
+    fn check_task_own_group_fence(&self, context: &OwnContext) -> Result<(), SdkError> {
+        if let Some(group) = &context.group {
+            let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+            if self.group_state(&group.group_id).is_ok() {
+                if self
+                    .account_db()?
+                    .group_member_role(&group.group_id, &local.device_id)?
+                    .is_none()
+                {
+                    return Err(invalid(
+                        "own task snapshot cannot restore removed local membership",
+                    ));
+                }
+                if self.group_state(&group.group_id)?.group_epoch < group.group_epoch {
+                    return Err(SdkError::InboundPending(
+                        "task snapshot awaits authenticated membership changes".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn task_own_packets(&self, carrier: &Carrier) -> Result<Vec<Vec<u8>>, SdkError> {
         let db = self.account_db()?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let thread = db
@@ -41,35 +66,39 @@ impl RamfluxClient {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let mut friend = None;
-        if group.is_none() {
-            if let Some(peer) = participants.iter().find(|id| **id != local.principal_id) {
-                friend = db.friend_link_for_peer(peer)?;
-                if friend.is_none() {
-                    if let Some(commitment) = db
-                        .client_record("identity", peer)?
-                        .as_ref()
-                        .and_then(|v| v["contact_identity_commitment"].as_str())
-                    {
-                        friend = db.friend_link_for_peer(commitment)?;
-                    }
-                }
+        if group.is_none()
+            && let Some(peer) = participants.iter().find(|id| **id != local.principal_id)
+        {
+            friend = db.friend_link_for_peer(peer)?;
+            if friend.is_none()
+                && let Some(commitment) = db
+                    .client_record("identity", peer)?
+                    .as_ref()
+                    .and_then(|v| v["contact_identity_commitment"].as_str())
+            {
+                friend = db.friend_link_for_peer(commitment)?;
             }
         }
         let mut history =
             self.task_history(&carrier.conversation_id, carrier.event()?.event().task_id())?;
         let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
-        history.events.push(AcceptedEvent {
-            carrier: carrier.clone(),
-            public_key: public,
-            actor_kind_verified: false,
-            received_at: crate::time::now_unix_timestamp(),
-        });
-        let mut principals = history
+        if !history.events.iter().any(|e| {
+            e.carrier.message_id == carrier.message_id
+                && e.carrier.principal_id == carrier.principal_id
+        }) {
+            history.events.push(AcceptedEvent {
+                carrier: carrier.clone(),
+                public_key: public,
+                actor_kind_verified: false,
+                received_at: crate::time::now_unix_timestamp(),
+                decision_certificate: None,
+            });
+        }
+        let principals = history
             .events
             .iter()
             .map(|e| e.carrier.principal_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        principals.remove(&local.principal_id);
         let mut manifests = Vec::new();
         for principal in principals {
             manifests.push(
@@ -77,6 +106,7 @@ impl RamfluxClient {
                     .ok_or_else(|| invalid("own task signer manifest missing"))?,
             );
         }
+        let pins = self.own_device_group_member_pins(group.as_slice())?;
         let packet = TaskOwnPacket {
             context: OwnContext {
                 conversation_id: carrier.conversation_id.clone(),
@@ -86,13 +116,11 @@ impl RamfluxClient {
             },
             history,
             manifests,
+            pins,
+            base: 0,
+            prefix_hash: task_prefix_hash(&[])?,
         };
-        let mut bytes = PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(&packet)?);
-        if bytes.len() > 4 * 1024 * 1024 {
-            return Err(invalid("own task history budget exceeded"));
-        }
-        Ok(bytes)
+        task_packet_pages(packet)
     }
     pub(crate) fn receive_task_own(
         &self,
@@ -102,7 +130,7 @@ impl RamfluxClient {
         body: &[u8],
     ) -> Result<bool, SdkError> {
         let Some(raw) = body.strip_prefix(PREFIX) else { return Ok(false) };
-        if body.len() > 4 * 1024 * 1024 {
+        if body.len() > 128 * 1024 {
             return Err(invalid("own task history budget exceeded"));
         }
         let source = self
@@ -121,30 +149,61 @@ impl RamfluxClient {
         {
             return Err(invalid("own task history context or count mismatch"));
         }
+        self.import_task_own_packet(&packet, &entry.envelope.source_device_id).map(|()| true)
+    }
+    fn import_task_own_packet(
+        &self,
+        packet: &TaskOwnPacket,
+        source_device: &str,
+    ) -> Result<(), SdkError> {
+        let conversation = &packet.context.conversation_id;
         self.account_db()?.write_transaction(|| {
-            self.import_surface_context(&packet.context, &entry.envelope.source_device_id)?;
+            self.check_task_own_group_fence(&packet.context)?;
             for manifest in &packet.manifests {
-                crate::client::contact::verify_device_manifest(
-                    manifest,
-                    &manifest.principal_commitment,
-                )?;
+                let existing =
+                    self.account_db()?.client_record("identity", &manifest.principal_id)?;
+                let commitment = if manifest.principal_id
+                    == self
+                        .device_branch
+                        .as_ref()
+                        .ok_or(SdkError::IdentityRootMissing)?
+                        .principal_id
+                {
+                    self.surface_local_root_commitment()?
+                } else {
+                    existing
+                        .as_ref()
+                        .and_then(|v| v["contact_identity_commitment"].as_str())
+                        .unwrap_or(&manifest.principal_commitment)
+                        .to_owned()
+                };
+                crate::client::contact::verify_device_manifest(manifest, &commitment)?;
                 self.persist_identity_directory(manifest)?;
             }
+            self.import_surface_context(&packet.context, source_device)?;
+            self.restore_own_group_pins(packet.context.group.as_slice(), &packet.pins)?;
             let first =
                 packet.history.events.first().ok_or_else(|| invalid("own task history empty"))?;
             let id = first.carrier.event()?.event().task_id().to_owned();
             let existing = self.task_history(conversation, &id)?;
-            if existing.events.len() > packet.history.events.len() {
-                return Ok(());
+            if packet.base > existing.events.len() {
+                return Err(SdkError::InboundPending(
+                    "task history page awaits earlier events".into(),
+                ));
             }
-            for (old, new) in existing.events.iter().zip(&packet.history.events) {
+            if task_prefix_hash(&existing.events[..packet.base])? != packet.prefix_hash {
+                return Err(invalid("task history page prefix differs from committed history"));
+            }
+            for (old, new) in existing.events.iter().skip(packet.base).zip(&packet.history.events) {
                 if old.carrier.bytes()? != new.carrier.bytes()? {
                     return Err(invalid("own task history is not a causal extension"));
                 }
             }
-            for accepted in packet.history.events.iter().skip(existing.events.len()) {
+            for accepted in
+                packet.history.events.iter().skip(existing.events.len().saturating_sub(packet.base))
+            {
                 let carrier = &accepted.carrier;
-                if carrier.conversation_id != conversation
+                if carrier.conversation_id != *conversation
                     || carrier.event()?.event().task_id() != id
                 {
                     return Err(invalid("own task event context mismatch"));
@@ -154,15 +213,18 @@ impl RamfluxClient {
                 {
                     return Err(invalid("own task key differs from verified device"));
                 }
+                if let Some(certificate) = &accepted.decision_certificate {
+                    self.save_task_commit_certificate(carrier, certificate)?;
+                }
                 let timeline = super::timeline_id(carrier)?;
                 let outcome = self
-                    .project_task_message(
+                    .project_owned_task_message(
                         &Delivery {
                             conversation,
                             message: &timeline,
                             principal: &carrier.principal_id,
                             device: &carrier.device_id,
-                            at: crate::time::now_unix_timestamp(),
+                            at: accepted.received_at,
                         },
                         &carrier.bytes()?,
                     )?
@@ -182,7 +244,85 @@ impl RamfluxClient {
                 )?;
             }
             Ok::<_, SdkError>(())
-        })?;
-        Ok(true)
+        })
     }
+}
+
+impl RamfluxClient {
+    pub(crate) fn own_task_packets(&self) -> Result<Vec<TaskOwnPacket>, SdkError> {
+        let rows = self.account_db()?.task_record_page::<TaskHistory>(
+            "task/history/",
+            "task/history/",
+            101,
+        )?;
+        if rows.len() > 100 {
+            return Err(invalid("task snapshot exceeds history page capacity"));
+        }
+        let mut packets = Vec::new();
+        let mut size = 0usize;
+        for (_, history) in rows {
+            if let Some(last) = history.events.last() {
+                for body in self.task_own_packets(&last.carrier)? {
+                    size = size.saturating_add(body.len());
+                    if size > 4 * 1024 * 1024 {
+                        return Err(invalid("task snapshot byte budget exceeded"));
+                    }
+                    packets.push(ramflux_protocol::parse_i_json(
+                        body.strip_prefix(PREFIX)
+                            .ok_or_else(|| invalid("task snapshot prefix missing"))?,
+                    )?);
+                }
+            }
+        }
+        Ok(packets)
+    }
+    pub(crate) fn import_own_task_packets(
+        &self,
+        packets: &[TaskOwnPacket],
+        source: &str,
+    ) -> Result<(), SdkError> {
+        if packets.len() > 100 || serde_json::to_vec(packets)?.len() > 4 * 1024 * 1024 {
+            return Err(invalid("task snapshot byte or count budget exceeded"));
+        }
+        for packet in packets {
+            self.account_db()?.write_transaction(|| self.import_task_own_packet(packet, source))?;
+        }
+        Ok(())
+    }
+}
+
+fn task_prefix_hash(events: &[AcceptedEvent]) -> Result<String, SdkError> {
+    let bytes = events.iter().map(|e| e.carrier.bytes()).collect::<Result<Vec<_>, _>>()?;
+    Ok(ramflux_protocol::hash_base64url(
+        "ramflux.task.history_prefix.v1",
+        &ramflux_protocol::canonical_json_bytes(&bytes)?,
+    ))
+}
+fn task_packet_pages(mut packet: TaskOwnPacket) -> Result<Vec<Vec<u8>>, SdkError> {
+    let events = std::mem::take(&mut packet.history.events);
+    let mut pages = Vec::new();
+    for event in &events {
+        packet.history.events.push(event.clone());
+        if PREFIX.len() + serde_json::to_vec(&packet)?.len() > 128 * 1024 {
+            packet.history.events.pop();
+            if packet.history.events.is_empty() {
+                return Err(invalid("task snapshot item exceeds the transport byte budget"));
+            }
+            let mut bytes = PREFIX.to_vec();
+            bytes.extend(serde_json::to_vec(&packet)?);
+            pages.push(bytes);
+            packet.base += packet.history.events.len();
+            packet.prefix_hash = task_prefix_hash(&events[..packet.base])?;
+            packet.history.events = vec![event.clone()];
+            if PREFIX.len() + serde_json::to_vec(&packet)?.len() > 128 * 1024 {
+                return Err(invalid("task snapshot item exceeds the transport byte budget"));
+            }
+        }
+    }
+    if !packet.history.events.is_empty() {
+        let mut bytes = PREFIX.to_vec();
+        bytes.extend(serde_json::to_vec(&packet)?);
+        pages.push(bytes);
+    }
+    Ok(pages)
 }

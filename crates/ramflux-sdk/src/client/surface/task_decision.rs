@@ -18,9 +18,11 @@ impl RamfluxClient {
         let row = self
             .account_db()?
             .load_actor_state::<Value>(&format!("{}/{decision_id}", key("actions", &reference)))?
-            .ok_or_else(|| invalid("task surface action not found"))?;
+            .ok_or_else(|| SdkError::InboundPending("task surface action not found".into()))?;
         if row["actionable"] != true {
-            return Err(invalid("task surface action has not been executed by its creator"));
+            return Err(SdkError::InboundPending(
+                "task surface action awaits its creator receipt".into(),
+            ));
         }
         let receipt: Carrier = serde_json::from_value(row["attestation"].clone())?;
         Ok(ramflux_protocol::encode_base64url(receipt.bytes()?))

@@ -50,6 +50,9 @@ impl Carrier {
         {
             return Err(invalid("invalid task signer binding"));
         }
+        if let Some(proof) = &self.decision_proof_base64 {
+            super::certificate::Certificate::decode(proof)?;
+        }
         if self.content_type != "task"
             || event.conversation_id() != self.conversation_id
             || self.message_id.is_empty()
@@ -74,17 +77,13 @@ impl Carrier {
         }
         Ok(Some(ramflux_protocol::parse_i_json(json)?))
     }
-    pub(crate) fn signer<'a>(
-        &'a self,
-        public: &'a str,
-        event: &'a TaskEvent,
-    ) -> Result<TaskSigner<'a>, SdkError> {
-        Ok(TaskSigner {
+    pub(crate) fn signer<'a>(&'a self, public: &'a str, event: &'a TaskEvent) -> TaskSigner<'a> {
+        TaskSigner {
             principal_id: &self.principal_id,
             actor_type: super::authority::relation_role(event.event()),
             signing_key_id: &event.signed().signing_key_id,
             public_key_base64url: public,
-        })
+        }
     }
     pub(crate) fn verify(&self, public: &str) -> Result<TaskEvent, SdkError> {
         ramflux_crypto::verify_canonical_signature(
@@ -93,7 +92,7 @@ impl Carrier {
             public,
         )?;
         let event = self.event()?;
-        event.verify(&self.signer(public, &event)?).map_err(|error| invalid(error.to_string()))?;
+        event.verify(&self.signer(public, &event)).map_err(|error| invalid(error.to_string()))?;
         Ok(event)
     }
 }

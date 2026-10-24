@@ -4,6 +4,8 @@
 //! Signed task carriers and account-owned task projections in encrypted conversations.
 mod authority;
 pub(crate) mod carrier;
+pub(crate) mod certificate;
+pub(crate) mod control;
 pub(crate) mod decision;
 mod intervention;
 pub(crate) mod pending;
@@ -22,6 +24,8 @@ pub(crate) struct AcceptedEvent {
     pub actor_kind_verified: bool,
     #[serde(default)]
     pub received_at: i64,
+    #[serde(default)]
+    pub decision_certificate: Option<certificate::Certificate>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct TaskHistory {
@@ -44,11 +48,11 @@ pub(crate) fn scoped(kind: &str, conversation: &str, id: &str) -> Result<String,
 }
 
 pub(crate) fn timeline_id(carrier: &carrier::Carrier) -> Result<String, SdkError> {
-    Ok(scoped(
+    scoped(
         "timeline",
         &carrier.conversation_id,
         &serde_json::to_string(&(&carrier.principal_id, &carrier.message_id))?,
-    )?)
+    )
 }
 
 #[cfg(test)]

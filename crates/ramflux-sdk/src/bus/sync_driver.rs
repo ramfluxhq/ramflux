@@ -52,7 +52,7 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
-    let task_sent = match super::task_jobs::run(account).await {
+    let task_sent = match super::dispatch::task_transport::drain_confirmations(account).await {
         Ok(count) => count,
         Err(error) => {
             tracing::warn!(%error,"task outbox deferred");

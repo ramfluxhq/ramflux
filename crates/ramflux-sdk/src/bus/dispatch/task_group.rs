@@ -3,14 +3,13 @@
 
 //! Pinned current-member routing and sender-key distribution before each group task publication.
 use super::task_transport::{Target, seal};
-use crate::bus::task_jobs::Delivery;
+use crate::bus::task_delivery::Delivery;
 use crate::client::task::{carrier::Carrier, invalid};
 use crate::prelude::*;
 use serde_json::json;
 pub(super) struct Plan {
     group: String,
-    targets: Vec<Target>,
-    pub bytes: usize,
+    pub targets: Vec<Target>,
 }
 pub(super) async fn plan(
     account: &LocalBusAccountState,
@@ -68,10 +67,7 @@ pub(super) async fn plan(
             own: false,
         });
     }
-    let bytes = targets
-        .len()
-        .saturating_mul(c.bytes()?.len().saturating_mul(12).saturating_add(128 * 1024));
-    Ok(Plan { group: group.into(), targets, bytes })
+    Ok(Plan { group: group.into(), targets })
 }
 pub(super) async fn prepare(
     account: &LocalBusAccountState,
@@ -96,7 +92,6 @@ pub(super) async fn prepare(
             seal(
                 account,
                 engine,
-                c,
                 &target,
                 &conversation,
                 &wrapper,
@@ -108,7 +103,6 @@ pub(super) async fn prepare(
             seal(
                 account,
                 engine,
-                c,
                 &target,
                 &c.conversation_id,
                 &encrypted,

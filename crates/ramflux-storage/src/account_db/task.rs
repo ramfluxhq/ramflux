@@ -10,7 +10,10 @@ impl AccountDb {
     /// # Errors
     /// Rejects keys outside task delivery/holdback or returns database errors.
     pub fn delete_task_state(&self, key: &str) -> Result<(), StorageError> {
-        if !(key.starts_with("task/transport/") || key.starts_with("task/pending/")) {
+        if !(key.starts_with("task/pending/")
+            || key.starts_with("task/ack/")
+            || key.starts_with("task/forward/"))
+        {
             return Err(StorageError::AuthorizationRejected);
         }
         self.connection
@@ -52,7 +55,7 @@ impl AccountDb {
     /// # Errors
     /// Rejects other namespaces and returns database errors.
     pub fn prune_task_diagnostics(&self, prefix: &str, retain: u32) -> Result<(), StorageError> {
-        if !matches!(prefix, "task/rejected/" | "task/rate/") {
+        if !matches!(prefix, "task/rejected/" | "task/rate/" | "task/ack_sent/") {
             return Err(StorageError::AuthorizationRejected);
         }
         self.connection.execute("DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 ORDER BY coalesce(json_extract(CAST(state_json AS TEXT),'$.start'),rowid) DESC,state_kind DESC LIMIT -1 OFFSET ?2)",params![prefix,retain.clamp(1,2048)])?;

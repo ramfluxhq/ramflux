@@ -6,7 +6,7 @@ use super::*;
 use crate::{LocalMcpApprovalRecord, LocalMcpGrantRecord, LocalMcpGrantSigningBody};
 use ramflux_protocol::{McpCapability, NeedsMe, RiskLevel, TaskDecision, TaskResolve};
 use ramflux_storage::McpGrantWrite;
-fn open(f: &Fixture, id: &str) -> Result<(), SdkError> {
+pub(super) fn open(f: &Fixture, id: &str) -> Result<(), SdkError> {
     let start = sign(&f.human, "thread", &format!("start-{id}"), start(id, "thread"))?;
     let needs = sign(
         &f.agent,
@@ -31,7 +31,7 @@ fn open(f: &Fixture, id: &str) -> Result<(), SdkError> {
     }
     Ok(())
 }
-fn resolution(id: &str, decision: TaskDecision) -> TaskResolve {
+pub(super) fn resolution(id: &str, decision: TaskDecision) -> TaskResolve {
     TaskResolve {
         task_id: id.into(),
         base_revision: 2,
@@ -41,7 +41,7 @@ fn resolution(id: &str, decision: TaskDecision) -> TaskResolve {
         decision,
     }
 }
-fn grant(f: &Fixture) -> Result<LocalMcpGrantRecord, SdkError> {
+pub(super) fn grant(f: &Fixture) -> Result<LocalMcpGrantRecord, SdkError> {
     let d = f.human.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let body = LocalMcpGrantSigningBody {
         approval_id: "approval".into(),
@@ -79,7 +79,7 @@ fn grant(f: &Fixture) -> Result<LocalMcpGrantRecord, SdkError> {
         confirmation_mode: "remote_app".into(),
     })
 }
-fn store(f: &Fixture, g: &LocalMcpGrantRecord) -> Result<(), SdkError> {
+pub(super) fn store(f: &Fixture, g: &LocalMcpGrantRecord) -> Result<(), SdkError> {
     f.agent.account_db()?.upsert_mcp_grant(&McpGrantWrite {
         grant_id: &g.grant_id,
         target_ai_device_id: &g.state.server_id,
@@ -248,5 +248,82 @@ fn a_verified_existing_mcp_denial_resolves_the_task_without_creating_any_grant()
     assert!(project(&f.agent, &signed_resolution(&f.human, res, &proof)?)?.accepted);
     assert_eq!(f.agent.task_get(Some("thread"), "task")?["state"], "failed");
     assert!(f.agent.account_db()?.load_mcp_grant::<LocalMcpGrantRecord>("grant")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn requester_keeps_resolution_pending_until_executor_commits_the_exact_intent() -> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let res = resolution("task", TaskDecision::Resume);
+    let intent = sign(&f.human, "thread", "human-intent", TaskEventBody::Resolve(res))?;
+    assert!(project(&f.human, &intent)?.pending);
+    assert!(project(&f.agent, &intent)?.pending);
+    assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 2);
+    store(&f, &grant(&f)?)?;
+    assert_eq!(f.agent.retry_pending_tasks(crate::time::now_unix_timestamp())?, 1);
+    let history = f.agent.task_history("thread", "task")?;
+    let certificate = history
+        .events
+        .last()
+        .and_then(|e| e.decision_certificate.as_ref())
+        .ok_or("certificate missing")?;
+    let wire = String::from_utf8(ramflux_protocol::decode_base64url(&certificate.encoded()?)?)?;
+    assert!(!wire.contains("arguments-hash"));
+    assert!(!wire.contains("signing_body"));
+    assert!(!wire.contains("confirmation_mode"));
+    f.human.save_task_commit_certificate(&intent, certificate)?;
+    assert_eq!(f.human.retry_pending_tasks(crate::time::now_unix_timestamp())?, 1);
+    assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 3);
+    assert!(project(&f.human, &intent)?.accepted);
+    let another = sign(&f.human, "thread", "another-intent", intent.event()?.event().clone())?;
+    assert!(f.human.save_task_commit_certificate(&another, certificate).is_err());
+    Ok(())
+}
+
+#[test]
+fn reserved_certificates_do_not_commit_any_task_on_requester_devices() -> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let g = grant(&f)?;
+    store(&f, &g)?;
+    let proof = f.agent.witness_task_decision(
+        "thread",
+        resolution("task", TaskDecision::Resume),
+        decision::Evidence::Grant { record: Box::new(g) },
+    )?;
+    let intent = signed_resolution(&f.human, resolution("task", TaskDecision::Resume), &proof)?;
+    assert!(project(&f.human, &intent)?.pending);
+    assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 2);
+    assert!(project(&f.agent, &intent)?.accepted);
+    Ok(())
+}
+
+#[test]
+fn writer_restart_preserves_committed_decision_and_global_replay_protection() -> TestResult {
+    let mut f = Fixture::new()?;
+    open(&f, "task")?;
+    store(&f, &grant(&f)?)?;
+    let intent = sign(
+        &f.human,
+        "thread",
+        "intent",
+        TaskEventBody::Resolve(resolution("task", TaskDecision::Resume)),
+    )?;
+    assert!(project(&f.agent, &intent)?.accepted);
+    let before = f.agent.task_get(Some("thread"), "task")?;
+    drop(f.agent.active_account_db.take());
+    f.agent.unlock_account("agent", b"task-test-secret")?;
+    assert_eq!(f.agent.task_get(Some("thread"), "task")?, before);
+    assert!(project(&f.agent, &intent)?.accepted);
+    open(&f, "other")?;
+    let replay = sign(
+        &f.human,
+        "thread",
+        "replay",
+        TaskEventBody::Resolve(resolution("other", TaskDecision::Resume)),
+    )?;
+    assert!(!project(&f.agent, &replay)?.accepted);
+    assert_eq!(f.agent.task_get(Some("thread"), "other")?["version"], 2);
     Ok(())
 }
