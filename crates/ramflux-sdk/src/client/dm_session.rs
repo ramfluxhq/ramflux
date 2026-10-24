@@ -254,7 +254,10 @@ impl RamfluxClient {
             slot_recv_checkpoint: self
                 .projection_checkpoint(&dm_session_checkpoint_name(&slot_conversation_id, "recv"))?
                 .or(self.account_db()?.load_actor_state::<String>(
-                    &crate::client::routed::object_watermark(object_id, recipient_device_id)?,
+                    &crate::client::routed::object_watermark(
+                        object_id,
+                        &self.local_device_identity(recipient_device_id)?,
+                    )?,
                 )?),
             receive_cursor: self.gateway_receive_cursor(target_delivery_id)?,
         })

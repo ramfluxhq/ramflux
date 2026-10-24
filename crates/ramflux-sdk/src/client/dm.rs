@@ -319,7 +319,7 @@ impl RamfluxClient {
 
     fn catch_up_legacy_cursor(&self,conversation_id: &str,entry: &GatewayInboxEntry,target: &str) -> Result<bool,SdkError> {
         if self.legacy_receive_checkpoint_current(conversation_id,entry)? {
-            self.account_db()?.persist_actor_state(&format!("legacy/committed/{}",entry.envelope.envelope_id),&conversation_id)?;
+            self.account_db()?.persist_actor_state(&self.legacy_committed_key(entry)?,&conversation_id)?;
             self.persist_gateway_receive_cursor(target,entry.inbox_seq)?;
             return Ok(true);
         }
@@ -336,7 +336,7 @@ impl RamfluxClient {
         self.authorize_bound_legacy(&engine.config, &entry, options.conversation_id).await?;
 
         let conversation_id = options.conversation_id;
-        let terminal = format!("legacy/committed/{}", entry.envelope.envelope_id);
+        let terminal = self.legacy_committed_key(&entry)?;
         if self.account_db()?.load_actor_state::<String>(&terminal)?.as_deref()
             == Some(conversation_id)
         {
@@ -522,10 +522,8 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.persist_dm_session(conversation, &entry.envelope.envelope_id, "recv", session)?;
-            self.account_db()?.persist_actor_state(
-                &format!("legacy/committed/{}", entry.envelope.envelope_id),
-                &conversation,
-            )?;
+            self.account_db()?
+                .persist_actor_state(&self.legacy_committed_key(entry)?, &conversation)?;
             self.persist_gateway_receive_cursor(target, entry.inbox_seq)
         })
     }

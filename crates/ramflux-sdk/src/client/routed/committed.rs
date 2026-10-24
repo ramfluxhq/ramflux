@@ -73,8 +73,11 @@ pub(crate) fn conversation_watermark(conversation: &str) -> String {
         )
     )
 }
-pub(crate) fn object_watermark(object: &str, recipient: &str) -> Result<String, SdkError> {
-    let bytes = ramflux_protocol::canonical_json_bytes(&(object, recipient))?;
+pub(crate) fn object_watermark(
+    object: &str,
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> Result<String, SdkError> {
+    let bytes = ramflux_protocol::canonical_json_bytes(&(object, recipient.storage_key()))?;
     Ok(format!(
         "routed/slot-watermark/{}",
         ramflux_crypto::blake3_256_base64url("ramflux.sdk.slot.watermark.v2", &bytes)
@@ -140,10 +143,14 @@ impl RamfluxClient {
         }
         Ok(self
             .account_db()?
-            .load_actor_state::<String>(&format!(
-                "legacy/committed/{}",
-                entry.envelope.envelope_id
-            ))?
+            .load_actor_state::<String>(&self.legacy_committed_key(entry)?)?
             .map(|conversation| (conversation, entry.envelope.envelope_id.clone())))
+    }
+
+    pub(crate) fn legacy_committed_key(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<String, SdkError> {
+        Ok(format!("legacy/committed-root/{}", self.authenticated_committed_key(entry)?))
     }
 }
