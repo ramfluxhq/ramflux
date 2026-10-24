@@ -120,8 +120,8 @@ fn conversation(
     saved: &Value,
 ) -> Result<Value, SdkError> {
     let db = client.account_db()?;
-    let device = own.get("device_id").and_then(Value::as_str).unwrap_or("");
-    let mut value = db.client_conversation_metadata(id, device)?;
+    let viewer = client.read_device_identity()?;
+    let mut value = db.client_conversation_metadata(id, viewer.as_ref())?;
     for field in ["kind", "title", "participants", "group_id", "direct_route"] {
         value[field] = saved.get(field).cloned().unwrap_or(Value::Null);
     }

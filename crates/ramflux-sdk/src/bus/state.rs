@@ -82,7 +82,7 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
     pub(crate) pending_deliveries: Vec<GatewayInboxEntry>,
-    pub(crate) acked_envelope_ids: super::ack_cache::AckCache,
+    pub(crate) acked_mailbox_positions: super::ack_cache::AckCache,
     pub(crate) calls: BTreeMap<String, LocalCallRecord>,
     pub(crate) call_lru: VecDeque<String>,
     pub(crate) a2i_lru: VecDeque<String>,
@@ -117,7 +117,7 @@ impl LocalBusAccountState {
             principal_commitment,
             target_delivery_id,
             pending_deliveries: Vec::new(),
-            acked_envelope_ids: super::ack_cache::AckCache::new(),
+            acked_mailbox_positions: super::ack_cache::AckCache::new(),
             calls: BTreeMap::new(),
             call_lru: VecDeque::new(),
             a2i_lru: VecDeque::new(),
@@ -148,7 +148,7 @@ impl LocalBusAccountState {
             principal_commitment,
             target_delivery_id,
             pending_deliveries: Vec::new(),
-            acked_envelope_ids: super::ack_cache::AckCache::new(),
+            acked_mailbox_positions: super::ack_cache::AckCache::new(),
             calls: BTreeMap::new(),
             call_lru: VecDeque::new(),
             a2i_lru: VecDeque::new(),
@@ -170,13 +170,18 @@ impl LocalBusAccountState {
     ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
         let mut fresh = Vec::new();
         for entry in entries {
-            let envelope_id = &entry.envelope.envelope_id;
-            if self.acked_envelope_ids.contains(envelope_id)
-                || self.client.account_db()?.has_gateway_ack(envelope_id)?
-                || self
-                    .pending_deliveries
-                    .iter()
-                    .any(|pending| pending.envelope.envelope_id == *envelope_id)
+            let receiver = self.client.owned_device_identity()?;
+            let position = (receiver.clone(), entry.target_delivery_id.clone(), entry.inbox_seq);
+            if self.acked_mailbox_positions.contains(&position)
+                || self.client.account_db()?.has_gateway_ack(
+                    &receiver,
+                    &entry.target_delivery_id,
+                    entry.inbox_seq,
+                )?
+                || self.pending_deliveries.iter().any(|pending| {
+                    pending.target_delivery_id == entry.target_delivery_id
+                        && pending.inbox_seq == entry.inbox_seq
+                })
             {
                 continue;
             }
@@ -191,9 +196,24 @@ impl LocalBusAccountState {
     }
 
     pub(crate) fn mark_acked(&mut self, envelope_id: &str) -> Result<(), SdkError> {
-        self.client.account_db()?.remember_gateway_ack(envelope_id)?;
-        self.acked_envelope_ids.insert(envelope_id.to_owned());
-        self.pending_deliveries.retain(|entry| entry.envelope.envelope_id != envelope_id);
+        // The compatibility ACK endpoint accepts an ID only when the node can prove it unique.
+        // Cache a position only when the local pending page identifies exactly one delivery too.
+        let mut matches = self
+            .pending_deliveries
+            .iter()
+            .filter(|entry| entry.envelope.envelope_id == envelope_id);
+        let position =
+            matches.next().map(|entry| (entry.target_delivery_id.clone(), entry.inbox_seq));
+        if matches.next().is_some() {
+            return Ok(());
+        }
+        if let Some((target, seq)) = position {
+            let receiver = self.client.owned_device_identity()?;
+            self.client.account_db()?.remember_gateway_ack(&receiver, &target, seq)?;
+            self.acked_mailbox_positions.insert((receiver, target.clone(), seq));
+            self.pending_deliveries
+                .retain(|entry| entry.target_delivery_id != target || entry.inbox_seq != seq);
+        }
         Ok(())
     }
 

@@ -274,7 +274,10 @@ impl AccountDb {
             receipts.insert(
                 device_id.clone(),
                 MessageReceiptState {
-                    device_id,
+                    principal_commitment: ramflux_protocol::parse_qualified_device_id(&device_id)?
+                        .map(|(root, _)| root),
+                    device_id: ramflux_protocol::parse_qualified_device_id(&device_id)?
+                        .map_or(device_id, |(_, name)| name),
                     state: "delivered".to_owned(),
                     delivered_at: Some(delivered_at),
                     read_at: None,
@@ -302,7 +305,10 @@ impl AccountDb {
                     receipt.read_at = Some(read_at);
                 })
                 .or_insert(MessageReceiptState {
-                    device_id,
+                    principal_commitment: ramflux_protocol::parse_qualified_device_id(&device_id)?
+                        .map(|(root, _)| root),
+                    device_id: ramflux_protocol::parse_qualified_device_id(&device_id)?
+                        .map_or(device_id, |(_, name)| name),
                     state: "read".to_owned(),
                     delivered_at: None,
                     read_at: Some(read_at),

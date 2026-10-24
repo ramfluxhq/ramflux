@@ -78,9 +78,18 @@ async fn assert_copied_device_cannot_change_thread(victim_principal: &str) -> Re
             .actor_state_exists(&alice.client.authenticated_committed_key(&ack)?)?
     );
     assert_eq!(alice.client.direct_messages("alice-bob")?.len(), before);
-    assert_eq!(alice.client.account_db()?.delivery_receipt("alice-bob", "bob")?, None);
     assert_eq!(
-        alice.client.account_db()?.delivery_receipt("alice-bob", &mallory.reference()?)?,
+        alice
+            .client
+            .account_db()?
+            .delivery_receipt("alice-bob", &bob.client.owned_device_identity()?)?,
+        None
+    );
+    assert_eq!(
+        alice
+            .client
+            .account_db()?
+            .delivery_receipt("alice-bob", &mallory.client.owned_device_identity()?)?,
         None
     );
     let read = serde_json::to_vec(
@@ -96,32 +105,62 @@ async fn assert_copied_device_cannot_change_thread(victim_principal: &str) -> Re
     assert!(
         alice.client.apply_routed_entry(&mut engine, &pool()?, &forged_read, false).await.is_err()
     );
-    for device in ["bob".to_owned(), bob.reference()?, mallory.reference()?] {
+    for device in [
+        None,
+        Some(bob.client.owned_device_identity()?),
+        Some(mallory.client.owned_device_identity()?),
+    ] {
         assert_eq!(
             alice
                 .client
                 .account_db()?
-                .conversation_projection("alice-bob", &device)?
+                .conversation_projection("alice-bob", device.as_ref())?
                 .read_through_message_id,
             None
         );
     }
+    assert_honest_delivery_is_root_scoped(&mut alice, &bob, &mallory, &mut engine).await?;
+    assert_honest_read_is_root_scoped(&mut alice, &bob, &mallory, &mut engine, &read).await?;
+    Ok(())
+}
+
+async fn assert_honest_delivery_is_root_scoped(
+    alice: &mut Fixture,
+    bob: &Fixture,
+    mallory: &Fixture,
+    engine: &mut GatewaySessionEngine,
+) -> Result<(), SdkError> {
     // Accepted receipts retain the authenticated root address, never the name shared by both roots.
     let honest_ack = seal_as(
-        &bob,
-        &alice,
-        outgoing(&bob, &alice, "honest-receipt"),
+        bob,
+        alice,
+        outgoing(bob, alice, "honest-receipt"),
         &receipt("bob", "honest")?,
         Route::receipt(),
     )?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &honest_ack, false).await?;
-    assert!(alice.client.account_db()?.delivery_receipt("alice-bob", &bob.reference()?)?.is_some());
+    alice.client.apply_routed_entry(engine, &pool()?, &honest_ack, false).await?;
+    assert!(
+        alice
+            .client
+            .account_db()?
+            .delivery_receipt("alice-bob", &bob.client.owned_device_identity()?)?
+            .is_some()
+    );
     assert_eq!(
-        alice.client.account_db()?.delivery_receipt("alice-bob", &mallory.reference()?)?,
+        alice
+            .client
+            .account_db()?
+            .delivery_receipt("alice-bob", &mallory.client.owned_device_identity()?)?,
         None
     );
-    assert_eq!(alice.client.account_db()?.delivery_receipt("alice-bob", "bob")?, None);
-    assert_honest_read_is_root_scoped(&mut alice, &bob, &mallory, &mut engine, &read).await?;
+    assert_eq!(
+        alice
+            .client
+            .account_db()?
+            .conversation_projection("alice-bob", None)?
+            .delivered_through_message_id,
+        None
+    );
     Ok(())
 }
 
@@ -139,17 +178,17 @@ async fn assert_honest_read_is_root_scoped(
         alice
             .client
             .account_db()?
-            .conversation_projection("alice-bob", &bob.reference()?)?
+            .conversation_projection("alice-bob", Some(&bob.client.owned_device_identity()?))?
             .read_through_message_id
             .as_deref(),
         Some("outgoing")
     );
-    for device in ["bob".to_owned(), mallory.reference()?] {
+    for device in [None, Some(mallory.client.owned_device_identity()?)] {
         assert_eq!(
             alice
                 .client
                 .account_db()?
-                .conversation_projection("alice-bob", &device)?
+                .conversation_projection("alice-bob", device.as_ref())?
                 .read_through_message_id,
             None
         );

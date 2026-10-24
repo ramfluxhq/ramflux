@@ -127,3 +127,28 @@ async fn copied_receiver_name_cannot_cross_an_account_root_or_rewrite_a_claim_be
     assert!(matches!(engine.ack(forged).await, Err(SdkError::InboundRejected(_))));
     Ok(())
 }
+
+#[test]
+fn ack_cache_keeps_distinct_deliveries_with_the_same_envelope_id() -> Result<(), SdkError> {
+    let mut receiver = Fixture::new("alice", 61)?;
+    let bob = Fixture::new("bob", 71)?;
+    let mallory = Fixture::owned("bob", "mallory", 81, 82)?;
+    let mut first = seal(&mallory, &receiver, message("same-id", "thread"), b"mallory")?;
+    first.inbox_seq = 1;
+    let mut second = seal(&bob, &receiver, message("same-id", "thread"), b"bob")?;
+    second.inbox_seq = 2;
+    let config = receiver.config()?;
+    let mut account = LocalBusAccountState::disconnected(
+        std::mem::take(&mut receiver.client),
+        config,
+        "unused".into(),
+    );
+    assert_eq!(account.merge_deliveries(vec![first.clone()])?.len(), 1);
+    account.mark_acked("same-id")?;
+    assert_eq!(account.merge_deliveries(vec![first, second.clone()])?.len(), 1);
+    assert_eq!(account.pending_page(10)[0].inbox_seq, 2);
+    let db = account.client.account_db()?;
+    let own = account.client.owned_device_identity()?;
+    assert!(!db.has_gateway_ack(&own, &second.target_delivery_id, second.inbox_seq)?);
+    Ok(())
+}

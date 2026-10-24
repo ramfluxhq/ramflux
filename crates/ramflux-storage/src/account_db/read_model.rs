@@ -117,10 +117,11 @@ impl AccountDb {
     pub fn client_conversation_metadata(
         &self,
         id: &str,
-        reader: &str,
+        reader: Option<&ramflux_crypto::RootQualifiedDeviceRef>,
     ) -> Result<Value, StorageError> {
         let state = self.read_conversation_list_state(id)?;
         let projection = self.conversation_projection(id, reader)?;
+        let reader = reader.map(ramflux_crypto::RootQualifiedDeviceRef::storage_key);
         let activity:Option<i64>=self.connection.query_row("SELECT max(created_at) FROM direct_message_projection WHERE conversation_id=?1 AND deleted=0",params![id],|row|row.get(0))?;
         let unread:u64=self.connection.query_row("SELECT count(*) FROM direct_message_projection m WHERE m.conversation_id=?1 AND m.deleted=0 AND m.created_at>?3 AND NOT EXISTS (SELECT 1 FROM conversation_read_state r JOIN direct_message_projection last ON last.message_id=r.read_through_message_id WHERE r.conversation_id=?1 AND r.reader_id=?2 AND (m.created_at<last.created_at OR (m.created_at=last.created_at AND m.message_id<=last.message_id)))",params![id,reader,state.cleared_at.unwrap_or(i64::MIN)],|row|row.get(0))?;
         Ok(

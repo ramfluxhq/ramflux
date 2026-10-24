@@ -11,10 +11,11 @@ impl AccountDb {
     pub fn mark_read(
         &self,
         conversation_id: &str,
-        reader_id: &str,
+        reader: &ramflux_crypto::RootQualifiedDeviceRef,
         message_id: &str,
     ) -> Result<(), StorageError> {
-        self.ensure_read_through_can_advance(conversation_id, reader_id, message_id)?;
+        self.ensure_read_through_can_advance(conversation_id, reader, message_id)?;
+        let reader_id = reader.storage_key();
         self.connection.execute(
             "INSERT INTO conversation_read_state
                 (conversation_id, reader_id, read_through_message_id, read_at)
@@ -32,12 +33,12 @@ impl AccountDb {
     pub fn mark_delivered(
         &self,
         conversation_id: &str,
-        receiver_device_id: &str,
+        receiver: &ramflux_crypto::RootQualifiedDeviceRef,
         message_id: &str,
         delivered_at: i64,
         ttl_seconds: i64,
     ) -> Result<DeliveryReceiptRecord, StorageError> {
-        if let Some(existing) = self.delivery_receipt(conversation_id, receiver_device_id)?
+        if let Some(existing) = self.delivery_receipt(conversation_id, receiver)?
             && !self.message_is_at_or_after(
                 conversation_id,
                 message_id,
@@ -46,6 +47,7 @@ impl AccountDb {
         {
             return Ok(existing);
         }
+        let receiver_device_id = receiver.storage_key();
         let ttl_seconds = bounded_ttl_seconds(
             ttl_seconds,
             DEFAULT_DELIVERY_RECEIPT_TTL_SECONDS,
@@ -63,7 +65,8 @@ impl AccountDb {
         )?;
         Ok(DeliveryReceiptRecord {
             conversation_id: conversation_id.to_owned(),
-            receiver_device_id: receiver_device_id.to_owned(),
+            receiver_device_id: receiver.device_id().to_owned(),
+            receiver_principal_commitment: receiver.root_commitment().to_owned(),
             delivered_through_message_id: message_id.to_owned(),
             delivered_at,
             ttl_seconds,
@@ -76,16 +79,26 @@ impl AccountDb {
         &self,
         event: ReceiptEventWrite<'_>,
     ) -> Result<bool, StorageError> {
+        let key = format!(
+            "receipt/v3/{}",
+            ramflux_protocol::hash_base64url(
+                "ramflux.receipt.actor.v3",
+                &ramflux_protocol::canonical_json_bytes(&(
+                    event.actor.storage_key(),
+                    event.receipt_id
+                ))?
+            )
+        );
         let changed = self.connection.execute(
             "INSERT OR IGNORE INTO receipt_projection
                 (receipt_id, conversation_id, message_id, receipt_type, actor_device_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
-                event.receipt_id,
+                key,
                 event.conversation_id,
                 event.message_id,
                 event.receipt_type,
-                event.actor_device_id,
+                event.actor.storage_key(),
                 event.created_at
             ],
         )?;
@@ -95,9 +108,10 @@ impl AccountDb {
     fn ensure_read_through_can_advance(
         &self,
         conversation_id: &str,
-        reader_id: &str,
+        reader: &ramflux_crypto::RootQualifiedDeviceRef,
         new_message_id: &str,
     ) -> Result<(), StorageError> {
+        let reader_id = reader.storage_key();
         self.message_created_at(conversation_id, new_message_id)?;
         let existing = self
             .connection
@@ -136,11 +150,15 @@ impl AccountDb {
     /// # Errors
     /// Returns an error when expired receipt cleanup fails.
     pub fn expire_delivery_receipts(&self, now: i64) -> Result<usize, StorageError> {
-        Ok(self.connection.execute(
-            "DELETE FROM conversation_delivery_state
-              WHERE delivered_at + ttl_seconds <= ?1",
+        let current = self.connection.execute(
+            "DELETE FROM conversation_delivery_state WHERE delivered_at + ttl_seconds <= ?1",
             params![now],
-        )?)
+        )?;
+        let legacy = self.connection.execute(
+            "DELETE FROM legacy_conversation_delivery_state WHERE delivered_at + ttl_seconds <= ?1",
+            params![now],
+        )?;
+        Ok(current + legacy)
     }
 
     /// # Errors
@@ -148,8 +166,9 @@ impl AccountDb {
     pub fn delivery_receipt(
         &self,
         conversation_id: &str,
-        receiver_device_id: &str,
+        receiver: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Option<DeliveryReceiptRecord>, StorageError> {
+        let receiver_device_id = receiver.storage_key();
         Ok(self
             .connection
             .query_row(
@@ -161,7 +180,8 @@ impl AccountDb {
                 |row| {
                     Ok(DeliveryReceiptRecord {
                         conversation_id: row.get(0)?,
-                        receiver_device_id: row.get(1)?,
+                        receiver_device_id: receiver.device_id().to_owned(),
+                        receiver_principal_commitment: receiver.root_commitment().to_owned(),
                         delivered_through_message_id: row.get(2)?,
                         delivered_at: row.get(3)?,
                         ttl_seconds: row.get(4)?,
@@ -176,10 +196,11 @@ impl AccountDb {
     pub fn set_unread_marker(
         &self,
         conversation_id: &str,
-        marker_owner: &str,
+        owner: &ramflux_crypto::RootQualifiedDeviceRef,
         message_id: &str,
         marker_epoch: u64,
     ) -> Result<(), StorageError> {
+        let marker_owner = owner.storage_key();
         let marker_epoch =
             i64::try_from(marker_epoch).map_err(|_err| StorageError::AuthorizationRejected)?;
         self.connection.execute(
@@ -201,9 +222,10 @@ impl AccountDb {
     pub fn clear_unread_marker(
         &self,
         conversation_id: &str,
-        marker_owner: &str,
+        owner: &ramflux_crypto::RootQualifiedDeviceRef,
         marker_epoch: u64,
     ) -> Result<(), StorageError> {
+        let marker_owner = owner.storage_key();
         let marker_epoch =
             i64::try_from(marker_epoch).map_err(|_err| StorageError::AuthorizationRejected)?;
         self.connection.execute(
@@ -224,8 +246,9 @@ impl AccountDb {
     pub fn conversation_projection(
         &self,
         conversation_id: &str,
-        reader_id: &str,
+        reader: Option<&ramflux_crypto::RootQualifiedDeviceRef>,
     ) -> Result<ConversationProjection, StorageError> {
+        let reader_id = reader.map(ramflux_crypto::RootQualifiedDeviceRef::storage_key);
         let list_state = self.read_conversation_list_state(conversation_id)?;
         let cleared_at = list_state.cleared_at.unwrap_or(i64::MIN);
         let message_count = self.connection.query_row(

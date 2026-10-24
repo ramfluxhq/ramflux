@@ -4,7 +4,10 @@
 //! Bounded per-account read routing, independent of network mutations.
 
 use crate::prelude::*;
+use ramflux_crypto::RootQualifiedDeviceRef;
+use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
+type ReaderIdentity = Arc<RwLock<Option<RootQualifiedDeviceRef>>>;
 
 pub(super) enum ReadCommand {
     Request(Box<LocalBusFrame>, oneshot::Sender<Result<serde_json::Value, SdkError>>),
@@ -13,16 +16,22 @@ pub(super) enum ReadCommand {
 
 #[derive(Clone)]
 pub(super) struct AccountReaders {
+    identity: ReaderIdentity,
     senders: Vec<mpsc::Sender<ReadCommand>>,
     next: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AccountReaders {
-    pub(super) fn start(db: &AccountDb) -> Result<Self, SdkError> {
+    pub(super) fn start(
+        db: &AccountDb,
+        device: Option<RootQualifiedDeviceRef>,
+    ) -> Result<Self, SdkError> {
         super::sync_status::initialize_coordinates(db)?;
+        let identity = Arc::new(RwLock::new(device));
         let mut senders = Vec::new();
         for _ in 0..2 {
             let reader = db.open_reader()?;
+            let identity = Arc::clone(&identity);
             let (sender, mut receiver) = mpsc::channel::<ReadCommand>(64);
             std::thread::Builder::new().name("ramflux-account-reader".to_owned()).spawn(
                 move || {
@@ -32,9 +41,16 @@ impl AccountReaders {
                         match command {
                             ReadCommand::Request(request, reply) => {
                                 if !reply.is_closed() {
-                                    let result = client.account_db().and_then(|db| {
-                                        db.read_snapshot(|| read(&client, &request))
-                                    });
+                                    let result = identity
+                                        .read()
+                                        .map_err(|_| closed())
+                                        .map(|device| device.clone())
+                                        .and_then(|device| {
+                                            client.reader_device_identity = device;
+                                            client.account_db().and_then(|db| {
+                                                db.read_snapshot(|| read(&client, &request))
+                                            })
+                                        });
                                     let _ = reply.send(result);
                                 }
                             }
@@ -49,7 +65,19 @@ impl AccountReaders {
             )?;
             senders.push(sender);
         }
-        Ok(Self { senders, next: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)) })
+        Ok(Self {
+            identity,
+            senders,
+            next: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    pub(super) fn set_identity(
+        &self,
+        device: Option<RootQualifiedDeviceRef>,
+    ) -> Result<(), SdkError> {
+        *self.identity.write().map_err(|_| closed())? = device;
+        Ok(())
     }
 
     pub(super) async fn request(
@@ -211,6 +239,54 @@ mod tests {
             super::super::read_model::row(&client, "object", "remote")?["transfer_state"],
             "failed"
         );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn read_markers_follow_the_authenticated_viewer_root_without_copying_signing_keys()
+    -> Result<(), SdkError> {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
+        let root = std::env::temp_dir()
+            .join(format!("ramflux-reader-root-{}-{suffix}", std::process::id()));
+        let mut client = RamfluxClient::new();
+        client.create_identity_root("alice", [1; 32]);
+        client.create_device_branch("alice", "phone", 1, [2; 32]);
+        client.open_account_index(&root)?;
+        client.create_account("a", "a")?;
+        client.unlock_account("a", b"secret")?;
+        client.send_direct_message("thread", "message", "peer", b"ciphertext")?;
+        let own = client.owned_device_identity()?;
+        let db = client.account_db()?;
+        db.mark_read("thread", &own, "message")?;
+        db.persist_client_record(
+            "identity",
+            "local",
+            &serde_json::json!({"principal_id":"alice","device_id":"phone"}),
+        )?;
+        db.persist_client_record(
+            "conversation",
+            "thread",
+            &serde_json::json!({"kind":"direct","participants":["alice","peer"]}),
+        )?;
+        let readers = AccountReaders::start(db, Some(own))?;
+        let request = LocalBusFrame::request(
+            "read",
+            Some("a".into()),
+            "conversation",
+            "conversation.directory",
+            serde_json::json!({}),
+        );
+        let first = readers.request(request.clone()).await?;
+        assert_eq!(first["conversations"][0]["unread_count"], 0);
+        let other = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            &ramflux_crypto::create_identity_root("mallory", [3; 32]),
+            "phone",
+        )?;
+        readers.set_identity(Some(other))?;
+        let second = readers.request(request).await?;
+        assert_eq!(second["conversations"][0]["unread_count"], 1);
+        readers.stop().await;
         drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())

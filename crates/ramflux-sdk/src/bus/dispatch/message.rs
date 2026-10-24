@@ -366,9 +366,16 @@ async fn dispatch_message_receipt_delivered(
     }
     let delivered_at = body.delivered_at.unwrap_or_else(now_unix_timestamp);
     let ttl_seconds = body.ttl_seconds.unwrap_or(300);
+    let actor = account.client.owned_account_device_identity(&body.receiver_device_id)?;
+    if body.recipient_device_id.is_some()
+        && body.target_delivery_id.is_some()
+        && actor != account.client.owned_device_identity()?
+    {
+        return Err(SdkError::InboundRejected("receipt actor differs from signing device".into()));
+    }
     let receipt = account.client.mark_delivered(
         &body.conversation_id,
-        &body.receiver_device_id,
+        &actor,
         &body.message_id,
         delivered_at,
         ttl_seconds,
@@ -376,6 +383,7 @@ async fn dispatch_message_receipt_delivered(
     let mut response = serde_json::json!({
         "conversation_id": receipt.conversation_id,
         "receiver_device_id": receipt.receiver_device_id,
+        "receiver_principal_commitment": receipt.receiver_principal_commitment,
         "delivered_through_message_id": receipt.delivered_through_message_id,
         "delivered_at": receipt.delivered_at,
         "ttl_seconds": receipt.ttl_seconds,
@@ -395,12 +403,12 @@ async fn dispatch_message_receipt_delivered(
             receipt_id: receipt_id.clone(),
             event_seq: u64::try_from(delivered_at).unwrap_or(0),
             nonce: receipt_id.clone(),
-            reader_device_id: body.receiver_device_id.clone(),
+            reader_device_id: actor.device_id().to_owned(),
             event: SdkReceiptEventBody::Delivered {
                 conversation_id: body.conversation_id.clone(),
                 message_id: body.message_id.clone(),
                 delivered_at,
-                receiver_device_id: body.receiver_device_id.clone(),
+                receiver_device_id: actor.device_id().to_owned(),
                 scope: "e2ee_private".to_owned(),
                 ttl_seconds: u32::try_from(ttl_seconds).unwrap_or(u32::MAX),
             },
@@ -428,10 +436,18 @@ async fn dispatch_message_receipt_read(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusMessageReceiptReadRequest = serde_json::from_value(request.body.clone())?;
     let read_at = body.read_at.unwrap_or_else(now_unix_timestamp);
-    account.client.mark_read(&body.conversation_id, &body.reader_id, &body.message_id)?;
+    let actor = account.client.owned_account_device_identity(&body.reader_id)?;
+    if body.recipient_device_id.is_some()
+        && body.target_delivery_id.is_some()
+        && actor != account.client.owned_device_identity()?
+    {
+        return Err(SdkError::InboundRejected("receipt actor differs from signing device".into()));
+    }
+    account.client.mark_read(&body.conversation_id, &actor, &body.message_id)?;
     let mut response = serde_json::json!({
         "conversation_id": body.conversation_id,
-        "reader_id": body.reader_id,
+        "reader_id": actor.device_id(),
+        "reader_principal_commitment": actor.root_commitment(),
         "read_through_message_id": body.message_id,
         "scope": "local_projection",
     });
@@ -447,11 +463,11 @@ async fn dispatch_message_receipt_read(
             receipt_id: receipt_id.clone(),
             event_seq: u64::try_from(read_at).unwrap_or(0),
             nonce: receipt_id.clone(),
-            reader_device_id: body.reader_id.clone(),
+            reader_device_id: actor.device_id().to_owned(),
             event: SdkReceiptEventBody::ReadPrivate {
                 conversation_id: body.conversation_id.clone(),
                 message_id: body.message_id.clone(),
-                reader_identity: body.reader_id.clone(),
+                reader_identity: actor.device_id().to_owned(),
                 read_at,
                 own_device_scope: "e2ee_private".to_owned(),
             },
