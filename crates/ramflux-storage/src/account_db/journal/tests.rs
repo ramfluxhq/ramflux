@@ -448,7 +448,7 @@ fn unverified_device_claims_cannot_spend_a_verified_senders_failure_quota()
         "genuine",
         &packet,
         InboxFailurePolicy {
-            verified_source: Some("principal-and-device"),
+            verified_source: Some(&pin_source("principal", "device")?),
             trusted: true,
             dependency: ("group", "g"),
             at: 100,
@@ -473,7 +473,7 @@ fn authenticated_policy_promotion_wakes_backoff_without_resetting_attempts_or_fi
         "pending",
         &packet,
         InboxFailurePolicy {
-            verified_source: Some("verified-root-and-device"),
+            verified_source: Some(&pin_source("principal", "device")?),
             trusted: true,
             dependency: ("group", "g"),
             at: 101,
@@ -501,7 +501,16 @@ fn legacy_budget_expiry_parks_ciphertext_until_the_original_quarantine_retention
     db.hold_unrouted("legacy-key", 1, &packet, 100)?;
     db.retain_legacy_inbox("legacy-key")?;
     assert_eq!(db.load_actor_state::<bool>("inbox/legacy-held/legacy-key")?, Some(true));
-    db.set_inbox_failure_policy("legacy-key", &packet, true, ("group", "g"), 100)?;
+    db.set_inbox_failure_policy(
+        "legacy-key",
+        &packet,
+        InboxFailureSource::Authenticated {
+            device: &pin_source("principal", "friend")?,
+            related: true,
+        },
+        ("group", "g"),
+        100,
+    )?;
     db.defer_inbox_entry("legacy-key", &packet, 100)?;
     db.expire_inbox_holds(701)?;
     assert_eq!(db.unrouted_count()?, 1);
@@ -535,6 +544,7 @@ fn parked_and_expired_legacy_holds_release_shared_stranger_source_and_retry_slot
             for index in 0..count {
                 let key = format!("legacy-{index}");
                 let source = if same_source { "peer".into() } else { format!("claim-{index}") };
+                let source_identity = pin_source("principal", &source)?;
                 let packet = serde_json::to_vec(
                     &serde_json::json!({"envelope":{"source_device_id":source,"created_at":100,"ttl":1_000_000}}),
                 )?;
@@ -543,7 +553,14 @@ fn parked_and_expired_legacy_holds_release_shared_stranger_source_and_retry_slot
                 assert!(db.set_inbox_failure_policy(
                     &key,
                     &packet,
-                    trusted,
+                    if trusted {
+                        InboxFailureSource::Authenticated {
+                            device: &source_identity,
+                            related: true,
+                        }
+                    } else {
+                        InboxFailureSource::Unverified
+                    },
                     ("manifest", "peer"),
                     100
                 )?);
@@ -559,11 +576,16 @@ fn parked_and_expired_legacy_holds_release_shared_stranger_source_and_retry_slot
             let genuine = serde_json::to_vec(
                 &serde_json::json!({"envelope":{"source_device_id":if same_source {"peer"}else{"genuine"},"created_at":at,"ttl":3600}}),
             )?;
+            let genuine_source = pin_source("principal", "peer")?;
             assert!(
                 db.set_inbox_failure_policy(
                     "routed-genuine",
                     &genuine,
-                    same_source,
+                    if same_source {
+                        InboxFailureSource::Authenticated { device: &genuine_source, related: true }
+                    } else {
+                        InboxFailureSource::Unverified
+                    },
                     ("manifest", "genuine"),
                     at
                 )?,
@@ -587,11 +609,20 @@ fn parked_and_expired_legacy_holds_release_shared_stranger_source_and_retry_slot
                 let key = format!("legacy-{index}");
                 assert!(!db.has_inbox_retry(&key)?);
                 assert!(db.legacy_inbox_parked(&key)?);
+                let source_identity =
+                    pin_source("principal", if same_source { "peer" } else { "unused" })?;
                 assert!(
                     !db.set_inbox_failure_policy(
                         &key,
                         &genuine,
-                        trusted,
+                        if trusted {
+                            InboxFailureSource::Authenticated {
+                                device: &source_identity,
+                                related: true,
+                            }
+                        } else {
+                            InboxFailureSource::Unverified
+                        },
                         ("manifest", "peer"),
                         at + 6 * 86400
                     )?,
@@ -630,7 +661,7 @@ fn parking_a_legacy_hold_keeps_only_ciphertext_and_marker_even_after_an_old_reje
     assert!(!db.set_inbox_failure_policy(
         "legacy-upgrade",
         packet,
-        false,
+        InboxFailureSource::Unverified,
         ("manifest", "uncached"),
         101
     )?);

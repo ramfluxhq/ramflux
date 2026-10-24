@@ -62,7 +62,11 @@ impl RamfluxClient {
         ))? && let Some(remote) = record["remote"].as_str()
         {
             let remote = self.device_reference(remote)?;
-            if self.require_cached_root_authority(&remote).is_ok() {
+            if self
+                .device_identity(&remote)
+                .and_then(|identity| self.require_cached_root_authority(&identity))
+                .is_ok()
+            {
                 candidates.insert(self.device_identity(&remote)?);
             }
         }
@@ -78,7 +82,10 @@ impl RamfluxClient {
                     let raw =
                         crate::client::identity_authority::device_namespace::wire_device_id(id)?;
                     if dm_device_id_hash(&raw) == slot.ciphertext.sender_device_id_hash
-                        && self.require_cached_root_authority(id).is_ok()
+                        && self
+                            .device_identity(id)
+                            .and_then(|identity| self.require_cached_root_authority(&identity))
+                            .is_ok()
                         && slot.source_principal_commitment.as_ref().is_none_or(|expected| {
                             self.device_root(id).is_ok_and(|root| root == *expected)
                         })

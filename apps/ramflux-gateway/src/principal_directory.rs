@@ -85,6 +85,7 @@ mod registration_tests {
         let root = ramflux_crypto::create_identity_root("p", [7; 32]);
         let device = ramflux_crypto::create_device_branch("p", "d", 1, [8; 32]);
         let mut request = ramflux_node_core::IdentityRegisterRequest {
+            device_set: None,
             root_public_key: String::new(),
             principal_commitment: String::new(),
             branch_public_key: String::new(),

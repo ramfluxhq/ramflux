@@ -147,11 +147,21 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
             .iter()
             .any(|d| d == &reference)
     );
-    assert!(peer.client.require_cached_root_authority(&reference).is_err());
+    assert!(
+        peer.client
+            .device_identity(&reference)
+            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .is_err()
+    );
     peer.reopen()?;
     assert_eq!(peer.client.observed_device_set(&initial.principal_commitment)?, Some(record));
     assert!(observe(&peer.client, &added).is_err());
-    assert!(peer.client.require_cached_root_authority(&reference).is_err());
+    assert!(
+        peer.client
+            .device_identity(&reference)
+            .and_then(|identity| peer.client.require_cached_root_authority(&identity))
+            .is_err()
+    );
     assert!(
         peer.client
             .account_db()?

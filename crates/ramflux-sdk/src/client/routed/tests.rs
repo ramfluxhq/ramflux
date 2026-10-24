@@ -694,10 +694,10 @@ mod legacy_group_auth;
 
 #[path = "contact_resolution_tests.rs"]
 mod contact_resolution;
-#[path = "legacy_admission_tests.rs"]
-mod legacy_admission;
 #[path = "discovery_tests.rs"]
 mod discovery;
+#[path = "legacy_admission_tests.rs"]
+mod legacy_admission;
 
 #[path = "participant_tests.rs"]
 mod participants;

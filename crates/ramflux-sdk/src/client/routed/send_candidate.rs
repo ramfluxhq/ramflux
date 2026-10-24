@@ -12,12 +12,12 @@ impl RamfluxClient {
     ) -> Result<Option<SendPair>, SdkError> {
         if self
             .account_db()?
-            .load_actor_state::<bool>(&self.device_revocation_key(remote.storage_key())?)?
+            .load_actor_state::<bool>(&Self::device_revocation_key(remote))?
             .unwrap_or(false)
         {
             return Err(SdkError::InboundRejected("recipient device is revoked".into()));
         }
-        if self.require_cached_root_authority(remote.storage_key()).is_err() {
+        if self.require_cached_root_authority(remote).is_err() {
             return Ok(None);
         }
         let Some((session, bundle)) = self.active_pair(local, remote)? else { return Ok(None) };

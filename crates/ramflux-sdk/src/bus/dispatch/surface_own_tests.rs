@@ -28,11 +28,24 @@ pub(super) async fn sibling_fixture(
     own.devices.extend(super::fixture::manifest(&sibling.client)?.devices);
     let mut remote = super::fixture::manifest(&peer.peers[0].client)?;
     remote.devices.extend(super::fixture::manifest(&peer.peers[1].client)?.devices);
+    crate::client::identity_authority::test_support::sign_manifest(
+        source.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut own,
+        2,
+    )?;
+    crate::client::identity_authority::test_support::sign_manifest(
+        peer.peers[0].client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut remote,
+        2,
+    )?;
+    source.client.persist_root_verified_directory(&own)?;
+    sibling.client.persist_root_verified_directory(&own)?;
+    sibling.client.persist_root_verified_directory(&remote)?;
     let (address, directory) = super::fixture::directory(
         root,
         BTreeMap::from([
             (own.principal_commitment.clone(), serde_json::to_value(&own)?),
-            (remote.principal_commitment.clone(), serde_json::to_value(remote)?),
+            (remote.principal_commitment.clone(), serde_json::to_value(&remote)?),
         ]),
     )
     .await?;
@@ -48,14 +61,24 @@ pub(super) async fn sibling_fixture(
         dm_device_id_hash("device-sender"),
         [3; 32],
     )?;
-    source.client.persist_pair("device-sender", "device-sibling", &[4; 32], &send)?;
-    sibling.client.persist_pair("device-sibling", "device-sender", &[4; 32], &recv)?;
+    source.client.persist_pair(
+        &source.client.owned_device_identity()?,
+        &sibling.client.owned_device_identity()?,
+        &[4; 32],
+        &send,
+    )?;
+    sibling.client.persist_pair(
+        &sibling.client.owned_device_identity()?,
+        &source.client.owned_device_identity()?,
+        &[4; 32],
+        &recv,
+    )?;
     let mut config = peer.config;
     config.gateway_addr = address;
     config.tcp_gateway_addr = Some(address);
     let mut receiver = config.clone();
     receiver.device_id = "device-sibling".into();
-    receiver.device_branch = sibling.client.device_branch.clone().map(Arc::new);
+    receiver = receiver.with_account_identity(&sibling.client)?;
     Ok((sibling, config, receiver, directory))
 }
 fn entry(envelope: ramflux_protocol::Envelope, sequence: u64) -> GatewayInboxEntry {
@@ -339,7 +362,7 @@ fn peer_receiver(
     let mut peer_config = config.clone();
     peer_config.principal_id = "peer".into();
     peer_config.device_id = "device-peer-one".into();
-    peer_config.device_branch = peer.client.device_branch.clone().map(Arc::new);
+    peer_config = peer_config.with_account_identity(&peer.client)?;
     peer_config.target_delivery_id = "device-peer-one".into();
     peer.client.persist_identity_directory(&super::fixture::manifest(source)?)?;
     peer.client.account_db()?.establish_friend_link("source-link", "peer", "sender")?;

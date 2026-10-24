@@ -125,7 +125,11 @@ fn conflicting_own_device_member_pins_skip_unsafe_history_and_preserve_local_mem
             .verifying_key()
             .to_bytes(),
     );
-    db.persist_group_member_device_key("sync_group", &target.owned_account_device_identity("source_device_sync")?, &existing_key)?;
+    db.persist_group_member_device_key(
+        "sync_group",
+        &target.owned_account_device_identity("source_device_sync")?,
+        &existing_key,
+    )?;
     source.send_direct_message("dm", "safe-direct", "source_device_sync", b"safe")?;
     let mut history = history;
     history.groups[0].group_epoch = 5;

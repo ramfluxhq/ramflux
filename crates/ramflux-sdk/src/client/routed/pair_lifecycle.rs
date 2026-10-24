@@ -14,7 +14,7 @@ impl RamfluxClient {
         }
         if self
             .account_db()?
-            .load_actor_state::<bool>(&self.device_revocation_key(local.storage_key())?)?
+            .load_actor_state::<bool>(&Self::device_revocation_key(local))?
             .unwrap_or(false)
         {
             return Err(SdkError::InboundRejected("local device is revoked".to_owned()));
@@ -27,16 +27,10 @@ impl RamfluxClient {
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
-        if db
-            .load_actor_state::<bool>(&self.device_revocation_key(local.storage_key())?)?
-            .unwrap_or(false)
-        {
+        if db.load_actor_state::<bool>(&Self::device_revocation_key(local))?.unwrap_or(false) {
             return Ok(false);
         }
-        if db
-            .load_actor_state::<bool>(&self.device_revocation_key(remote.storage_key())?)?
-            .unwrap_or(false)
-        {
+        if db.load_actor_state::<bool>(&Self::device_revocation_key(remote))?.unwrap_or(false) {
             return Ok(false);
         }
         let Some(record) = db.client_record("device", remote.storage_key())? else {
@@ -107,7 +101,10 @@ impl RamfluxClient {
                 )?;
             }
             db.remove_actor_state(&format!("directory/device/{reference}"))?;
-            db.persist_actor_state(&self.device_revocation_key(&reference)?, &true)?;
+            db.persist_actor_state(
+                &Self::device_revocation_key(&self.device_identity(&reference)?),
+                &true,
+            )?;
             Ok(())
         })?;
         self.finish_pair_retirement()

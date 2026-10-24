@@ -14,8 +14,13 @@ pub(crate) fn verify_manifest(
     let record =
         manifest.signed_device_set.as_ref().ok_or_else(|| invalid("missing signed set"))?;
     let mut seen = std::collections::BTreeSet::new();
+    let public = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
     for device in &manifest.devices {
-        if !seen.insert(&device.device_id) {
+        if !seen.insert(ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
+            &public,
+            record,
+            &device.device_id,
+        )?) {
             return Err(invalid("duplicate manifest device"));
         }
         let bundle = &device.prekey_bundle;
@@ -93,12 +98,11 @@ pub(crate) fn verify_manifest_authority(
 }
 
 impl crate::RamfluxClient {
-    pub(crate) fn require_fresh_device_authorization(&self, remote: &str) -> Result<(), SdkError> {
-        let reference = self.device_reference(remote)?;
-        let remote = reference.as_str();
-        if ramflux_protocol::parse_qualified_device_id(remote)?.is_none() {
-            return Err(invalid("root-qualified device proof required"));
-        }
+    pub(crate) fn require_fresh_device_authorization(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<(), SdkError> {
+        let remote = identity.storage_key();
         let row = self
             .account_db()?
             .client_record("device", remote)?
@@ -113,18 +117,17 @@ impl crate::RamfluxClient {
     }
     pub(crate) fn verify_root_bound_prekey(
         &self,
-        remote: &str,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
         bundle: &ramflux_crypto::PrekeyBundle,
     ) -> Result<(), SdkError> {
-        let reference = self.device_reference(remote)?;
-        let remote = reference.as_str();
+        let remote = identity.storage_key();
         let record = {
-            self.require_cached_root_authority(remote)?;
+            self.require_cached_root_authority(identity)?;
             self.account_db()?
                 .client_record("device", remote)?
                 .ok_or_else(|| invalid("recipient missing"))?
         };
-        self.require_fresh_device_authorization(remote)?;
+        self.require_fresh_device_authorization(identity)?;
         let identity: [u8; 32] = serde_json::from_value(
             record
                 .get("x25519_identity_public")

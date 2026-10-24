@@ -235,3 +235,23 @@ pub(crate) fn is_missing_group_sender_key_error(error: &SdkError) -> bool {
 pub(crate) fn group_associated_data(group_id: &str, sender_id: &str, epoch: u64) -> Vec<u8> {
     format!("ramflux.group.sender_key.v1|{group_id}|{sender_id}|{epoch}").into_bytes()
 }
+
+pub(crate) fn distribution_envelope_key(
+    group: &str,
+    sender: &ramflux_crypto::RootQualifiedDeviceRef,
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    epoch: u64,
+) -> Result<String, crate::SdkError> {
+    Ok(format!(
+        "group/distribution-envelope/v2/{}",
+        ramflux_protocol::hash_base64url(
+            "ramflux.group.distribution_envelope.v2",
+            &ramflux_protocol::canonical_json_bytes(&(
+                group,
+                sender.storage_key(),
+                recipient.storage_key(),
+                epoch
+            ))?,
+        )
+    ))
+}

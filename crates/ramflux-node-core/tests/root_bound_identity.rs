@@ -92,8 +92,17 @@ fn signed_revocations_remain_visible_even_with_no_active_devices() -> TestResult
     let manifest = registry.device_manifest(&f.request.principal_commitment).ok_or("manifest")?;
     assert_eq!(manifest.devices, []);
     assert_eq!(manifest.signed_device_set, Some(revoked));
-    assert!(registry.prekey_bundle(&qualified(&f)?).is_none());
-    assert!(registry.device_auth_key(&qualified(&f)?).ok_or("device")?.revoked);
+    assert!(
+        registry
+            .prekey_bundle(&RootQualifiedDeviceRef::for_owned_device(&f.root, &f.device)?)
+            .is_none()
+    );
+    assert!(
+        registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(&f.root, &f.device)?)
+            .ok_or("device")?
+            .revoked
+    );
     assert!(registry.register_identity(&f.request).is_err());
     Ok(())
 }
@@ -244,8 +253,16 @@ fn root_authorized_rotation_disables_old_keys_until_the_new_bound_registration()
         },
     )?;
     registry.publish_signed_device_set(&f.publish(record))?;
-    assert!(registry.device_auth_key(&qualified(&f)?).is_none());
-    assert!(registry.prekey_bundle(&qualified(&f)?).is_none());
+    assert!(
+        registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(&f.root, &f.device)?)
+            .is_none()
+    );
+    assert!(
+        registry
+            .prekey_bundle(&RootQualifiedDeviceRef::for_owned_device(&f.root, &f.device)?)
+            .is_none()
+    );
     assert!(registry.register_identity(&f.request).is_err());
     let mut request = f.request.clone();
     request.device_set = None;
@@ -276,7 +293,10 @@ fn root_authorized_rotation_disables_old_keys_until_the_new_bound_registration()
         )?,
     })?;
     assert_eq!(
-        registry.device_auth_key(&qualified(&f)?).ok_or("rotated device")?.branch_public_key,
+        registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(&f.root, &f.device)?)
+            .ok_or("rotated device")?
+            .branch_public_key,
         request.branch_public_key
     );
     Ok(())
@@ -409,4 +429,25 @@ fn qualified(f: &Fixture) -> Result<String, serde_json::Error> {
             &f.device.device_id
         ))?)
     ))
+}
+
+#[test]
+fn historical_unqualified_proof_ids_cannot_reserve_a_current_root_qualified_proof() -> TestResult {
+    let f = Fixture::new()?;
+    let source = RootQualifiedDeviceRef::for_owned_device(&f.root, &f.device)?;
+    let predicted = blake3_256_base64url(
+        "ramflux.node.registration_proof.v2",
+        &ramflux_protocol::canonical_json_bytes(&(
+            source.storage_key(),
+            &f.request.proof.proof_id,
+        ))?,
+    );
+    let mut old = serde_json::to_value(IdentityRegistry::new())?;
+    old.as_object_mut().ok_or("registry")?.remove("root_seen_proofs");
+    old["seen_proofs"] = serde_json::json!([predicted]);
+    let mut reopened: IdentityRegistry = serde_json::from_value(old)?;
+    reopened.register_identity(&f.request)?;
+    assert!(reopened.device_auth_key(&source).is_some());
+    assert!(reopened.register_identity(&f.request).is_err());
+    Ok(())
 }

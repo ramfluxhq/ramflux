@@ -126,18 +126,38 @@ fn another_root_cannot_reserve_or_revoke_a_local_device_name() -> TestResult {
     registry.register_identity(&bob.request)?;
     let future = named("carol", "future-device", 51)?;
     registry.register_identity(&future.request)?;
-    assert!(!registry.device_auth_key(&lookup(&future)?).ok_or("future device")?.revoked);
+    assert!(
+        !registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(
+                &future.root,
+                &future.device
+            )?)
+            .ok_or("future device")?
+            .revoked
+    );
     for f in [&alice, &bob] {
         registry.publish_prekey(PrekeyPublishRequest {
             device_id: f.device.device_id.clone(),
             bundle: f.bundle()?,
         })?;
     }
-    assert_eq!(registry.device_auth_key(&lookup(&alice)?).ok_or("alice")?.principal_id, "alice");
-    assert_eq!(registry.device_auth_key(&lookup(&bob)?).ok_or("bob")?.principal_id, "bob");
-    assert!(
-        registry.device_auth_key("alice-device").is_none(),
-        "ambiguous legacy lookup must fail closed"
+    assert_eq!(
+        registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(&alice.root, &alice.device)?)
+            .ok_or("alice")?
+            .principal_id,
+        "alice"
+    );
+    assert_eq!(
+        registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(&bob.root, &bob.device)?)
+            .ok_or("bob")?
+            .principal_id,
+        "bob"
+    );
+    assert_ne!(
+        RootQualifiedDeviceRef::for_owned_device(&alice.root, &alice.device)?,
+        RootQualifiedDeviceRef::for_owned_device(&bob.root, &bob.device)?
     );
     // A complete revocation must retain the existing future-device tombstone.
     let mut all = registry
@@ -158,9 +178,23 @@ fn another_root_cannot_reserve_or_revoke_a_local_device_name() -> TestResult {
         },
     )?;
     registry.publish_signed_device_set(&alice.publish(revoked))?;
-    assert!(registry.device_auth_key(&lookup(&alice)?).ok_or("alice")?.revoked);
-    assert!(!registry.device_auth_key(&lookup(&bob)?).ok_or("bob")?.revoked);
-    assert!(registry.prekey_bundle(&lookup(&bob)?).is_some());
+    assert!(
+        registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(&alice.root, &alice.device)?)
+            .ok_or("alice")?
+            .revoked
+    );
+    assert!(
+        !registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_device(&bob.root, &bob.device)?)
+            .ok_or("bob")?
+            .revoked
+    );
+    assert!(
+        registry
+            .prekey_bundle(&RootQualifiedDeviceRef::for_owned_device(&bob.root, &bob.device)?)
+            .is_some()
+    );
     Ok(())
 }
 #[test]
@@ -177,14 +211,18 @@ fn empty_commitment_legacy_device_is_fenced_from_own_device_copies() -> TestResu
     )?;
     let old = json!({"root_public_keys":{"alice":f.request.root_public_key},"root_public_keys_by_commitment":{f.request.principal_commitment.clone():f.request.root_public_key},"devices":{"legacy":{"principal_id":"alice","device_id":"legacy","device_epoch":1,"branch_public_key":encode_base64url(legacy.signing_key.verifying_key().to_bytes()),"target_delivery_id":"legacy-target","branch_proof":proof}},"revoked_devices":[],"seen_proofs":[],"prekey_bundles":{}});
     let mut registry: IdentityRegistry = serde_json::from_value(old)?;
-    assert_eq!(registry.active_own_device_targets("alice", "alice-device").len(), 1);
+    assert!(registry.active_own_device_targets("alice", "alice-device").is_empty());
     // Publishing a root set permanently fences omitted legacy IDs, including blank commitments.
     registry.publish_signed_device_set(&f.publish(f.record(1, DeviceSetStatus::Active)?))?;
     assert_eq!(
         registry.active_own_device_targets("alice", "alice-device"),
         Vec::<(String, String)>::new()
     );
-    assert!(registry.device_auth_key("legacy").ok_or("legacy")?.revoked);
+    assert!(
+        registry
+            .device_auth_key(&RootQualifiedDeviceRef::for_owned_account_device(&f.root, "legacy")?)
+            .is_none()
+    );
     Ok(())
 }
 #[test]
@@ -272,7 +310,7 @@ fn copying_an_existing_device_label_cannot_change_qualified_prekey_or_auth_looku
     );
     let error =
         router.mvp1_prekey_checked(&victim.device.device_id).err().ok_or("bare lookup accepted")?;
-    assert!(error.to_string().contains("ambiguous"));
+    assert!(error.to_string().contains("qualified"));
     assert!(router.mvp1_device_auth_key_checked(&victim.device.device_id).is_err());
     assert_eq!(
         router.mvp1_device_auth_key_checked(&lookup(&victim)?)?.ok_or("victim")?.branch_public_key,

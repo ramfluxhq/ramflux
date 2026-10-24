@@ -120,7 +120,7 @@ impl Group {
         config.principal_id = branch.principal_id.clone();
         config.device_id = branch.device_id.clone();
         config.target_delivery_id = branch.principal_id.clone();
-        config.device_branch = Some(Arc::new(branch));
+        config = config.with_account_identity(&self.peers[index].client)?;
         Ok(config)
     }
     async fn request(&mut self, index: usize) -> TestResult<ramflux_protocol::Envelope> {

@@ -27,5 +27,5 @@ pub(crate) use group::*;
 pub(crate) use message::*;
 pub(crate) use object::*;
 
-pub(crate) mod surface_transport;
 mod identity_authority;
+pub(crate) mod surface_transport;

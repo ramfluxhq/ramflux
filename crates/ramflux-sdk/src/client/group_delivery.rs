@@ -7,11 +7,12 @@ use crate::prelude::*;
 
 impl RamfluxClient {
     pub fn append_gateway_delivery(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
-        if self.event_body(&entry.envelope.envelope_id)?.is_some() {
+        let event = format!("gateway/delivery/v2/{}", self.inbox_admission_key(entry)?);
+        if self.event_body(&event)?.is_some() {
             return Ok(());
         }
         let body = ramflux_protocol::canonical_json_bytes(&entry.envelope)?;
-        self.append_event(&entry.envelope.envelope_id, "gateway.deliver.opaque", &body)
+        self.append_event(&event, "gateway.deliver.opaque", &body)
     }
 
     /// # Errors
@@ -250,7 +251,9 @@ impl RamfluxClient {
                 "group bootstrap manifest verification is incomplete",
             )
         })?;
-        if actor_device.principal_id != event.actor_principal_id || actor_device.branch_public_key != *actor_device_signing_public_key {
+        if actor_device.principal_id != event.actor_principal_id
+            || actor_device.branch_public_key != *actor_device_signing_public_key
+        {
             return Err(SdkError::LocalBus(
                 "group membership event actor key does not match verified manifest".to_owned(),
             ));

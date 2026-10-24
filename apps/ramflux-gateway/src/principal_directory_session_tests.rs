@@ -103,6 +103,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
     )?;
     let endpoint = server.local_addr()?.to_string();
     let expected = ramflux_node_core::DeviceManifestResponse {
+        signed_device_set: None,
         principal_id: "bob".into(),
         principal_commitment: "bob-root".into(),
         root_public_key: "fixture-public-key".into(),
@@ -124,6 +125,10 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
         }),
     };
     let runtime = crate::GatewaySessionRuntime {
+        source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
+            &ramflux_crypto::create_identity_root("alice", [1; 32]),
+            &ramflux_crypto::create_device_branch("alice", "alice-device", 1, [2; 32]),
+        )?,
         session_id: "session".into(),
         resume_token: "resume".into(),
         principal_id: "alice".into(),

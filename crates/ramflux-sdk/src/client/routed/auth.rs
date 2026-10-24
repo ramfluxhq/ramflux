@@ -26,7 +26,11 @@ impl RamfluxClient {
         }) {
             return Err(invalid("sender device is revoked"));
         }
-        if self.require_cached_root_authority(&reference).is_err() {
+        if self
+            .device_identity(&reference)
+            .and_then(|identity| self.require_cached_root_authority(&identity))
+            .is_err()
+        {
             if !self.inbound_relationship_names_root(
                 &entry.envelope.source_principal_id,
                 &commitment,
@@ -63,20 +67,20 @@ impl RamfluxClient {
         Ok(())
     }
 
-    pub(crate) fn trusted_device(&self, remote: &str) -> Result<Value, SdkError> {
-        if ramflux_protocol::parse_qualified_device_id(remote)?.is_none() {
-            return Err(SdkError::InboundPending("root-qualified trusted device required".into()));
-        }
+    pub(crate) fn trusted_device(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Value, SdkError> {
         if self
             .account_db()?
-            .load_actor_state::<bool>(&self.device_revocation_key(remote)?)?
+            .load_actor_state::<bool>(&Self::device_revocation_key(identity))?
             .unwrap_or(false)
         {
             return Err(SdkError::InboundRejected("revoked device".to_owned()));
         }
 
-        self.require_cached_root_authority(remote)?;
-        self.account_db()?.client_record("device", remote)?.ok_or_else(|| {
+        self.require_cached_root_authority(identity)?;
+        self.account_db()?.client_record("device", identity.storage_key())?.ok_or_else(|| {
             SdkError::InboundPending("sender device has no verified manifest".to_owned())
         })
     }
@@ -85,7 +89,8 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
-        let record = self.trusted_device(&self.inbound_device_reference(entry)?)?;
+        let record =
+            self.trusted_device(&self.device_identity(&self.inbound_device_reference(entry)?)?)?;
         if let Some(hint) =
             decode(&entry.envelope).ok().and_then(|wrapper| wrapper.source_principal_commitment)
             && record["principal_commitment"] != hint
@@ -108,7 +113,7 @@ impl RamfluxClient {
 
     pub(super) fn verify_initiator_identity(
         &self,
-        remote: &str,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
         header: &SdkDmX3dhHeader,
     ) -> Result<(), SdkError> {
         let record = self.trusted_device(remote)?;

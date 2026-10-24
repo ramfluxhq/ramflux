@@ -3,6 +3,47 @@
 
 //! Principal directory admission must not choose between conflicting active roots.
 use super::*;
+fn registration_request(
+    principal: &str,
+    device: &str,
+    nonce: u64,
+    pow: Option<RegistrationPowProof>,
+    source: &str,
+) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
+    let mut request =
+        super::registration_request(&RouterCore::new(), principal, device, nonce, pow, source)?;
+    let root = ramflux_crypto::create_identity_root(principal, seed_from_nonce(0x31, nonce));
+    let branch =
+        ramflux_crypto::create_device_branch(principal, device, 1, seed_from_nonce(0x41, nonce));
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed(seed_from_nonce(0x51, nonce));
+    request.root_public_key =
+        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
+    request.principal_commitment =
+        ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
+    request.proof = ramflux_crypto::authorize_device_branch_v2(
+        &root,
+        &branch,
+        ramflux_crypto::BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: request.now - 1,
+            expires_at: request.now + 3600,
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            agreement_identity_public_key: agreement.public,
+        },
+    )?;
+    let mut entries = request.device_set.take().ok_or("missing set")?.devices;
+    request.device_set = Some(ramflux_crypto::sign_device_set(
+        &root,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            device_set_epoch: 1,
+            devices: std::mem::take(&mut entries),
+        },
+    )?);
+    Ok(request)
+}
+
 fn register(
     registry: &mut IdentityRegistry,
     device: &str,
@@ -12,13 +53,43 @@ fn register(
     registry.register_identity(&request)?;
     let branch =
         ramflux_crypto::create_device_branch("alice", device, 1, seed_from_nonce(0x41, nonce));
-    let key = ramflux_crypto::X25519KeyPair::from_seed([71; 32]);
+    let key = ramflux_crypto::X25519KeyPair::from_seed(seed_from_nonce(0x51, nonce));
     let prekey = ramflux_crypto::X25519KeyPair::from_seed([72; 32]);
     registry.publish_prekey(PrekeyPublishRequest {
         device_id: device.into(),
         bundle: ramflux_crypto::create_prekey_bundle(&branch, &key, "prekey", &prekey, None, None)?,
     })?;
     Ok(request)
+}
+fn revoke_root_device(
+    registry: &mut IdentityRegistry,
+    request: &IdentityRegisterRequest,
+    nonce: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = ramflux_crypto::create_identity_root(
+        &request.proof.principal_id,
+        seed_from_nonce(0x31, nonce),
+    );
+    let mut next =
+        registry.signed_device_set(&request.principal_commitment).ok_or("signed set")?.clone();
+    next.device_set_epoch += 1;
+    let device =
+        next.devices.iter_mut().find(|d| d.device_id == request.proof.device_id).ok_or("device")?;
+    device.status = ramflux_protocol::DeviceSetStatus::Revoked;
+    device.revoked_at = Some(request.now + 1);
+    let record = ramflux_crypto::sign_device_set(
+        &root,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: next.principal_kind,
+            device_set_epoch: next.device_set_epoch,
+            devices: next.devices,
+        },
+    )?;
+    registry.publish_signed_device_set(&crate::DeviceSetPublishRequest {
+        root_public_key: request.root_public_key.clone(),
+        record,
+    })?;
+    Ok(())
 }
 #[test]
 fn principal_lookup_returns_only_one_active_root_and_never_a_revoked_or_ambiguous_identity()
@@ -35,7 +106,9 @@ fn principal_lookup_returns_only_one_active_root_and_never_a_revoked_or_ambiguou
     let second = register(&mut other, "alice-two", 2)?;
     let mut saved = serde_json::to_value(&registry)?;
     let old = serde_json::to_value(other)?;
-    for field in ["devices", "root_public_keys_by_commitment", "prekey_bundles"] {
+    for field in
+        ["devices", "root_public_keys_by_commitment", "prekey_bundles", "signed_device_sets"]
+    {
         if let Some(map) = old[field].as_object() {
             saved[field].as_object_mut().ok_or("registry map missing")?.extend(map.clone());
         }
@@ -46,19 +119,7 @@ fn principal_lookup_returns_only_one_active_root_and_never_a_revoked_or_ambiguou
         "conflicting active roots must not be selected by map order"
     );
     for (request, nonce) in [(second, 2), (first, 1)] {
-        let revoked_at = request.now + 1;
-        let body = serde_json::json!({"device_id":request.proof.device_id,"principal_commitment":request.principal_commitment,"revoked_at":revoked_at});
-        let root = ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, nonce));
-        registry.revoke_device(&DeviceRevokeRequest {
-            device_id: request.proof.device_id,
-            principal_commitment: request.principal_commitment,
-            root_public_key: request.root_public_key,
-            revoked_at,
-            signature: ramflux_crypto::sign_canonical_bytes_with_seed(
-                &ramflux_protocol::canonical_json_bytes(&body)?,
-                root.signing_key.to_bytes(),
-            ),
-        })?;
+        revoke_root_device(&mut registry, &request, nonce)?;
         if nonce == 2 {
             assert_eq!(
                 registry
@@ -85,18 +146,7 @@ fn a_second_root_cannot_take_a_registered_name_even_after_every_device_is_revoke
         registry.principal_manifest("alice").ok_or("original lookup lost")?.principal_commitment,
         first.principal_commitment
     );
-    let revoked_at = first.now + 1;
-    let body = serde_json::json!({"device_id":first.proof.device_id,"principal_commitment":first.principal_commitment,"revoked_at":revoked_at});
-    registry.revoke_device(&DeviceRevokeRequest {
-        device_id: first.proof.device_id,
-        principal_commitment: first.principal_commitment,
-        root_public_key: first.root_public_key,
-        revoked_at,
-        signature: ramflux_crypto::sign_canonical_bytes_with_seed(
-            &ramflux_protocol::canonical_json_bytes(&body)?,
-            seed_from_nonce(0x31, 1),
-        ),
-    })?;
+    revoke_root_device(&mut registry, &first, 1)?;
     assert!(registry.principal_manifest("alice").is_none());
     let mut restored: IdentityRegistry = serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
     assert!(matches!(restored.register_identity(&takeover), Err(NodeCoreError::PrincipalIdTaken)));
@@ -134,25 +184,24 @@ fn principal_lookup_authenticates_before_lookup_and_shares_quotas_across_an_acco
     query.session_id = current.session_id;
     // Register a second device with the same root using a fresh root-signed proof.
     let mut second = registration_request("alice", "alice-two", 2, None, "test-source")?;
+    second = same_root_registration(second, 1, 2)?;
     let root = ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, 1));
-    let branch =
-        ramflux_crypto::create_device_branch("alice", "alice-two", 1, seed_from_nonce(0x41, 2));
-    second.root_public_key = registration.root_public_key.clone();
-    second.principal_commitment = registration.principal_commitment.clone();
-    second.proof = ramflux_crypto::authorize_device_branch(
+    let mut entries = registration.device_set.as_ref().ok_or("first set")?.devices.clone();
+    entries.extend(second.device_set.as_ref().ok_or("second set")?.devices.clone());
+    second.device_set = Some(ramflux_crypto::sign_device_set(
         &root,
-        &branch,
-        IDENTITY_BIND_AUDIENCE,
-        vec![IDENTITY_BIND_CAPABILITY.to_owned()],
-        second.now - 1,
-        second.now + 60,
-    )?;
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            device_set_epoch: 2,
+            devices: entries,
+        },
+    )?);
     second.target_delivery_id = "target_alice-two".into();
     second.session_id = "session_alice-two".into();
     let second_reply = router.mvp1_register_identity(&second)?;
     let branch =
         ramflux_crypto::create_device_branch("alice", "alice-one", 1, seed_from_nonce(0x41, 1));
-    let identity = ramflux_crypto::X25519KeyPair::from_seed([71; 32]);
+    let identity = ramflux_crypto::X25519KeyPair::from_seed(seed_from_nonce(0x51, 1));
     let prekey = ramflux_crypto::X25519KeyPair::from_seed([72; 32]);
     router.mvp1_publish_prekey(PrekeyPublishRequest {
         device_id: "alice-one".into(),
@@ -199,7 +248,20 @@ fn a_foreign_root_cannot_take_a_device_or_delivery_alias_and_revoke_its_owner()
     let mallory = registration_request("mallory", "mallory-one", 2, None, "attacker")?;
     registry.register_identity(&mallory)?;
     let takeover = registration_request("mallory-two", "alice-one", 3, None, "attacker")?;
-    assert!(matches!(registry.register_identity(&takeover), Err(NodeCoreError::DeviceIdTaken)));
+    registry.register_identity(&takeover)?;
+    assert_eq!(
+        registry.device_manifest(&alice.principal_commitment).ok_or("alice root missing")?.devices
+            [0]
+        .branch_public_key,
+        alice.branch_public_key
+    );
+    assert_eq!(
+        registry
+            .device_manifest(&takeover.principal_commitment)
+            .ok_or("second root missing")?
+            .principal_id,
+        "mallory-two"
+    );
     let mut alias = mallory.clone();
     alias.target_delivery_id = alice.target_delivery_id.clone();
     assert!(matches!(registry.register_identity(&alias), Err(NodeCoreError::DeviceIdTaken)));
@@ -219,27 +281,34 @@ fn a_foreign_root_cannot_take_a_device_or_delivery_alias_and_revoke_its_owner()
         registry.principal_manifest("alice").ok_or("alice missing")?.principal_commitment,
         alice.principal_commitment
     );
-    let mut again = alice.clone();
-    let root = ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, 1));
-    let device =
-        ramflux_crypto::create_device_branch("alice", "alice-one", 2, seed_from_nonce(0x41, 9));
-    again.branch_public_key =
-        ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes());
-    again.proof = ramflux_crypto::authorize_device_branch(
-        &root,
-        &device,
-        IDENTITY_BIND_AUDIENCE,
-        vec![IDENTITY_BIND_CAPABILITY.into()],
-        alice.now,
-        alice.now + 3600,
+    let mut again = same_root_registration(
+        registration_request("alice", "alice-one", 9, None, "owner")?,
+        1,
+        9,
     )?;
-    registry.register_identity(&again)?;
+    again.device_set = Some(ramflux_crypto::sign_device_set(
+        &ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, 1)),
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            device_set_epoch: 2,
+            devices: again.device_set.as_ref().ok_or("rotation set")?.devices.clone(),
+        },
+    )?);
+    // Same-epoch key replacement is rejected; the existing owner's key stays intact.
+    assert!(registry.register_identity(&again).is_err());
     let mut legacy = serde_json::to_value(&registry)?;
     legacy.as_object_mut().ok_or("registry")?.remove("device_root_bindings");
     legacy.as_object_mut().ok_or("registry")?.remove("delivery_root_bindings");
     let mut restored: IdentityRegistry = serde_json::from_value(legacy)?;
     restored.remove_principal_metadata("alice");
-    assert!(matches!(restored.register_identity(&takeover), Err(NodeCoreError::DeviceIdTaken)));
+    assert!(restored.register_identity(&takeover).is_err());
+    assert_eq!(
+        restored
+            .device_manifest(&mallory.principal_commitment)
+            .ok_or("mallory preserved")?
+            .principal_id,
+        "mallory"
+    );
     Ok(())
 }
 
@@ -304,7 +373,9 @@ fn legacy_devices_are_owned_by_their_signed_root_even_when_a_principal_name_is_a
     register(&mut second, "alice-two", 2)?;
     let mut snapshot = serde_json::to_value(&first)?;
     let other = serde_json::to_value(&second)?;
-    for field in ["devices", "root_public_keys_by_commitment", "prekey_bundles"] {
+    for field in
+        ["devices", "root_public_keys_by_commitment", "prekey_bundles", "signed_device_sets"]
+    {
         snapshot[field]
             .as_object_mut()
             .ok_or("snapshot")?
@@ -325,9 +396,9 @@ fn legacy_devices_are_owned_by_their_signed_root_even_when_a_principal_name_is_a
         claim.now,
         claim.now + 3600,
     )?;
-    assert!(matches!(registry.register_identity(&claim), Err(NodeCoreError::DeviceIdTaken)));
+    assert!(registry.register_identity(&claim).is_err());
     registry.remove_principal_metadata("alice");
-    assert!(matches!(registry.register_identity(&claim), Err(NodeCoreError::DeviceIdTaken)));
+    assert!(registry.register_identity(&claim).is_err());
     Ok(())
 }
 

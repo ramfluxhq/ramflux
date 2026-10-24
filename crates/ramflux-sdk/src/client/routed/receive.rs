@@ -68,7 +68,7 @@ impl RamfluxClient {
             let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
                 ramflux_protocol::parse_i_json(body)?;
             if sync.source_device_id != entry.envelope.source_device_id
-                || sync.target_device_id != opened.local_device
+                || sync.target_device_id != opened.local_device.device_id()
             {
                 return Err(invalid("own-device history transport scope mismatch"));
             }

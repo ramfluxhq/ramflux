@@ -105,7 +105,14 @@ async fn group_roster_without_seed_refuses_surface_in_the_unreceived_conversatio
         Arc::new(AtomicBool::new(false)),
     )?;
     owner.client.create_group("group", "device-owner")?;
-    owner.client.add_group_member("group", "device-agent", "member")?;
+    owner.client.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&agent.client)?,
+    )?;
+    owner.client.add_group_member(
+        "group",
+        agent.client.owned_device_identity()?.storage_key(),
+        "member",
+    )?;
     let join = owner.client.create_signed_group_member_join_event(
         "group",
         "device-owner",

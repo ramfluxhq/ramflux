@@ -97,60 +97,40 @@ impl IdentityRegistry {
             return Err(reject("identity was deleted or its immutable kind changed"));
         }
         if self
-            .root_public_keys
-            .get(&next.principal_id)
+            .root_public_keys_by_commitment
+            .get(&next.principal_commitment)
             .is_some_and(|old| old != &request.root_public_key)
-            || self
-                .root_public_keys_by_commitment
-                .get(&next.principal_commitment)
-                .is_some_and(|old| old != &request.root_public_key)
         {
-            return Err(reject("principal is already bound to a different root"));
+            return Err(reject("root commitment is already bound to another key"));
         }
         if let Some(previous) = self.signed_device_sets.get(&next.principal_commitment) {
             ramflux_crypto::validate_device_set_transition(previous, next)
                 .map_err(|error| crypto(&error))?;
         }
-        self.validate_set_ownership(next)?;
+        self.validate_set_ownership(next, &request.root_public_key)?;
+        let public = ramflux_crypto::verifying_key_from_base64url(&request.root_public_key)
+            .map_err(|e| crypto(&e))?;
         for entry in &next.devices {
+            let identity = ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
+                &public,
+                next,
+                &entry.device_id,
+            )
+            .map_err(|e| crypto(&e))?;
+            let changed = self
+                .device_record(&identity)
+                .is_some_and(|device| !Self::device_matches_entry(device, entry));
             if entry.status == DeviceSetStatus::Revoked {
-                self.revoked_devices
-                    .insert(Self::device_storage_key(&next.principal_commitment, &entry.device_id));
+                self.revoked_devices.insert(Self::device_storage_key(&identity));
             }
-            if self
-                .devices
-                .get(&Self::device_storage_key(&next.principal_commitment, &entry.device_id))
-                .or_else(|| {
-                    self.devices
-                        .get(&entry.device_id)
-                        .filter(|d| d.principal_id == next.principal_id)
-                })
-                .is_some_and(|device| !Self::device_matches_entry(device, entry))
-                || entry.status == DeviceSetStatus::Revoked
-            {
-                self.prekey_bundles.remove(&Self::device_storage_key(
-                    &next.principal_commitment,
-                    &entry.device_id,
-                ));
-                if self
-                    .devices
-                    .get(&entry.device_id)
-                    .is_some_and(|d| d.principal_id == next.principal_id)
-                {
-                    self.prekey_bundles.remove(&entry.device_id);
-                }
+            if changed || entry.status == DeviceSetStatus::Revoked {
+                self.prekey_bundles.remove(&Self::device_storage_key(&identity));
+                self.legacy_remove_device_metadata(&identity);
             }
         }
-        for device in self.devices.values().filter(|d| {
-            d.principal_id == next.principal_id
-                && d.principal_commitment.is_empty()
-                && !next.devices.iter().any(|e| e.device_id == d.device_id)
-        }) {
-            self.revoked_devices
-                .insert(Self::device_storage_key(&next.principal_commitment, &device.device_id));
-            self.prekey_bundles.remove(&device.device_id);
-        }
-        self.root_public_keys.insert(next.principal_id.clone(), request.root_public_key.clone());
+        self.root_public_keys
+            .entry(next.principal_id.clone())
+            .or_insert_with(|| request.root_public_key.clone());
         self.root_public_keys_by_commitment
             .insert(next.principal_commitment.clone(), request.root_public_key.clone());
         self.identity_authority_fences.insert(
@@ -160,17 +140,21 @@ impl IdentityRegistry {
         self.signed_device_sets.insert(next.principal_commitment.clone(), next.clone());
         Ok(())
     }
-    fn validate_set_ownership(&self, next: &SignedDeviceSetRecord) -> Result<(), NodeCoreError> {
+    fn validate_set_ownership(
+        &self,
+        next: &SignedDeviceSetRecord,
+        public: &str,
+    ) -> Result<(), NodeCoreError> {
+        let public =
+            ramflux_crypto::verifying_key_from_base64url(public).map_err(|e| crypto(&e))?;
         for entry in &next.devices {
-            if let Some(device) = self
-                .devices
-                .get(&Self::device_storage_key(&next.principal_commitment, &entry.device_id))
-                .or_else(|| {
-                    self.devices
-                        .get(&entry.device_id)
-                        .filter(|d| d.principal_id == next.principal_id)
-                })
-            {
+            let identity = ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
+                &public,
+                next,
+                &entry.device_id,
+            )
+            .map_err(|e| crypto(&e))?;
+            if let Some(device) = self.device_record(&identity) {
                 if device.principal_id != next.principal_id
                     || (!device.principal_commitment.is_empty()
                         && device.principal_commitment != next.principal_commitment)
@@ -190,8 +174,7 @@ impl IdentityRegistry {
                     .as_ref()
                     .map(|binding| binding.agreement_identity_public_key.clone())
                     .or_else(|| {
-                        self.prekey_bundles
-                            .get(&device.device_id)
+                        self.legacy_prekey_bundle(&identity)
                             .map(|bundle| ramflux_protocol::encode_base64url(bundle.identity_key))
                     });
                 let agreement_changed = agreement
@@ -211,9 +194,7 @@ impl IdentityRegistry {
                     return Err(reject("device key rotation requires a newer device epoch"));
                 }
             }
-            if self
-                .revoked_devices
-                .contains(&Self::device_storage_key(&next.principal_commitment, &entry.device_id))
+            if self.revoked_devices.contains(&Self::device_storage_key(&identity))
                 && entry.status != DeviceSetStatus::Revoked
             {
                 return Err(reject("revoked device cannot be resurrected"));
@@ -259,6 +240,7 @@ impl IdentityRegistry {
         if request.principal_commitment != ramflux_crypto::identity_root_commitment(&root) {
             return Err(reject("root-bound registration commitment mismatch"));
         }
+        self.check_registration_root_ownership(request)?;
         if let Some(record) = &request.device_set {
             self.apply_signed_device_set(&DeviceSetPublishRequest {
                 root_public_key: request.root_public_key.clone(),
@@ -312,8 +294,11 @@ impl IdentityRegistry {
         }
         Ok(())
     }
-    pub(crate) fn device_is_usable(&self, id: &str) -> bool {
-        let Some(device) = self.device_record(id) else {
+    pub(crate) fn device_is_usable(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> bool {
+        let Some(device) = self.device_record(identity) else {
             return false;
         };
         self.device_record_is_usable(device)
@@ -322,11 +307,13 @@ impl IdentityRegistry {
         if self.record_is_revoked(device) {
             return false;
         }
-        let set = self.signed_device_sets.get(&device.principal_commitment).or_else(|| {
-            self.signed_device_sets.values().find(|set| set.principal_id == device.principal_id)
-        });
-        let Some(set) = set else {
-            return device.branch_proof.key_binding.is_none();
+        let Some(identity) =
+            self.device_identity_for_root(&device.principal_commitment, &device.device_id)
+        else {
+            return false;
+        };
+        let Some(set) = self.signed_device_sets.get(identity.root_commitment()) else {
+            return false;
         };
         set.devices.iter().any(|entry| {
             entry.device_id == device.device_id

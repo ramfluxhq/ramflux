@@ -28,7 +28,13 @@ fn copied_name_cannot_pin_first_claimer_and_signed_member_root_chooses_bob() -> 
     let m = mallory.manifest()?;
     observe(&alice.client, &m)?;
     assert_eq!(alice.client.device_reference("shared")?, "shared");
-    assert!(alice.client.require_cached_root_authority("shared").is_err());
+    assert!(
+        alice
+            .client
+            .device_identity("shared")
+            .and_then(|identity| alice.client.require_cached_root_authority(&identity))
+            .is_err()
+    );
 
     alice.client.create_group("g", "alice")?;
     assert!(matches!(

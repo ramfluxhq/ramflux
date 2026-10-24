@@ -270,13 +270,7 @@ pub(crate) mod tests {
 
         let (oracle_state, oracle_store, _oracle_path) = test_router("fanout_oracle")?;
         register_test_device(oracle_state.as_ref(), "alice", "alice_phone", "target_phone", 1)?;
-        register_test_device(
-            oracle_state.as_ref(),
-            "alice",
-            "alice_laptop",
-            "target_laptop",
-            2,
-        )?;
+        register_test_device(oracle_state.as_ref(), "alice", "alice_laptop", "target_laptop", 2)?;
         let oracle = crate::router_engine::own_device_fanout(
             oracle_state.as_ref(),
             oracle_store.as_ref(),

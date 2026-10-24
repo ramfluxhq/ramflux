@@ -98,8 +98,18 @@ pub(super) async fn peer_fixture(
             dm_device_id_hash("device-sender"),
             [3; 32],
         )?;
-        source.client.persist_pair("device-sender", device, &[4; 32], &send)?;
-        peer.client.persist_pair(device, "device-sender", &[4; 32], &recv)?;
+        source.client.persist_pair(
+            &source.client.owned_device_identity()?,
+            &peer.client.owned_device_identity()?,
+            &[4; 32],
+            &send,
+        )?;
+        peer.client.persist_pair(
+            &peer.client.owned_device_identity()?,
+            &source.client.owned_device_identity()?,
+            &[4; 32],
+            &recv,
+        )?;
         peer.client.account_db()?.persist_client_record(
             "conversation",
             "thread",
@@ -107,6 +117,19 @@ pub(super) async fn peer_fixture(
         )?;
         peer.client.account_db()?.persist_client_record("device","device-sender",&json!({"principal_id":"sender","signing_public_key":ramflux_protocol::encode_base64url(source.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.verifying_key().to_bytes())}))?;
         peers.push(peer);
+    }
+    if let Some(manifest) = peer_manifest.as_mut() {
+        crate::client::identity_authority::test_support::sign_manifest(
+            peers[0].client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            manifest,
+            2,
+        )?;
+        source.client.persist_root_verified_directory(manifest)?;
+        for peer in &peers {
+            peer.client.persist_root_verified_directory(manifest)?;
+            peer.client
+                .persist_root_verified_directory(&super::fixture::manifest(&source.client)?)?;
+        }
     }
     let peer_manifest = peer_manifest.ok_or("peer manifest")?;
     source.client.account_db()?.establish_friend_link("surface-peer", "sender", "peer")?;
@@ -137,7 +160,7 @@ pub(super) async fn peer_fixture(
         target_delivery_id: "sender".into(),
         prekey_http_url: None,
     })
-    .with_device_branch(source.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?);
+    .with_account_identity(&source.client)?;
     Ok(PeerFixture { peers, config, address, directory })
 }
 pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
@@ -213,9 +236,7 @@ async fn assert_deliveries(
                     target_delivery_id: "peer".into(),
                     prekey_http_url: None,
                 })
-                .with_device_branch(
-                    peer.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?,
-                );
+                .with_account_identity(&peer.client)?;
                 // Already authenticated directory records isolate this receive from prekey discovery.
                 let own_manifest = super::fixture::manifest(source)?;
                 peer.client.persist_identity_directory(&own_manifest)?;

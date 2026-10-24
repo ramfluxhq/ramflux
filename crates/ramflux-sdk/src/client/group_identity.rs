@@ -195,7 +195,7 @@ impl RamfluxClient {
         if db.client_record("device", device)?.is_none() {
             return Err(SdkError::InboundPending("joined member identity unavailable".into()));
         }
-        let record = self.trusted_device(device)?;
+        let record = self.trusted_device(&identity)?;
         let (Some(principal), Some(commitment), Some(key)) = (
             record["principal_id"].as_str(),
             record["principal_commitment"].as_str(),

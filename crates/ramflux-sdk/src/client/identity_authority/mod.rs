@@ -96,23 +96,23 @@ impl RamfluxClient {
 
 impl RamfluxClient {
     pub(crate) fn root_qualified_device_lookup(&self, device: &str) -> Result<String, SdkError> {
-        self.require_cached_root_authority(device)?;
-        self.device_reference(device)
+        let identity = self.device_identity(device)?;
+        self.require_cached_root_authority(&identity)?;
+        Ok(identity.storage_key().into())
     }
 
-    pub(crate) fn require_cached_root_authority(&self, device: &str) -> Result<(), SdkError> {
-        let device = self.device_reference(device)?;
-        if ramflux_protocol::parse_qualified_device_id(&device)?.is_none() {
-            return Err(invalid("root-qualified device authority required"));
-        }
-        let raw = device_namespace::wire_device_id(&device)?;
+    pub(crate) fn require_cached_root_authority(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<(), SdkError> {
+        let device = identity.storage_key();
+        let raw = identity.device_id();
         let db = self.account_db()?;
-        if db.load_actor_state::<bool>(&self.device_revocation_key(&device)?)?.unwrap_or(false) {
+        if db.load_actor_state::<bool>(&Self::device_revocation_key(identity))?.unwrap_or(false) {
             return Err(invalid("device is locally fenced by a pending root revocation"));
         }
-        let row = db
-            .client_record("device", &device)?
-            .ok_or_else(|| invalid("device metadata absent"))?;
+        let row =
+            db.client_record("device", device)?.ok_or_else(|| invalid("device metadata absent"))?;
         let commitment = row["principal_commitment"]
             .as_str()
             .ok_or_else(|| invalid("legacy device has no root authority"))?;

@@ -153,7 +153,10 @@ impl RamfluxClient {
             .client_record("device", recipient)?
             .as_ref()
             .is_none_or(|record| record.get("x25519_identity_public").is_none())
-            || self.require_cached_root_authority(recipient).is_err()
+            || self
+                .device_identity(recipient)
+                .and_then(|identity| self.require_cached_root_authority(&identity))
+                .is_err()
         {
             self.resolve_target_principal_commitment(
                 &engine.config,
@@ -205,7 +208,10 @@ impl RamfluxClient {
             .recipient_device_id
             .as_deref()
             .ok_or_else(|| invalid("recipient device required"))?;
-        self.verify_root_bound_prekey(&Self::qualified_recipient(message)?, &bundle)?;
+        self.verify_root_bound_prekey(
+            &self.device_identity(&Self::qualified_recipient(message)?)?,
+            &bundle,
+        )?;
         let hash = prekey_bundle_hash(&bundle)?;
         let aad = associated_data(&message.envelope_id, local.device_id(), remote, &hash)?;
         let (session, header) = self.create_send_dm_session_with_aad(
@@ -237,13 +243,13 @@ impl RamfluxClient {
             return Err(invalid("v2 ciphertext device binding mismatch"));
         }
         if let Some(header) = envelope.x3dh.as_ref() {
-            self.verify_initiator_identity(remote.storage_key(), header)?;
+            self.verify_initiator_identity(remote, header)?;
         }
         if let Some(record) = self.load_pair(local, remote, &envelope.ciphertext.session_id)? {
             return Ok(record);
         }
         let header = envelope.x3dh.as_ref().ok_or(SdkError::PairRecoveryRequired)?;
-        self.require_fresh_device_authorization(remote.storage_key())?;
+        self.require_fresh_device_authorization(remote)?;
         self.check_bootstrap_sequence(local, remote, header)?;
         if header.recipient_device_id != local.device_id()
             || header.initiator_device_id_hash != dm_device_id_hash(&wire_remote)

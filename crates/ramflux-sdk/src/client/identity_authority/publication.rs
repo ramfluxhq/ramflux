@@ -142,10 +142,10 @@ impl RamfluxClient {
                     )?;
                 }
                 db.persist_actor_state(
-                    &self.device_revocation_key(&ramflux_protocol::qualified_device_id(
+                    &Self::device_revocation_key(&self.device_identity_for_root(
                         &record.principal_commitment,
                         &entry.device_id,
-                    )?)?,
+                    )?),
                     &true,
                 )?;
             }

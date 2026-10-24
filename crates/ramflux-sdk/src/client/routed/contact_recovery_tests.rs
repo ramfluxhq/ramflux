@@ -38,8 +38,10 @@ async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retire
     let (mut a, mut b, fake, _d, _origin, mut s, old) = lying_lookup().await?;
     a.client =
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client);
+    let local = a.client.owned_device_identity()?;
+    let fake_identity = fake.client.owned_device_identity()?;
     seal(&a, &fake, message("old-session", "thread"), b"old")?;
-    assert!(a.client.active_pair("alice", "bob")?.is_some());
+    assert!(a.client.active_pair(&local, &fake_identity)?.is_some());
     s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client =
         std::mem::take(&mut a.client);
     let signed = card(&mut s).await?;
@@ -54,7 +56,7 @@ async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retire
     let real = s.accounts.get("bob").ok_or_else(|| invalid("bob"))?.principal_commitment.clone();
     assert_eq!(details["proposed_root_commitment"], real);
     assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
-    assert!(client(&s)?.active_pair("alice", "bob")?.is_some());
+    assert!(client(&s)?.active_pair(&local, &fake_identity)?.is_some());
     let stale = call(
         &mut s,
         "alice",
@@ -72,7 +74,7 @@ async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retire
     assert_eq!(fixed["contact"]["root_source"], "card");
     assert_eq!(fixed["contact"]["reachable"], true);
     assert_eq!(fixed["contact"]["verified"], false);
-    assert!(client(&s)?.active_pair("alice", "bob")?.is_none());
+    assert!(client(&s)?.active_pair(&local, &fake_identity)?.is_none());
     let db = client(&s)?.account_db()?;
     assert!(db.client_record("commitment", &old)?.is_none());
     assert_eq!(
@@ -194,12 +196,20 @@ async fn a_rejected_contact_resolution_keeps_the_group_key_change_observation()
     let (_a, _b, fake, _d, _origin, mut s, _old) = lying_lookup().await?;
     let original = super::super::r9::manifest(&fake)?;
     client(&s)?.create_group("pinned", "alice")?;
-    client(&s)?.add_group_member("pinned", "bob", "member")?;
+    client(&s)?.add_group_member(
+        "pinned",
+        fake.client.owned_device_identity()?.storage_key(),
+        "member",
+    )?;
     let db = client(&s)?.account_db()?;
-    db.persist_group_member_device_key("pinned", "bob", &original.devices[0].branch_public_key)?;
+    db.persist_group_member_device_key(
+        "pinned",
+        &RamfluxClient::device_identity_from_manifest(&original, "bob")?,
+        &original.devices[0].branch_public_key,
+    )?;
     db.bind_group_member_key_identity(
         "pinned",
-        "bob",
+        &RamfluxClient::device_identity_from_manifest(&original, "bob")?,
         "bob",
         &original.principal_commitment,
         &original.devices[0].branch_public_key,
@@ -245,7 +255,7 @@ async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_be
         super::super::review::trust(&b, &a)?;
         b.client.establish_friend_link("prior-friend", "alice", "bob")?;
         let mut message = message("legacy-control", "history");
-        let bundle = b.client.load_x3dh_private_state("bob")?.bundle;
+        let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
         let (mut session, header) =
             a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
         let body = serde_json::to_vec(
@@ -253,6 +263,9 @@ async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_be
         )?;
         let ciphertext = session.encrypt(&body, dm_associated_data("history"))?;
         message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+            source_principal_commitment: Some(
+                a.client.owned_device_identity()?.root_commitment().into(),
+            ),
             schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
             version: 1,
             x3dh: header.clone(),
@@ -325,6 +338,9 @@ async fn valid_delivery_after_rejected_control(
 ) -> Result<(), SdkError> {
     let mut next = super::super::message("legacy-next", "history");
     next.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: Some(
+            a.client.owned_device_identity()?.root_commitment().into(),
+        ),
         schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
         version: 1,
         x3dh: None,
@@ -362,7 +378,7 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
     super::super::review::trust(&b, &a)?;
     b.client.establish_friend_link("prior-friend", "alice", "bob")?;
     let mut message = message("legacy-control", "history");
-    let bundle = b.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
     let (mut session, header) =
         a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
     let body = serde_json::to_vec(
@@ -370,6 +386,9 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
     )?;
     let ciphertext = session.encrypt(&body, dm_associated_data("history"))?;
     message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: Some(
+            a.client.owned_device_identity()?.root_commitment().into(),
+        ),
         schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
         version: 1,
         x3dh: header.clone(),

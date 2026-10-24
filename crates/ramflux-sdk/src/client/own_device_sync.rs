@@ -40,14 +40,12 @@ impl RamfluxClient {
             manifest.devices.iter().find(|d| d.device_id == target_device_id).ok_or_else(|| {
                 SdkError::InboundRejected("own sync target revoked or unavailable".into())
             })?;
-        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
-            principal_commitment,
-            &source_device_id,
-        )?)?;
-        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
-            principal_commitment,
-            target_device_id,
-        )?)?;
+        self.require_cached_root_authority(
+            &self.device_identity_for_root(principal_commitment, &source_device_id)?,
+        )?;
+        self.require_cached_root_authority(
+            &self.device_identity_for_root(principal_commitment, target_device_id)?,
+        )?;
         if source_device.principal_commitment != target_device.principal_commitment {
             return Err(SdkError::LocalBus("own-device sync principal mismatch".to_owned()));
         }
@@ -290,10 +288,11 @@ impl RamfluxClient {
         id: &str,
         source_device_id: &str,
     ) -> Result<Option<SdkOwnDeviceGroupSnapshot>, SdkError> {
+        let source = self.local_device_identity(source_device_id)?;
         let group = self.group_state(id)?;
-        let Some(role) = group.roles.get(source_device_id).cloned() else { return Ok(None) };
+        let Some(role) = group.roles.get(source.device_id()).cloned() else { return Ok(None) };
         let Some(joined_epoch) =
-            self.account_db()?.group_member_joined_epoch(id, source_device_id)?
+            self.account_db()?.group_member_joined_epoch(id, source.device_id())?
         else {
             return Ok(None);
         };
@@ -448,14 +447,12 @@ impl RamfluxClient {
                     envelope.target_device_id
                 ))
             })?;
-        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
-            &envelope.principal_commitment,
-            &source.device_id,
-        )?)?;
-        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
-            &envelope.principal_commitment,
-            &target.device_id,
-        )?)?;
+        self.require_cached_root_authority(
+            &self.device_identity_for_root(&envelope.principal_commitment, &source.device_id)?,
+        )?;
+        self.require_cached_root_authority(
+            &self.device_identity_for_root(&envelope.principal_commitment, &target.device_id)?,
+        )?;
         if source.principal_commitment != envelope.principal_commitment
             || target.principal_commitment != envelope.principal_commitment
         {
@@ -974,7 +971,23 @@ pub(crate) mod tests {
         )?;
         source.persist_dm_session("history-thread", "legacy-checkpoint", "send", &session)?;
         source.create_group("history-group", "source_device_sync")?;
-        source.add_group_member("history-group", "target_device_sync", "member")?;
+        let mut own_manifest =
+            crate::client::identity_authority::test_support::public_manifest(&source)?;
+        own_manifest.devices.extend(
+            crate::client::identity_authority::test_support::public_manifest(&target)?.devices,
+        );
+        crate::client::identity_authority::test_support::sign_manifest(
+            source.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &mut own_manifest,
+            1,
+        )?;
+        source.persist_root_verified_directory(&own_manifest)?;
+        target.persist_root_verified_directory(&own_manifest)?;
+        source.add_group_member(
+            "history-group",
+            target.owned_device_identity()?.storage_key(),
+            "member",
+        )?;
         let history = source.own_device_history_bundle(
             "principal_sync",
             "source_device_sync",

@@ -27,11 +27,15 @@ impl AccountDb {
         dependency: (&str, &str),
         at: i64,
     ) -> Result<bool, StorageError> {
-        let (verified_source,trusted)=match identity {
-            InboxFailureSource::Authenticated {device,related} => (Some(device),related),
-            InboxFailureSource::Unverified => (None,false),
+        let (verified_source, trusted) = match identity {
+            InboxFailureSource::Authenticated { device, related } => (Some(device), related),
+            InboxFailureSource::Unverified => (None, false),
         };
-        self.set_verified_inbox_failure_policy(key,entry,InboxFailurePolicy {verified_source,trusted,dependency,at})
+        self.set_verified_inbox_failure_policy(
+            key,
+            entry,
+            InboxFailurePolicy { verified_source, trusted, dependency, at },
+        )
     }
     /// Sets failure policy with a verified identity scope independent of claimed device IDs.
     /// # Errors
@@ -45,8 +49,10 @@ impl AccountDb {
         let InboxFailurePolicy { verified_source, trusted, dependency: (class, subject), at } =
             policy;
         let trusted = trusted && verified_source.is_some();
-        let source = verified_source
-            .map_or_else(|| format!("unverified/{}",ramflux_protocol::encode_base64url(key)), |source| source.storage_key().to_owned());
+        let source = verified_source.map_or_else(
+            || format!("unverified/{}", ramflux_protocol::encode_base64url(key)),
+            |source| source.storage_key().to_owned(),
+        );
         let value: serde_json::Value = serde_json::from_slice(entry).unwrap_or_default();
         self.write_transaction(|| {
             self.release_expired_legacy_inbox(at)?;

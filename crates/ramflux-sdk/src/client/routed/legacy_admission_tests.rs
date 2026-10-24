@@ -48,7 +48,7 @@ fn forged_legacy_holds_release_admission_for_a_genuine_routed_first_contact() ->
         if expired {
             db.expire_inbox_holds(at)?;
         }
-        let key = committed_key(&genuine)?;
+        let key = bob.client.inbox_admission_key(&genuine)?;
         assert!(
             crate::client::inbox_failure::defer_entry(
                 &bob.client,

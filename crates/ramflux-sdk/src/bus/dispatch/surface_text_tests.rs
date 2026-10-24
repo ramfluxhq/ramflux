@@ -102,16 +102,6 @@ pub(super) fn members(
 ) -> Result<Vec<LocalBusAccountState>, SdkError> {
     source.client.create_group("group", "device-sender")?;
     let mut peers = Vec::new();
-    let sender_key = ramflux_protocol::encode_base64url(
-        source
-            .client
-            .device_branch
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .verifying_key()
-            .to_bytes(),
-    );
     for i in 0..count {
         let id = format!("peer-{i}");
         let device = format!("device-{id}");
@@ -119,23 +109,14 @@ pub(super) fn members(
             runtime_tests::account(&root.join(&id), &id, None, Arc::new(AtomicBool::new(false)))?;
         peer.client.create_identity_root(&id, [110 + i; 32]);
         peer.client.create_device_branch(&id, &device, 1, [111 + i; 32]);
-        let commitment = super::fixture::manifest(&peer.client)?.principal_commitment;
-        source.client.add_group_member("group", &device, "member")?;
-        let key = ramflux_protocol::encode_base64url(
-            peer.client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .signing_key
-                .verifying_key()
-                .to_bytes(),
-        );
-        source.client.account_db()?.persist_client_record(
-            "device",
-            &device,
-            &json!({"principal_id":id}),
+        let member_manifest = super::fixture::manifest(&peer.client)?;
+        source.client.persist_root_verified_directory(&member_manifest)?;
+        peer.client.persist_root_verified_directory(&super::fixture::manifest(&source.client)?)?;
+        source.client.add_group_member(
+            "group",
+            peer.client.owned_device_identity()?.storage_key(),
+            "member",
         )?;
-        source.client.account_db()?.persist_client_record("identity",&id,&json!({"contact_identity_commitment":commitment,"devices":[{"device_id":device,"signing_public_key":key,"target_delivery_id":id}]}))?;
         // Pre-established authenticated pair sessions isolate this test from directory/prekey I/O.
         let send = ramflux_crypto::DmSession::initiator(
             [i + 1; 32],
@@ -149,12 +130,17 @@ pub(super) fn members(
             dm_device_id_hash("device-sender"),
             [3; 32],
         )?;
-        source.client.persist_pair("device-sender", &device, &[4; 32], &send)?;
-        peer.client.persist_pair(&device, "device-sender", &[4; 32], &recv)?;
-        peer.client.account_db()?.persist_client_record(
-            "device",
-            "device-sender",
-            &json!({"principal_id":"sender","principal_commitment":super::fixture::manifest(&source.client)?.principal_commitment,"signing_public_key":sender_key}),
+        source.client.persist_pair(
+            &source.client.owned_device_identity()?,
+            &peer.client.owned_device_identity()?,
+            &[4; 32],
+            &send,
+        )?;
+        peer.client.persist_pair(
+            &peer.client.owned_device_identity()?,
+            &source.client.owned_device_identity()?,
+            &[4; 32],
+            &recv,
         )?;
         peers.push(peer);
     }
@@ -197,6 +183,11 @@ pub(super) fn assert_receivers(
             "conversation",
             "thread",
             &json!({"kind":"group","group_id":"group"}),
+        )?;
+        peer.client.pin_local_group_member("group")?;
+        peer.client.pin_joined_group_member(
+            "group",
+            peer.client.peer_device_identity("sender", "device-sender")?.storage_key(),
         )?;
         for (index, delivery) in pair.iter().enumerate() {
             let entry = GatewayInboxEntry {
@@ -277,7 +268,7 @@ pub(super) async fn directory_config(
         target_delivery_id: "sender".into(),
         prekey_http_url: None,
     })
-    .with_device_branch(source.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?);
+    .with_account_identity(&source.client)?;
     Ok((config, task))
 }
 
@@ -317,7 +308,7 @@ async fn assert_admission(
     let epoch = source.client.group_state("group")?.group_epoch;
     let before = serde_json::to_value(source.client.load_group_sender_key_state(
         "group",
-        "device-sender",
+        &source.client.owned_device_identity()?,
         epoch,
         "send",
     )?)?;
@@ -335,7 +326,7 @@ async fn assert_admission(
     assert_eq!(
         serde_json::to_value(source.client.load_group_sender_key_state(
             "group",
-            "device-sender",
+            &source.client.owned_device_identity()?,
             epoch,
             "send"
         )?)?,
@@ -420,7 +411,11 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
     }
     assert_eq!(source.client.surface_get("surface", 0, None)?["version"], 65);
     source.client.remove_group_member("group", "device-sender", "device-peer-0")?;
-    source.client.add_group_member("group", "device-peer-0", "member")?;
+    source.client.add_group_member(
+        "group",
+        peers[0].client.owned_device_identity()?.storage_key(),
+        "member",
+    )?;
     let error = send(&mut source, &resync).await.err().ok_or("old-epoch retry was accepted")?;
     assert!(error.to_string().contains("epoch changed"), "{error}");
     assert_eq!(captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 3);
@@ -576,7 +571,17 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
         dm_device_id_hash(&remote),
         [3; 32],
     )?;
-    source.client.persist_pair(&device, &remote, &[4; 32], &session)?;
+    let remote_manifest = crate::client::identity_authority::test_support::remote_manifest(
+        "peer", &remote, [89; 32],
+    )?;
+    source.client.persist_root_verified_directory(&remote_manifest)?;
+    let remote_identity = RamfluxClient::device_identity_from_manifest(&remote_manifest, &remote)?;
+    source.client.persist_pair(
+        &source.client.owned_device_identity()?,
+        &remote_identity,
+        &[4; 32],
+        &session,
+    )?;
     let config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
         bind_addr: "127.0.0.1:0".parse()?,
         gateway_addr: "127.0.0.1:1".parse()?,
@@ -587,7 +592,7 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
         target_delivery_id: device.clone(),
         prekey_http_url: None,
     })
-    .with_device_branch(source.client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?);
+    .with_account_identity(&source.client)?;
     let gateway = super::fixture::RecordingGateway::new(Arc::default());
     let lengths = gateway.frame_lengths.clone();
     let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(gateway));
@@ -598,6 +603,7 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
         source_principal_id: principal,
         sender_id: device,
         recipient_device_id: Some(remote.clone()),
+        recipient_principal_commitment: Some(remote_identity.root_commitment().into()),
         target_delivery_id: remote,
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),

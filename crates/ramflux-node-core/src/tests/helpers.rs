@@ -837,13 +837,28 @@ pub(super) fn same_root_registration(
         "ramflux.identity.root_public_key.commitment.v1",
         &root.signing_key.verifying_key().to_bytes(),
     );
-    request.proof = ramflux_crypto::authorize_device_branch(
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed(seed_from_nonce(0x51, device_nonce));
+    request.proof = ramflux_crypto::authorize_device_branch_v2(
         &root,
         &device,
-        IDENTITY_BIND_AUDIENCE,
-        vec![IDENTITY_BIND_CAPABILITY.into()],
-        request.now - 1,
-        request.now + 3600,
+        ramflux_crypto::BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: request.now - 1,
+            expires_at: request.now + 3600,
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            agreement_identity_public_key: agreement.public,
+        },
     )?;
+    if let Some(set) = &mut request.device_set {
+        *set = ramflux_crypto::sign_device_set(
+            &root,
+            ramflux_crypto::DeviceSetSigningInput {
+                principal_kind: set.principal_kind,
+                device_set_epoch: set.device_set_epoch,
+                devices: set.devices.clone(),
+            },
+        )?;
+    }
     Ok(request)
 }
