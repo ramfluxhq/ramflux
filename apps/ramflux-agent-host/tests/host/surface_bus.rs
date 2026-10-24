@@ -28,9 +28,16 @@ pub struct SurfaceBus {
 }
 #[derive(Default)]
 pub struct Faults {
-    pub stale_stream: bool,
+    pub stale: StalePoint,
     pub disconnect_after_conflict: bool,
     pub lose_resync: bool,
+}
+#[derive(Default, PartialEq, Eq)]
+pub enum StalePoint {
+    #[default]
+    None,
+    Stream,
+    Close,
 }
 impl SurfaceBus {
     pub fn id(&self) -> Result<&str> {
@@ -42,6 +49,32 @@ impl SurfaceBus {
         self.action = Some(
             json!({"id":"decision","actionable":!self.replica,"wire_base64":ramflux_protocol::encode_base64url(wire)}),
         );
+        Ok(())
+    }
+    fn advance_before_close(&mut self) -> Result<()> {
+        self.faults.stale = StalePoint::None;
+        let content = self.state.content().ok_or(Error::State)?;
+        let patch = C::PatchSurface(ramflux_protocol::PatchSurfaceCommand {
+            surface_id: content.surface_id.clone(),
+            base_surface_hash: self.state.hash().ok_or(Error::State)?.into(),
+            ops: vec![ramflux_protocol::SurfacePatchOp::SetFallbackText {
+                fallback_text: content.fallback_text.clone(),
+            }],
+            new_surface_hash: self.state.hash().ok_or(Error::State)?.into(),
+        });
+        let wire = ramflux_protocol::encode_a2ui_conversation_event(
+            "group-thread",
+            self.state.version() + 1,
+            &patch,
+        )
+        .map_err(|_| Error::State)?;
+        self.state = self
+            .state
+            .apply(&A2uiConversationEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
+            .map_err(|_| Error::State)?;
+        if let Some(action) = self.action.as_mut() {
+            action["actionable"] = json!(false);
+        }
         Ok(())
     }
     fn send(&mut self, body: Value) -> Result<Value> {
@@ -57,10 +90,10 @@ impl SurfaceBus {
         if let Some(reason) = self.refusal.take() {
             return Err(Error::SurfaceRefused(reason));
         }
-        if self.faults.stale_stream
+        if self.faults.stale == StalePoint::Stream
             && let C::StreamAppend(append) = event.command()
         {
-            self.faults.stale_stream = false;
+            self.faults.stale = StalePoint::None;
             let mut concurrent = append.clone();
             concurrent.final_ = false;
             let mut end = (concurrent.text_delta.len() / 2).max(1);
@@ -81,6 +114,10 @@ impl SurfaceBus {
             if self.faults.disconnect_after_conflict {
                 self.get_failures = 1;
             }
+        }
+        if self.faults.stale == StalePoint::Close && matches!(event.command(), C::DeleteSurface(_))
+        {
+            self.advance_before_close()?;
         }
         if (self.conflict || self.conflicts_remaining > 0)
             && matches!(event.command(), C::PatchSurface(_))

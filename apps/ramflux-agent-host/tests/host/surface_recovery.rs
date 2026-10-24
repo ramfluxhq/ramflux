@@ -14,7 +14,7 @@ async fn stale_stream_reloads_and_appends_only_the_missing_suffix_with_a_final_m
 {
     let f = fixture()?;
     let mut bus = SurfaceBus::default();
-    bus.faults.stale_stream = true;
+    bus.faults.stale = super::surface_bus::StalePoint::Stream;
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
     host.start(&mut bus).await?;
     host.apply(&mut bus, incoming(11, true), 2000).await?;

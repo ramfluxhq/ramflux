@@ -23,14 +23,14 @@ impl<E: EngineProvider> AgentHost<E> {
         let store = CheckpointStore::new(config.state_file.clone())?;
         let state = store.load()?;
         if state.handled_actions.len() > 2048
-            || state.last_reply_ms.len() > config.max_conversations
             || state.pending.as_ref().is_some_and(|p| {
                 !matches!(
                     p.method.as_str(),
                     "message.submit" | "group.send" | "surface.send" | "surface.resync"
                 ) || p.remaining.len() > 95
                     || p.remaining.iter().any(|o| {
-                        o.method != "surface.send" || o.body["conversation_id"] != p.conversation_id
+                        !matches!(o.method.as_str(), "surface.send" | "message.submit")
+                            || o.body["conversation_id"] != p.conversation_id
                     })
                     || p.body["conversation_id"] != p.conversation_id
             })
@@ -75,14 +75,8 @@ impl<E: EngineProvider> AgentHost<E> {
         if self.state.cursor.is_none() {
             self.state.cursor = Some(ack["head_seq"].as_u64().ok_or(Error::Bus)?);
         }
-        participant::directory(
-            bus,
-            "conversation.directory",
-            "conversations",
-            self.config.max_conversations,
-        )
-        .await?;
-        participant::directory(bus, "group.list", "groups", self.config.max_conversations).await?;
+        participant::snapshot(bus, "conversation.directory", "conversations").await?;
+        participant::snapshot(bus, "group.list", "groups").await?;
         self.store.save(&self.state)?;
         self.recover_pending(bus).await
     }
@@ -109,8 +103,19 @@ impl<E: EngineProvider> AgentHost<E> {
             return Ok(());
         }
         if matches!(event.method.as_str(), "identity.device_branch.revoked" | "account.locked") {
-            return Err(Error::Unauthorized);
+            return Err(Error::IdentityLost);
         }
+        self.prune_rate_history(now_ms);
+        let result = self.apply_event(bus, &event, seq, now_ms).await;
+        self.finish_event(result, &event, seq)
+    }
+    async fn apply_event(
+        &mut self,
+        bus: &mut impl AgentBus,
+        event: &LocalBusFrame,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<()> {
         if self.state.pending.is_some() {
             self.recover_pending(bus).await?;
             if self.state.cursor.is_some_and(|cursor| seq <= cursor) {
@@ -121,10 +126,10 @@ impl<E: EngineProvider> AgentHost<E> {
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         }
         if matches!(event.method.as_str(), "message.received" | "group.message.received") {
-            self.message(bus, &event, seq, now_ms).await?;
+            self.message(bus, event, seq, now_ms).await?;
         }
         if event.method == "surface.changed" {
-            self.surface_action(bus, &event, seq, now_ms).await?;
+            self.surface_action(bus, event, seq, now_ms).await?;
         }
         self.state.cursor = Some(seq);
         self.store.save(&self.state)
@@ -160,11 +165,9 @@ impl<E: EngineProvider> AgentHost<E> {
         if self.state.last_reply_ms.get(conversation_id).is_some_and(|last| {
             now_ms < last.saturating_add(self.config.per_conversation_interval_ms)
         }) {
-            return Ok(());
+            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
         }
-        if !self.state.last_reply_ms.contains_key(conversation_id)
-            && self.state.last_reply_ms.len() >= self.config.max_conversations
-        {
+        if !self.rate_history_has_capacity(conversation_id) {
             return Err(Error::Limit);
         }
         let read =
@@ -212,15 +215,16 @@ impl<E: EngineProvider> AgentHost<E> {
             if text.is_empty() || text.len() > crate::config::MAX_TEXT_BYTES {
                 return Err(Error::Limit);
             }
-            let (method, operation_id, body) =
-                participant::reply_body(bus, &self.state, &conversation, message, text, 0).await?;
-            vec![crate::checkpoint::Output { method, operation_id, body }]
+            participant::reply_outputs(bus, &self.state, &conversation, message, text, 0).await?
         } else {
             if !matches!(intents.first(), Some(Intent::CreateSurface(_))) {
                 return Err(Error::State);
             }
             crate::runner_output::surface_outputs(conversation_id, &intents, 1)?
         };
+        if serde_json::to_vec(&outputs).map_err(|_| Error::State)?.len() > 262_144 {
+            return Err(Error::Limit);
+        }
         let first = outputs.remove(0);
         self.state.pending = Some(Pending {
             seq,

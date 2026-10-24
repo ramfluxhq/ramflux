@@ -4,40 +4,39 @@
 use crate::{AgentBus, Checkpoint, Error, Result};
 use serde_json::{Value, json};
 
-pub(crate) async fn directory(
+async fn directory_find(
     bus: &mut impl AgentBus,
     method: &str,
     field: &str,
-    max: usize,
-) -> Result<Vec<Value>> {
-    let mut rows = Vec::new();
+    matches: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>> {
     let mut cursor = Value::Null;
-    let mut pages = 0usize;
-    let mut bytes = 0usize;
+    let mut seen = std::collections::BTreeSet::new();
     loop {
-        pages += 1;
-        if pages > max + 1 {
+        let page = bus.request(method, json!({"limit":100,"cursor":cursor}), None).await?;
+        let batch = page[field].as_array().ok_or(Error::State)?;
+        if batch.len() > 100
+            || serde_json::to_vec(&page).map_err(|_| Error::State)?.len() > 1_048_576
+        {
             return Err(Error::Limit);
         }
-        let page = bus.request(method, json!({"limit":100,"cursor":cursor}), None).await?;
-        bytes = bytes.saturating_add(serde_json::to_vec(&page).map_err(|_| Error::Bus)?.len());
-        if bytes > 1_048_576 {
-            return Err(Error::Limit);
+        if let Some(row) = batch.iter().find(|row| matches(row)) {
+            return Ok(Some(row.clone()));
         }
         let next = page["next_cursor"].clone();
-        let batch = page[field].as_array().ok_or(Error::Bus)?;
-        if rows.len().saturating_add(batch.len()) > max {
-            return Err(Error::Limit);
-        }
-        rows.extend(batch.iter().cloned());
         if next.is_null() {
-            return Ok(rows);
+            return Ok(None);
         }
-        if next == cursor || next.as_str().is_none_or(|s| s.len() > 4096) {
-            return Err(Error::Bus);
+        let key = next.as_str().filter(|s| !s.is_empty() && s.len() <= 4096).ok_or(Error::State)?;
+        if seen.len() >= 10_000 || !seen.insert(key.to_owned()) {
+            return Err(Error::Limit);
         }
         cursor = next;
     }
+}
+pub(crate) async fn snapshot(bus: &mut impl AgentBus, method: &str, field: &str) -> Result<()> {
+    directory_find(bus, method, field, |_| false).await?;
+    Ok(())
 }
 pub(crate) async fn identity(
     bus: &mut impl AgentBus,
@@ -46,28 +45,28 @@ pub(crate) async fn identity(
 ) -> Result<()> {
     let status = bus.request("account.status", json!({}), None).await?;
     if status["client_mode"] != "headless_ai" || status["local_device_authorized"] != true {
-        return Err(Error::Unauthorized);
+        return Err(Error::IdentityLost);
     }
     let principal = field(&status, "principal_id")?;
     let devices = bus.request("device.list", json!({}), None).await?;
     let device = field(&devices, "local_device_id")?;
     if devices["principal_id"] != principal || !contains(&devices["devices"], "device_id", device) {
-        return Err(Error::Unauthorized);
+        return Err(Error::IdentityLost);
     }
-    let identities = directory(bus, "identity.directory", "identities", 1024).await?;
-    let own = identities
-        .iter()
-        .find(|v| v["principal_id"] == principal && v["is_self"] == true)
-        .ok_or(Error::Unauthorized)?;
+    let own = directory_find(bus, "identity.directory", "identities", |v| {
+        v["principal_id"] == principal && v["is_self"] == true
+    })
+    .await?
+    .ok_or(Error::IdentityLost)?;
     if own["kind"] != "headless_ai" {
-        return Err(Error::Unauthorized);
+        return Err(Error::IdentityLost);
     }
     if !state.account_id.is_empty()
         && (state.account_id != account
             || state.principal_id != principal
             || state.device_id != device)
     {
-        return Err(Error::Unauthorized);
+        return Err(Error::IdentityLost);
     }
     state.account_id = account.into();
     state.principal_id = principal.into();
@@ -78,10 +77,11 @@ pub(crate) async fn conversation(
     bus: &mut impl AgentBus,
     state: &Checkpoint,
     id: &str,
-    max: usize,
+    _max: usize,
 ) -> Result<Option<Value>> {
-    let rows = directory(bus, "conversation.directory", "conversations", max).await?;
-    let Some(row) = rows.into_iter().find(|r| r["id"] == id) else {
+    let Some(row) =
+        directory_find(bus, "conversation.directory", "conversations", |r| r["id"] == id).await?
+    else {
         return Ok(None);
     };
     if row["removed"] == true || row["deleted"] == true {
@@ -114,14 +114,14 @@ pub(crate) fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or(Error::Bus)
 }
 
-pub(crate) async fn reply_body(
+pub(crate) async fn reply_outputs(
     bus: &mut impl AgentBus,
     state: &Checkpoint,
     conversation: &Value,
     message: &Value,
     text: &str,
     index: usize,
-) -> Result<(String, String, Value)> {
+) -> Result<Vec<crate::checkpoint::Output>> {
     let conversation_id = field(conversation, "id")?;
     let input_id = field(message, "message_id")?;
     let operation = ramflux_protocol::hash_base64url(
@@ -136,42 +136,67 @@ pub(crate) async fn reply_body(
     );
     let message_id = format!("agent-{operation}");
     let mut body = json!({"conversation_id":conversation_id,"message_id":message_id,"sender_id":state.device_id,"encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(text.as_bytes())});
-    let method = if let Some(group) = conversation["group_id"].as_str() {
+    if let Some(group) = conversation["group_id"].as_str() {
         body["group_id"] = json!(group);
-        "group.send"
+        Ok(vec![crate::checkpoint::Output {
+            method: "group.send".into(),
+            operation_id: operation,
+            body,
+        }])
     } else {
         let sender = field(message, "sender_id")?;
-        let peers = directory(bus, "identity.directory", "identities", 1024).await?;
-        let peer =
-            peers.iter().find(|peer| peer["principal_id"] == sender).ok_or(Error::Unauthorized)?;
-        let principal = field(peer, "principal_id")?;
+        let peer = directory_find(bus, "identity.directory", "identities", |peer| {
+            peer["principal_id"] == sender
+        })
+        .await?
+        .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+        let principal = field(&peer, "principal_id")?;
         if principal == state.principal_id || !array_has(&conversation["participants"], principal) {
             return Err(Error::Unauthorized);
         }
-        let device = peer["devices"]
+        let devices = peer["devices"]
             .as_array()
-            .and_then(|devices| {
-                devices
-                    .iter()
-                    .filter(|device| {
-                        device["revoked"] != true
-                            && device["status"] != "revoked"
-                            && device["device_id"].as_str().is_some()
-                            && device["target_delivery_id"].as_str().is_some()
-                    })
-                    .min_by_key(|device| device["device_id"].as_str())
-            })
-            .ok_or(Error::Unauthorized)?;
-        body["recipient_device_id"] = json!(field(device, "device_id")?);
-        body["recipient_principal_commitment"] = json!(field(peer, "contact_identity_commitment")?);
-        body["target_delivery_id"] = json!(field(device, "target_delivery_id")?);
-        body["source_principal_id"] = json!(state.principal_id);
-        body["envelope_id"] = json!(format!("agent-env-{operation}"));
-        // Freeze this timestamp in the prepared checkpoint so retries reuse the same intent.
-        // A delayed input must not inherit an expired gateway delivery timestamp.
-        body["created_at"] = json!(crate::bus::now_ms() / 1000);
-        body["ttl"] = json!(300);
-        "message.submit"
-    };
-    Ok((method.into(), operation, body))
+            .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+        let mut active = devices
+            .iter()
+            .filter(|device| device["revoked"] != true && device["status"] != "revoked")
+            .collect::<Vec<_>>();
+        active.sort_by_key(|device| device["device_id"].as_str());
+        if active.is_empty() {
+            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound));
+        }
+        if active.len() > 96 {
+            return Err(Error::Limit);
+        }
+        let created_at = crate::bus::now_ms() / 1000;
+        let mut outputs = Vec::with_capacity(active.len());
+        for device in active {
+            let mut body = body.clone();
+            let device_id = field(device, "device_id")
+                .map_err(|_| Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+            let delivery_id = field(device, "target_delivery_id")
+                .map_err(|_| Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+            let operation_id = ramflux_protocol::hash_base64url(
+                "ramflux.agent.reply.device.v1",
+                &ramflux_protocol::canonical_json_bytes(&(&operation, device_id))
+                    .map_err(|_| Error::State)?,
+            );
+            body["recipient_device_id"] = json!(device_id);
+            body["recipient_principal_commitment"] =
+                json!(field(&peer, "contact_identity_commitment")?);
+            body["target_delivery_id"] = json!(delivery_id);
+            body["source_principal_id"] = json!(state.principal_id);
+            body["envelope_id"] = json!(format!("agent-env-{operation_id}"));
+            // Freeze this timestamp in the prepared checkpoint so retries reuse the same intent.
+            // A delayed input must not inherit an expired gateway delivery timestamp.
+            body["created_at"] = json!(created_at);
+            body["ttl"] = json!(300);
+            outputs.push(crate::checkpoint::Output {
+                method: "message.submit".into(),
+                operation_id,
+                body,
+            });
+        }
+        Ok(outputs)
+    }
 }

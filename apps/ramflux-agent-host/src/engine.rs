@@ -139,6 +139,21 @@ impl EngineProvider for RuleEngine {
             return Ok(Vec::new());
         };
         if !input.snapshot.allowed_actions.iter().any(|action| action["name"] == choice.id) {
+            let expected = format!("You chose {}.", choice.label);
+            if surface.close_on_action
+                && input.snapshot.allowed_actions.is_empty()
+                && input.snapshot.fallback_text == expected
+                && input
+                    .snapshot
+                    .components
+                    .iter()
+                    .any(|block| block["id"] == "result" && block["text"] == expected)
+            {
+                return Ok(vec![Intent::CloseSurface(DeleteSurfaceCommand {
+                    surface_id: input.snapshot.surface_id.clone(),
+                    reason: None,
+                })]);
+            }
             return Ok(Vec::new());
         }
         let result = format!("You chose {}.", choice.label);

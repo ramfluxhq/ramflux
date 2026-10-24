@@ -32,9 +32,6 @@ impl<E: EngineProvider> AgentHost<E> {
         if self.state.handled_actions.contains(&key) {
             return Ok(());
         }
-        if self.state.handled_actions.len() >= 2048 {
-            return Err(Error::Limit);
-        }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         if participant::conversation(bus, &self.state, conversation, self.config.max_conversations)
             .await?
@@ -42,21 +39,16 @@ impl<E: EngineProvider> AgentHost<E> {
         {
             return Ok(());
         }
-        let ready_at = self.state.last_reply_ms.get(conversation).map_or(now_ms, |last| {
-            last.saturating_add(self.config.per_conversation_interval_ms).max(now_ms)
-        });
-        let delay = ready_at.saturating_sub(now_ms);
-        if delay > self.config.per_conversation_interval_ms {
-            return Err(Error::State);
-        }
-        if delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        let ready_at =
+            self.state.last_reply_ms.get(conversation).map_or(now_ms, |last| {
+                last.saturating_add(self.config.per_conversation_interval_ms)
+            });
+        if now_ms < ready_at {
+            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
         }
         let work =
             ActionWork { surface_ref: reference.into(), action_id: action.into(), attempts: 0 };
-        if !self.state.last_reply_ms.contains_key(conversation)
-            && self.state.last_reply_ms.len() >= self.config.max_conversations
-        {
+        if !self.rate_history_has_capacity(conversation) {
             return Err(Error::Limit);
         }
         self.state.last_reply_ms.insert(conversation.into(), ready_at);
@@ -90,7 +82,7 @@ impl<E: EngineProvider> AgentHost<E> {
             Err(error) => return Err(error),
         };
         if outputs.is_empty() {
-            self.state.handled_actions.push(key);
+            self.remember_action(key);
             return Ok(());
         }
         self.replace_action_pending(&original, outputs, work)?;
@@ -112,15 +104,12 @@ impl<E: EngineProvider> AgentHost<E> {
         {
             return Ok(());
         }
-        let ready = self.state.last_reply_ms.get(conversation).map_or(now_ms, |last| {
-            last.saturating_add(self.config.per_conversation_interval_ms).max(now_ms)
-        });
-        let delay = ready.saturating_sub(now_ms);
-        if delay > self.config.per_conversation_interval_ms {
-            return Err(Error::State);
-        }
-        if delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        let ready =
+            self.state.last_reply_ms.get(conversation).map_or(now_ms, |last| {
+                last.saturating_add(self.config.per_conversation_interval_ms)
+            });
+        if now_ms < ready {
+            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
         }
         let id = ramflux_sdk::new_surface_message_id().map_err(|_| Error::State)?;
         let pending = Pending {
@@ -138,9 +127,7 @@ impl<E: EngineProvider> AgentHost<E> {
         if view["out_of_sync"] != true {
             return Ok(());
         }
-        if !self.state.last_reply_ms.contains_key(conversation)
-            && self.state.last_reply_ms.len() >= self.config.max_conversations
-        {
+        if !self.rate_history_has_capacity(conversation) {
             return Err(Error::Limit);
         }
         self.state.last_reply_ms.insert(conversation.into(), ready);
@@ -189,14 +176,15 @@ impl<E: EngineProvider> AgentHost<E> {
             || view["executor_device_id"] != self.state.device_id
             || view["is_action_executor"] != true
         {
-            return Err(Error::Unauthorized);
+            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotActionExecutor));
         }
         if view["out_of_sync"] == true {
             return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::OutOfSync));
         }
-        let Some(row) = view["actions"].as_array().and_then(|rows| {
-            rows.iter().find(|row| row["id"] == work.action_id && row["actionable"] == true)
-        }) else {
+        let Some(row) = view["actions"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == work.action_id))
+        else {
             return Ok(Vec::new());
         };
         let wire =
@@ -209,12 +197,18 @@ impl<E: EngineProvider> AgentHost<E> {
         if action.conversation_id() != conversation || action.surface_id() != content.surface_id {
             return Err(Error::Unauthorized);
         }
+        let actionable = row["actionable"] == true;
         let intents = self.engine.action(&ActionInput {
             action: &action,
             snapshot: &content,
             closed: view["closed"] == true,
         })?;
         if intents.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !actionable
+            && intents.iter().any(|intent| !matches!(intent, crate::Intent::CloseSurface(_)))
+        {
             return Ok(Vec::new());
         }
         if intents.iter().any(|intent| {

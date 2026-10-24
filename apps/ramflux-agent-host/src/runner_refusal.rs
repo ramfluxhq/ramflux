@@ -64,10 +64,8 @@ impl<E: EngineProvider> AgentHost<E> {
         let mut next = pending.clone();
         if let Some(work) = &mut next.action {
             if work.attempts >= 2 {
-                work.attempts = 3;
-                self.state.pending = Some(next);
-                self.store.save(&self.state)?;
-                return Err(Error::Limit);
+                self.stop_surface_output(pending, reason)?;
+                return Ok(false);
             }
             work.attempts += 1;
         } else if let Some(plan) = &mut next.plan {

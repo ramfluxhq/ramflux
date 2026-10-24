@@ -30,7 +30,7 @@ async fn run() -> ramflux_agent_host::Result<()> {
         };
         tokio::select! {
             result=attempt=>match result{
-                Err(Error::Bus|Error::Resync)=>{},other=>return other,
+                Err(error) if !error.stops_host()=>{},other=>return other,
             },
             result=tokio::signal::ctrl_c()=>{result.map_err(|_|Error::Bus)?;return Ok(());}
         }

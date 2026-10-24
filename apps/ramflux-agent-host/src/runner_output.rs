@@ -20,7 +20,7 @@ pub(crate) fn surface_outputs(
     {
         return Err(Error::State);
     }
-    intents
+    let outputs = intents
         .iter()
         .enumerate()
         .map(|(index, intent)| {
@@ -36,13 +36,30 @@ pub(crate) fn surface_outputs(
                 body: serde_json::to_value(request).map_err(|_| Error::State)?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if serde_json::to_vec(&outputs).map_err(|_| Error::State)?.len() > 262_144 {
+        return Err(Error::Limit);
+    }
+    Ok(outputs)
 }
 impl<E: EngineProvider> AgentHost<E> {
     pub(crate) async fn recover_pending(&mut self, bus: &mut impl AgentBus) -> Result<()> {
+        let result = self.recover_outputs(bus).await;
+        match result {
+            Err(error) if !error.stops_host() && !matches!(error, Error::Bus | Error::Resync) => {
+                if let Some(pending) = self.state.pending.clone() {
+                    self.stop_surface_output(&pending, crate::runner_policy::refusal(&error))?;
+                }
+                Ok(())
+            }
+            other => other,
+        }
+    }
+    async fn recover_outputs(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         while let Some(mut pending) = self.state.pending.clone() {
             if pending.action.as_ref().is_some_and(|work| work.attempts > 2) {
-                return Err(Error::Limit);
+                self.stop_surface_output(&pending, ramflux_sdk::SurfaceRefusalCode::StaleVersion)?;
+                return Ok(());
             }
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
             let context = participant::conversation(
@@ -53,7 +70,7 @@ impl<E: EngineProvider> AgentHost<E> {
             )
             .await?;
             let Some(current) = context else {
-                self.complete_pending(&pending)?;
+                self.stop_surface_output(&pending, ramflux_sdk::SurfaceRefusalCode::NotPermitted)?;
                 return Ok(());
             };
             if let Some(reason) = pending.needs_rederive {
@@ -141,12 +158,7 @@ impl<E: EngineProvider> AgentHost<E> {
     pub(crate) fn complete_pending(&mut self, pending: &Pending) -> Result<()> {
         if let Some(work) = &pending.action {
             let id = action_key(&work.surface_ref, &work.action_id);
-            if !self.state.handled_actions.contains(&id) {
-                if self.state.handled_actions.len() >= 2048 {
-                    return Err(Error::Limit);
-                }
-                self.state.handled_actions.push(id);
-            }
+            self.remember_action(id);
         }
         self.state.cursor = Some(self.state.cursor.unwrap_or(0).max(pending.seq));
         self.state.pending = None;

@@ -51,7 +51,7 @@ async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_di
         if let Some(expected) = expected {
             assert!(matches!(error,Error::SurfaceRefused(actual) if actual==expected));
         } else if index == 3 {
-            assert!(matches!(error, Error::Bus));
+            assert!(matches!(error, Error::SurfaceRefused(Code::NotPermitted)));
         } else {
             assert!(matches!(error, Error::Resync));
         }

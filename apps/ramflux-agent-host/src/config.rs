@@ -43,7 +43,11 @@ impl SurfaceRule {
             && self.choices.len() <= 16
             && crate::engine::chunks(reply, self.chunk_bytes).len() <= 64
             && self.choices.iter().all(|c| {
-                !c.id.is_empty() && c.id.len() <= 128 && !c.label.is_empty() && c.label.len() <= 256
+                !c.id.is_empty()
+                    && c.id.len() <= 128
+                    && !c.label.is_empty()
+                    && c.label.len() <= 256
+                    && ramflux_protocol::text_safety::free_text_is_safe(&c.label)
             })
             && self.choices.iter().map(|c| &c.id).collect::<std::collections::BTreeSet<_>>().len()
                 == self.choices.len()
@@ -102,6 +106,7 @@ impl Config {
                     || r.pattern.len() > 1024
                     || r.reply.is_empty()
                     || r.reply.len() > MAX_TEXT_BYTES
+                    || !ramflux_protocol::text_safety::free_text_is_safe(&r.reply)
                     || r.surface.as_ref().is_some_and(|surface| !surface.valid(&r.reply))
             })
         {

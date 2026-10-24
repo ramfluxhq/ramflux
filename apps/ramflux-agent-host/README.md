@@ -13,8 +13,9 @@ kind before acting. Persisted local-device authorization is checked independentl
 the display device list, which always includes the active device. Conversation
 membership and device authorization are checked again
 before every output. Direct-message replies resolve the projected sender principal
-inside that conversation and choose a current device from that principal's directory
-entry; device display names cannot select a different principal. Surface output uses `surface.send`, the author `surface.resync` RPC and typed protocol
+inside that conversation and prepare one durable delivery for every current device
+from that principal's directory entry, with one logical message ID and distinct
+per-device envelope and operation IDs; device display names cannot select a different principal. Surface output uses `surface.send`, the author `surface.resync` RPC and typed protocol
 builders; the host sends no task/tool/approval operations.
 
 Copy `example.json` and set the socket, account and durable state paths. Create the
@@ -79,8 +80,11 @@ bytes through `from_wire_bytes` and checks surface/conversation bindings.
 
 A conflicting result is rebuilt from a fresh `surface.get` with a new request ID;
 the old patch/hash is not resent. At most two rebuilds are allowed. Persistent
-conflicts leave a terminal bounded-error checkpoint requiring operator review;
-restart does not submit that rejected result again. An interrupted successful batch
+conflicts retire that output with a typed last_refusal, advance its event cursor,
+and leave the host available for later events. Restart does not submit that rejected
+result again. If a result patch was accepted before a stale close refusal, the rule
+rederives only the missing close from the retained accepted action and matching
+result/fallback, even though the action is no longer actionable. An interrupted successful batch
 reuses its exact pending bytes. A conflicting ordinary stream reloads its scoped snapshot and validates its hash.
 The prepared target may resume only an unchanged reply whose current text is a
 prefix of the target: it appends the missing suffix, finalizes the stream, and
@@ -101,11 +105,22 @@ out of sync, the batch stops with a recorded refusal rather than sending another
 resync in a loop. Older checkpoints without prepared target
 metadata remain readable; stale legacy streams stop instead of guessing a target.
 
-Handled action IDs are scoped and persisted, capped at 2048 without eviction. Action
-output observes the conversation interval; the sequential host waits until that
-interval is due and rechecks authorization before each send. Long configured
-intervals therefore delay other work too. Message triggers inside the interval are
-skipped as before. Fresh/gap startup does not synthesize commands from old snapshots;
+Handled action IDs are scoped and persisted as a FIFO of the most recent 2048 IDs.
+This cache is an optimization: rfd's actionable/action_already_used checks remain
+the authoritative replay guard. Expired last-reply entries are pruned before each
+event; max_conversations bounds recent rate history, not directory size. Directory
+lookups scan pages of at most 100 rows and 1 MiB per page without retaining the whole
+directory (a 10,000-cursor ceiling and cycle detection bound a corrupt pager).
+Recent conversation keys also have a 64 KiB budget; prepared output bodies are
+bounded to 256 KiB so an individual output cannot exhaust checkpoint space.
+
+Message, action and resync triggers inside the configured interval are dropped with
+rate_limited; the event loop never sleeps for a conversation interval. A peer losing
+its devices, a stale executor notification, an unusable surface or an invalid provider
+output records a typed last_refusal and advances the cursor. Lost transport replies
+retain the exact durable pending request and reconnect. Only loss of the host's own
+identity/authorization or unrecoverable checkpoint I/O stops the running host.
+Configuration rejects unsafe reply and choice-label text before connecting. Fresh/gap startup does not synthesize commands from old snapshots;
 only already prepared work resumes. This deterministic skeleton has no automatic
 executor takeover, task engine, provider networking or approval capability.
 

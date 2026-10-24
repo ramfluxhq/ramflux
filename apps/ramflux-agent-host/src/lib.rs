@@ -9,6 +9,7 @@ mod engine;
 mod participant;
 mod runner;
 mod runner_output;
+mod runner_policy;
 mod runner_refusal;
 mod runner_surface;
 mod surface_plan;
@@ -24,6 +25,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("surface output refused: {0:?}")]
     SurfaceRefused(ramflux_sdk::SurfaceRefusalCode),
+    #[error("host identity is unavailable or revoked")]
+    IdentityLost,
+    #[error("durable host storage is unavailable")]
+    Storage,
     #[error("invalid host configuration")]
     Config,
     #[error("host state could not be read or persisted")]
@@ -36,4 +41,12 @@ pub enum Error {
     Limit,
     #[error("event stream requires reconnect and snapshot reload")]
     Resync,
+}
+
+impl Error {
+    /// Only local identity loss and unrecoverable durable storage stop the running process.
+    #[must_use]
+    pub const fn stops_host(&self) -> bool {
+        matches!(self, Self::IdentityLost | Self::Storage)
+    }
 }

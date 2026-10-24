@@ -3,6 +3,7 @@
 mod host {
     mod principal_routing;
     mod recovery;
+    mod resilience;
     mod safety;
     mod support;
     mod surface_bus;

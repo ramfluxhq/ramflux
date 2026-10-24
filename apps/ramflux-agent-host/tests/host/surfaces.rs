@@ -106,7 +106,7 @@ async fn conflict_reloads_current_snapshot_and_rebuilds_the_result_patch() -> Te
     Ok(())
 }
 #[tokio::test]
-async fn mirrored_actions_never_execute_on_a_replica_terminal() -> TestResult {
+async fn r3_mirrored_actions_never_execute_on_a_replica_terminal() -> TestResult {
     let f = fixture()?;
     let mut bus = SurfaceBus::default();
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
@@ -117,13 +117,18 @@ async fn mirrored_actions_never_execute_on_a_replica_terminal() -> TestResult {
     let before = bus.sent.len();
     host.apply(&mut bus, event(20, true), 4000).await?;
     // Even a stale executor notification cannot override the current read's replica flag.
-    assert!(matches!(host.apply(&mut bus, event(21, false), 4000).await, Err(Error::Unauthorized)));
+    host.apply(&mut bus, event(21, false), 4000).await?;
+    assert_eq!(host.checkpoint().cursor, Some(21));
+    assert_eq!(
+        host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason,
+        ramflux_sdk::SurfaceRefusalCode::NotActionExecutor
+    );
     assert_eq!(bus.sent.len(), before);
     Ok(())
 }
 
 #[tokio::test]
-async fn repeated_conflicts_stop_durably_without_resending_a_known_stale_result() -> TestResult {
+async fn r3_repeated_conflicts_stop_durably_without_resending_a_known_stale_result() -> TestResult {
     let f = fixture()?;
     let mut bus = SurfaceBus::default();
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
@@ -131,11 +136,20 @@ async fn repeated_conflicts_stop_durably_without_resending_a_known_stale_result(
     host.apply(&mut bus, incoming(11, true), 2000).await?;
     bus.decision()?;
     bus.conflicts_remaining = 3;
-    assert!(matches!(host.apply(&mut bus, event(20, false), 4000).await, Err(Error::Limit)));
+    host.apply(&mut bus, event(20, false), 4000).await?;
+    assert_eq!(host.checkpoint().cursor, Some(20));
+    assert_eq!(
+        host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason,
+        ramflux_sdk::SurfaceRefusalCode::StaleVersion
+    );
     let requests = bus.requests.len();
     drop(host);
     let mut resumed = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
-    assert!(matches!(resumed.start(&mut bus).await, Err(Error::Limit)));
+    resumed.start(&mut bus).await?;
+    let mut next = event(21, false);
+    next.method = "device.changed".into();
+    resumed.apply(&mut bus, next, 6000).await?;
+    assert_eq!(resumed.checkpoint().cursor, Some(21));
     assert_eq!(requests, bus.requests.len());
     Ok(())
 }

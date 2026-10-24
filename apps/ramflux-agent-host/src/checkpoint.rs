@@ -75,8 +75,9 @@ impl CheckpointStore {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
-        if std::fs::metadata(parent).map_err(|_| Error::State)?.permissions().mode() & 0o077 != 0 {
-            return Err(Error::State);
+        if std::fs::metadata(parent).map_err(|_| Error::Storage)?.permissions().mode() & 0o077 != 0
+        {
+            return Err(Error::Storage);
         }
         let lock = std::fs::OpenOptions::new()
             .read(true)
@@ -85,13 +86,13 @@ impl CheckpointStore {
             .truncate(false)
             .mode(0o600)
             .open(sidecar(&path, ".lock"))
-            .map_err(|_| Error::State)?;
-        lock.try_lock().map_err(|_| Error::State)?;
+            .map_err(|_| Error::Storage)?;
+        lock.try_lock().map_err(|_| Error::Storage)?;
         let temp = sidecar(&path, ".next");
         match std::fs::remove_file(temp) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(Error::State),
+            Err(_) => return Err(Error::Storage),
         }
         Ok(Self { path, _lock: lock })
     }
@@ -101,20 +102,20 @@ impl CheckpointStore {
         let file = match std::fs::File::open(&self.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Checkpoint::default()),
-            Err(_) => return Err(Error::State),
+            Err(_) => return Err(Error::Storage),
         };
         let mut bytes = Vec::new();
-        file.take(MAX_STATE_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Error::State)?;
+        file.take(MAX_STATE_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Error::Storage)?;
         if bytes.len() > usize::try_from(MAX_STATE_BYTES).map_err(|_| Error::Limit)? {
-            return Err(Error::State);
+            return Err(Error::Storage);
         }
-        serde_json::from_slice(&bytes).map_err(|_| Error::State)
+        serde_json::from_slice(&bytes).map_err(|_| Error::Storage)
     }
     /// # Errors
     /// Writes with owner-only permissions, fsync, atomic rename and a synced parent directory.
     pub fn save(&self, state: &Checkpoint) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
-        let bytes = serde_json::to_vec(state).map_err(|_| Error::State)?;
+        let bytes = serde_json::to_vec(state).map_err(|_| Error::Storage)?;
         if bytes.len() > usize::try_from(MAX_STATE_BYTES).map_err(|_| Error::Limit)? {
             return Err(Error::Limit);
         }
@@ -134,7 +135,7 @@ impl CheckpointStore {
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(temp);
-            return Err(Error::State);
+            return Err(Error::Storage);
         }
         Ok(())
     }
