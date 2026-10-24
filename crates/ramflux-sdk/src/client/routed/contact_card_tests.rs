@@ -60,15 +60,14 @@ impl Origin {
         let body = serde_json::to_vec(&record)?;
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = requests.clone();
+        let proxy_request = format!("GET {url}/.well-known/ramflux/client ");
         let task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let mut buf = [0_u8; 4096];
                 let n = stream.read(&mut buf).await?;
                 observed.fetch_add(1, Ordering::SeqCst);
-                assert!(
-                    String::from_utf8_lossy(&buf[..n])
-                        .contains("/.well-known/ramflux/client HTTP/1.1")
-                );
+                let request = String::from_utf8_lossy(&buf[..n]);
+                assert!(request.starts_with("GET /.well-known/ramflux/client ") || request.starts_with(&proxy_request));
                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
                 stream.write_all(&body).await?;
                 stream.shutdown().await?;
