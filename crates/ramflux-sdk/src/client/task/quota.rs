@@ -179,7 +179,7 @@ impl RamfluxClient {
                 SIGNER_QUOTA,
             ));
         }
-        self.admit_global_task_history(c, history)
+        self.admit_global_task_history(c, &usage, control)
     }
     pub(super) fn record_task_capacity_rejection(
         &self,

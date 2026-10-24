@@ -252,7 +252,13 @@ fn the_aggregate_history_cap_reclaims_the_largest_signer_without_discarding_a_sm
         f.human.account_db()?.persist_actor_state(&index, &row)?;
     }
     let c = sign(&f.human, "thread", "new", start("new", "thread"))?;
-    f.human.admit_global_task_history(&c, &TaskHistory::default())?;
+    let mut usage = super::super::quota::Usage::default();
+    usage.charge(&c, u64::try_from(c.bytes()?.len())?, None)?;
+    f.human.admit_global_task_history(
+        &c,
+        &std::collections::BTreeMap::from([("human".into(), usage)]),
+        false,
+    )?;
     assert_eq!(f.human.task_get(Some("thread"), "large")?["compacted"], true);
     assert_ne!(f.human.task_get(Some("thread"), "small")?["compacted"], true);
     assert_eq!(
