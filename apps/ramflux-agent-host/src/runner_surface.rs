@@ -63,7 +63,7 @@ impl<E: EngineProvider> AgentHost<E> {
             plan: None,
             needs_rederive: None,
         };
-        let outputs = match self.derive_action_outputs(bus, conversation, &work).await {
+        let outputs = match self.derive_action_outputs(bus, conversation, &work, false).await {
             Ok(outputs) => outputs,
             Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::OutOfSync)) => {
                 let mut original = original;
@@ -163,6 +163,7 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         conversation: &str,
         work: &ActionWork,
+        allow_consumed_close: bool,
     ) -> Result<Vec<Output>> {
         let view = bus
             .request(
@@ -187,6 +188,9 @@ impl<E: EngineProvider> AgentHost<E> {
         else {
             return Ok(Vec::new());
         };
+        if row["actionable"] != true && !allow_consumed_close {
+            return Ok(Vec::new());
+        }
         let wire =
             ramflux_protocol::decode_base64url(row["wire_base64"].as_str().ok_or(Error::State)?)
                 .map_err(|_| Error::State)?;

@@ -120,7 +120,7 @@ impl<E: EngineProvider> AgentHost<E> {
         reason: Code,
     ) -> Result<bool> {
         let result = if let Some(work) = &pending.action {
-            self.derive_action_outputs(bus, &pending.conversation_id, work).await
+            self.derive_action_outputs(bus, &pending.conversation_id, work, true).await
         } else if let Some(plan) = &pending.plan {
             match plan.rederive(view) {
                 Ok(intents) if intents.is_empty() => Ok(Vec::new()),
