@@ -22,10 +22,7 @@ pub(crate) fn connect(error: quinn::ConnectError) -> TransportError {
     }
     match error {
         quinn::ConnectError::InvalidServerName(name) => TransportError::InvalidDnsName(name),
-        quinn::ConnectError::EndpointStopping | quinn::ConnectError::CidsExhausted => {
-            TransportError::Quic(error.to_string())
-        }
-        other => wire(other.to_string()),
+        other => TransportError::Quic(other.to_string()),
     }
 }
 pub(crate) fn wire(message: impl Into<String>) -> TransportError {
