@@ -16,6 +16,7 @@ pub(super) fn list(account: &LocalBusAccountState) -> Result<Vec<Value>, SdkErro
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()?;
     rows.extend(account.client.task_remote_approvals()?);
+    rows.extend(account.client.task_approval_decision_rows()?);
     Ok(rows)
 }
 pub(super) fn decide(
@@ -44,7 +45,12 @@ pub(super) fn decide(
     Ok(Some(local_bus_account(state, account_id)?.client.decide_task_approval(id, approved)?))
 }
 pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    apply_decisions(account)?;
+    if let Err(error) = apply_decisions(account) {
+        tracing::warn!(%error,"task approval decision scan deferred");
+    }
+    if let Err(error) = cleanup(account) {
+        tracing::warn!(%error,"task approval cleanup deferred");
+    }
     if let Err(error) = queue_requests(account) {
         tracing::warn!(%error,"task approval request admission deferred; decision courier continues");
     }
@@ -62,13 +68,11 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
     let mut sent = 0;
     for (storage, mut job) in rows
         .into_iter()
-        .filter(|(_, j)| {
-            j.next_at <= now && j.attempts < 8 && j.packet.request().approval.expires_at > now
-        })
+        .filter(|(_, j)| j.next_at <= now && j.attempts < 8 && j.packet.deadline() > now)
         .take(2)
     {
         let request = job.packet.request();
-        if request.approval.expires_at <= now || job.attempts >= 8 {
+        if job.packet.deadline() <= now || job.attempts >= 8 {
             continue;
         }
         let bytes = job.packet.bytes()?;
@@ -79,14 +83,7 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
             &bytes,
         )
         .await;
-        // Keep the durable packet as an idempotency fence; bounded expiry cleanup removes it later.
-        job.attempts += 1;
-        job.next_at = if result.is_ok() {
-            request.approval.expires_at
-        } else {
-            now.saturating_add(2_i64.pow(job.attempts.min(6)))
-        };
-        account.client.account_db()?.persist_actor_state(&storage, &job)?;
+        record_delivery(account, &storage, &mut job, result.is_ok(), now)?;
         if result.is_ok() {
             sent += 1;
         }
@@ -94,7 +91,6 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
     Ok(sent)
 }
 fn queue_requests(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
-    cleanup(account)?;
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone();
     let pending = account.mcp_pending_approvals.values().cloned().collect::<Vec<_>>();
     if pending.is_empty() {
@@ -154,12 +150,14 @@ fn queue_requests(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
                     }),
                 })?;
                 let source_key = key("approval_source", &packet.id()?);
-                if account.client.account_db()?.actor_state_exists(&source_key)? {
+                if account.client.account_db()?.actor_state_exists(&source_key)?
+                    || account.client.task_approval_receipt(&packet.id()?)?.is_some()
+                {
                     continue;
                 }
                 account.client.account_db()?.write_transaction(|| {
                     account.client.queue_task_approval(&packet)?;
-                    account.client.account_db()?.persist_actor_state(&source_key, &packet)?;
+                    account.client.remember_task_approval_source(&packet)?;
                     Ok::<_, SdkError>(())
                 })?;
                 account.mcp_pending_approvals.insert(approval.approval_id.clone(), approval);
@@ -175,144 +173,48 @@ fn queue_requests(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
     }
     Ok(())
 }
-fn apply_decisions(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
-    let rows = account.client.account_db()?.task_record_page::<Packet>(
-        "task/approval_decision_in/",
-        "task/approval_decision_in/",
-        129,
-    )?;
-    let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone();
-    let mut accepted = 0;
-    for (_, packet) in
-        rows.into_iter().filter(|(_, p)| p.request().binding.executor_device_id == local.device_id)
-    {
-        let id = packet.id()?;
-        let applied = key("approval_applied", &id);
-        if account.client.account_db()?.actor_state_exists(&applied)? {
-            continue;
-        }
-        let Some(original) = account
-            .client
-            .account_db()?
-            .load_actor_state::<Packet>(&key("approval_source", &id))?
-        else {
-            continue;
-        };
-        let Payload::Decision { request, approved, .. } = &packet.payload else {
-            continue;
-        };
-        if serde_json::to_vec(request.as_ref())? != serde_json::to_vec(original.request())? {
-            return Err(invalid("task decision differs from original MCP approval"));
-        }
-        if accepted >= 2 {
-            break;
-        }
-        let approval = request.approval.clone();
-        // Recompute against the current installed registry; a stale registry requires a new approval.
-        if serde_json::to_vec(&super::grant_mcp::mcp_grant_signing_body(account, &approval)?)?
-            != serde_json::to_vec(&request.grant_body)?
-        {
-            continue;
-        }
-        if *approved {
-            if let Err(error) = accept_grant(account, &packet) {
-                tracing::warn!(%error,"task approval rejected by MCP validation");
-                account.client.account_db()?.persist_actor_state(
-                    &applied,
-                    &json!({"expires_at":approval.expires_at,"rejected":true}),
-                )?;
-                continue;
-            }
-        } else {
-            let mut denial = approval.clone();
-            denial.status = "denied".into();
-            account
-                .client
-                .account_db()?
-                .persist_actor_state(&format!("mcp/denied/{}", approval.approval_id), &denial)?;
-        }
-        accepted += 1;
-        account.mcp_pending_approvals.remove(&approval.approval_id);
-        account
-            .client
-            .account_db()?
-            .persist_actor_state(&applied, &json!({"expires_at":approval.expires_at}))?;
-        account.client.account_db()?.append_journal(
-            &format!("task-approval-applied:{id}"),
-            if *approved { "mcp.approval.granted" } else { "mcp.approval.denied" },
-            &json!({"grant_id":request.grant_body.grant_id,"task_id":request.binding.task_id}),
-            now_unix_timestamp(),
-            None,
-        )?;
-    }
-    Ok(())
-}
-fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
-    let db = account.client.account_db()?;
-    let now = now_unix_timestamp();
-    let mut cursor = "task/approval_".to_owned();
-    for _ in 0..6 {
-        let rows = db.task_record_page::<Value>("task/approval_", &cursor, 101)?;
-        let done = rows.len() < 101;
-        for (key, row) in rows {
-            cursor.clone_from(&key);
-            let packet = row.get("packet").unwrap_or(&row);
-            let expires = packet["payload"]["request"]["approval"]["expires_at"]
-                .as_i64()
-                .or_else(|| row["expires_at"].as_i64());
-            if expires.is_some_and(|t| t <= now) {
-                db.delete_task_state(&key)?;
-            }
-        }
-        if done {
-            break;
-        }
-    }
-    Ok(())
-}
-
+#[path = "task_approval_apply.rs"]
+mod apply;
+use apply::apply_decisions;
+#[path = "task_approval_cleanup.rs"]
+mod cleanup;
+use cleanup::cleanup;
 #[cfg(test)]
 #[path = "tests/task_approval.rs"]
 mod tests;
 
-fn accept_grant(account: &mut LocalBusAccountState, packet: &Packet) -> Result<(), SdkError> {
-    let Payload::Decision { request, grant_signature, .. } = &packet.payload else {
-        return Err(invalid("approval decision expected"));
-    };
-    let body = &request.grant_body;
-    let signature =
-        grant_signature.as_deref().ok_or_else(|| invalid("task grant signature missing"))?;
-    if let Some(stored) =
-        account.client.account_db()?.load_mcp_grant::<LocalMcpGrantRecord>(&body.grant_id)?
-    {
-        if stored.signature != signature
-            || serde_json::to_vec(&stored.signing_body)? != serde_json::to_vec(body)?
-        {
-            return Err(invalid("task approval conflicts with an existing grant"));
+fn record_delivery(
+    account: &LocalBusAccountState,
+    storage: &str,
+    job: &mut Job,
+    success: bool,
+    now: i64,
+) -> Result<(), SdkError> {
+    use crate::client::task::approval_retention::{DeliveryReason, DeliveryState};
+    job.attempts = job.attempts.saturating_add(1);
+    let db = account.client.account_db()?;
+    db.write_transaction(|| {
+        let decision = matches!(job.packet.payload, Payload::Decision { .. });
+        if success {
+            if decision {
+                account.client.retire_task_approval(&job.packet, DeliveryState::Submitted, None)?;
+            }
+            db.delete_task_state(storage)?;
+        } else {
+            job.next_at = now.saturating_add(2_i64.pow(job.attempts.min(6)));
+            db.persist_actor_state(storage, job)?;
+            if decision {
+                account.client.record_task_approval_delivery(
+                    &job.packet,
+                    if job.attempts >= 8 { DeliveryState::Failed } else { DeliveryState::Pending },
+                    Some(if job.attempts >= 8 {
+                        DeliveryReason::RetryExhausted
+                    } else {
+                        DeliveryReason::TransportUnavailable
+                    }),
+                )?;
+            }
         }
-        // Recovery after grant persistence must never undo consumption or revocation.
-        account.mcp_grants.insert(stored.grant_id.clone(), stored);
-        return Ok(());
-    }
-    let binding = account.client.task_approval_binding(
-        &request.binding.conversation_id,
-        &request.binding.task_id,
-        &request.binding.step_id,
-        &ramflux_protocol::NeedsMe::Approval { grant_id: body.grant_id.clone() },
-    )?;
-    if binding != request.binding {
-        return Err(invalid("task approval intervention changed before MCP acceptance"));
-    }
-    let public = account.client.task_signer_key(&packet.principal, &packet.device)?;
-    super::grant_mcp::mcp_remote_grant_from_approval(
-        account,
-        request.approval.clone(),
-        LocalBusMcpApprovalGrantRequest {
-            approval_id: request.approval.approval_id.clone(),
-            signed_by_device_id: packet.device.clone(),
-            signer_public_key: public,
-            signature: signature.into(),
-        },
-    )?;
-    Ok(())
+        Ok(())
+    })
 }

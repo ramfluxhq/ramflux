@@ -490,3 +490,6 @@ fn the_ordinary_history_event_limit_keeps_a_reserved_requester_cancellation_slot
 
 #[path = "r4_quota_tests.rs"]
 mod r4;
+
+#[path = "r5_quota_tests.rs"]
+mod r5;

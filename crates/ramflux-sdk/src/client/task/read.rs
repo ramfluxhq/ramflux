@@ -13,6 +13,15 @@ impl RamfluxClient {
                 .load_actor_state(&scoped("view", conversation, id)?)?
                 .unwrap_or(Value::Null);
             attach_pending(&mut row, &self.account_db()?.task_pending_metadata()?);
+            if !row.is_null() {
+                row["approval_decisions"] = json!(
+                    self.task_approval_decision_rows()?
+                        .into_iter()
+                        .filter(|r| r["task_binding"]["conversation_id"] == conversation
+                            && r["task_binding"]["task_id"] == id)
+                        .collect::<Vec<_>>()
+                );
+            }
             return Ok(row);
         }
         let mut found = None;

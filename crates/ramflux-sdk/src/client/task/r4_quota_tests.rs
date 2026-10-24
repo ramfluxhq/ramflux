@@ -239,6 +239,18 @@ fn the_aggregate_history_cap_reclaims_the_largest_signer_without_discarding_a_sm
     let f = Fixture::new()?;
     for id in ["large", "small"] {
         assert!(project(&f.human, &sign(&f.human, "thread", id, start(id, "thread"))?)?.accepted);
+        assert!(
+            project(
+                &f.human,
+                &sign(
+                    &f.human,
+                    "thread",
+                    &format!("cancel-{id}"),
+                    TaskEventBody::Cancel(TaskCancel { task_id: id.into(), base_revision: 1 })
+                )?
+            )?
+            .accepted
+        );
         let index = scoped("lifecycle", "thread", id)?;
         let mut row: super::super::lifecycle::Lifecycle =
             f.human.account_db()?.load_actor_state(&index)?.ok_or("index")?;
@@ -263,7 +275,7 @@ fn the_aggregate_history_cap_reclaims_the_largest_signer_without_discarding_a_sm
     assert_ne!(f.human.task_get(Some("thread"), "small")?["compacted"], true);
     assert_eq!(
         f.human.task_history("thread", "large")?.state()?.task().ok_or("checkpoint")?.version,
-        1
+        2
     );
     Ok(())
 }

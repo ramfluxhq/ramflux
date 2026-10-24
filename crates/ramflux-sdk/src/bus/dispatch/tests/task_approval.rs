@@ -94,6 +94,15 @@ fn a_remote_requester_approval_round_trip_is_accepted_by_mcp_before_the_agent_re
     agent.client.account_db()?.set_mcp_grant_revoked("grant")?;
     let id = decisions[0].1.packet.id()?;
     agent.client.account_db()?.delete_task_state(&key("approval_applied", &id))?;
+    agent.client.account_db()?.delete_task_state(&key("approval_receipt", &id))?;
+    agent
+        .client
+        .account_db()?
+        .persist_actor_state(&key("approval_source", &id), &jobs[0].1.packet)?;
+    agent
+        .client
+        .account_db()?
+        .persist_actor_state(&key("approval_decision_in", &id), &decisions[0].1.packet)?;
     apply_decisions(&mut agent)?;
     assert!(
         agent.mcp_grants.get("grant").ok_or("consumed grant")?.state.revoked,

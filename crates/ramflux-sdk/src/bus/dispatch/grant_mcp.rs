@@ -5,7 +5,7 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
-const MCP_GRANT_TTL_SECONDS: i64 = 86_400;
+pub(crate) const MCP_GRANT_TTL_SECONDS: i64 = 86_400;
 const MCP_STANDING_APPROVAL_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 pub(crate) fn dispatch_mcp_bus_request(

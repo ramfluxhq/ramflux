@@ -17,3 +17,12 @@ pub use validation::{
     MAX_TASK_EVENT_BYTES, MAX_TASK_STEPS, MAX_TASK_TEXT_CHARS, MAX_TASK_TITLE_CHARS,
     MAX_TASK_VERSION, TaskDecisionChange, TaskReject,
 };
+
+/// The change made to an account's task read model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskChangeKind {
+    Updated,
+    Compacted,
+    Removed,
+}

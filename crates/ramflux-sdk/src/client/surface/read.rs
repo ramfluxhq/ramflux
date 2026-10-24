@@ -83,6 +83,12 @@ impl RamfluxClient {
         for action in &mut actions {
             action["action_receipt_id"] = action["id"].clone();
             action["receipt_verified"] = json!(!action["attestation"].is_null());
+            if let Some(wire) = action["carrier"]["wire_base64"].as_str() {
+                let raw = ramflux_protocol::decode_base64url(wire)
+                    .map_err(|_| invalid("stored surface action wire invalid"))?;
+                let parsed = ramflux_protocol::A2uiSurfaceAction::from_wire_bytes(&raw)?;
+                action["task_binding"] = serde_json::to_value(parsed.task_binding())?;
+            }
             if let Some(row) = action.as_object_mut() {
                 row.remove("attestation");
             }

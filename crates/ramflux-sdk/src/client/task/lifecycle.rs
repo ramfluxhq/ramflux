@@ -252,7 +252,7 @@ impl RamfluxClient {
                 db.persist_actor_state(&index_key, &compact)?;
             }
             let version=db.load_actor_state::<Value>(&view_key)?.and_then(|v|v["version"].as_u64());
-            db.append_journal(&format!("task-lifecycle:{}:{}:{}",scoped("event",&row.conversation_id,&row.task_id)?,row.updated_at,if prune{"pruned"}else{"compacted"}),"task.changed",&json!({"conversation_id":row.conversation_id,"task_id":row.task_id,"version":version,"compacted":!prune,"removed":prune}),crate::time::now_unix_timestamp(),None)?;
+            db.append_journal(&format!("task-lifecycle:{}:{}:{}",scoped("event",&row.conversation_id,&row.task_id)?,row.updated_at,if prune{"pruned"}else{"compacted"}),"task.changed",&json!({"kind":if prune {ramflux_protocol::TaskChangeKind::Removed}else{ramflux_protocol::TaskChangeKind::Compacted},"conversation_id":row.conversation_id,"task_id":row.task_id,"version":version,"compacted":!prune,"removed":prune}),crate::time::now_unix_timestamp(),None)?;
             Ok(())
         })
     }

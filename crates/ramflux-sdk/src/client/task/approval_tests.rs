@@ -28,9 +28,11 @@ fn request(f: &Fixture) -> Result<Packet, SdkError> {
         status: "pending".into(),
         details: json!({"arguments":arguments,"requested_grant_id":body.grant_id,"single_use":true,"arguments_hash":body.arguments_hash,"task_binding":binding}),
     };
-    f.agent.sign_task_approval(Payload::Request {
+    let packet = f.agent.sign_task_approval(Payload::Request {
         request: Box::new(Request { binding, approval, grant_body: body }),
-    })
+    })?;
+    f.agent.account_db()?.persist_actor_state(&key("approval_source", &packet.id()?), &packet)?;
+    Ok(packet)
 }
 #[test]
 fn a_requesters_second_device_reads_the_remote_approval_and_returns_a_task_bound_signed_decision()
@@ -155,6 +157,31 @@ fn peer_request_capacity_cannot_consume_the_requesters_decision_return_headroom(
     let result = f.human.decide_task_approval(&id, true)?;
     assert_eq!(result["status"], "approved");
     assert_eq!(db.task_state_usage("task/approval_decision_out/")?.0, 1);
-    assert_eq!(db.task_state_usage("task/approval_decision_in/")?.0, 1);
+    assert_eq!(db.task_state_usage("task/approval_decision_in/")?.0, 0);
+    assert_eq!(db.task_state_usage("task/approval_receipt/")?.0, 1);
+    assert_eq!(f.human.decide_task_approval(&id, true)?["status"], "approved");
+    assert!(f.human.decide_task_approval(&id, false).is_err());
+    Ok(())
+}
+
+#[test]
+fn r5_pending_resolution_names_its_step_across_restart_and_executor_timeout() -> TestResult {
+    let mut f = Fixture::new()?;
+    open(&f, "task")?;
+    let c = sign(
+        &f.human,
+        "thread",
+        "intent",
+        TaskEventBody::Resolve(resolution("task", TaskDecision::Resume)),
+    )?;
+    assert!(project(&f.human, &c)?.pending);
+    assert_eq!(f.human.task_get(Some("thread"), "task")?["pending_resolution"]["step_id"], "step");
+    drop(f.human.active_account_db.take());
+    f.human.unlock_account("human", b"task-test-secret")?;
+    assert_eq!(f.human.task_get(Some("thread"), "task")?["pending_resolution"]["step_id"], "step");
+    f.human.release_local_task_slots(crate::time::now_unix_timestamp() + 61)?;
+    let pending = f.human.task_get(Some("thread"), "task")?["pending_resolution"].clone();
+    assert_eq!(pending["step_id"], "step");
+    assert_eq!(pending["state"], "executor_timeout");
     Ok(())
 }
