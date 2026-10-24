@@ -407,3 +407,7 @@ async fn own_targets(
         })
         .collect())
 }
+
+#[cfg(test)]
+#[path = "task_transport_tests.rs"]
+mod tests;

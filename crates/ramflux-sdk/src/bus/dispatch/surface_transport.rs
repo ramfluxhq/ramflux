@@ -176,7 +176,7 @@ fn peer_commitments(
 
 #[cfg(test)]
 #[path = "surface_text_fixture.rs"]
-mod fixture;
+pub(super) mod fixture;
 #[cfg(test)]
 #[path = "surface_text_tests.rs"]
-mod tests;
+pub(super) mod tests;

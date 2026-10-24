@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
-pub(super) struct RecordingGateway {
+pub(crate) struct RecordingGateway {
     last: Option<GatewayClientFrame>,
     pub delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
 }
