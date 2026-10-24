@@ -68,6 +68,7 @@ async fn raw_name_lookup_rejects_known_and_unknown_queries_before_router_io() ->
                 path: format!("/mvp1/principal-manifest/{name}"),
                 body: serde_json::Value::Null,
             },
+            context.remote_addr.ip(),
         )
         .await?;
         assert_eq!(response.status, 401);

@@ -232,7 +232,17 @@ fn connection_header_requests_keep_alive(value: &str) -> bool {
 
 #[must_use]
 pub fn source_ip_hash(source_ip: &str) -> String {
-    ramflux_crypto::blake3_256_base64url("ramflux.source_ip_hash.v1", source_ip.as_bytes())
+    let key = match source_ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(ip)) => ip.to_ipv4_mapped().map_or_else(
+            || {
+                let s = ip.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            },
+            |ip| ip.to_string(),
+        ),
+        _ => source_ip.to_owned(),
+    };
+    ramflux_crypto::blake3_256_base64url("ramflux.source_ip_hash.v1", key.as_bytes())
 }
 
 /// # Errors

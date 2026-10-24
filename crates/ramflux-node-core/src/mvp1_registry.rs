@@ -65,7 +65,7 @@ impl Default for RegistrationPolicy {
         Self {
             challenge_policy: RegistrationChallengePolicy::None,
             pow_difficulty_bits: 0,
-            per_source_ip_registration_limit: u32::MAX,
+            per_source_ip_registration_limit: 120,
             registration_window_seconds: 60,
         }
     }
@@ -224,6 +224,10 @@ pub struct IdentityRegistry {
     root_public_keys_by_commitment: BTreeMap<String, String>,
     pub(crate) devices: BTreeMap<String, IdentityDeviceRecord>,
     revoked_devices: BTreeSet<String>,
+    #[serde(default)]
+    device_root_bindings: BTreeMap<String, (String, String)>,
+    #[serde(default)]
+    delivery_root_bindings: BTreeMap<String, (String, String, String)>,
     seen_proofs: BTreeSet<String>,
     prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
     #[serde(default)]
@@ -249,12 +253,6 @@ impl IdentityRegistry {
         request: &IdentityRegisterRequest,
     ) -> Result<(SessionDescriptor, RegistrationTrustTier), NodeCoreError> {
         let registration_trust_tier = self.validate_registration_policy(request)?;
-        if self.revoked_devices.contains(&request.proof.device_id) {
-            return Err(NodeCoreError::ItestHttp(format!(
-                "device revoked: {}",
-                request.proof.device_id
-            )));
-        }
         let root_public_key =
             ramflux_crypto::verifying_key_from_base64url(&request.root_public_key)
                 .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
@@ -295,6 +293,13 @@ impl IdentityRegistry {
         {
             return Err(NodeCoreError::PrincipalIdTaken);
         }
+        self.check_registration_ownership(request)?;
+        if self.revoked_devices.contains(&request.proof.device_id) {
+            return Err(NodeCoreError::ItestHttp(format!(
+                "device revoked: {}",
+                request.proof.device_id
+            )));
+        }
         if !self.seen_proofs.insert(request.proof.proof_id.clone()) {
             return Err(NodeCoreError::ItestHttp(format!(
                 "branch proof replay: {}",
@@ -309,7 +314,7 @@ impl IdentityRegistry {
             self.root_public_keys_by_commitment
                 .insert(request.principal_commitment.clone(), request.root_public_key.clone());
         }
-        self.record_registration(request);
+        self.reserve_registration_ownership(request);
         self.registration_trust_tiers
             .insert(request.proof.principal_id.clone(), registration_trust_tier.clone());
         self.devices.insert(
@@ -417,27 +422,85 @@ impl IdentityRegistry {
         &mut self,
         request: &IdentityRegisterRequest,
     ) -> Result<(), NodeCoreError> {
-        let source_ip_hash = request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip");
-        let window_seconds =
-            i64::try_from(self.registration_policy.registration_window_seconds).unwrap_or(i64::MAX);
-        let window_start = request.now.saturating_sub(window_seconds);
-        let entries =
-            self.registration_times_by_source_ip.entry(source_ip_hash.to_owned()).or_default();
-        entries.retain(|timestamp| *timestamp >= window_start);
-        if entries.len() >= self.registration_policy.per_source_ip_registration_limit as usize {
-            return Err(NodeCoreError::ItestHttp(format!(
-                "registration source rate exceeded: {source_ip_hash}"
-            )));
+        let source = request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip");
+        if self.registration_times_by_source_ip.len() > 4096 {
+            let mut order = self
+                .registration_times_by_source_ip
+                .iter()
+                .map(|(key, times)| (times.last().copied().unwrap_or(0), key.clone()))
+                .collect::<Vec<_>>();
+            order.sort_unstable();
+            for (_, key) in
+                order.into_iter().take(self.registration_times_by_source_ip.len() - 4096)
+            {
+                self.registration_times_by_source_ip.remove(&key);
+            }
         }
+        while (self.registration_times_by_source_ip.len() > 4096
+            || (self.registration_times_by_source_ip.len() == 4096
+                && !self.registration_times_by_source_ip.contains_key(source)))
+            && let Some(victim) = self
+                .registration_times_by_source_ip
+                .iter()
+                .min_by_key(|(_, v)| v.last().copied().unwrap_or(0))
+                .map(|(k, _)| k.clone())
+        {
+            self.registration_times_by_source_ip.remove(&victim);
+        }
+        let seconds =
+            i64::try_from(self.registration_policy.registration_window_seconds).unwrap_or(i64::MAX);
+        let entries = self.registration_times_by_source_ip.entry(source.into()).or_default();
+        let effective_now = request.now.max(entries.last().copied().unwrap_or(request.now));
+        entries.retain(|t| effective_now.saturating_sub(*t) < seconds);
+        if entries.len() >= self.registration_policy.per_source_ip_registration_limit as usize {
+            return Err(NodeCoreError::ItestHttp("registration source rate exceeded".into()));
+        }
+        entries.push(effective_now);
         Ok(())
     }
 
-    fn record_registration(&mut self, request: &IdentityRegisterRequest) {
-        let source_ip_hash = request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip");
-        self.registration_times_by_source_ip
-            .entry(source_ip_hash.to_owned())
-            .or_default()
-            .push(request.now);
+    fn reserve_registration_ownership(&mut self, request: &IdentityRegisterRequest) {
+        self.device_root_bindings.insert(
+            request.proof.device_id.clone(),
+            (request.proof.principal_id.clone(), request.root_public_key.clone()),
+        );
+        self.delivery_root_bindings.insert(
+            request.target_delivery_id.clone(),
+            (
+                request.proof.principal_id.clone(),
+                request.root_public_key.clone(),
+                request.proof.device_id.clone(),
+            ),
+        );
+    }
+
+    fn check_registration_ownership(
+        &self,
+        request: &IdentityRegisterRequest,
+    ) -> Result<(), NodeCoreError> {
+        if self
+            .device_root_bindings
+            .get(&request.proof.device_id)
+            .is_some_and(|(p, r)| p != &request.proof.principal_id || r != &request.root_public_key)
+            || self.devices.get(&request.proof.device_id).is_some_and(|d| {
+                d.principal_id != request.proof.principal_id
+                    || self
+                        .principal_root_bindings
+                        .get(&d.principal_id)
+                        .or_else(|| self.root_public_keys.get(&d.principal_id))
+                        .is_some_and(|r| r != &request.root_public_key)
+            })
+            || self.delivery_root_bindings.get(&request.target_delivery_id).is_some_and(
+                |(p, r, _)| p != &request.proof.principal_id || r != &request.root_public_key,
+            )
+            || self.devices.values().any(|d| {
+                d.target_delivery_id == request.target_delivery_id
+                    && d.principal_id != request.proof.principal_id
+            })
+        {
+            return Err(NodeCoreError::DeviceIdTaken);
+        }
+        Ok(())
     }
 
     /// # Errors
@@ -686,6 +749,22 @@ impl IdentityRegistry {
             self.principal_root_bindings
                 .entry(principal_id.to_owned())
                 .or_insert_with(|| root.clone());
+        }
+        if let Some(root) = self
+            .principal_root_bindings
+            .get(principal_id)
+            .or_else(|| self.root_public_keys.get(principal_id))
+        {
+            for device in self.devices.values().filter(|d| d.principal_id == principal_id) {
+                self.device_root_bindings
+                    .entry(device.device_id.clone())
+                    .or_insert_with(|| (principal_id.into(), root.clone()));
+                self.delivery_root_bindings
+                    .entry(device.target_delivery_id.clone())
+                    .or_insert_with(|| {
+                        (principal_id.into(), root.clone(), device.device_id.clone())
+                    });
+            }
         }
         let before_devices = self.devices.len();
         let before_prekeys = self.prekey_bundles.len();

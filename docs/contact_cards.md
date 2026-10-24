@@ -132,3 +132,15 @@ The existing `request`/`request_frame` convenience methods retain their text-err
 The contact-add CLI prints the structured error body on failure so both compared roots
 remain available. Desktop adapters should preserve those fields when presenting a
 replacement confirmation rather than parsing the convenience method's error string.
+
+Registration attempts are limited before proof-of-work and ownership checks. The
+finite default is 120 attempts per transport source in 60 seconds; IPv6 sources
+share a /64 bucket. Client-supplied source and clock fields are overwritten at
+the gateway, and the router supplies its own clock. Taken names necessarily
+reveal signup availability after this admission; unrestricted probing is not
+supported. Source tables retain at most 4096 entries.
+
+Device IDs and delivery aliases cannot be reassigned to a different root, even
+after revocation or metadata removal. This interim reservation guard precedes
+root-scoped device namespaces. Card import currently requires a configured home
+node profile; hand-configured accounts must configure one first.

@@ -72,7 +72,8 @@ pub(crate) async fn handle_gateway_quic_stream(
         handle_gateway_session_stream(send, recv, context, frame).await?;
     } else {
         let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-        let response = dispatch_quic_json_request(&context.router, request).await?;
+        let response =
+            dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
         let write_started = Instant::now();
         ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
         ramflux_node_core::record_gateway_quic_response_write_us(elapsed_us(write_started));
@@ -102,7 +103,8 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
     } else {
         let mut send = Box::new(send);
         let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-        let response = dispatch_quic_json_request(&context.router, request).await?;
+        let response =
+            dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
         ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
     }
     Ok(())
@@ -381,8 +383,10 @@ pub(crate) async fn run_gateway_session_loop(
                 handle_gateway_own_device_fanout(&send, &context, &runtime, &fanout).await?;
             }
             ramflux_node_core::GatewayClientFrame::IdentityRegister { mut request } => {
-                request.source_ip_hash =
-                    request.source_ip_hash.or_else(|| Some(context.remote_addr.ip().to_string()));
+                crate::principal_directory::registration_context(
+                    &mut request,
+                    context.remote_addr.ip(),
+                )?;
                 let response: serde_json::Value =
                     router_post_json(&context.router, "/mvp1/identity/register", &request)?;
                 let frame = if let Ok(error) = serde_json::from_value::<

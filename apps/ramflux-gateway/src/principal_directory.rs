@@ -65,3 +65,58 @@ mod tests {
         Ok(())
     }
 }
+
+pub(crate) fn registration_context(
+    request: &mut ramflux_node_core::IdentityRegisterRequest,
+    source: std::net::IpAddr,
+) -> anyhow::Result<()> {
+    let source = match source {
+        std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or_else(
+            || {
+                let s = ip.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            },
+            |v| v.to_string(),
+        ),
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+    };
+    request.source_ip_hash = Some(source);
+    request.now = i64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod registration_tests {
+    #[test]
+    fn actual_ipv6_transport_prefix_replaces_forged_registration_source_and_clock()
+    -> anyhow::Result<()> {
+        let root = ramflux_crypto::create_identity_root("p", [7; 32]);
+        let device = ramflux_crypto::create_device_branch("p", "d", 1, [8; 32]);
+        let mut request = ramflux_node_core::IdentityRegisterRequest {
+            root_public_key: String::new(),
+            principal_commitment: String::new(),
+            branch_public_key: String::new(),
+            proof: ramflux_crypto::authorize_device_branch(
+                &root,
+                &device,
+                "ramflux-node",
+                vec!["device.delivery.bind".into()],
+                0,
+                1,
+            )?,
+            target_delivery_id: "target".into(),
+            gateway_id: "gateway".into(),
+            session_id: "session".into(),
+            push_alias_hash: None,
+            now: 0,
+            registration_pow: None,
+            source_ip_hash: Some("forged".into()),
+        };
+        super::registration_context(&mut request, "2001:db8:1:2::1".parse()?)?;
+        assert_eq!(request.source_ip_hash.as_deref(), Some("2001:db8:1:2::/64"));
+        assert!(request.now > 1);
+        Ok(())
+    }
+}

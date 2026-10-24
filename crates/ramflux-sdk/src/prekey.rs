@@ -201,9 +201,16 @@ where
     };
     if let Ok(error) = serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
         response.body.clone(),
-    ) && error.error.reason_code == ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken
-    {
-        return Err(crate::ContactReason::PrincipalIdTaken.into());
+    ) {
+        match error.error.reason_code {
+            ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken => {
+                return Err(crate::ContactReason::PrincipalIdTaken.into());
+            }
+            ramflux_protocol::IdentityDirectoryReason::DeviceIdTaken => {
+                return Err(crate::ContactReason::DeviceIdTaken.into());
+            }
+            _ => (),
+        }
     }
     if response.status != 200 {
         return Err(SdkError::GatewaySessionRejected(format!(

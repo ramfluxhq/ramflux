@@ -35,8 +35,12 @@ pub(crate) fn handle_itest_request(
     }
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/mvp1/identity/register") => {
-            let response =
-                handle_mvp1_identity_register(&request.body, router.state(), router.store())?;
+            let response = handle_mvp1_identity_register(
+                &request.body,
+                router.state(),
+                router.store(),
+                Some(request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip")),
+            )?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp6/registration/policy") => {
@@ -477,7 +481,8 @@ fn handle_mesh_general_value(
 ) -> anyhow::Result<MeshResponse> {
     match (method, path) {
         ("POST", "/mvp1/identity/register") => {
-            let response = handle_mvp1_identity_register(body, router.state(), router.store())?;
+            let response =
+                handle_mvp1_identity_register(body, router.state(), router.store(), None)?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
         ("POST", "/mvp6/registration/policy") => {
@@ -693,8 +698,15 @@ fn handle_mvp1_identity_register(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
+    source_override: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
-    let request: ramflux_node_core::IdentityRegisterRequest = serde_json::from_slice(body)?;
+    let mut request: ramflux_node_core::IdentityRegisterRequest = serde_json::from_slice(body)?;
+    if let Some(source) = source_override {
+        request.source_ip_hash = Some(source.into());
+    }
+    request.now = i64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+    )?;
     tracing::info!(
         principal_id = %request.proof.principal_id,
         device_id = %request.proof.device_id,
@@ -703,10 +715,18 @@ fn handle_mvp1_identity_register(
     );
     let response = match state.mvp1_register_identity(&request) {
         Ok(response) => response,
-        Err(ramflux_node_core::NodeCoreError::PrincipalIdTaken) => {
+        Err(
+            error @ (ramflux_node_core::NodeCoreError::PrincipalIdTaken
+            | ramflux_node_core::NodeCoreError::DeviceIdTaken),
+        ) => {
             return Ok(serde_json::to_value(ramflux_protocol::IdentityRegistrationFailure {
                 error: ramflux_protocol::IdentityRegistrationFailureBody {
-                    reason_code: ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken,
+                    reason_code: if matches!(error, ramflux_node_core::NodeCoreError::DeviceIdTaken)
+                    {
+                        ramflux_protocol::IdentityDirectoryReason::DeviceIdTaken
+                    } else {
+                        ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken
+                    },
                 },
             })?);
         }

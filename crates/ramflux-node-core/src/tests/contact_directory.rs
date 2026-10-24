@@ -190,3 +190,107 @@ fn principal_lookup_authenticates_before_lookup_and_shares_quotas_across_an_acco
     assert_eq!(router.mvp1_authenticated_principal_lookup(&query, 160).reason_code, None);
     Ok(())
 }
+
+#[test]
+fn a_foreign_root_cannot_take_a_device_or_delivery_alias_and_revoke_its_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut registry = IdentityRegistry::default();
+    let alice = register(&mut registry, "alice-one", 1)?;
+    let mallory = registration_request("mallory", "mallory-one", 2, None, "attacker")?;
+    registry.register_identity(&mallory)?;
+    let takeover = registration_request("mallory-two", "alice-one", 3, None, "attacker")?;
+    assert!(matches!(registry.register_identity(&takeover), Err(NodeCoreError::DeviceIdTaken)));
+    let mut alias = mallory.clone();
+    alias.target_delivery_id = alice.target_delivery_id.clone();
+    assert!(matches!(registry.register_identity(&alias), Err(NodeCoreError::DeviceIdTaken)));
+    let body = serde_json::json!({"device_id":"alice-one","principal_commitment":mallory.principal_commitment,"revoked_at":mallory.now});
+    let revoke = DeviceRevokeRequest {
+        device_id: "alice-one".into(),
+        principal_commitment: mallory.principal_commitment.clone(),
+        root_public_key: mallory.root_public_key.clone(),
+        revoked_at: mallory.now,
+        signature: ramflux_crypto::sign_canonical_bytes_with_seed(
+            &ramflux_protocol::canonical_json_bytes(&body)?,
+            seed_from_nonce(0x31, 2),
+        ),
+    };
+    assert!(registry.revoke_device(&revoke).is_err());
+    assert_eq!(
+        registry.principal_manifest("alice").ok_or("alice missing")?.principal_commitment,
+        alice.principal_commitment
+    );
+    let mut again = alice.clone();
+    let root = ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, 1));
+    let device =
+        ramflux_crypto::create_device_branch("alice", "alice-one", 2, seed_from_nonce(0x41, 9));
+    again.branch_public_key =
+        ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes());
+    again.proof = ramflux_crypto::authorize_device_branch(
+        &root,
+        &device,
+        IDENTITY_BIND_AUDIENCE,
+        vec![IDENTITY_BIND_CAPABILITY.into()],
+        alice.now,
+        alice.now + 3600,
+    )?;
+    registry.register_identity(&again)?;
+    let mut legacy = serde_json::to_value(&registry)?;
+    legacy.as_object_mut().ok_or("registry")?.remove("device_root_bindings");
+    legacy.as_object_mut().ok_or("registry")?.remove("delivery_root_bindings");
+    let mut restored: IdentityRegistry = serde_json::from_value(legacy)?;
+    restored.remove_principal_metadata("alice");
+    assert!(matches!(restored.register_identity(&takeover), Err(NodeCoreError::DeviceIdTaken)));
+    Ok(())
+}
+
+#[test]
+fn every_taken_name_probe_is_charged_before_the_name_check_and_pow_precedes_ownership()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut registry = IdentityRegistry::default();
+    register(&mut registry, "alice-one", 1)?;
+    registry.set_registration_policy(RegistrationPolicy {
+        per_source_ip_registration_limit: 2,
+        ..RegistrationPolicy::default()
+    });
+    let probe = registration_request("alice", "other", 2, None, "attacker")?;
+    let mut taken = 0;
+    for _ in 0..15 {
+        if matches!(registry.register_identity(&probe), Err(NodeCoreError::PrincipalIdTaken)) {
+            taken += 1;
+        }
+    }
+    assert_eq!(taken, 2);
+    assert!(
+        registry
+            .register_identity(&registration_request("fresh", "fresh", 3, None, "attacker")?)
+            .is_err()
+    );
+    registry.set_registration_policy(RegistrationPolicy {
+        challenge_policy: RegistrationChallengePolicy::Pow,
+        pow_difficulty_bits: 1,
+        ..RegistrationPolicy::default()
+    });
+    assert!(!matches!(registry.register_identity(&probe), Err(NodeCoreError::PrincipalIdTaken)));
+    assert!(RegistrationPolicy::default().per_source_ip_registration_limit < u32::MAX);
+    Ok(())
+}
+
+#[test]
+fn failed_registration_source_tables_are_bounded_and_ipv6_sources_share_a_prefix_budget()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut registry = IdentityRegistry::default();
+    let mut request = registration_request("probe", "probe", 1, None, "source")?;
+    request.root_public_key = String::new();
+    for i in 0..4100 {
+        request.source_ip_hash = Some(format!("source-{i}"));
+        assert!(registry.register_identity(&request).is_err());
+    }
+    let state = serde_json::to_value(&registry)?;
+    assert!(state["registration_times_by_source_ip"].as_object().ok_or("sources")?.len() <= 4096);
+    assert_eq!(
+        crate::source_ip_hash("2001:db8:1:2::1"),
+        crate::source_ip_hash("2001:db8:1:2::ffff")
+    );
+    assert_ne!(crate::source_ip_hash("2001:db8:1:2::1"), crate::source_ip_hash("2001:db8:1:3::1"));
+    Ok(())
+}

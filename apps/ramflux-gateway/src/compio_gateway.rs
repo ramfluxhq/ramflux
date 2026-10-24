@@ -164,12 +164,13 @@ async fn handle_gateway_compio_quic_stream(
     }
 
     let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
-    let response =
-        if let Some(response) = crate::principal_directory::reject_unauthenticated(&request) {
-            response
-        } else {
-            dispatch_gateway_request_blocking(context.router.clone(), request).await?
-        };
+    let response = if let Some(response) =
+        crate::principal_directory::reject_unauthenticated(&request)
+    {
+        response
+    } else {
+        dispatch_gateway_request_blocking(context.router.clone(), request, remote_addr.ip()).await?
+    };
     send.write_json_message(&response).await?;
     send.finish()?;
     Ok(())
@@ -236,6 +237,7 @@ fn spawn_gateway_session_worker(
 async fn dispatch_gateway_request_blocking(
     router: crate::RouterMeshClient,
     request: ramflux_transport::GatewayQuicRequest,
+    source: std::net::IpAddr,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
     let (sender, receiver) =
         tokio::sync::oneshot::channel::<anyhow::Result<ramflux_transport::GatewayQuicResponse>>();
@@ -244,7 +246,9 @@ async fn dispatch_gateway_request_blocking(
             .enable_all()
             .build()
             .map_err(Into::into)
-            .and_then(|runtime| runtime.block_on(dispatch_quic_json_request(&router, request)));
+            .and_then(|runtime| {
+                runtime.block_on(dispatch_quic_json_request(&router, request, source))
+            });
         let _result = sender.send(result);
     })?;
     receiver.await?

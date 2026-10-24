@@ -49,7 +49,9 @@ impl RamfluxClient {
     ) -> Result<ContactRootSource, SdkError> {
         let db = self.account_db()?;
         if let Some(root) = identity["contact_identity_commitment"].as_str()
-            && db.contact_verification(root)?.is_some_and(|v| v.verification_state == "verified")
+            && db
+                .contact_verification(root)?
+                .is_some_and(|v| matches!(v.verification_state.as_str(), "verified" | "changed"))
         {
             return Ok(ContactRootSource::Verified);
         }

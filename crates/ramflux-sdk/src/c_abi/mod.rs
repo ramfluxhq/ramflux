@@ -838,7 +838,9 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
-        SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => RamfluxErrorCode::RateLimited,
+        SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => {
+            RamfluxErrorCode::RateLimited
+        }
         SdkError::SurfaceRefused { .. }
         | SdkError::SurfaceDeliveryTooLarge { .. }
         | SdkError::ContactConfirmationRequired(_)

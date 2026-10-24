@@ -173,8 +173,10 @@ pub(crate) fn dispatch_protected_itest_request(
         ("POST", "/mvp1/identity/register") => {
             let mut registration: ramflux_node_core::IdentityRegisterRequest =
                 serde_json::from_slice(&request.body)?;
-            registration.source_ip_hash =
-                registration.source_ip_hash.or_else(|| request.source_ip_hash.clone());
+            registration.source_ip_hash.clone_from(&request.source_ip_hash);
+            registration.now = i64::try_from(
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+            )?;
             let response: serde_json::Value =
                 router_post_json(router, "/mvp1/identity/register", &registration)?;
             let rejected = serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(

@@ -107,8 +107,30 @@ async fn out_of_band_safety_preview_is_non_mutating_and_confirmation_promotes_th
     let verified=call(&mut s,"alice","contact.verify",json!({"principal_id":"bob","contact_identity_commitment":root,"replace_provisional_root":old})).await?;
     assert_eq!(verified["safety_number"], preview["safety_number"]);
     assert_eq!(client(&s)?.contact_entry("bob")?["root_source"], "verified");
+    assert_eq!(
+        client(&s)?
+            .account_db()?
+            .client_record("identity", "bob")?
+            .ok_or_else(|| invalid("identity"))?["root_source"],
+        "verified"
+    );
     assert_eq!(client(&s)?.contact_entry("bob")?["verified"], true);
     assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], root);
+    let db = client(&s)?.account_db()?;
+    let record = db.contact_verification(&root)?.ok_or_else(|| invalid("verification"))?;
+    db.observe_contact_key_state(ramflux_storage::ContactKeyObservation {
+        contact_identity_commitment: &root,
+        safety_number_hash: "changed",
+        device_set_hash: &record.verified_device_set_hash,
+        lineage_head: &record.verified_lineage_head,
+        change_event_id: "changed-root",
+        seen_at: now_unix_timestamp(),
+    })?;
+    let identity = db.client_record("identity", "bob")?.ok_or_else(|| invalid("identity"))?;
+    assert_eq!(identity["root_source"], "verified");
+    assert!(
+        client(&s)?.contact_replacement(&identity, "bob", "different-root", Some(&root)).is_err()
+    );
     Ok(())
 }
 #[tokio::test]
@@ -260,7 +282,9 @@ async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_be
             )
             .await;
         if forged {
-            assert!(matches!(result, Err(SdkError::InboundRejected(_))));
+            assert!(result?.is_none());
+            assert_eq!(b.client.gateway_receive_cursor("bob")?, 1);
+            valid_delivery_after_rejected_control(&a, &mut b, &mut engine, &mut session).await?;
             assert!(!b.client.friend_links()?.iter().any(|l| l.link_id == "incoming-request"));
         } else {
             result?;
@@ -290,5 +314,42 @@ async fn invalid_directory_signatures_return_a_typed_manifest_error_without_a_co
     assert_eq!(body.reason_code.as_deref(), Some("manifest_invalid"));
     assert_eq!(client(&s)?.friend_links()?.len(), 0);
     assert!(client(&s)?.account_db()?.client_record("identity", "bob")?.is_none());
+    Ok(())
+}
+
+async fn valid_delivery_after_rejected_control(
+    a: &Fixture,
+    b: &mut Fixture,
+    engine: &mut GatewaySessionEngine,
+    session: &mut ramflux_crypto::DmSession,
+) -> Result<(), SdkError> {
+    let mut next = super::super::message("legacy-next", "history");
+    next.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
+        version: 1,
+        x3dh: None,
+        ciphertext: session.encrypt(b"after rejected control", dm_associated_data("history"))?,
+    })?;
+    let next = GatewayInboxEntry {
+        inbox_seq: 2,
+        target_delivery_id: "bob".into(),
+        envelope: gateway_direct_message_envelope(&a.config()?, &next, None)?,
+    };
+    let delivered = b
+        .client
+        .receive_legacy_entry(
+            engine,
+            &super::super::review::pool()?,
+            next,
+            crate::client::dm::LegacyReceive {
+                conversation_id: "history",
+                auto_fetch_attachments: false,
+                relay_service_key_base64: None,
+            },
+        )
+        .await?;
+    assert!(delivered.is_some());
+    assert_eq!(b.client.gateway_receive_cursor("bob")?, 2);
+
     Ok(())
 }

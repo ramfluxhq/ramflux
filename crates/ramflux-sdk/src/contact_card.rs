@@ -16,6 +16,8 @@ const MAX_CARD_BYTES: usize = 4096;
 pub enum ContactReason {
     #[error("principal_id_taken")]
     PrincipalIdTaken,
+    #[error("device_id_taken")]
+    DeviceIdTaken,
     #[error("principal_id_ambiguous")]
     PrincipalIdAmbiguous,
     #[error("rate_limited")]

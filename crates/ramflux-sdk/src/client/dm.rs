@@ -333,24 +333,10 @@ impl RamfluxClient {
             return self.plaintext_projection_delivery(conversation_id, &entry);
         }
         self.append_gateway_delivery(&entry)?;
-        // T21-A2a / CTRL-028: the recv session checkpoint — not the plaintext projection — is
-        // the authoritative "this entry is committed" signal. Only when the persisted recv
-        // session already covers this envelope do we know the ratchet advanced and every side
-        // effect ran; then a cursor that lagged (crash between session commit and cursor commit)
-        // is safely caught up. A present projection with an uncommitted recv session (crash
-        // between projection write and session commit) must be re-decrypted so the ratchet
-        // actually advances; the idempotent side effects below converge on that retry.
-        let projection_present =
-            self.plaintext_projection_delivery(conversation_id, &entry)?.is_some();
-        let session_checkpoint_current =
-            self.recv_session_checkpoint_at(conversation_id, &entry.envelope.envelope_id)?;
-        match receive_terminal_recovery(projection_present, session_checkpoint_current) {
-            ReceiveTerminalDecision::CursorCatchUp => {
-                self.account_db()?.persist_actor_state(&terminal, &conversation_id)?;
-                self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
-                return Ok(None);
-            }
-            ReceiveTerminalDecision::Decrypt => {}
+        if self.legacy_receive_checkpoint_current(conversation_id, &entry)? {
+            self.account_db()?.persist_actor_state(&terminal, &conversation_id)?;
+            self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+            return Ok(None);
         }
         let (envelope, session, decrypted) = self.decrypt_legacy_entry(conversation_id, &entry)?;
         let body = decrypted.plaintext.clone();
@@ -359,7 +345,18 @@ impl RamfluxClient {
         // receive cursor advances. If any downstream step fails, the local `session` is dropped
         // so the persisted ratchet snapshot and cursor stay unchanged and the same ciphertext
         // can be re-decrypted on a later `dm read`.
-        self.project_legacy_contact_control(&entry, &body)?;
+        if let Err(error) = self.project_legacy_contact_control(&entry, &body) {
+            if !matches!(error, SdkError::InboundRejected(_)) {
+                return Err(error);
+            }
+            self.quarantine_legacy_control(
+                &entry,
+                conversation_id,
+                engine.target_delivery_id(),
+                &session,
+            )?;
+            return Ok(None);
+        }
         if self.apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id)?.is_some() {
             // Receipt applied: commit the advanced recv ratchet, then the cursor.
             self.commit_legacy_receive(
@@ -370,21 +367,12 @@ impl RamfluxClient {
             )?;
             return Ok(None);
         }
-        if let Some(reason) = self.friend_rejection_reason(&entry.envelope.source_principal_id)? {
-            self.account_db()?.reject_inbox_message(
-                conversation_id,
-                &entry.envelope.envelope_id,
-                &entry.envelope.source_principal_id,
-                &reason,
-                now_unix_timestamp(),
-            )?;
-            // Rejection recorded: commit the advanced recv ratchet, then the cursor.
-            self.commit_legacy_receive(
-                conversation_id,
-                &entry,
-                engine.target_delivery_id(),
-                &session,
-            )?;
+        if self.reject_legacy_peer(
+            conversation_id,
+            &entry,
+            engine.target_delivery_id(),
+            &session,
+        )? {
             return Ok(None);
         }
         let (projection_body, attachment_refs) = decode_dm_attachment_body(&body)?;
@@ -464,6 +452,58 @@ impl RamfluxClient {
         Ok((envelope, session, decrypted))
     }
 
+    fn legacy_receive_checkpoint_current(
+        &self,
+        conversation: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<bool, SdkError> {
+        // The persisted ratchet checkpoint, not a partial plaintext projection, permits cursor catch-up.
+        let projected = self.plaintext_projection_delivery(conversation, entry)?.is_some();
+        let committed =
+            self.recv_session_checkpoint_at(conversation, &entry.envelope.envelope_id)?;
+        Ok(matches!(
+            receive_terminal_recovery(projected, committed),
+            ReceiveTerminalDecision::CursorCatchUp
+        ))
+    }
+    fn reject_legacy_peer(
+        &self,
+        conversation: &str,
+        entry: &GatewayInboxEntry,
+        target: &str,
+        session: &ramflux_crypto::DmSession,
+    ) -> Result<bool, SdkError> {
+        if let Some(reason) = self.friend_rejection_reason(&entry.envelope.source_principal_id)? {
+            self.account_db()?.reject_inbox_message(
+                conversation,
+                &entry.envelope.envelope_id,
+                &entry.envelope.source_principal_id,
+                &reason,
+                now_unix_timestamp(),
+            )?;
+            // Rejection recorded: commit the advanced recv ratchet, then the cursor.
+            self.commit_legacy_receive(conversation, entry, target, session)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    fn quarantine_legacy_control(
+        &self,
+        entry: &GatewayInboxEntry,
+        conversation: &str,
+        target: &str,
+        session: &ramflux_crypto::DmSession,
+    ) -> Result<(), SdkError> {
+        let key = crate::client::routed::committed_key(entry)?;
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            db.dead_letter_inbox(&key,&serde_json::to_vec(entry)?,&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"error_code":"legacy_control_rejected"}),now_unix_timestamp())?;
+            self.commit_legacy_receive(conversation,entry,target,session)?;
+            db.remove_unrouted(&key)?;
+            db.remove_unrouted(&entry.envelope.envelope_id)?;
+            Ok::<_,SdkError>(())
+        })
+    }
     fn commit_legacy_receive(
         &self,
         conversation: &str,

@@ -5,6 +5,8 @@
 pub enum NodeCoreError {
     #[error("principal_id_taken")]
     PrincipalIdTaken,
+    #[error("device_id_taken")]
+    DeviceIdTaken,
     #[error("--config requires a path")]
     MissingConfigPath,
     #[error("cannot read config {path}: {source}")]

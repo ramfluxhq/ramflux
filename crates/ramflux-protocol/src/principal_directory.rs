@@ -11,6 +11,7 @@ pub enum IdentityDirectoryReason {
     RateLimited,
     PrincipalIdAmbiguous,
     PrincipalIdTaken,
+    DeviceIdTaken,
 }
 /// Known and unknown directory results have the same outer shape.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -7,6 +7,7 @@ use std::time::Instant;
 pub(crate) async fn dispatch_quic_json_request(
     router: &RouterMeshClient,
     request: ramflux_transport::GatewayQuicRequest,
+    source: std::net::IpAddr,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
     if let Some(response) = crate::principal_directory::reject_unauthenticated(&request) {
         return Ok(response);
@@ -48,8 +49,9 @@ pub(crate) async fn dispatch_quic_json_request(
             serde_json::to_value(response)?
         }
         ("POST", "/mvp1/identity/register") => {
-            let registration: ramflux_node_core::IdentityRegisterRequest =
+            let mut registration: ramflux_node_core::IdentityRegisterRequest =
                 serde_json::from_value(request.body)?;
+            crate::principal_directory::registration_context(&mut registration, source)?;
             let response: serde_json::Value =
                 router_post_json(router, "/mvp1/identity/register", &registration)?;
             if serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(

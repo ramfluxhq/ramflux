@@ -425,6 +425,9 @@ impl GatewaySessionEngine {
             GatewayServerFrame::IdentityRegistrationRejected {
                 reason_code: ramflux_protocol::IdentityDirectoryReason::PrincipalIdTaken,
             } => Err(crate::ContactReason::PrincipalIdTaken.into()),
+            GatewayServerFrame::IdentityRegistrationRejected {
+                reason_code: ramflux_protocol::IdentityDirectoryReason::DeviceIdTaken,
+            } => Err(crate::ContactReason::DeviceIdTaken.into()),
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected identity_registered frame, got {other:?}"

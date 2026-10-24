@@ -139,6 +139,7 @@ impl RamfluxClient {
                     &contact_material,
                     &own_gateway.device_id,
                 )?;
+                identity["root_source"] = json!(crate::ContactRootSource::Verified);
             }
 
             db.persist_client_record("identity", principal, &identity)?;

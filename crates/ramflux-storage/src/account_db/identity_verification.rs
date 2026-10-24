@@ -105,6 +105,7 @@ impl AccountDb {
         &self,
         update: ContactVerificationUpdate<'_>,
     ) -> Result<ContactVerificationRecord, StorageError> {
+        self.write_transaction(|| {
         self.connection.execute(
             "INSERT INTO contact_verification_projection (
                 contact_identity_commitment, verification_state, safety_number_hash,
@@ -130,8 +131,10 @@ impl AccountDb {
                 update.verified_by_device_id
             ],
         )?;
+        self.connection.execute("UPDATE runtime_actor_state SET state_json=CAST(json_set(CAST(state_json AS TEXT),'$.root_source','verified') AS BLOB) WHERE substr(state_kind,1,19)='directory/identity/' AND json_extract(CAST(state_json AS TEXT),'$.contact_identity_commitment')=?1",params![update.contact_identity_commitment])?;
         self.contact_verification(update.contact_identity_commitment)?.ok_or_else(|| {
             StorageError::AccountNotFound(update.contact_identity_commitment.to_owned())
+        })
         })
     }
 
