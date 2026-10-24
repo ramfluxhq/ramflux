@@ -126,6 +126,7 @@ impl RamfluxClient {
         let event = A2uiConversationEvent::from_wire_bytes(&wire)?;
         let bytes = ramflux_protocol::decode_base64url(&record.checkpoint_base64)
             .map_err(|_| SdkError::SurfaceCheckpointMismatch)?;
+        let repeated = previous.as_ref().is_some_and(|(_, state)| state.version() == owned.version);
         let prior = previous.map_or_else(SurfaceState::default, |(_, state)| state);
         let state =
             prior.resynchronize(&event, &bytes).map_err(|_| SdkError::SurfaceCheckpointMismatch)?;
@@ -135,6 +136,9 @@ impl RamfluxClient {
             || state.content().is_none_or(|content| content.surface_id != record.surface_id)
         {
             return Err(SdkError::SurfaceCheckpointMismatch);
+        }
+        if repeated {
+            return Ok(());
         }
         let db = self.account_db()?;
         if let Some(existing) = db.client_record("conversation", &record.conversation_id)? {

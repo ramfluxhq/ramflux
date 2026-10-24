@@ -63,7 +63,7 @@ impl RamfluxClient {
         rows.truncate(64);
         result.metadata.next_before =
             if result.metadata.truncated { rows.last().map(|(order, _)| *order) } else { None };
-        let mut bytes = 0usize;
+        let mut bytes = serde_json::to_vec(&result)?.len() + 4096;
         let mut blocks = Vec::new();
         // Select the newest bounded window, dropping older items first. Import each selected
         // surface/checkpoint before its decisions; metadata makes every omission explicit.
@@ -100,7 +100,7 @@ impl RamfluxClient {
                 result.metadata.skip("surface_byte_budget");
                 continue;
             }
-            bytes += size;
+            bytes += size + 1;
             let epoch = checkpoint.group_epoch;
             let floor = if let Some(group) = checkpoint.conversation["group_id"].as_str() {
                 let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -124,27 +124,28 @@ impl RamfluxClient {
         }
         result.checkpoints.reverse();
         result.controls = blocks.into_iter().rev().flatten().collect();
+        fit_export(&mut result, HISTORY_BYTES)?;
         db.persist_actor_state("surface/export_metadata", &result.metadata)?;
         Ok(result)
     }
     pub(crate) fn own_surface_history_pages(&self) -> Result<Vec<SurfaceHistoryExport>, SdkError> {
-        let mut pages = Vec::new();
+        let mut pages: Vec<SurfaceHistoryExport> = Vec::new();
         let mut cursor = None;
-        let mut bytes = 0usize;
-        // The history envelope is bounded across pages; own authored state is selected first.
         for _ in 0..64 {
-            let page = self.own_surface_history_export(cursor)?;
-            let size = serde_json::to_vec(&page)?.len();
-            if bytes.saturating_add(size) > 8 * 1024 * 1024 {
+            let mut page = self.own_surface_history_export(cursor)?;
+            cursor = page.metadata.next_before;
+            // Account for the outer page array, separators, and serialized metadata as well
+            // as every control/checkpoint. Trim individual items rather than losing a page.
+            let used = serde_json::to_vec(&pages)?.len();
+            let available = HISTORY_BYTES.saturating_sub(used + usize::from(!pages.is_empty()));
+            if available < 4096 {
                 if let Some(last) = pages.last_mut() {
-                    let last: &mut SurfaceHistoryExport = last;
                     last.metadata.truncated = true;
                     last.metadata.skip("history_byte_budget");
                 }
                 break;
             }
-            bytes += size;
-            cursor = page.metadata.next_before;
+            fit_export(&mut page, available.saturating_sub(4096))?;
             pages.push(page);
             if cursor.is_none() {
                 break;
@@ -192,7 +193,7 @@ impl RamfluxClient {
                 metadata.skip("action_byte_budget");
                 continue;
             }
-            *bytes += size;
+            *bytes += size + 1;
             controls.push(control);
         }
         controls.reverse();
@@ -206,6 +207,10 @@ impl RamfluxClient {
         if controls.len() > 64 * 129 || serde_json::to_vec(controls)?.len() > 8 * 1024 * 1024 {
             return Err(invalid("own surface history budget exceeded"));
         }
+        let page_scope = ramflux_protocol::hash_base64url(
+            "ramflux.surface.history_page.v1",
+            &serde_json::to_vec(controls)?,
+        );
         for (index, control) in controls.iter().enumerate() {
             let imported = self.account_db()?.surface_transaction(|| {
                 if control.kind != ControlKind::Own {
@@ -234,7 +239,7 @@ impl RamfluxClient {
                         domain: ramflux_protocol::domain::SURFACE_CARRIER.into(),
                         ext: ramflux_protocol::Ext::default(),
                         signed: envelope.signed.clone(),
-                        envelope_id: format!("{}:{index}", envelope.snapshot_id),
+                        envelope_id: format!("{}:{page_scope}:{index}", envelope.snapshot_id),
                         source_principal_id: principal.into(),
                         source_device_id: envelope.source_device_id.clone(),
                         target_delivery_id: envelope.target_device_id.clone(),
@@ -257,11 +262,65 @@ impl RamfluxClient {
             });
             if let Err(error) = imported {
                 self.account_db()?.persist_actor_state(
-                    &key("import_control_skip", &format!("{}:{index}", envelope.snapshot_id)),
+                    &key(
+                        "import_control_skip",
+                        &format!("{}:{page_scope}:{index}", envelope.snapshot_id),
+                    ),
                     &serde_json::json!({"reason":error.to_string()}),
                 )?;
             }
         }
+        Ok(())
+    }
+}
+
+const HISTORY_BYTES: usize = 8 * 1024 * 1024;
+fn fit_export(page: &mut SurfaceHistoryExport, budget: usize) -> Result<(), SdkError> {
+    while serde_json::to_vec(page)?.len() > budget {
+        let removed = if !page.controls.is_empty() {
+            page.controls.remove(0);
+            true
+        } else if !page.checkpoints.is_empty() {
+            page.checkpoints.remove(0);
+            true
+        } else {
+            false
+        };
+        page.metadata.truncated = true;
+        page.metadata.skip("serialized_history_byte_budget");
+        if !removed {
+            return Err(invalid("surface export metadata exceeds byte budget"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn serialized_first_page_overflow_keeps_items_and_explicit_metadata() -> Result<(), SdkError> {
+        let control = SurfaceControl {
+            kind: ControlKind::Own,
+            carrier_base64: "x".repeat(2000),
+            group_epoch: None,
+            context: None,
+            manifests: Vec::new(),
+        };
+        let mut page = SurfaceHistoryExport {
+            controls: vec![control.clone(); 4],
+            ..SurfaceHistoryExport::default()
+        };
+        let item_bytes = serde_json::to_vec(&control)?.len();
+        fit_export(&mut page, item_bytes * 4)?;
+        assert_eq!(page.controls.len(), 3);
+        assert!(page.metadata.truncated);
+        assert_eq!(page.metadata.skipped["serialized_history_byte_budget"], 1);
+        assert!(serde_json::to_vec(&page)?.len() <= item_bytes * 4);
+        fit_export(&mut page, 512)?;
+        assert_eq!(page.controls.len(), 0);
+        assert!(page.metadata.truncated && !page.metadata.skipped.is_empty());
+        assert!(serde_json::to_vec(&page)?.len() <= 512);
         Ok(())
     }
 }

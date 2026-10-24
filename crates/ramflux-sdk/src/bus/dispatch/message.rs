@@ -106,6 +106,18 @@ async fn dispatch_message_submit_request(
     let account_id = request_account_id(request)?;
     let body: LocalBusMessageSubmitRequest = serde_json::from_value(request.body.clone())?;
     let account = local_bus_account_mut(state, account_id)?;
+    submit_message(account, body).await
+}
+
+pub(super) async fn submit_message(
+    account: &mut LocalBusAccountState,
+    body: LocalBusMessageSubmitRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    if let Some(plaintext) = body.plaintext_body()?
+        && crate::client::surface::Carrier::decode(&plaintext)?.is_some()
+    {
+        crate::client::surface::check_delivery_size(plaintext.len())?;
+    }
     let entry = if let Some(plaintext) = body.plaintext_body()? {
         if !body.attachments.is_empty() {
             if body.federation.is_some() {

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
-use crate::client::surface::{ControlKind, SurfaceLogicalJob, control::SurfaceControl};
+use crate::client::surface::{ControlKind, control::SurfaceControl};
 struct Terminals {
     root: PathBuf,
     clients: Vec<RamfluxClient>,
@@ -100,12 +100,12 @@ fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestRe
     assert!(project(b2, &first, "b2-first")?.queued);
     assert_eq!(b2.surface_get("s", 0, None)?["actions"], json!([]));
     assert!(project(b1, &first, "b1-first")?.accepted);
-    let jobs = b1.account_db()?.surface_history_page::<SurfaceLogicalJob>(
-        "surface/receipt_job/",
-        "surface/receipt_job/",
-        100,
-    )?;
-    let ack = &jobs.first().ok_or("receipt")?.carrier;
+    let reference = first.surface_reference()?;
+    let prefix = super::super::key("actions", &reference) + "/";
+    let rows = b1.account_db()?.surface_history_page::<Value>(&prefix, &prefix, 100)?;
+    let ack: Carrier =
+        serde_json::from_value(rows.first().ok_or("action")?["attestation"].clone())?;
+    assert_eq!(ack.payload_kind, PayloadKind::ActionReceipt);
     // The receiver already has the human's verified directory record. The signed own context
     // below exercises receiver authentication without a network directory request.
     let control = SurfaceControl {

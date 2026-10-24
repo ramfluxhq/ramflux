@@ -9,11 +9,9 @@ mod control;
 mod control_context;
 mod decision;
 mod group;
-mod logical;
 mod own_checkpoint;
 mod own_history;
 pub(crate) use control::{ControlKind, SurfaceControl};
-pub(crate) use logical::SurfaceLogicalJob;
 pub(crate) use own_checkpoint::OwnedSurfaceCheckpoint;
 pub(crate) use own_history::{SurfaceExportMetadata, SurfaceHistoryExport};
 mod delivery;
@@ -113,4 +111,15 @@ pub(super) fn receipt_key(carrier: &Carrier) -> Result<String, crate::SdkError> 
         "receipt_v2",
         &[&carrier.surface_reference()?, &carrier.sender_principal_id, &carrier.message_id],
     )
+}
+
+/// Measured encrypted JSON/base64 expansion stays below 32x. Reserve 64 KiB for IDs,
+/// routing, bootstrap and sender-key distribution framing within the gateway's 1 MiB frame.
+pub(crate) const MAX_DELIVERY_BYTES: usize =
+    (ramflux_transport::MAX_GATEWAY_FRAME_BYTES - 64 * 1024) / 32;
+pub(crate) fn check_delivery_size(bytes: usize) -> Result<(), crate::SdkError> {
+    if bytes > MAX_DELIVERY_BYTES {
+        return Err(crate::SdkError::SurfaceDeliveryTooLarge { bytes, limit: MAX_DELIVERY_BYTES });
+    }
+    Ok(())
 }

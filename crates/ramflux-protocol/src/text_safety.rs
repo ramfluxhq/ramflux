@@ -41,12 +41,18 @@ pub fn quote_fallback_field(value: &str) -> String {
             '\t' => quoted.push_str("\\t"),
             _ if matches!(
                 get_general_category(ch),
-                C::Control | C::Format | C::LineSeparator | C::ParagraphSeparator
-            ) || index == 0
-                && matches!(
-                    get_general_category(ch),
-                    C::NonspacingMark | C::SpacingMark | C::EnclosingMark
-                ) =>
+                C::Control
+                    | C::Format
+                    | C::LineSeparator
+                    | C::ParagraphSeparator
+                    | C::PrivateUse
+                    | C::Unassigned
+            ) || matches!(ch, '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}')
+                || index == 0
+                    && matches!(
+                        get_general_category(ch),
+                        C::NonspacingMark | C::SpacingMark | C::EnclosingMark
+                    ) =>
             {
                 let _ = write!(quoted, "\\u{{{:x}}}", u32::from(ch));
             }
@@ -111,6 +117,12 @@ mod tests {
         assert!(free_text_is_safe("one\ntwo 👩\u{200d}💻"));
         for ch in ['\t', '\r', '\u{061c}', '\u{200e}', '\u{202e}', '\u{2069}'] {
             assert!(!free_text_is_safe(&format!("x{ch}y")));
+        }
+    }
+    #[test]
+    fn invisible_fillers_private_and_unassigned_characters_are_escaped() {
+        for ch in ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{e000}', '\u{378}'] {
+            assert!(!quote_fallback_field(&format!("x{ch}y")).contains(ch));
         }
     }
 }
