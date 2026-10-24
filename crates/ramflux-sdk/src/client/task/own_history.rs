@@ -101,7 +101,7 @@ impl RamfluxClient {
             self.authorize_task_relations(carrier, state.task())?;
             state
                 .apply(&event, &carrier.signer(&public, &event))
-                .map_err(|e| invalid(e.to_string()))?;
+                .map_err(|error| crate::task_refusal::protocol(&error))?;
             let at = crate::time::now_unix_timestamp();
             let membership = self.task_membership_witness(
                 carrier,
@@ -214,7 +214,9 @@ impl RamfluxClient {
                     active_pins.push(pin.clone());
                 }
             }
-            self.restore_own_group_pins(packet.context.group.as_slice(), &active_pins)?;
+            for pin in &active_pins {
+                self.restore_own_member_pin(pin)?;
+            }
             let first =
                 packet.history.events.first().ok_or_else(|| invalid("own task history empty"))?;
             let id = first.carrier.event()?.event().task_id().to_owned();

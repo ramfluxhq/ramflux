@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Outcome {
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub reason_code: Option<crate::TaskRefusalCode>,
     pub accepted: bool,
     pub fallback_text: String,
     pub reject: Option<String>,
@@ -30,7 +34,10 @@ pub(crate) struct Delivery<'a> {
 impl TaskHistory {
     pub(crate) fn state(&self) -> Result<TaskState, SdkError> {
         if self.events.len() > 289 {
-            return Err(invalid("task event history limit reached"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::TaskQuotaExhausted,
+                "task event history limit reached",
+            ));
         }
         let mut state = self.checkpoint.as_ref().map(|c| c.state.clone()).unwrap_or_default();
         let mut regular = 0;
@@ -47,11 +54,14 @@ impl TaskHistory {
                 regular += 1;
             }
             if regular > 256 || controls > 33 {
-                return Err(invalid("task event history limit reached"));
+                return Err(crate::task_refusal::refused(
+                    crate::TaskRefusalCode::TaskQuotaExhausted,
+                    "task event history limit reached",
+                ));
             }
             state
                 .apply(&event, &accepted.carrier.signer(&accepted.public_key, &event))
-                .map_err(|e| invalid(e.to_string()))?;
+                .map_err(|error| crate::task_refusal::protocol(&error))?;
         }
         Ok(state)
     }
@@ -87,7 +97,10 @@ impl RamfluxClient {
         let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
         let event = carrier.verify(&public)?;
         if self.task_has_no_local_role(carrier)? {
-            return Err(invalid("local account has no role in this task"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::NoLocalRole,
+                "local account has no role in this task",
+            ));
         }
         let history = self.task_history(&carrier.conversation_id, event.event().task_id())?;
         let state = history.state()?;
@@ -96,14 +109,19 @@ impl RamfluxClient {
         let mut candidate = state.clone();
         candidate
             .apply(&event, &carrier.signer(&public, &event))
-            .map_err(|e| invalid(e.to_string()))?;
+            .map_err(|error| crate::task_refusal::protocol(&error))?;
         if history.events.len() >= if control { 289 } else { 256 } {
-            return Err(invalid("task event history limit reached"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::TaskQuotaExhausted,
+                "task event history limit reached",
+            ));
         }
         self.check_task_capacity(carrier, &history)?;
         let (decision_key, decision_proof) =
             if let TaskEventBody::Resolve(resolution) = event.event() {
-                let task = state.task().ok_or_else(|| invalid("task not found"))?;
+                let task = state.task().ok_or_else(|| {
+                    crate::task_refusal::refused(crate::TaskRefusalCode::NotFound, "task not found")
+                })?;
                 let (key, proof) = self.verify_task_decision(carrier, task, resolution)?;
                 if self.account_db()?.load_actor_state::<Value>(&key)?.is_some() {
                     return Err(invalid("external task decision has already been consumed"));
@@ -155,7 +173,9 @@ impl RamfluxClient {
         let event = c.verify(&public)?;
         let mut state = self.task_history(&c.conversation_id, event.event().task_id())?.state()?;
         self.authorize_task_relations(c, state.task())?;
-        state.apply(&event, &c.signer(&public, &event)).map_err(|e| invalid(e.to_string()))?;
+        state
+            .apply(&event, &c.signer(&public, &event))
+            .map_err(|error| crate::task_refusal::protocol(&error))?;
         Ok(())
     }
     pub(crate) fn preflight_task(&self, carrier: &Carrier) -> Result<Task, SdkError> {
@@ -274,6 +294,10 @@ impl RamfluxClient {
             db.prune_task_diagnostics("task/rejected/", 256)?;
         }
         self.store_task_message_metadata(delivery, &outcome)?;
+        let key = scoped("message", delivery.conversation, delivery.message)?;
+        let mut metadata = db.load_actor_state::<Value>(&key)?.unwrap_or_else(|| json!({}));
+        metadata["task_id"] = json!(carrier.event()?.event().task_id());
+        db.persist_actor_state(&key, &metadata)?;
         Ok(outcome)
     }
     fn rejected_task_outcome(
@@ -282,10 +306,18 @@ impl RamfluxClient {
         error: &SdkError,
     ) -> Result<Outcome, SdkError> {
         self.record_task_capacity_rejection(carrier, error)?;
-        if error.to_string().contains("local account has no role in this task") {
+        if matches!(
+            error,
+            SdkError::TaskRefused { reason: crate::TaskRefusalCode::NoLocalRole, .. }
+        ) {
             self.remember_task_no_role(carrier)?;
         }
         Ok(Outcome {
+            task_id: Some(carrier.event()?.event().task_id().into()),
+            reason_code: Some(match error {
+                SdkError::TaskRefused { reason, .. } => *reason,
+                _ => crate::TaskRefusalCode::InvalidEvent,
+            }),
             accepted: false,
             fallback_text: "[Task rejected]".into(),
             reject: Some(error.to_string()),
@@ -345,7 +377,10 @@ impl RamfluxClient {
         };
         let maximum = 2 * 1024 * 1024 + reserve;
         if serde_json::to_vec(&history)?.len() > maximum {
-            return Err(invalid("task history byte budget exceeded"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::TaskQuotaExhausted,
+                "task history byte budget exceeded",
+            ));
         }
         let history_key = scoped("history", &task.conversation_id, &task.task_id)?;
         db.persist_actor_state(&history_key, &history)?;
@@ -368,6 +403,8 @@ impl RamfluxClient {
             view["certificate_hashes"] = json!(history.certificate_hashes()?);
         }
         view["actor_kind_verified"] = json!(kind_verified);
+        view["actors"] = super::read::actor_metadata(self, &task, &history)?;
+        view["result_summary"] = json!(task.result_summary);
         view["created_at"] = json!(history.created_at);
         view["updated_at"] = json!(history.updated_at);
         db.persist_actor_state(&scoped("view", &task.conversation_id, &task.task_id)?, &view)?;
@@ -381,14 +418,26 @@ impl RamfluxClient {
                 delivery.device,
             )?;
         }
-        Ok(Outcome { accepted: true, fallback_text: fallback, reject: None, pending: false })
+        Ok(Outcome {
+            task_id: Some(task.task_id.clone()),
+            reason_code: None,
+            accepted: true,
+            fallback_text: fallback,
+            reject: None,
+            pending: false,
+        })
     }
     pub(super) fn store_task_message_metadata(
         &self,
         delivery: &Delivery<'_>,
         outcome: &Outcome,
     ) -> Result<(), SdkError> {
-        self.account_db()?.persist_actor_state(&scoped("message",delivery.conversation,delivery.message)?,&json!({"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind_verified":super::actor_kind_verified(self, delivery.principal, delivery.device)}))?;
+        let db = self.account_db()?;
+        let key = scoped("message", delivery.conversation, delivery.message)?;
+        let task_id = outcome.task_id.clone().or(db
+            .load_actor_state::<Value>(&key)?
+            .and_then(|v| v["task_id"].as_str().map(str::to_owned)));
+        db.persist_actor_state(&key,&json!({"task_id":task_id,"reason_code":outcome.reason_code,"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind_verified":super::actor_kind_verified(self, delivery.principal, delivery.device)}))?;
         Ok(())
     }
     pub(crate) fn task_message_metadata(

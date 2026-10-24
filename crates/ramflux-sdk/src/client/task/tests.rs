@@ -69,7 +69,7 @@ fn sign(
         body,
         crate::prelude::sdk_device_signed_fields(&d.device_id, ""),
     )
-    .map_err(|e| invalid(e.to_string()))?;
+    .map_err(|error| crate::task_refusal::protocol(&error))?;
     client.sign_task_event(e, id.into(), None)
 }
 fn project(
@@ -158,6 +158,10 @@ fn task_actor_kind_is_unverified_and_agent_cannot_accept_its_own_proposal() -> T
     assert!(project(&f.human, &accepted)?.accepted);
     let row = f.human.task_get(Some("thread"), "proposal")?;
     assert_eq!(row["requester"], "human");
+    assert_eq!(row["actors"]["acceptor"]["principal_id"], "human");
+    assert_eq!(row["actors"]["requester"]["actor_kind_verified"], false);
+    assert_eq!(row["actors"]["assignee"]["actor_kind_verified"], false);
+    assert_eq!(row["actors"]["acceptor"]["actor_kind_verified"], false);
     assert_eq!(row["actor_kind_verified"], false);
     Ok(())
 }
@@ -207,6 +211,7 @@ fn rejected_updates_leave_task_revision_and_steps_unchanged_and_replays_are_idem
         "thread",
         "bad-update",
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: "task".into(),
             version: 2,
             state: TaskStatus::Done,
@@ -246,6 +251,7 @@ fn out_of_order_task_revisions_wait_durably_and_apply_after_the_missing_start() 
         "thread",
         "early-update",
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: "task".into(),
             version: 2,
             state: TaskStatus::Running,
@@ -272,6 +278,7 @@ fn task_holdback_is_bounded_and_one_expired_task_does_not_block_another_conversa
             "thread",
             &format!("early-{index}"),
             TaskEventBody::Update(TaskUpdate {
+                result_summary: None,
                 task_id: format!("missing-{index}"),
                 version: 2,
                 state: TaskStatus::Running,
@@ -286,6 +293,7 @@ fn task_holdback_is_bounded_and_one_expired_task_does_not_block_another_conversa
         "thread",
         "overflow",
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: "overflow".into(),
             version: 2,
             state: TaskStatus::Running,
@@ -403,3 +411,6 @@ mod lifecycle_regressions;
 
 #[path = "quota_tests.rs"]
 mod signer_quota_regressions;
+
+#[path = "approval_tests.rs"]
+mod approval_regressions;

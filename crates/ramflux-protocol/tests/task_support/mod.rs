@@ -81,6 +81,7 @@ pub fn proposal() -> TaskEventBody {
 }
 pub fn update(version: u64, state: TaskStatus, steps: Vec<TaskStep>) -> TaskEventBody {
     TaskEventBody::Update(TaskUpdate {
+        result_summary: None,
         task_id: "task".to_owned(),
         version,
         state,

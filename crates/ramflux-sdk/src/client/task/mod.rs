@@ -2,12 +2,14 @@
 // Copyright (c) 2026 Span Brain
 
 //! Signed task carriers and account-owned task projections in encrypted conversations.
+pub(crate) mod approval;
 mod authority;
 pub(crate) mod carrier;
 pub(crate) mod certificate;
 mod checkpoint;
 pub(crate) mod control;
 pub(crate) mod decision;
+mod global_capacity;
 mod historical;
 mod intervention;
 mod lifecycle;
@@ -52,7 +54,7 @@ pub(crate) fn key(kind: &str, id: &str) -> String {
     )
 }
 pub(crate) fn invalid(message: impl Into<String>) -> SdkError {
-    SdkError::LocalBus(message.into())
+    crate::task_refusal::refused(crate::TaskRefusalCode::InvalidRequest, message)
 }
 
 pub(crate) fn scoped(kind: &str, conversation: &str, id: &str) -> Result<String, SdkError> {

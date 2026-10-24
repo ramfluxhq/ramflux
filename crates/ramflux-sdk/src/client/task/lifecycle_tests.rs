@@ -204,12 +204,13 @@ fn replayed_decision_ids_leave_no_reservation_for_an_otherwise_valid_second_gran
         f.human.device_branch.as_ref().ok_or("device")?,
         &grant.signing_body,
     )?;
-    decisions::store(&f, &grant)?;
+
     let update = sign(
         &f.agent,
         "thread",
         "second-needs-me",
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: "task".into(),
             version: 4,
             state: TaskStatus::NeedsMe,
@@ -225,6 +226,17 @@ fn replayed_decision_ids_leave_no_reservation_for_an_otherwise_valid_second_gran
         }),
     )?;
     assert!(project(&f.agent, &update)?.accepted);
+    grant.signing_body.task_binding = Some(f.agent.task_approval_binding(
+        "thread",
+        "task",
+        "step",
+        &ramflux_protocol::NeedsMe::Approval { grant_id: grant.grant_id.clone() },
+    )?);
+    grant.signature = ramflux_crypto::sign_with_device_branch(
+        f.human.device_branch.as_ref().ok_or("device")?,
+        &grant.signing_body,
+    )?;
+    decisions::store(&f, &grant)?;
     let mut resolution = decisions::resolution("task", ramflux_protocol::TaskDecision::Resume);
     resolution.base_revision = 4;
     resolution.target = ramflux_protocol::NeedsMe::Approval { grant_id: grant.grant_id };

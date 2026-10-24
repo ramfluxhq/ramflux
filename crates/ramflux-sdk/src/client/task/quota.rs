@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Event-signer resource accounting and independent requester recovery headroom.
-use super::{TaskHistory, carrier::Carrier, invalid, lifecycle::Lifecycle, scoped};
+use super::{TaskHistory, carrier::Carrier, lifecycle::Lifecycle, scoped};
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::TaskEventBody;
 use serde::{Deserialize, Serialize};
@@ -11,14 +11,14 @@ use std::collections::BTreeMap;
 const SIGNER_QUOTA: &str = "task signer history quota reached";
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct Usage {
-    bytes: u64,
-    events: u64,
+    pub(super) bytes: u64,
+    pub(super) events: u64,
     decisions: u64,
     decision_bytes: u64,
     cancel_bytes: u64,
 }
 impl Usage {
-    fn charge(
+    pub(super) fn charge(
         &mut self,
         carrier: &Carrier,
         bytes: u64,
@@ -98,10 +98,16 @@ impl RamfluxClient {
         if existing.as_ref().is_some_and(|r| r.compaction_eligible)
             && matches!(c.event()?.event(), TaskEventBody::Update(_))
         {
-            return Err(invalid(SIGNER_QUOTA));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::TaskStalled,
+                SIGNER_QUOTA,
+            ));
         }
         if existing.as_ref().is_some_and(|r| r.compacted) && !control {
-            return Err(invalid("task history has been archived"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::TaskStalled,
+                "task history has been archived",
+            ));
         }
         let mut usage = history_usage(history)?;
         if !history.events.iter().any(|e| {
@@ -120,7 +126,10 @@ impl RamfluxClient {
             return if current.cancel_bytes <= 16 * 1024 {
                 Ok(())
             } else {
-                Err(invalid("task cancel byte quota reached"))
+                Err(crate::task_refusal::refused(
+                    crate::TaskRefusalCode::TaskQuotaExhausted,
+                    "task cancel byte quota reached",
+                ))
             };
         }
         let index = scoped("lifecycle", &c.conversation_id, &id)?;
@@ -153,7 +162,10 @@ impl RamfluxClient {
                 || total.decisions > 512
                 || total.decision_bytes > 1024 * 1024
             {
-                return Err(invalid("task requester decision quota reached"));
+                return Err(crate::task_refusal::refused(
+                    crate::TaskRefusalCode::SignerQuotaExhausted,
+                    "task requester decision quota reached",
+                ));
             }
         } else if total.bytes > 8 * 1024 * 1024
             || conversation.bytes > 8 * 1024 * 1024
@@ -162,26 +174,43 @@ impl RamfluxClient {
             || (matches!(c.event()?.event(), TaskEventBody::Start(_) | TaskEventBody::Proposal(_))
                 && (active.len() >= 32 || local_active >= 16))
         {
-            return Err(invalid(SIGNER_QUOTA));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::SignerQuotaExhausted,
+                SIGNER_QUOTA,
+            ));
         }
-        Ok(())
+        self.admit_global_task_history(c, history)
     }
     pub(super) fn record_task_capacity_rejection(
         &self,
         c: &Carrier,
         error: &SdkError,
     ) -> Result<(), SdkError> {
-        if !matches!(error, SdkError::LocalBus(message) if matches!(message.as_str(), SIGNER_QUOTA | "task event history limit reached" | "task history byte budget exceeded"))
-            || !matches!(c.event()?.event(), TaskEventBody::Update(_))
-        {
+        let all = match error {
+            SdkError::TaskRefused {
+                reason: crate::TaskRefusalCode::SignerQuotaExhausted, ..
+            } => true,
+            SdkError::TaskRefused {
+                reason: crate::TaskRefusalCode::TaskQuotaExhausted, ..
+            } => false,
+            _ => return Ok(()),
+        };
+        if !matches!(c.event()?.event(), TaskEventBody::Update(_)) {
             return Ok(());
         }
+        let rejected_id = c.event()?.event().task_id().to_owned();
         let db = self.account_db()?;
         for value in db.task_lifecycle_rows(None, None, false)? {
             let mut row: Lifecycle = serde_json::from_value(value)?;
             let view_key = scoped("view", &row.conversation_id, &row.task_id)?;
             let Some(mut view) = db.load_actor_state::<Value>(&view_key)? else { continue };
-            if row.terminal || row.compacted || view["assignee"] != c.principal_id {
+            if row.terminal
+                || row.compacted
+                || row.compaction_eligible
+                || view["assignee"] != c.principal_id
+                || (!all
+                    && (row.task_id != rejected_id || row.conversation_id != c.conversation_id))
+            {
                 continue;
             }
             if row.usage.is_empty() && row.bytes > 0 {
@@ -246,7 +275,10 @@ impl RamfluxClient {
             }
             let count = rate["count"].as_u64().unwrap_or(0);
             if count >= maximum {
-                return Err(invalid("task admission rate exceeded"));
+                return Err(crate::task_refusal::refused(
+                    crate::TaskRefusalCode::RateLimited,
+                    "task admission rate exceeded",
+                ));
             }
             rate["count"] = json!(count + 1);
             db.persist_actor_state(&key, &rate)?;

@@ -7,7 +7,7 @@ use ramflux_protocol::TaskCancel;
 fn register(f: &Fixture, id: &str, seed: u8) -> Result<RamfluxClient, SdkError> {
     let peer = client(&f.root.join(id), id, seed)?;
     let branch = peer.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    f.human.account_db()?.persist_client_record("device", &branch.device_id, &json!({"principal_id":id,"signing_public_key":ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())}))?;
+    f.human.account_db()?.persist_client_record("device", &branch.device_id, &json!({"principal_id":id,"principal_commitment":crate::identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(peer.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.verifying_key().to_bytes()))?,"signing_public_key":ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())}))?;
     Ok(peer)
 }
 fn peer_start(id: &str, conversation: &str, source: &str, assignee: &str) -> TaskEventBody {
@@ -26,6 +26,7 @@ fn early(peer: &RamfluxClient, conversation: &str, id: &str) -> Result<carrier::
         conversation,
         id,
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: id.into(),
             version: 2,
             state: TaskStatus::Running,
@@ -49,6 +50,7 @@ fn seed_large_assignee_history(f: &Fixture) -> TestResult {
                 "thread",
                 &format!("update-{}", offset * 7 + task),
                 TaskEventBody::Update(TaskUpdate {
+                    result_summary: None,
                     task_id: id.clone(),
                     version: 2 + offset,
                     state: TaskStatus::Running,
@@ -151,6 +153,7 @@ fn an_assignees_one_hundred_sixty_updates_cannot_spend_the_requesters_quota_or_p
             "thread",
             &format!("update-{index}"),
             TaskEventBody::Update(TaskUpdate {
+                result_summary: None,
                 task_id: id,
                 version,
                 state: TaskStatus::Running,
@@ -313,6 +316,7 @@ fn rejected_no_role_group_tasks_never_hold_their_followup_events() -> TestResult
             "group-thread",
             &format!("followup-{index}"),
             TaskEventBody::Update(TaskUpdate {
+                result_summary: None,
                 task_id: "unrelated".into(),
                 version: 2 + index,
                 state: TaskStatus::Running,
@@ -366,6 +370,7 @@ fn twenty_one_peer_terminal_rounds_compact_only_that_peers_history() -> TestResu
                 "thread",
                 "work",
                 TaskEventBody::Update(TaskUpdate {
+                    result_summary: None,
                     task_id: "worked".into(),
                     version: 2,
                     state: TaskStatus::Running,
@@ -456,6 +461,7 @@ fn the_ordinary_history_event_limit_keeps_a_reserved_requester_cancellation_slot
             "thread",
             &format!("update-{version}"),
             TaskEventBody::Update(TaskUpdate {
+                result_summary: None,
                 task_id: "task".into(),
                 version,
                 state: TaskStatus::Running,
@@ -481,3 +487,6 @@ fn the_ordinary_history_event_limit_keeps_a_reserved_requester_cancellation_slot
     assert_eq!(f.human.task_get(Some("thread"), "task")?["state"], "cancelled");
     Ok(())
 }
+
+#[path = "r4_quota_tests.rs"]
+mod r4;

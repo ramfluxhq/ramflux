@@ -14,6 +14,15 @@ pub(crate) async fn dispatch_task(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    dispatch_task_inner(request, state).await.map_err(|error| match error {
+        SdkError::Json(_) => invalid("invalid task request shape"),
+        other => other,
+    })
+}
+async fn dispatch_task_inner(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
     let id = request_account_id(request)?;
     if matches!(request.method.as_str(), "task.get" | "task.list") {
         return Ok(local_bus_ok(read_task(&local_bus_account(state, id)?.client, request)?));
@@ -27,10 +36,12 @@ pub(crate) async fn dispatch_task(
     let principal = device.principal_id.clone();
     let conversation = if let Some(conversation) = request.body["conversation_id"].as_str() {
         conversation.to_owned()
-    } else if request.method == "task.cancel" {
+    } else if !matches!(request.method.as_str(), "task.start" | "task.propose") {
         account.client.task_get(None, required(&request.body, "task_id")?)?["conversation_id"]
             .as_str()
-            .ok_or_else(|| invalid("task not found"))?
+            .ok_or_else(|| {
+                crate::task_refusal::refused(crate::TaskRefusalCode::NotFound, "task not found")
+            })?
             .to_owned()
     } else {
         return Err(invalid("task conversation_id required"));
@@ -41,16 +52,18 @@ pub(crate) async fn dispatch_task(
     let mut body = request.body.clone();
     let object = body.as_object_mut().ok_or_else(|| invalid("task request must be an object"))?;
     object.remove("message_id");
-    object.remove("proposal_id");
+    if object.contains_key("proposal_id") {
+        return Err(invalid("proposal acceptance uses task.accept {task_id,version}"));
+    }
     object.remove("decision_proof_base64");
     let message = request.body["message_id"]
         .as_str()
         .map_or_else(crate::new_surface_message_id, |id| Ok(id.to_owned()))?;
     object.insert("task_id".into(), json!(task_id));
-    let event = build_event(request, account, &conversation, &principal, body)?;
+    let event = build_event(request, &principal, body)?;
     let event =
         TaskEvent::new(conversation, event, sdk_device_signed_fields(&device.device_id, ""))
-            .map_err(|e| invalid(e.to_string()))?;
+            .map_err(|error| crate::task_refusal::protocol(&error))?;
     let carrier = account.client.sign_task_event(
         event,
         message,
@@ -184,35 +197,11 @@ fn authorize_local_task_sender(
 
 fn build_event(
     request: &LocalBusFrame,
-    account: &LocalBusAccountState,
-    conversation: &str,
     principal: &str,
     mut body: Value,
 ) -> Result<TaskEventBody, SdkError> {
     let object = body.as_object_mut().ok_or_else(|| invalid("task request must be an object"))?;
     Ok(match request.method.as_str() {
-        "task.start" if request.body["proposal_id"].is_string() => {
-            let proposal = required(&request.body, "proposal_id")?;
-            let current = account.client.task_get(Some(conversation), proposal)?;
-            if current.is_null()
-                || current["assignee"] != request.body["assignee"]
-                || request.body["constraints"].as_str().is_some_and(|v| !v.is_empty())
-                || request.body["text"]
-                    .as_str()
-                    .is_some_and(|v| !v.is_empty() && current["title"].as_str() != Some(v))
-            {
-                return Err(invalid(
-                    "proposal acceptance requires unchanged proposal; use task.accept without text or constraints",
-                ));
-            }
-            TaskEventBody::Accept(TaskAccept {
-                task_id: proposal.into(),
-                version: current["version"]
-                    .as_u64()
-                    .ok_or_else(|| invalid("proposal revision missing"))?
-                    + 1,
-            })
-        }
         "task.start" => {
             object.insert("requester".into(), json!(principal));
             TaskEventBody::Start(serde_json::from_value::<TaskStart>(body)?)

@@ -218,7 +218,7 @@ impl RamfluxClient {
         self.account_db()?.prune_task_certificates(now)?;
         Ok(())
     }
-    fn compact_task(&self, row: &Lifecycle, prune: bool) -> Result<(), SdkError> {
+    pub(super) fn compact_task(&self, row: &Lifecycle, prune: bool) -> Result<(), SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| {
             let history = self.task_history(&row.conversation_id, &row.task_id)?;
@@ -251,6 +251,8 @@ impl RamfluxClient {
                 compact.compaction_eligible = false;
                 db.persist_actor_state(&index_key, &compact)?;
             }
+            let version=db.load_actor_state::<Value>(&view_key)?.and_then(|v|v["version"].as_u64());
+            db.append_journal(&format!("task-lifecycle:{}:{}:{}",scoped("event",&row.conversation_id,&row.task_id)?,row.updated_at,if prune{"pruned"}else{"compacted"}),"task.changed",&json!({"conversation_id":row.conversation_id,"task_id":row.task_id,"version":version,"compacted":!prune,"removed":prune}),crate::time::now_unix_timestamp(),None)?;
             Ok(())
         })
     }

@@ -26,7 +26,7 @@ impl TaskHistory {
             let event = accepted.carrier.verify(&accepted.public_key)?;
             let task = state
                 .apply(&event, &accepted.carrier.signer(&accepted.public_key, &event))
-                .map_err(|e| invalid(e.to_string()))?;
+                .map_err(|error| crate::task_refusal::protocol(&error))?;
             let current =
                 task.steps.iter().find(|s| s.id == step).and_then(|s| s.needs_me.as_ref());
             if current == Some(target) {

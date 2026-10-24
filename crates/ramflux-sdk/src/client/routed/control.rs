@@ -14,6 +14,9 @@ impl RamfluxClient {
         if self.receive_surface_resync_request(entry, &opened.routing.conversation_id, body)? {
             return Ok(None);
         }
+        if self.receive_task_approval(entry, &opened.routing.conversation_id, body)? {
+            return Ok(None);
+        }
         if self.receive_task_control(
             entry,
             &opened.routing.conversation_id,
@@ -208,7 +211,8 @@ impl RamfluxClient {
         opened: &Opened,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if body.starts_with(crate::client::task::own_history::PREFIX)
+        if body.starts_with(crate::client::task::approval::PREFIX)
+            || body.starts_with(crate::client::task::own_history::PREFIX)
             || body.starts_with(crate::client::task::control::PREFIX)
         {
             return Ok(());

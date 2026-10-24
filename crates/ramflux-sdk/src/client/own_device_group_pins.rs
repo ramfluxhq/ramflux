@@ -104,7 +104,7 @@ impl RamfluxClient {
         }
         Ok(blocked)
     }
-    fn restore_own_member_pin(
+    pub(crate) fn restore_own_member_pin(
         &self,
         pin: &crate::own_device_sync::SdkOwnDeviceGroupMemberPin,
     ) -> Result<(), SdkError> {

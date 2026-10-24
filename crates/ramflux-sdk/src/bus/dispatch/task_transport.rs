@@ -21,7 +21,10 @@ pub(crate) async fn send(
     if let Some(outcome) = account.client.task_delivery_receipt(c)?
         && !outcome.accepted
     {
-        return Err(invalid(outcome.reject.unwrap_or_else(|| "task rejected".into())));
+        return Err(crate::task_refusal::refused(
+            outcome.reason_code.unwrap_or(crate::TaskRefusalCode::InvalidEvent),
+            outcome.reject.unwrap_or_else(|| "task rejected".into()),
+        ));
     }
     let thread = account
         .client
@@ -42,7 +45,7 @@ pub(crate) async fn send(
             at: now_unix_timestamp(),
         }, &c.bytes()?)?.ok_or_else(|| invalid("task projection absent"))?;
         if !outcome.accepted && !outcome.pending {
-            return Err(invalid(outcome.reject.unwrap_or_else(|| "task rejected".into())));
+            return Err(crate::task_refusal::refused(outcome.reason_code.unwrap_or(crate::TaskRefusalCode::InvalidEvent),outcome.reject.unwrap_or_else(|| "task rejected".into())));
         }
         if account.client.direct_message_by_id(&timeline)?.is_none() {
             account.client.send_direct_message(&c.conversation_id,&timeline,&c.device_id,&[])?;
@@ -87,7 +90,16 @@ pub(super) async fn prepare(
     let mut peers = Vec::new();
     if !matches!(mode, Mode::Own) {
         if let Some(group) = thread["group_id"].as_str() {
-            group_plan = Some(super::task_group::plan(account, c, group, &engine.config).await?);
+            group_plan = Some(
+                super::task_group::plan(
+                    account,
+                    &c.conversation_id,
+                    &c.message_id,
+                    group,
+                    &engine.config,
+                )
+                .await?,
+            );
         } else {
             peers = direct_targets(account, &engine.config, thread).await?;
         }
@@ -136,21 +148,13 @@ pub(super) async fn prepare(
         (Some(pages), original)
     };
     crate::client::task::check_delivery_size(task_body.len())?;
-    let own_bytes =
-        own_packet.as_ref().map_or(0, |pages| pages.iter().map(Vec::len).sum::<usize>());
-    let group_targets = group_plan.as_ref().map_or(0, |plan| plan.targets.len().saturating_mul(2));
-    let budget = own_bytes
-        .saturating_mul(own_targets.len())
-        .saturating_add(
-            task_body
-                .len()
-                .saturating_add(4096)
-                .saturating_mul(peers.len().saturating_add(group_targets)),
-        )
-        .saturating_mul(32);
-    if budget > 32 * 1024 * 1024 {
-        return Err(invalid("task fanout preparation byte budget exceeded"));
-    }
+    check_preparation_budget(
+        own_packet.as_deref(),
+        own_targets.len(),
+        group_plan.as_ref().map_or(0, |p| p.targets.len().saturating_mul(2)),
+        peers.len(),
+        task_body.len(),
+    )?;
     let mut deliveries = Vec::new();
     if let Some(plan) = group_plan {
         deliveries.extend(super::task_group::prepare(account, engine, c, plan).await?);
@@ -171,6 +175,25 @@ pub(super) async fn prepare(
         }
     }
     Ok(deliveries)
+}
+fn check_preparation_budget(
+    own: Option<&[Vec<u8>]>,
+    own_targets: usize,
+    group_targets: usize,
+    peers: usize,
+    body: usize,
+) -> Result<(), SdkError> {
+    let own_bytes = own.map_or(0, |pages| pages.iter().map(Vec::len).sum::<usize>());
+    let budget = own_bytes
+        .saturating_mul(own_targets)
+        .saturating_add(
+            body.saturating_add(4096).saturating_mul(peers.saturating_add(group_targets)),
+        )
+        .saturating_mul(32);
+    if budget > 32 * 1024 * 1024 {
+        return Err(invalid("task fanout preparation byte budget exceeded"));
+    }
+    Ok(())
 }
 fn delivery_route(
     target: &Target,
@@ -326,7 +349,7 @@ pub(crate) async fn drain_confirmations(
     }
     Ok(sent)
 }
-async fn send_control(
+pub(super) async fn send_control(
     account: &mut LocalBusAccountState,
     c: &Carrier,
     mode: Mode<'_>,
@@ -354,7 +377,7 @@ async fn send_control(
     Ok(())
 }
 
-async fn direct_targets(
+pub(super) async fn direct_targets(
     account: &LocalBusAccountState,
     gateway: &GatewaySessionConfig,
     thread: &Value,
@@ -419,7 +442,7 @@ async fn direct_targets(
         .collect())
 }
 
-async fn own_targets(
+pub(super) async fn own_targets(
     account: &LocalBusAccountState,
     gateway: &GatewaySessionConfig,
 ) -> Result<Vec<Target>, SdkError> {

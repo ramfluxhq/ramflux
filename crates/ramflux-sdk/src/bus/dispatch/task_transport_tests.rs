@@ -4,7 +4,7 @@
 //! Task carrier and own-control frame limits through the real encrypted transport adapters.
 use super::super::surface_transport::{
     fixture,
-    tests::{directory_config, members_count},
+    tests::{directory_config, members as members_count},
 };
 use super::*;
 use crate::bus::runtime_tests;
@@ -162,6 +162,67 @@ async fn requester_cancellation_after_compaction_prepares_original_sibling_event
     assert_eq!(super::send(&mut source, &cancel).await?["accepted"], true);
     assert!(captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() > before);
     assert_eq!(source.client.task_get(Some("thread"), "task")?["state"], "cancelled");
+    directory.abort();
+    drop(peers);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_group_members()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::{TaskEvent, TaskEventBody, TaskStart};
+    let root = runtime_tests::root("task-private-approval");
+    let mut source = runtime_tests::account(
+        &root.join("sender"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let peers = members_count(&root, &source, 2)?;
+    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    for peer in &peers {
+        source.client.persist_identity_directory(&fixture::manifest(&peer.client)?)?;
+        source.client.pin_joined_group_member(
+            "group",
+            &peer.client.device_branch.as_ref().ok_or("peer device")?.device_id,
+        )?;
+    }
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    source.put_engine(GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(fixture::RecordingGateway::new(captured.clone())),
+    ));
+    source.client.account_db()?.persist_client_record(
+        "conversation",
+        "thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    let event = TaskEvent::new(
+        "thread".into(),
+        TaskEventBody::Start(TaskStart {
+            task_id: "task".into(),
+            conversation_id: "thread".into(),
+            requester: "sender".into(),
+            assignee: "peer-0".into(),
+            text: "work".into(),
+            constraints: None,
+        }),
+        sdk_device_signed_fields("device-sender", ""),
+    )?;
+    let anchor = source.client.sign_task_event(event, "anchor".into(), None)?;
+    super::super::task_approval_transport::send(
+        &mut source,
+        &anchor.conversation_id,
+        "peer-0",
+        b"PRIVATE_MCP_ARGUMENTS",
+    )
+    .await?;
+    let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert_eq!(envelopes.len(), 1, "the unrelated group member receives no approval payload");
+    assert_eq!(envelopes[0].target_delivery_id, "peer-0");
+    assert!(!serde_json::to_string(&envelopes)?.contains("PRIVATE_MCP_ARGUMENTS"));
     directory.abort();
     drop(peers);
     drop(source);

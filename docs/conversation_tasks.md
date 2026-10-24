@@ -9,24 +9,48 @@ execute tools, change a tool's arguments, or grant tool capabilities.
 
 All methods select an unlocked local account through the request's account ID.
 
-| Method | Body |
-|---|---|
-| `task.start` | `conversation_id`, `assignee`, `text`, optional `constraints`, `task_id`, `message_id` |
-| `task.propose` | `conversation_id`, `assignee`, `title`, `steps`, optional `task_id`, `message_id` |
-| `task.accept` | `conversation_id`, `task_id`, next `version`, optional `message_id` |
-| `task.decline` | `conversation_id`, `task_id`, `base_revision`, optional `reason`, `message_id` |
-| `task.update` | `conversation_id`, `task_id`, next `version`, `state`, `steps`, optional `result_ref`, `message_id` |
-| `task.cancel` | `task_id`, `base_revision` (alias `version`), optional `conversation_id`, `reason`, `message_id` |
-| `task.resolve` | `conversation_id`, `task_id`, `base_revision`, `step_id`, `target`, `decision_id`, `decision`, optional `message_id` |
-| `task.get` | `task_id`, optional `conversation_id` |
-| `task.list` | `conversation_id`, optional `state`, `cursor`, `limit` |
+Each example is a request method and body. Account selection belongs to the bus frame.
+Optional `message_id` is an idempotency key for writes. Omit `conversation_id` on
+existing-task methods only when the task ID is unambiguous. `task.accept` has one
+form: accept the existing proposal by task ID and next version; `proposal_id`
+on `task.start` is rejected. Decline uses the next version; Cancel uses the
+observed version (converted internally to `base_revision`). Resolve uses the
+observed `base_revision`. Reason fields are not accepted.
 
-The desktop `task.start` form with `proposal_id` accepts the existing proposal;
-it does not create another task. Its assignee and any nonempty text must match
-the proposal. New constraints must use a separate task because acceptance
-cannot change the proposal. `task.cancel {task_id, version}` uses the observed
-revision, not the next revision. Unscoped lookups and cancellation reject
-ambiguous IDs across conversations.
+```json
+{"method":"task.start","body":{"conversation_id":"thread","task_id":"task","assignee":"agent","text":"Investigate","constraints":"Use approved tools"}}
+```
+```json
+{"method":"task.propose","body":{"conversation_id":"thread","task_id":"task","assignee":"agent","title":"Investigate","steps":[{"id":"step","title":"Inspect","state":"proposed"}]}}
+```
+```json
+{"method":"task.accept","body":{"task_id":"task","version":2}}
+```
+```json
+{"method":"task.decline","body":{"task_id":"task","version":2}}
+```
+```json
+{"method":"task.update","body":{"task_id":"task","version":3,"state":"done","steps":[{"id":"step","title":"Inspect","state":"done"}],"result_ref":"object:report","result_summary":"Inspection complete"}}
+```
+```json
+{"method":"task.cancel","body":{"task_id":"task","version":3}}
+```
+```json
+{"method":"task.resolve","body":{"task_id":"task","base_revision":4,"step_id":"step","target":{"kind":"approval","grant_id":"grant"},"decision_id":"approval","decision":"resume"}}
+```
+```json
+{"method":"task.get","body":{"task_id":"task"}}
+```
+```json
+{"method":"task.list","body":{"conversation_id":"thread","state":"needs_me","cursor":"","limit":50}}
+```
+
+Refusals use typed `error.code`: `invalid_request`, `invalid_event`,
+`not_requester`, `not_assignee`, `not_member`, `not_eligible_acceptor`,
+`human_required`, `stale_revision`, `terminal`, `task_stalled`, `not_found`,
+`already_exists`, `no_local_role`, `quota_exhausted`, `rate_limited`,
+`decision_consumed`, or `decision_mismatch`. Transport failures keep their
+transport error codes. Clients never need to parse English messages.
 
 Start creates a running task. Proposal creates a proposed task, then acceptance
 starts it. An ordinary text request can precede a proposal. A task cannot be
@@ -51,10 +75,31 @@ a peer's self-asserted kind is never trusted.
 Approval refers to a single-use, argument-bound decision accepted by the
 existing MCP approval flow. The grant signature must belong to a verified
 requester device. A task receipt does not consume or execute the MCP tool call.
+An assignee's pending MCP approval is sent privately to the requester's active
+devices as an assignee-signed, pair-E2EE control inside the conversation.
+`grant.list.approvals` and `mcp.approval.list.approvals` contain the remote
+approval, a scoped `approval_id`, the original `decision_id`, `grant_id` and
+`task_binding` (conversation/task/step/opening revision/requester/assignee/executor).
+The requester calls `grant.approve {approval_id}` or `grant.deny {approval_id}`.
+Its attended daemon signs the immutable grant body and queues the decision
+back to the executor and its own siblings. The response's `decision_id` is the
+ID to pass to `task.resolve`; the scoped UI approval ID is not a grant ID.
+The executor revalidates the installed MCP registry and original request before
+accepting the grant. The grant signature also binds the task intervention;
+a changed task or opening revision cannot reuse it. Pending requests and
+decisions are stored in the encrypted account database before acknowledgement.
+Private tool arguments are never published to other group members or journals.
+Courier attempts are bounded (two per sync tick, eight attempts, capped
+exponential backoff), with expiry and bounded encrypted storage. Tool execution
+still uses the existing argument-bound single-use MCP gate.
+
 Choice/input refers to an accepted surface action at the current surface
 version/hash with validated arguments and deduplication. That action's values
 must contain `decision: "resume"` or `decision: "deny"` matching the resolution.
-`decision_id` is the surface action receipt ID returned by `surface.get`.
+`decision_id` is `surface.get.actions[].action_receipt_id` (also
+`surface.get.action_receipt_id` for the latest action). `receipt_verified:true`
+on the action means its creator receipt is available; wait for it before resolving.
+This is the delivery receipt ID, distinct from the action name `action_id`.
 A read-only replica may verify a creator-signed receipt; task confirmation never
 makes that surface action executable on the replica.
 
@@ -99,7 +144,7 @@ of container overhead, so resolution traffic cannot consume cancellation space. 
 local account is neither requester nor assignee are rejected. Proposals can
 also involve the local account as an eligible acceptor. Quota failures produce
 rejection receipts instead of disabling intake for other sources.
-An assignee exceeding its quota is rejected and marks its active tasks
+A per-task limit stalls only that task. An assignee exceeding its own signer quota is rejected and marks its active tasks
 `stalled_by_assignee:true`, with `progress_state:"stalled by assignee"`.
 Maintenance can compact those histories while retaining a trusted local
 reduction checkpoint and intervention origins. Requester cancellation and
@@ -124,9 +169,10 @@ event position (group epoch or direct participant/time context); importing
 history does not rejudge those events by today's membership or blocked state.
 Locally validated roster snapshots, where retained, override bundle membership
 claims at that epoch. The claimed position cannot authorize an actor or
-assignee absent from the receiver's validated roster. These snapshots are
-captured on local group mutations and verified control events, independently
-of snapshot import, and are bounded to 256 records. Bundle witnesses are
+assignee absent from the receiver's validated roster. These rosters are
+recorded only after verified group controls, never on snapshot import, and are
+bounded to 256 records. Recording errors are nonfatal. A snapshot mismatch is
+logged and the verified roster wins. Legacy unproven roster caches are ignored. Bundle witnesses are
 trusted only within authenticated same-root history, never
 as peer authority. Older direct histories can use their committed participant
 context; a group history without an epoch witness is skipped with a reason.
@@ -141,6 +187,12 @@ oldest entry. Rejected no-role Starts leave bounded tombstones (64 per signer,
 512 per account, seven days), so unrelated follow-up traffic never enters
 holdback while its tombstone is retained.
 
+Retained regular event history has an aggregate cap of 32 MiB / 32,768 events
+across all signers. Admission reclaims a history from the largest signer first,
+retaining a local checkpoint; requester Cancel/Resolve keep recovery headroom.
+No-role tombstones include the authenticated signer, so another principal can
+legitimately use the same task ID.
+
 Offline export scans bounded history pages with a persisted continuation cursor
 per target device.
 Each snapshot includes at most 100 task pages / 4 MiB and optional
@@ -154,8 +206,12 @@ the final history. Snapshot pages can be incomplete when the budget is reached.
 `task.get` returns the task, steps, revision, timestamps and unverified-kind
 marker; `task.list` returns `tasks` plus `next_cursor`. `message.list` and
 `message.read` include task content type, escaped fallback and the same marker.
-Clients without task rendering can display the fallback. `task.changed` contains
-IDs, version and status metadata, never task text, constraints or form values.
+Both message methods expose `task_id`. Reads include `result_ref` and
+`result_summary` (at most 4,096 safe text characters, signed, terminal updates
+only), per-actor `actors.{requester,assignee,acceptor}.{principal_id,actor_kind_verified}`,
+and restart-durable `pending_resolution` metadata (`awaiting_executor` or
+`executor_timeout`). Compaction retains the summary. Clients without task rendering can display the fallback. `task.changed` contains
+IDs, version and status metadata, including `compacted`/`removed` lifecycle notices, never task text, constraints or form values.
 
 Delivery admits at most 30 KiB including the signed carrier or history page,
 using a measured conservative budget for nested JSON and E2EE framing under

@@ -42,7 +42,7 @@ fn manifest(c: &RamfluxClient) -> Result<SdkDeviceManifestResponse, SdkError> {
         }],
     })
 }
-fn manifests(f: &Fixture) -> Result<(), SdkError> {
+pub(super) fn manifests(f: &Fixture) -> Result<(), SdkError> {
     for owner in [&f.human, &f.agent] {
         let m = manifest(owner)?;
         for local in [&f.human, &f.agent] {
@@ -110,6 +110,7 @@ fn own_device_history_pages_fit_the_transport_budget_and_require_the_causal_pref
             "thread",
             &format!("update-{version}"),
             TaskEventBody::Update(TaskUpdate {
+                result_summary: None,
                 task_id: "task".into(),
                 version,
                 state: TaskStatus::Running,
@@ -160,6 +161,7 @@ fn importing_old_verified_history_does_not_charge_eighty_events_as_new_peer_traf
                 "thread",
                 &format!("update-{version}"),
                 TaskEventBody::Update(TaskUpdate {
+                    result_summary: None,
                     task_id: "task".into(),
                     version,
                     state: TaskStatus::Running,
@@ -416,6 +418,13 @@ fn a_bundle_cannot_claim_membership_at_an_epoch_the_receiver_validated_without_t
     let f = Fixture::new()?;
     manifests(&f)?;
     f.agent.create_group("group", "agent-device")?;
+    f.agent.add_group_member("group", "excluded-device", "member")?;
+    f.agent.create_signed_group_member_kick(
+        "group",
+        "agent-device",
+        "excluded-device",
+        "leave before human",
+    )?;
     f.agent.add_group_member("group", "human-device", "member")?;
     f.agent.account_db()?.persist_client_record(
         "conversation",
@@ -431,17 +440,24 @@ fn a_bundle_cannot_claim_membership_at_an_epoch_the_receiver_validated_without_t
     );
     let packets = f.agent.own_task_packets("agent2-device")?;
     let mut raw = serde_json::to_value(&packets[0])?;
-    raw["history"]["events"][0]["membership"]["epoch"] = json!(1);
+    raw["history"]["events"][0]["membership"]["epoch"] = json!(3);
     let packet: own_history::TaskOwnPacket = serde_json::from_value(raw)?;
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
     sibling.persist_identity_directory(&manifest(&f.human)?)?;
     sibling.create_group("group", "agent2-device")?;
+    sibling.add_group_member("group", "excluded-device", "member")?;
+    sibling.create_signed_group_member_kick(
+        "group",
+        "agent2-device",
+        "excluded-device",
+        "leave before human",
+    )?;
     sibling.add_group_member("group", "human-device", "member")?;
     sibling.import_own_task_packets(&[packet], "agent-device")?;
     assert!(sibling.task_get(Some("group-thread"), "task")?.is_null());
     assert_eq!(sibling.account_db()?.task_state_usage("task/import_skip/")?.0, 1);
-    // The same real signed task is valid at epoch 2; the original unmodified packet still imports.
+    // The same real signed task is valid at epoch 4; the original unmodified packet still imports.
     sibling.import_own_task_packets(&packets, "agent-device")?;
     assert_eq!(sibling.task_get(Some("group-thread"), "task")?["requester"], "human");
     drop(sibling);

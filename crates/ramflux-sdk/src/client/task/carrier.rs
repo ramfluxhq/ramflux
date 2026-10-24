@@ -41,7 +41,8 @@ impl Carrier {
             return Err(invalid("task wire too large"));
         }
         // Parse the original authenticated bytes. Never accept an already-decoded map as ingress.
-        let event = TaskEvent::from_wire_bytes(&wire).map_err(|e| invalid(e.to_string()))?;
+        let event = TaskEvent::from_wire_bytes(&wire)
+            .map_err(|error| crate::task_refusal::protocol(&error))?;
         if self.principal_id.is_empty()
             || self.principal_id.len() > 256
             || self.device_id.is_empty()
@@ -92,7 +93,9 @@ impl Carrier {
             public,
         )?;
         let event = self.event()?;
-        event.verify(&self.signer(public, &event)).map_err(|error| invalid(error.to_string()))?;
+        event
+            .verify(&self.signer(public, &event))
+            .map_err(|error| crate::task_refusal::protocol(&error))?;
         Ok(event)
     }
 }
@@ -140,10 +143,12 @@ impl RamfluxClient {
             return Err(invalid("task signing key must be the local device"));
         }
         let signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
-            &event.signing_bytes().map_err(|e| invalid(e.to_string()))?,
+            &event.signing_bytes().map_err(|error| crate::task_refusal::protocol(&error))?,
             device,
         );
-        event = event.with_signature(signature).map_err(|e| invalid(e.to_string()))?;
+        event = event
+            .with_signature(signature)
+            .map_err(|error| crate::task_refusal::protocol(&error))?;
         let mut carrier = Carrier {
             content_type: "task".into(),
             conversation_id: event.conversation_id().to_owned(),

@@ -157,6 +157,9 @@ impl TaskEvent {
             }
             TaskEventBody::Update(v) => {
                 steps(&v.steps)?;
+                if let Some(summary) = &v.result_summary {
+                    free_text(summary, "result_summary")?;
+                }
                 if let Some(reference) = &v.result_ref {
                     field(reference, "result_ref", 256)?;
                 }
