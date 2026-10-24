@@ -339,6 +339,7 @@ fn reopening_legacy_registration_policies_restores_finite_admission_and_keeps_op
     {
         let path = temp_store_path(&format!("registration-upgrade-{limit}-{window}"))?;
         let router = RouterCore::new();
+        router.upsert_session(session("upgrade-session", SessionLifecycle::Live, 1, 1))?;
         router.mvp6_set_registration_policy(RegistrationPolicy {
             per_source_ip_registration_limit: limit,
             registration_window_seconds: window,
