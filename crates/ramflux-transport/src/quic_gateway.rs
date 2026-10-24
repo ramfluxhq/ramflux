@@ -413,7 +413,8 @@ impl QuicGatewayBidiStream {
         T: serde::de::DeserializeOwned,
     {
         let body = self.recv_frame().await?;
-        Ok(serde_json::from_slice(&body)?)
+        ramflux_protocol::parse_i_json(&body)
+            .map_err(|error| TransportError::Quic(format!("invalid I-JSON frame: {error}")))
     }
 
     /// # Errors
@@ -534,7 +535,7 @@ where
     T: serde::de::DeserializeOwned,
 {
     let body = source.recv_frame().await?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok(ramflux_protocol::parse_i_json(&body)?)
 }
 /// # Errors
 /// Returns an error when the frame cannot be serialized or written to the QUIC stream.
@@ -570,7 +571,7 @@ where
     T: serde::de::DeserializeOwned,
 {
     let body = read_quic_raw_frame(recv).await?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok(ramflux_protocol::parse_i_json(&body)?)
 }
 
 pub(crate) async fn write_quic_raw_frame(
@@ -715,5 +716,23 @@ mod relay_client_quic_config_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod authority_json_tests {
+    use super::*;
+    struct Raw(Vec<u8>);
+    impl GatewaySessionFrameSource for Raw {
+        fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
+            Box::pin(async { Ok(std::mem::take(&mut self.0)) })
+        }
+    }
+    #[tokio::test]
+    async fn duplicate_publication_fields_are_rejected_before_value_normalization() {
+        let mut source=Raw(br#"{"method":"POST","path":"/mvp2/device-set","body":{"record":{"device_set_epoch":1,"device_set_epoch":2}}}"#.to_vec());
+        assert!(read_gateway_session_json::<serde_json::Value>(&mut source).await.is_err());
+        let mut source=Raw(br#"{"method":"POST","path":"/mvp2/device-set","body":{"record":{"device_set_epoch":1}}}"#.to_vec());
+        assert!(read_gateway_session_json::<serde_json::Value>(&mut source).await.is_ok());
     }
 }

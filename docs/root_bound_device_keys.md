@@ -21,7 +21,8 @@ For bound proofs its signing body additionally contains
 shape plus `key_binding`; the domain is added by the signing-body encoder.
 `verify_root_bound_branch_proof` compares both advertised keys and the expected
 kind with that binding, then verifies the root signature, audience, capability
-and validity interval. Callers must obtain the expected keys from the bundle and
+and validity interval. Future issuance is accepted within the documented
+`BRANCH_PROOF_CLOCK_SKEW_SECONDS = 300` second bound; expiry is still enforced. Callers must obtain the expected keys from the bundle and
 compare them, rather than treating a generic proof-signature check as key
 validation. The node performs this comparison for registration and prekey writes.
 
@@ -71,7 +72,17 @@ using the shared encoder. Array order is part of the signature.
 `IdentityRegisterRequest.device_set` can carry the initial signed record or an
 updated record together with a v2 branch proof. Initial authority is admitted only
 through identity enrollment and its existing registration policy/rate/PoW gates.
-Publishing a record alone cannot enroll a new root. The node pins the identity
+Publishing a record alone cannot enroll a new root.
+Exact record/root retransmissions take a read path without cloning or persisting
+the registry. Gateway publication admission is bounded by both the actual source
+IP and principal commitment. Per-minute defaults are 60 per principal and 120 per
+source, with at most 4096 active admission buckets. Configuration uses
+`RAMFLUX_GATEWAY_DEVICE_SET_PER_PRINCIPAL_PER_MINUTE`,
+`RAMFLUX_GATEWAY_DEVICE_SET_PER_SOURCE_PER_MINUTE`, and
+`RAMFLUX_GATEWAY_DEVICE_SET_MAX_BUCKETS`; values must be positive and are capped
+at 10000, 20000 and 65536, respectively. A full table rejects new admission rather
+than evicting active quota windows. Both QUIC and TCP-TLS gateway JSON framing
+reject duplicate keys before decoding into generic values. The node pins the identity
 root and kind; it rejects a device ID already owned by another identity.
 
 `POST /mvp2/device-set` accepts `{ "root_public_key": "...", "record": { ... } }`
@@ -88,7 +99,9 @@ record; the old device-revoke endpoint is rejected for those identities.
 candidate registry and durably store it under the control writer lock before
 publishing its authority changes to readers. Identity snapshot persistence also
 uses that lock and the current registry, so a captured older snapshot cannot
-replace a newer signed epoch. Session persistence retains its existing lifecycle.
+replace a newer signed epoch. Deletion cleanup also takes its current identity state and commits cleanup under
+that same writer lock; it cannot persist an earlier captured identity snapshot.
+Session persistence retains its existing lifecycle.
 
 Irreversible identity deletion removes its key/route records but retains a minimal
 root-commitment/kind deletion fence. The deleted root cannot reenroll or change
@@ -96,6 +109,23 @@ kind through a new principal label. `human`, `headless_ai`, `bot` and `workflow`
 are immutable root assertions for an enrolled identity, not attestations that an
 unknown new root belongs to a biological human. Distinct new roots still need
 identity trust and policy; the enum does not solve Sybil identity classification.
+
+## Root-scoped device routing
+
+Device/prekey storage and revocation indexes use `(root_commitment, device_id)`;
+one root's signed set does not reserve another root's local device name. A local
+ID can therefore exist independently under different roots. New records use scoped
+storage keys; historical unscoped rows remain readable through their pinned owner.
+Gateway session authentication selects the device by its signed principal claim
+and then verifies the claim with that root's registered device key.
+
+The existing prekey/device-auth lookup endpoints accept an opaque lookup token:
+`root~BASE64URL(JSON([root_commitment,device_id]))` or
+`principal~BASE64URL(JSON([principal_id,device_id]))`. The gateway uses the latter
+for session authentication. Responses keep the original signed local device ID.
+An unqualified legacy lookup works only when that name identifies one registered
+device; ambiguous lookups fail closed. SDK consumers must retain root context
+when selecting a target, rather than treating the raw local ID as globally unique.
 
 ## Legacy migration and client integration
 
@@ -106,7 +136,12 @@ prekey write, including replacing an existing legacy key. To migrate, the root
 signs a complete set covering every existing device and issues v2 proofs binding
 the existing keys. A changed legacy key requires a higher device epoch. Publishing
 the set fences old registrations until matching v2 registrations/prekeys arrive;
-there is no automatic unsigned upgrade or trust-on-first-use exception.
+there is no automatic unsigned upgrade or trust-on-first-use exception. Legacy
+rows whose root commitment is empty are fenced by their principal's accepted
+signed set too. Omitted blank-commitment devices become unusable for routing and
+own-device copies, and their legacy IDs cannot later be resurrected as active
+under that root. Explicit inclusion still requires matching root-bound registration
+before the device becomes usable.
 
 Client integration must verify the bundle signature, exact branch key and
 agreement-key binding, root commitment, principal kind, signed-set membership and

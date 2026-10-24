@@ -408,8 +408,7 @@ impl RouterCore {
             let control = crate::lock_unpoisoned(&self.control);
             control
                 .mvp1_identities
-                .devices
-                .get(&request.actor_device_id)
+                .device_record_for_principal(&request.principal_id, &request.actor_device_id)
                 .filter(|device| device.principal_id == request.principal_id)
                 .map(|device| device.branch_public_key.clone())
                 .ok_or_else(|| {

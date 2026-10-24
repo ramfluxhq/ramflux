@@ -122,3 +122,5 @@ pub use signaling::*;
 
 #[cfg(test)]
 mod tests;
+
+mod device_namespace;

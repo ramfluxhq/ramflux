@@ -38,11 +38,7 @@ pub(crate) fn handle_mvp7_lifecycle_finalize(
         .map(str::to_owned);
     let response = state.mvp7_finalize_delete(&request)?;
     if let Some(target_delivery_id) = target_delivery_id {
-        store.record_target_deleted_cleanup(
-            &target_delivery_id,
-            &state.mvp1_identities_snapshot(),
-            &response.record,
-        )?;
+        state.persist_deleted_target(store, &target_delivery_id, &response.record)?;
     } else {
         store.record_lifecycle_record(&response.record)?;
         state.persist_identity_registry(store)?;

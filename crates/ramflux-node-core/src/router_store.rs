@@ -43,6 +43,7 @@ pub struct RouterRedbStore {
     path: PathBuf,
     commit_writer: Option<RouterCommitWriter>,
     submission_wal: Option<RouterWalStore>,
+    identity_registry_writes: std::sync::atomic::AtomicU64,
 }
 
 struct RouterCommitWriter {
@@ -310,7 +311,13 @@ impl RouterRedbStore {
             None
         };
         let submission_wal = wal_root.map(RouterWalStore::open).transpose()?;
-        Ok(Self { db, path: path.to_path_buf(), commit_writer, submission_wal })
+        Ok(Self {
+            db,
+            path: path.to_path_buf(),
+            commit_writer,
+            submission_wal,
+            identity_registry_writes: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     #[must_use]
@@ -618,7 +625,15 @@ impl RouterRedbStore {
         &self,
         registry: &IdentityRegistry,
     ) -> Result<(), NodeCoreError> {
-        save_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY, registry)
+        save_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY, registry)?;
+        self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Number of successful authority snapshot writes by this store instance (diagnostics).
+    #[must_use]
+    pub fn identity_registry_write_count(&self) -> u64 {
+        self.identity_registry_writes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// # Errors
@@ -687,7 +702,7 @@ impl RouterRedbStore {
 
     /// # Errors
     /// Returns an error when finalized target cleanup cannot be durably recorded.
-    pub fn record_target_deleted_cleanup(
+    pub(crate) fn record_target_deleted_cleanup(
         &self,
         target_delivery_id: &str,
         identity_registry: &IdentityRegistry,
@@ -719,6 +734,7 @@ impl RouterRedbStore {
             remove_inbox_entries_for_target(&write_txn, target_delivery_id)?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

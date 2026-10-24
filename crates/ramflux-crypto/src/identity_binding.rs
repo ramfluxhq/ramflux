@@ -8,6 +8,9 @@ use crate::{
 use ed25519_dalek::{Signer, VerifyingKey};
 use ramflux_protocol::{DeviceKeyBinding, PrincipalKind, decode_base64url, encode_base64url};
 use serde::Serialize;
+/// Maximum accepted forward clock skew for root authorizations (five minutes).
+pub const BRANCH_PROOF_CLOCK_SKEW_SECONDS: i64 = 300;
+
 /// Local root-owned inputs; no key or kind is inferred from a server response.
 pub struct BranchAuthorization<'a> {
     pub audience: &'a str,
@@ -117,7 +120,10 @@ pub fn verify_root_bound_branch_proof(
 ) -> Result<(), CryptoError> {
     let binding =
         proof.key_binding.as_ref().ok_or_else(|| invalid("legacy branch proof is read-only"))?;
-    if binding != expected || proof.issued_at > now || root.is_weak() {
+    if binding != expected
+        || proof.issued_at > now.saturating_add(BRANCH_PROOF_CLOCK_SKEW_SECONDS)
+        || root.is_weak()
+    {
         return Err(invalid("branch key, kind or time mismatch"));
     }
     crate::verify_branch_proof(root, proof, audience, capability, now)

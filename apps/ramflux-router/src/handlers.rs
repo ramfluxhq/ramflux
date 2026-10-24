@@ -675,7 +675,6 @@ pub(crate) fn handle_mvp1_identity_register(
         "router decoded mvp1 identity registration"
     );
     let response = state.register_identity_durable(&request, store)?;
-    state.persist_identity_registry(store)?;
     let session = state
         .session(&response.target_delivery_id)
         .ok_or_else(|| anyhow::anyhow!("session missing after identity registration"))?;

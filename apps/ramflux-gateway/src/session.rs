@@ -72,6 +72,7 @@ pub(crate) async fn handle_gateway_quic_stream(
         handle_gateway_session_stream(send, recv, context, frame).await?;
     } else {
         let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
+        crate::device_set_limit::admit_request(&request, context.remote_addr.ip())?;
         let response = dispatch_quic_json_request(&context.router, request).await?;
         let write_started = Instant::now();
         ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
@@ -102,6 +103,7 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
     } else {
         let mut send = Box::new(send);
         let request: ramflux_transport::GatewayQuicRequest = serde_json::from_value(first_frame)?;
+        crate::device_set_limit::admit_request(&request, context.remote_addr.ip())?;
         let response = dispatch_quic_json_request(&context.router, request).await?;
         ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
     }
@@ -155,7 +157,13 @@ pub(crate) async fn handle_gateway_session_transport(
     let registered_auth_key: Option<ramflux_node_core::DeviceAuthKeyResponse> =
         router_get_json_async(
             &context.router,
-            &format!("/mvp1/device-auth-key/{}", open.device_id),
+            &format!(
+                "/mvp1/device-auth-key/principal~{}",
+                ramflux_protocol::encode_base64url(serde_json::to_vec(&(
+                    &auth_frame.device_proof.principal_id,
+                    &open.device_id
+                ))?)
+            ),
         )
         .await?;
     let Some(registered_auth_key) = registered_auth_key else {

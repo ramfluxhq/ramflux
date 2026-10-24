@@ -171,8 +171,10 @@ pub(crate) fn dispatch_protected_itest_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp2/device-set") => {
+            let source = stream.peer_addr()?.ip();
             let request: ramflux_node_core::DeviceSetPublishRequest =
                 ramflux_protocol::parse_i_json(&request.body)?;
+            crate::device_set_limit::admit(&request.record.principal_commitment, source)?;
             let response: ramflux_protocol::SignedDeviceSetRecord =
                 router_post_json(router, "/mvp2/device-set", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
