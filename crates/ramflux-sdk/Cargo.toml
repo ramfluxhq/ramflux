@@ -89,3 +89,6 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[dev-dependencies]
+rcgen = { workspace = true }

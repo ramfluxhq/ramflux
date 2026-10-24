@@ -13,6 +13,7 @@ pub(crate) struct SurfaceExportMetadata {
     pub next_before: Option<i64>,
     pub skipped: std::collections::BTreeMap<String, u32>,
 }
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct SurfaceHistoryExport {
     pub controls: Vec<SurfaceControl>,
     pub checkpoints: Vec<OwnedSurfaceCheckpoint>,
@@ -51,7 +52,8 @@ impl RamfluxClient {
         before: Option<i64>,
     ) -> Result<SurfaceHistoryExport, SdkError> {
         let db = self.account_db()?;
-        let mut rows = db.surface_recent_records::<Value>("directory/surface/", before, 65)?;
+        let owner = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
+        let mut rows = db.surface_export_records::<super::StoredSurface>(owner, before, 65)?;
         let mut result = SurfaceHistoryExport {
             controls: Vec::new(),
             checkpoints: Vec::new(),
@@ -65,22 +67,20 @@ impl RamfluxClient {
         let mut blocks = Vec::new();
         // Select the newest bounded window, dropping older items first. Import each selected
         // surface/checkpoint before its decisions; metadata makes every omission explicit.
-        for (_, view) in rows {
+        for (_, stored) in rows {
             let mut block = Vec::new();
-            let Some(reference) = view["surface_ref"].as_str() else {
-                result.metadata.skip("invalid_view");
-                continue;
-            };
+            let reference = &super::scope::surface_reference(
+                &stored.conversation_id,
+                &stored.author_principal_id,
+                &stored.surface_id,
+            )?;
             let Ok(checkpoint) = self.export_owned_surface_checkpoint(reference) else {
                 result.metadata.skip("checkpoint_unavailable_or_below_floor");
                 continue;
             };
             let prefix = key("history", reference) + "/";
             let normal = db
-                .load_actor_state::<Value>(&format!(
-                    "{prefix}{:020}",
-                    view["version"].as_u64().unwrap_or(0)
-                ))?
+                .load_actor_state::<Value>(&format!("{prefix}{:020}", checkpoint.version))?
                 .and_then(|history| {
                     serde_json::from_value::<Carrier>(history["carrier"].clone()).ok()
                 })
@@ -126,6 +126,31 @@ impl RamfluxClient {
         result.controls = blocks.into_iter().rev().flatten().collect();
         db.persist_actor_state("surface/export_metadata", &result.metadata)?;
         Ok(result)
+    }
+    pub(crate) fn own_surface_history_pages(&self) -> Result<Vec<SurfaceHistoryExport>, SdkError> {
+        let mut pages = Vec::new();
+        let mut cursor = None;
+        let mut bytes = 0usize;
+        // The history envelope is bounded across pages; own authored state is selected first.
+        for _ in 0..64 {
+            let page = self.own_surface_history_export(cursor)?;
+            let size = serde_json::to_vec(&page)?.len();
+            if bytes.saturating_add(size) > 8 * 1024 * 1024 {
+                if let Some(last) = pages.last_mut() {
+                    let last: &mut SurfaceHistoryExport = last;
+                    last.metadata.truncated = true;
+                    last.metadata.skip("history_byte_budget");
+                }
+                break;
+            }
+            bytes += size;
+            cursor = page.metadata.next_before;
+            pages.push(page);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(pages)
     }
     fn surface_export_decisions(
         &self,
@@ -181,8 +206,8 @@ impl RamfluxClient {
         if controls.len() > 64 * 129 || serde_json::to_vec(controls)?.len() > 8 * 1024 * 1024 {
             return Err(invalid("own surface history budget exceeded"));
         }
-        self.account_db()?.surface_transaction(|| {
-            for (index, control) in controls.iter().enumerate() {
+        for (index, control) in controls.iter().enumerate() {
+            let imported = self.account_db()?.surface_transaction(|| {
                 if control.kind != ControlKind::Own {
                     return Err(invalid("own history contains peer control"));
                 }
@@ -228,8 +253,15 @@ impl RamfluxClient {
                     context.group.as_ref().map(|g| g.group_id.as_str()),
                     &control.bytes()?,
                 )?;
+                Ok::<_, SdkError>(())
+            });
+            if let Err(error) = imported {
+                self.account_db()?.persist_actor_state(
+                    &key("import_control_skip", &format!("{}:{index}", envelope.snapshot_id)),
+                    &serde_json::json!({"reason":error.to_string()}),
+                )?;
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 }

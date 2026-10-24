@@ -27,11 +27,6 @@ pub(crate) async fn send(
     let group = super::surface_group::plan(account, carrier)?;
     let reservation = group.as_ref().map_or((0, 0), |plan| (1, plan.bytes));
     let prepared = prepare(account, carrier, group.is_some(), None, reservation).await?;
-    let group_deliveries = if let Some(plan) = group {
-        super::surface_group::prepare(account, carrier, plan).await?
-    } else {
-        Vec::new()
-    };
     let timeline = RamfluxClient::surface_timeline_id(carrier)?;
     let result = account.client.account_db()?.surface_transaction(|| {
         super::super::surface_jobs::admit(account, prepared.envelopes.len(), 0)?;
@@ -73,7 +68,9 @@ pub(crate) async fn send(
                 result.fallback_text.as_bytes(),
             )?;
             super::super::surface_jobs::enqueue(account, prepared.envelopes)?;
-            super::super::surface_jobs::enqueue_group(account, group_deliveries)?;
+            if let Some(plan) = group {
+                super::super::surface_jobs::enqueue_latest_group(account, carrier, plan)?;
+            }
         }
         let mut response = serde_json::to_value(result)?;
         response["surface_id"] = json!(carrier.surface_id);
@@ -206,11 +203,17 @@ async fn prepare_with_engine(
                 .saturating_add(64 * 1024),
         )
     })?;
-    super::super::surface_jobs::admit(
-        account,
-        payloads.len().saturating_add(reservation.0),
-        bytes,
-    )?;
+    if reservation.0 > 0 {
+        super::super::surface_jobs::admit_group(account, carrier, bytes)?;
+        // Own-device copies are separately retained and may not be hidden by coalescing.
+        super::super::surface_jobs::admit(
+            account,
+            payloads.len(),
+            bytes.saturating_sub(reservation.1),
+        )?;
+    } else {
+        super::super::surface_jobs::admit(account, payloads.len(), bytes)?;
+    }
     let mut envelopes = Vec::new();
     for (target, body) in payloads {
         let id = crate::new_surface_message_id()?;

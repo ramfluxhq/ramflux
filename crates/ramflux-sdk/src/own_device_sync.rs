@@ -48,6 +48,8 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
     pub(crate) snapshot_id: String,
     pub(crate) messages: Vec<DirectMessageRecord>,
     #[serde(default)]
+    pub(crate) surface_pages: Vec<crate::client::surface::SurfaceHistoryExport>,
+    #[serde(default)]
     pub(crate) surface_controls: Vec<crate::client::surface::SurfaceControl>,
     #[serde(default)]
     pub(crate) surface_checkpoints: Vec<crate::client::surface::OwnedSurfaceCheckpoint>,
