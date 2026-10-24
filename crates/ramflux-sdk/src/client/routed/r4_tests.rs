@@ -300,7 +300,18 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
         envelope: gateway_direct_message_envelope(&alice.config()?, &msg, None)?,
     };
     let (mut engine, writes) = Inbox::engine(bob.config()?, vec![entry])?;
-    assert_eq!(bob.client.receive_a2i_control_events(&mut engine, 16).await?, vec![event]);
+    let mut expected = event;
+    expected.source_principal_id = Some(alice.id.clone());
+    expected.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
+        &alice
+            .client
+            .identity_root
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_key
+            .verifying_key(),
+    ));
+    assert_eq!(bob.client.receive_a2i_control_events(&mut engine, 16).await?, vec![expected]);
     assert_eq!(bob.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?.len(), 1);
     assert!(writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
     assert_eq!(bob.client.gateway_receive_cursor("bob")?, 1);

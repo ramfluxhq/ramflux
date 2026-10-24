@@ -12,6 +12,18 @@ impl RamfluxClient {
         event: &A2iControlEvent,
         target_delivery_id: Option<String>,
     ) -> Result<GatewayInboxEntry, SdkError> {
+        let mut event = event.clone();
+        let source = self.bind_owned_a2i_event(&mut event)?;
+        if engine.config.device_id != source.device_id()
+            || event.source_principal_id.as_deref() != Some(engine.config.principal_id.as_str())
+            || engine.config.device_branch.as_ref().is_none_or(|branch| {
+                self.device_branch.as_ref().is_none_or(|owned| {
+                    branch.signing_key.verifying_key() != owned.signing_key.verifying_key()
+                })
+            })
+        {
+            return Err(SdkError::InboundRejected("A2I source engine mismatch".into()));
+        }
         self.resolve_target_principal_commitment(&engine.config, None, &event.target_device_id)
             .await?;
         let lookup = self.root_qualified_device_lookup(&event.target_device_id)?;
@@ -29,11 +41,6 @@ impl RamfluxClient {
                 ))
             })?;
         let root = self.device_root(&event.target_device_id)?;
-        let mut event = event.clone();
-        let source = self.bind_owned_a2i_event(&mut event)?;
-        if engine.config.device_id != source.device_id() {
-            return Err(SdkError::InboundRejected("A2I source engine mismatch".into()));
-        }
         event.target_device_id =
             super::identity_authority::device_namespace::wire_device_id(&event.target_device_id)?;
         let conversation_id =

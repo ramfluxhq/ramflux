@@ -44,3 +44,98 @@ async fn copied_device_name_cannot_preclaim_an_honest_envelope_id_in_another_thr
     );
     Ok(())
 }
+
+fn a2i(device: &str, target: &str) -> A2iControlEvent {
+    A2iControlEvent {
+        source_principal_id: None,
+        source_principal_commitment: None,
+        event_id: "same-control-event".into(),
+        event_type: "a2i.control".into(),
+        source_device_id: device.into(),
+        target_device_id: target.into(),
+        control_domain: "message".into(),
+        action: "test".into(),
+        subject_base64: String::new(),
+        created_at: now_unix_timestamp(),
+        acknowledged: false,
+    }
+}
+#[tokio::test]
+async fn copied_name_controls_have_independent_keys_and_cannot_forge_bobs_attribution()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::new("alice", 11)?;
+    let bob = Fixture::owned("bob", "bob", 31, 32)?;
+    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    trust(&alice, &bob)?;
+    trust(&alice, &mallory)?;
+    let mut engine =
+        GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
+    for sender in [&mallory, &bob] {
+        let event = a2i("bob", "alice");
+        let entry = seal_as(
+            sender,
+            &alice,
+            super::r5::outgoing(sender, &alice, "same-control-envelope"),
+            &serde_json::to_vec(&event)?,
+            Route::control(),
+        )?;
+        alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    }
+    let before = alice.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")?;
+    assert_eq!(before.len(), 2);
+    assert!(before.iter().any(|event| event.source_principal_id.as_deref() == Some("bob")));
+    assert!(before.iter().any(|event| event.source_principal_id.as_deref() == Some("mallory")));
+    assert_ne!(before[0].source_principal_commitment, before[1].source_principal_commitment);
+    let mut forged = a2i("bob", "alice");
+    forged.source_principal_id = Some("bob".into());
+    forged.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
+        &bob.client
+            .identity_root
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_key
+            .verifying_key(),
+    ));
+    let entry = seal_as(
+        &mallory,
+        &alice,
+        super::r5::outgoing(&mallory, &alice, "forged-attribution"),
+        &serde_json::to_vec(&forged)?,
+        Route::control(),
+    )?;
+    assert!(alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err());
+    assert_eq!(
+        alice.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")?,
+        before
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn outgoing_a2i_refuses_forged_identity_and_engine_principal_before_peer_io()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 11)?;
+    let mut event = a2i("alice", "unresolved-peer");
+    event.source_principal_id = Some("mallory".into());
+    let mut engine =
+        GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
+    let error = alice
+        .client
+        .send_a2i_control_event_via_gateway(&mut engine, &event, None)
+        .await
+        .err()
+        .ok_or_else(|| invalid("forged source was submitted"))?;
+    assert!(error.to_string().contains("A2I source attribution"), "{error}");
+    event.source_principal_id = None;
+    let mut config = alice.config()?;
+    config.principal_id = "mallory".into();
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    let error = alice
+        .client
+        .send_a2i_control_event_via_gateway(&mut engine, &event, None)
+        .await
+        .err()
+        .ok_or_else(|| invalid("foreign engine principal was submitted"))?;
+    assert!(error.to_string().contains("A2I source engine mismatch"), "{error}");
+    assert_eq!(alice.client.account_db()?.actor_state_keys("a2i/")?, Vec::<String>::new());
+    Ok(())
+}
