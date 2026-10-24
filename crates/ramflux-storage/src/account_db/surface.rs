@@ -68,7 +68,9 @@ impl AccountDb {
         max_bytes: u64,
         preserve: &str,
     ) -> Result<(), StorageError> {
-        if !(prefix.starts_with("surface/history/") || prefix.starts_with("surface/actions/"))
+        if !(prefix.starts_with("surface/history/")
+            || prefix.starts_with("surface/actions/")
+            || prefix.starts_with("surface/authored/"))
             || !preserve.starts_with(prefix)
             || max_rows == 0
             || max_bytes == 0

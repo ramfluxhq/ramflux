@@ -144,6 +144,7 @@ impl RamfluxClient {
         carrier: &Carrier,
         payload: Payload,
         outbound: bool,
+        group_epoch: Option<u64>,
     ) -> Result<Outcome, SdkError> {
         let outcome = self.evaluate_surface(carrier, &payload, outbound)?;
         if !outcome.accepted {
@@ -174,11 +175,11 @@ impl RamfluxClient {
                         .client_record("surface", &carrier.surface_reference()?)?
                         .is_some_and(|v| v["executor_device_id"] == local.device_id)
                 {
-                    self.persist_surface_decision(carrier, &action, true)?;
+                    self.persist_surface_decision(carrier, &action, true, group_epoch)?;
                 }
             }
             Payload::ActionReceipt { original, action } => {
-                self.persist_surface_decision(&original, &action, false)?;
+                self.persist_surface_decision(&original, &action, false, group_epoch)?;
                 self.store_surface_action_attestation(&original, carrier)?;
                 self.account_db()?.persist_actor_state(
                     &super::receipt_key(&original)?,

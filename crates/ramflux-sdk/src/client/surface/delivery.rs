@@ -100,7 +100,7 @@ impl RamfluxClient {
                 .ok_or_else(|| super::invalid("snapshot floor has no surface state"))?;
             Outcome::accepted(&carrier.author_principal_id, &state)?
         } else {
-            self.apply_surface_payload(&carrier, payload, outbound)?
+            self.apply_surface_payload(&carrier, payload, outbound, sender.group_epoch)?
         };
         if outcome.retryable
             && !outbound
