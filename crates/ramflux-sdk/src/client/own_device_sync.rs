@@ -177,13 +177,7 @@ impl RamfluxClient {
         let bundle: SdkOwnDeviceHistoryBundle = serde_json::from_slice(&plaintext)?;
         self.account_db()?.write_transaction(|| {
             let result = self.import_own_device_history_bundle(envelope, &bundle)?;
-            self.account_db()?.persist_actor_state(&receipt, &result)?;
-            self.account_db()?.prune_surface_records(
-                "own-device/imported/",
-                512,
-                256 * 1024,
-                &receipt,
-            )?;
+            self.cache_own_sync_import_receipt(envelope, &result)?;
             Ok(result)
         })
     }

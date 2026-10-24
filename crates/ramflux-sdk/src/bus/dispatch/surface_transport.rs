@@ -240,3 +240,7 @@ mod own_tests;
 #[cfg(test)]
 #[path = "surface_resync_tests.rs"]
 mod resync_tests;
+
+#[cfg(test)]
+#[path = "surface_history_import_tests.rs"]
+mod history_import_tests;

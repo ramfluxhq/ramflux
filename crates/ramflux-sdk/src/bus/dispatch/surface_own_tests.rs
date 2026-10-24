@@ -8,7 +8,7 @@ use ramflux_protocol::{A2uiConversationCommand, StreamAppendCommand};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-async fn sibling_fixture(
+pub(super) async fn sibling_fixture(
     root: &Path,
     source: &mut LocalBusAccountState,
 ) -> Result<

@@ -183,6 +183,11 @@ fn prepare_carrier(
     } else {
         body.author_principal_id.clone().unwrap_or_else(|| device.principal_id.clone())
     };
+    if kind == PayloadKind::Event && !create && owner != device.principal_id {
+        return Err(
+            crate::SurfaceRefusalCode::NotAuthor.error("only the author may update a surface")
+        );
+    }
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
@@ -254,3 +259,7 @@ pub(super) async fn request_resync(
     account.put_engine(engine);
     result
 }
+
+#[cfg(test)]
+#[path = "surface_authoring_tests.rs"]
+mod authoring_tests;
