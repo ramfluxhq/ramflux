@@ -77,6 +77,7 @@ impl RamfluxClient {
         original: &Carrier,
         action: &A2uiSurfaceAction,
         actionable: bool,
+        group_epoch: Option<u64>,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let reference = original.surface_reference()?;
@@ -103,7 +104,7 @@ impl RamfluxClient {
             || db
                 .load_actor_state::<Value>(&action_key)?
                 .is_some_and(|row| row["actionable"] == true);
-        db.persist_actor_state(&action_key,&json!({"id":id,"message_id":original.message_id,"sender_principal_id":original.sender_principal_id,"sender_device_id":original.sender_device_id,"carrier":original,"version":action.version(),"actionable":recorded_actionable}))?;
+        db.persist_actor_state(&action_key,&json!({"id":id,"message_id":original.message_id,"sender_principal_id":original.sender_principal_id,"sender_device_id":original.sender_device_id,"carrier":original,"version":action.version(),"actionable":recorded_actionable,"group_epoch":group_epoch}))?;
         db.prune_surface_records(&prefix, 128, 4 * 1024 * 1024, &action_key)?;
         if let Some(mut view) = db.client_record("surface", &reference)? {
             view["last_action_id"] = json!(id);

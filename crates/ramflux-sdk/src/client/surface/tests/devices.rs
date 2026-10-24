@@ -197,3 +197,33 @@ fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() 
     assert!(!project(target, &first, "covered-create")?.retryable);
     Ok(())
 }
+
+#[test]
+fn own_surface_history_omits_group_state_below_the_current_membership_floor() -> TestResult {
+    let t = Terminals::new()?;
+    let source = &t.clients[0];
+    source.create_group("g", "author-device")?;
+    let db = source.account_db()?;
+    db.persist_client_record("conversation", "thread", &json!({"kind":"group","group_id":"g"}))?;
+    let mut first =
+        carrier(source, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
+    source.attach_surface_snapshot(&mut first)?;
+    first = source.sign_surface_carrier(first)?;
+    source.project_surface_message(
+        "thread",
+        "group-create",
+        super::super::SurfaceSender {
+            principal: "author",
+            device: "author-device",
+            envelope_id: "group-create",
+            expires_at: None,
+            group_epoch: Some(1),
+        },
+        &first.bytes()?,
+        false,
+    )?;
+    assert_eq!(source.own_surface_history_controls()?.len(), 1);
+    db.upsert_group_local_membership_snapshot("g", 5, 128, "none", "author-device", "owner", 5)?;
+    assert_eq!(source.own_surface_history_controls()?.len(), 0);
+    Ok(())
+}
