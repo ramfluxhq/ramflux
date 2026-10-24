@@ -326,8 +326,9 @@ async fn assert_admission(
         .ok_or_else(|| invalid("peer pin"))?;
     pin["contact_identity_commitment"] = json!("wrong-root");
     source.client.account_db()?.persist_client_record("identity", "peer-0", &pin)?;
-    let mut forged_route = carrier.clone();
-    forged_route.message_id = crate::new_surface_message_id()?;
+    let forged_route = source
+        .client
+        .prepare_surface_resync(&carrier.surface_reference()?, &crate::new_surface_message_id()?)?;
     assert!(send(source, &forged_route).await.is_err());
     assert_eq!(
         serde_json::to_value(source.client.load_group_sender_key_state(
