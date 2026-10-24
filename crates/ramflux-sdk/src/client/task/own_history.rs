@@ -88,6 +88,9 @@ impl RamfluxClient {
         }
         let mut history =
             self.task_history(&carrier.conversation_id, carrier.event()?.event().task_id())?;
+        if history.checkpoint.is_some() {
+            return Ok(Vec::new());
+        }
         let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
         if !history.events.iter().any(|e| {
             e.carrier.message_id == carrier.message_id
@@ -168,7 +171,7 @@ impl RamfluxClient {
         let packet: TaskOwnPacket = ramflux_protocol::parse_i_json(raw)?;
         if packet.context.conversation_id != conversation
             || packet.context.group.as_ref().map(|g| g.group_id.as_str()) != group
-            || packet.history.events.len() > 256
+            || packet.history.events.len() > 289
             || packet.manifests.len() > 64
         {
             return Err(invalid("own task history context or count mismatch"));
@@ -255,12 +258,16 @@ impl RamfluxClient {
 }
 
 impl RamfluxClient {
-    pub(crate) fn own_task_packets(&self) -> Result<Vec<TaskOwnPacket>, SdkError> {
+    pub(crate) fn own_task_packets(
+        &self,
+        target_device: &str,
+    ) -> Result<Vec<TaskOwnPacket>, SdkError> {
         self.maintain_task_lifecycle(crate::time::now_unix_timestamp())?;
         let db = self.account_db()?;
-        let mut cursor = db
-            .load_actor_state::<String>("task/export_cursor")?
-            .unwrap_or_else(|| "task/history/".into());
+        let cursor_key = super::key("export_cursor", target_device);
+        let metadata_key = super::key("export_metadata", target_device);
+        let mut cursor =
+            db.load_actor_state::<String>(&cursor_key)?.unwrap_or_else(|| "task/history/".into());
         let mut packets = Vec::new();
         let mut metadata = TaskExportMetadata::default();
         let mut size = 0usize;
@@ -293,8 +300,8 @@ impl RamfluxClient {
                             cursor = previous;
                         }
                         metadata.next_cursor = Some(cursor.clone());
-                        db.persist_actor_state("task/export_metadata", &metadata)?;
-                        db.persist_actor_state("task/export_cursor", &cursor)?;
+                        db.persist_actor_state(&metadata_key, &metadata)?;
+                        db.persist_actor_state(&cursor_key, &cursor)?;
                         return Ok(packets);
                     }
                     for body in bodies {
@@ -308,8 +315,8 @@ impl RamfluxClient {
                 if packets.len() >= 100 {
                     metadata.truncated = true;
                     metadata.next_cursor = Some(cursor.clone());
-                    db.persist_actor_state("task/export_metadata", &metadata)?;
-                    db.persist_actor_state("task/export_cursor", &cursor)?;
+                    db.persist_actor_state(&metadata_key, &metadata)?;
+                    db.persist_actor_state(&cursor_key, &cursor)?;
                     return Ok(packets);
                 }
             }
@@ -322,8 +329,8 @@ impl RamfluxClient {
             metadata.truncated = true;
             metadata.next_cursor = Some(cursor.clone());
         }
-        db.persist_actor_state("task/export_metadata", &metadata)?;
-        db.persist_actor_state("task/export_cursor", &cursor)?;
+        db.persist_actor_state(&metadata_key, &metadata)?;
+        db.persist_actor_state(&cursor_key, &cursor)?;
         Ok(packets)
     }
     pub(super) fn record_task_history_skip(

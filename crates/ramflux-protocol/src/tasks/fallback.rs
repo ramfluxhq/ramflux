@@ -7,6 +7,12 @@ impl TaskEvent {
     /// Deterministic quoted display after verification against the caller-pinned signing key.
     #[must_use]
     pub fn fallback_text(&self) -> String {
+        self.fallback_text_with_actor_kind(false)
+    }
+    /// Renders the caller-verified actor-kind status without changing signed event bytes.
+    #[must_use]
+    pub fn fallback_text_with_actor_kind(&self, actor_kind_verified: bool) -> String {
+        let actor = if actor_kind_verified { "" } else { " (actor kind unverified)" };
         let id = self.event().task_id();
         let lines = match self.event() {
             TaskEventBody::Start(v) => {
@@ -24,9 +30,9 @@ impl TaskEvent {
                 lines.extend(step_lines(&v.steps));
                 lines
             }
-            TaskEventBody::Accept(_) => vec![format!("Task {id} accepted (actor kind unverified)")],
+            TaskEventBody::Accept(_) => vec![format!("Task {id} accepted{actor}")],
             TaskEventBody::Decline(_) => {
-                vec![format!("Task {id} declined (actor kind unverified)")]
+                vec![format!("Task {id} declined{actor}")]
             }
             TaskEventBody::Cancel(_) => vec![format!("Task {id} cancelled by its requester")],
             TaskEventBody::Update(v) => {
@@ -38,7 +44,7 @@ impl TaskEvent {
                 lines
             }
             TaskEventBody::Resolve(v) => vec![format!(
-                "Task {id}: decision (actor kind unverified) {} for step {} at {} (decision {})",
+                "Task {id}: decision{actor} {} for step {} at {} (decision {})",
                 match v.decision {
                     TaskDecision::Resume => "resume",
                     TaskDecision::Deny => "deny",

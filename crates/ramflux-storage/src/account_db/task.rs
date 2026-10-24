@@ -17,6 +17,7 @@ impl AccountDb {
             || key.starts_with("task/local_pending/")
             || key.starts_with("task/local_intent_status/")
             || key.starts_with("task/history/")
+            || key.starts_with("task/checkpoint/")
             || key.starts_with("task/lifecycle/")
             || key.starts_with("task/view/")
             || key.starts_with("task/receipt/")
@@ -60,6 +61,13 @@ impl AccountDb {
         }
         Ok(self.connection.query_row("SELECT count(*),coalesce(sum(length(state_json)),0) FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1",params![prefix],|r|Ok((r.get(0)?,r.get(1)?)))?)
     }
+    /// Bounds unrelated-task tombstones per original signer and age.
+    /// # Errors
+    /// Returns database errors.
+    pub fn prune_task_no_role(&self, now: i64) -> Result<(), StorageError> {
+        self.connection.execute("DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM (SELECT state_kind,json_extract(CAST(state_json AS TEXT),'$.at') at,row_number() OVER (PARTITION BY json_extract(CAST(state_json AS TEXT),'$.source') ORDER BY rowid DESC) sender_rank,row_number() OVER (ORDER BY rowid DESC) account_rank FROM runtime_actor_state WHERE substr(state_kind,1,13)='task/no_role/') WHERE sender_rank>64 OR account_rank>512 OR at<?1)",params![now.saturating_sub(7*86400)])?;
+        Ok(())
+    }
     /// Bounds compact pending-status records separately from active local decision slots.
     /// # Errors
     /// Returns database errors.
@@ -76,9 +84,25 @@ impl AccountDb {
     pub fn unindexed_task_histories<T: serde::de::DeserializeOwned>(
         &self,
     ) -> Result<Vec<T>, StorageError> {
-        let mut query = self.connection.prepare("SELECT h.state_json FROM runtime_actor_state h WHERE substr(h.state_kind,1,13)='task/history/' AND NOT EXISTS(SELECT 1 FROM runtime_actor_state l WHERE l.state_kind=replace(h.state_kind,'task/history/','task/lifecycle/')) ORDER BY h.state_kind LIMIT 32")?;
+        let mut query = self.connection.prepare("SELECT h.state_json FROM runtime_actor_state h WHERE substr(h.state_kind,1,13)='task/history/' AND NOT EXISTS(SELECT 1 FROM runtime_actor_state l WHERE l.state_kind=replace(h.state_kind,'task/history/','task/lifecycle/') AND json_type(CAST(l.state_json AS TEXT),'$.usage') IS NOT NULL) ORDER BY h.state_kind LIMIT 32")?;
         let rows = query.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         rows.map(|r| Ok(serde_json::from_slice(&r?)?)).collect()
+    }
+    /// Sums every retained event for its verified signer, independently of maintenance page limits.
+    /// None indicates that this signer's legacy histories still need bounded accounting migration.
+    /// # Errors
+    /// Returns database errors.
+    pub fn task_signer_usage(
+        &self,
+        signer: &str,
+        conversation: Option<&str>,
+        excluded_lifecycle: &str,
+    ) -> Result<Option<[u64; 4]>, StorageError> {
+        let legacy: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state h LEFT JOIN runtime_actor_state l ON l.state_kind=replace(h.state_kind,'task/history/','task/lifecycle/') WHERE substr(h.state_kind,1,13)='task/history/' AND replace(h.state_kind,'task/history/','task/lifecycle/')!=?3 AND (l.state_kind IS NULL OR json_type(CAST(l.state_json AS TEXT),'$.usage') IS NULL) AND EXISTS(SELECT 1 FROM json_each(CAST(h.state_json AS TEXT),'$.events') e WHERE json_extract(e.value,'$.carrier.principal_id')=?1))",params![signer,conversation,excluded_lifecycle],|r|r.get(0))?;
+        if legacy {
+            return Ok(None);
+        }
+        Ok(Some(self.connection.query_row("SELECT coalesce(sum(json_extract(u.value,'$.bytes')),0),coalesce(sum(json_extract(u.value,'$.events')),0),coalesce(sum(json_extract(u.value,'$.decisions')),0),coalesce(sum(json_extract(u.value,'$.decision_bytes')),0) FROM runtime_actor_state l,json_each(CAST(l.state_json AS TEXT),'$.usage') u WHERE substr(l.state_kind,1,15)='task/lifecycle/' AND u.key=?1 AND (?2 IS NULL OR json_extract(CAST(l.state_json AS TEXT),'$.conversation_id')=?2) AND l.state_kind!=?3",params![signer,conversation,excluded_lifecycle],|r|Ok([r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?]))?))
     }
     /// Reads lifecycle rows for one source, conversation, or a bounded terminal maintenance page.
     /// # Errors
@@ -89,11 +113,32 @@ impl AccountDb {
         conversation: Option<&str>,
         terminal_only: bool,
     ) -> Result<Vec<serde_json::Value>, StorageError> {
+        self.read_task_lifecycle_rows(source, conversation, terminal_only, false)
+    }
+    /// Reads a bounded terminal page after filtering to its retention owner.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn task_retention_rows(
+        &self,
+        source: Option<&str>,
+        conversation: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        self.read_task_lifecycle_rows(source, conversation, true, true)
+    }
+    fn read_task_lifecycle_rows(
+        &self,
+        source: Option<&str>,
+        conversation: Option<&str>,
+        terminal_only: bool,
+        retention: bool,
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
         let mut query = self.connection.prepare(
-            "SELECT state_json FROM runtime_actor_state WHERE substr(state_kind,1,15)='task/lifecycle/' AND (?1 IS NULL OR json_extract(CAST(state_json AS TEXT),'$.source')=?1) AND (?2 IS NULL OR json_extract(CAST(state_json AS TEXT),'$.conversation_id')=?2) AND (?3=0 OR json_extract(CAST(state_json AS TEXT),'$.terminal')=1) ORDER BY json_extract(CAST(state_json AS TEXT),'$.updated_at') DESC,state_kind LIMIT 2048",
+            "SELECT state_json FROM runtime_actor_state WHERE substr(state_kind,1,15)='task/lifecycle/' AND (?1 IS NULL OR CASE WHEN ?4 THEN coalesce(json_extract(CAST(state_json AS TEXT),'$.retention_source'),json_extract(CAST(state_json AS TEXT),'$.source')) ELSE json_extract(CAST(state_json AS TEXT),'$.source') END=?1) AND (?2 IS NULL OR json_extract(CAST(state_json AS TEXT),'$.conversation_id')=?2) AND (?3=0 OR json_extract(CAST(state_json AS TEXT),'$.terminal')=1) ORDER BY json_extract(CAST(state_json AS TEXT),'$.updated_at') DESC,state_kind LIMIT 2048",
         )?;
         let rows = query
-            .query_map(params![source, conversation, terminal_only], |r| r.get::<_, Vec<u8>>(0))?;
+            .query_map(params![source, conversation, terminal_only, retention], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })?;
         rows.map(|row| Ok(serde_json::from_slice(&row?)?)).collect()
     }
     /// Caps transient commit certificates by count and age without deleting consumed decisions.
@@ -113,6 +158,7 @@ impl AccountDb {
         if !matches!(
             prefix,
             "task/rejected/"
+                | "task/verified_roster/"
                 | "task/rate/"
                 | "task/ack_sent/"
                 | "task/import_skip/"
@@ -124,3 +170,6 @@ impl AccountDb {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

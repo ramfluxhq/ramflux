@@ -29,12 +29,26 @@ pub(crate) struct Delivery<'a> {
 }
 impl TaskHistory {
     pub(crate) fn state(&self) -> Result<TaskState, SdkError> {
-        if self.events.len() > 256 {
+        if self.events.len() > 289 {
             return Err(invalid("task event history limit reached"));
         }
-        let mut state = TaskState::default();
+        let mut state = self.checkpoint.as_ref().map(|c| c.state.clone()).unwrap_or_default();
+        let mut regular = 0;
+        let mut controls = 0;
         for accepted in &self.events {
             let event = accepted.carrier.verify(&accepted.public_key)?;
+            if matches!(event.event(), TaskEventBody::Cancel(_) | TaskEventBody::Resolve(_))
+                && state
+                    .task()
+                    .is_some_and(|t| t.requester.as_deref() == Some(&accepted.carrier.principal_id))
+            {
+                controls += 1;
+            } else {
+                regular += 1;
+            }
+            if regular > 256 || controls > 33 {
+                return Err(invalid("task event history limit reached"));
+            }
             state
                 .apply(&event, &accepted.carrier.signer(&accepted.public_key, &event))
                 .map_err(|e| invalid(e.to_string()))?;
@@ -57,25 +71,36 @@ impl RamfluxClient {
         conversation: &str,
         id: &str,
     ) -> Result<TaskHistory, SdkError> {
-        Ok(self
-            .account_db()?
-            .load_actor_state(&scoped("history", conversation, id)?)?
-            .unwrap_or_default())
+        let db = self.account_db()?;
+        let mut history: TaskHistory =
+            db.load_actor_state(&scoped("history", conversation, id)?)?.unwrap_or_default();
+        history.checkpoint = db.load_actor_state(&scoped("checkpoint", conversation, id)?)?;
+        if history.events.is_empty()
+            && let Some(checkpoint) = &history.checkpoint
+        {
+            history.created_at = checkpoint.created_at;
+            history.updated_at = checkpoint.updated_at;
+        }
+        Ok(history)
     }
     fn evaluate_task(&self, carrier: &Carrier) -> Result<Applied, SdkError> {
         let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
         let event = carrier.verify(&public)?;
-        let history = self.task_history(&carrier.conversation_id, event.event().task_id())?;
-        if history.events.len() >= 256 {
-            return Err(invalid("task event history limit reached"));
+        if self.task_has_no_local_role(carrier)? {
+            return Err(invalid("local account has no role in this task"));
         }
+        let history = self.task_history(&carrier.conversation_id, event.event().task_id())?;
         let state = history.state()?;
+        let control = Self::is_requester_task_control(carrier, &history)?;
         self.authorize_task_relations(carrier, state.task())?;
-        self.check_task_capacity(carrier, &history)?;
         let mut candidate = state.clone();
         candidate
             .apply(&event, &carrier.signer(&public, &event))
             .map_err(|e| invalid(e.to_string()))?;
+        if history.events.len() >= if control { 289 } else { 256 } {
+            return Err(invalid("task event history limit reached"));
+        }
+        self.check_task_capacity(carrier, &history)?;
         let (decision_key, decision_proof) =
             if let TaskEventBody::Resolve(resolution) = event.event() {
                 let task = state.task().ok_or_else(|| invalid("task not found"))?;
@@ -233,12 +258,7 @@ impl RamfluxClient {
             }
             Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
             Err(SdkError::Io(error)) => return Err(SdkError::Io(error)),
-            Err(error) => Outcome {
-                accepted: false,
-                fallback_text: "[Task rejected]".into(),
-                reject: Some(error.to_string()),
-                pending: false,
-            },
+            Err(error) => self.rejected_task_outcome(&carrier, &error)?,
         };
         db.delete_task_state(&pending_key)?;
         if pending_key.starts_with("task/local_pending/") {
@@ -256,6 +276,22 @@ impl RamfluxClient {
         self.store_task_message_metadata(delivery, &outcome)?;
         Ok(outcome)
     }
+    fn rejected_task_outcome(
+        &self,
+        carrier: &Carrier,
+        error: &SdkError,
+    ) -> Result<Outcome, SdkError> {
+        self.record_task_capacity_rejection(carrier, error)?;
+        if error.to_string().contains("local account has no role in this task") {
+            self.remember_task_no_role(carrier)?;
+        }
+        Ok(Outcome {
+            accepted: false,
+            fallback_text: "[Task rejected]".into(),
+            reject: Some(error.to_string()),
+            pending: false,
+        })
+    }
     pub(super) fn record_task_applied(
         &self,
         delivery: &Delivery<'_>,
@@ -266,13 +302,13 @@ impl RamfluxClient {
         let Applied { mut history, event, public, task, decision_key, decision_proof, membership } =
             applied;
         let db = self.account_db()?;
-        if history.events.is_empty() {
+        if history.events.is_empty() && history.checkpoint.is_none() {
             history.created_at = delivery.at;
         }
         history.updated_at = delivery.at;
         let kind_verified =
             super::actor_kind_verified(self, &carrier.principal_id, &carrier.device_id);
-        let mut fallback = event.fallback_text();
+        let mut fallback = event.fallback_text_with_actor_kind(kind_verified);
         if !kind_verified && !fallback.contains("(actor kind unverified)") {
             fallback.push_str(" (actor kind unverified)");
         }
@@ -297,7 +333,18 @@ impl RamfluxClient {
             &history.events.last().ok_or_else(|| invalid("empty history"))?.carrier,
             &history,
         )?;
-        if serde_json::to_vec(&history)?.len() > 2 * 1024 * 1024 {
+        let last = &history.events.last().ok_or_else(|| invalid("empty history"))?.carrier;
+        let recovery = Self::is_requester_task_control(last, &history)?;
+        let reserve = if recovery {
+            match last.event()?.event() {
+                TaskEventBody::Cancel(_) => 80 * 1024 + 4096,
+                _ => 64 * 1024 + 4096,
+            }
+        } else {
+            0
+        };
+        let maximum = 2 * 1024 * 1024 + reserve;
+        if serde_json::to_vec(&history)?.len() > maximum {
             return Err(invalid("task history byte budget exceeded"));
         }
         let history_key = scoped("history", &task.conversation_id, &task.task_id)?;
@@ -307,7 +354,19 @@ impl RamfluxClient {
             db.persist_actor_state(&key,&json!({"conversation_id":task.conversation_id,"task_id":task.task_id,"version":task.version}))?;
         }
         let mut view = serde_json::to_value(&task)?;
+        if !task.state.is_terminal()
+            && db
+                .load_actor_state::<Value>(&scoped("view", &task.conversation_id, &task.task_id)?)?
+                .is_some_and(|v| v["stalled_by_assignee"] == true)
+        {
+            view["stalled_by_assignee"] = json!(true);
+            view["progress_state"] = json!("stalled by assignee");
+        }
         view["id"] = json!(task.task_id);
+        if history.checkpoint.is_some() {
+            view["compacted"] = json!(true);
+            view["certificate_hashes"] = json!(history.certificate_hashes()?);
+        }
         view["actor_kind_verified"] = json!(kind_verified);
         view["created_at"] = json!(history.created_at);
         view["updated_at"] = json!(history.updated_at);
@@ -323,31 +382,6 @@ impl RamfluxClient {
             )?;
         }
         Ok(Outcome { accepted: true, fallback_text: fallback, reject: None, pending: false })
-    }
-    fn admit_task_event(&self, carrier: &Carrier, now: i64) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let task = carrier.event()?.event().task_id().to_owned();
-        for (scope, maximum) in [
-            ("account".to_owned(), 512),
-            (format!("principal:{}", carrier.principal_id), 128),
-            (format!("task:{}:{}:{}", carrier.conversation_id, task, carrier.principal_id), 64),
-        ] {
-            let id = super::key("rate", &scope);
-            let mut rate = db
-                .load_actor_state::<Value>(&id)?
-                .unwrap_or_else(|| json!({"start":now,"count":0}));
-            if now.saturating_sub(rate["start"].as_i64().unwrap_or(now)) >= 60 {
-                rate = json!({"start":now,"count":0});
-            }
-            let count = rate["count"].as_u64().unwrap_or(0);
-            if count >= maximum {
-                return Err(invalid("task admission rate exceeded"));
-            }
-            rate["count"] = json!(count + 1);
-            db.persist_actor_state(&id, &rate)?;
-        }
-        db.prune_task_diagnostics("task/rate/", 2048)?;
-        Ok(())
     }
     pub(super) fn store_task_message_metadata(
         &self,

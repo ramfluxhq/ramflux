@@ -134,6 +134,7 @@ fn terminal_count_retention_compacts_old_bodies_and_fully_prunes_older_projectio
                 .collect::<Result<Vec<_>, SdkError>>()?;
             let history = TaskHistory {
                 events,
+                checkpoint: None,
                 created_at: 1,
                 updated_at: crate::time::now_unix_timestamp(),
             };

@@ -97,3 +97,74 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn requester_cancellation_after_compaction_prepares_original_sibling_events_and_submits_to_peers()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::{TaskCancel, TaskEvent, TaskEventBody, TaskStart};
+    let root = runtime_tests::root("task-compacted-cancel");
+    let mut source = runtime_tests::account(
+        &root.join("sender"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let peers = members_count(&root, &source, 1)?;
+    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    source.put_engine(GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(fixture::RecordingGateway::new(captured.clone())),
+    ));
+    source.client.account_db()?.persist_client_record(
+        "conversation",
+        "thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    source.client.persist_identity_directory(&fixture::manifest(&peers[0].client)?)?;
+    source.client.pin_joined_group_member("group", "device-peer-0")?;
+    let event = TaskEvent::new(
+        "thread".into(),
+        TaskEventBody::Start(TaskStart {
+            task_id: "task".into(),
+            conversation_id: "thread".into(),
+            requester: "sender".into(),
+            assignee: "peer-0".into(),
+            text: "work".into(),
+            constraints: None,
+        }),
+        sdk_device_signed_fields("device-sender", ""),
+    )?;
+    let start = source.client.sign_task_event(event, "start".into(), None)?;
+    assert_eq!(super::send(&mut source, &start).await?["accepted"], true);
+    let key = crate::client::task::scoped("lifecycle", "thread", "task")?;
+    let mut row =
+        source.client.account_db()?.load_actor_state::<Value>(&key)?.ok_or("lifecycle")?;
+    row["compaction_eligible"] = json!(true);
+    source.client.account_db()?.persist_actor_state(&key, &row)?;
+    source.client.maintain_task_lifecycle(now_unix_timestamp())?;
+    let event = TaskEvent::new(
+        "thread".into(),
+        TaskEventBody::Cancel(TaskCancel { task_id: "task".into(), base_revision: 1 }),
+        sdk_device_signed_fields("device-sender", ""),
+    )?;
+    let cancel = source.client.sign_task_event(event, "cancel".into(), None)?;
+    let bytes = cancel.bytes()?;
+    let (own, original) =
+        super::own_payloads(&source.client, &cancel, &bytes, &super::Mode::Event)?;
+    assert!(original);
+    assert_eq!(own, vec![bytes.clone()]);
+    assert_eq!(
+        super::own_payloads(&source.client, &cancel, &bytes, &super::Mode::Own)?.0,
+        Vec::<Vec<u8>>::new()
+    );
+    let before = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len();
+    assert_eq!(super::send(&mut source, &cancel).await?["accepted"], true);
+    assert!(captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() > before);
+    assert_eq!(source.client.task_get(Some("thread"), "task")?["state"], "cancelled");
+    directory.abort();
+    drop(peers);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

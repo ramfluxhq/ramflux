@@ -28,8 +28,14 @@ impl RamfluxClient {
             .client_record("conversation", &c.conversation_id)?
             .ok_or_else(|| invalid("task conversation missing"))?;
         let group = thread["group_id"].as_str().map(str::to_owned);
-        let epoch =
-            group.as_deref().map(|g| self.group_state(g).map(|s| s.group_epoch)).transpose()?;
+        let epoch = group
+            .as_deref()
+            .map(|g| {
+                let state = self.group_state(g)?;
+                self.record_verified_task_roster(&state)?;
+                Ok::<_, SdkError>(state.group_epoch)
+            })
+            .transpose()?;
         Ok(Membership {
             conversation: c.conversation_id.clone(),
             group,
@@ -55,7 +61,7 @@ impl RamfluxClient {
             .apply(&event, &c.signer(&accepted.public_key, &event))
             .map_err(|e| invalid(e.to_string()))?;
         let task = state.task().cloned().ok_or_else(|| invalid("historical task is absent"))?;
-        Self::check_task_historical_membership(accepted, context, &task)?;
+        self.check_task_historical_membership(accepted, context, &task)?;
         self.check_task_capacity(c, &history)?;
         let (decision_key, certificate) = if let TaskEventBody::Resolve(resolution) = event.event()
         {
@@ -107,6 +113,7 @@ impl RamfluxClient {
         Ok(outcome.fallback_text)
     }
     fn check_task_historical_membership(
+        &self,
         accepted: &AcceptedEvent,
         context: &OwnContext,
         task: &Task,
@@ -123,6 +130,9 @@ impl RamfluxClient {
                 || !witness.members.contains(&task.assignee)
             {
                 return Err(invalid("historical task membership witness mismatch"));
+            }
+            if let (Some(group), Some(epoch)) = (group, witness.epoch) {
+                self.check_verified_task_roster(c, &group.group_id, epoch, &task.assignee)?;
             }
             if group.is_none()
                 && (!context.participants.contains(&c.principal_id)

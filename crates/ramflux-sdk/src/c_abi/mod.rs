@@ -842,7 +842,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
             RamfluxErrorCode::RateLimited
         }
         SdkError::SurfaceRefused { .. }
-        | SdkError::TaskDeliveryTooLarge {..}
+        | SdkError::TaskDeliveryTooLarge { .. }
         | SdkError::SurfaceDeliveryTooLarge { .. }
         | SdkError::ContactConfirmationRequired(_)
         | SdkError::ContactHomeNodeUnsupported
