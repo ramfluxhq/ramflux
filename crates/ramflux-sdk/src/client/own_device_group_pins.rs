@@ -61,7 +61,7 @@ impl RamfluxClient {
                     .filter(|g| g.group_id == pin.group_id)
                     .max_by_key(|g| g.group_epoch)
                     .is_some_and(|g| g.members.iter().any(|m| m.member_id == pin.device_id))
-                && db.group_member_role(&pin.group_id, &pin.device_id)?.is_some();
+                && db.group_member_role_metadata(&pin.group_id, &pin.device_id)?.is_some();
             let result = if accepted {
                 db.write_transaction(|| self.restore_own_member_pin(pin))
             } else {

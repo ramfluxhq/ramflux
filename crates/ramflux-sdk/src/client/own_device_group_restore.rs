@@ -60,9 +60,9 @@ impl RamfluxClient {
                 if previous.is_some() { Some(self.group_state(&group.group_id)?) } else { None };
             let joined = group
                 .local_joined_epoch
-                .max(db.group_member_joined_epoch(&group.group_id, local)?.unwrap_or(0));
+                .max(db.group_member_joined_epoch_metadata(&group.group_id, local)?.unwrap_or(0));
             let role = if previous == Some(group.group_epoch) {
-                db.group_member_role(&group.group_id, local)?
+                db.group_member_role_metadata(&group.group_id, local)?
                     .unwrap_or_else(|| group.local_role.clone())
             } else {
                 group.local_role.clone()
@@ -87,13 +87,13 @@ impl RamfluxClient {
             }
             self.restore_own_group_members(bundle, group, previous)?;
             for route in &group.routes {
-                if db.group_member_role(&group.group_id, &route.member_id)?.is_some() {
+                if db.group_member_role_metadata(&group.group_id, &route.member_id)?.is_some() {
                     self.persist_group_member_route(&group.group_id, route)?;
                 }
             }
             floors.insert(
                 group.group_id.clone(),
-                db.group_member_joined_epoch(&group.group_id, local)?
+                db.group_member_joined_epoch_metadata(&group.group_id, local)?
                     .unwrap_or(group.local_joined_epoch),
             );
         }
@@ -118,14 +118,14 @@ impl RamfluxClient {
                 continue;
             }
             if previous != Some(group.group_epoch)
-                || db.group_member_role(&group.group_id, &member.member_id)?.is_none()
+                || db.group_member_role_metadata(&group.group_id, &member.member_id)?.is_none()
             {
                 db.upsert_group_member_snapshot(
                     &group.group_id,
                     &member.member_id,
                     &member.role,
                     member.joined_epoch.max(
-                        db.group_member_joined_epoch(&group.group_id, &member.member_id)?
+                        db.group_member_joined_epoch_metadata(&group.group_id, &member.member_id)?
                             .unwrap_or(0),
                     ),
                 )?;
@@ -165,7 +165,7 @@ impl RamfluxClient {
             || blocked.contains(&(distribution.group_id.clone(), distribution.sender_id.clone()))
             || self
                 .account_db()?
-                .group_member_role(&distribution.group_id, &distribution.sender_id)?
+                .group_member_role_metadata(&distribution.group_id, &distribution.sender_id)?
                 .is_none()
         {
             self.account_db()?.record_own_device_restore_skip(

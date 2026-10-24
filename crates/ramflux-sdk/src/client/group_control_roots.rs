@@ -174,11 +174,11 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
-    pub(super) fn group_control_signer(
+    pub(super) fn group_control_actor_identity(
         &self,
         event: &GroupEvent,
         group: &str,
-    ) -> Result<String, SdkError> {
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
         let roots = GroupDeviceRoots::from_event(event)?;
         let actor = if let Some(roots) = &roots {
             qualified_device_id(&roots.actor_principal_commitment, &event.actor_device_id)?
@@ -187,6 +187,15 @@ impl RamfluxClient {
         } else {
             self.group_device_reference(group, &event.actor_device_id)?
         };
+        self.device_identity(&actor)
+    }
+    pub(super) fn group_control_signer(
+        &self,
+        event: &GroupEvent,
+        group: &str,
+    ) -> Result<String, SdkError> {
+        let actor_identity = self.group_control_actor_identity(event, group)?;
+        let actor = actor_identity.storage_key().to_owned();
         let public = if let GroupEventBody::MemberAccepted { invite_id, invitee_identity, .. } =
             &event.body
         {

@@ -79,7 +79,12 @@ impl RamfluxClient {
             return Err(SdkError::InboundRejected("revoked device".to_owned()));
         }
 
-        self.require_cached_root_authority(identity)?;
+        self.require_cached_root_authority(identity).map_err(|error| {
+            crate::client::inbox_failure::lookup_error(
+                error,
+                "cached sender directory is incomplete",
+            )
+        })?;
         self.account_db()?.client_record("device", identity.storage_key())?.ok_or_else(|| {
             SdkError::InboundPending("sender device has no verified manifest".to_owned())
         })

@@ -424,14 +424,7 @@ impl RamfluxClient {
                     "kind":"direct","title":null,"group_id":null,"participants":[engine.config.principal_id,entry.envelope.source_principal_id],"direct_route":null
                 }))?;
         }
-        for attachment in &attachment_refs {
-            self.persist_received_attachment_reference(
-                attachment,
-                &entry.envelope.source_principal_id,
-                conversation_id,
-                &entry.envelope.envelope_id,
-            )?;
-        }
+        self.persist_legacy_attachment_references(&attachment_refs, &entry, conversation_id)?;
         // Every attachment was imported, ACKed, and projected: only now do we commit the
         // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above
         // returns before this point, leaving the persisted ratchet snapshot and cursor intact so
@@ -449,6 +442,23 @@ impl RamfluxClient {
             attachments,
             entry,
         }))
+    }
+
+    fn persist_legacy_attachment_references(
+        &self,
+        attachment_refs: &[SdkDmAttachmentRef],
+        entry: &GatewayInboxEntry,
+        conversation_id: &str,
+    ) -> Result<(), SdkError> {
+        for attachment in attachment_refs {
+            self.persist_received_attachment_reference(
+                attachment,
+                &entry.envelope.source_principal_id,
+                conversation_id,
+                &entry.envelope.envelope_id,
+            )?;
+        }
+        Ok(())
     }
 
     fn decrypt_legacy_entry(

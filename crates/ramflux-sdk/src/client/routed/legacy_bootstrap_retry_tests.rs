@@ -63,7 +63,11 @@ async fn malformed_gateway_success_during_bootstrap_is_held_and_the_same_distrib
 -> Result<(), SdkError> {
     let (alice, bob) = setup()?;
     alice.client.create_group("bootstrap", "alice")?;
-    alice.client.add_group_member("bootstrap", "bob", "member")?;
+    alice.client.add_group_member(
+        "bootstrap",
+        bob.client.owned_device_identity()?.storage_key(),
+        "member",
+    )?;
     let manifest = super::super::r9::manifest(&alice)?;
     let event = alice.client.create_signed_group_member_join_event(
         "bootstrap",

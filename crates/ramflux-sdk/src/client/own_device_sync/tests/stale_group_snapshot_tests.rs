@@ -76,6 +76,7 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
     target.import_group_sender_key_distribution(
         &bob.export_group_sender_key_distribution("g", "bob")?,
     )?;
+    let bob_identity = bob.owned_device_identity()?;
     let before = member_packet(&bob, "before-removal", &bob_root)?;
     assert!(matches!(
         target.append_group_gateway_delivery_for_recipient(
@@ -88,19 +89,14 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
         GroupGatewayDeliveryResult::Message(_)
     ));
     let db = target.account_db()?;
-    db.remove_group_member("g", "target_device_sync", "bob")?;
+    db.remove_group_member(
+        "g",
+        &target.owned_device_identity()?,
+        &target.peer_device_identity("bob", "bob")?,
+    )?;
     let epoch = target.group_state("g")?.group_epoch;
-    let key = db
-        .group_member_device_key(
-            "g",
-            &RamfluxClient::device_identity_from_manifest(
-                &crate::client::identity_authority::test_support::remote_manifest(
-                    "bob", "bob", [0x63; 32],
-                )?,
-                "bob",
-            )?,
-        )?
-        .ok_or(SdkError::IdentityRootMissing)?;
+    let key =
+        db.group_member_device_key("g", &bob_identity)?.ok_or(SdkError::IdentityRootMissing)?;
     drop(target.active_account_db.take());
     target.unlock_account("acct", b"own-device-sync-test")?;
     target.import_own_device_history_bundle(
@@ -108,47 +104,10 @@ fn stale_snapshot_preserves_removed_members_and_inactive_pins_after_reopen() -> 
         &history,
     )?;
     assert_eq!(target.group_state("g")?.group_epoch, epoch);
-    assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
-    assert!(
-        target
-            .account_db()?
-            .group_member_key_binding(
-                "g",
-                &RamfluxClient::device_identity_from_manifest(
-                    &crate::client::identity_authority::test_support::remote_manifest(
-                        "bob", "bob", [0x63; 32]
-                    )?,
-                    "bob"
-                )?
-            )?
-            .is_none()
-    );
-    assert_eq!(
-        target.account_db()?.group_member_device_key(
-            "g",
-            &RamfluxClient::device_identity_from_manifest(
-                &crate::client::identity_authority::test_support::remote_manifest(
-                    "bob", "bob", [0x63; 32]
-                )?,
-                "bob"
-            )?
-        )?,
-        Some(key)
-    );
-    assert!(
-        target
-            .require_group_sender_pin(
-                "g",
-                "bob",
-                &RamfluxClient::device_identity_from_manifest(
-                    &crate::client::identity_authority::test_support::remote_manifest(
-                        "bob", "bob", [0x63; 32]
-                    )?,
-                    "bob"
-                )?
-            )
-            .is_err()
-    );
+    assert!(target.account_db()?.group_member_role_metadata("g", "bob")?.is_none());
+    assert!(target.account_db()?.group_member_key_binding("g", &bob_identity)?.is_none());
+    assert_eq!(target.account_db()?.group_member_device_key("g", &bob_identity)?, Some(key));
+    assert!(target.require_group_sender_pin("g", "bob", &bob_identity).is_err());
     let after = member_packet(&bob, "after-removal", &bob_root)?;
     assert!(target.authenticated_envelope_sender(&after).is_ok());
     assert!(
@@ -189,7 +148,7 @@ fn highest_snapshot_epoch_wins_for_an_unseen_group_regardless_of_bundle_order()
             &history,
         )?;
         assert_eq!(target.group_state("g")?.group_epoch, 4);
-        assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
+        assert!(target.account_db()?.group_member_role_metadata("g", "bob")?.is_none());
         assert!(
             target
                 .account_db()?
@@ -227,7 +186,7 @@ fn a_newer_snapshot_omission_retires_members_before_an_older_snapshot_can_reintr
         &envelope("source_device_sync", "target_device_sync"),
         &history,
     )?;
-    assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
+    assert!(target.account_db()?.group_member_role_metadata("g", "bob")?.is_none());
     assert!(
         target
             .account_db()?
@@ -258,12 +217,42 @@ fn snapshot_import_cannot_reactivate_a_removed_local_device() -> Result<(), SdkE
         1,
     )?;
     db.upsert_group_member_snapshot("g", "source_device_sync", "owner", 1)?;
-    db.remove_group_member("g", "source_device_sync", "target_device_sync")?;
+    db.persist_group_member_device_key(
+        "g",
+        &source.owned_device_identity()?,
+        &ramflux_protocol::encode_base64url(
+            source
+                .device_branch
+                .as_ref()
+                .ok_or(SdkError::IdentityRootMissing)?
+                .signing_key
+                .verifying_key()
+                .to_bytes(),
+        ),
+    )?;
+    db.persist_group_member_device_key(
+        "g",
+        &target.owned_device_identity()?,
+        &ramflux_protocol::encode_base64url(
+            target
+                .device_branch
+                .as_ref()
+                .ok_or(SdkError::IdentityRootMissing)?
+                .signing_key
+                .verifying_key()
+                .to_bytes(),
+        ),
+    )?;
+    db.remove_group_member(
+        "g",
+        &source.owned_device_identity()?,
+        &target.owned_device_identity()?,
+    )?;
     target.import_own_device_history_bundle(
         &envelope("source_device_sync", "target_device_sync"),
         &history,
     )?;
-    assert!(db.group_member_role("g", "target_device_sync")?.is_none());
+    assert!(db.group_member_role_metadata("g", "target_device_sync")?.is_none());
     assert!(db.group_member_key_binding("g", &target.owned_device_identity()?)?.is_none());
     assert_eq!(target.group_state("g")?.group_epoch, 3);
     finish(source, sr, target, tr)
@@ -328,7 +317,7 @@ fn a_member_joined_after_the_snapshot_epoch_is_not_activated_or_pinned() -> Resu
         &envelope("source_device_sync", "target_device_sync"),
         &history,
     )?;
-    assert!(target.account_db()?.group_member_role("g", "bob")?.is_none());
+    assert!(target.account_db()?.group_member_role_metadata("g", "bob")?.is_none());
     assert!(
         target
             .account_db()?
@@ -363,9 +352,12 @@ fn equal_epoch_snapshot_does_not_lower_the_existing_local_join_floor_or_raise_it
         &envelope("source_device_sync", "target_device_sync"),
         &history,
     )?;
-    assert_eq!(target.account_db()?.group_member_joined_epoch("g", "target_device_sync")?, Some(5));
     assert_eq!(
-        target.account_db()?.group_member_role("g", "target_device_sync")?.as_deref(),
+        target.account_db()?.group_member_joined_epoch_metadata("g", "target_device_sync")?,
+        Some(5)
+    );
+    assert_eq!(
+        target.account_db()?.group_member_role_metadata("g", "target_device_sync")?.as_deref(),
         Some("member")
     );
     finish(source, sr, target, tr)
@@ -466,7 +458,10 @@ fn a_target_joining_after_the_source_skips_older_group_messages_without_rolling_
     assert!(target.account_db()?.message_content("before-target-join")?.is_none());
     assert!(target.direct_message_by_id("direct-safe")?.is_some());
     assert!(target.direct_message_by_id("after-target-join")?.is_some());
-    assert_eq!(target.account_db()?.group_member_joined_epoch("g", "target_device_sync")?, Some(3));
+    assert_eq!(
+        target.account_db()?.group_member_joined_epoch_metadata("g", "target_device_sync")?,
+        Some(3)
+    );
     assert!(
         target
             .account_db()?
@@ -583,7 +578,37 @@ fn skipped_group_surface_history_preserves_direct_history_and_records_each_skip(
         )?;
         db.upsert_group_member_snapshot("g", "source_device_sync", "owner", 1)?;
         if removed {
-            db.remove_group_member("g", "source_device_sync", "target_device_sync")?;
+            db.persist_group_member_device_key(
+                "g",
+                &source.owned_device_identity()?,
+                &ramflux_protocol::encode_base64url(
+                    source
+                        .device_branch
+                        .as_ref()
+                        .ok_or(SdkError::IdentityRootMissing)?
+                        .signing_key
+                        .verifying_key()
+                        .to_bytes(),
+                ),
+            )?;
+            db.persist_group_member_device_key(
+                "g",
+                &target.owned_device_identity()?,
+                &ramflux_protocol::encode_base64url(
+                    target
+                        .device_branch
+                        .as_ref()
+                        .ok_or(SdkError::IdentityRootMissing)?
+                        .signing_key
+                        .verifying_key()
+                        .to_bytes(),
+                ),
+            )?;
+            db.remove_group_member(
+                "g",
+                &source.owned_device_identity()?,
+                &target.owned_device_identity()?,
+            )?;
         } else {
             history.groups[0].group_epoch = 3;
         }

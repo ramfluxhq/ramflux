@@ -342,17 +342,7 @@ impl IdentityRegistry {
         let identity = self
             .device_identity_for_root(&request.principal_commitment, &request.proof.device_id)
             .ok_or_else(|| NodeCoreError::ItestHttp("registration authority missing".into()))?;
-        let proof_key = ramflux_crypto::blake3_256_base64url(
-            "ramflux.node.registration_proof.v2",
-            &ramflux_protocol::canonical_json_bytes(&(
-                identity.storage_key(),
-                &request.proof.proof_id,
-            ))
-            .map_err(|e| NodeCoreError::ItestHttp(e.to_string()))?,
-        );
-        if !self.root_seen_proofs.insert(proof_key) {
-            return Err(NodeCoreError::ItestHttp("branch proof replay".into()));
-        }
+        self.admit_registration_proof(&identity, &request.proof.proof_id)?;
         self.principal_root_bindings
             .insert(request.proof.principal_id.clone(), request.root_public_key.clone());
         self.root_public_keys
@@ -402,6 +392,21 @@ impl IdentityRegistry {
         ))
     }
 
+    fn admit_registration_proof(
+        &mut self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        proof: &str,
+    ) -> Result<(), NodeCoreError> {
+        let key = ramflux_crypto::blake3_256_base64url(
+            "ramflux.node.registration_proof.v2",
+            &ramflux_protocol::canonical_json_bytes(&(source.storage_key(), proof))
+                .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?,
+        );
+        if !self.root_seen_proofs.insert(key) {
+            return Err(NodeCoreError::ItestHttp("branch proof replay".into()));
+        }
+        Ok(())
+    }
     pub fn set_registration_policy(&mut self, policy: RegistrationPolicy) {
         self.registration_policy = policy;
     }
@@ -723,6 +728,9 @@ impl IdentityRegistry {
 
     #[must_use]
     pub fn device_manifest(&self, principal_commitment: &str) -> Option<DeviceManifestResponse> {
+        if !self.signed_device_sets.contains_key(principal_commitment) {
+            return self.legacy_device_manifest(principal_commitment);
+        }
         let root_public_key = self.root_public_keys_by_commitment.get(principal_commitment)?;
         let mut devices =
             self.devices

@@ -209,6 +209,17 @@ pub fn verify_branch_proof(
     )
 }
 
+/// Authenticated source and verification context for admitting a branch proof once.
+#[derive(Clone, Copy)]
+pub struct BranchProofAdmission<'a> {
+    pub source: &'a crate::RootQualifiedDeviceRef,
+    pub root_public_key: &'a VerifyingKey,
+    pub proof: &'a BranchProofDocument,
+    pub audience: &'a str,
+    pub required_capability: &'a str,
+    pub now: i64,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DeviceRevocationReplayGuard {
     revoked_devices: BTreeSet<crate::RootQualifiedDeviceRef>,
@@ -229,13 +240,16 @@ impl DeviceRevocationReplayGuard {
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn accept_branch_proof(
         &mut self,
-        source: &crate::RootQualifiedDeviceRef,
-        root_public_key: &VerifyingKey,
-        proof: &BranchProofDocument,
-        audience: &str,
-        required_capability: &str,
-        now: i64,
+        admission: BranchProofAdmission<'_>,
     ) -> Result<(), CryptoError> {
+        let BranchProofAdmission {
+            source,
+            root_public_key,
+            proof,
+            audience,
+            required_capability,
+            now,
+        } = admission;
         if source.root_commitment() != crate::identity_root_commitment(root_public_key)
             || source.device_id() != proof.device_id
         {

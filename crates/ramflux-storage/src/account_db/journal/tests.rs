@@ -426,7 +426,9 @@ fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
     db.persist_group_member_device_key("group", &alice, "alice-key")?;
     let owner:(String,String)=db.connection.query_row("SELECT member_principal_id,principal_commitment FROM group_member_device_key WHERE group_id='group' AND member_id=?1",params![alice.storage_key()],|r|Ok((r.get(0)?,r.get(1)?)))?;
     assert_eq!(owner, ("alice".into(), alice.root_commitment().into()));
-    db.remove_group_member("group", "owner", "device")?;
+    let owner = pin_source("owner", "owner")?;
+    db.persist_group_member_device_key("group", &owner, "owner-key")?;
+    db.remove_group_member("group", &owner, &alice)?;
     assert!(db.persist_group_member_device_key("group", &mallory, "mallory-key").is_err());
     assert_eq!(db.group_member_device_key("group", &alice)?.as_deref(), Some("alice-key"));
     drop(db);
@@ -699,7 +701,9 @@ fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
     assert_eq!(db.group_member_key_binding("legacy", &bob)?, None);
     assert_eq!(db.group_member_device_key("legacy", &mallory)?, None);
     assert!(db.persist_group_member_device_key("legacy", &bob, "same-key").is_err());
-    db.remove_group_member("legacy", "owner", "shared")?;
+    let owner = pin_source("owner", "owner")?;
+    db.persist_group_member_device_key("legacy", &owner, "owner-key")?;
+    db.legacy_remove_group_member("legacy", &owner, "shared")?;
     db.add_group_member("legacy", "shared", "member")?;
     db.persist_group_member_device_key("legacy", &bob, "same-key")?;
     assert_eq!(db.group_member_device_key("legacy", &bob)?.as_deref(), Some("same-key"));
@@ -719,6 +723,102 @@ fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
         )?,
         1
     );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn group_control_replay_uses_the_authenticated_actor_and_ignores_legacy_ids()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let alice = pin_source("alice", "owner")?;
+    let bob = pin_source("bob", "admin")?;
+    let impostor = pin_source("mallory", "owner")?;
+    db.create_group("g", "owner")?;
+    db.add_group_member("g", "admin", "admin")?;
+    db.persist_group_member_device_key("g", &alice, "alice-key")?;
+    db.persist_group_member_device_key("g", &bob, "bob-key")?;
+    db.connection.execute("INSERT INTO group_control_event_seen(group_id,event_id,event_kind,actor_device_id,target_member_id,previous_epoch,new_group_epoch,applied_at) VALUES('g','shared','member_invited','owner','old',2,2,1)", [])?;
+    let recipient_root = pin_source("recipient", "one")?.root_commitment().to_owned();
+    let invite =
+        |actor: &ramflux_crypto::RootQualifiedDeviceRef, id: &str| crate::GroupInviteWrite {
+            group_id: "g".into(),
+            event_id: "shared".into(),
+            actor_device_id: actor.device_id().into(),
+            invite_id: id.into(),
+            invitee_identity: id.into(),
+            invitee_principal_commitment: recipient_root.clone(),
+            invitee_signing_public_key: "recipient-key".into(),
+            invited_role: "member".into(),
+            group_epoch: 2,
+            expires_at: i64::MAX,
+            reason: String::new(),
+        };
+    assert!(db.apply_group_member_invite(&invite(&impostor, "forged"), &impostor).is_err());
+    db.apply_group_member_invite(&invite(&bob, "one"), &bob)?;
+    db.apply_group_member_invite(&invite(&alice, "two"), &alice)?;
+    assert!(matches!(
+        db.apply_group_member_invite(&invite(&alice, "three"), &alice),
+        Err(StorageError::GroupControlReplay(_))
+    ));
+    drop(db);
+    let index = AccountIndex::open(&root)?;
+    let db = AccountDb::open(&index, "a", &AccountDbKey::derive("a", b"secret"))?;
+    assert!(matches!(
+        db.apply_group_member_invite(&invite(&alice, "four"), &alice),
+        Err(StorageError::GroupControlReplay(_))
+    ));
+    let legacy_count: u64 =
+        db.connection
+            .query_row("SELECT count(*) FROM group_control_event_seen", [], |r| r.get(0))?;
+    assert_eq!(legacy_count, 1);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn an_invite_for_one_root_cannot_be_accepted_by_a_copied_literal_device_name()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let owner = pin_source("owner", "owner")?;
+    let bob = pin_source("bob", "shared")?;
+    let mallory = pin_source("mallory", "shared")?;
+    db.create_group("g", "owner")?;
+    db.persist_group_member_device_key("g", &owner, "owner-key")?;
+    db.apply_group_member_invite(
+        &crate::GroupInviteWrite {
+            group_id: "g".into(),
+            event_id: "invite-event".into(),
+            actor_device_id: "owner".into(),
+            invite_id: "invite".into(),
+            invitee_identity: "shared".into(),
+            invitee_principal_commitment: bob.root_commitment().into(),
+            invitee_signing_public_key: "bob-key".into(),
+            invited_role: "member".into(),
+            group_epoch: 1,
+            expires_at: i64::MAX,
+            reason: String::new(),
+        },
+        &owner,
+    )?;
+    let accept = crate::GroupInviteAcceptWrite {
+        group_id: "g".into(),
+        event_id: "accept-event".into(),
+        actor_device_id: "shared".into(),
+        invite_id: "invite".into(),
+        invitee_identity: "shared".into(),
+        accepted_role: "member".into(),
+        previous_epoch: 1,
+        new_group_epoch: 2,
+        now: 100,
+    };
+    assert!(db.apply_group_member_accept(&accept, &mallory).is_err());
+    assert_eq!(db.group_invite("g", "invite")?.state, "pending");
+    db.apply_group_member_accept(&accept, &bob)?;
+    assert_eq!(db.group_member_role("g", &bob)?.as_deref(), Some("member"));
+    assert_eq!(db.group_member_role("g", &mallory)?, None);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

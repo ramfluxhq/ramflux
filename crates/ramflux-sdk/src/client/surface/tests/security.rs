@@ -22,8 +22,11 @@ fn invalid_signatures_never_reserve_another_senders_receipt() -> TestResult {
 #[test]
 fn deferred_group_sender_principal_comes_from_the_verified_device_record() -> TestResult {
     let f = Fixture::new()?;
+    f.author.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&f.human)?,
+    )?;
     f.author.create_group("g", "author-device")?;
-    f.author.add_group_member("g", "human-device", "member")?;
+    f.author.add_group_member("g", f.human.owned_device_identity()?.storage_key(), "member")?;
     f.author.account_db()?.persist_client_record(
         "conversation",
         "thread",

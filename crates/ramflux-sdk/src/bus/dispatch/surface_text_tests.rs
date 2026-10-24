@@ -571,17 +571,7 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
         dm_device_id_hash(&remote),
         [3; 32],
     )?;
-    let remote_manifest = crate::client::identity_authority::test_support::remote_manifest(
-        "peer", &remote, [89; 32],
-    )?;
-    source.client.persist_root_verified_directory(&remote_manifest)?;
-    let remote_identity = RamfluxClient::device_identity_from_manifest(&remote_manifest, &remote)?;
-    source.client.persist_pair(
-        &source.client.owned_device_identity()?,
-        &remote_identity,
-        &[4; 32],
-        &session,
-    )?;
+    let remote_identity = prepare_frame_test_pair(&source.client, &remote, &session)?;
     let config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
         bind_addr: "127.0.0.1:0".parse()?,
         gateway_addr: "127.0.0.1:1".parse()?,
@@ -631,4 +621,17 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
     drop(source);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn prepare_frame_test_pair(
+    source: &RamfluxClient,
+    remote: &str,
+    session: &ramflux_crypto::DmSession,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
+    let remote_manifest =
+        crate::client::identity_authority::test_support::remote_manifest("peer", remote, [89; 32])?;
+    source.persist_root_verified_directory(&remote_manifest)?;
+    let remote_identity = RamfluxClient::device_identity_from_manifest(&remote_manifest, remote)?;
+    source.persist_pair(&source.owned_device_identity()?, &remote_identity, &[4; 32], session)?;
+    Ok(remote_identity)
 }

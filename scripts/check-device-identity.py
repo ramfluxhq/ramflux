@@ -43,6 +43,9 @@ def violations(source, path):
             continue
         typed = "RootQualifiedDeviceRef" in signature or "RootQualifiedDeviceIdentity" in signature
         args = STRING_ARG.findall(signature)
+        if not typed and re.search(r"(?:replay|dedup|device|pair).*_key$", name) and re.search(r":\s*&\s*(?:str|String)\b", signature):
+            if re.search(r"format!|canonical_json_bytes|hash_base64url|blake3_256", body):
+                found.append((line, f"{name}: identity key cannot take an untyped string source"))
         if args and not typed and re.search(r"(?:_key|_bucket|_replay|_dedup|_receipt)$", name):
             if re.search(r"\b(?:format!|canonical_json_bytes|hash_base64url|blake3_256)", body):
                 found.append((line, f"{name}: device key builder requires RootQualifiedDeviceRef"))
@@ -61,9 +64,9 @@ def violations(source, path):
         declaration = re.search(r"struct\s+RootQualifiedDeviceRef\s*\{([^}]+)\}", source, re.S)
         if not declaration or re.search(r"\bpub\b", declaration[1]):
             found.append((1, "authenticated device reference fields must stay private"))
-        if re.search(r"impl\s+(?:<[^>]+>\s*)?(?:\w+::)*(?:Deserialize|From|TryFrom|Deref|Display|AsRef)\b[^{}]*\b(?:for\s+)?RootQualifiedDeviceRef", source):
+        if re.search(r"impl\s+(?:<[^>]+>\s*)?(?:\w+::)*(?:Default|Deserialize|From|TryFrom|Deref|Display|AsRef)\b[^{}]*\b(?:for\s+)?RootQualifiedDeviceRef", source):
             found.append((1, "authenticated device reference cannot acquire a string or deserialization shortcut"))
-        if re.search(r"#\[derive\([^]]*(?:Serialize|Deserialize)[^]]*\)\]", source):
+        if re.search(r"#\[derive\([^]]*(?:Default|Serialize|Deserialize)[^]]*\)\]", source):
             found.append((1, "authenticated device reference must not derive wire serialization"))
     if path != "crates/ramflux-crypto/src/device_reference.rs":
         if re.search(r"impl\s+(?:ramflux_protocol::)?RootQualifiedDeviceIdentity\s+for", source):

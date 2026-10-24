@@ -45,6 +45,11 @@ impl RamfluxClient {
                 &format!("identity/manifest/{}", manifest.principal_id),
                 manifest,
             )?;
+            db.persist_actor_state(
+                &format!("identity/manifest-root/{}", manifest.principal_commitment),
+                manifest,
+            )?;
+
             Ok::<_, SdkError>(())
         })?;
         self.finish_pair_retirement()

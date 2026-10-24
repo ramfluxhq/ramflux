@@ -219,7 +219,10 @@ impl RamfluxClient {
                         || epoch > group.group_epoch
                         || self
                             .account_db()?
-                            .group_member_joined_epoch(&group.group_id, &local_device(self)?)?
+                            .group_member_joined_epoch_metadata(
+                                &group.group_id,
+                                &local_device(self)?,
+                            )?
                             .is_some_and(|floor| epoch < floor)
                     {
                         return Err(invalid("own surface snapshot is below the joined epoch"));

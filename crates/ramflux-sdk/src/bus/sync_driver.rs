@@ -126,10 +126,12 @@ async fn receive(
             .client
             .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
         if accepted {
-            if !account.pending_deliveries.iter().any(|item| {
-                item.envelope.source_device_id == entry.envelope.source_device_id
-                    && item.envelope.envelope_id == entry.envelope.envelope_id
-            }) {
+            let pending_keys = account
+                .pending_deliveries
+                .iter()
+                .map(|item| account.client.inbox_admission_key(item))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if !pending_keys.contains(&account.client.inbox_admission_key(&entry)?) {
                 account.pending_deliveries.push(entry);
                 if account.pending_deliveries.len() > 64 {
                     account.pending_deliveries.remove(0);
@@ -245,6 +247,10 @@ fn append_pending_entries(
     entries: &mut Vec<GatewayInboxEntry>,
     now: i64,
 ) -> Result<(), SdkError> {
+    let mut seen = entries
+        .iter()
+        .map(|entry| account.client.inbox_admission_key(entry))
+        .collect::<Result<BTreeSet<_>, _>>()?;
     for bytes in account
         .client
         .account_db()?
@@ -253,10 +259,7 @@ fn append_pending_entries(
         .chain(account.client.account_db()?.due_inbox_retries(now)?)
     {
         let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
-        if !entries.iter().any(|item| {
-            item.envelope.source_device_id == entry.envelope.source_device_id
-                && item.envelope.envelope_id == entry.envelope.envelope_id
-        }) {
+        if seen.insert(account.client.inbox_admission_key(&entry)?) {
             entries.push(entry);
         }
     }

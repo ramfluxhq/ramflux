@@ -107,11 +107,15 @@ impl RamfluxClient {
         {
             own.signing_key.verifying_key()
         } else {
-            let manifest: SdkDeviceManifestResponse = db
-                .load_actor_state(&format!("identity/manifest/{}", record.principal_id))?
-                .ok_or_else(|| {
+            let manifest: SdkDeviceManifestResponse = if let Some(manifest) =
+                db.load_actor_state(&format!("identity/manifest-root/{root}"))?
+            {
+                manifest
+            } else {
+                self.legacy_root_manifest(root, &record.principal_id)?.ok_or_else(|| {
                     SdkError::InboundPending("verified root manifest unavailable".into())
-                })?;
+                })?
+            };
             if manifest.principal_commitment != root {
                 return Err(invalid("manifest root mismatch"));
             }
@@ -121,6 +125,18 @@ impl RamfluxClient {
             return Err(invalid("signed authority root mismatch"));
         }
         Ok(RootQualifiedDeviceRef::from_signed_device_set(&public, &record, device)?)
+    }
+    fn legacy_root_manifest(
+        &self,
+        root: &str,
+        principal: &str,
+    ) -> Result<Option<SdkDeviceManifestResponse>, SdkError> {
+        Ok(self
+            .account_db()?
+            .load_actor_state::<SdkDeviceManifestResponse>(&format!(
+                "identity/manifest/{principal}"
+            ))?
+            .filter(|manifest| manifest.principal_commitment == root))
     }
     pub(crate) fn device_identity_from_manifest(
         manifest: &SdkDeviceManifestResponse,

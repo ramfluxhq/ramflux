@@ -125,6 +125,33 @@ impl AccountDb {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Read-only root provenance for safety notices about a pinned principal label.
+    /// # Errors
+    /// Returns SQL errors. These rows do not authenticate a manifest or grant membership.
+    pub fn pinned_group_root_metadata(
+        &self,
+        principal: &str,
+        name: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut query = self.connection.prepare("SELECT DISTINCT k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) WHERE m.active=1 AND (k.member_principal_id=?1 OR k.member_principal_id IS NULL) AND COALESCE(k.raw_device_id,k.member_id)=?2 AND k.principal_commitment IS NOT NULL")?;
+        Ok(query
+            .query_map(params![principal, name], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// An authenticated inviter's pending offer may select trust material to fetch.
+    /// This metadata does not authenticate a sender or grant group membership.
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn pending_group_invite_root_metadata(
+        &self,
+        name: &str,
+        root: &str,
+        at: i64,
+    ) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM root_group_invite_identity r JOIN group_invite_projection i ON i.group_id=r.group_id AND i.invite_id=r.invite_id WHERE r.device_name=?1 AND r.expected_root=?2 AND i.invitee_identity=?1 AND i.state='pending' AND i.expires_at>=?3)",params![name,root,at],|row|row.get(0))?)
+    }
+
     /// Update an existing ownership-bound pin after the caller verifies a newer root-signed set.
     /// # Errors
     /// Rejects ownership/key races and returns SQL failures. This grants no authority to a directory.

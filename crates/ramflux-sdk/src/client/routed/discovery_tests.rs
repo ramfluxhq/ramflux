@@ -129,3 +129,53 @@ async fn a_non_string_signed_root_hint_is_rejected_before_manifest_discovery() -
         Err(SdkError::InboundRejected(reason)) if reason.ends_with("invalid sender root hint")));
     Ok(())
 }
+
+#[test]
+fn saved_group_root_selects_proof_material_but_never_authenticates_an_unproven_device() -> TestResult
+{
+    let sender = Fixture::new("alice", 81)?;
+    let staging = Fixture::new("bob", 82)?;
+    let receiver = Fixture::new("bob", 82)?;
+    let entry = seal(&sender, &staging, message("group-proof", "group-thread"), b"body")?;
+    let identity = sender.client.owned_device_identity()?;
+    let public = ramflux_protocol::encode_base64url(
+        sender
+            .client
+            .device_branch
+            .as_ref()
+            .ok_or("branch")?
+            .signing_key
+            .verifying_key()
+            .to_bytes(),
+    );
+    receiver.client.create_group("g", "bob")?;
+    let db = receiver.client.account_db()?;
+    db.add_group_member("g", "alice", "member")?;
+    db.persist_group_member_device_key("g", &identity, &public)?;
+    db.bind_group_member_key_identity(
+        "g",
+        &identity,
+        "alice",
+        identity.root_commitment(),
+        &public,
+    )?;
+    assert!(receiver.client.device_identity_for_root(identity.root_commitment(), "alice").is_err());
+    assert!(receiver.client.inbound_relationship_names_root(
+        "alice",
+        identity.root_commitment(),
+        "alice"
+    )?);
+    assert!(!receiver.client.inbound_relationship_names_root(
+        "mallory",
+        identity.root_commitment(),
+        "alice"
+    )?);
+    assert!(receiver.client.authenticated_device_identity(&entry).is_err());
+    let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    receiver.client.persist_root_verified_directory(&manifest)?;
+    assert_eq!(receiver.client.authenticated_device_identity(&entry)?, identity);
+    let mut forged = entry;
+    forged.envelope.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
+    assert!(receiver.client.authenticated_device_identity(&forged).is_err());
+    Ok(())
+}

@@ -9,12 +9,11 @@ impl AccountDb {
     /// Returns database errors.
     pub fn remove_device_directory_root(
         &self,
-        device: &str,
-        root: &str,
+        device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), StorageError> {
         self.connection.execute(
-            "DELETE FROM device_directory WHERE device_id=?1 AND principal_commitment=?2",
-            params![device, root],
+            "DELETE FROM device_directory WHERE COALESCE(raw_device_id,device_id)=?1 AND principal_commitment=?2",
+            params![device.device_id(), device.root_commitment()],
         )?;
         Ok(())
     }

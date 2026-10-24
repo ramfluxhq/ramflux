@@ -76,7 +76,12 @@ impl RamfluxClient {
         actor_id: &str,
         target_member_id: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.remove_group_member(group_id, actor_id, target_member_id)?)
+        let actor = self.local_device_identity(actor_id)?;
+        if let Some(target) = self.group_route_identity(group_id, target_member_id)? {
+            Ok(self.account_db()?.remove_group_member(group_id, &actor, &target)?)
+        } else {
+            Ok(self.account_db()?.legacy_remove_group_member(group_id, &actor, target_member_id)?)
+        }
     }
 
     /// # Errors
@@ -375,7 +380,9 @@ impl RamfluxClient {
         {
             self.verify_group_control_event(event)?;
             if !matches!(
-                self.account_db()?.group_member_role(group_id, &event.actor_device_id)?.as_deref(),
+                self.account_db()?
+                    .group_member_role_metadata(group_id, &event.actor_device_id)?
+                    .as_deref(),
                 Some("owner" | "admin")
             ) {
                 return Err(StorageError::GroupPermissionDenied.into());
@@ -403,15 +410,18 @@ impl RamfluxClient {
         target_identity: &str,
         new_role: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.apply_group_role_change(&GroupRoleChangeWrite {
-            group_id: group_id.to_owned(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            target_member_id: target_identity.to_owned(),
-            previous_epoch,
-            new_group_epoch,
-            new_role: new_role.to_owned(),
-        })?)
+        Ok(self.account_db()?.apply_group_role_change(
+            &GroupRoleChangeWrite {
+                group_id: group_id.to_owned(),
+                event_id: event.event_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                target_member_id: target_identity.to_owned(),
+                previous_epoch,
+                new_group_epoch,
+                new_role: new_role.to_owned(),
+            },
+            &self.group_control_actor_identity(event, group_id)?,
+        )?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -466,15 +476,18 @@ impl RamfluxClient {
         removed_identity: &str,
         reason: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.apply_group_member_kick(&GroupMemberKickWrite {
-            group_id: group_id.to_owned(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            target_member_id: removed_identity.to_owned(),
-            previous_epoch,
-            new_group_epoch,
-            reason: reason.to_owned(),
-        })?)
+        Ok(self.account_db()?.apply_group_member_kick(
+            &GroupMemberKickWrite {
+                group_id: group_id.to_owned(),
+                event_id: event.event_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                target_member_id: removed_identity.to_owned(),
+                previous_epoch,
+                new_group_epoch,
+                reason: reason.to_owned(),
+            },
+            &self.group_control_actor_identity(event, group_id)?,
+        )?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -488,16 +501,19 @@ impl RamfluxClient {
         reason: &str,
         ban_id: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.apply_group_member_ban(&GroupMemberBanWrite {
-            group_id: group_id.to_owned(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            target_member_id: banned_identity.to_owned(),
-            previous_epoch,
-            new_group_epoch,
-            reason: reason.to_owned(),
-            ban_id: ban_id.to_owned(),
-        })?)
+        Ok(self.account_db()?.apply_group_member_ban(
+            &GroupMemberBanWrite {
+                group_id: group_id.to_owned(),
+                event_id: event.event_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                target_member_id: banned_identity.to_owned(),
+                previous_epoch,
+                new_group_epoch,
+                reason: reason.to_owned(),
+                ban_id: ban_id.to_owned(),
+            },
+            &self.group_control_actor_identity(event, group_id)?,
+        )?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -511,16 +527,19 @@ impl RamfluxClient {
         tombstone_id: &str,
         reason: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.apply_group_message_delete(&GroupMessageDeleteWrite {
-            group_id: group_id.to_owned(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            target_message_id: target_message_id.to_owned(),
-            group_epoch,
-            delete_scope: delete_scope.to_owned(),
-            tombstone_id: tombstone_id.to_owned(),
-            reason: reason.to_owned(),
-        })?)
+        Ok(self.account_db()?.apply_group_message_delete(
+            &GroupMessageDeleteWrite {
+                group_id: group_id.to_owned(),
+                event_id: event.event_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                target_message_id: target_message_id.to_owned(),
+                group_epoch,
+                delete_scope: delete_scope.to_owned(),
+                tombstone_id: tombstone_id.to_owned(),
+                reason: reason.to_owned(),
+            },
+            &self.group_control_actor_identity(event, group_id)?,
+        )?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -537,18 +556,28 @@ impl RamfluxClient {
         reason: &str,
     ) -> Result<GroupState, SdkError> {
         self.account_db()?.write_transaction(|| {
-            let state = self.account_db()?.apply_group_member_invite(&GroupInviteWrite {
-                group_id: group_id.to_owned(),
-                event_id: event.event_id.clone(),
-                actor_device_id: event.actor_device_id.clone(),
-                invite_id: invite_id.to_owned(),
-                invitee_identity: invitee_identity.to_owned(),
-                invitee_signing_public_key: invitee_signing_public_key.to_owned(),
-                invited_role: invited_role.to_owned(),
-                group_epoch,
-                expires_at,
-                reason: reason.to_owned(),
-            })?;
+            let state = self.account_db()?.apply_group_member_invite(
+                &GroupInviteWrite {
+                    group_id: group_id.to_owned(),
+                    event_id: event.event_id.clone(),
+                    actor_device_id: event.actor_device_id.clone(),
+                    invite_id: invite_id.to_owned(),
+                    invitee_identity: invitee_identity.to_owned(),
+                    invitee_principal_commitment: ramflux_protocol::parse_qualified_device_id(
+                        &self.group_event_member_reference(event)?.ok_or_else(|| {
+                            SdkError::InboundPending("invited member root absent".into())
+                        })?,
+                    )?
+                    .ok_or_else(|| SdkError::InboundPending("invited member root absent".into()))?
+                    .0,
+                    invitee_signing_public_key: invitee_signing_public_key.to_owned(),
+                    invited_role: invited_role.to_owned(),
+                    group_epoch,
+                    expires_at,
+                    reason: reason.to_owned(),
+                },
+                &self.group_control_actor_identity(event, group_id)?,
+            )?;
             self.remember_group_invite_root(event, group_id, invitee_identity, invite_id)?;
             Ok(state)
         })
@@ -843,7 +872,9 @@ impl RamfluxClient {
         joined_role: &str,
         actor_principal_commitment: &str,
     ) -> Result<ramflux_protocol::GroupEvent, SdkError> {
-        let actor = self.local_device_identity(actor_device_id)?;
+        let actor = self
+            .local_device_identity(actor_device_id)
+            .map_err(|_| SdkError::Storage(StorageError::GroupPermissionDenied))?;
         if actor.root_commitment() != actor_principal_commitment {
             return Err(SdkError::InboundRejected("group join actor root mismatch".into()));
         }

@@ -25,7 +25,7 @@ fn substitution_diagnostic_is_rejected_without_poisoning_the_real_registration()
     )?;
     verify_prekey_bundle(&replacement.signing_key.verifying_key(), &malicious)?;
     assert!(registry.register_identity(&attack).is_err());
-    assert_eq!(registry, IdentityRegistry::new());
+    assert_only_admission_charged(&registry)?;
     registry.register_identity(&f.request)?;
     assert!(
         registry
@@ -173,7 +173,7 @@ fn legacy_registry_load_is_readable_but_key_writes_require_root_bound_migration(
             })
             .is_err()
     );
-    assert_eq!(legacy, before);
+    assert_authority_unchanged_after_admission(&legacy, &before)?;
     legacy.register_identity(&f.request)?;
     legacy.publish_prekey(PrekeyPublishRequest {
         device_id: f.device.device_id.clone(),
@@ -416,7 +416,7 @@ fn individually_valid_proof_and_record_with_different_kinds_cannot_be_combined()
     )?;
     let mut registry = IdentityRegistry::new();
     assert!(registry.register_identity(&request).is_err());
-    assert_eq!(registry, IdentityRegistry::new());
+    assert_only_admission_charged(&registry)?;
     registry.register_identity(&f.request)?;
     Ok(())
 }
@@ -449,5 +449,24 @@ fn historical_unqualified_proof_ids_cannot_reserve_a_current_root_qualified_proo
     reopened.register_identity(&f.request)?;
     assert!(reopened.device_auth_key(&source).is_some());
     assert!(reopened.register_identity(&f.request).is_err());
+    Ok(())
+}
+
+fn assert_only_admission_charged(registry: &IdentityRegistry) -> TestResult {
+    assert_authority_unchanged_after_admission(registry, &IdentityRegistry::new())
+}
+
+fn assert_authority_unchanged_after_admission(
+    registry: &IdentityRegistry,
+    before: &IdentityRegistry,
+) -> TestResult {
+    let mut actual = serde_json::to_value(registry)?;
+    let previous = serde_json::to_value(before)?;
+    assert_eq!(
+        actual["registration_times_by_source_ip"]["unknown-source-ip"],
+        serde_json::json!([1100])
+    );
+    actual["registration_times_by_source_ip"] = previous["registration_times_by_source_ip"].clone();
+    assert_eq!(actual, previous);
     Ok(())
 }

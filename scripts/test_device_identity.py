@@ -29,6 +29,9 @@ class DeviceIdentityGateTests(unittest.TestCase):
         self.rejects('fn receive(device_id: &str) { entries.get(device_id); }')
         self.rejects('fn receive(entry: &Envelope) { entries.insert(entry.source_device_id.clone(), true); }')
 
+    def test_renaming_the_source_does_not_restore_a_string_key_api(self):
+        self.rejects('fn replay_key(value: &str) -> String { format!("seen/{value}") }')
+
     def test_inline_wire_sender_cannot_become_a_replay_key(self):
         self.rejects('fn receive(entry: &Envelope) { let replay_key = format!("seen/{}", entry.source_device_id); }')
 
@@ -50,6 +53,9 @@ class DeviceIdentityGateTests(unittest.TestCase):
         self.assertTrue(GATE.violations("pub struct RootQualifiedDeviceRef { pub name: String }", path))
         self.assertTrue(GATE.violations(
             "#[derive(Deserialize)] pub struct RootQualifiedDeviceRef { name: String }", path
+        ))
+        self.assertTrue(GATE.violations(
+            "#[derive(Default)] pub struct RootQualifiedDeviceRef { name: String }", path
         ))
         self.assertTrue(GATE.violations(
             "pub struct RootQualifiedDeviceRef { name: String } impl From<String> for RootQualifiedDeviceRef {}", path
