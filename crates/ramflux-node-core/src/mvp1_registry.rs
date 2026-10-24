@@ -474,6 +474,19 @@ impl IdentityRegistry {
         );
     }
 
+    fn device_root_matches(device: &IdentityDeviceRecord, root: &str) -> bool {
+        ramflux_crypto::verifying_key_from_base64url(root).is_ok_and(|key| {
+            ramflux_crypto::verify_branch_proof(
+                &key,
+                &device.branch_proof,
+                IDENTITY_BIND_AUDIENCE,
+                IDENTITY_BIND_CAPABILITY,
+                device.branch_proof.issued_at,
+            )
+            .is_ok()
+        })
+    }
+
     fn check_registration_ownership(
         &self,
         request: &IdentityRegisterRequest,
@@ -484,18 +497,15 @@ impl IdentityRegistry {
             .is_some_and(|(p, r)| p != &request.proof.principal_id || r != &request.root_public_key)
             || self.devices.get(&request.proof.device_id).is_some_and(|d| {
                 d.principal_id != request.proof.principal_id
-                    || self
-                        .principal_root_bindings
-                        .get(&d.principal_id)
-                        .or_else(|| self.root_public_keys.get(&d.principal_id))
-                        .is_some_and(|r| r != &request.root_public_key)
+                    || !Self::device_root_matches(d, &request.root_public_key)
             })
             || self.delivery_root_bindings.get(&request.target_delivery_id).is_some_and(
                 |(p, r, _)| p != &request.proof.principal_id || r != &request.root_public_key,
             )
             || self.devices.values().any(|d| {
                 d.target_delivery_id == request.target_delivery_id
-                    && d.principal_id != request.proof.principal_id
+                    && (d.principal_id != request.proof.principal_id
+                        || !Self::device_root_matches(d, &request.root_public_key))
             })
         {
             return Err(NodeCoreError::DeviceIdTaken);
@@ -750,21 +760,25 @@ impl IdentityRegistry {
                 .entry(principal_id.to_owned())
                 .or_insert_with(|| root.clone());
         }
-        if let Some(root) = self
-            .principal_root_bindings
-            .get(principal_id)
-            .or_else(|| self.root_public_keys.get(principal_id))
-        {
-            for device in self.devices.values().filter(|d| d.principal_id == principal_id) {
-                self.device_root_bindings
-                    .entry(device.device_id.clone())
-                    .or_insert_with(|| (principal_id.into(), root.clone()));
-                self.delivery_root_bindings
-                    .entry(device.target_delivery_id.clone())
-                    .or_insert_with(|| {
-                        (principal_id.into(), root.clone(), device.device_id.clone())
-                    });
-            }
+        for device in self.devices.values().filter(|d| d.principal_id == principal_id) {
+            let root = self
+                .root_public_keys_by_commitment
+                .get(&device.principal_commitment)
+                .or_else(|| self.principal_root_bindings.get(principal_id))
+                .filter(|root| Self::device_root_matches(device, root))
+                .cloned()
+                .unwrap_or_default();
+            self.device_root_bindings
+                .entry(device.device_id.clone())
+                .or_insert_with(|| (principal_id.into(), root.clone()));
+            self.delivery_root_bindings
+                .entry(device.target_delivery_id.clone())
+                .and_modify(|(_, old, _)| {
+                    if *old != root {
+                        *old = String::new();
+                    }
+                })
+                .or_insert_with(|| (principal_id.into(), root, device.device_id.clone()));
         }
         let before_devices = self.devices.len();
         let before_prekeys = self.prekey_bundles.len();

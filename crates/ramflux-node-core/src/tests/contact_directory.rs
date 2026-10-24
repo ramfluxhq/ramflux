@@ -294,3 +294,39 @@ fn failed_registration_source_tables_are_bounded_and_ipv6_sources_share_a_prefix
     assert_ne!(crate::source_ip_hash("2001:db8:1:2::1"), crate::source_ip_hash("2001:db8:1:3::1"));
     Ok(())
 }
+
+#[test]
+fn legacy_devices_are_owned_by_their_signed_root_even_when_a_principal_name_is_ambiguous()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut first = IdentityRegistry::default();
+    let alice = register(&mut first, "alice-one", 1)?;
+    let mut second = IdentityRegistry::default();
+    register(&mut second, "alice-two", 2)?;
+    let mut snapshot = serde_json::to_value(&first)?;
+    let other = serde_json::to_value(&second)?;
+    for field in ["devices", "root_public_keys_by_commitment", "prekey_bundles"] {
+        snapshot[field]
+            .as_object_mut()
+            .ok_or("snapshot")?
+            .extend(other[field].as_object().ok_or("other")?.clone());
+    }
+    let mut registry: IdentityRegistry = serde_json::from_value(snapshot)?;
+    let root = ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, 1));
+    let device = ramflux_crypto::create_device_branch("alice", "alice-two", 2, [98; 32]);
+    let mut claim = alice.clone();
+    claim.target_delivery_id = "new-alias".into();
+    claim.branch_public_key =
+        ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes());
+    claim.proof = ramflux_crypto::authorize_device_branch(
+        &root,
+        &device,
+        IDENTITY_BIND_AUDIENCE,
+        vec![IDENTITY_BIND_CAPABILITY.into()],
+        claim.now,
+        claim.now + 3600,
+    )?;
+    assert!(matches!(registry.register_identity(&claim), Err(NodeCoreError::DeviceIdTaken)));
+    registry.remove_principal_metadata("alice");
+    assert!(matches!(registry.register_identity(&claim), Err(NodeCoreError::DeviceIdTaken)));
+    Ok(())
+}
