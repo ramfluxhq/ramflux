@@ -47,15 +47,20 @@ fn r7_a_bad_task_does_not_prevent_expired_approval_receipt_cleanup() -> Case {
     let decision = decide(&human, &request.packet, true)?;
     let id = decision.packet.id()?;
     let storage = key("approval_receipt", &id);
+    agent.client.record_task_approval_delivery(
+        &decision.packet,
+        crate::client::task::approval_retention::DeliveryState::Submitted,
+        None,
+    )?;
     let mut receipt: Value =
-        human.client.account_db()?.load_actor_state(&storage)?.ok_or("receipt")?;
+        agent.client.account_db()?.load_actor_state(&storage)?.ok_or("receipt")?;
     receipt["expires_at"] = json!(now_unix_timestamp() - 1);
-    // Retire its job so the intentionally protected in-flight exception no longer applies.
-    human.client.account_db()?.delete_task_state(&key("approval_decision_out", &id))?;
-    human.client.account_db()?.persist_actor_state(&storage, &receipt)?;
-    corrupt_history(&human, "bad")?;
-    cleanup(&human)?;
-    assert!(!human.client.account_db()?.actor_state_exists(&storage)?);
+    agent.client.account_db()?.persist_actor_state(&storage, &receipt)?;
+    // The executor still owns live source/outgoing rows whose task history is now broken.
+    assert!(agent.client.account_db()?.actor_state_exists(&key("approval_source", &id))?);
+    corrupt_history(&agent, "bad")?;
+    cleanup(&agent)?;
+    assert!(!agent.client.account_db()?.actor_state_exists(&storage)?);
     assert!(!agent.mcp_grants.contains_key("grant"));
     drop(human);
     drop(agent);
