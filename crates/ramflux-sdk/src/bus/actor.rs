@@ -142,3 +142,7 @@ impl AccountActor {
 fn stopped() -> SdkError {
     SdkError::LocalBus("account actor stopped".to_owned())
 }
+
+#[cfg(test)]
+#[path = "runtime_tests/surface_restore.rs"]
+mod surface_restore_tests;

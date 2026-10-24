@@ -83,7 +83,10 @@ pub(super) fn is_reader_request(method: &str) -> bool {
         )
 }
 
-fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<serde_json::Value, SdkError> {
+pub(super) fn read(
+    client: &RamfluxClient,
+    request: &LocalBusFrame,
+) -> Result<serde_json::Value, SdkError> {
     if super::read_model::handles(&request.method) {
         return super::read_model::read(client, request);
     }

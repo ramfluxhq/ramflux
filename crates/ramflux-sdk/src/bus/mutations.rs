@@ -15,6 +15,16 @@ pub(super) async fn execute(
         state.nodes = nodes.clone();
     }
     super::read_model::validate(&command.request)?;
+    // A cold account can admit a read to its mailbox before its reader pool exists.
+    // Once restored, use the same read dispatcher as the warm-pool path.
+    if super::readers::is_reader_request(&command.request.method) {
+        let account = local_bus_account(state, account_id)?;
+        return Ok(ActorResponse {
+            body: super::readers::read(&account.client, &command.request)?,
+            events: Vec::new(),
+            nodes: None,
+        });
+    }
     let mut connection =
         LocalBusConnectionState::new(command.connection_id, command.outbound.clone());
     connection.topics.clone_from(&command.topics);
