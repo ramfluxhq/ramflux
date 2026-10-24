@@ -704,7 +704,7 @@ impl RouterRedbStore {
     /// Returns an error when finalized target cleanup cannot be durably recorded.
     pub(crate) fn record_target_deleted_cleanup(
         &self,
-        target_delivery_id: &str,
+        target_delivery_id: Option<&str>,
         identity_registry: &IdentityRegistry,
         lifecycle_record: &AccountLifecycleRecord,
     ) -> Result<(), NodeCoreError> {
@@ -727,11 +727,13 @@ impl RouterRedbStore {
                 .insert(lifecycle_record.principal_id.as_str(), lifecycle_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
 
-            remove_key(&write_txn, ROUTER_SESSION_ENTRY_TABLE, target_delivery_id)?;
-            remove_key(&write_txn, ROUTER_CURSOR_STATE_TABLE, target_delivery_id)?;
-            put_bool(&write_txn, ROUTER_DEACTIVATED_TARGET_TABLE, target_delivery_id, false)?;
-            put_bool(&write_txn, ROUTER_DELETED_TARGET_TABLE, target_delivery_id, true)?;
-            remove_inbox_entries_for_target(&write_txn, target_delivery_id)?;
+            if let Some(target_delivery_id) = target_delivery_id {
+                remove_key(&write_txn, ROUTER_SESSION_ENTRY_TABLE, target_delivery_id)?;
+                remove_key(&write_txn, ROUTER_CURSOR_STATE_TABLE, target_delivery_id)?;
+                put_bool(&write_txn, ROUTER_DEACTIVATED_TARGET_TABLE, target_delivery_id, false)?;
+                put_bool(&write_txn, ROUTER_DELETED_TARGET_TABLE, target_delivery_id, true)?;
+                remove_inbox_entries_for_target(&write_txn, target_delivery_id)?;
+            }
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         self.identity_registry_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

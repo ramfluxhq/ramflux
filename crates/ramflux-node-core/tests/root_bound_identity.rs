@@ -92,8 +92,8 @@ fn signed_revocations_remain_visible_even_with_no_active_devices() -> TestResult
     let manifest = registry.device_manifest(&f.request.principal_commitment).ok_or("manifest")?;
     assert_eq!(manifest.devices, []);
     assert_eq!(manifest.signed_device_set, Some(revoked));
-    assert!(registry.prekey_bundle(&f.device.device_id).is_none());
-    assert!(registry.device_auth_key(&f.device.device_id).ok_or("device")?.revoked);
+    assert!(registry.prekey_bundle(&qualified(&f)?).is_none());
+    assert!(registry.device_auth_key(&qualified(&f)?).ok_or("device")?.revoked);
     assert!(registry.register_identity(&f.request).is_err());
     Ok(())
 }
@@ -204,7 +204,7 @@ fn highest_signed_epoch_and_revocation_survive_durable_restart() -> TestResult {
     let store = RouterRedbStore::open(&path)?;
     let restored = store.load_router()?.ok_or("restored router")?;
     assert_eq!(restored.signed_device_set(&f.request.principal_commitment), Some(revoked));
-    assert!(restored.mvp1_device_auth_key(&f.device.device_id).ok_or("device")?.revoked);
+    assert!(restored.mvp1_device_auth_key(&qualified(&f)?).ok_or("device")?.revoked);
     assert!(
         restored
             .publish_signed_device_set(&f.publish(f.record(1, DeviceSetStatus::Active)?), &store)
@@ -244,8 +244,8 @@ fn root_authorized_rotation_disables_old_keys_until_the_new_bound_registration()
         },
     )?;
     registry.publish_signed_device_set(&f.publish(record))?;
-    assert!(registry.device_auth_key(&f.device.device_id).is_none());
-    assert!(registry.prekey_bundle(&f.device.device_id).is_none());
+    assert!(registry.device_auth_key(&qualified(&f)?).is_none());
+    assert!(registry.prekey_bundle(&qualified(&f)?).is_none());
     assert!(registry.register_identity(&f.request).is_err());
     let mut request = f.request.clone();
     request.device_set = None;
@@ -276,7 +276,7 @@ fn root_authorized_rotation_disables_old_keys_until_the_new_bound_registration()
         )?,
     })?;
     assert_eq!(
-        registry.device_auth_key(&f.device.device_id).ok_or("rotated device")?.branch_public_key,
+        registry.device_auth_key(&qualified(&f)?).ok_or("rotated device")?.branch_public_key,
         request.branch_public_key
     );
     Ok(())
@@ -399,4 +399,14 @@ fn individually_valid_proof_and_record_with_different_kinds_cannot_be_combined()
     assert_eq!(registry, IdentityRegistry::new());
     registry.register_identity(&f.request)?;
     Ok(())
+}
+
+fn qualified(f: &Fixture) -> Result<String, serde_json::Error> {
+    Ok(format!(
+        "root~{}",
+        encode_base64url(serde_json::to_vec(&(
+            &f.request.principal_commitment,
+            &f.device.device_id
+        ))?)
+    ))
 }

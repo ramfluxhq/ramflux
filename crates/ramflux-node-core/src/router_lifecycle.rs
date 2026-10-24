@@ -156,58 +156,68 @@ impl RouterCore {
         })
     }
 
+    /// Finalize an in-process lifecycle transition. Service callers use the durable variant.
     /// # Errors
-    /// Returns an error when the delete timelock has not expired.
+    /// Rejects an invalid or unexpired deletion request.
     pub fn mvp7_finalize_delete(
         &self,
         request: &LifecycleFinalizeRequest,
     ) -> Result<LifecycleResponse, NodeCoreError> {
-        let existing = crate::lock_unpoisoned(&self.control)
-            .lifecycle_by_principal
-            .get(&request.principal_id)
-            .cloned()
-            .ok_or_else(|| {
-                NodeCoreError::ItestHttp(format!("missing lifecycle: {}", request.principal_id))
-            })?;
+        self.finalize_delete(request, None)
+    }
+    /// Finalize deletion and commit authority, lifecycle and target cleanup under one writer lock.
+    /// # Errors
+    /// Rejects invalid requests or persistence failures without publishing the candidate deletion.
+    pub fn mvp7_finalize_delete_durable(
+        &self,
+        request: &LifecycleFinalizeRequest,
+        store: &crate::RouterRedbStore,
+    ) -> Result<LifecycleResponse, NodeCoreError> {
+        self.finalize_delete(request, Some(store))
+    }
+    fn finalize_delete(
+        &self,
+        request: &LifecycleFinalizeRequest,
+        store: Option<&crate::RouterRedbStore>,
+    ) -> Result<LifecycleResponse, NodeCoreError> {
+        let mut control = crate::lock_unpoisoned(&self.control);
+        let existing =
+            control.lifecycle_by_principal.get(&request.principal_id).cloned().ok_or_else(
+                || NodeCoreError::ItestHttp(format!("missing lifecycle: {}", request.principal_id)),
+            )?;
         if existing.state != AccountLifecycleState::DeletePending {
             return Err(NodeCoreError::ItestHttp(format!(
                 "delete is not pending: {}",
                 request.principal_id
             )));
         }
-        if let Some(timelock_until) = existing.timelock_until
-            && request.now < timelock_until
-        {
+        if existing.timelock_until.is_some_and(|until| request.now < until) {
             return Err(NodeCoreError::ItestHttp(format!(
                 "delete timelock has not expired: {}",
                 request.principal_id
             )));
         }
-        let tombstone_hash = existing.tombstone_hash.clone().ok_or_else(|| {
-            NodeCoreError::ItestHttp("missing lifecycle tombstone hash".to_owned())
-        })?;
-        let (target_delivery_id, mut deleted_metadata_count) = {
-            let mut control = crate::lock_unpoisoned(&self.control);
-            let target_delivery_id = control
-                .mvp1_identities
-                .target_delivery_id_for_principal(&request.principal_id)
-                .map(ToOwned::to_owned);
-            let deleted_metadata_count = u64::try_from(
-                control.mvp1_identities.remove_principal_metadata(&request.principal_id),
-            )
-            .unwrap_or(u64::MAX);
-            (target_delivery_id, deleted_metadata_count)
-        };
-        if let Some(target_delivery_id) = &target_delivery_id {
-            let mut shard = self.target_shard(target_delivery_id);
+        let tombstone_hash = existing
+            .tombstone_hash
+            .clone()
+            .ok_or_else(|| NodeCoreError::ItestHttp("missing lifecycle tombstone hash".into()))?;
+        let target = control
+            .mvp1_identities
+            .target_delivery_id_for_principal(&request.principal_id)
+            .map(str::to_owned);
+        let mut identities = control.mvp1_identities.clone();
+        let mut deleted_metadata_count =
+            u64::try_from(identities.remove_principal_metadata(&request.principal_id))
+                .unwrap_or(u64::MAX);
+        let mut shard = target.as_ref().map(|target| self.target_shard(target));
+        let mut candidate_shard = shard.as_ref().map(|guard| (**guard).clone());
+        if let (Some(target), Some(candidate)) = (&target, &mut candidate_shard) {
             deleted_metadata_count = deleted_metadata_count
-                .saturating_add(u64::from(shard.registry.remove_target(target_delivery_id)));
-            deleted_metadata_count = deleted_metadata_count.saturating_add(
-                u64::try_from(shard.inbox.remove_target(target_delivery_id)).unwrap_or(u64::MAX),
-            );
-            shard.deleted_delivery_targets.insert(target_delivery_id.clone());
-            drop(shard);
-            self.remove_target_index(target_delivery_id);
+                .saturating_add(u64::from(candidate.registry.remove_target(target)))
+                .saturating_add(
+                    u64::try_from(candidate.inbox.remove_target(target)).unwrap_or(u64::MAX),
+                );
+            candidate.deleted_delivery_targets.insert(target.clone());
         }
         let proof = identity_deletion_proof(
             &request.principal_id,
@@ -223,16 +233,27 @@ impl RouterCore {
             causal_event_id: format!("{}_finalized", existing.causal_event_id),
             updated_at: request.now,
             timelock_until: None,
-            tombstone_hash: Some(tombstone_hash),
+            tombstone_hash: Some(tombstone_hash.clone()),
             deletion_proof: Some(proof),
         };
-        let tombstone = record
-            .tombstone_hash
-            .as_deref()
-            .and_then(|hash| self.lifecycle_tombstone_by_hash(hash));
-        crate::lock_unpoisoned(&self.control)
-            .lifecycle_by_principal
-            .insert(request.principal_id.clone(), record.clone());
+        if let Some(store) = store {
+            store.record_target_deleted_cleanup(target.as_deref(), &identities, &record)?;
+        }
+        control.mvp1_identities = identities;
+        control.lifecycle_by_principal.insert(request.principal_id.clone(), record.clone());
+        let tombstone = control
+            .lifecycle_tombstones
+            .values()
+            .find(|t| t.tombstone_hash == tombstone_hash)
+            .cloned();
+        if let (Some(shard), Some(candidate)) = (&mut shard, candidate_shard) {
+            **shard = candidate;
+        }
+        drop(shard);
+        if let Some(target) = &target {
+            self.remove_target_index(target);
+        }
+        self.refresh_migration_read_snapshot_from_control(&control);
         Ok(LifecycleResponse {
             record,
             metadata_present: false,

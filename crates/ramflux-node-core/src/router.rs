@@ -513,6 +513,37 @@ impl RouterCore {
         })
     }
 
+    /// Fetch keys only with a root context, except for an unambiguous pre-v2 legacy row.
+    /// # Errors
+    /// Rejects missing, ambiguous or unqualified root-bound device lookups.
+    pub fn mvp1_prekey_checked(&self, lookup: &str) -> Result<PrekeyResponse, NodeCoreError> {
+        let control = lock_unpoisoned(&self.control);
+        let identities = &control.mvp1_identities;
+        identities.check_device_lookup(lookup)?;
+        let record = identities
+            .device_record(lookup)
+            .ok_or_else(|| NodeCoreError::ItestHttp("device not found".into()))?;
+        Ok(PrekeyResponse {
+            device_id: record.device_id.clone(),
+            bundle: identities.prekey_bundle(lookup).cloned(),
+            principal_commitment: identities
+                .principal_commitment_for_device(lookup)
+                .unwrap_or_default()
+                .into(),
+            target_delivery_id: identities.target_delivery_id_for_device(lookup).map(str::to_owned),
+        })
+    }
+    /// Authenticate a root-qualified device; bare IDs are restricted to legacy rows.
+    /// # Errors
+    /// Rejects missing, ambiguous or unqualified root-bound device lookups.
+    pub fn mvp1_device_auth_key_checked(
+        &self,
+        lookup: &str,
+    ) -> Result<Option<DeviceAuthKeyResponse>, NodeCoreError> {
+        let control = lock_unpoisoned(&self.control);
+        control.mvp1_identities.check_device_lookup(lookup)?;
+        Ok(control.mvp1_identities.device_auth_key(lookup))
+    }
     #[must_use]
     pub fn mvp1_prekey(&self, device_id: &str) -> PrekeyResponse {
         let control = lock_unpoisoned(&self.control);

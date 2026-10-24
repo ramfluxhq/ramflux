@@ -12,10 +12,16 @@ impl RouterCore {
         request: &DeviceSetPublishRequest,
         store: &RouterRedbStore,
     ) -> Result<ramflux_protocol::SignedDeviceSetRecord, NodeCoreError> {
-        let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(stored) = control.mvp1_identities.exact_signed_device_set(request) {
             return Ok(stored.clone());
         }
+        control.mvp1_identities.require_pinned_publication_root(request)?;
+        drop(control);
+        request.verify_signature()?;
+        let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        control.mvp1_identities.require_pinned_publication_root(request)?;
+        control.mvp1_identities.validate_publication_revision(request)?;
         let mut candidate = control.mvp1_identities.clone();
         candidate.publish_signed_device_set(request)?;
         store.record_identity_registry(&candidate)?;
@@ -33,7 +39,7 @@ impl RouterCore {
         lifecycle: &crate::AccountLifecycleRecord,
     ) -> Result<(), NodeCoreError> {
         let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        store.record_target_deleted_cleanup(target, &control.mvp1_identities, lifecycle)
+        store.record_target_deleted_cleanup(Some(target), &control.mvp1_identities, lifecycle)
     }
     /// Persist the current registry under its writer lock so concurrent metadata updates cannot
     /// overwrite a newer signed epoch using a previously captured snapshot.

@@ -37,6 +37,9 @@ pub(crate) fn handle_itest_request(
     if crate::identity_authority::handle_itest_identity_authority(stream, &request, router)? {
         return Ok(());
     }
+    if handle_itest_device_lookup(stream, &request, router.state())? {
+        return Ok(());
+    }
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/mvp6/registration/policy") => {
             let response =
@@ -550,10 +553,10 @@ fn handle_mesh_general_value(
             let response = handle_mvp1_prekey_publish(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
-        ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response = handle_mvp1_prekey_fetch(path, router.state());
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
+        ("GET", path) if path.starts_with("/mvp1/prekey/") => device_lookup_mesh_response(
+            handle_mvp1_prekey_fetch(path, router.state())
+                .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from)),
+        ),
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => Ok(MeshResponse::json(
             "401 Unauthorized",
             serde_json::to_vec(&unauthenticated_principal_lookup())?,
@@ -570,10 +573,10 @@ fn handle_mesh_general_value(
             let response = handle_mvp1_device_manifest_fetch(path, router.state());
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
-        ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
-            let response = handle_mvp1_device_auth_key_fetch(path, router.state());
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
+        ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => device_lookup_mesh_response(
+            handle_mvp1_device_auth_key_fetch(path, router.state())
+                .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from)),
+        ),
         ("GET", path) if path.starts_with("/mvp1/inbox/") => {
             let response = handle_mvp1_inbox_fetch(path, router.state())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
@@ -749,12 +752,53 @@ pub(crate) fn handle_mvp1_identity_register(
     Ok(serde_json::to_value(response)?)
 }
 
+#[cfg(feature = "itest-http")]
+fn handle_itest_device_lookup(
+    stream: &mut TcpStream,
+    request: &ramflux_node_core::NodeHttpRequest,
+    state: &ramflux_node_core::RouterCore,
+) -> anyhow::Result<bool> {
+    if request.method != "GET" {
+        return Ok(false);
+    }
+    let result = if request.path.starts_with("/mvp1/prekey/") {
+        handle_mvp1_prekey_fetch(&request.path, state)
+            .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from))
+    } else if request.path.starts_with("/mvp1/device-auth-key/") {
+        handle_mvp1_device_auth_key_fetch(&request.path, state)
+            .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from))
+    } else {
+        return Ok(false);
+    };
+    match result {
+        Ok(value) => ramflux_node_core::write_itest_json_response(stream, "200 OK", &value)?,
+        Err(error) => ramflux_node_core::write_itest_json_response(
+            stream,
+            "400 Bad Request",
+            &serde_json::json!({"error":error.to_string()}),
+        )?,
+    }
+    Ok(true)
+}
+
+fn device_lookup_mesh_response(
+    result: anyhow::Result<serde_json::Value>,
+) -> anyhow::Result<MeshResponse> {
+    match result {
+        Ok(response) => Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)),
+        Err(error) => Ok(MeshResponse::json(
+            "400 Bad Request",
+            serde_json::to_vec(&serde_json::json!({"error":error.to_string()}))?,
+        )),
+    }
+}
+
 fn handle_mvp1_device_auth_key_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> Option<ramflux_node_core::DeviceAuthKeyResponse> {
+) -> anyhow::Result<Option<ramflux_node_core::DeviceAuthKeyResponse>> {
     let device_id = path.trim_start_matches("/mvp1/device-auth-key/");
-    state.mvp1_device_auth_key(device_id)
+    Ok(state.mvp1_device_auth_key_checked(device_id)?)
 }
 
 fn handle_mvp6_registration_policy(
@@ -824,16 +868,16 @@ fn handle_mvp1_prekey_publish(
 fn handle_mvp1_prekey_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> ramflux_node_core::PrekeyResponse {
+) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
     let device_id = path.trim_start_matches("/mvp1/prekey/");
-    let response = state.mvp1_prekey(device_id);
+    let response = state.mvp1_prekey_checked(device_id)?;
     tracing::info!(
         device_id = %response.device_id,
         has_bundle = response.bundle.is_some(),
         target_delivery_id = ?response.target_delivery_id,
         "router mvp1 prekey fetch outcome"
     );
-    response
+    Ok(response)
 }
 
 fn is_identity_manifest_path(path: &str) -> bool {
@@ -927,6 +971,34 @@ mod tests {
 
         let _removed = std::fs::remove_file(&path);
         let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_device_lookup_errors_are_explicit_responses() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let path = temp_path("device_lookup_errors")?;
+        let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
+        let state = Arc::new(ramflux_node_core::RouterCore::new());
+        let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
+        for path in ["/mvp1/prekey/missing", "/mvp1/device-auth-key/missing"] {
+            let request = ramflux_transport::GatewayQuicRequest {
+                method: "GET".into(),
+                path: path.into(),
+                body: serde_json::Value::Null,
+            };
+            let response = runtime.block_on(handle_mesh_quic_request_value(
+                &request,
+                &handle,
+                "ramflux-gateway",
+            ))?;
+            assert_eq!(response.status, 400);
+            assert!(
+                response.body["error"].as_str().is_some_and(|s| s.contains("device not found"))
+            );
+        }
+        drop(handle);
+        let _ = std::fs::remove_file(path);
         Ok(())
     }
 

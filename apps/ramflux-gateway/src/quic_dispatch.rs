@@ -96,7 +96,10 @@ pub(crate) async fn dispatch_quic_json_request(
         }
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
             let response: ramflux_node_core::PrekeyResponse =
-                router_get_json_async(router, path).await?;
+                match router_get_json_async(router, path).await {
+                    Ok(response) => response,
+                    Err(error) => return Ok(lookup_error(&error)),
+                };
             serde_json::to_value(response)?
         }
         ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
@@ -116,4 +119,11 @@ pub(crate) async fn dispatch_quic_json_request(
 
 fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn lookup_error(error: &dyn std::fmt::Display) -> ramflux_transport::GatewayQuicResponse {
+    ramflux_transport::GatewayQuicResponse {
+        status: 400,
+        body: serde_json::json!({"error":error.to_string()}),
+    }
 }
