@@ -46,8 +46,8 @@ fn a_remote_requester_approval_round_trip_is_accepted_by_mcp_before_the_agent_re
     let id = rows[0]["approval_id"].as_str().ok_or("id")?;
     human.client.decide_task_approval(id, true)?;
     let decisions = human.client.account_db()?.task_record_page::<Job>(
-        "task/approval_out/",
-        "task/approval_out/",
+        "task/approval_decision_out/",
+        "task/approval_decision_out/",
         10,
     )?;
     agent.client.accept_task_approval(&decisions[0].1.packet)?;
