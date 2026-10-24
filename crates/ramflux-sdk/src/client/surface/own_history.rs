@@ -276,22 +276,47 @@ impl RamfluxClient {
 
 const HISTORY_BYTES: usize = 8 * 1024 * 1024;
 fn fit_export(page: &mut SurfaceHistoryExport, budget: usize) -> Result<(), SdkError> {
-    while serde_json::to_vec(page)?.len() > budget {
-        let removed = if !page.controls.is_empty() {
-            page.controls.remove(0);
-            true
-        } else if !page.checkpoints.is_empty() {
-            page.checkpoints.remove(0);
-            true
-        } else {
-            false
+    let control_sizes = page
+        .controls
+        .iter()
+        .map(|value| Ok(serde_json::to_vec(value)?.len()))
+        .collect::<Result<Vec<usize>, SdkError>>()?;
+    let checkpoint_sizes = page
+        .checkpoints
+        .iter()
+        .map(|value| Ok(serde_json::to_vec(value)?.len()))
+        .collect::<Result<Vec<usize>, SdkError>>()?;
+    let mut content_bytes = control_sizes.iter().chain(&checkpoint_sizes).sum::<usize>()
+        + page.controls.len().saturating_sub(1)
+        + page.checkpoints.len().saturating_sub(1);
+    let mut controls_removed = 0;
+    let mut checkpoints_removed = 0;
+    loop {
+        // Serialize only the small metadata/framing object while selecting the retained
+        // suffix. Each potentially large control/checkpoint was measured exactly once.
+        let framing = SurfaceHistoryExport {
+            controls: Vec::new(),
+            checkpoints: Vec::new(),
+            metadata: page.metadata.clone(),
         };
-        page.metadata.truncated = true;
-        page.metadata.skip("serialized_history_byte_budget");
-        if !removed {
+        if content_bytes + serde_json::to_vec(&framing)?.len() <= budget {
+            break;
+        }
+        if let Some(size) = control_sizes.get(controls_removed) {
+            content_bytes -= size + usize::from(control_sizes.len() - controls_removed > 1);
+            controls_removed += 1;
+        } else if let Some(size) = checkpoint_sizes.get(checkpoints_removed) {
+            content_bytes -= size + usize::from(checkpoint_sizes.len() - checkpoints_removed > 1);
+            checkpoints_removed += 1;
+        } else {
             return Err(invalid("surface export metadata exceeds byte budget"));
         }
+        page.metadata.truncated = true;
+        page.metadata.skip("serialized_history_byte_budget");
     }
+    // One compaction per array instead of moving the remaining elements for each item.
+    page.controls.drain(..controls_removed);
+    page.checkpoints.drain(..checkpoints_removed);
     Ok(())
 }
 
@@ -321,6 +346,31 @@ mod tests {
         assert_eq!(page.controls.len(), 0);
         assert!(page.metadata.truncated && !page.metadata.skipped.is_empty());
         assert!(serde_json::to_vec(&page)?.len() <= 512);
+        Ok(())
+    }
+    #[test]
+    fn thousands_of_controls_trim_with_a_single_retained_suffix() -> Result<(), SdkError> {
+        let controls = (0..4000)
+            .map(|index| SurfaceControl {
+                kind: ControlKind::Own,
+                carrier_base64: format!("{index:04}{}", "x".repeat(1996)),
+                group_epoch: None,
+                context: None,
+                manifests: Vec::new(),
+            })
+            .collect();
+        let mut page = SurfaceHistoryExport { controls, ..SurfaceHistoryExport::default() };
+        let budget = serde_json::to_vec(&page)?.len() / 2;
+        fit_export(&mut page, budget)?;
+        assert!(page.controls.len() > 1900 && page.controls.len() < 2100);
+        assert!(
+            page.controls.first().is_some_and(|control| control.carrier_base64.starts_with("200"))
+        );
+        assert_eq!(
+            page.metadata.skipped["serialized_history_byte_budget"] as usize,
+            4000 - page.controls.len()
+        );
+        assert!(serde_json::to_vec(&page)?.len() <= budget);
         Ok(())
     }
 }
