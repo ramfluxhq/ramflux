@@ -489,7 +489,20 @@ fn receipt_gateway_message(
                 .pointer("/direct_route/recipient_principal_commitment")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
-            let root = if let Some(root) = root {
+            let own_conversation = thread["participants"].as_array().is_some_and(|ids| {
+                !ids.is_empty() && ids.iter().all(|id| id == &local.principal_id)
+            });
+            let root = if own_conversation {
+                ramflux_crypto::identity_root_commitment(
+                    &account
+                        .client
+                        .identity_root
+                        .as_ref()
+                        .ok_or(SdkError::IdentityRootMissing)?
+                        .signing_key
+                        .verifying_key(),
+                )
+            } else if let Some(root) = root {
                 root
             } else {
                 let participants = thread["participants"].as_array().ok_or_else(|| {
@@ -816,6 +829,24 @@ mod root_tests {
             receipt_gateway_message(&account, "direct", "receipt", "shared", "target", 1)?;
         assert_eq!(receipt.recipient_principal_commitment.as_deref(), Some("bob-root"));
         assert_eq!(receipt.recipient_device_id.as_deref(), Some("shared"));
+        account.client.account_db()?.persist_client_record(
+            "conversation",
+            "self",
+            &serde_json::json!({"kind":"direct","participants":["alice","alice"]}),
+        )?;
+        let own_root = ramflux_crypto::identity_root_commitment(
+            &account
+                .client
+                .identity_root
+                .as_ref()
+                .ok_or(SdkError::IdentityRootMissing)?
+                .signing_key
+                .verifying_key(),
+        );
+        let sibling =
+            receipt_gateway_message(&account, "self", "own-receipt", "shared", "own-target", 1)?;
+        assert_eq!(sibling.recipient_principal_commitment.as_deref(), Some(own_root.as_str()));
+        assert_eq!(sibling.recipient_device_id.as_deref(), Some("shared"));
         assert!(
             receipt_gateway_message(&account, "unknown", "receipt", "shared", "target", 1).is_err()
         );

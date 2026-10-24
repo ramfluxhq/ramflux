@@ -234,15 +234,7 @@ impl RamfluxClient {
         if let Some(conversation) = context {
             let kind = conversation.get("kind").and_then(serde_json::Value::as_str);
             if route.kind == Kind::Direct
-                && !conversation
-                    .get("participants")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|participants| {
-                        participants.iter().any(|id| {
-                            id.as_str() == Some(&entry.envelope.source_principal_id)
-                                || id.as_str() == Some(&entry.envelope.source_device_id)
-                        })
-                    })
+                && !self.authenticated_direct_participant(&conversation, entry)?
             {
                 return Err(invalid(
                     "authenticated sender is not a direct conversation participant",
