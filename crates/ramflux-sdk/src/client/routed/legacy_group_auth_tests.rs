@@ -202,3 +202,6 @@ fn previously_parked_group_messages_cannot_claim_another_members_sender_id() -> 
     assert_eq!(bob.client.direct_messages("thread")?.len(), 0);
     Ok(())
 }
+
+#[path = "legacy_bootstrap_retry_tests.rs"]
+mod bootstrap_retry;

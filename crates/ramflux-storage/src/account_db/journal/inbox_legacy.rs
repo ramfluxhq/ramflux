@@ -23,7 +23,13 @@ impl AccountDb {
         lookup_recoverable: bool,
         quota_blocked: bool,
     ) -> Result<(), StorageError> {
-        self.persist_actor_state(&format!("inbox/legacy-held/{key}"), &serde_json::json!({"lookup_recoverable":lookup_recoverable,"quota_blocked":quota_blocked}))
+        let mut marker = self
+            .load_actor_state::<serde_json::Value>(&format!("inbox/legacy-held/{key}"))?
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        marker["lookup_recoverable"] = serde_json::json!(lookup_recoverable);
+        marker["quota_blocked"] = serde_json::json!(quota_blocked);
+        self.persist_actor_state(&format!("inbox/legacy-held/{key}"), &marker)
     }
     /// Reports whether a hold awaits retry capacity rather than a fresh delivery attempt.
     /// # Errors
@@ -45,10 +51,34 @@ impl AccountDb {
     /// # Errors
     /// Returns database errors.
     pub fn park_legacy_inbox_retry(&self, key: &str) -> Result<(), StorageError> {
-        self.connection.execute(
-            "UPDATE runtime_inbox_retry SET next_at=?2 WHERE envelope_key=?1",
-            params![key, i64::MAX],
-        )?;
+        self.write_transaction(|| {
+            let name = format!("inbox/legacy-held/{key}");
+            let Some(value) = self.load_actor_state::<serde_json::Value>(&name)? else { return Err(StorageError::AuthorizationRejected); };
+            let mut marker = if value.is_object() { value } else { serde_json::json!({}) };
+            marker["parked"] = serde_json::json!(true);
+            self.persist_actor_state(&name,&marker)?;
+            self.connection.execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1",params![key])?;
+            self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key=?1 AND envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_dead_letter)",params![key])?;
+            Ok(())
+        })
+    }
+    /// Reports a retained hold that has permanently released its network retry admission.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn legacy_inbox_parked(&self, key: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .load_actor_state::<serde_json::Value>(&format!("inbox/legacy-held/{key}"))?
+            .is_some_and(|value| value["parked"] == true))
+    }
+    pub(super) fn release_expired_legacy_inbox(&self, at: i64) -> Result<(), StorageError> {
+        let mut query = self.connection.prepare("SELECT p.envelope_key FROM runtime_inbox_policy p LEFT JOIN runtime_inbox_retry r USING(envelope_key) WHERE EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind='inbox/legacy-held/'||p.envelope_key) AND (p.expires_at<=?1 OR p.attempts>=CASE WHEN p.trusted=1 THEN 8 ELSE 3 END OR r.next_at=9223372036854775807)")?;
+        let keys = query
+            .query_map(params![at], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(query);
+        for key in keys {
+            self.park_legacy_inbox_retry(&key)?;
+        }
         Ok(())
     }
     pub(super) fn cleanup_legacy_inbox_holds(&self) -> Result<(), StorageError> {

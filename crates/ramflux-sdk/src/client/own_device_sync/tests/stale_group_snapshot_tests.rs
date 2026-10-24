@@ -432,3 +432,29 @@ fn a_reused_local_device_id_ignores_foreign_self_pins_and_later_restores_group_k
     );
     finish(source, sr, target, tr)
 }
+
+#[test]
+fn history_for_an_unavailable_group_is_reported_as_unavailable_without_blocking_direct_history()
+-> Result<(), SdkError> {
+    let (source, sr, target, tr, mut history) = setup("unavailable-reason")?;
+    let mut unavailable = snapshot_message(&source, "unavailable", 1)?;
+    let mut body: serde_json::Value = serde_json::from_slice(&unavailable.encrypted_body)?;
+    body["group_id"] = serde_json::json!("not-in-snapshot");
+    unavailable.encrypted_body = serde_json::to_vec(&body)?;
+    history.messages = vec![unavailable, direct_history("direct-safe")];
+    let result = target.import_own_device_history_bundle(
+        &envelope("source_device_sync", "target_device_sync"),
+        &history,
+    )?;
+    assert_eq!(result.imported_messages, 1);
+    assert!(target.direct_message_by_id("unavailable")?.is_none());
+    assert!(target.direct_message_by_id("direct-safe")?.is_some());
+    assert!(
+        target
+            .account_db()?
+            .list_actor_states::<serde_json::Value>("own-device/restore-skip/")?
+            .iter()
+            .any(|r| r["item"] == "unavailable" && r["reason"] == "group_message_unavailable")
+    );
+    finish(source, sr, target, tr)
+}

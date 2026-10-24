@@ -56,6 +56,8 @@ impl AccountDb {
             .map_or_else(|| format!("unverified:{key}"), |source| format!("verified:{source}"));
         let value: serde_json::Value = serde_json::from_slice(entry).unwrap_or_default();
         self.write_transaction(|| {
+            self.release_expired_legacy_inbox(at)?;
+            if self.legacy_inbox_parked(key)? { return Ok(false); }
             let exists: bool = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM runtime_inbox_policy WHERE envelope_key=?1)",
                 params![key],
@@ -63,7 +65,7 @@ impl AccountDb {
             )?;
             if exists {
                 if verified_source.is_some() {
-                    let count: i64 = self.connection.query_row("SELECT count(*) FROM runtime_inbox_policy WHERE source=?1 AND envelope_key!=?2",params![source,key],|r|r.get(0))?;
+                    let count: i64 = self.connection.query_row("SELECT count(*) FROM runtime_inbox_policy WHERE source=?1 AND envelope_key!=?2 AND expires_at>?3",params![source,key,at],|r|r.get(0))?;
                     if count >= if trusted { 8 } else { 2 } { return Ok(false); }
                     if trusted {
                         self.connection.execute("UPDATE runtime_inbox_retry SET next_at=?2 WHERE envelope_key=?1 AND EXISTS(SELECT 1 FROM runtime_inbox_policy WHERE envelope_key=?1 AND trusted=0)",params![key,at])?;
@@ -77,18 +79,18 @@ impl AccountDb {
                 return Ok(true);
             }
             let count: i64 = self.connection.query_row(
-                "SELECT count(*) FROM runtime_inbox_policy WHERE source=?1",
-                params![source],
+                "SELECT count(*) FROM runtime_inbox_policy WHERE source=?1 AND expires_at>?2",
+                params![source,at],
                 |r| r.get(0),
             )?;
             let total: i64 = self.connection.query_row(
-                "SELECT count(*) FROM runtime_inbox_policy",
-                [],
+                "SELECT count(*) FROM runtime_inbox_policy WHERE expires_at>?1",
+                params![at],
                 |r| r.get(0),
             )?;
             let strangers: i64 = self.connection.query_row(
-                "SELECT count(*) FROM runtime_inbox_policy WHERE trusted=0",
-                [],
+                "SELECT count(*) FROM runtime_inbox_policy WHERE trusted=0 AND expires_at>?1",
+                params![at],
                 |r| r.get(0),
             )?;
             if count >= if trusted { 8 } else { 2 } || total >= 128 || (!trusted && strangers >= 16)

@@ -19,6 +19,16 @@ pub(crate) fn wire_signature_error(entry: &GatewayInboxEntry) -> Option<SdkError
     }
 }
 
+/// Directory response failures do not prove that immutable message bytes are invalid.
+pub(crate) fn lookup_error(error: SdkError, context: &str) -> SdkError {
+    match error {
+        SdkError::Json(_) | SdkError::Protocol(_) | SdkError::Crypto(_) => {
+            SdkError::InboundPending(context.into())
+        }
+        other => other,
+    }
+}
+
 pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
         SdkError::Crypto(

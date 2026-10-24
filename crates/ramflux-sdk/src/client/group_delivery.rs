@@ -146,8 +146,19 @@ impl RamfluxClient {
         let plaintext =
             session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
         validate_legacy_group_payload(&plaintext, group_id)?;
-        self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "recv", &session)?;
-        if self.apply_group_control_plaintext(&plaintext)?.is_some() {
+        let control = self.account_db()?.write_transaction(|| {
+            if self.apply_group_control_plaintext(&plaintext)?.is_some() {
+                self.persist_dm_session(
+                    &conversation_id,
+                    &entry.envelope.envelope_id,
+                    "recv",
+                    &session,
+                )?;
+                return Ok::<_, SdkError>(true);
+            }
+            Ok(false)
+        })?;
+        if control {
             return Ok(GroupGatewayDeliveryResult::Message(Vec::new()));
         }
         let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(&plaintext)?;
@@ -157,37 +168,33 @@ impl RamfluxClient {
                 wrapper.schema
             )));
         }
-        self.apply_sender_key_membership_bootstrap(gateway, entry, recipient_device_id, &wrapper)
+        let bootstrap = self
+            .verify_sender_key_membership_bootstrap(gateway, recipient_device_id, &wrapper)
             .await?;
         let distribution = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
             .map_err(|error| {
                 SdkError::LocalBus(format!("invalid sender key distribution payload: {error}"))
             })?;
         let parsed: SdkGroupSenderKeyDistribution = serde_json::from_slice(&distribution)?;
-        self.require_group_payload_sender(&parsed.group_id, &parsed.sender_id, entry)?;
-        self.import_group_sender_key_distribution_inner(&distribution, false)
-            .map(|(distribution, _pending)| distribution)
-            .map(GroupGatewayDeliveryResult::SenderKeyDistribution)
-    }
-
-    pub(crate) async fn apply_sender_key_membership_bootstrap(
-        &self,
-        gateway: &GatewaySessionConfig,
-        entry: &GatewayInboxEntry,
-        recipient_device_id: &str,
-        wrapper: &SdkGroupSenderKeyDistributionEnvelope,
-    ) -> Result<(), SdkError> {
-        if let Some((event, key)) = self
-            .verify_sender_key_membership_bootstrap(gateway, recipient_device_id, wrapper)
-            .await?
-        {
-            self.apply_bootstrap_group_member_join_event(
-                &event,
-                &entry.envelope.source_device_id,
-                &key,
+        self.account_db()?.write_transaction(|| {
+            if let Some((event, key)) = bootstrap {
+                self.apply_bootstrap_group_member_join_event(
+                    &event,
+                    &entry.envelope.source_device_id,
+                    &key,
+                )?;
+            }
+            self.require_group_payload_sender(&parsed.group_id, &parsed.sender_id, entry)?;
+            let (distribution, _) =
+                self.import_group_sender_key_distribution_inner(&distribution, false)?;
+            self.persist_dm_session(
+                &conversation_id,
+                &entry.envelope.envelope_id,
+                "recv",
+                &session,
             )?;
-        }
-        Ok(())
+            Ok(GroupGatewayDeliveryResult::SenderKeyDistribution(distribution))
+        })
     }
 
     pub(crate) async fn verify_sender_key_membership_bootstrap(
@@ -227,7 +234,7 @@ impl RamfluxClient {
                 actor_principal_commitment,
                 &event.actor_device_id,
                 "group.member_joined.bootstrap.federation",
-            )?
+            )
         } else {
             self.assert_manifest_active_device_cached(
                 gateway,
@@ -235,8 +242,14 @@ impl RamfluxClient {
                 &event.actor_device_id,
                 "group.member_joined.bootstrap",
             )
-            .await?
-        };
+            .await
+        }
+        .map_err(|error| {
+            super::inbox_failure::lookup_error(
+                error,
+                "group bootstrap manifest verification is incomplete",
+            )
+        })?;
         if actor_device.branch_public_key != *actor_device_signing_public_key {
             return Err(SdkError::LocalBus(
                 "group membership event actor key does not match verified manifest".to_owned(),

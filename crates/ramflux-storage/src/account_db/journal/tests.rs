@@ -455,7 +455,8 @@ fn legacy_budget_expiry_parks_ciphertext_until_the_original_quarantine_retention
     db.defer_inbox_entry("legacy-key", &packet, 100)?;
     db.expire_inbox_holds(701)?;
     assert_eq!(db.unrouted_count()?, 1);
-    assert!(db.has_inbox_retry("legacy-key")?);
+    assert!(!db.has_inbox_retry("legacy-key")?);
+    assert!(db.legacy_inbox_parked("legacy-key")?);
     assert_eq!(db.due_inbox_retries(702)?, Vec::<Vec<u8>>::new());
     assert_eq!(db.journal_after(0, 64)?, Vec::<JournalEvent>::new());
     db.hold_unrouted("legacy-key", 1, &packet, 1000)?;
@@ -467,8 +468,90 @@ fn legacy_budget_expiry_parks_ciphertext_until_the_original_quarantine_retention
     assert_eq!(received, 100);
     db.expire_inbox_holds(101 + 7 * 24 * 60 * 60)?;
     assert_eq!(db.unrouted_count()?, 0);
-    assert_eq!(db.load_actor_state::<bool>("inbox/legacy-held/legacy-key")?, None);
+    assert_eq!(db.load_actor_state::<serde_json::Value>("inbox/legacy-held/legacy-key")?, None);
     drop(db);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn parked_and_expired_legacy_holds_release_shared_stranger_source_and_retry_slots()
+-> Result<(), StorageError> {
+    for expired in [false, true] {
+        for (count, trusted, same_source) in
+            [(16, false, false), (64, true, false), (8, true, true)]
+        {
+            let (root, db) = database()?;
+            for index in 0..count {
+                let key = format!("legacy-{index}");
+                let source = if same_source { "peer".into() } else { format!("claim-{index}") };
+                let packet = serde_json::to_vec(
+                    &serde_json::json!({"envelope":{"source_device_id":source,"created_at":100,"ttl":1_000_000}}),
+                )?;
+                db.hold_unrouted(&key, index, &packet, 100)?;
+                db.retain_legacy_inbox(&key)?;
+                assert!(db.set_inbox_failure_policy(
+                    &key,
+                    &packet,
+                    trusted,
+                    ("manifest", "peer"),
+                    100
+                )?);
+                assert_eq!(db.defer_inbox_entry(&key, &packet, 100)?, 1);
+                if !expired {
+                    db.park_legacy_inbox_retry(&key)?;
+                }
+            }
+            let at = if expired { 701 } else { 101 };
+            if expired {
+                db.expire_inbox_holds(at)?;
+            }
+            let genuine = serde_json::to_vec(
+                &serde_json::json!({"envelope":{"source_device_id":if same_source {"peer"}else{"genuine"},"created_at":at,"ttl":3600}}),
+            )?;
+            assert!(
+                db.set_inbox_failure_policy(
+                    "routed-genuine",
+                    &genuine,
+                    same_source,
+                    ("manifest", "genuine"),
+                    at
+                )?,
+                "legacy holds cannot pin shared admission"
+            );
+            assert_eq!(db.defer_inbox_entry("routed-genuine", &genuine, at)?, 1);
+            assert_eq!(db.unrouted_count()?, count);
+            assert_eq!(
+                db.connection
+                    .query_row("SELECT count(*) FROM runtime_inbox_retry", [], |r| r
+                        .get::<_, u64>(0))?,
+                1
+            );
+            assert_eq!(
+                db.connection
+                    .query_row("SELECT count(*) FROM runtime_inbox_policy", [], |r| r
+                        .get::<_, u64>(0))?,
+                1
+            );
+            for index in 0..count {
+                let key = format!("legacy-{index}");
+                assert!(!db.has_inbox_retry(&key)?);
+                assert!(db.legacy_inbox_parked(&key)?);
+                assert!(
+                    !db.set_inbox_failure_policy(
+                        &key,
+                        &genuine,
+                        trusted,
+                        ("manifest", "peer"),
+                        at + 6 * 86400
+                    )?,
+                    "redelivery never renews a parked slot"
+                );
+            }
+            assert_eq!(db.journal_after(0, 100)?, Vec::<JournalEvent>::new());
+            drop(db);
+            std::fs::remove_dir_all(root)?;
+        }
+    }
     Ok(())
 }

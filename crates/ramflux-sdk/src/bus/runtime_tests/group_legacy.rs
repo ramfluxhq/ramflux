@@ -288,7 +288,8 @@ fn exhausted_or_expired_legacy_retries_stay_held_without_terminal_rejection() ->
     db.park_legacy_inbox_retry(&key)?;
     db.expire_inbox_holds(start + 601)?;
     assert_eq!(db.unrouted_count()?, 1);
-    assert!(db.has_inbox_retry(&key)?);
+    assert!(!db.has_inbox_retry(&key)?);
+    assert!(db.legacy_inbox_parked(&key)?);
     assert_eq!(db.due_inbox_retries(start + 602)?, Vec::<Vec<u8>>::new());
     assert!(!db.journal_after(0, 64)?.iter().any(|e| e.topic == "message.undeliverable"));
     drop(sender);
@@ -541,10 +542,43 @@ fn a_legacy_failure_without_a_retry_slot_cannot_reenter_as_a_fresh_delivery() ->
     }
     assert!(!db.has_inbox_retry(&key)?);
     db.remove_inbox_retry("occupied-0")?;
-    assert!(receiver.client.legacy_group_retry_ready(&good)?);
-    assert!(db.has_inbox_retry(&key)?);
     assert!(!receiver.client.legacy_group_retry_ready(&good)?);
+    assert!(!db.has_inbox_retry(&key)?);
+    assert!(db.legacy_inbox_parked(&key)?);
+    receiver.client.pin_joined_group_member("g", "device-alice")?;
+    receiver.client.import_group_sender_key_distribution(
+        &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
+    )?;
+    assert!(receiver.client.legacy_group_retry_ready(&good)?);
+    assert!(!db.has_inbox_retry(&key)?);
     assert!(!db.journal_after(0, 64)?.iter().any(|event| event.topic == "message.undeliverable"));
+    drop(sender);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn held_legacy_group_messages_emit_one_metadata_only_unrouted_journal_event()
+-> Result<(), SdkError> {
+    let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
+    receiver.client.account_db()?.hold_unrouted(
+        &legacy_key(&good)?,
+        good.inbox_seq,
+        &serde_json::to_vec(&good)?,
+        now_unix_timestamp(),
+    )?;
+    crate::bus::sync_driver::run(&mut receiver).await?;
+    crate::bus::sync_driver::run(&mut receiver).await?;
+    let rows = receiver.client.account_db()?.journal_after(0, 64)?;
+    let held = rows.iter().filter(|e| e.topic == "message.unrouted").collect::<Vec<_>>();
+    assert_eq!(held.len(), 1);
+    let body = serde_json::to_string(&held[0])?;
+    assert!(body.contains("legacy_group"));
+    assert!(!body.contains("valid after rejected"));
+    assert!(!body.contains(&good.envelope.encrypted_payload));
+    assert!(receiver.client.direct_message_by_id("valid")?.is_none());
+    assert_eq!(receiver.client.account_db()?.unrouted_count()?, 1);
     drop(sender);
     drop(receiver);
     std::fs::remove_dir_all(root)?;

@@ -29,12 +29,10 @@ pub(super) async fn apply(
             {
                 return Err(auth_error);
             }
-            return Err(match error {
-                SdkError::Json(_) | SdkError::Protocol(_) | SdkError::Crypto(_) => {
-                    SdkError::InboundPending("sender directory verification is incomplete".into())
-                }
-                other => other,
-            });
+            return Err(crate::client::inbox_failure::lookup_error(
+                error,
+                "sender directory verification is incomplete",
+            ));
         }
         client
             .append_group_gateway_delivery_for_recipient_with_gateway(

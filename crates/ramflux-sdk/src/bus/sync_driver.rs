@@ -161,10 +161,7 @@ async fn process(
         return Err(SdkError::InboundRejected("unsupported envelope schema or version".to_owned()));
     }
     if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
-        let key = crate::client::group_quarantine::legacy_key(entry)?;
-        let db = account.client.account_db()?;
-        db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
-        db.retain_legacy_inbox(&key)?;
+        account.client.retain_legacy_group_entry(entry)?;
         return Ok(false);
     }
     if account.client.v2_blocks_legacy(&entry.envelope.source_device_id)? {

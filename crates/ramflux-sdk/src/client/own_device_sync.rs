@@ -415,6 +415,16 @@ impl RamfluxClient {
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
         for message in &bundle.messages {
+            if serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
+                .is_ok_and(|g| !floor_by_group.contains_key(&g.group_id))
+            {
+                self.account_db()?.record_own_device_restore_skip(
+                    &bundle.snapshot_id,
+                    &message.message_id,
+                    "group_message_unavailable",
+                )?;
+                continue;
+            }
             if !Self::message_allowed_by_group_floor(message, &floor_by_group) {
                 self.account_db()?.record_own_device_restore_skip(
                     &bundle.snapshot_id,

@@ -33,9 +33,13 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let key = legacy_key(entry)?;
         let db = self.account_db()?;
-        db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
-        db.retain_legacy_inbox(&key)?;
-        Ok(())
+        let now = now_unix_timestamp();
+        db.write_transaction(|| {
+            db.hold_unrouted(&key,entry.inbox_seq,&serde_json::to_vec(entry)?,now)?;
+            db.retain_legacy_inbox(&key)?;
+            db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"inbox_seq":entry.inbox_seq,"legacy_group":true}),now,None)?;
+            Ok::<_,SdkError>(())
+        })
     }
     pub(crate) fn legacy_group_retry_ready(
         &self,
@@ -45,6 +49,10 @@ impl RamfluxClient {
         let key = legacy_key(entry)?;
         let db = self.account_db()?;
         db.redrive_inbox_changes(now)?;
+        if db.legacy_inbox_parked(&key)? {
+            return Ok(db.legacy_inbox_lookup_recoverable(&key)?
+                && self.cached_legacy_group_ready(entry)?);
+        }
         let retrying = db.has_inbox_retry(&key)?;
         if !retrying && !db.legacy_inbox_quota_blocked(&key)? {
             return Ok(true);

@@ -7,7 +7,7 @@ use super::review::{pool, trust};
 use super::session_record::{Wire, active, last};
 use super::*;
 use serde_json::json;
-fn manifest(f: &Fixture) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+pub(super) fn manifest(f: &Fixture) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
     let root = f.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let branch = f.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let public = ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
