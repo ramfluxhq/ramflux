@@ -179,12 +179,6 @@ impl RamfluxClient {
                 &plaintext,
                 false,
             )?;
-            if surface.as_ref().is_some_and(|result| result.accepted)
-                && let Ok(Some(carrier)) = crate::client::surface::Carrier::decode(&plaintext)
-                && carrier.payload_kind == crate::client::surface::PayloadKind::Event
-            {
-                self.queue_surface_forward(&carrier, Some(group.group_key_epoch))?;
-            }
             let task = self.project_task_message(
                 &crate::client::task::Delivery {
                     conversation: &route.conversation_id,

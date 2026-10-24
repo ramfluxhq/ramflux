@@ -938,4 +938,31 @@ mod tests {
     }
     #[path = "own_device_group_pin_tests.rs"]
     mod group_pin_tests;
+    #[test]
+    fn control_import_skip_keys_distinguish_pages_and_are_retry_idempotent() -> Result<(), SdkError>
+    {
+        let (client, root) =
+            client_with_account("surface-skip-pages", "principal_sync", "target_device_sync")?;
+        let envelope = envelope("source_device_sync", "target_device_sync");
+        let mut control = crate::client::surface::SurfaceControl {
+            kind: crate::client::surface::ControlKind::Peer,
+            carrier_base64: "page-one".into(),
+            group_epoch: None,
+            context: None,
+            manifests: Vec::new(),
+        };
+        client.import_own_surface_history(&envelope, &[control.clone()])?;
+        control.carrier_base64 = "page-two".into();
+        client.import_own_surface_history(&envelope, &[control.clone()])?;
+        client.import_own_surface_history(&envelope, &[control])?;
+        let rows = client.account_db()?.surface_history_page::<serde_json::Value>(
+            "surface/import_control_skip/",
+            "surface/import_control_skip/",
+            100,
+        )?;
+        assert_eq!(rows.len(), 2);
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

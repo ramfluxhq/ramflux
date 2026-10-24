@@ -37,29 +37,14 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     account.put_engine(engine);
     let received = result?;
     let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
-    // Inbound receive and its commit/ACK must not depend on outbound queue health.
-    let sent = match super::surface_jobs::run(account).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error, "surface outbox deferred");
-            0
-        }
-    };
-    let forwarded = match super::dispatch::surface_transport::drain_forwarding(account).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error, "surface forwarding deferred");
-            0
-        }
-    };
     let task_sent = match super::dispatch::task_transport::drain_confirmations(account).await {
         Ok(count) => count,
         Err(error) => {
-            tracing::warn!(%error,"task outbox deferred");
+            tracing::warn!(%error,"task confirmation deferred");
             0
         }
     };
-    Ok(received + sent + forwarded + task_sent + tasks_applied)
+    Ok(received + task_sent + tasks_applied)
 }
 
 async fn receive(
