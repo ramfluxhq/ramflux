@@ -69,6 +69,7 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
     let mut attempted = 0;
     for (storage, row) in rows {
         let Some(mut job) = crate::error_policy::task_scan(
+            &storage,
             serde_json::from_value::<Job>(row).map_err(SdkError::from),
         )?
         else {
@@ -77,7 +78,9 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
         if job.next_at > now || job.packet.deadline() <= now || job.attempts >= 8 {
             continue;
         }
-        let Some(bytes) = crate::error_policy::task_scan(job.packet.bytes())? else { continue };
+        let Some(bytes) = crate::error_policy::task_scan(&storage, job.packet.bytes())? else {
+            continue;
+        };
         let request = job.packet.request();
         attempted += 1;
         let result = super::task_approval_transport::send(
@@ -87,13 +90,10 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
             &bytes,
         )
         .await;
-        crate::error_policy::task_scan(record_delivery(
-            account,
+        crate::error_policy::task_scan(
             &storage,
-            &mut job,
-            result.is_ok(),
-            now,
-        ))?;
+            record_delivery(account, &storage, &mut job, result.is_ok(), now),
+        )?;
         if result.is_ok() {
             sent += 1;
         }
@@ -191,7 +191,7 @@ fn queue_requests(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
                 }
                 Ok::<_, SdkError>(())
             })();
-            crate::error_policy::task_scan(result)?;
+            crate::error_policy::task_scan(&cursor, result)?;
             if made >= 2 {
                 return Ok(());
             }

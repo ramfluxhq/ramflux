@@ -15,6 +15,7 @@ mod mesh_quic;
 mod mesh_tls;
 mod perf_metrics;
 mod policy;
+mod quic_errors;
 mod quic_gateway;
 mod relay_quic_pool;
 mod tls_config;

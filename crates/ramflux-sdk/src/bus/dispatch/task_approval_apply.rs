@@ -38,12 +38,20 @@ pub(super) fn apply_using(
         match result {
             Ok(applied) => accepted += usize::from(applied),
             Err(error) if crate::error_policy::approval_retryable(&error) => {
-                tracing::warn!(%error,"task approval deferred for retry");
+                crate::task_warnings::warn(&storage, &error, "task approval deferred for retry");
             }
             Err(error) => {
-                tracing::warn!(%error,"task approval row rejected; other decisions continue");
+                crate::task_warnings::warn(
+                    &storage,
+                    &error,
+                    "task approval row rejected; other decisions continue",
+                );
                 if let Err(error) = reject_row(account, &storage) {
-                    tracing::warn!(%error,"task approval rejection persistence deferred");
+                    crate::task_warnings::warn(
+                        &storage,
+                        &error,
+                        "task approval rejection persistence deferred",
+                    );
                 }
             }
         }
@@ -124,7 +132,11 @@ pub(super) fn apply_one(
         if crate::error_policy::approval_retryable(&error) {
             return Err(error);
         }
-        tracing::warn!(%error,"task approval rejected by MCP validation");
+        crate::task_warnings::warn(
+            &key("approval_decision_in", &id),
+            &error,
+            "task approval rejected by MCP validation",
+        );
         account.client.retire_task_approval(
             &trusted,
             DeliveryState::Rejected,

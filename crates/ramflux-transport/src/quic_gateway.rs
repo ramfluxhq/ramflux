@@ -45,9 +45,8 @@ pub struct QuicGatewayClient {
 
 /// Structured outcome of a pooled connect attempt (see [`QuicGatewayClient::connect_pooled`]). A
 /// handshake timeout is distinguished from a handshake failure at the source, not by string
-/// matching. quinn does not expose a stable, machine-readable "peer authentication failed" reason
-/// separate from other transport-layer handshake failures, so a non-timeout handshake failure is
-/// reported uniformly as [`QuicConnectPhase::HandshakeFailed`] rather than guessed from text.
+/// matching. Typed QUIC crypto alerts are reported as [`QuicConnectPhase::HandshakeSecurity`];
+/// other failures remain [`QuicConnectPhase::HandshakeFailed`].
 #[derive(Debug)]
 pub enum QuicConnectPhase {
     /// Endpoint bind or client-config setup failed before any handshake began.
@@ -56,6 +55,8 @@ pub enum QuicConnectPhase {
     HandshakeTimeout,
     /// The handshake failed (peer unreachable, TLS/cert rejection, transport error).
     HandshakeFailed(String),
+    /// TLS alert or certificate verification failed during the handshake.
+    HandshakeSecurity(String),
 }
 
 /// Structured outcome of a pooled request (see [`QuicGatewayClient::request_pooled`]).
@@ -67,10 +68,14 @@ pub enum QuicRequestPhase {
     ConnectionLost(String),
     /// A complete frame was received but could not be decoded — not a business response.
     Protocol(String),
+    /// A TLS alert terminated the connection while exchanging a frame.
+    Security(String),
 }
 
 fn quic_request_phase_from_transport(error: TransportError) -> QuicRequestPhase {
     match error {
+        TransportError::Tls(message) => QuicRequestPhase::Security(message),
+        TransportError::Protocol(error) => QuicRequestPhase::Protocol(error.to_string()),
         TransportError::Codec(codec) => {
             QuicRequestPhase::Protocol(format!("response decode: {codec}"))
         }
@@ -108,13 +113,12 @@ impl QuicGatewayClient {
     ) -> Result<Self, TransportError> {
         let mut endpoint = quinn::Endpoint::client(bind_addr)?;
         endpoint.set_default_client_config(quic_gateway_client_config(ca_cert)?);
-        let connecting = endpoint
-            .connect(peer_addr, server_name)
-            .map_err(|error| TransportError::Quic(format!("{error}; detail={error:?}")))?;
+        let connecting =
+            endpoint.connect(peer_addr, server_name).map_err(crate::quic_errors::connect)?;
         let connection = tokio::time::timeout(timeout, connecting)
             .await
             .map_err(|error| TransportError::Quic(format!("{error}; phase=handshake peer={peer_addr} server_name={server_name}; detail={error:?}")))?
-            .map_err(|error| TransportError::Quic(format!("{error}; phase=handshake peer={peer_addr} server_name={server_name}; detail={error:?}")))?;
+            .map_err(|error| crate::quic_errors::connection(&error))?;
         Ok(Self { _endpoint: endpoint, connection, timeout })
     }
 
@@ -145,9 +149,10 @@ impl QuicGatewayClient {
             .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
         match tokio::time::timeout(handshake_timeout, connecting).await {
             Err(_elapsed) => Err(QuicConnectPhase::HandshakeTimeout),
-            Ok(Err(error)) => {
-                Err(QuicConnectPhase::HandshakeFailed(format!("{error}; detail={error:?}")))
-            }
+            Ok(Err(error)) => match crate::quic_errors::connection(&error) {
+                TransportError::Tls(message) => Err(QuicConnectPhase::HandshakeSecurity(message)),
+                other => Err(QuicConnectPhase::HandshakeFailed(other.to_string())),
+            },
             Ok(Ok(connection)) => {
                 Ok(Self { _endpoint: endpoint, connection, timeout: request_timeout })
             }
@@ -157,8 +162,8 @@ impl QuicGatewayClient {
     /// Sends a single request, returning a **structured** [`QuicRequestPhase`] on failure. A
     /// request deadline is [`QuicRequestPhase::RequestTimeout`] taken directly from the timeout
     /// `Elapsed` (no string parsing); a decode failure is [`QuicRequestPhase::Protocol`] (a
-    /// complete-but-invalid frame, never a business response); any other stream/connection error
-    /// is [`QuicRequestPhase::ConnectionLost`] (no complete application response). Used by the pool
+    /// complete-but-invalid frame, never a business response). TLS alerts retain
+    /// [`QuicRequestPhase::Security`]; other stream/connection errors use [`QuicRequestPhase::ConnectionLost`] (no complete application response). Used by the pool
     /// so its typed error contract does not depend on quinn's error wording.
     ///
     /// # Errors
@@ -167,9 +172,9 @@ impl QuicGatewayClient {
         &self,
         request: &GatewayQuicRequest,
     ) -> Result<GatewayQuicResponse, QuicRequestPhase> {
-        match tokio::time::timeout(self.timeout, async {
+        let result = match tokio::time::timeout(self.timeout, async {
             let (mut send, mut recv) = self.connection.open_bi().await.map_err(|error| {
-                QuicRequestPhase::ConnectionLost(format!("{error}; detail={error:?}"))
+                quic_request_phase_from_transport(crate::quic_errors::connection(&error))
             })?;
             write_quic_json_frame(&mut send, request)
                 .await
@@ -180,7 +185,14 @@ impl QuicGatewayClient {
         {
             Ok(inner) => inner,
             Err(_elapsed) => Err(QuicRequestPhase::RequestTimeout),
+        };
+        if result.is_err()
+            && let Some(reason) = self.connection.close_reason()
+            && let TransportError::Tls(message) = crate::quic_errors::connection(&reason)
+        {
+            return Err(QuicRequestPhase::Security(message));
         }
+        result
     }
 
     pub fn set_session_timeout(&mut self, timeout: Duration) {
@@ -229,13 +241,21 @@ impl QuicGatewayClient {
         .map_err(|error| {
             TransportError::Quic(format!("{error}; phase=request_timeout; detail={error:?}"))
         })?;
-        result.map_err(|error| match error {
-            TransportError::Quic(reason) => TransportError::Quic(format!(
-                "{reason}; phase=request peer={}; connection_close={:?}",
-                self.connection.remote_address(),
-                self.connection.close_reason()
-            )),
-            other => other,
+        result.map_err(|error| {
+            if let Some(reason) = self.connection.close_reason() {
+                let mapped = crate::quic_errors::connection(&reason);
+                if mapped.is_tls_failure() {
+                    return mapped;
+                }
+            }
+            match error {
+                TransportError::Quic(reason) => TransportError::Quic(format!(
+                    "{reason}; phase=request peer={}; connection_close={:?}",
+                    self.connection.remote_address(),
+                    self.connection.close_reason()
+                )),
+                other => other,
+            }
         })
     }
 

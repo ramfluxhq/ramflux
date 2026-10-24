@@ -666,10 +666,7 @@ impl RelayQuicPool {
     }
 }
 
-/// Maps a structured connect phase to the pool's typed error. A non-timeout handshake failure is
-/// reported uniformly as `Handshake` (quinn does not expose a stable peer-auth-vs-transport
-/// distinction; see [`QuicConnectPhase`]); only client-config/CA-material construction errors, which
-/// the pool detects before any handshake, become `PeerAuth`/`Config`.
+/// Preserves typed TLS alerts as `PeerAuth` while keeping transport handshake failures distinct.
 fn map_connect_phase(phase: QuicConnectPhase) -> RelayQuicRequestError {
     match phase {
         QuicConnectPhase::Setup(message) => RelayQuicRequestError::Connect(message),
@@ -677,6 +674,7 @@ fn map_connect_phase(phase: QuicConnectPhase) -> RelayQuicRequestError {
             "handshake did not complete before deadline".to_owned(),
         ),
         QuicConnectPhase::HandshakeFailed(message) => RelayQuicRequestError::Handshake(message),
+        QuicConnectPhase::HandshakeSecurity(message) => RelayQuicRequestError::PeerAuth(message),
     }
 }
 
@@ -687,6 +685,7 @@ fn map_request_phase(phase: QuicRequestPhase) -> RelayQuicRequestError {
         ),
         QuicRequestPhase::ConnectionLost(message) => RelayQuicRequestError::ConnectionLost(message),
         QuicRequestPhase::Protocol(message) => RelayQuicRequestError::Protocol(message),
+        QuicRequestPhase::Security(message) => RelayQuicRequestError::PeerAuth(message),
     }
 }
 
@@ -821,6 +820,14 @@ mod tests {
         assert!(matches!(
             map_connect_phase(QuicConnectPhase::HandshakeFailed("tls reject".to_owned())),
             RelayQuicRequestError::Handshake(_)
+        ));
+        assert!(matches!(
+            map_connect_phase(QuicConnectPhase::HandshakeSecurity("unknown CA".into())),
+            RelayQuicRequestError::PeerAuth(_)
+        ));
+        assert!(matches!(
+            map_request_phase(QuicRequestPhase::Security("TLS alert".into())),
+            RelayQuicRequestError::PeerAuth(_)
         ));
         assert!(matches!(
             map_connect_phase(QuicConnectPhase::Setup("bind failed".to_owned())),

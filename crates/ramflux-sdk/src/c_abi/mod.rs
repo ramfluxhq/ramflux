@@ -825,8 +825,17 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::IdentityRootMissing => RamfluxErrorCode::AuthFailed,
+        SdkError::Transport(error) => match crate::error_policy::transport_code(error) {
+            "Unavailable" => RamfluxErrorCode::TransportUnavailable,
+            "Unauthenticated" | "TransportSecurity" => RamfluxErrorCode::AuthFailed,
+            _ => RamfluxErrorCode::InvalidArgument,
+        },
+        SdkError::ContactUnavailable(source)
+            if crate::error_policy::security_code(source).is_some() =>
+        {
+            RamfluxErrorCode::AuthFailed
+        }
         SdkError::ContactUnavailable(_)
-        | SdkError::Transport(_)
         | SdkError::GatewaySessionRejected(_)
         | SdkError::GatewaySessionNotEstablished => RamfluxErrorCode::TransportUnavailable,
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => {
@@ -875,3 +884,7 @@ impl CAbiError {
         Self { code, message: message.into() }
     }
 }
+
+#[cfg(test)]
+#[path = "transport_error_tests.rs"]
+mod transport_error_tests;

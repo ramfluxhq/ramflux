@@ -452,9 +452,7 @@ impl MeshQuicServer {
         tracing::info!(%remote_address, "mesh QUIC connection accepted; completing handshake");
         let connection = connecting.await.map_err(|error| {
             tracing::error!(%remote_address, %error, "mesh QUIC handshake failed");
-            TransportError::Quic(format!(
-                "mesh QUIC handshake failed from {remote_address}: {error}"
-            ))
+            crate::quic_errors::connection(&error)
         })?;
         record_mesh_server_quic_connection_accepted();
         tracing::info!(%remote_address, "mesh QUIC handshake completed");
@@ -879,7 +877,7 @@ impl MeshQuicClientRuntime {
             TransportError::Quic(format!("mesh QUIC runtime stopped: {error}"))
         })?? {
             MeshQuicClientResponsePayload::Json(response) => Ok(response),
-            MeshQuicClientResponsePayload::Postcard(_response) => Err(TransportError::Quic(
+            MeshQuicClientResponsePayload::Postcard(_response) => Err(crate::quic_errors::wire(
                 "mesh QUIC runtime returned postcard response for JSON request".to_owned(),
             )),
         }
@@ -911,7 +909,7 @@ impl MeshQuicClientRuntime {
             TransportError::Quic(format!("mesh QUIC runtime stopped: {error}"))
         })?? {
             MeshQuicClientResponsePayload::Json(response) => Ok(response),
-            MeshQuicClientResponsePayload::Postcard(_response) => Err(TransportError::Quic(
+            MeshQuicClientResponsePayload::Postcard(_response) => Err(crate::quic_errors::wire(
                 "mesh QUIC runtime returned postcard response for JSON request".to_owned(),
             )),
         }
@@ -943,7 +941,7 @@ impl MeshQuicClientRuntime {
             TransportError::Quic(format!("mesh QUIC runtime stopped: {error}"))
         })?? {
             MeshQuicClientResponsePayload::Postcard(response) => Ok(response),
-            MeshQuicClientResponsePayload::Json(_response) => Err(TransportError::Quic(
+            MeshQuicClientResponsePayload::Json(_response) => Err(crate::quic_errors::wire(
                 "mesh QUIC runtime returned JSON response for postcard request".to_owned(),
             )),
         }
@@ -1176,7 +1174,7 @@ async fn mesh_quic_connect(
     endpoint.set_default_client_config(mesh_quic_client_config_with_pem_roots(tls, peer_ca_pems)?);
     let probe = breakers.before_connect(peer_addr, server_name, Instant::now())?;
     let connecting = endpoint.connect(peer_addr, server_name).map_err(|error| {
-        let error = TransportError::Quic(error.to_string());
+        let error = crate::quic_errors::connect(error);
         breakers.record_connect_failure(&probe, Instant::now(), breaker_cooldown);
         error
     })?;
@@ -1197,7 +1195,7 @@ async fn mesh_quic_connect(
         })?
         .map_err(|error| {
             tracing::error!(peer_addr = %peer_addr, server_name, %error, "mesh QUIC client handshake failed");
-            TransportError::Quic(format!("mesh QUIC connect to {peer_addr} failed: {error}"))
+            crate::quic_errors::connection(&error)
         });
     let connection = match connection_result {
         Ok(connection) => {
@@ -1205,7 +1203,12 @@ async fn mesh_quic_connect(
             connection
         }
         Err(error) => {
-            breakers.record_connect_failure(&probe, Instant::now(), breaker_cooldown);
+            if error.is_tls_failure() {
+                // A trust failure must not become a cached, retryable outage for the next caller.
+                breakers.record_connect_success(&probe);
+            } else {
+                breakers.record_connect_failure(&probe, Instant::now(), breaker_cooldown);
+            }
             return Err(error);
         }
     };
@@ -1220,10 +1223,10 @@ async fn mesh_quic_request_on_connection(
     request: &MeshQuicClientRequestPayload,
     timeout: Duration,
 ) -> Result<MeshQuicClientResponsePayload, TransportError> {
-    tokio::time::timeout(timeout, async {
+    let result = tokio::time::timeout(timeout, async {
         let open_bi_started = std::time::Instant::now();
         let open_bi_result =
-            connection.open_bi().await.map_err(|error| TransportError::Quic(error.to_string()));
+            connection.open_bi().await.map_err(|error| crate::quic_errors::connection(&error));
         record_mesh_client_open_bi(open_bi_started.elapsed());
         let (mut send, mut recv) = open_bi_result?;
         let request_write_started = std::time::Instant::now();
@@ -1250,9 +1253,7 @@ async fn mesh_quic_request_on_connection(
                 MeshQuicClientRequestPayload::Postcard(_request) => {
                     let frame = read_quic_raw_frame(&mut recv).await?;
                     let body = frame.strip_prefix(MESH_QUIC_POSTCARD_MAGIC).ok_or_else(|| {
-                        TransportError::Quic(
-                            "mesh QUIC postcard response missing binary magic".to_owned(),
-                        )
+                        crate::quic_errors::wire("mesh QUIC postcard response missing binary magic")
                     })?;
                     MeshQuicClientResponsePayload::Postcard(postcard_from_bytes(body)?)
                 }
@@ -1268,7 +1269,16 @@ async fn mesh_quic_request_on_connection(
     .map_err(|error| {
         record_mesh_client_request_timeout();
         TransportError::Quic(error.to_string())
-    })?
+    })?;
+    if result.is_err()
+        && let Some(reason) = connection.close_reason()
+    {
+        let error = crate::quic_errors::connection(&reason);
+        if error.is_tls_failure() {
+            return Err(error);
+        }
+    }
+    result
 }
 
 async fn timed_mesh_quic_request_on_connection(
@@ -1296,12 +1306,12 @@ async fn write_postcard_frame<T: serde::Serialize>(
 
 fn postcard_to_allocvec<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, TransportError> {
     postcard::to_allocvec(value)
-        .map_err(|error| TransportError::Quic(format!("postcard encode failed: {error}")))
+        .map_err(|error| crate::quic_errors::wire(format!("postcard encode failed: {error}")))
 }
 
 fn postcard_from_bytes<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, TransportError> {
     postcard::from_bytes(bytes)
-        .map_err(|error| TransportError::Quic(format!("postcard decode failed: {error}")))
+        .map_err(|error| crate::quic_errors::wire(format!("postcard decode failed: {error}")))
 }
 
 async fn drain_quic_recv_to_fin(recv: &mut quinn::RecvStream) -> Result<(), TransportError> {
@@ -1336,10 +1346,14 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        GatewayQuicRequest, MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT,
-        MESH_QUIC_CONNECT_TIMEOUT_DEFAULT, MeshQuicCircuitBreakers, MeshQuicConnectionPool,
-        MeshQuicPoolKey, MeshQuicPoolRegistry, MeshQuicServer, MeshTlsConfig,
-        duration_from_millis_value, mesh_quic_get_json_with_peer_ca_pems, resolve_endpoint,
+        GatewayQuicRequest, GatewayQuicResponse, MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT,
+        MESH_QUIC_CONNECT_TIMEOUT_DEFAULT, MeshQuicAcceptedWireRequest, MeshQuicCircuitBreakers,
+        MeshQuicClientJob, MeshQuicClientRequestPayload, MeshQuicClientResponsePayload,
+        MeshQuicClientRuntime, MeshQuicConnectionPool, MeshQuicPoolKey, MeshQuicPoolRegistry,
+        MeshQuicPostcardRequest, MeshQuicPostcardResponse, MeshQuicServer, MeshTlsConfig,
+        drain_quic_recv_to_fin, duration_from_millis_value, mesh_quic_get_json_with_peer_ca_pems,
+        mesh_quic_post_postcard_with_peer_ca_pems_async, postcard_from_bytes, postcard_to_allocvec,
+        resolve_endpoint, write_quic_json_message,
     };
     use crate::TransportError;
 
@@ -1808,6 +1822,124 @@ mod tests {
 
     fn path_str(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
         path.to_str().ok_or_else(|| format!("non-UTF-8 path {}", path.display()).into())
+    }
+
+    #[test]
+    fn r8_postcard_encode_and_decode_failures_are_permanent_protocol_errors() {
+        struct CannotEncode;
+        impl serde::Serialize for CannotEncode {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("cannot encode this value"))
+            }
+        }
+        assert!(matches!(postcard_to_allocvec(&CannotEncode), Err(TransportError::Protocol(_))));
+        assert!(matches!(postcard_from_bytes::<u64>(&[0xff]), Err(TransportError::Protocol(_))));
+    }
+    #[tokio::test]
+    async fn r8_runtime_payload_type_mismatches_are_permanent_protocol_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (jobs, receiver) = mpsc::channel::<MeshQuicClientJob>();
+        let runtime = MeshQuicClientRuntime { jobs };
+        let worker = std::thread::spawn(move || -> Result<(), String> {
+            for _ in 0..3 {
+                let job = receiver.recv().map_err(|e| e.to_string())?;
+                let response = match job.request.request {
+                    MeshQuicClientRequestPayload::Json(_) => {
+                        MeshQuicClientResponsePayload::Postcard(MeshQuicPostcardResponse {
+                            status: 200,
+                            body: Vec::new(),
+                        })
+                    }
+                    MeshQuicClientRequestPayload::Postcard(_) => {
+                        MeshQuicClientResponsePayload::Json(GatewayQuicResponse {
+                            status: 200,
+                            body: serde_json::Value::Null,
+                        })
+                    }
+                };
+                job.response.send(Ok(response));
+            }
+            Ok(())
+        });
+        let tls = MeshTlsConfig {
+            ca_cert: PathBuf::new(),
+            service_cert: PathBuf::new(),
+            service_key: PathBuf::new(),
+        };
+        let request = GatewayQuicRequest {
+            method: "GET".into(),
+            path: "/".into(),
+            body: serde_json::Value::Null,
+        };
+        assert!(matches!(
+            runtime.request("unused", &tls, "unused", &[], request.clone()),
+            Err(TransportError::Protocol(_))
+        ));
+        assert!(matches!(
+            runtime.request_async("unused", &tls, "unused", &[], request).await,
+            Err(TransportError::Protocol(_))
+        ));
+        assert!(matches!(
+            runtime
+                .request_postcard_async(
+                    "unused",
+                    &tls,
+                    "unused",
+                    &[],
+                    MeshQuicPostcardRequest {
+                        method: "POST".into(),
+                        path: "/".into(),
+                        body: Vec::new()
+                    }
+                )
+                .await,
+            Err(TransportError::Protocol(_))
+        ));
+        worker.join().map_err(|_| test_error("worker panicked"))?.map_err(test_error)?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn r8_a_real_postcard_response_without_magic_is_a_permanent_protocol_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("r8-magic")?;
+        let ca = issue_test_ca(&root)?;
+        let client = issue_test_service_cert(&ca, "node-r8", "client")?;
+        let server = issue_test_service_cert(&ca, "node-r8", "server")?;
+        let roots = Arc::new(move || Ok(vec![client.ca_pem.clone()]));
+        let listener =
+            MeshQuicServer::bind_with_pem_roots_provider("127.0.0.1:0", &server.tls, roots)?;
+        let endpoint = listener.local_addr()?.to_string();
+        let task = tokio::spawn(async move {
+            let connection = listener.accept_connection().await?;
+            let MeshQuicAcceptedWireRequest::Postcard(mut request) =
+                MeshQuicServer::accept_json_or_postcard_request_on_connection(&connection).await?
+            else {
+                return Err(TransportError::Io(std::io::Error::other("postcard request expected")));
+            };
+            write_quic_json_message(
+                &mut request.send,
+                &GatewayQuicResponse { status: 200, body: serde_json::Value::Null },
+            )
+            .await?;
+            request.send.finish().map_err(|e| TransportError::Quic(e.to_string()))?;
+            drain_quic_recv_to_fin(&mut request.recv).await?;
+            std::future::pending::<()>().await;
+            Ok::<(), TransportError>(())
+        });
+        let result = mesh_quic_post_postcard_with_peer_ca_pems_async::<_, u8>(
+            &endpoint,
+            "/",
+            &client.tls,
+            "server",
+            &[server.ca_pem],
+            &1_u8,
+        )
+        .await;
+        task.abort();
+        let _ = task.await;
+        assert!(matches!(result, Err(TransportError::Protocol(_))), "{result:?}");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {

@@ -21,9 +21,17 @@ pub(super) fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
             let result = (|| {
                 let nested = row.get("packet").is_some();
                 let value = if nested { row["packet"].clone() } else { row.clone() };
-                let Ok(mut packet) = serde_json::from_value::<Packet>(value) else {
-                    db.delete_task_state(&storage)?;
-                    return Ok(());
+                let mut packet = match serde_json::from_value::<Packet>(value) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        crate::task_warnings::warn(
+                            &storage,
+                            &SdkError::from(error),
+                            "malformed approval row retired",
+                        );
+                        db.delete_task_state(&storage)?;
+                        return Ok(());
+                    }
                 };
                 if packet.local_expires_at.is_none() {
                     packet = packet.received();
@@ -69,7 +77,7 @@ pub(super) fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
                 }
                 Ok::<_, SdkError>(())
             })();
-            crate::error_policy::task_scan(result)?;
+            crate::error_policy::task_scan(&storage, result)?;
         }
     }
     for namespace in ["approval_applied", "approval_rejected"] {

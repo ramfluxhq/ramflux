@@ -24,7 +24,7 @@ pub enum TransportError {
     #[error("HTTP error: {0}")]
     Http(String),
     #[error("HTTP client error: {0}")]
-    HttpClient(#[from] reqwest::Error),
+    HttpClient(#[source] reqwest::Error),
     #[error("QUIC error: {0}")]
     Quic(String),
     #[error("invalid DNS name: {0}")]
@@ -45,3 +45,33 @@ pub enum TransportError {
     UnsupportedOperation { operation: &'static str },
 }
 use ramflux_protocol::ProtocolError;
+
+impl From<reqwest::Error> for TransportError {
+    fn from(error: reqwest::Error) -> Self {
+        if tls_source(&error) { Self::Tls(error.to_string()) } else { Self::HttpClient(error) }
+    }
+}
+impl TransportError {
+    /// Reports a TLS failure even when an HTTP caller retained the original source chain.
+    #[must_use]
+    pub fn is_tls_failure(&self) -> bool {
+        matches!(self, Self::Tls(_)) || matches!(self, Self::HttpClient(error) if tls_source(error))
+    }
+}
+pub(crate) fn tls_source(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.is::<rustls::Error>() {
+            return true;
+        }
+        // Some I/O wrappers expose their custom payload separately from Error::source.
+        if let Some(inner) =
+            error.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref)
+            && tls_source(inner)
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}

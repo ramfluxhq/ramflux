@@ -105,6 +105,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 }
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+    if let Some(code) = crate::error_policy::security_code(error) {
+        return code;
+    }
     match error {
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",

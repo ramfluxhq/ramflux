@@ -139,6 +139,7 @@ impl RamfluxClient {
         let rows = self.account_db()?.task_retention_rows(Some(source), None)?;
         let mut rank = 0;
         for value in rows {
+            let warning_key = crate::task_warnings::row_key(&value);
             let result = (|| {
                 let mut row: Lifecycle = serde_json::from_value(value)?;
                 if self.task_retention_source(&mut row)? != source {
@@ -152,7 +153,7 @@ impl RamfluxClient {
                 rank += 1;
                 Ok::<_, SdkError>(())
             })();
-            crate::error_policy::task_scan(result)?;
+            crate::error_policy::task_scan(&warning_key, result)?;
         }
         Ok(())
     }
@@ -167,11 +168,12 @@ impl RamfluxClient {
             owners.insert(owner.to_owned());
         } else {
             for value in self.account_db()?.task_retention_rows(None, Some(conversation))? {
+                let warning_key = crate::task_warnings::row_key(&value);
                 let result = (|| {
                     let mut row: Lifecycle = serde_json::from_value(value)?;
                     self.task_retention_source(&mut row)
                 })();
-                if let Some(source) = crate::error_policy::task_scan(result)? {
+                if let Some(source) = crate::error_policy::task_scan(&warning_key, result)? {
                     owners.insert(source);
                 }
             }
@@ -179,6 +181,7 @@ impl RamfluxClient {
         for owner in owners {
             let mut rank = 0;
             for value in self.account_db()?.task_retention_rows(Some(&owner), Some(conversation))? {
+                let warning_key = crate::task_warnings::row_key(&value);
                 let result = (|| {
                     let mut row: Lifecycle = serde_json::from_value(value)?;
                     if self.task_retention_source(&mut row)? != owner {
@@ -194,13 +197,17 @@ impl RamfluxClient {
                     rank += 1;
                     Ok::<_, SdkError>(())
                 })();
-                crate::error_policy::task_scan(result)?;
+                crate::error_policy::task_scan(&warning_key, result)?;
             }
         }
         Ok(())
     }
     pub(super) fn migrate_task_lifecycle(&self, now: i64) -> Result<(), SdkError> {
         for history in self.account_db()?.unindexed_task_histories::<TaskHistory>()? {
+            let warning_key = history.events.first().map_or_else(
+                || "task/migration/unknown".to_owned(),
+                |e| super::key("migration", &e.carrier.message_id),
+            );
             let result = (|| {
                 if let Some(task) = history.state()?.task() {
                     self.record_task_lifecycle(task, &history)?;
@@ -212,7 +219,7 @@ impl RamfluxClient {
                 }
                 Ok::<_, SdkError>(())
             })();
-            crate::error_policy::task_scan(result)?;
+            crate::error_policy::task_scan(&warning_key, result)?;
         }
         Ok(())
     }
@@ -220,6 +227,7 @@ impl RamfluxClient {
         self.migrate_task_lifecycle(now)?;
         let rows = self.account_db()?.task_lifecycle_rows(None, None, false)?;
         for value in &rows {
+            let warning_key = crate::task_warnings::row_key(value);
             let result = (|| {
                 let row: Lifecycle = serde_json::from_value(value.clone())?;
                 if row.compaction_eligible && !row.compacted {
@@ -227,18 +235,17 @@ impl RamfluxClient {
                 }
                 Ok::<_, SdkError>(())
             })();
-            crate::error_policy::task_scan(result)?;
+            crate::error_policy::task_scan(&warning_key, result)?;
         }
         let conversations = rows
             .iter()
             .filter_map(|r| r["conversation_id"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
         for conversation in conversations {
-            crate::error_policy::task_scan(self.maintain_task_conversation(
-                conversation,
-                now,
-                None,
-            ))?;
+            crate::error_policy::task_scan(
+                &scoped("maintenance", conversation, "")?,
+                self.maintain_task_conversation(conversation, now, None),
+            )?;
         }
         self.account_db()?.prune_task_certificates(now)?;
         Ok(())

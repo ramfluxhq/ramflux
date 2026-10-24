@@ -1977,8 +1977,8 @@ where
 }
 
 /// Maps a transport-layer relay pool error to `SdkError`. Backpressure is preserved as an explicit
-/// transport/capacity error (never collapsed into `CapabilityDenied` or a faked HTTP status); every
-/// other typed failure becomes a transport QUIC error. Complete HTTP responses never reach here —
+/// transport/capacity error (never collapsed into `CapabilityDenied` or a faked HTTP status).
+/// Peer-auth/protocol failures retain their permanent classification. Complete HTTP responses never reach here —
 /// they are returned `Ok` and handled by the caller's business-status logic.
 fn relay_pool_error_to_sdk(error: ramflux_transport::RelayQuicRequestError) -> SdkError {
     match error {
@@ -1987,6 +1987,15 @@ fn relay_pool_error_to_sdk(error: ramflux_transport::RelayQuicRequestError) -> S
                 capacity,
                 in_flight,
             })
+        }
+        ramflux_transport::RelayQuicRequestError::PeerAuth(message) => {
+            SdkError::Transport(ramflux_transport::TransportError::Tls(message))
+        }
+        ramflux_transport::RelayQuicRequestError::Protocol(message)
+        | ramflux_transport::RelayQuicRequestError::Config(message) => {
+            SdkError::Transport(ramflux_transport::TransportError::Protocol(
+                ramflux_protocol::ProtocolError::TransportProtocol(message),
+            ))
         }
         other => SdkError::Transport(ramflux_transport::TransportError::Quic(other.to_string())),
     }
@@ -2604,7 +2613,7 @@ mod t24a2_relay_retry_tests {
         let request = frame();
         let (result, seen) =
             drive(&request, vec![Err(RelayQuicRequestError::PeerAuth("bad ca".to_owned()))]).await;
-        assert!(matches!(result, Err(SdkError::Transport(_))));
+        assert!(matches!(result, Err(SdkError::Transport(TransportError::Tls(_)))));
         assert_eq!(seen.len(), 1);
     }
 
@@ -2613,7 +2622,7 @@ mod t24a2_relay_retry_tests {
         let request = frame();
         let (result, seen) =
             drive(&request, vec![Err(RelayQuicRequestError::Protocol("partial".to_owned()))]).await;
-        assert!(matches!(result, Err(SdkError::Transport(_))));
+        assert!(matches!(result, Err(SdkError::Transport(TransportError::Protocol(_)))));
         assert_eq!(seen.len(), 1, "a complete-but-invalid frame is not reconnect-retryable");
     }
 

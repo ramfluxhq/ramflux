@@ -337,3 +337,6 @@ mod r6;
 
 #[path = "task_approval_r7.rs"]
 mod r7;
+
+#[path = "task_approval_r8.rs"]
+mod r8;

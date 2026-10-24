@@ -30,10 +30,15 @@ impl RamfluxClient {
         let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
         let mut candidates = Vec::new();
         for value in db.task_lifecycle_rows(None, None, false)? {
+            let warning_key = crate::task_warnings::row_key(&value);
             let row: Lifecycle = match serde_json::from_value(value) {
                 Ok(row) => row,
                 Err(error) => {
-                    tracing::warn!(%error,"malformed task lifecycle skipped during compaction");
+                    crate::task_warnings::warn(
+                        &warning_key,
+                        &SdkError::from(error),
+                        "malformed lifecycle row skipped during compaction",
+                    );
                     continue;
                 }
             };
@@ -71,7 +76,10 @@ impl RamfluxClient {
             });
             let Some((index, _)) = victim else { break };
             let victim = candidates.swap_remove(index);
-            crate::error_policy::task_scan(self.compact_task(&victim, false))?;
+            crate::error_policy::task_scan(
+                &scoped("lifecycle", &victim.conversation_id, &victim.task_id)?,
+                self.compact_task(&victim, false),
+            )?;
         }
         Err(crate::task_refusal::refused(
             TaskRefusalCode::TaskQuotaExhausted,
