@@ -191,7 +191,8 @@ preflight cannot make distributed delivery atomic.
 
 `conversation.directory` group rows and `group.list` expose `member_routes` including unresolved
 members. `delivery_target_known` describes available routing metadata, not network reachability.
-`account.status` now includes `principal_commitment`, matching the self identity directory row.
+`account.status` now includes `principal_commitment` and the local sender `device_id`, matching the self
+identity directory row.
 
 
 ## Autonomous receive and compatibility reads
