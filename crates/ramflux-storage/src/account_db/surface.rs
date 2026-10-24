@@ -46,6 +46,88 @@ impl AccountDb {
         self.connection.execute("INSERT INTO runtime_message_content(message_id,conversation_id,body) VALUES(?1,?2,?3) ON CONFLICT(message_id) DO UPDATE SET body=excluded.body WHERE runtime_message_content.conversation_id=excluded.conversation_id", params![message,conversation,body])?;
         Ok(())
     }
+    /// Removes one private surface projection record inside the caller's transaction.
+    /// # Errors
+    /// Returns database failures; callers supply only account-owned surface keys.
+    pub fn delete_surface_state(&self, key: &str) -> Result<(), StorageError> {
+        if !key.starts_with("surface/") {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.connection
+            .execute("DELETE FROM runtime_actor_state WHERE state_kind=?1", params![key])?;
+        Ok(())
+    }
+    /// Retains bounded private surface history/actions, preserving the just-written record.
+    /// # Errors
+    /// Returns SQL errors or rejects a record that alone exceeds the caller's byte budget.
+    /// Call inside `surface_transaction` so a failed budget check rolls back the write.
+    pub fn prune_surface_records(
+        &self,
+        prefix: &str,
+        max_rows: u32,
+        max_bytes: u64,
+        preserve: &str,
+    ) -> Result<(), StorageError> {
+        if !(prefix.starts_with("surface/history/")
+            || prefix.starts_with("surface/actions/")
+            || prefix.starts_with("surface/authored/"))
+            || !preserve.starts_with(prefix)
+            || max_rows == 0
+            || max_bytes == 0
+        {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let mut query=self.connection.prepare("SELECT state_kind,length(state_json) FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 ORDER BY json_extract(CAST(state_json AS TEXT),'$.version'),state_kind")?;
+        let rows = query
+            .query_map(params![prefix], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.unsigned_abs()))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut count = rows.len();
+        let mut bytes = rows.iter().try_fold(0u64, |sum, (_, size)| {
+            sum.checked_add(*size).ok_or(StorageError::AuthorizationRejected)
+        })?;
+        let max_rows =
+            usize::try_from(max_rows).map_err(|_| StorageError::AuthorizationRejected)?;
+        for (key, size) in rows {
+            if count <= max_rows && bytes <= max_bytes {
+                break;
+            }
+            if key == preserve {
+                continue;
+            }
+            self.delete_surface_state(&key)?;
+            count -= 1;
+            bytes -= size;
+        }
+        if count > max_rows || bytes > max_bytes {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(())
+    }
+    /// Reads bounded private records together with their exact account-owned keys.
+    /// # Errors
+    /// Returns database or decoding failures. At most 101 rows are returned.
+    pub fn surface_record_page<T: serde::de::DeserializeOwned>(
+        &self,
+        prefix: &str,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, T)>, StorageError> {
+        if !prefix.starts_with("surface/") {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let mut query=self.connection.prepare("SELECT state_kind,state_json FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 AND state_kind>?2 ORDER BY state_kind LIMIT ?3")?;
+        query
+            .query_map(params![prefix, after, limit.min(101)], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .map(|row| {
+                let (key, bytes) = row?;
+                Ok((key, serde_json::from_slice(&bytes)?))
+            })
+            .collect()
+    }
     /// Private actor-state history page; callers must enforce their account/conversation scope.
     /// # Errors
     /// Returns SQL/JSON errors; pages never exceed 101 rows.

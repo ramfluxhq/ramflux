@@ -38,6 +38,7 @@ impl RamfluxClient {
                 ));
             }
         }
+        db.persist_actor_state(&format!("identity/manifest/{}", manifest.principal_id), manifest)?;
         let material = contact_safety_material_from_manifest(manifest)?;
         let device_set_hash =
             ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&material.devices));
@@ -850,7 +851,7 @@ pub(crate) async fn assert_target_manifest_active_device(
     assert_manifest_active_device(gateway, principal_commitment, device_id).await
 }
 
-fn verify_device_manifest(
+pub(crate) fn verify_device_manifest(
     manifest: &SdkDeviceManifestResponse,
     expected_identity_commitment: &str,
 ) -> Result<(), SdkError> {

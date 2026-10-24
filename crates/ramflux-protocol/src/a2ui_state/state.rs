@@ -24,7 +24,20 @@ pub struct SurfaceState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct FinalText {
     pub(super) nested: bool,
-    pub(super) text: String,
+    pub(super) text_hash: String,
+}
+pub(super) fn final_component_key(id: &str) -> String {
+    crate::hash_base64url(crate::domain::A2UI_FINAL_COMPONENT, id.as_bytes())
+}
+pub(super) fn final_text_hash(text: &str) -> String {
+    crate::hash_base64url(crate::domain::A2UI_FINAL_TEXT, text.as_bytes())
+}
+impl FinalText {
+    pub(super) fn matches(&self, component: &Value) -> bool {
+        stream_text(component).is_some_and(|(nested, text)| {
+            nested == self.nested && final_text_hash(text) == self.text_hash
+        })
+    }
 }
 pub(super) fn stream_text(component: &Value) -> Option<(bool, &str)> {
     if let Some(value) = component.get("text") {
@@ -45,6 +58,10 @@ impl SurfaceState {
     #[must_use]
     pub const fn content(&self) -> Option<&CreateSurfaceCommand> {
         self.content.as_ref()
+    }
+    #[must_use]
+    pub fn conversation_id(&self) -> Option<&str> {
+        self.conversation_id.as_deref()
     }
     #[must_use]
     pub fn hash(&self) -> Option<&str> {
@@ -88,8 +105,8 @@ impl SurfaceState {
         let content = next.content.as_ref().ok_or(SurfaceReject::NotCreated)?;
         for component in &content.components {
             let id = snapshot::component_id(component)?;
-            if let Some(final_text) = next.final_components.get(id)
-                && stream_text(component) != Some((final_text.nested, final_text.text.as_str()))
+            if let Some(final_text) = next.final_components.get(final_component_key(id).as_str())
+                && !final_text.matches(component)
             {
                 return Err(SurfaceReject::BlockClosed);
             }
@@ -262,7 +279,7 @@ fn append_text(
     append: &crate::StreamAppendCommand,
     final_components: &mut BTreeMap<Arc<str>, Arc<FinalText>>,
 ) -> Result<(), SurfaceReject> {
-    if final_components.contains_key(append.component_id.as_str()) {
+    if final_components.contains_key(final_component_key(&append.component_id).as_str()) {
         return Err(SurfaceReject::BlockClosed);
     }
     if append.text_delta.len() > MAX_SURFACE_TEXT_DELTA_BYTES {
@@ -289,8 +306,8 @@ fn append_text(
             return Err(limits::exceeded(SurfaceLimit::FinalizedBlocks));
         }
         final_components.insert(
-            Arc::<str>::from(append.component_id.as_str()),
-            Arc::new(FinalText { nested, text: text.clone() }),
+            Arc::<str>::from(final_component_key(&append.component_id)),
+            Arc::new(FinalText { nested, text_hash: final_text_hash(text) }),
         );
     }
     Ok(())

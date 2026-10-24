@@ -11,6 +11,14 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, SdkError> {
+        if self.receive_surface_control(
+            entry,
+            &opened.routing.conversation_id,
+            opened.routing.group_id.as_deref(),
+            body,
+        )? {
+            return Ok(None);
+        }
         if let Ok(mut event) = serde_json::from_slice::<A2iControlEvent>(body) {
             if event.source_device_id != opened.remote_device
                 || event.target_device_id != opened.local_device

@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("surface checkpoint does not match its owning row")]
+    SurfaceCheckpointMismatch,
     #[error("authenticated device pair requires a fresh bootstrap")]
     PairRecoveryRequired,
     #[error("inbound envelope rejected: {0}")]

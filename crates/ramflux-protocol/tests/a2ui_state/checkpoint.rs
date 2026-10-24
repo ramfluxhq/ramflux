@@ -45,7 +45,8 @@ fn invalid_checkpoint_schema_and_inconsistent_text_are_rejected() {
         );
     }
     let mut changed = value.clone();
-    changed["final_text"][0]["text"] = json!("different");
+    changed["final_text"][0]["text_hash"] =
+        json!(ramflux_protocol::hash_base64url("ramflux.a2ui.final_text.v1", b"different"));
     assert_eq!(
         SurfaceState::from_checkpoint_bytes(&serde_json::to_vec(&changed).unwrap()),
         Err(SurfaceReject::BlockClosed)
@@ -61,5 +62,25 @@ fn invalid_checkpoint_schema_and_inconsistent_text_are_rejected() {
     assert_eq!(
         SurfaceState::from_checkpoint_bytes(&empty.checkpoint_bytes().unwrap()).unwrap(),
         empty
+    );
+}
+
+#[test]
+fn full_state_recovery_preserves_known_finality_and_closed_state() {
+    let old = created().apply(&stream(2, "frozen", true)).unwrap();
+    let snapshot = ramflux_protocol::encode_a2ui_conversation_event(
+        old.conversation_id().unwrap(),
+        old.version(),
+        &ramflux_protocol::A2uiConversationCommand::CreateSurface(old.content().unwrap().clone()),
+    )
+    .unwrap();
+    let event = A2uiConversationEvent::from_wire_bytes(&snapshot).unwrap();
+    let recovered = created().resynchronize(&event, &old.checkpoint_bytes().unwrap()).unwrap();
+    assert_eq!(recovered, old);
+    assert_eq!(recovered.apply(&stream(3, "x", false)), Err(SurfaceReject::BlockClosed));
+    let closed = old.apply(&close(3)).unwrap();
+    assert_eq!(
+        closed.resynchronize(&event, &old.checkpoint_bytes().unwrap()),
+        Err(SurfaceReject::WrongSurface)
     );
 }
