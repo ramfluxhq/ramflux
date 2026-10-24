@@ -545,23 +545,6 @@ impl RouterCore {
         Ok(control.mvp1_identities.device_auth_key(lookup))
     }
     #[must_use]
-    pub fn mvp1_prekey(&self, device_id: &str) -> PrekeyResponse {
-        let control = lock_unpoisoned(&self.control);
-        PrekeyResponse {
-            device_id: device_id.to_owned(),
-            bundle: control.mvp1_identities.prekey_bundle(device_id).cloned(),
-            principal_commitment: control
-                .mvp1_identities
-                .principal_commitment_for_device(device_id)
-                .unwrap_or_default()
-                .to_owned(),
-            target_delivery_id: control
-                .mvp1_identities
-                .target_delivery_id_for_device(device_id)
-                .map(str::to_owned),
-        }
-    }
-
     /// Looks up a name only for an authenticated live account session, charging node-wide quotas.
     #[must_use]
     pub fn mvp1_authenticated_principal_lookup(
@@ -614,11 +597,6 @@ impl RouterCore {
         principal_commitment: &str,
     ) -> Option<DeviceManifestResponse> {
         lock_unpoisoned(&self.control).mvp1_identities.device_manifest(principal_commitment)
-    }
-
-    #[must_use]
-    pub fn mvp1_device_auth_key(&self, device_id: &str) -> Option<DeviceAuthKeyResponse> {
-        lock_unpoisoned(&self.control).mvp1_identities.device_auth_key(device_id)
     }
 
     #[must_use]

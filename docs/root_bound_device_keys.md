@@ -76,13 +76,14 @@ Publishing a record alone cannot enroll a new root.
 Exact record/root retransmissions take a read path without cloning or persisting
 the registry. Gateway publication admission is bounded by both the actual source
 IP and principal commitment. Per-minute defaults are 60 per principal and 120 per
-source, with at most 4096 admission buckets. Signatures and root commitments are
+source, with separate bounded source and root tables, each holding at most 4096 buckets. Signatures and root commitments are
 verified before charging root quotas; malformed claims never spend a victim's
 root allowance. Already observed signed epochs do not consume mutation quota on
 replay. Source admission still applies to every decoded publication. IPv4 sources
 use addresses (including mapped IPv4); IPv6 sources aggregate by /64. Saturated
-admission state evicts least recently used entries instead of denying all new
-publishers. Configuration uses
+admission state evicts least recently used entries within its own table instead of denying all new
+publishers. Root churn cannot evict source quotas. Signature verification holds neither bucket
+lock; ordered eviction and updates take logarithmic work without scanning the tables. Configuration uses
 `RAMFLUX_GATEWAY_DEVICE_SET_PER_PRINCIPAL_PER_MINUTE`,
 `RAMFLUX_GATEWAY_DEVICE_SET_PER_SOURCE_PER_MINUTE`, and
 `RAMFLUX_GATEWAY_DEVICE_SET_MAX_BUCKETS`; values must be positive and are capped
