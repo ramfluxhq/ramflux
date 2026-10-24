@@ -29,15 +29,15 @@ fn absent_metadata_round_trips_without_new_wire_fields() -> Result<(), SdkError>
 #[test]
 fn account_label_counts_characters_and_kind_is_closed() -> Result<(), SdkError> {
     let mut body = account();
-    for kind in ["human", "headless_ai", "bot"] {
+    for kind in ["human", "headless_ai", "bot", "workflow"] {
         body["label"] = json!("🦀".repeat(64));
         body["kind"] = json!(kind);
         let typed: LocalBusAccountCreateRequest = serde_json::from_value(body.clone())?;
         assert_eq!(typed.label.as_ref().map(|label| label.chars().count()), Some(64));
-        assert_eq!(typed.kind.as_deref(), Some(kind));
+        assert_eq!(serde_json::to_value(typed.kind)?, json!(kind));
         let manifest = LocalBusPersistedAccount::from_create_request(&typed);
         assert_eq!(manifest.label, typed.label);
-        assert_eq!(manifest.kind, typed.kind);
+        assert_eq!(manifest.kind.as_deref(), Some(kind));
     }
     body["label"] = json!("🦀".repeat(65));
     assert!(serde_json::from_value::<LocalBusAccountCreateRequest>(body.clone()).is_err());

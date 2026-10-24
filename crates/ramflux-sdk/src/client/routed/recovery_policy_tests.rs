@@ -164,7 +164,8 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
         None,
         None,
     )?;
-    let manifest = crate::prekey::SdkDeviceManifestResponse {
+    let mut manifest = crate::prekey::SdkDeviceManifestResponse {
+        signed_device_set: None,
         principal_id: "alice".into(),
         principal_commitment: commitment.clone(),
         root_public_key: public,
@@ -182,6 +183,13 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
             branch_authorized_event_id: "alice-new:authorized".into(),
         }],
     };
+    crate::client::identity_authority::test_support::sign_manifest(&root, &mut manifest, 1)?;
+    let mut complete = manifest.clone();
+    complete
+        .devices
+        .extend(crate::client::identity_authority::test_support::manifest(&alice.client)?.devices);
+    crate::client::identity_authority::test_support::sign_manifest(&root, &mut complete, 2)?;
+    manifest.signed_device_set = complete.signed_device_set;
     RamfluxClient::verify_device_manifest_json(serde_json::to_value(&manifest)?, &commitment)?;
     let before =
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?;

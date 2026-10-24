@@ -16,6 +16,8 @@ pub struct SdkPrekeyPublishRequest {
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct SdkIdentityRegisterRequest {
+    #[serde(default)]
+    pub(crate) device_set: Option<ramflux_protocol::SignedDeviceSetRecord>,
     pub(crate) root_public_key: String,
     pub(crate) principal_commitment: String,
     pub(crate) branch_public_key: String,
@@ -49,28 +51,6 @@ pub struct SdkPrekeyResponse {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkDeviceRevokeRequest {
-    pub(crate) device_id: String,
-    pub(crate) principal_commitment: String,
-    pub(crate) root_public_key: String,
-    pub(crate) revoked_at: i64,
-    pub(crate) signature: String,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct SdkDeviceRevokeSigningBody<'a> {
-    pub(crate) device_id: &'a str,
-    pub(crate) principal_commitment: &'a str,
-    pub(crate) revoked_at: i64,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct SdkDeviceRevokeResponse {
-    pub(crate) device_id: String,
-    pub(crate) revoked: bool,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct SdkDeviceManifestEntry {
     pub(crate) principal_id: String,
     pub(crate) principal_commitment: String,
@@ -85,6 +65,8 @@ pub(crate) struct SdkDeviceManifestEntry {
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct SdkDeviceManifestResponse {
+    #[serde(default)]
+    pub(crate) signed_device_set: Option<ramflux_protocol::SignedDeviceSetRecord>,
     pub(crate) principal_id: String,
     pub(crate) principal_commitment: String,
     pub(crate) root_public_key: String,

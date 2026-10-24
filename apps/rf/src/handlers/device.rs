@@ -8,6 +8,43 @@ use super::*;
 pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
+        DeviceAction::Authorize(selector) => print_json(
+            &bus.request(
+                Some(selector.account),
+                "device",
+                "device.authorize",
+                serde_json::json!({}),
+            )
+            .await?,
+        ),
+        DeviceAction::Migrate(migrate) => {
+            let mut proofs = Vec::new();
+            for file in migrate.authorizations {
+                let bytes = std::fs::read(file)?;
+                if bytes.len() > 512 * 1024 {
+                    return Err(RfError::Message("authorization file exceeds budget".into()));
+                }
+                proofs.push(serde_json::from_slice::<serde_json::Value>(&bytes)?);
+            }
+            print_json(
+                &bus.request(
+                    Some(migrate.account),
+                    "device",
+                    "device.migrate",
+                    serde_json::json!({"authorizations":proofs}),
+                )
+                .await?,
+            )
+        }
+        DeviceAction::Refresh(refresh) => print_json(
+            &bus.request(
+                Some(refresh.account),
+                "device",
+                "device.refresh",
+                serde_json::json!({"principal_commitment":refresh.principal_commitment}),
+            )
+            .await?,
+        ),
         DeviceAction::Activate(activate) => {
             let request = ramflux_sdk::LocalBusDeviceActivateRequest {
                 node_id: activate.node,

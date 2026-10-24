@@ -83,4 +83,22 @@ impl AccountDb {
             .query_map(params![device], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    /// Update an existing ownership-bound pin after the caller verifies a newer root-signed set.
+    /// # Errors
+    /// Rejects ownership/key races and returns SQL failures. This grants no authority to a directory.
+    pub fn rotate_root_authorized_group_device_key(
+        &self,
+        group: &str,
+        device: &str,
+        principal: &str,
+        commitment: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), StorageError> {
+        let changed=self.connection.execute("UPDATE group_member_device_key SET device_signing_public_key=?6 WHERE group_id=?1 AND member_id=?2 AND member_principal_id=?3 AND principal_commitment=?4 AND device_signing_public_key=?5",params![group,device,principal,commitment,old,new])?;
+        if changed != 1 {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        Ok(())
+    }
 }

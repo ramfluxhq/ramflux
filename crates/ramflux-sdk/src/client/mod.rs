@@ -21,6 +21,7 @@ pub(crate) mod group_quarantine;
 pub mod group_session;
 pub mod identity;
 pub(crate) mod inbox_failure;
+pub mod identity_authority;
 pub mod mcp_a2ui;
 pub mod object;
 pub(crate) mod own_device_copy;

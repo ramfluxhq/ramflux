@@ -28,13 +28,19 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
         && let Some(mut value) = db.client_record("identity", &config.principal_id)?
     {
         value["display_name"] = json!(manifest.label);
-        value["kind"] = json!(manifest.kind.unwrap_or_else(|| {
-            if manifest.client_mode == LocalBusClientMode::HeadlessAi {
-                "headless_ai".to_owned()
-            } else {
-                "human".to_owned()
-            }
-        }));
+        let verified = account.client.verified_principal_kind(&config.principal_id)?;
+        value["kind_verified"] = json!(verified.is_some());
+        value["kind"] = if let Some(kind) = verified {
+            json!(kind)
+        } else {
+            json!(manifest.kind.unwrap_or_else(|| {
+                if manifest.client_mode == LocalBusClientMode::HeadlessAi {
+                    "headless_ai".to_owned()
+                } else {
+                    "human".to_owned()
+                }
+            }))
+        };
         db.persist_client_record("identity", &config.principal_id, &value)?;
     }
     let mut device = db.client_record("device", &config.device_id)?.unwrap_or_else(|| json!({}));
@@ -58,9 +64,6 @@ pub(crate) fn capture(
         let metadata: LocalBusAccountCreateRequest = serde_json::from_value(body.clone())?;
         if metadata.label.is_some() {
             manifest.label = metadata.label;
-        }
-        if metadata.kind.is_some() {
-            manifest.kind = metadata.kind;
         }
         write_local_bus_account_manifest(root, &manifest)?;
     }

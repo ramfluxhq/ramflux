@@ -5,12 +5,8 @@
 use super::*;
 
 pub(super) fn trust(receiver: &Fixture, sender: &Fixture) -> Result<(), SdkError> {
-    receiver.client.account_db()?.persist_client_record("device", &sender.id, &serde_json::json!({
-        "principal_id":sender.id,
-        "principal_commitment":crate::prekey::identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(sender.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.verifying_key().to_bytes()))?,
-        "x25519_identity_public":sender.client.load_x3dh_private_state(&sender.id)?.bundle.identity_key,
-        "signing_public_key":ramflux_protocol::encode_base64url(sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.verifying_key().to_bytes())
-    }))?;
+    let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    receiver.client.persist_identity_directory(&manifest)?;
     Ok(())
 }
 pub(super) fn pool() -> Result<ramflux_transport::RelayQuicPool, SdkError> {

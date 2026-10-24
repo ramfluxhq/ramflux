@@ -130,7 +130,11 @@ async fn restore_local_bus_account_impl(
     client.create_device_branch(
         &manifest.principal_id,
         &manifest.device_id,
-        1,
+        manifest
+            .devices
+            .iter()
+            .find(|d| d.device_id == manifest.device_id)
+            .map_or(1, |d| d.device_epoch),
         manifest.device_seed,
     );
     client.open_account_index(&state.config.data_root)?;

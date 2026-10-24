@@ -46,17 +46,39 @@ impl RamfluxClient {
         principal: &str,
     ) -> Result<(), SdkError> {
         let own = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if own.principal_id != principal {
-            return Err(super::invalid("revocation principal mismatch"));
+        let identity = self.account_db()?.client_record("identity", principal)?;
+        let commitment = if own.principal_id == principal {
+            self.identity_root
+                .as_ref()
+                .map(|r| ramflux_crypto::identity_root_commitment(&r.signing_key.verifying_key()))
+        } else {
+            identity
+                .as_ref()
+                .and_then(|v| v["contact_identity_commitment"].as_str())
+                .map(str::to_owned)
+        }
+        .ok_or_else(|| super::invalid("revocation root unavailable"))?;
+        let record = self
+            .account_db()?
+            .load_actor_state::<ramflux_protocol::SignedDeviceSetRecord>(&format!(
+                "identity/signed_set/{commitment}"
+            ))?
+            .ok_or_else(|| super::invalid("revocation requires signed authority"))?;
+        if record.principal_id != principal
+            || !record.devices.iter().any(|d| {
+                d.device_id == remote && d.status == ramflux_protocol::DeviceSetStatus::Revoked
+            })
+        {
+            return Err(super::invalid("revocation is not root-authorized"));
         }
         let db = self.account_db()?;
         db.write_transaction(|| -> Result<(), SdkError> {
             if remote == own.device_id {
                 for peer in db.pair_peer_devices(&own.device_id)? {
-                    self.remove_device_pair(&peer, "own_device_revoked")?;
+                    self.remove_device_pair(&peer, "root_signed_device_revoked")?;
                 }
             } else {
-                self.remove_device_pair(remote, "own_device_revoked")?;
+                self.remove_device_pair(remote, "root_signed_device_revoked")?;
             }
             db.remove_actor_state(&format!("directory/device/{remote}"))?;
             db.persist_actor_state(&format!("device/revoked/{remote}"), &true)?;

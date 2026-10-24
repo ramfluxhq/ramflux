@@ -105,8 +105,7 @@ pub(crate) use crate::own_device_sync::{
     own_device_sync_slot_conversation_id,
 };
 pub(crate) use crate::prekey::{
-    SdkDeviceManifestResponse, SdkDeviceRevokeRequest, SdkDeviceRevokeResponse,
-    SdkDeviceRevokeSigningBody, identity_root_public_key_commitment, sdk_fetch_prekey_bundle,
+    SdkDeviceManifestResponse, identity_root_public_key_commitment, sdk_fetch_prekey_bundle,
     sdk_gateway_get_json, sdk_gateway_post_json, sdk_http_get_json, sdk_http_host_port,
     sdk_http_json_request, sdk_http_post_json, sdk_publish_prekey_bundle,
 };
