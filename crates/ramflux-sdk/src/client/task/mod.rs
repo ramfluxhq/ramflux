@@ -5,6 +5,8 @@
 mod authority;
 pub(crate) mod carrier;
 pub(crate) mod decision;
+mod intervention;
+pub(crate) mod pending;
 mod projection;
 pub(crate) use authority::require_local_human;
 pub(crate) mod own_history;
@@ -16,6 +18,10 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct AcceptedEvent {
     pub carrier: carrier::Carrier,
     pub public_key: String,
+    #[serde(default)]
+    pub actor_kind_verified: bool,
+    #[serde(default)]
+    pub received_at: i64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct TaskHistory {
@@ -44,3 +50,6 @@ pub(crate) fn timeline_id(carrier: &carrier::Carrier) -> Result<String, SdkError
         &serde_json::to_string(&(&carrier.principal_id, &carrier.message_id))?,
     )?)
 }
+
+#[cfg(test)]
+mod tests;

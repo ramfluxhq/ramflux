@@ -3,7 +3,7 @@
 
 //! Verified external decisions: an assignee witness is a receipt and never a tool capability.
 use super::{carrier::Carrier, invalid, key};
-use crate::{LocalMcpGrantRecord, RamfluxClient, SdkError};
+use crate::{LocalMcpApprovalRecord, LocalMcpGrantRecord, RamfluxClient, SdkError};
 use ramflux_protocol::{NeedsMe, Task, TaskDecision, TaskResolve};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum Evidence {
     Grant { record: Box<LocalMcpGrantRecord> },
     Surface { receipt_base64: String },
+    Denied { record: Box<LocalMcpApprovalRecord> },
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,10 +55,17 @@ impl RamfluxClient {
         resolution: TaskResolve,
         evidence: Evidence,
     ) -> Result<DecisionProof, SdkError> {
-        let state = self.task_history(conversation, &resolution.task_id)?.state()?;
+        let history = self.task_history(conversation, &resolution.task_id)?;
+        let (executor, opened) =
+            history.intervention_source(&resolution.step_id, &resolution.target)?;
+        let state = history.state()?;
         let task = state.task().ok_or_else(|| invalid("task not found"))?;
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if task.assignee != device.principal_id {
+        if task.assignee != device.principal_id
+            || device.device_id != executor
+            || resolution.base_revision < opened
+            || resolution.base_revision > task.version
+        {
             return Err(invalid("only task assignee can attest an external decision"));
         }
         let mut proof = DecisionProof {
@@ -69,13 +77,34 @@ impl RamfluxClient {
             evidence,
             signature: String::new(),
         };
-        self.verify_task_evidence(&proof, task, true)?;
-        proof.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
-            &proof.signing_bytes()?,
-            device,
-        );
-        Ok(proof)
+        self.account_db()?.write_transaction(|| {
+            let decision_key = self.verify_task_evidence(&proof, task, true)?;
+            let reservation = key("decision_reserved", &decision_key);
+            if self.account_db()?.load_actor_state::<serde_json::Value>(&decision_key)?.is_some() {
+                return Err(invalid("task external decision already consumed"));
+            }
+            if let Some(previous) =
+                self.account_db()?.load_actor_state::<DecisionProof>(&reservation)?
+            {
+                if previous.conversation_id != proof.conversation_id
+                    || previous.resolution != proof.resolution
+                    || previous.issuer_device != proof.issuer_device
+                {
+                    return Err(invalid(
+                        "external decision already reserved for another task intervention",
+                    ));
+                }
+                return Ok(previous);
+            }
+            proof.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+                &proof.signing_bytes()?,
+                device,
+            );
+            self.account_db()?.persist_actor_state(&reservation, &proof)?;
+            Ok(proof)
+        })
     }
+
     pub(super) fn verify_task_decision(
         &self,
         carrier: &Carrier,
@@ -92,6 +121,12 @@ impl RamfluxClient {
             || task.requester.as_deref() != Some(carrier.principal_id.as_str())
         {
             return Err(invalid("task decision proof context mismatch"));
+        }
+        let history = self.task_history(&task.conversation_id, &task.task_id)?;
+        let (executor, opened) =
+            history.intervention_source(&resolution.step_id, &resolution.target)?;
+        if proof.issuer_device != executor || resolution.base_revision < opened {
+            return Err(invalid("task decision is not from the intervention's executor"));
         }
         self.require_task_member(
             &task.conversation_id,
@@ -162,6 +197,34 @@ impl RamfluxClient {
                     }
                 }
                 Ok(key_for_decision("grant", &(&task.assignee, grant_id))?)
+            }
+            (NeedsMe::Approval { grant_id }, Evidence::Denied { record }) => {
+                let requested = record.details["requested_grant_id"]
+                    .as_str()
+                    .map_or_else(|| format!("grant_{}", record.approval_id), str::to_owned);
+                if resolution.decision != TaskDecision::Deny
+                    || record.status != "denied"
+                    || record.approval_id != resolution.decision_id
+                    || requested != *grant_id
+                    || record.details["single_use"] != true
+                {
+                    return Err(invalid("task denial is not the matching existing MCP decision"));
+                }
+                if require_stored {
+                    let stored = self
+                        .account_db()?
+                        .load_actor_state::<LocalMcpApprovalRecord>(&format!(
+                            "mcp/denied/{}",
+                            record.approval_id
+                        ))?
+                        .ok_or_else(|| {
+                            invalid("task MCP denial has not completed the existing flow")
+                        })?;
+                    if serde_json::to_vec(&stored)? != serde_json::to_vec(record)? {
+                        return Err(invalid("task MCP denial differs from the stored decision"));
+                    }
+                }
+                key_for_decision("grant", &(&task.assignee, grant_id))
             }
             (
                 NeedsMe::Choice { surface_id } | NeedsMe::Input { surface_id },

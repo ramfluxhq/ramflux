@@ -58,7 +58,12 @@ impl RamfluxClient {
         let mut history =
             self.task_history(&carrier.conversation_id, carrier.event()?.event().task_id())?;
         let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
-        history.events.push(AcceptedEvent { carrier: carrier.clone(), public_key: public });
+        history.events.push(AcceptedEvent {
+            carrier: carrier.clone(),
+            public_key: public,
+            actor_kind_verified: false,
+            received_at: crate::time::now_unix_timestamp(),
+        });
         let mut principals = history
             .events
             .iter()
@@ -116,7 +121,7 @@ impl RamfluxClient {
         {
             return Err(invalid("own task history context or count mismatch"));
         }
-        self.account_db()?.task_transaction(|| {
+        self.account_db()?.write_transaction(|| {
             self.import_surface_context(&packet.context, &entry.envelope.source_device_id)?;
             for manifest in &packet.manifests {
                 crate::client::contact::verify_device_manifest(

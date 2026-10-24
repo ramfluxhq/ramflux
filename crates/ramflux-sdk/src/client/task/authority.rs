@@ -43,7 +43,13 @@ impl RamfluxClient {
                 if owner == Some(principal) || local.is_some_and(|d| d.principal_id == principal) {
                     if device.is_none_or(|id| id == member) {
                         if let Some(device) = device {
-                            self.require_group_sender_pin(group, principal, device)?;
+                            if local.is_some_and(|d| {
+                                d.device_id == device && d.principal_id == principal
+                            }) {
+                                self.pin_local_group_member(group)?;
+                            } else {
+                                self.require_group_sender_pin(group, principal, device)?;
+                            }
                         }
                         return Ok(());
                     }

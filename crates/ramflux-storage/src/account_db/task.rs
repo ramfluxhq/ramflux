@@ -6,37 +6,11 @@ use super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
 impl AccountDb {
-    /// Applies a synchronous task phase atomically, including inside receive transactions.
+    /// Deletes a private task delivery or holdback job after completion or expiry.
     /// # Errors
-    /// Rolls back the complete phase on callback or database failure.
-    pub fn task_transaction<T, E>(&self, apply: impl FnOnce() -> Result<T, E>) -> Result<T, E>
-    where
-        E: From<StorageError>,
-    {
-        self.connection.execute_batch("SAVEPOINT task_projection").map_err(StorageError::from)?;
-        match apply() {
-            Ok(value) => {
-                if let Err(error) = self.connection.execute_batch("RELEASE task_projection") {
-                    self.connection
-                        .execute_batch("ROLLBACK TO task_projection; RELEASE task_projection")
-                        .map_err(StorageError::from)?;
-                    return Err(StorageError::from(error).into());
-                }
-                Ok(value)
-            }
-            Err(error) => {
-                self.connection
-                    .execute_batch("ROLLBACK TO task_projection; RELEASE task_projection")
-                    .map_err(StorageError::from)?;
-                Err(error)
-            }
-        }
-    }
-    /// Deletes a private task transport job after delivery or expiry.
-    /// # Errors
-    /// Rejects non-transport keys or returns database errors.
+    /// Rejects keys outside task delivery/holdback or returns database errors.
     pub fn delete_task_state(&self, key: &str) -> Result<(), StorageError> {
-        if !key.starts_with("task/transport/") {
+        if !(key.starts_with("task/transport/") || key.starts_with("task/pending/")) {
             return Err(StorageError::AuthorizationRejected);
         }
         self.connection
@@ -64,5 +38,24 @@ impl AccountDb {
             Ok((key, serde_json::from_slice(&bytes)?))
         })
         .collect()
+    }
+    /// Returns count and byte usage for one private task namespace.
+    /// # Errors
+    /// Rejects non-task namespaces and returns database errors.
+    pub fn task_state_usage(&self, prefix: &str) -> Result<(u64, u64), StorageError> {
+        if !prefix.starts_with("task/") {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(self.connection.query_row("SELECT count(*),coalesce(sum(length(state_json)),0) FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1",params![prefix],|r|Ok((r.get(0)?,r.get(1)?)))?)
+    }
+    /// Retains a bounded diagnostic/rate ledger without removing accepted event receipts.
+    /// # Errors
+    /// Rejects other namespaces and returns database errors.
+    pub fn prune_task_diagnostics(&self, prefix: &str, retain: u32) -> Result<(), StorageError> {
+        if !matches!(prefix, "task/rejected/" | "task/rate/") {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.connection.execute("DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 ORDER BY coalesce(json_extract(CAST(state_json AS TEXT),'$.start'),rowid) DESC,state_kind DESC LIMIT -1 OFFSET ?2)",params![prefix,retain.clamp(1,2048)])?;
+        Ok(())
     }
 }

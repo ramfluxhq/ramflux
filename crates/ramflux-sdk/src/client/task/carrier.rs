@@ -42,6 +42,14 @@ impl Carrier {
         }
         // Parse the original authenticated bytes. Never accept an already-decoded map as ingress.
         let event = TaskEvent::from_wire_bytes(&wire).map_err(|e| invalid(e.to_string()))?;
+        if self.principal_id.is_empty()
+            || self.principal_id.len() > 256
+            || self.device_id.is_empty()
+            || self.device_id.len() > 256
+            || event.signed().signing_key_id != format!("device:{}", self.device_id)
+        {
+            return Err(invalid("invalid task signer binding"));
+        }
         if self.content_type != "task"
             || event.conversation_id() != self.conversation_id
             || self.message_id.is_empty()
@@ -66,11 +74,15 @@ impl Carrier {
         }
         Ok(Some(ramflux_protocol::parse_i_json(json)?))
     }
-    pub(crate) fn signer<'a>(&'a self, public: &'a str) -> Result<TaskSigner<'a>, SdkError> {
+    pub(crate) fn signer<'a>(
+        &'a self,
+        public: &'a str,
+        event: &'a TaskEvent,
+    ) -> Result<TaskSigner<'a>, SdkError> {
         Ok(TaskSigner {
             principal_id: &self.principal_id,
-            actor_type: super::authority::relation_role(self.event()?.event()),
-            signing_key_id: &self.device_id,
+            actor_type: super::authority::relation_role(event.event()),
+            signing_key_id: &event.signed().signing_key_id,
             public_key_base64url: public,
         })
     }
@@ -81,7 +93,7 @@ impl Carrier {
             public,
         )?;
         let event = self.event()?;
-        event.verify(&self.signer(public)?).map_err(|error| invalid(error.to_string()))?;
+        event.verify(&self.signer(public, &event)?).map_err(|error| invalid(error.to_string()))?;
         Ok(event)
     }
 }
@@ -125,7 +137,7 @@ impl RamfluxClient {
         decision_proof_base64: Option<String>,
     ) -> Result<Carrier, SdkError> {
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if event.signed().signing_key_id != device.device_id {
+        if event.signed().signing_key_id != format!("device:{}", device.device_id) {
             return Err(invalid("task signing key must be the local device"));
         }
         let signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(

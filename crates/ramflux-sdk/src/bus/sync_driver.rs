@@ -36,6 +36,7 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     let result = receive(account, &mut engine).await;
     account.put_engine(engine);
     let received = result?;
+    let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
     // Inbound receive and its commit/ACK must not depend on outbound queue health.
     let sent = match super::surface_jobs::run(account).await {
         Ok(count) => count,
@@ -58,7 +59,7 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
-    Ok(received + sent + forwarded + task_sent)
+    Ok(received + sent + forwarded + task_sent + tasks_applied)
 }
 
 async fn receive(

@@ -116,7 +116,9 @@ pub(crate) async fn dispatch_task(
         message,
         request.body["decision_proof_base64"].as_str().map(str::to_owned),
     )?;
-    account.client.preflight_task(&carrier)?;
+    if account.client.task_delivery_receipt(&carrier)?.is_none() {
+        account.client.preflight_task(&carrier)?;
+    }
     let response = super::task_transport::send(account, &carrier).await?;
     Ok(local_bus_ok(response))
 }
@@ -160,6 +162,17 @@ fn prove_decision(
     let conversation = required(&request.body, "conversation_id")?;
     let resolution: TaskResolve = serde_json::from_value(request.body["resolution"].clone())?;
     let evidence = match &resolution.target {
+        NeedsMe::Approval { .. } if resolution.decision == ramflux_protocol::TaskDecision::Deny => {
+            Evidence::Denied {
+                record: Box::new(
+                    account
+                        .client
+                        .account_db()?
+                        .load_actor_state(&format!("mcp/denied/{}", resolution.decision_id))?
+                        .ok_or_else(|| invalid("verified task MCP denial not found"))?,
+                ),
+            }
+        }
         NeedsMe::Approval { grant_id } => Evidence::Grant {
             record: Box::new(
                 account
