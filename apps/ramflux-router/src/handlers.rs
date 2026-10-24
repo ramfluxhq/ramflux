@@ -102,7 +102,7 @@ pub(crate) fn handle_itest_request(
             let response = handle_mvp1_prekey_fetch(path, router.state());
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
-        ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
+        ("GET", path) if is_identity_manifest_path(path) => {
             let response = handle_mvp1_device_manifest_fetch(path, router.state());
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
@@ -518,7 +518,7 @@ fn handle_mesh_general_value(
             let response = handle_mvp1_prekey_fetch(path, router.state());
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
-        ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
+        ("GET", path) if is_identity_manifest_path(path) => {
             let response = handle_mvp1_device_manifest_fetch(path, router.state());
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
@@ -765,10 +765,17 @@ fn handle_mvp1_prekey_fetch(
     response
 }
 
+fn is_identity_manifest_path(path: &str) -> bool {
+    path.starts_with("/mvp1/device-manifest/") || path.starts_with("/mvp1/principal-manifest/")
+}
+
 fn handle_mvp1_device_manifest_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
 ) -> Option<ramflux_node_core::DeviceManifestResponse> {
+    if let Some(principal) = path.strip_prefix("/mvp1/principal-manifest/") {
+        return state.mvp1_principal_manifest(principal);
+    }
     let principal_commitment = path.trim_start_matches("/mvp1/device-manifest/");
     let response = state.mvp1_device_manifest(principal_commitment);
     tracing::info!(

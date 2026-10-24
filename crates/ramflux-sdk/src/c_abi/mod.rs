@@ -825,7 +825,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::IdentityRootMissing => RamfluxErrorCode::AuthFailed,
-        SdkError::Transport(_)
+        SdkError::ContactUnavailable(_)
+        | SdkError::Transport(_)
         | SdkError::GatewaySessionRejected(_)
         | SdkError::GatewaySessionNotEstablished => RamfluxErrorCode::TransportUnavailable,
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => {
@@ -839,6 +840,8 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::SurfaceRefused { .. }
         | SdkError::SurfaceDeliveryTooLarge { .. }
+        | SdkError::ContactHomeNodeUnsupported
+        | SdkError::ContactInput(_)
         | SdkError::LocalBus(_)
         | SdkError::InboundRejected(_)
         | SdkError::InboundPending(_)

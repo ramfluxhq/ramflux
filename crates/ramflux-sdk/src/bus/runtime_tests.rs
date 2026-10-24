@@ -929,3 +929,4 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+mod contact_state;

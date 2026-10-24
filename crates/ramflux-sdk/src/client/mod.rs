@@ -4,6 +4,7 @@
 pub mod a2i;
 pub mod account;
 pub mod contact;
+pub(crate) mod contact_resolution;
 pub mod conversation;
 mod deferred_attachment;
 pub mod dm;

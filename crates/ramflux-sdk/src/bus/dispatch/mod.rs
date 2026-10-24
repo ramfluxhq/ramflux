@@ -5,6 +5,7 @@ pub mod a2i_a2ui;
 pub mod account;
 pub mod call_bot;
 pub mod contact;
+mod contact_resolution;
 pub mod daemon;
 pub(crate) mod deferred_attachment;
 pub mod device;

@@ -75,6 +75,11 @@ pub(crate) async fn dispatch_quic_json_request(
                 router_get_json_async(router, path).await?;
             serde_json::to_value(response)?
         }
+        ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
+            let response: Option<ramflux_node_core::DeviceManifestResponse> =
+                router_get_json_async(router, path).await?;
+            serde_json::to_value(response)?
+        }
         ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
             let response: Option<ramflux_node_core::DeviceManifestResponse> =
                 router_get_json_async(router, path).await?;

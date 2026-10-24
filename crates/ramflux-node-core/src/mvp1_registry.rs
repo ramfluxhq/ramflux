@@ -521,6 +521,24 @@ impl IdentityRegistry {
         keys
     }
 
+    /// Resolves one active root for a principal; ambiguous registrations fail closed.
+    #[must_use]
+    pub fn principal_manifest(&self, principal_id: &str) -> Option<DeviceManifestResponse> {
+        let roots = self
+            .devices
+            .values()
+            .filter(|device| {
+                device.principal_id == principal_id
+                    && !self.revoked_devices.contains(&device.device_id)
+            })
+            .map(|device| &device.principal_commitment)
+            .collect::<std::collections::BTreeSet<_>>();
+        if roots.len() != 1 {
+            return None;
+        }
+        self.device_manifest(roots.into_iter().next()?)
+    }
+
     #[must_use]
     pub fn device_manifest(&self, principal_commitment: &str) -> Option<DeviceManifestResponse> {
         let root_public_key = self.root_public_keys_by_commitment.get(principal_commitment)?;

@@ -76,6 +76,11 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         current = source.source();
     }
     LocalBusErrorBody {
+        reason_code: match error {
+            SdkError::ContactInput(reason) => Some(reason.to_string()),
+            SdkError::ContactHomeNodeUnsupported => Some("invalid_card".into()),
+            _ => None,
+        },
         code: local_bus_error_code(error).to_owned(),
         message: error.to_string(),
         retry_after_ms: None,
@@ -93,6 +98,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::GrantInvalidated | SdkError::Sync(SyncError::GrantInvalidated) => {
             "GrantInvalidated"
         }
+        SdkError::ContactUnavailable(_) => "Unavailable",
         SdkError::SignatureVerificationFailed(_) => "SignatureVerificationFailed",
         SdkError::RemoteAppApprovalRequired => "RemoteAppApprovalRequired",
         _ => "ValidationFailed",

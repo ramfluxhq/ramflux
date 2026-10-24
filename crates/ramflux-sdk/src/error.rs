@@ -13,6 +13,14 @@ pub enum SdkError {
     SurfaceDeliveryTooLarge { bytes: usize, limit: usize },
     #[error("surface checkpoint does not match its owning row")]
     SurfaceCheckpointMismatch,
+    #[error(
+        "contact card names a different home node; automatic cross-node contact routing is unavailable"
+    )]
+    ContactHomeNodeUnsupported,
+    #[error("contact lookup unavailable: {0}")]
+    ContactUnavailable(#[source] Box<SdkError>),
+    #[error(transparent)]
+    ContactInput(#[from] crate::ContactReason),
     #[error("authenticated device pair requires a fresh bootstrap")]
     PairRecoveryRequired,
     #[error("inbound envelope rejected: {0}")]

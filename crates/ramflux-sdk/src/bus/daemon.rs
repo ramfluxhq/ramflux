@@ -506,7 +506,7 @@ mod tests {
             shutdown_tx.send(true).expect("shutdown daemon");
         };
         let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let (server_result, ()) = tokio::join!(server, client_flow);
+            let (server_result, ()) = tokio::join!(server, Box::pin(client_flow));
             server_result.expect("server result");
         })
         .await;
@@ -545,7 +545,7 @@ mod tests {
             shutdown_tx.send(true).expect("shutdown daemon");
         };
         let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let (server_result, ()) = tokio::join!(server, client_flow);
+            let (server_result, ()) = tokio::join!(server, Box::pin(client_flow));
             server_result.expect("server result");
         })
         .await;

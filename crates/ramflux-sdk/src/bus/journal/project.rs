@@ -220,6 +220,7 @@ fn project_contact(
             .map(|id| super::super::read_model::row(client, "identity", id))
             .transpose()?
             .unwrap_or_else(|| json!({"contact_identity_commitment":commitment}));
+        events.push(("contact.changed".to_owned(), identity.clone(), Some(commitment.to_owned())));
         events.push(("safety.changed".to_owned(), identity, Some(commitment.to_owned())));
     }
     if entry.table_name == "friend_link_projection" {

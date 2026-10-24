@@ -224,6 +224,11 @@ pub(crate) fn dispatch_protected_itest_request(
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
             write_prekey_fetch(stream, router, path)?;
         }
+        ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
+            let response: Option<ramflux_node_core::DeviceManifestResponse> =
+                router_get_json(router, path)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
         ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
             let response: Option<ramflux_node_core::DeviceManifestResponse> =
                 router_get_json(router, path)?;

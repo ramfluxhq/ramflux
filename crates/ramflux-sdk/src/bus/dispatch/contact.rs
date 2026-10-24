@@ -11,11 +11,8 @@ pub(crate) async fn dispatch_contact_bus_request(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
     match request.method.as_str() {
-        "contact.add" => {
-            let body: LocalBusContactAddRequest = serde_json::from_value(request.body.clone())?;
-            let link = dispatch_contact_add(state, account_id, &body)?;
-            Ok(local_bus_ok(serde_json::to_value(link)?))
-        }
+        "contact.add" => Box::pin(super::contact_resolution::add(request, state, account_id)).await,
+        "contact.card.export" => super::contact_resolution::export(state, account_id),
         "contact.accept" => {
             if let Ok(body) =
                 serde_json::from_value::<LocalBusContactFederatedRequest>(request.body.clone())
@@ -40,9 +37,7 @@ pub(crate) async fn dispatch_contact_bus_request(
                     "delivery": response,
                 })))
             } else {
-                let body: LocalBusContactAddRequest = serde_json::from_value(request.body.clone())?;
-                let link = dispatch_contact_add(state, account_id, &body)?;
-                Ok(local_bus_ok(serde_json::to_value(link)?))
+                Box::pin(super::contact_resolution::add(request, state, account_id)).await
             }
         }
         "contact.request" => {
@@ -59,11 +54,7 @@ pub(crate) async fn dispatch_contact_bus_request(
             let response = response?;
             Ok(local_bus_ok(serde_json::to_value(response)?))
         }
-        "contact.list" => {
-            let account = local_bus_account(state, account_id)?;
-            let links = account.client.friend_links()?;
-            Ok(local_bus_ok(serde_json::json!({ "contacts": links })))
-        }
+        "contact.list" => contact_list(state, account_id),
         "contact.safety_number" => dispatch_contact_safety_number(request, state, account_id).await,
         "contact.verify" => dispatch_contact_verify(request, state, account_id).await,
         "contact.verification.status" => {
@@ -101,20 +92,6 @@ pub(crate) async fn dispatch_contact_bus_request(
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
-}
-
-// Establishing a friend link is a local projection of a signed friend-event
-// chain (see ramflux_friend_link_design §3/§4): it does NOT verify the peer's
-// device manifest. Device/key verification happens later and out-of-band via
-// the safety-number flow, and the manifest gate is enforced fail-closed on the
-// DM/group/object send paths (resolve_target_principal_commitment), not here.
-fn dispatch_contact_add(
-    state: &mut LocalBusDaemonState,
-    account_id: &str,
-    body: &LocalBusContactAddRequest,
-) -> Result<FriendLinkRecord, SdkError> {
-    let account = local_bus_account_mut(state, account_id)?;
-    account.client.establish_friend_link(&body.link_id, &body.requester_id, &body.target_id)
 }
 
 fn contact_safety_request(
@@ -200,4 +177,30 @@ async fn dispatch_contact_verification_status(
         "safety_number": safety.safety_number,
         "fingerprint_hex": safety.fingerprint_hex,
     })))
+}
+
+fn contact_list(
+    state: &LocalBusDaemonState,
+    account_id: &str,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account = local_bus_account(state, account_id)?;
+    let links = account.client.friend_links()?;
+    let mut contacts = Vec::new();
+    for link in links {
+        let own = [&account.gateway_config.principal_id, &account.principal_commitment];
+        let peer =
+            if own.contains(&&link.requester_id) { &link.target_id } else { &link.requester_id };
+        let principal = account
+            .client
+            .account_db()?
+            .client_record("commitment", peer)?
+            .and_then(|r| r["principal_id"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| peer.clone());
+        let mut value = serde_json::to_value(link)?;
+        if let serde_json::Value::Object(fields) = account.client.contact_entry(&principal)? {
+            value.as_object_mut().ok_or(crate::ContactReason::UnknownPrincipal)?.extend(fields);
+        }
+        contacts.push(value);
+    }
+    Ok(local_bus_ok(serde_json::json!({ "contacts": contacts })))
 }

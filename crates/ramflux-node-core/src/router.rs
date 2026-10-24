@@ -488,6 +488,12 @@ impl RouterCore {
         }
     }
 
+    /// Looks up an active principal through this home node's directory.
+    #[must_use]
+    pub fn mvp1_principal_manifest(&self, principal_id: &str) -> Option<DeviceManifestResponse> {
+        lock_unpoisoned(&self.control).mvp1_identities.principal_manifest(principal_id)
+    }
+
     #[must_use]
     pub fn mvp1_device_manifest(
         &self,

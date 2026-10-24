@@ -11,17 +11,19 @@ pub(crate) async fn handle_contact(
 ) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
-        ContactAction::Add(link) => {
-            let account = link.account.clone();
-            let request = LocalBusContactAddRequest {
-                link_id: link.link,
-                requester_id: link.requester,
-                target_id: link.target,
-            };
-            print_json(
-                &request_body(&mut bus, Some(account), "contact", "contact.add", request).await?,
-            )
+        ContactAction::Add(add) => {
+            let body = contact_add_body(&add);
+            print_json(&bus.request(Some(add.account), "contact", "contact.add", body).await?)
         }
+        ContactAction::Card(selector) => print_json(
+            &bus.request(
+                Some(selector.account),
+                "contact",
+                "contact.card.export",
+                serde_json::json!({}),
+            )
+            .await?,
+        ),
         ContactAction::Request(link) => {
             let account = link.link.account.clone();
             let request = rf_contact_federated_request(link.link, link.federated);
@@ -169,5 +171,15 @@ async fn handle_contact_accept(
             target_id: accept.link.target,
         };
         print_json(&request_body(bus, Some(account), "contact", "contact.accept", request).await?)
+    }
+}
+
+fn contact_add_body(add: &ContactAdd) -> serde_json::Value {
+    if let Some(principal) = &add.principal {
+        serde_json::json!({"principal_id":principal})
+    } else if let Some(card) = &add.card {
+        serde_json::json!({"card":card})
+    } else {
+        serde_json::json!({"link_id":add.link,"requester_id":add.requester,"target_id":add.target})
     }
 }

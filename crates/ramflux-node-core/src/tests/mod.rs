@@ -23,3 +23,5 @@ mod notify;
 mod routing;
 mod signaling_gateway;
 mod stores;
+
+mod contact_directory;

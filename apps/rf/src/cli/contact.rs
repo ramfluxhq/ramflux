@@ -15,7 +15,8 @@ pub(crate) struct ContactCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum ContactAction {
-    Add(ContactLink),
+    Add(ContactAdd),
+    Card(AccountSelector),
     Request(ContactFederatedLink),
     Accept(ContactAccept),
     Remove(ContactRemove),
@@ -26,6 +27,23 @@ pub(crate) enum ContactAction {
     Verify(ContactVerify),
     SafetyNumber(ContactSafetySelector),
     Verification(ContactVerificationCommand),
+}
+
+#[derive(Args)]
+#[command(group(clap::ArgGroup::new("contact_selector").args(["principal", "card", "target"]).required(true).multiple(false)))]
+pub(crate) struct ContactAdd {
+    #[arg(long)]
+    pub(crate) account: String,
+    #[arg(long)]
+    pub(crate) principal: Option<String>,
+    #[arg(long)]
+    pub(crate) card: Option<String>,
+    #[arg(long, requires_all = ["link", "requester"])]
+    pub(crate) target: Option<String>,
+    #[arg(long, requires = "target")]
+    pub(crate) link: Option<String>,
+    #[arg(long, requires = "target")]
+    pub(crate) requester: Option<String>,
 }
 
 #[derive(Args)]

@@ -66,7 +66,7 @@ impl RamfluxClient {
             serde_json::Value::Null
         };
         let devices=manifest.devices.iter().map(|device|serde_json::json!({"id":device.device_id,"device_id":device.device_id,"label":null,"last_seen":null,"verified_at":now_unix_timestamp(),"target_delivery_id":device.target_delivery_id,"signing_public_key":device.branch_public_key})).collect::<Vec<_>>();
-        db.persist_client_record("identity",&manifest.principal_id,&serde_json::json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":old.get("kind"),"is_self":self.device_branch.as_ref().is_some_and(|branch|branch.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":device_set_hash,"safety_number":safety_number}))?;
+        db.persist_client_record("identity",&manifest.principal_id,&serde_json::json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":old.get("kind"),"kind_asserted":old.get("kind_asserted"),"node":old.get("node"),"is_self":self.device_branch.as_ref().is_some_and(|branch|branch.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":device_set_hash,"safety_number":safety_number}))?;
         db.persist_client_record(
             "commitment",
             &manifest.principal_commitment,
@@ -945,7 +945,7 @@ pub(crate) fn verify_device_manifest(
     Ok(())
 }
 
-fn contact_safety_material_from_manifest(
+pub(crate) fn contact_safety_material_from_manifest(
     manifest: &SdkDeviceManifestResponse,
 ) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {
     let identity_bytes = manifest.principal_commitment.as_bytes();
