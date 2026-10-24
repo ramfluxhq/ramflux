@@ -126,6 +126,7 @@ async fn revocation_event_preempts_pending_recovery_even_before_projection_catch
     let sent = bus.requests.iter().filter(|(m, _)| m == "message.submit").count();
     let mut revoked = incoming(12, false);
     revoked.method = "identity.device_branch.revoked".into();
+    revoked.body["device_id"] = serde_json::json!("agent-device");
     assert!(matches!(host.apply(&mut bus, revoked, 3000).await, Err(Error::IdentityLost)));
     assert_eq!(bus.requests.iter().filter(|(m, _)| m == "message.submit").count(), sent);
     Ok(())

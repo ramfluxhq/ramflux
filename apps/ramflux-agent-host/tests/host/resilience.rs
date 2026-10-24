@@ -252,3 +252,19 @@ async fn r3_a_peer_device_batch_resumes_after_a_lost_ack_without_duplicate_deliv
     assert_eq!(resumed.checkpoint().cursor, Some(11));
     Ok(())
 }
+
+#[tokio::test]
+async fn r3_a_sibling_device_revocation_does_not_stop_the_authorized_host() -> TestResult {
+    let f = Fixture::new()?;
+    let mut bus = RoutedBus::default();
+    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
+    host.start(&mut bus).await?;
+    let mut revoked = incoming(11, false);
+    revoked.method = "identity.device_branch.revoked".into();
+    revoked.body = json!({"device_id":"agent-sibling","revoked_at":1234});
+    host.apply(&mut bus, revoked, 2000).await?;
+    assert_eq!(host.checkpoint().cursor, Some(11));
+    host.apply(&mut bus, incoming(12, false), 4000).await?;
+    assert_eq!(bus.inner.replies.len(), 2);
+    Ok(())
+}

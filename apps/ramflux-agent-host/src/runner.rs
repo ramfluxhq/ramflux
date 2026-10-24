@@ -102,7 +102,10 @@ impl<E: EngineProvider> AgentHost<E> {
         if self.state.cursor.is_some_and(|cursor| seq <= cursor) {
             return Ok(());
         }
-        if matches!(event.method.as_str(), "identity.device_branch.revoked" | "account.locked") {
+        if event.method == "account.locked"
+            || event.method == "identity.device_branch.revoked"
+                && event.body["device_id"] == self.state.device_id
+        {
             return Err(Error::IdentityLost);
         }
         self.prune_rate_history(now_ms);
@@ -122,7 +125,7 @@ impl<E: EngineProvider> AgentHost<E> {
                 return Ok(());
             }
         }
-        if event.method == "device.changed" {
+        if matches!(event.method.as_str(), "device.changed" | "identity.device_branch.revoked") {
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         }
         if matches!(event.method.as_str(), "message.received" | "group.message.received") {
