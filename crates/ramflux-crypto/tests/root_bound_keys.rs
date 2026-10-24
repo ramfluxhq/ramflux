@@ -233,3 +233,43 @@ fn device_set_ingress_and_key_material_are_bounded_and_strict() -> TestResult {
     assert!(set(&root, 2, invalid).is_err());
     Ok(())
 }
+
+#[test]
+fn root_bound_proof_accepts_only_the_documented_forward_clock_skew() -> TestResult {
+    let root = create_identity_root("alice", [11; 32]);
+    let device = create_device_branch("alice", "device", 1, [12; 32]);
+    let x = X25519KeyPair::from_seed([14; 32]);
+    let proof = authorize_device_branch_v2(
+        &root,
+        &device,
+        BranchAuthorization {
+            audience: "ramflux-node",
+            capability_scope: vec!["device.delivery.bind".into()],
+            issued_at: 1300,
+            expires_at: 2300,
+            principal_kind: PrincipalKind::HeadlessAi,
+            agreement_identity_public_key: x.public,
+        },
+    )?;
+    assert_eq!(BRANCH_PROOF_CLOCK_SKEW_SECONDS, 300);
+    verify_root_bound_branch_proof(
+        &root.signing_key.verifying_key(),
+        &proof,
+        &binding(&device, &x),
+        "ramflux-node",
+        "device.delivery.bind",
+        1000,
+    )?;
+    assert!(
+        verify_root_bound_branch_proof(
+            &root.signing_key.verifying_key(),
+            &proof,
+            &binding(&device, &x),
+            "ramflux-node",
+            "device.delivery.bind",
+            999
+        )
+        .is_err()
+    );
+    Ok(())
+}

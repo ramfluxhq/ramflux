@@ -12,8 +12,8 @@ mod identity;
 mod identity_binding;
 mod signed_device_set;
 pub use identity_binding::{
-    BranchAuthorization, authorize_device_branch_v2, branch_proof_signing_bytes,
-    verify_root_bound_branch_proof,
+    BRANCH_PROOF_CLOCK_SKEW_SECONDS, BranchAuthorization, authorize_device_branch_v2,
+    branch_proof_signing_bytes, verify_root_bound_branch_proof,
 };
 pub use signed_device_set::{
     DeviceSetSigningInput, device_key_commitments, identity_root_commitment, sign_device_set,
