@@ -62,13 +62,17 @@ impl RamfluxClient {
         self.require_task_member(&c.conversation_id, &c.principal_id, Some(&c.device_id))?;
         let db = self.account_db()?;
         let rows = db.task_record_page::<Pending>("task/pending/", "task/pending/", 33)?;
-        let pair = (&c.principal_id, &c.conversation_id);
         let mut buckets = BTreeMap::new();
         for (_, row) in &rows {
-            *buckets.entry((&row.carrier.principal_id, &row.conversation)).or_insert(0usize) += 1;
+            *buckets.entry(row.carrier.principal_id.as_str()).or_insert(0usize) += 1;
         }
-        let own = buckets.get(&pair).copied().unwrap_or(0);
-        let source = rows.iter().filter(|(_, p)| p.carrier.principal_id == c.principal_id).count();
+        let source = buckets.get(c.principal_id.as_str()).copied().unwrap_or(0);
+        let own = rows
+            .iter()
+            .filter(|(_, p)| {
+                p.carrier.principal_id == c.principal_id && p.conversation == c.conversation_id
+            })
+            .count();
         if own >= 8 || source >= 16 || c.bytes()?.len() > 128 * 1024 {
             return Err(SdkError::InboundPending("task peer holdback quota reached".into()));
         }
@@ -77,17 +81,13 @@ impl RamfluxClient {
             || bytes.saturating_add(u64::try_from(c.bytes()?.len()).unwrap_or(u64::MAX))
                 > 5 * 1024 * 1024
         {
-            let largest =
-                buckets.iter().filter(|(key, _)| **key != pair).max_by_key(|(_, count)| **count);
-            let Some((largest, count)) = largest.filter(|(_, count)| **count > own + 1) else {
-                return Err(SdkError::InboundPending("task fair holdback capacity reached".into()));
-            };
-            let _ = count;
-            if let Some((key, pending)) = rows
+            let maximum = buckets.values().copied().max().unwrap_or(0);
+            let victim = rows
                 .iter()
-                .filter(|(_, p)| (&p.carrier.principal_id, &p.conversation) == *largest)
-                .min_by_key(|(_, p)| p.at)
-            {
+                .filter(|(_, p)| buckets.get(p.carrier.principal_id.as_str()) == Some(&maximum))
+                .filter(|(_, p)| source != maximum || p.carrier.principal_id == c.principal_id)
+                .min_by_key(|(key, p)| (p.at, key.as_str()));
+            if let Some((key, pending)) = victim {
                 let outcome = Outcome {
                     accepted: false,
                     pending: false,

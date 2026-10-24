@@ -5,6 +5,7 @@
 mod authority;
 pub(crate) mod carrier;
 pub(crate) mod certificate;
+mod checkpoint;
 pub(crate) mod control;
 pub(crate) mod decision;
 mod historical;
@@ -13,9 +14,12 @@ mod lifecycle;
 mod local_pending;
 pub(crate) mod pending;
 mod projection;
+mod quota;
+mod rejected_task;
 pub(crate) use authority::require_local_human;
 pub(crate) mod own_history;
 mod read;
+mod roster;
 use crate::SdkError;
 pub(crate) use projection::Delivery;
 use serde::{Deserialize, Serialize};
@@ -37,6 +41,9 @@ pub(crate) struct TaskHistory {
     pub events: Vec<AcceptedEvent>,
     pub created_at: i64,
     pub updated_at: i64,
+    // Local encrypted-database checkpoint only; never accepted or exported in a carrier.
+    #[serde(skip)]
+    pub checkpoint: Option<checkpoint::Checkpoint>,
 }
 pub(crate) fn key(kind: &str, id: &str) -> String {
     format!(

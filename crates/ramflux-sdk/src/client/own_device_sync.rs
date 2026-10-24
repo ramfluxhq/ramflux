@@ -207,7 +207,10 @@ impl RamfluxClient {
         let mut messages = Vec::new();
         let mut surface_message_epochs = BTreeMap::new();
         for message in self.account_db()?.all_direct_messages()? {
-            if self.task_message_metadata(&message.conversation_id,&message.message_id)?.is_some() {continue;}
+            if self.task_message_metadata(&message.conversation_id, &message.message_id)?.is_some()
+            {
+                continue;
+            }
             let surface_epoch = self.surface_message_group_epoch(&message.message_id)?;
             if !Self::message_allowed_by_group_floor(&message, &floor_by_group)
                 || surface_epoch.as_ref().is_some_and(|(group, epoch)| {
@@ -244,8 +247,11 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
-            task_packets:self.own_task_packets()?,
-            task_export_metadata:self.account_db()?.load_actor_state("task/export_metadata")?.unwrap_or_default(),
+            task_packets: self.own_task_packets(target_device_id)?,
+            task_export_metadata: self
+                .account_db()?
+                .load_actor_state(&crate::client::task::key("export_metadata", target_device_id))?
+                .unwrap_or_default(),
             surface_pages,
             surface_controls: surfaces.controls,
             surface_checkpoints: surfaces.checkpoints,
@@ -471,7 +477,7 @@ impl RamfluxClient {
         }
         let floor_by_group = self.restore_own_groups(bundle)?;
         let blocked = self.restore_own_device_group_member_pins(bundle, &floor_by_group)?;
-        self.import_own_task_packets(&bundle.task_packets,&bundle.source_device_id)?;
+        self.import_own_task_packets(&bundle.task_packets, &bundle.source_device_id)?;
         let mut imported_messages = 0_usize;
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
@@ -784,7 +790,8 @@ mod tests {
         groups: Vec<SdkOwnDeviceGroupSnapshot>,
     ) -> SdkOwnDeviceHistoryBundle {
         SdkOwnDeviceHistoryBundle {
-            task_packets:Vec::new(), task_export_metadata:crate::client::task::own_history::TaskExportMetadata::default(),
+            task_packets: Vec::new(),
+            task_export_metadata: crate::client::task::own_history::TaskExportMetadata::default(),
             surface_controls: Vec::new(),
             surface_pages: Vec::new(),
             surface_checkpoints: Vec::new(),

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Peer-scoped task capacity and terminal compaction without forgetting consumed decisions.
-use super::{TaskHistory, carrier::Carrier, invalid, scoped};
+use super::{TaskHistory, invalid, scoped};
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::Task;
 use serde::{Deserialize, Serialize};
@@ -13,51 +13,24 @@ pub(super) struct Lifecycle {
     pub conversation_id: String,
     pub task_id: String,
     pub source: String,
+    #[serde(default)]
+    pub retention_source: Option<String>,
     pub terminal: bool,
     pub compacted: bool,
     pub updated_at: i64,
     pub bytes: u64,
     pub related: Vec<String>,
+    #[serde(default)]
+    pub usage: std::collections::BTreeMap<String, super::quota::Usage>,
+    #[serde(default)]
+    pub compaction_eligible: bool,
 }
 impl RamfluxClient {
     pub(super) fn task_is_archived(&self, conversation: &str, id: &str) -> Result<bool, SdkError> {
         Ok(self
             .account_db()?
             .load_actor_state::<Lifecycle>(&scoped("lifecycle", conversation, id)?)?
-            .is_some_and(|row| row.compacted))
-    }
-    pub(super) fn check_task_capacity(
-        &self,
-        carrier: &Carrier,
-        history: &TaskHistory,
-    ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let id = carrier.event()?.event().task_id().to_owned();
-        if self.task_is_archived(&carrier.conversation_id, &id)? {
-            return Err(invalid("task history has been archived"));
-        }
-        let first = history.events.first().map_or(carrier, |e| &e.carrier);
-        let rows = db.task_lifecycle_rows(Some(&first.principal_id), None, false)?;
-        let others = rows
-            .iter()
-            .filter(|r| !(r["task_id"] == id && r["conversation_id"] == carrier.conversation_id))
-            .collect::<Vec<_>>();
-        let active = others.iter().filter(|r| r["terminal"] == false).collect::<Vec<_>>();
-        let bytes: u64 = others.iter().map(|r| r["bytes"].as_u64().unwrap_or(0)).sum();
-        if (history.events.len() <= 1
-            && (active.len() >= 32
-                || active
-                    .iter()
-                    .filter(|r| r["conversation_id"] == carrier.conversation_id)
-                    .count()
-                    >= 16))
-            || bytes.saturating_add(
-                u64::try_from(serde_json::to_vec(history)?.len()).unwrap_or(u64::MAX),
-            ) > 8 * 1024 * 1024
-        {
-            return Err(invalid("task source history quota reached"));
-        }
-        Ok(())
+            .is_some_and(|row| row.compacted && row.terminal))
     }
     pub(super) fn record_task_lifecycle(
         &self,
@@ -83,47 +56,132 @@ impl RamfluxClient {
                 )?);
             }
         }
+        let previous = self.account_db()?.load_actor_state::<Lifecycle>(&scoped(
+            "lifecycle",
+            &task.conversation_id,
+            &task.task_id,
+        )?)?;
         let row = Lifecycle {
             conversation_id: task.conversation_id.clone(),
             task_id: task.task_id.clone(),
-            source: first.carrier.principal_id.clone(),
+            source: previous
+                .as_ref()
+                .map_or_else(|| first.carrier.principal_id.clone(), |row| row.source.clone()),
+            retention_source: Some({
+                let local =
+                    &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
+                if task.requester.as_deref() == Some(local)
+                    || (task.assignee == *local
+                        && history.events.iter().any(|e| e.carrier.principal_id == *local))
+                {
+                    local.clone()
+                } else {
+                    previous
+                        .as_ref()
+                        .and_then(|r| r.retention_source.clone())
+                        .unwrap_or_else(|| first.carrier.principal_id.clone())
+                }
+            }),
             terminal: task.state.is_terminal(),
             compacted: false,
             updated_at: crate::time::now_unix_timestamp(),
             bytes: u64::try_from(serde_json::to_vec(history)?.len()).unwrap_or(u64::MAX),
             related,
+            usage: super::quota::history_usage(history)?,
+            compaction_eligible: previous.as_ref().is_some_and(|row| row.compaction_eligible),
         };
         self.account_db()?.persist_actor_state(
             &scoped("lifecycle", &task.conversation_id, &task.task_id)?,
             &row,
         )?;
-        self.maintain_task_conversation(&task.conversation_id, row.updated_at)?;
-        self.maintain_task_source(&row.source)?;
+        if row.terminal
+            && (history.checkpoint.is_some() || previous.is_some_and(|r| r.compaction_eligible))
+        {
+            self.compact_task(&row, false)?;
+        }
+        self.maintain_task_conversation(
+            &task.conversation_id,
+            row.updated_at,
+            row.retention_source.as_deref(),
+        )?;
+        self.maintain_task_source(row.retention_source.as_deref().unwrap_or(&row.source))?;
         self.account_db()?.prune_task_certificates(row.updated_at)?;
         Ok(())
     }
+    fn task_retention_source(&self, row: &mut Lifecycle) -> Result<String, SdkError> {
+        if let Some(source) = &row.retention_source {
+            return Ok(source.clone());
+        }
+        let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
+        let view = self
+            .account_db()?
+            .load_actor_state::<Value>(&scoped("view", &row.conversation_id, &row.task_id)?)?
+            .unwrap_or(Value::Null);
+        let participated = view["requester"] == *local
+            || (view["assignee"] == *local
+                && self
+                    .task_history(&row.conversation_id, &row.task_id)?
+                    .events
+                    .iter()
+                    .any(|e| e.carrier.principal_id == *local));
+        let source = if participated { local.clone() } else { row.source.clone() };
+        if row.usage.is_empty() && row.bytes > 0 {
+            row.usage = super::quota::history_usage(
+                &self.task_history(&row.conversation_id, &row.task_id)?,
+            )?;
+        }
+        row.retention_source = Some(source.clone());
+        self.account_db()?
+            .persist_actor_state(&scoped("lifecycle", &row.conversation_id, &row.task_id)?, row)?;
+        Ok(source)
+    }
     fn maintain_task_source(&self, source: &str) -> Result<(), SdkError> {
-        let rows = self.account_db()?.task_lifecycle_rows(Some(source), None, true)?;
-        for (rank, value) in rows.into_iter().enumerate() {
-            let row: Lifecycle = serde_json::from_value(value)?;
+        let rows = self.account_db()?.task_retention_rows(Some(source), None)?;
+        let mut rank = 0;
+        for value in rows {
+            let mut row: Lifecycle = serde_json::from_value(value)?;
+            if self.task_retention_source(&mut row)? != source {
+                continue;
+            }
             if rank >= 128 {
                 self.compact_task(&row, true)?;
             } else if rank >= 32 && !row.compacted {
                 self.compact_task(&row, false)?;
             }
+            rank += 1;
         }
         Ok(())
     }
-    fn maintain_task_conversation(&self, conversation: &str, now: i64) -> Result<(), SdkError> {
-        let rows = self.account_db()?.task_lifecycle_rows(None, Some(conversation), true)?;
-        for (rank, value) in rows.into_iter().enumerate() {
-            let row: Lifecycle = serde_json::from_value(value)?;
-            if rank >= 128 || now.saturating_sub(row.updated_at) >= 90 * DAY {
-                self.compact_task(&row, true)?;
-            } else if !row.compacted
-                && (rank >= 16 || now.saturating_sub(row.updated_at) >= 7 * DAY)
-            {
-                self.compact_task(&row, false)?;
+    fn maintain_task_conversation(
+        &self,
+        conversation: &str,
+        now: i64,
+        owner: Option<&str>,
+    ) -> Result<(), SdkError> {
+        let mut owners = std::collections::BTreeSet::new();
+        if let Some(owner) = owner {
+            owners.insert(owner.to_owned());
+        } else {
+            for value in self.account_db()?.task_retention_rows(None, Some(conversation))? {
+                let mut row: Lifecycle = serde_json::from_value(value)?;
+                owners.insert(self.task_retention_source(&mut row)?);
+            }
+        }
+        for owner in owners {
+            let mut rank = 0;
+            for value in self.account_db()?.task_retention_rows(Some(&owner), Some(conversation))? {
+                let mut row: Lifecycle = serde_json::from_value(value)?;
+                if self.task_retention_source(&mut row)? != owner {
+                    continue;
+                }
+                if rank >= 128 || now.saturating_sub(row.updated_at) >= 90 * DAY {
+                    self.compact_task(&row, true)?;
+                } else if !row.compacted
+                    && (rank >= 16 || now.saturating_sub(row.updated_at) >= 7 * DAY)
+                {
+                    self.compact_task(&row, false)?;
+                }
+                rank += 1;
             }
         }
         Ok(())
@@ -143,13 +201,19 @@ impl RamfluxClient {
     }
     pub(crate) fn maintain_task_lifecycle(&self, now: i64) -> Result<(), SdkError> {
         self.migrate_task_lifecycle(now)?;
-        let rows = self.account_db()?.task_lifecycle_rows(None, None, true)?;
+        let rows = self.account_db()?.task_lifecycle_rows(None, None, false)?;
+        for value in &rows {
+            let row: Lifecycle = serde_json::from_value(value.clone())?;
+            if row.compaction_eligible && !row.compacted {
+                self.compact_task(&row, false)?;
+            }
+        }
         let conversations = rows
             .iter()
             .filter_map(|r| r["conversation_id"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
         for conversation in conversations {
-            self.maintain_task_conversation(conversation, now)?;
+            self.maintain_task_conversation(conversation, now, None)?;
         }
         self.account_db()?.prune_task_certificates(now)?;
         Ok(())
@@ -158,17 +222,13 @@ impl RamfluxClient {
         let db = self.account_db()?;
         db.write_transaction(|| {
             let history = self.task_history(&row.conversation_id, &row.task_id)?;
-            let hashes = history
-                .events
-                .iter()
-                .filter_map(|e| e.decision_certificate.as_ref())
-                .map(|c| {
-                    Ok(ramflux_protocol::hash_base64url(
-                        "ramflux.task.archived_certificate.v1",
-                        &serde_json::to_vec(c)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, SdkError>>()?;
+            let checkpoint = scoped("checkpoint", &row.conversation_id, &row.task_id)?;
+            if row.terminal {
+                db.delete_task_state(&checkpoint)?;
+            } else {
+                db.persist_actor_state(&checkpoint, &history.local_checkpoint()?)?;
+            }
+            let hashes = history.certificate_hashes()?;
             for related in &row.related {
                 db.delete_task_state(related)?;
             }
@@ -187,6 +247,8 @@ impl RamfluxClient {
                 compact.compacted = true;
                 compact.bytes = 0;
                 compact.related.clear();
+                compact.usage.clear();
+                compact.compaction_eligible = false;
                 db.persist_actor_state(&index_key, &compact)?;
             }
             Ok(())

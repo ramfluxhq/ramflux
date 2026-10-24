@@ -10,7 +10,7 @@ use crate::ActorType;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Read-only snapshot; a proposal is provisional until `accepted` is true.
-#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Task {
     pub task_id: String,
     pub conversation_id: String,
@@ -27,7 +27,9 @@ pub struct Task {
     pub accepted: bool,
 }
 /// One task's verified state. Rejected events leave every field unchanged.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Serialization supports trusted local storage checkpoints only. A deserialized
+/// state is not an authenticated event or an ingress authorization proof.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TaskState {
     task: Option<Task>,
     decisions: BTreeSet<String>,

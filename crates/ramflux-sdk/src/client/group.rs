@@ -35,6 +35,7 @@ impl RamfluxClient {
         if self.account_db()?.client_record("device", creator_id)?.is_some() {
             self.pin_joined_group_member(group_id, creator_id)?;
         }
+        self.record_verified_task_roster(&group)?;
         Ok(group)
     }
 
@@ -47,12 +48,15 @@ impl RamfluxClient {
         role: &str,
     ) -> Result<GroupState, SdkError> {
         self.account_db()?.write_transaction(|| {
+            let previous = self.group_state(group_id)?;
             let state = self.account_db()?.add_group_member(group_id, member_id, role)?;
             if self.device_branch.as_ref().is_some_and(|own| own.device_id == member_id)
                 || self.account_db()?.client_record("device", member_id)?.is_some()
             {
                 self.pin_joined_group_member(group_id, member_id)?;
             }
+            self.record_verified_task_roster(&previous)?;
+            self.record_verified_task_roster(&state)?;
             Ok(state)
         })
     }
@@ -65,7 +69,14 @@ impl RamfluxClient {
         actor_id: &str,
         target_member_id: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.remove_group_member(group_id, actor_id, target_member_id)?)
+        self.account_db()?.write_transaction(|| {
+            let previous = self.group_state(group_id)?;
+            let state =
+                self.account_db()?.remove_group_member(group_id, actor_id, target_member_id)?;
+            self.record_verified_task_roster(&previous)?;
+            self.record_verified_task_roster(&state)?;
+            Ok(state)
+        })
     }
 
     /// # Errors
@@ -76,130 +87,148 @@ impl RamfluxClient {
         event: &ramflux_protocol::GroupEvent,
     ) -> Result<GroupState, SdkError> {
         self.verify_group_control_event(event)?;
-        match &event.body {
-            ramflux_protocol::GroupEventBody::RoleChanged {
-                group_id,
-                previous_epoch,
-                new_group_epoch,
-                target_identity,
-                new_role,
-            } => self.apply_verified_group_role_change(
-                event,
-                group_id,
-                *previous_epoch,
-                *new_group_epoch,
-                target_identity,
-                new_role,
-            ),
-            ramflux_protocol::GroupEventBody::MemberRemoved {
-                group_id,
-                previous_epoch,
-                new_group_epoch,
-                removed_identity,
-                reason,
-            } => self.apply_verified_group_member_kick(
-                event,
-                group_id,
-                *previous_epoch,
-                *new_group_epoch,
-                removed_identity,
-                reason,
-            ),
-            ramflux_protocol::GroupEventBody::MemberBanned {
-                group_id,
-                previous_epoch,
-                new_group_epoch,
-                banned_identity,
-                reason,
-                ban_id,
-            } => self.apply_verified_group_member_ban(
-                event,
-                group_id,
-                *previous_epoch,
-                *new_group_epoch,
-                banned_identity,
-                reason,
-                ban_id,
-            ),
-            ramflux_protocol::GroupEventBody::MessageDeleted {
-                group_id,
-                group_epoch,
-                target_message_id,
-                delete_scope,
-                tombstone_id,
-                reason,
-            } => self.apply_verified_group_message_delete(
-                event,
-                group_id,
-                *group_epoch,
-                target_message_id,
-                delete_scope,
-                tombstone_id,
-                reason,
-            ),
-            ramflux_protocol::GroupEventBody::MemberInvitedV2 {
-                group_id,
-                group_epoch,
-                invite_id,
-                invitee_identity,
-                invitee_signing_public_key,
-                invited_role,
-                inviter_device_id: _,
-                expires_at,
-                reason,
-            } => self.apply_verified_group_member_invite(
-                event,
-                group_id,
-                *group_epoch,
-                invite_id,
-                invitee_identity,
-                invitee_signing_public_key,
-                invited_role,
-                *expires_at,
-                reason,
-            ),
-            ramflux_protocol::GroupEventBody::MemberAccepted {
-                group_id,
-                previous_epoch,
-                new_group_epoch,
-                invite_id,
-                invitee_identity,
-                accepted_role,
-            } => self.apply_verified_group_member_accept(
-                event,
-                group_id,
-                *previous_epoch,
-                *new_group_epoch,
-                invite_id,
-                invitee_identity,
-                accepted_role,
-            ),
-            ramflux_protocol::GroupEventBody::MemberJoined {
-                group_id,
-                previous_epoch,
-                new_group_epoch,
-                joined_identity,
-                joined_role,
-                actor_role,
-                actor_principal_commitment,
-                actor_device_signing_public_key,
-                max_members,
-                new_member_history,
-            } => self.apply_verified_group_member_join(
-                event,
-                group_id,
-                *previous_epoch,
-                *new_group_epoch,
-                joined_identity,
-                joined_role,
-                actor_role,
-                actor_principal_commitment,
-                actor_device_signing_public_key,
-                *max_members,
-                new_member_history,
-            ),
-            _ => Err(SdkError::LocalBus("unsupported group control event body".to_owned())),
-        }
+        self.account_db()?.write_transaction(|| {
+            let group_id = match &event.body {
+                ramflux_protocol::GroupEventBody::RoleChanged { group_id, .. }
+                | ramflux_protocol::GroupEventBody::MemberRemoved { group_id, .. }
+                | ramflux_protocol::GroupEventBody::MemberBanned { group_id, .. }
+                | ramflux_protocol::GroupEventBody::MessageDeleted { group_id, .. }
+                | ramflux_protocol::GroupEventBody::MemberInvitedV2 { group_id, .. }
+                | ramflux_protocol::GroupEventBody::MemberAccepted { group_id, .. }
+                | ramflux_protocol::GroupEventBody::MemberJoined { group_id, .. } => Some(group_id),
+                _ => None,
+            };
+            let previous = group_id.and_then(|id| self.group_state(id).ok());
+            let state = match &event.body {
+                ramflux_protocol::GroupEventBody::RoleChanged {
+                    group_id,
+                    previous_epoch,
+                    new_group_epoch,
+                    target_identity,
+                    new_role,
+                } => self.apply_verified_group_role_change(
+                    event,
+                    group_id,
+                    *previous_epoch,
+                    *new_group_epoch,
+                    target_identity,
+                    new_role,
+                ),
+                ramflux_protocol::GroupEventBody::MemberRemoved {
+                    group_id,
+                    previous_epoch,
+                    new_group_epoch,
+                    removed_identity,
+                    reason,
+                } => self.apply_verified_group_member_kick(
+                    event,
+                    group_id,
+                    *previous_epoch,
+                    *new_group_epoch,
+                    removed_identity,
+                    reason,
+                ),
+                ramflux_protocol::GroupEventBody::MemberBanned {
+                    group_id,
+                    previous_epoch,
+                    new_group_epoch,
+                    banned_identity,
+                    reason,
+                    ban_id,
+                } => self.apply_verified_group_member_ban(
+                    event,
+                    group_id,
+                    *previous_epoch,
+                    *new_group_epoch,
+                    banned_identity,
+                    reason,
+                    ban_id,
+                ),
+                ramflux_protocol::GroupEventBody::MessageDeleted {
+                    group_id,
+                    group_epoch,
+                    target_message_id,
+                    delete_scope,
+                    tombstone_id,
+                    reason,
+                } => self.apply_verified_group_message_delete(
+                    event,
+                    group_id,
+                    *group_epoch,
+                    target_message_id,
+                    delete_scope,
+                    tombstone_id,
+                    reason,
+                ),
+                ramflux_protocol::GroupEventBody::MemberInvitedV2 {
+                    group_id,
+                    group_epoch,
+                    invite_id,
+                    invitee_identity,
+                    invitee_signing_public_key,
+                    invited_role,
+                    inviter_device_id: _,
+                    expires_at,
+                    reason,
+                } => self.apply_verified_group_member_invite(
+                    event,
+                    group_id,
+                    *group_epoch,
+                    invite_id,
+                    invitee_identity,
+                    invitee_signing_public_key,
+                    invited_role,
+                    *expires_at,
+                    reason,
+                ),
+                ramflux_protocol::GroupEventBody::MemberAccepted {
+                    group_id,
+                    previous_epoch,
+                    new_group_epoch,
+                    invite_id,
+                    invitee_identity,
+                    accepted_role,
+                } => self.apply_verified_group_member_accept(
+                    event,
+                    group_id,
+                    *previous_epoch,
+                    *new_group_epoch,
+                    invite_id,
+                    invitee_identity,
+                    accepted_role,
+                ),
+                ramflux_protocol::GroupEventBody::MemberJoined {
+                    group_id,
+                    previous_epoch,
+                    new_group_epoch,
+                    joined_identity,
+                    joined_role,
+                    actor_role,
+                    actor_principal_commitment,
+                    actor_device_signing_public_key,
+                    max_members,
+                    new_member_history,
+                } => self.apply_verified_group_member_join(
+                    event,
+                    group_id,
+                    *previous_epoch,
+                    *new_group_epoch,
+                    joined_identity,
+                    joined_role,
+                    actor_role,
+                    actor_principal_commitment,
+                    actor_device_signing_public_key,
+                    *max_members,
+                    new_member_history,
+                ),
+                _ => Err(SdkError::LocalBus("unsupported group control event body".to_owned())),
+            }?;
+            if let Some(previous) = previous {
+                self.record_verified_task_roster(&previous)?;
+            }
+            self.record_verified_task_roster(&state)?;
+            Ok(state)
+        })
     }
 
     /// # Errors

@@ -70,7 +70,7 @@ the executor. Reserved certificates cannot advance peer projections.
 Accepted and pending copies survive restart. Future peer revisions use a fair
 holdback with at most 32 events/5 MiB per account, eight per
 (source principal, conversation), and 16 per source. A less represented source
-can displace held work from an overrepresented pair; displaced or expired work
+can displace held work from an overrepresented signer; displaced or expired work
 is marked as requiring resync. Unknown-task events still require current
 conversation membership. Peer holds expire after ten minutes.
 
@@ -81,19 +81,38 @@ compacting into a pending-status record. Status records retain at most 64 per
 executor / 512 per account for 30 days; the conversation fallback stays pending. A later executor acknowledgement can
 still commit it. This timeout does not authorize or reject the external decision.
 Admission uses receiver time: 64 events per task/sender, 128 per principal and
-512 per account per minute. Executor confirmation and own-device forwarding
+512 per receiving-account/signer per minute. A requester's Cancel and Resolve
+use independent 64/minute signer budgets (8 per task), so an executor cannot
+consume recovery headroom. Executor confirmation and own-device forwarding
 retry at most eight times within ten minutes; inbound receive and ACK do not
 depend on their success.
 
 New active tasks have per-source quotas: 32 across the account, 16 per
-conversation, and 8 MiB of retained history per source. Starts in which the
+conversation. Retained bytes and events are charged to each event's verified
+signer, not the task's originator: 8 MiB per signer across the account and in a
+conversation, 8,192 events per signer and 4,096 per signer/conversation. A
+requester's Resolve has a separate 32-event / 64 KiB per-task budget and
+512-event / 1 MiB signer budget; Cancel has its own 16 KiB bound. The ordinary
+256-event / 2 MiB task history reserves 33 extra requester control events and
+64 KiB for resolutions plus a separate 16 KiB for cancellation and 4 KiB
+of container overhead, so resolution traffic cannot consume cancellation space. Starts in which the
 local account is neither requester nor assignee are rejected. Proposals can
 also involve the local account as an eligible acceptor. Quota failures produce
 rejection receipts instead of disabling intake for other sources.
+An assignee exceeding its quota is rejected and marks its active tasks
+`stalled_by_assignee:true`, with `progress_state:"stalled by assignee"`.
+Maintenance can compact those histories while retaining a trusted local
+reduction checkpoint and intervention origins. Requester cancellation and
+verified resolution still work after restart. Checkpoints never enter peer or
+own-device history ingress/export; only original signed histories are synced.
 Terminal histories compact after seven days, or beyond the newest 16 per
-conversation / 32 per source. Compaction retains the projection and certificate
+conversation/originating signer and 32 per originating signer. Compaction retains the projection and certificate
 hashes and removes signed history bodies. Older projections are fully pruned
-after 90 days or beyond 128 terminal tasks per conversation / source.
+after 90 days or beyond 128 terminal tasks per conversation/originating signer
+or per originating signer. Locally requested or accepted tasks and work signed
+by the local assignee use the local account's retention budget. Unsolicited
+assignments stay in their originating signer's bucket until local participation;
+a peer cannot allocate local retention slots just by naming the local assignee.
 Consumed external-decision keys are preserved independently. Certificate caches
 retain at most 32 per executor principal, 64 per conversation and 256 per
 account, expire after seven days, and follow task compaction. Existing histories
@@ -103,14 +122,27 @@ Own-device task history uses causal pages capped at 30 KiB and original signer
 verification. Committed events carry same-root membership witnesses from their
 event position (group epoch or direct participant/time context); importing
 history does not rejudge those events by today's membership or blocked state.
-These witnesses are trusted only within authenticated same-root history, never
+Locally validated roster snapshots, where retained, override bundle membership
+claims at that epoch. The claimed position cannot authorize an actor or
+assignee absent from the receiver's validated roster. These snapshots are
+captured on local group mutations and verified control events, independently
+of snapshot import, and are bounded to 256 records. Bundle witnesses are
+trusted only within authenticated same-root history, never
 as peer authority. Older direct histories can use their committed participant
 context; a group history without an epoch witness is skipped with a reason.
 Snapshots cannot reactivate known removed local group membership or inactive
 member pins. Task import is best effort per causal page; rejected pages are
 recorded and do not abort ordinary history restoration.
 
-Offline export scans bounded history pages with a persisted continuation cursor.
+Peer holdback is capped at 16 entries per signer across conversations and 8
+per signer/conversation. At its 32-entry account bound, admission rebalances
+from the signer holding the most entries; equal counts replace that signer's
+oldest entry. Rejected no-role Starts leave bounded tombstones (64 per signer,
+512 per account, seven days), so unrelated follow-up traffic never enters
+holdback while its tombstone is retained.
+
+Offline export scans bounded history pages with a persisted continuation cursor
+per target device.
 Each snapshot includes at most 100 task pages / 4 MiB and optional
 `task_export_metadata` (`truncated`, `skipped_items`, `next_cursor`). Oversized or
 unavailable task items are skipped; task capacity does not fail the surrounding

@@ -400,3 +400,6 @@ mod controls;
 mod holdback_regressions;
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_regressions;
+
+#[path = "quota_tests.rs"]
+mod signer_quota_regressions;

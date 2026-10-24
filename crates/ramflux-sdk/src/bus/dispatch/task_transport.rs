@@ -129,7 +129,12 @@ pub(super) async fn prepare(
             }
         }
     }
-    let own_packet = if own_targets.is_empty() { None } else { Some(client.task_own_packets(c)?) };
+    let (own_packet, original_own_event) = if own_targets.is_empty() {
+        (None, false)
+    } else {
+        let (pages, original) = own_payloads(client, c, &task_body, &mode)?;
+        (Some(pages), original)
+    };
     crate::client::task::check_delivery_size(task_body.len())?;
     let own_bytes =
         own_packet.as_ref().map_or(0, |pages| pages.iter().map(Vec::len).sum::<usize>());
@@ -152,15 +157,8 @@ pub(super) async fn prepare(
     }
     own_targets.append(&mut peers);
     for target in own_targets {
-        let route = if target.own || control {
-            crate::client::routed::Route {
-                kind: crate::client::routed::Kind::Control,
-                group_id: thread["group_id"].as_str().map(str::to_owned),
-                attachments: false,
-            }
-        } else {
-            crate::client::routed::Route::direct()
-        };
+        let route =
+            delivery_route(&target, control, original_own_event, thread["group_id"].as_str());
         if target.own {
             for page in own_packet.as_ref().ok_or_else(|| invalid("own task pages missing"))? {
                 deliveries.push(
@@ -173,6 +171,44 @@ pub(super) async fn prepare(
         }
     }
     Ok(deliveries)
+}
+fn delivery_route(
+    target: &Target,
+    control: bool,
+    original: bool,
+    group: Option<&str>,
+) -> crate::client::routed::Route {
+    if (target.own && original) || (!target.own && !control) {
+        return crate::client::routed::Route::direct();
+    }
+    crate::client::routed::Route {
+        kind: crate::client::routed::Kind::Control,
+        group_id: group.map(str::to_owned),
+        attachments: false,
+    }
+}
+// A compacted local checkpoint is never sent as signed history. An original local
+// event still travels to existing siblings through ordinary authenticated ingress.
+fn own_payloads(
+    client: &RamfluxClient,
+    c: &Carrier,
+    body: &[u8],
+    mode: &Mode<'_>,
+) -> Result<(Vec<Vec<u8>>, bool), SdkError> {
+    let pages = client.task_own_packets(c)?;
+    if !pages.is_empty() || matches!(mode, Mode::Own) {
+        return Ok((pages, false));
+    }
+    let original = matches!(mode, Mode::Event);
+    if original
+        && client
+            .device_branch
+            .as_ref()
+            .is_none_or(|d| d.principal_id != c.principal_id || d.device_id != c.device_id)
+    {
+        return Err(invalid("compacted original task sender differs from local device"));
+    }
+    Ok((vec![body.to_vec()], original))
 }
 pub(super) async fn seal(
     account: &LocalBusAccountState,

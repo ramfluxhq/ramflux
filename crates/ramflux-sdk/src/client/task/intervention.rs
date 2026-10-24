@@ -4,15 +4,20 @@
 //! Identifies the assignee device and revision that opened the current intervention.
 use super::{TaskHistory, invalid};
 use crate::SdkError;
-use ramflux_protocol::{NeedsMe, TaskState};
+use ramflux_protocol::NeedsMe;
 impl TaskHistory {
     pub(crate) fn intervention_source(
         &self,
         step: &str,
         target: &NeedsMe,
     ) -> Result<(String, u64), SdkError> {
-        let mut state = TaskState::default();
-        let mut opening = None;
+        let mut state = self.checkpoint.as_ref().map(|c| c.state.clone()).unwrap_or_default();
+        let mut opening = self
+            .checkpoint
+            .as_ref()
+            .and_then(|c| c.openings.get(step))
+            .filter(|(_, _, saved)| saved == target)
+            .map(|(device, revision, _)| (device.clone(), *revision));
         for accepted in &self.events {
             let previous = state
                 .task()

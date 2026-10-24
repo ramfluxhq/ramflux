@@ -72,7 +72,7 @@ fn own_device_task_history_replays_verified_carriers_and_committed_decisions_ide
     assert!(project(&f.agent, &intent)?.accepted);
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
-    let packets = f.agent.own_task_packets()?;
+    let packets = f.agent.own_task_packets("agent2-device")?;
     assert_eq!(packets.len(), 1);
     sibling.import_own_task_packets(&packets, "agent-device")?;
     assert_eq!(sibling.task_get(Some("thread"), "task")?["version"], 3);
@@ -131,7 +131,7 @@ fn own_device_history_pages_fit_the_transport_budget_and_require_the_causal_pref
     let pages = f.agent.task_own_packets(last)?;
     assert!(pages.len() > 1);
     assert!(pages.iter().all(|p| p.len() <= super::super::MAX_DELIVERY_BYTES));
-    let packets = f.agent.own_task_packets()?;
+    let packets = f.agent.own_task_packets("agent2-device")?;
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
     sibling.import_own_task_packets(&packets[1..], "agent-device")?;
@@ -149,7 +149,8 @@ fn importing_old_verified_history_does_not_charge_eighty_events_as_new_peer_traf
     let f = Fixture::new()?;
     manifests(&f)?;
     let first = sign(&f.human, "thread", "start", start("task", "thread"))?;
-    let mut history = TaskHistory { events: Vec::new(), created_at: 1, updated_at: 80 };
+    let mut history =
+        TaskHistory { events: Vec::new(), created_at: 1, updated_at: 80, ..TaskHistory::default() };
     for version in 1..=80 {
         let c = if version == 1 {
             first.clone()
@@ -179,7 +180,7 @@ fn importing_old_verified_history_does_not_charge_eighty_events_as_new_peer_traf
     }
     assert_eq!(history.state()?.task().ok_or("task")?.version, 80);
     f.agent.account_db()?.persist_actor_state(&scoped("history", "thread", "task")?, &history)?;
-    let packets = f.agent.own_task_packets()?;
+    let packets = f.agent.own_task_packets("agent2-device")?;
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
     sibling.import_own_task_packets(&packets, "agent-device")?;
@@ -234,7 +235,7 @@ fn later_blocking_a_contact_does_not_reject_its_previously_committed_task_histor
     );
     f.agent.account_db()?.establish_friend_link("link", "agent", "human")?;
     f.agent.account_db()?.block_friend_link("link", crate::time::now_unix_timestamp())?;
-    let packets = f.agent.own_task_packets()?;
+    let packets = f.agent.own_task_packets("agent2-device")?;
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
     sibling.account_db()?.establish_friend_link("link", "agent", "human")?;
@@ -262,7 +263,7 @@ fn departed_group_participants_remain_valid_in_witnessed_history_without_regaini
     let event = sign(&f.human, "group-thread", "start", start("task", "group-thread"))?;
     assert!(project(&f.agent, &event)?.accepted);
     f.agent.remove_group_member("group", "agent-device", "human-device")?;
-    let packets = f.agent.own_task_packets()?;
+    let packets = f.agent.own_task_packets("agent2-device")?;
     assert_eq!(packets.len(), 1);
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
@@ -287,7 +288,7 @@ fn a_bad_own_task_item_is_recorded_and_does_not_block_other_histories() -> TestR
     assert!(
         project(&f.agent, &sign(&f.human, "thread", "start", start("task", "thread"))?)?.accepted
     );
-    let packets = f.agent.own_task_packets()?;
+    let packets = f.agent.own_task_packets("agent2-device")?;
     let mut bad = serde_json::to_value(&packets[0])?;
     bad["history"]["events"][0]["carrier"]["signature"] = json!("invalid");
     let bad = serde_json::from_value(bad)?;
@@ -329,6 +330,7 @@ fn seed_legacy_terminal_histories(f: &Fixture, total: usize) -> Result<(), SdkEr
             .collect::<Result<Vec<_>, SdkError>>()?;
             let history = TaskHistory {
                 events,
+                checkpoint: None,
                 created_at: 1,
                 updated_at: crate::time::now_unix_timestamp(),
             };
@@ -369,5 +371,79 @@ fn accounts_with_over_one_hundred_and_one_thousand_tasks_still_export_bounded_ne
         }
         drop(sibling);
     }
+    Ok(())
+}
+
+#[test]
+fn task_export_pages_advance_independently_for_each_target_device() -> TestResult {
+    let f = Fixture::new()?;
+    manifests(&f)?;
+    f.agent.account_db()?.write_transaction(|| {
+        for index in 0..101 {
+            let id = format!("export-{index}");
+            let c = sign(&f.human, "thread", &id, start(&id, "thread"))?;
+            let history = TaskHistory {
+                events: vec![AcceptedEvent {
+                    public_key: f.agent.task_signer_key(&c.principal_id, &c.device_id)?,
+                    carrier: c,
+                    actor_kind_verified: false,
+                    received_at: 1,
+                    decision_certificate: None,
+                    membership: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                ..TaskHistory::default()
+            };
+            f.agent
+                .account_db()?
+                .persist_actor_state(&scoped("history", "thread", &id)?, &history)?;
+        }
+        Ok::<_, SdkError>(())
+    })?;
+    let first_a = f.agent.own_task_packets("target-a")?;
+    let first_b = f.agent.own_task_packets("target-b")?;
+    assert_eq!(first_a.len(), 100);
+    assert_eq!(serde_json::to_value(&first_a)?, serde_json::to_value(&first_b)?);
+    let second_a = f.agent.own_task_packets("target-a")?;
+    assert_eq!(second_a.len(), 1);
+    assert_ne!(serde_json::to_value(&first_a[0])?, serde_json::to_value(&second_a[0])?);
+    Ok(())
+}
+#[test]
+fn a_bundle_cannot_claim_membership_at_an_epoch_the_receiver_validated_without_that_actor()
+-> TestResult {
+    let f = Fixture::new()?;
+    manifests(&f)?;
+    f.agent.create_group("group", "agent-device")?;
+    f.agent.add_group_member("group", "human-device", "member")?;
+    f.agent.account_db()?.persist_client_record(
+        "conversation",
+        "group-thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    assert!(
+        project(
+            &f.agent,
+            &sign(&f.human, "group-thread", "start", start("task", "group-thread"))?
+        )?
+        .accepted
+    );
+    let packets = f.agent.own_task_packets("agent2-device")?;
+    let mut raw = serde_json::to_value(&packets[0])?;
+    raw["history"]["events"][0]["membership"]["epoch"] = json!(1);
+    let packet: own_history::TaskOwnPacket = serde_json::from_value(raw)?;
+    let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
+    sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
+    sibling.persist_identity_directory(&manifest(&f.human)?)?;
+    sibling.create_group("group", "agent2-device")?;
+    sibling.add_group_member("group", "human-device", "member")?;
+    sibling.import_own_task_packets(&[packet], "agent-device")?;
+    assert!(sibling.task_get(Some("group-thread"), "task")?.is_null());
+    assert_eq!(sibling.account_db()?.task_state_usage("task/import_skip/")?.0, 1);
+    // The same real signed task is valid at epoch 2; the original unmodified packet still imports.
+    sibling.import_own_task_packets(&packets, "agent-device")?;
+    assert_eq!(sibling.task_get(Some("group-thread"), "task")?["requester"], "human");
+    drop(sibling);
     Ok(())
 }

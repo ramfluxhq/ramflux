@@ -26,6 +26,9 @@ impl RamfluxClient {
     }
     pub(super) fn task_event_is_future(&self, c: &Carrier) -> Result<bool, SdkError> {
         let event = c.event()?;
+        if self.task_has_no_local_role(c)? {
+            return Ok(false);
+        }
         if self.task_is_archived(&c.conversation_id, event.event().task_id())? {
             return Ok(false);
         }
