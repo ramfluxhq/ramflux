@@ -312,7 +312,13 @@ impl AccountDb {
         self.write_transaction(|| {
             let lookup=if root.is_some() {address.as_str()} else {raw.as_str()};
             let stored=self.group_pin_key(group_id,lookup)?.unwrap_or_else(||address.clone());
-            if self.group_member_role(group_id,&raw)?.is_some() && self.group_member_device_key(group_id,lookup)?.is_some_and(|old|old!=device_signing_public_key) {
+            let bound: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE group_id=?1 AND member_id=?2 AND principal_commitment IS NOT NULL)",
+                params![group_id, stored], |row| row.get(0),
+            )?;
+            // A bare write cannot replace an established root's key, including after removal.
+            if ((root.is_none() && bound) || self.group_member_role(group_id,&raw)?.is_some())
+                && self.group_member_device_key(group_id,lookup)?.is_some_and(|old|old!=device_signing_public_key) {
                 return Err(StorageError::GroupPermissionDenied);
             }
             if let Some(root)=&root {
