@@ -458,3 +458,52 @@ fn history_for_an_unavailable_group_is_reported_as_unavailable_without_blocking_
     );
     finish(source, sr, target, tr)
 }
+
+#[test]
+fn skipped_group_surface_history_preserves_direct_history_and_records_each_skip()
+-> Result<(), SdkError> {
+    for removed in [true, false] {
+        let (source, sr, target, tr, mut history) = setup(&format!("surface-skip-{removed}"))?;
+        let db = target.account_db()?;
+        db.upsert_group_local_membership_snapshot(
+            "g",
+            3,
+            128,
+            "none",
+            "target_device_sync",
+            "member",
+            3,
+        )?;
+        db.upsert_group_member_snapshot("g", "source_device_sync", "owner", 1)?;
+        if removed {
+            db.remove_group_member("g", "source_device_sync", "target_device_sync")?;
+        } else {
+            history.groups[0].group_epoch = 3;
+        }
+        let mut surface = direct_history("routed:surface:probe");
+        surface.conversation_id = "group-thread".into();
+        surface.encrypted_body.clear();
+        history.surface_message_epochs.insert(surface.message_id.clone(), ("g".into(), 1));
+        history
+            .contents
+            .insert(surface.message_id.clone(), zeroize::Zeroizing::new(b"not entitled".to_vec()));
+        history.messages = vec![surface, direct_history("direct-safe")];
+        let result = target.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(result.imported_messages, 1);
+        assert!(target.direct_message_by_id("direct-safe")?.is_some());
+        assert!(target.direct_message_by_id("routed:surface:probe")?.is_none());
+        assert!(db.message_content("routed:surface:probe")?.is_none());
+        let reason =
+            if removed { "group_message_unavailable" } else { "group_message_below_join_floor" };
+        assert!(
+            db.list_actor_states::<serde_json::Value>("own-device/restore-skip/")?
+                .iter()
+                .any(|r| r["item"] == "routed:surface:probe" && r["reason"] == reason)
+        );
+        finish(source, sr, target, tr)?;
+    }
+    Ok(())
+}

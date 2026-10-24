@@ -507,11 +507,9 @@ impl RamfluxClient {
                 )?;
                 continue;
             }
-            Self::validate_owned_surface_message_floor(
-                bundle,
-                &message.message_id,
-                &floor_by_group,
-            )?;
+            if self.skip_owned_surface_message(bundle, &message.message_id, &floor_by_group)? {
+                continue;
+            }
             self.account_db()?.import_direct_message_projection(DirectMessageWrite {
                 conversation_id: &message.conversation_id,
                 message_id: &message.message_id,

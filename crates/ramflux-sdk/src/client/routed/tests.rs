@@ -272,10 +272,22 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     );
     let delivered = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
     assert_eq!(delivered.routing.kind, Kind::GroupControl);
+    assert!(b.client.group_state(group)?.members.contains("bob"));
+    assert!(
+        b.client.account_db()?.client_record("conversation", conversation)?.is_none(),
+        "a roster/control wait does not establish the group text conversation"
+    );
     let inner = a.client.encrypt_group_message(group, "alice", b"private group text")?;
     let message = seal_group(&a, &b, message("group-message", conversation), &inner)?;
     let delivered = b.client.apply_routed_entry(&mut engine, &pool, &message, false).await?;
     assert_eq!(delivered.routing.kind, Kind::GroupMessage);
+    assert_eq!(
+        b.client
+            .account_db()?
+            .client_record("conversation", conversation)?
+            .ok_or_else(|| invalid("seed did not establish conversation"))?["group_id"],
+        group
+    );
     let plaintext = delivered.plaintext.ok_or_else(|| invalid("missing group plaintext"))?;
     assert_eq!(
         ramflux_protocol::decode_base64url(&plaintext.plaintext_body_base64)

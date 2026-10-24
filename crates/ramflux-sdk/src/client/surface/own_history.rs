@@ -323,21 +323,22 @@ fn fit_export(page: &mut SurfaceHistoryExport, budget: usize) -> Result<(), SdkE
 }
 
 impl RamfluxClient {
-    pub(crate) fn validate_owned_surface_message_floor(
+    pub(crate) fn skip_owned_surface_message(
+        &self,
         bundle: &crate::own_device_sync::SdkOwnDeviceHistoryBundle,
         message: &str,
         floors: &std::collections::BTreeMap<String, u64>,
-    ) -> Result<(), SdkError> {
-        if bundle
-            .surface_message_epochs
-            .get(message)
-            .is_some_and(|(group, epoch)| floors.get(group).is_none_or(|floor| epoch < floor))
-        {
-            return Err(SdkError::LocalBus(
-                "own-device sync surface message below joined epoch".into(),
-            ));
-        }
-        Ok(())
+    ) -> Result<bool, SdkError> {
+        let Some((group, epoch)) = bundle.surface_message_epochs.get(message) else {
+            return Ok(false);
+        };
+        let reason = match floors.get(group) {
+            None => "group_message_unavailable",
+            Some(floor) if epoch < floor => "group_message_below_join_floor",
+            Some(_) => return Ok(false),
+        };
+        self.account_db()?.record_own_device_restore_skip(&bundle.snapshot_id, message, reason)?;
+        Ok(true)
     }
 }
 
