@@ -60,7 +60,7 @@ pub(super) async fn add(
     let gateway = match card.as_ref() {
         Some(card) => {
             let home = account_home(state, account_id)?;
-            card_gateway(card, &own, &state.config.data_root, home.as_ref()).await?
+            card_gateway(card, &own, &state.config.data_root, &home).await?
         }
         None => own.clone(),
     };
@@ -109,10 +109,9 @@ async fn card_gateway(
     card: &ContactCardBody,
     own: &GatewaySessionConfig,
     root: &Path,
-    home: Option<&crate::NodeProfile>,
+    home: &crate::NodeProfile,
 ) -> Result<GatewaySessionConfig, SdkError> {
     // A self-signed locator is not authority to contact an arbitrary host.
-    let home = home.ok_or(SdkError::ContactHomeNodeUnsupported)?;
     let home_origin = if home.discovery_url.is_empty() {
         format!("https://{}", home.node_id)
     } else {
@@ -158,25 +157,7 @@ pub(super) fn export(
     id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account(state, id)?;
-    let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-        &state.config.data_root,
-        id,
-    ))?;
-    let node_id = manifest
-        .node_id
-        .as_deref()
-        .ok_or_else(|| SdkError::LocalBus("contact cards require a bound home node".into()))?;
-    let profile = state
-        .nodes
-        .selected(Some(node_id), false)?
-        .ok_or_else(|| SdkError::LocalBus("contact cards require a configured home node".into()))?;
-    if profile.expires_at <= now_unix_timestamp().unsigned_abs()
-        || profile.safety_warnings.contains("key_changed")
-    {
-        return Err(SdkError::LocalBus(
-            "refresh the home node before exporting a contact card".into(),
-        ));
-    }
+    let profile = account_home(state, id)?;
     let root = account.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let identity = account
         .client
@@ -281,19 +262,20 @@ fn parse_selector(
     Ok(Selection { legacy, card, selector, requester_is_peer, replace_provisional_root })
 }
 
-fn account_home(
-    state: &LocalBusDaemonState,
-    id: &str,
-) -> Result<Option<crate::NodeProfile>, SdkError> {
+fn account_home(state: &LocalBusDaemonState, id: &str) -> Result<crate::NodeProfile, SdkError> {
     let path = local_bus_account_manifest_path(&state.config.data_root, id);
     if !path.exists() {
-        return Ok(None);
+        return Err(ContactReason::HomeProfileMissing.into());
     }
-    let account = read_local_bus_account_manifest(&path)?;
-    account
-        .node_id
-        .as_deref()
-        .map(|id| state.nodes.selected(Some(id), false))
-        .transpose()
-        .map(Option::flatten)
+    let manifest = read_local_bus_account_manifest(&path)?;
+    let node = manifest.node_id.as_deref().ok_or(ContactReason::HomeProfileMissing)?;
+    let profile = state.nodes.profiles.get(node).ok_or(ContactReason::HomeProfileMissing)?;
+    if !profile.enabled
+        || profile.expires_at <= now_unix_timestamp().unsigned_abs()
+        || profile.safety_warnings.contains("key_changed")
+        || crate::contact_node_fingerprint(&profile.node_public_key).is_err()
+    {
+        return Err(ContactReason::HomeProfileStale.into());
+    }
+    Ok(profile.clone())
 }
