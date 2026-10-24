@@ -192,7 +192,7 @@ impl RamfluxClient {
             )
         ))
     }
-    fn own_device_history_bundle(
+    pub(super) fn own_device_history_bundle(
         &self,
         principal_commitment: &str,
         source_device_id: &str,
@@ -207,6 +207,7 @@ impl RamfluxClient {
         let mut messages = Vec::new();
         let mut surface_message_epochs = BTreeMap::new();
         for message in self.account_db()?.all_direct_messages()? {
+            if self.task_message_metadata(&message.conversation_id,&message.message_id)?.is_some() {continue;}
             let surface_epoch = self.surface_message_group_epoch(&message.message_id)?;
             if !Self::message_allowed_by_group_floor(&message, &floor_by_group)
                 || surface_epoch.as_ref().is_some_and(|(group, epoch)| {
@@ -243,6 +244,8 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
+            task_packets:self.own_task_packets()?,
+            task_export_metadata:self.account_db()?.load_actor_state("task/export_metadata")?.unwrap_or_default(),
             surface_pages,
             surface_controls: surfaces.controls,
             surface_checkpoints: surfaces.checkpoints,
@@ -468,6 +471,7 @@ impl RamfluxClient {
         }
         let floor_by_group = self.restore_own_groups(bundle)?;
         let blocked = self.restore_own_device_group_member_pins(bundle, &floor_by_group)?;
+        self.import_own_task_packets(&bundle.task_packets,&bundle.source_device_id)?;
         let mut imported_messages = 0_usize;
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
@@ -780,6 +784,7 @@ mod tests {
         groups: Vec<SdkOwnDeviceGroupSnapshot>,
     ) -> SdkOwnDeviceHistoryBundle {
         SdkOwnDeviceHistoryBundle {
+            task_packets:Vec::new(), task_export_metadata:crate::client::task::own_history::TaskExportMetadata::default(),
             surface_controls: Vec::new(),
             surface_pages: Vec::new(),
             surface_checkpoints: Vec::new(),
@@ -798,6 +803,43 @@ mod tests {
             group_member_pins: Vec::new(),
             sender_key_distributions_base64: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rejected_task_history_items_do_not_abort_ordinary_message_restore() -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("task-best-effort", "principal_sync", "target_device_sync")?;
+        let message = DirectMessageRecord {
+            conversation_id: "direct".into(),
+            message_id: "safe".into(),
+            sender_id: "source_device_sync".into(),
+            encrypted_body: b"safe history".to_vec(),
+            metadata: MessageMetadata::default(),
+            deleted: false,
+            created_at: 1,
+            receipts: Vec::new(),
+        };
+        let mut history =
+            bundle("source_device_sync", "target_device_sync", vec![message], Vec::new());
+        history.task_packets.push(serde_json::from_value(serde_json::json!({
+            "context":{"conversation_id":"missing-task-thread","participants":["principal_sync","peer"],"group":null,"friend":null},
+            "history":{"events":[],"created_at":1,"updated_at":1},"manifests":[],"pins":[],"base":0,"prefix_hash":"invalid"
+        }))?);
+        let result = client.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(result.imported_messages, 1);
+        assert_eq!(
+            client
+                .direct_message_by_id("safe")?
+                .ok_or_else(|| SdkError::LocalBus("message absent".into()))?
+                .encrypted_body,
+            b"safe history"
+        );
+        assert_eq!(client.account_db()?.task_state_usage("task/import_skip/")?.0, 1);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

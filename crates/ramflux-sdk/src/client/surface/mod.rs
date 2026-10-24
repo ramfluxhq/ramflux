@@ -25,6 +25,7 @@ mod read;
 mod resync_request;
 pub(crate) use resync_request::ResyncReply;
 mod scope;
+mod task_decision;
 mod snapshot;
 pub(crate) use carrier::{Carrier, Payload, PayloadKind, command_id, invalid};
 pub(crate) use read::surface_metadata;

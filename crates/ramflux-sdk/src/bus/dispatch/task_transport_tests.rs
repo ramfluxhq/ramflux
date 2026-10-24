@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Task carrier and own-control frame limits through the real encrypted transport adapters.
+use super::super::surface_transport::{
+    fixture,
+    tests::{directory_config, members_count},
+};
+use super::*;
+use crate::bus::runtime_tests;
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
+#[tokio::test]
+async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::{TaskEvent, TaskEventBody, TaskStart};
+    let root = runtime_tests::root("task-frame-budget");
+    let mut source = runtime_tests::account(
+        &root.join("sender"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let peers = members_count(&root, &source, 1)?;
+    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    source.put_engine(GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(fixture::RecordingGateway::new(captured.clone())),
+    ));
+    source.client.account_db()?.persist_client_record(
+        "conversation",
+        "thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    let peer = &peers[0];
+    let manifest = fixture::manifest(&peer.client)?;
+    source.client.persist_identity_directory(&manifest)?;
+    source.client.pin_joined_group_member("group", "device-peer-0")?;
+    let event = TaskEvent::new(
+        "thread".into(),
+        TaskEventBody::Start(TaskStart {
+            task_id: "task".into(),
+            conversation_id: "thread".into(),
+            requester: "sender".into(),
+            assignee: "peer-0".into(),
+            text: "🦀".repeat(1800),
+            constraints: None,
+        }),
+        sdk_device_signed_fields("device-sender", ""),
+    )?;
+    let c = source.client.sign_task_event(event, "large-task".into(), None)?;
+    let result = super::send(&mut source, &c).await?;
+    assert_eq!(result["accepted"], true);
+    let before = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len();
+    assert_eq!(before, 2);
+    let mut engine = source.take_live_engine().await?;
+    let target = super::Target {
+        device: "device-peer-0".into(),
+        delivery: "peer-0".into(),
+        federation: None,
+        own: true,
+    };
+    let page = vec![b'"'; crate::client::task::MAX_DELIVERY_BYTES];
+    let delivery = super::seal(
+        &source,
+        &mut engine,
+        &target,
+        "thread",
+        &page,
+        crate::client::routed::Route {
+            kind: crate::client::routed::Kind::Control,
+            group_id: Some("group".into()),
+            attachments: false,
+        },
+    )
+    .await?;
+    source.put_engine(engine);
+    crate::bus::task_delivery::submit_all(&mut source, vec![delivery]).await?;
+    assert_eq!(
+        captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+        before + 1
+    );
+    let mut oversized = c.clone();
+    oversized.wire_base64 = "x".repeat(crate::client::task::MAX_DELIVERY_BYTES);
+    assert!(matches!(
+        super::send(&mut source, &oversized).await,
+        Err(SdkError::TaskDeliveryTooLarge { .. })
+    ));
+    assert_eq!(
+        captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+        before + 1,
+        "over-cap rejection must precede sealing and submission"
+    );
+    directory.abort();
+    drop(peers);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

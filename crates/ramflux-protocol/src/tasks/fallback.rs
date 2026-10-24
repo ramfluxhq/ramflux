@@ -18,14 +18,16 @@ impl TaskEvent {
             }
             TaskEventBody::Proposal(v) => {
                 let mut lines = vec![format!(
-                    "Task {id} proposed by {} for {} (awaiting human acceptance): {}",
+                    "Task {id} proposed by {} for {} (awaiting acceptance): {}",
                     v.proposer, v.assignee, v.title
                 )];
                 lines.extend(step_lines(&v.steps));
                 lines
             }
-            TaskEventBody::Accept(_) => vec![format!("Task {id} accepted by a human")],
-            TaskEventBody::Decline(_) => vec![format!("Task {id} declined by a human")],
+            TaskEventBody::Accept(_) => vec![format!("Task {id} accepted (actor kind unverified)")],
+            TaskEventBody::Decline(_) => {
+                vec![format!("Task {id} declined (actor kind unverified)")]
+            }
             TaskEventBody::Cancel(_) => vec![format!("Task {id} cancelled by its requester")],
             TaskEventBody::Update(v) => {
                 let mut lines = vec![format!("Task {id}: {}", status(v.state))];
@@ -36,7 +38,7 @@ impl TaskEvent {
                 lines
             }
             TaskEventBody::Resolve(v) => vec![format!(
-                "Task {id}: human decision {} for step {} at {} (decision {})",
+                "Task {id}: decision (actor kind unverified) {} for step {} at {} (decision {})",
                 match v.decision {
                     TaskDecision::Resume => "resume",
                     TaskDecision::Deny => "deny",
@@ -58,7 +60,7 @@ fn step_lines(steps: &[TaskStep]) -> Vec<String> {
         .iter()
         .map(|step| match &step.needs_me {
             Some(target) => format!(
-                "{}: {} ({}) — needs human decision at {}",
+                "{}: {} ({}) — needs decision at {}",
                 step.id,
                 step.title,
                 status(step.state),
