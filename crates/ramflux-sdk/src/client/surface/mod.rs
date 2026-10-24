@@ -15,7 +15,7 @@ mod own_history;
 pub(crate) use control::{ControlKind, OwnContext, SurfaceControl};
 pub(crate) use logical::SurfaceLogicalJob;
 pub(crate) use own_checkpoint::OwnedSurfaceCheckpoint;
-pub(crate) use own_history::SurfaceExportMetadata;
+pub(crate) use own_history::{SurfaceExportMetadata, SurfaceHistoryExport};
 mod delivery;
 mod fallback;
 mod origin;

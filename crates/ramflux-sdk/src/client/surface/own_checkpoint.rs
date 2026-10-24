@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 pub(crate) struct OwnedSurfaceCheckpoint {
     pub(super) record: StoredSurface,
     snapshot_wire_base64: String,
-    version: u64,
+    pub(super) version: u64,
     surface_hash: String,
     pub(super) conversation: Value,
     pub(super) group_epoch: Option<u64>,
@@ -78,12 +78,29 @@ impl RamfluxClient {
         if checkpoints.len() > 64 || serde_json::to_vec(checkpoints)?.len() > 8 * 1024 * 1024 {
             return Err(invalid("owned surface checkpoint budget exceeded"));
         }
-        self.account_db()?.surface_transaction(|| {
-            for owned in checkpoints {
-                self.import_owned_surface_checkpoint(owned)?;
+        for owned in checkpoints {
+            if let Err(error) = self
+                .account_db()?
+                .surface_transaction(|| self.import_owned_surface_checkpoint(owned))
+            {
+                let reference = super::scope::surface_reference(
+                    &owned.record.conversation_id,
+                    &owned.record.author_principal_id,
+                    &owned.record.surface_id,
+                )?;
+                self.account_db()?.persist_actor_state(
+                    &key("import_skip", &reference),
+                    &json!({"reason":error.to_string(),"version":owned.version}),
+                )?;
+                self.account_db()?
+                    .persist_actor_state(&key("out_of_sync", &reference), &owned.version)?;
+                if let Some(mut view) = self.account_db()?.client_record("surface", &reference)? {
+                    view["out_of_sync"] = json!(true);
+                    self.account_db()?.persist_client_record("surface", &reference, &view)?;
+                }
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
     fn import_owned_surface_checkpoint(
         &self,

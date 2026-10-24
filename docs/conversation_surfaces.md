@@ -16,7 +16,7 @@ the request before sending and reuse its ID and bytes for retries. `rf surface`
 commands read `--wire-file`; `--message` is optional and otherwise generates an ID.
 
 The response reports `accepted`, `renderer_error`, and `delivery_state: "queued"`.
-Acceptance commits local projection and a durable encrypted outbox atomically;
+Acceptance commits local projection and a durable outbox atomically;
 it does not claim remote delivery. Identical committed requests return
 `replayed: true`. The retained authored carrier preserves its original signed
 snapshot proof on retry. Changing bytes under an existing ID is rejected.
@@ -47,9 +47,10 @@ siblings. Own forwarding requires the same verified identity root, preserves the
 original signed carrier, and never copies DM ratchet state. Existing
 blocked/revoked contacts are preserved.
 
-The authenticated own-device history bundle exports at most 64 recent surfaces,
-128 retained actions per surface, and 8 MiB of surface data. It selects the newest
-bounded window and emits it oldest-first. `surface_export_metadata` exposes
+The authenticated own-device history bundle pages validated surfaces in batches of
+64, up to 64 pages, with 128 retained actions per surface and 8 MiB total surface
+data. It prioritizes own authored state before peer state and emits each selected
+window oldest-first. `surface_export_metadata` exposes
 `truncated`, an optional older-window `next_before` cursor, and counted `skipped`
 reasons; the same metadata is recorded locally. A peer cannot abort the bundle by
 omitting a full-state proof or exceeding a count budget. Normal signed proofs are
@@ -80,16 +81,18 @@ automatic handoff in this version.
 Prepared ciphertext envelopes are committed before transport submission and
 reused unchanged on retries. Count and conservative byte admission run before
 pair or group encryption. The account transport queue holds at most 64 logical
-jobs / 32 MiB. A group publication occupies one job containing its member delivery
-envelopes, so 100 devices do not exhaust the job-count limit. A very large payload
+jobs / 32 MiB. The latest publication of one group surface occupies one logical
+job, preparing member delivery envelopes lazily, so 100 devices do not exhaust
+the job-count limit. A very large payload
 or group can still hit the byte bound. Own-forward/decision preparation holds at
 most 64 entries / 8 MiB. Preparation congestion records
 `surface.forward_deferred`, with own-device history as the recovery path. Retries
-are bounded by 8 attempts per recipient and the original 600-second expiry. A
-recipient waiting for retry does not block other group members; its distribution
-stays ahead of its messages. Inbound receive/commit/ACK runs first, followed by at
-most two outbound submissions with two-second local submit timeouts; outbound
-queue/preparation errors are logged and deferred without aborting receive.
+are bounded by 8 attempts per prepared recipient packet and a 600-second window
+from the latest coalesced enqueue; expired group work regenerates the retained
+full snapshot. A recipient waiting for retry does not block other members; its
+distribution stays ahead of its messages. Inbound receive/commit/ACK runs first,
+followed by a 200 ms / 4 MiB outbound budget. Local asynchronous requests use the
+remaining tick time. Queue/preparation errors are deferred without aborting receive.
 
 ## Ordering, integrity and retention
 
@@ -136,3 +139,29 @@ This pre-merge revision changes private checkpoint/storage scoping; use fresh
 prototype account roots rather than importing unscoped development databases.
 The legacy sync `legacy_a2ui_render_profile_hash` hashes a different v1 recursive
 permission/profile object under `A2I_CONTROL`; it is not a conversation hash.
+
+
+### Bounded history and superseding group publications
+
+History export reads validated state rather than transient hold-back directory placeholders.
+It prioritizes the account's own authored state, then pages peer state in batches of 64,
+with up to 64 pages and an 8 MiB total surface budget. Truncation and skipped-item reasons
+are explicit metadata. Unknown-surface placeholders expire with their pending events.
+Checkpoint and control imports isolate each item in a savepoint; conflicting local state
+survives, is marked out of sync, and records a skip reason without blocking honest surfaces.
+Repeated imports use the existing idempotent group/message projections and surface keys.
+
+A queued group publication retains only the latest author-signed full-state proof for its
+surface scope. Group and pair encryption are deferred until delivery, with the same explicit
+root commitment/membership checks used by group text. One shared sender-key ciphertext is
+wrapped per recipient; failed submissions retain the exact prepared ciphertext for retry.
+The scheduler uses a 200 ms deadline and a 4 MiB send budget per tick. Failed recipients
+back off while other members proceed. The 600-second retry age starts when the latest job
+is enqueued; expiry regenerates a full snapshot with current membership and fresh packet
+lifetimes, rather than losing the final state. A verified full-state proof can fill a version
+gap immediately, including when no earlier state reached the recipient.
+
+Fallback fields retain printable Unicode, including ideographic/nonbreaking spaces,
+variation selectors and ordinary combining marks. Leading combining marks are escaped so
+they cannot combine with the opening quote. Controls, format characters, line separators,
+quotes and backslashes are escaped by the shared protocol renderer.

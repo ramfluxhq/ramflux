@@ -73,6 +73,7 @@ impl RamfluxClient {
                     self.mark_surface_out_of_sync(&pending.carrier, pending.version)?;
                 }
                 db.delete_surface_state(&pending_key(&pending.carrier)?)?;
+                self.expire_surface_placeholder(&pending.carrier)?;
             } else {
                 retained.push(pending);
             }
@@ -225,6 +226,14 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    fn expire_surface_placeholder(&self, carrier: &Carrier) -> Result<(), SdkError> {
+        let reference = carrier.surface_reference()?;
+        if self.surface_state_ref(&reference)?.is_none() {
+            self.account_db()?.delete_surface_placeholder(&reference)?;
+            self.account_db()?.delete_surface_state(&key("out_of_sync", &reference))?;
+        }
+        Ok(())
+    }
     pub(crate) fn expire_surface_pending(&self) -> Result<(), SdkError> {
         self.account_db()?.surface_transaction(|| {
             let db = self.account_db()?;
@@ -243,6 +252,7 @@ impl RamfluxClient {
                         self.mark_surface_out_of_sync(&entry.carrier, entry.version)?;
                     }
                     db.delete_surface_state(&key)?;
+                    self.expire_surface_placeholder(&entry.carrier)?;
                 }
             }
             db.persist_actor_state("surface/pending_expiry_cursor", &next)?;

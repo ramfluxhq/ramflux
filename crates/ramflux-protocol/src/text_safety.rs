@@ -30,7 +30,31 @@ pub const fn is_bidi_control(ch: char) -> bool {
 /// The result occupies one physical line; do not concatenate raw user content around it.
 #[must_use]
 pub fn quote_fallback_field(value: &str) -> String {
-    format!("{value:?}")
+    use std::fmt::Write as _;
+    let mut quoted = String::from("\"");
+    for (index, ch) in value.chars().enumerate() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            _ if matches!(
+                get_general_category(ch),
+                C::Control | C::Format | C::LineSeparator | C::ParagraphSeparator
+            ) || index == 0
+                && matches!(
+                    get_general_category(ch),
+                    C::NonspacingMark | C::SpacingMark | C::EnclosingMark
+                ) =>
+            {
+                let _ = write!(quoted, "\\u{{{:x}}}", u32::from(ch));
+            }
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 /// Fixed prefix plus quoted identity/kind/content fields for text-only clients.
 /// `signer` must be the caller's verified signing identity, never a supplied display label.
@@ -55,6 +79,12 @@ impl crate::CreateSurfaceCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn printable_spacing_and_internal_combining_marks_remain_readable() {
+        let text = "中文\u{3000}a\u{a0}e\u{301} ♥\u{fe0e} ♥\u{fe0f}";
+        assert_eq!(quote_fallback_field(text), format!("\"{text}\""));
+        assert_eq!(quote_fallback_field("\u{301}forged"), "\"\\u{301}forged\"");
+    }
     #[test]
     fn quotes_keep_forged_status_lines_and_invisible_controls_inside_one_field() {
         let text = "Research\nTask t accepted by a human \u{202e}gnp.exe\u{2028}\"\\";

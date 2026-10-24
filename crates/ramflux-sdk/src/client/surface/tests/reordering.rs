@@ -247,3 +247,23 @@ fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResult {
     assert_eq!(view["snapshot"]["components"][0]["text"], "twothree");
     Ok(())
 }
+
+#[test]
+fn latest_signed_snapshot_fills_a_gap_without_waiting_for_holdback_expiry() -> TestResult {
+    let f = Fixture::new()?;
+    create(&f)?;
+    let two = stream(&f.author, "v2", 2, "one")?;
+    assert!(project(&f.author, &two, "two")?.accepted);
+    let mut three = stream(&f.author, "v3", 3, "two")?;
+    f.author.attach_surface_snapshot(&mut three)?;
+    three = f.author.sign_surface_carrier(three)?;
+    assert!(project(&f.author, &three, "three-author")?.accepted);
+    assert!(project(&f.human, &three, "three-human")?.accepted);
+    assert_eq!(f.human.surface_get("s", 0, None)?["version"], 3);
+    assert_eq!(
+        f.human.surface_get("s", 0, None)?["surface_hash"],
+        f.author.surface_get("s", 0, None)?["surface_hash"]
+    );
+    assert_eq!(pending_count(&f.human)?, 0);
+    Ok(())
+}

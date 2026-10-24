@@ -196,7 +196,12 @@ impl RamfluxClient {
         let dm_sessions = Vec::new();
         let sender_key_distributions_base64 =
             self.own_device_sender_key_distributions(source_device_id, &groups)?;
-        let surfaces = self.own_surface_history_export(None)?;
+        let mut surface_pages = self.own_surface_history_pages()?;
+        let surfaces = if surface_pages.is_empty() {
+            crate::client::surface::SurfaceHistoryExport::default()
+        } else {
+            surface_pages.remove(0)
+        };
         Ok(SdkOwnDeviceHistoryBundle {
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,
@@ -205,6 +210,7 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
+            surface_pages,
             surface_controls: surfaces.controls,
             surface_checkpoints: surfaces.checkpoints,
             surface_export_metadata: surfaces.metadata,
@@ -491,7 +497,16 @@ impl RamfluxClient {
             self.import_group_sender_key_distribution(&distribution)?;
             imported_sender_keys = imported_sender_keys.saturating_add(1);
         }
+        if bundle.surface_pages.len() > 63
+            || serde_json::to_vec(&bundle.surface_pages)?.len() > 8 * 1024 * 1024
+        {
+            return Err(SdkError::LocalBus("surface history pages budget exceeded".into()));
+        }
         self.import_owned_surface_checkpoints(&bundle.surface_checkpoints)?;
+        for page in &bundle.surface_pages {
+            self.import_owned_surface_checkpoints(&page.checkpoints)?;
+            self.import_own_surface_history(envelope, &page.controls)?;
+        }
         self.import_own_surface_history(envelope, &bundle.surface_controls)?;
         Ok(SdkOwnDeviceSyncImportResponse {
             snapshot_id: bundle.snapshot_id.clone(),
@@ -730,6 +745,7 @@ mod tests {
     ) -> SdkOwnDeviceHistoryBundle {
         SdkOwnDeviceHistoryBundle {
             surface_controls: Vec::new(),
+            surface_pages: Vec::new(),
             surface_checkpoints: Vec::new(),
             surface_export_metadata: crate::client::surface::SurfaceExportMetadata::default(),
             surface_message_epochs: BTreeMap::new(),
@@ -869,6 +885,8 @@ mod tests {
             b"approved history plaintext",
         )?;
         source.persist_dm_session("history-thread", "legacy-checkpoint", "send", &session)?;
+        source.create_group("history-group", "source_device_sync")?;
+        source.add_group_member("history-group", "target_device_sync", "member")?;
         let history = source.own_device_history_bundle(
             "principal_sync",
             "source_device_sync",
@@ -881,6 +899,16 @@ mod tests {
             &envelope("source_device_sync", "target_device_sync"),
             &history,
         )?;
+        let group_before = serde_json::to_value(target.group_state("history-group")?)?;
+        target.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(serde_json::to_value(target.group_state("history-group")?)?, group_before);
+        assert_eq!(
+            target.direct_message_by_id("history-message")?.map(|m| m.message_id),
+            Some("history-message".into())
+        );
         assert_eq!(imported.imported_dm_sessions, 0);
         assert_eq!(
             target.account_db()?.message_content("history-message")?,
