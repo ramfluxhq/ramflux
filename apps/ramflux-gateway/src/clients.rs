@@ -226,16 +226,29 @@ where
     R: serde::de::DeserializeOwned,
 {
     if let Some(async_mesh) = &router.async_mesh {
-        match ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
-            &async_mesh.endpoint,
-            path,
-            &async_mesh.tls,
-            &async_mesh.server_name,
-            &async_mesh.peer_ca_pems,
-            value,
-        )
-        .await
-        {
+        // Only the router's envelope hot path accepts the postcard wire format.
+        let response = if path == "/mvp0/envelope" {
+            ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
+                &async_mesh.endpoint,
+                path,
+                &async_mesh.tls,
+                &async_mesh.server_name,
+                &async_mesh.peer_ca_pems,
+                value,
+            )
+            .await
+        } else {
+            ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async(
+                &async_mesh.endpoint,
+                path,
+                &async_mesh.tls,
+                &async_mesh.server_name,
+                &async_mesh.peer_ca_pems,
+                value,
+            )
+            .await
+        };
+        match response {
             Ok(response) => return Ok(response),
             Err(error @ ramflux_transport::TransportError::Quic(_)) => {
                 tracing::warn!(%error, "router async QUIC mesh failed; falling back to blocking mesh");
@@ -463,7 +476,7 @@ pub(crate) fn notification_class_for_envelope(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
@@ -1174,12 +1187,12 @@ mod tests {
         }
     }
 
-    struct TestPeerCerts {
-        tls: ramflux_transport::MeshTlsConfig,
-        ca_pem: String,
+    pub(crate) struct TestPeerCerts {
+        pub(crate) tls: ramflux_transport::MeshTlsConfig,
+        pub(crate) ca_pem: String,
     }
 
-    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    pub(crate) fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir().join(format!(
             "ramflux_gateway_{name}_{}_{}",
@@ -1193,7 +1206,7 @@ mod tests {
         Ok(root)
     }
 
-    fn issue_test_ca_and_service_cert(
+    pub(crate) fn issue_test_ca_and_service_cert(
         root: &Path,
         node_id: &str,
         service_id: &str,

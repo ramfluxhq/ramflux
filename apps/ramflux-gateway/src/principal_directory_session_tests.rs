@@ -78,3 +78,131 @@ async fn raw_name_lookup_rejects_known_and_unknown_queries_before_router_io() ->
     assert_eq!(bodies[0], bodies[1]);
     Ok(())
 }
+
+struct LookupFrame(Option<Vec<u8>>);
+impl GatewaySessionFrameSource for LookupFrame {
+    fn recv_frame(&mut self) -> FrameFuture<'_, Vec<u8>> {
+        let frame = self.0.take();
+        Box::pin(
+            async move { frame.ok_or_else(|| TransportError::Quic("test session ended".into())) },
+        )
+    }
+}
+
+#[tokio::test]
+async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_manifest()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
+    let root = temp_cert_root("principal-lookup-ingress")?;
+    let gateway = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-gateway")?;
+    let router = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-router")?;
+    let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+        "127.0.0.1:0",
+        &router.tls,
+        Arc::new(move || Ok(vec![gateway.ca_pem.clone()])),
+    )?;
+    let endpoint = server.local_addr()?.to_string();
+    let expected = ramflux_node_core::DeviceManifestResponse {
+        principal_id: "bob".into(),
+        principal_commitment: "bob-root".into(),
+        root_public_key: "fixture-public-key".into(),
+        devices: Vec::new(),
+    };
+    let (done, finished) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(serve_lookup_router(server, expected.clone(), finished));
+    let mut context = super::tests::test_gateway_context()?;
+    context.router = crate::RouterMeshClient {
+        endpoint: "127.0.0.1:0".into(),
+        server_name: "ramflux-router".into(),
+        tls: gateway.tls.clone(),
+        client: ramflux_transport::MeshHttpClient::new(),
+        async_mesh: Some(crate::RouterAsyncMeshClient {
+            endpoint,
+            server_name: "ramflux-router".into(),
+            tls: gateway.tls,
+            peer_ca_pems: vec![router.ca_pem],
+        }),
+    };
+    let runtime = crate::GatewaySessionRuntime {
+        session_id: "session".into(),
+        resume_token: "resume".into(),
+        principal_id: "alice".into(),
+        device_id: "alice-device".into(),
+        target_delivery_id: "alice-target".into(),
+        branch_public_key: "fixture-branch-key".into(),
+    };
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let send: crate::GatewaySendHandle =
+        Arc::new(tokio::sync::Mutex::new(Box::new(Sink(Arc::clone(&frames)))));
+    let result = super::run_gateway_session_loop(
+        send,
+        Box::new(LookupFrame(Some(serde_json::to_vec(
+            &ramflux_node_core::GatewayClientFrame::PrincipalManifestFetch {
+                principal_id: "bob".into(),
+            },
+        )?))),
+        context,
+        runtime,
+    )
+    .await;
+    let _ = done.send(());
+    let observed = serving.await??;
+    result?;
+    let observed = observed.ok_or("lookup used unsupported postcard ingress")?;
+    assert_eq!(observed.principal_id, "bob");
+    assert_eq!(observed.session_id, "session");
+    assert_eq!(observed.requester_device_id, "alice-device");
+    assert_eq!(observed.target_delivery_id, "alice-target");
+    let frames = frames.lock().map_err(|_| anyhow::anyhow!("frame mutex"))?;
+    assert_eq!(frames.len(), 1);
+    let response: ramflux_node_core::GatewayServerFrame = serde_json::from_slice(&frames[0])?;
+    assert_eq!(
+        response,
+        ramflux_node_core::GatewayServerFrame::PrincipalManifest {
+            response: ramflux_protocol::PrincipalLookupResponse {
+                manifest: Some(expected),
+                reason_code: None
+            }
+        }
+    );
+    drop(frames);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+async fn serve_lookup_router(
+    server: ramflux_transport::MeshQuicServer,
+    manifest: ramflux_node_core::DeviceManifestResponse,
+    finished: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<Option<ramflux_node_core::PrincipalLookupRequest>> {
+    let connection = server.accept_connection().await?;
+    let accepted =
+        ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(
+            &connection,
+        )
+        .await?;
+    let request = match accepted {
+        ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) => {
+            anyhow::ensure!(
+                accepted.request.method == "POST"
+                    && accepted.request.path == "/mvp1/principal-lookup",
+                "unexpected directory request"
+            );
+            let request: ramflux_node_core::PrincipalLookupRequest =
+                serde_json::from_value(accepted.request.body.clone())?;
+            let response = ramflux_protocol::PrincipalLookupResponse {
+                manifest: Some(manifest),
+                reason_code: None,
+            };
+            accepted.write_json_response(200, &response).await?;
+            Some(request)
+        }
+        ramflux_transport::MeshQuicAcceptedWireRequest::Postcard(accepted) => {
+            // The production router's postcard ingress accepts only /mvp0/envelope.
+            accepted.write_text_response(404, "not found").await?;
+            None
+        }
+    };
+    let _ = finished.await;
+    Ok(request)
+}
