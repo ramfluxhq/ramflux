@@ -142,6 +142,15 @@ impl RamfluxClient {
     ) -> Result<Outcome, SdkError> {
         let outcome = self.evaluate_surface(carrier, &payload, outbound)?;
         if !outcome.accepted {
+            if !outbound
+                && outcome
+                    .renderer_error
+                    .as_ref()
+                    .is_some_and(|error| error["code"] == "surface_hash_mismatch")
+                && let Payload::Event(event) = &payload
+            {
+                self.mark_surface_out_of_sync(carrier, event.version())?;
+            }
             return Ok(outcome);
         }
         let db = self.account_db()?;

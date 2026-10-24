@@ -26,7 +26,23 @@ The retained authored carrier preserves its original signed event and result has
 A failed send retains the quoted fallback in one logical timeline row and exposes
 `delivery_state: "failed"` on the surface view. Per-device ciphertexts share that
 logical ID; retrying does not add another timeline row.
+DM delivery attempts every active peer device, even after one fails. `delivery_devices`
+reports each root/device result; an aggregate failure retains the failed state and fallback.
 Changing bytes under an existing ID is rejected.
+
+Live author-device copies use the existing `OwnDeviceFanout` transport, one encrypted
+per-event control with pair-ratchet-wrapped keys for active siblings. They never publish
+full-history bundles or upload objects. The immutable inner device signature survives
+node fanout rewriting the outer route. A lost ACK retries the same inner ciphertext
+under a fresh outer envelope ID; sibling receipts and projection commit atomically.
+`own_device_copy_state` is independent of peer `delivery_state`. The account retries
+up to 10 attempts within the original 600-second lifetime (2–60 seconds backoff),
+with a 256-message / 8 MiB pending budget. Each drain has a soft 250 ms work
+budget and stops on its first network failure; one operation is bounded by the
+ordinary gateway timeout. Exhaustion is visible as `failed`; an explicit
+fresh resync can repair a sibling that missed updates. Manual history export/restore
+remains separate from live fanout. Live copies require updated sibling receivers;
+transport submission does not claim sibling projection or read acknowledgement.
 
 `surface.get` accepts `surface_ref`, or `surface_id` with optional
 `conversation_id` and `author_principal_id`. An ambiguous short ID fails explicitly.
@@ -118,9 +134,21 @@ backpressure marks `out_of_sync`; an author-signed explicit resync can recover
 it while preserving known stream-finality commitments. Until that resync arrives,
 the last valid snapshot remains visible. The author calls `surface.resync` with
 `surface_ref` and an optional durable `message_id`, or `rf surface resync`.
+A recipient can call `surface.request_resync` with `surface_ref`, or
+`rf surface request-resync --account ... --surface-ref ...`. The surface must be
+out of sync. Requests use authenticated pair controls to the author's devices;
+only the original author device answers through the existing full-state send path.
+This deterministic coordinator prevents amplification across author devices and
+must be online to answer. Requesters are limited to one request per surface per
+60 seconds; the author admits at most one response per surface/requester root and
+principal per 60 seconds, across requester devices and envelope IDs. The admission
+window commits before the synchronous send; after a failed reply the requester can
+try again next window. No surface delivery outbox or group scheduler is introduced.
 
 Normal authored patches, stream appends and closes contain the original delta
-plus the resulting snapshot hash. They carry no full snapshot or checkpoint.
+plus the mandatory resulting snapshot hash. A missing hash is rejected; disagreement
+marks `out_of_sync` without advancing state or hash history. They carry no full
+snapshot or checkpoint.
 Full state travels in creates and explicit resyncs; resync carries one create-shaped
 wire payload and compact content-free finality metadata. The canonical snapshot
 cap and per-block stream accumulation cap are 16,384 bytes. JCS and domain-separated

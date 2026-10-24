@@ -32,66 +32,113 @@ pub(crate) async fn send(
     if !outcome.accepted {
         return Ok(serde_json::to_value(outcome)?);
     }
-    let sent: Result<(), SdkError> = async {
+    let mut devices = Vec::new();
+    let mut failure = None;
     if let Some(group) = group {
         let request = LocalBusFrame::request(
             "surface-group",
             None,
             "ramflux.sdk.v1",
             "group.send",
-            json!({
-                "group_id":group,"conversation_id":carrier.conversation_id,
-                "message_id":RamfluxClient::surface_timeline_id(carrier)?,"sender_id":carrier.sender_device_id,
-                "plaintext_body_base64":ramflux_protocol::encode_base64url(&bytes),"encrypted_body_base64":""
-            }),
+            json!({"group_id":group,"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"sender_id":carrier.sender_device_id,"plaintext_body_base64":ramflux_protocol::encode_base64url(&bytes),"encrypted_body_base64":""}),
         );
-        super::group::dispatch_group_send_request(&request, account).await?;
-    } else {
-        let peers = peer_commitments(account, carrier, &thread)?;
-        for (root, principal) in peers {
-            let engine = account.take_live_engine().await?;
-            let manifest = account
-                .client
-                .cache_verified_device_manifest(&engine.config, &root, "surface_peer")
-                .await;
-            account.put_engine(engine);
-            let manifest = manifest?;
-            if manifest.devices.is_empty() {
-                return Err(invalid("surface peer has no active verified devices"));
-            }
-            if principal.as_ref().is_some_and(|principal| *principal != manifest.principal_id) {
-                return Err(invalid("surface peer root principal changed"));
-            }
-            for device in manifest.devices {
-                let body: LocalBusMessageSubmitRequest = serde_json::from_value(json!({
-                    "conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,
-                    "envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,
-                    "sender_id":carrier.sender_device_id,"recipient_device_id":device.device_id,
-                    "recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,
-                    "plaintext_body_base64":ramflux_protocol::encode_base64url(&bytes),"encrypted_body_base64":"",
-                    "created_at":now_unix_timestamp(),"ttl":600
-                }))?;
-                super::message::submit_message(account, body).await?;
-            }
+        if let Err(error) = super::group::dispatch_group_send_request(&request, account).await {
+            failure = Some(error);
         }
+    } else {
+        (devices, failure) = send_direct(account, carrier, &thread, &bytes).await?;
     }
-        Ok(())
-    }.await;
-    if let Err(error) = sent {
-        account.client.set_surface_outgoing_state(carrier, "failed")?;
+    let delivery = if failure.is_some() { "failed" } else { "submitted" };
+    account.client.set_surface_outgoing_state(carrier, delivery)?;
+    account.client.set_surface_delivery_devices(carrier, &devices)?;
+    let own = copy_own(account, carrier, group_epoch).await;
+    let own_state = match own {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(%error,"surface own-device copy could not be staged");
+            account.client.set_surface_own_copy_state(carrier, "failed")?;
+            "failed".into()
+        }
+    };
+    if let Some(error) = failure {
         return Err(error);
     }
-    if let Err(error) = super::super::device_history::push(account).await {
-        account.client.set_surface_outgoing_state(carrier, "failed")?;
-        return Err(error);
-    }
-    account.client.set_surface_outgoing_state(carrier, "submitted")?;
     let mut response = serde_json::to_value(outcome)?;
     response["surface_id"] = json!(carrier.surface_id);
     response["surface_ref"] = json!(carrier.surface_reference()?);
     response["message_id"] = json!(carrier.message_id);
-    response["delivery_state"] = json!("submitted");
+    response["delivery_state"] = json!(delivery);
+    response["delivery_devices"] = json!(devices);
+    response["own_device_copy_state"] = json!(own_state);
     Ok(response)
+}
+async fn send_direct(
+    account: &mut LocalBusAccountState,
+    carrier: &Carrier,
+    thread: &Value,
+    bytes: &[u8],
+) -> Result<(Vec<Value>, Option<SdkError>), SdkError> {
+    let mut devices = Vec::new();
+    let mut failure = None;
+    for (root, principal) in peer_commitments(account, carrier, thread)? {
+        let engine = account.take_live_engine().await?;
+        let manifest = account
+            .client
+            .cache_verified_device_manifest(&engine.config, &root, "surface_peer")
+            .await;
+        account.put_engine(engine);
+        let manifest = match manifest {
+            Ok(manifest)
+                if !manifest.devices.is_empty()
+                    && principal
+                        .as_ref()
+                        .is_none_or(|principal| *principal == manifest.principal_id) =>
+            {
+                manifest
+            }
+            Ok(_) => {
+                devices
+                    .push(json!({"root":root,"state":"failed","error":"peer_manifest_mismatch"}));
+                failure.get_or_insert_with(|| invalid("surface peer manifest mismatch"));
+                continue;
+            }
+            Err(error) => {
+                devices.push(
+                    json!({"root":root,"state":"failed","error":"peer_manifest_unavailable"}),
+                );
+                failure.get_or_insert(error);
+                continue;
+            }
+        };
+        for device in manifest.devices {
+            let id = device.device_id.clone();
+            let body: LocalBusMessageSubmitRequest = serde_json::from_value(
+                json!({"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,"sender_id":carrier.sender_device_id,"recipient_device_id":id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"plaintext_body_base64":ramflux_protocol::encode_base64url(bytes),"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":600}),
+            )?;
+            match super::message::submit_message(account, body).await {
+                Ok(_) => devices.push(json!({"root":root,"device_id":id,"state":"submitted"})),
+                Err(error) => {
+                    devices.push(json!({"root":root,"device_id":id,"state":"failed","error":"delivery_failed"}));
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+    }
+    Ok((devices, failure))
+}
+async fn copy_own(
+    account: &mut LocalBusAccountState,
+    carrier: &Carrier,
+    epoch: Option<u64>,
+) -> Result<String, SdkError> {
+    if !account.client.queue_surface_own_copy(carrier, epoch)? {
+        return Ok("failed".into());
+    }
+    super::super::own_device_copy::flush(account).await?;
+    super::super::own_device_copy::status(
+        &account.client,
+        &RamfluxClient::surface_timeline_id(carrier)?,
+    )
 }
 
 fn peer_commitments(
@@ -143,3 +190,7 @@ mod tests;
 #[cfg(test)]
 #[path = "surface_dm_tests.rs"]
 mod dm_tests;
+
+#[cfg(test)]
+#[path = "surface_own_tests.rs"]
+mod own_tests;

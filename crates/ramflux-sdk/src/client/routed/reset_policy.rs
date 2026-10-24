@@ -35,7 +35,7 @@ impl RamfluxClient {
         Ok(first)
     }
 
-    pub(super) fn begin_pair_recovery(
+    pub(crate) fn begin_pair_recovery(
         &self,
         local: &str,
         remote: &str,

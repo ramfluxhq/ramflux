@@ -33,6 +33,13 @@ pub(crate) enum SurfaceAction {
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// Ask the author for a signed full state when this recipient is out of sync.
+    RequestResync {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        surface_ref: String,
+    },
     Resync {
         #[arg(long)]
         account: String,

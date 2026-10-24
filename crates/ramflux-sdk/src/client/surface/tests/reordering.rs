@@ -89,6 +89,7 @@ fn future_event_survives_restart_and_waits_for_create() -> TestResult {
 fn conflicting_pending_message_cannot_replace_the_verified_original() -> TestResult {
     let f = Fixture::new()?;
     create(&f)?;
+    let two = stream(&f.author, "v2", 2, "")?;
     let first = stream(&f.author, "future", 3, "original")?;
     let conflict = stream(&f.author, "future", 3, "replacement")?;
     f.human.send_direct_message("thread", "future", "author-device", b"encrypted")?;
@@ -96,7 +97,6 @@ fn conflicting_pending_message_cannot_replace_the_verified_original() -> TestRes
     let rejected = project(&f.human, &conflict, "conflict")?;
     assert!(!rejected.accepted);
     assert_eq!(rejected.renderer_error.ok_or("error")?["code"], "message_id_conflict");
-    let two = stream(&f.author, "v2", 2, "")?;
     assert!(project(&f.human, &two, "v2")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?["snapshot"]["components"][0]["text"], "original");
     Ok(())
@@ -105,6 +105,7 @@ fn conflicting_pending_message_cannot_replace_the_verified_original() -> TestRes
 fn bounded_queue_reports_backpressure_and_rejected_gap_can_be_retried() -> TestResult {
     let f = Fixture::new()?;
     create(&f)?;
+    let two = stream(&f.author, "v2", 2, "")?;
     for version in 3..=35 {
         let id = format!("future-{version}");
         let signed = stream(&f.author, &id, version, "x")?;
@@ -114,7 +115,6 @@ fn bounded_queue_reports_backpressure_and_rejected_gap_can_be_retried() -> TestR
         assert_eq!(result.queued, version < 35);
     }
     assert_eq!(pending_count(&f.human)?, 32);
-    let two = stream(&f.author, "v2", 2, "")?;
     assert!(project(&f.human, &two, "v2")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 34);
     let retry = stream(&f.author, "future-35", 35, "x")?;
@@ -234,13 +234,17 @@ fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResult {
     first.author_principal_id = "human".into();
     first = f.human.sign_surface_carrier(first)?;
     assert!(project(&f.human, &first, "other-create")?.accepted);
-    let mut third = stream(&f.human, "other-v3", 3, "three")?;
-    third.author_principal_id = "human".into();
-    third = f.human.sign_surface_carrier(third)?;
-    assert!(project(&f.human, &third, "other-v3")?.queued);
     let mut second = stream(&f.human, "other-v2", 2, "two")?;
     second.author_principal_id = "human".into();
+    let wire = ramflux_protocol::decode_base64url(&second.wire_base64)?;
+    attach_reference_hash(&f.human, &mut second, &wire)?;
     second = f.human.sign_surface_carrier(second)?;
+    let mut third = stream(&f.human, "other-v3", 3, "three")?;
+    third.author_principal_id = "human".into();
+    let wire = ramflux_protocol::decode_base64url(&third.wire_base64)?;
+    attach_reference_hash(&f.human, &mut third, &wire)?;
+    third = f.human.sign_surface_carrier(third)?;
+    assert!(project(&f.human, &third, "other-v3")?.queued);
     assert!(project(&f.human, &second, "other-v2")?.accepted);
     let reference = first.surface_reference()?;
     let view = f.human.surface_get_ref(&reference, 0, None)?;

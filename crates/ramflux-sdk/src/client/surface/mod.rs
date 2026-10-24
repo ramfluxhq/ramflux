@@ -22,6 +22,7 @@ mod pending;
 mod persist;
 mod projection;
 mod read;
+mod resync_request;
 mod scope;
 mod snapshot;
 pub(crate) use carrier::{Carrier, Payload, PayloadKind, command_id, invalid};

@@ -21,6 +21,12 @@ pub(crate) async fn dispatch_surface(
     _connection: &LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let id = request_account_id(request)?;
+    if request.method == "surface.request_resync" {
+        let reference = required(&request.body, "surface_ref")?;
+        return request_resync(local_bus_account_mut(state, id)?, reference)
+            .await
+            .map(local_bus_ok);
+    }
     if request.method == "surface.resync" {
         let reference = required(&request.body, "surface_ref")?;
         let message = request.body["message_id"]
@@ -187,4 +193,51 @@ fn prepare_carrier(
     }
     client.attach_surface_snapshot(&mut carrier)?;
     client.sign_surface_carrier(carrier)
+}
+
+pub(super) async fn request_resync(
+    account: &mut LocalBusAccountState,
+    reference: &str,
+) -> Result<Value, SdkError> {
+    let Some(request) = account.client.prepare_surface_resync_request(reference)? else {
+        return Ok(json!({"rate_limited":true,"retry_after_seconds":60}));
+    };
+    let root = if account
+        .client
+        .device_branch
+        .as_ref()
+        .is_some_and(|local| local.principal_id == request.author)
+    {
+        account.client.surface_local_root_commitment()?
+    } else {
+        account
+            .client
+            .account_db()?
+            .client_record("identity", &request.author)?
+            .and_then(|identity| {
+                identity["contact_identity_commitment"].as_str().map(str::to_owned)
+            })
+            .ok_or_else(|| invalid("surface author root is unknown"))?
+    };
+    let mut engine = account.take_live_engine().await?;
+    let result=async {
+        let manifest=account.client.cache_verified_device_manifest(&engine.config,&root,"surface_resync_author").await?;
+        if manifest.principal_id!=request.author || manifest.devices.is_empty() {return Err(invalid("surface resync author manifest mismatch"));}
+        let body=serde_json::to_vec(&request)?;
+        let mut failure=None;
+        let mut submitted=0;
+        for device in manifest.devices {
+            if request.author==engine.config.principal_id && device.device_id==engine.config.device_id {continue;}
+            let request:LocalBusMessageSubmitRequest=serde_json::from_value(json!({"conversation_id":request.conversation_id,"message_id":crate::new_surface_message_id()?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":engine.config.principal_id,"sender_id":engine.config.device_id,"recipient_device_id":device.device_id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":600}))?;
+            let message=request.into_gateway_message_with_body(Vec::new());
+            match account.client.send_plaintext_direct_message_without_franking(&mut engine,message,&body,crate::client::routed::Route::control()).await {
+                Ok(_)=>submitted+=1,
+                Err(error)=>{failure.get_or_insert(error);}
+            }
+        }
+        if submitted==0 && let Some(error)=failure {return Err(error);}
+        Ok(json!({"submitted_devices":submitted,"rate_limited":false,"retry_after_seconds":60}))
+    }.await;
+    account.put_engine(engine);
+    result
 }
