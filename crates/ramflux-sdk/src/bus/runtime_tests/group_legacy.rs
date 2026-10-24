@@ -502,3 +502,51 @@ async fn a_verified_pin_arrival_repairs_legacy_delivery_after_its_network_retry_
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn a_legacy_failure_without_a_retry_slot_cannot_reenter_as_a_fresh_delivery() -> Result<(), SdkError>
+{
+    let (root, sender, receiver, good) = legacy_group_fixture_with_pin(false)?;
+    let db = receiver.client.account_db()?;
+    let now = now_unix_timestamp();
+    for index in 0..64 {
+        let key = format!("occupied-{index}");
+        assert!(db.set_verified_inbox_failure_policy(
+            &key,
+            b"{}",
+            ramflux_storage::InboxFailurePolicy {
+                verified_source: Some(&key),
+                trusted: true,
+                dependency: ("none", ""),
+                at: now,
+            }
+        )?);
+        assert_eq!(db.defer_inbox_entry(&key, b"{}", now)?, 1);
+    }
+    let pending = receiver.client.append_group_gateway_delivery_for_recipient(
+        "thread",
+        "g",
+        "valid",
+        &good,
+        "device-bob",
+    );
+    assert!(matches!(
+        receiver.client.isolate_legacy_group_delivery(&good, pending)?,
+        LegacyGroupDelivery::Held
+    ));
+    let key = legacy_key(&good)?;
+    assert!(!db.has_inbox_retry(&key)?);
+    for _ in 0..4 {
+        assert!(!receiver.client.legacy_group_retry_ready(&good)?);
+    }
+    assert!(!db.has_inbox_retry(&key)?);
+    db.remove_inbox_retry("occupied-0")?;
+    assert!(receiver.client.legacy_group_retry_ready(&good)?);
+    assert!(db.has_inbox_retry(&key)?);
+    assert!(!receiver.client.legacy_group_retry_ready(&good)?);
+    assert!(!db.journal_after(0, 64)?.iter().any(|event| event.topic == "message.undeliverable"));
+    drop(sender);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -58,7 +58,9 @@ impl RamfluxClient {
             &serde_json::to_vec(entry)?,
             now,
         )?;
-        if admitted && db.inbox_retry_ready(&key, now)? {
+        let scheduled = retrying
+            || (admitted && db.defer_inbox_entry(&key, &serde_json::to_vec(entry)?, now)? != 0);
+        if admitted && scheduled && (!retrying || db.inbox_retry_ready(&key, now)?) {
             return Ok(true);
         }
         Ok(db.legacy_inbox_lookup_recoverable(&key)? && self.cached_legacy_group_ready(entry)?)
@@ -125,6 +127,14 @@ impl RamfluxClient {
                 let admitted = super::inbox_failure::set_failure_policy(
                     self, local, entry, &key, &bytes, now,
                 )?;
+                let mut blocked = !admitted;
+                if admitted
+                    && db.inbox_retry_ready(&key, now)?
+                    && db.defer_inbox_entry(&key, &bytes, now)? == 0
+                {
+                    db.park_legacy_inbox_retry(&key)?;
+                    blocked = true;
+                }
                 db.record_legacy_inbox_failure(
                     &key,
                     matches!(
@@ -134,14 +144,8 @@ impl RamfluxClient {
                             | SdkError::Transport(_)
                             | SdkError::LocalBus(_)
                     ),
-                    !admitted,
+                    blocked,
                 )?;
-                if admitted
-                    && db.inbox_retry_ready(&key, now)?
-                    && db.defer_inbox_entry(&key, &bytes, now)? == 0
-                {
-                    db.park_legacy_inbox_retry(&key)?;
-                }
                 Ok(LegacyGroupDelivery::Held)
             }
         }
