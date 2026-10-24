@@ -909,7 +909,6 @@ mod metadata;
 mod restore;
 mod stream;
 
-mod group_legacy;
 #[tokio::test]
 async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), SdkError> {
     let root = root("surface-outbound-isolation");
@@ -930,3 +929,4 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
     Ok(())
 }
 mod contact_state;
+mod group_legacy;

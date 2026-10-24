@@ -584,7 +584,7 @@ mod r9;
 #[path = "legacy_group_auth_tests.rs"]
 mod legacy_group_auth;
 
-#[path = "legacy_admission_tests.rs"]
-mod legacy_admission;
 #[path = "contact_resolution_tests.rs"]
 mod contact_resolution;
+#[path = "legacy_admission_tests.rs"]
+mod legacy_admission;
