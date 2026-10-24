@@ -129,6 +129,10 @@ impl<E: EngineProvider> AgentHost<E> {
         self.state.cursor = Some(seq);
         self.store.save(&self.state)
     }
+    fn is_own_message(&self, message: &serde_json::Value) -> bool {
+        message["sender_id"] == self.state.device_id
+            || message["sender_id"] == self.state.principal_id
+    }
     async fn message(
         &mut self,
         bus: &mut impl AgentBus,
@@ -139,7 +143,7 @@ impl<E: EngineProvider> AgentHost<E> {
         let metadata = &event.body["message"];
         let conversation_id = participant::field(metadata, "conversation_id")?;
         let message_id = participant::field(metadata, "message_id")?;
-        if metadata["sender_id"] == self.state.device_id || metadata["deleted"] == true {
+        if self.is_own_message(metadata) || metadata["deleted"] == true {
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
@@ -171,7 +175,7 @@ impl<E: EngineProvider> AgentHost<E> {
         else {
             return Ok(());
         };
-        if message["deleted"] == true || message["sender_id"] == self.state.device_id {
+        if message["deleted"] == true || self.is_own_message(message) {
             return Ok(());
         }
         let Some(text) =

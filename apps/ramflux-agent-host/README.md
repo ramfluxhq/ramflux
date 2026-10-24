@@ -12,7 +12,9 @@ normal rfd flows. The host verifies both persisted `client_mode` and self identi
 kind before acting. Persisted local-device authorization is checked independently of
 the display device list, which always includes the active device. Conversation
 membership and device authorization are checked again
-before every output. Surface output uses `surface.send`, the author `surface.resync` RPC and typed protocol
+before every output. Direct-message replies resolve the projected sender principal
+inside that conversation and choose a current device from that principal's directory
+entry; device display names cannot select a different principal. Surface output uses `surface.send`, the author `surface.resync` RPC and typed protocol
 builders; the host sends no task/tool/approval operations.
 
 Copy `example.json` and set the socket, account and durable state paths. Create the

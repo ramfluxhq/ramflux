@@ -103,7 +103,7 @@ impl Fake {
                 json!({"head_seq":10,"floor_seq":1,"subscribed":true})
             }
             "message.read" => {
-                json!({"messages":[{"conversation_id":body["conversation_id"],"message_id":"ping","sender_id":if self.faults.contains(&Fault::SelfSender){"agent-device"}else{"human-device"},"body_utf8":"@agent ping","created_at":1000,"deleted":false}]})
+                json!({"messages":[{"conversation_id":body["conversation_id"],"message_id":"ping","sender_id":if self.faults.contains(&Fault::SelfSender){"agent-principal"}else{"human-principal"},"body_utf8":"@agent ping","created_at":1000,"deleted":false}]})
             }
             "message.submit" | "group.send" => {
                 let id = operation.ok_or(Error::Bus)?;

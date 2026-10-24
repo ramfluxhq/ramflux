@@ -142,19 +142,27 @@ pub(crate) async fn reply_body(
     } else {
         let sender = field(message, "sender_id")?;
         let peers = directory(bus, "identity.directory", "identities", 1024).await?;
-        let peer = peers
-            .iter()
-            .find(|peer| contains(&peer["devices"], "device_id", sender))
-            .ok_or(Error::Unauthorized)?;
+        let peer =
+            peers.iter().find(|peer| peer["principal_id"] == sender).ok_or(Error::Unauthorized)?;
         let principal = field(peer, "principal_id")?;
         if principal == state.principal_id || !array_has(&conversation["participants"], principal) {
             return Err(Error::Unauthorized);
         }
         let device = peer["devices"]
             .as_array()
-            .and_then(|v| v.iter().find(|v| v["device_id"] == sender))
+            .and_then(|devices| {
+                devices
+                    .iter()
+                    .filter(|device| {
+                        device["revoked"] != true
+                            && device["status"] != "revoked"
+                            && device["device_id"].as_str().is_some()
+                            && device["target_delivery_id"].as_str().is_some()
+                    })
+                    .min_by_key(|device| device["device_id"].as_str())
+            })
             .ok_or(Error::Unauthorized)?;
-        body["recipient_device_id"] = json!(sender);
+        body["recipient_device_id"] = json!(field(device, "device_id")?);
         body["recipient_principal_commitment"] = json!(field(peer, "contact_identity_commitment")?);
         body["target_delivery_id"] = json!(field(device, "target_delivery_id")?);
         body["source_principal_id"] = json!(state.principal_id);

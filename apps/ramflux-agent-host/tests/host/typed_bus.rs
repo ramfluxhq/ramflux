@@ -27,6 +27,8 @@ async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_di
             response.ok = Some(false);
             response.body = json!(null);
             response.error = Some(LocalBusErrorBody {
+                details: None,
+                reason_code: Some("stale_version".into()),
                 code: code.into(),
                 message: "secret diagnostic contains stale_version and not_author".into(),
                 retry_after_ms: None,
