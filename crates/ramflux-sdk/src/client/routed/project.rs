@@ -65,6 +65,14 @@ impl RamfluxClient {
             body,
             false,
         )?;
+        if surface.as_ref().is_some_and(|result| result.accepted)
+            && self
+                .device_branch
+                .as_ref()
+                .is_some_and(|local| local.principal_id != entry.envelope.source_principal_id)
+        {
+            self.mark_own_history_changed()?;
+        }
         let display = surface.as_ref().map_or(body, |result| result.fallback_text.as_bytes());
         self.append_plaintext_projection_once(
             &route.conversation_id,
@@ -163,6 +171,14 @@ impl RamfluxClient {
                 &plaintext,
                 false,
             )?;
+            if surface.as_ref().is_some_and(|result| result.accepted)
+                && self
+                    .device_branch
+                    .as_ref()
+                    .is_some_and(|local| local.principal_id != entry.envelope.source_principal_id)
+            {
+                self.mark_own_history_changed()?;
+            }
             let is_surface = surface.is_some();
             let display = surface.map_or(plaintext, |result| result.fallback_text.into_bytes());
             if is_surface {

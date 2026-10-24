@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Authenticated routing dispatch and commit-before-cursor receive processing.
+use super::committed::Committed;
 use super::{
     GatewayInboxEntry, GatewayPlaintextDelivery, GatewaySessionEngine, Kind, MessageMetadata,
     Opened, RamfluxClient, Routing, SdkError, SdkGroupSenderKeyDistribution,
@@ -29,6 +30,56 @@ struct Commit<'a> {
 }
 
 impl RamfluxClient {
+    fn prepare_routed_surface_projection(
+        &self,
+        opened: &mut Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        // Only an authenticated carrier may select the reserved logical surface projection.
+        // The pair packet and transport receipt retain their per-envelope identities.
+        if opened.routing.kind == Kind::Direct
+            && let Ok(Some(carrier)) = crate::client::surface::Carrier::decode(body)
+            && carrier.conversation_id == opened.routing.conversation_id
+            && self
+                .verify_surface_carrier(
+                    &carrier,
+                    &entry.envelope.source_principal_id,
+                    &entry.envelope.source_device_id,
+                )
+                .is_ok()
+        {
+            opened.routing.message_id = Self::surface_timeline_id(&carrier)?;
+        }
+        Ok(())
+    }
+    async fn import_routed_own_history(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        entry: &GatewayInboxEntry,
+        opened: &Opened,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        if opened.routing.kind == Kind::Control
+            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(body)
+            && value["schema"] == "ramflux.sdk.own_device_sync.v1"
+        {
+            let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
+                ramflux_protocol::parse_i_json(body)?;
+            if sync.source_device_id != entry.envelope.source_device_id
+                || sync.target_device_id != opened.local_device
+            {
+                return Err(invalid("own-device history transport scope mismatch"));
+            }
+            let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+            let expected = crate::identity_root_public_key_commitment(
+                &ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()),
+            )?;
+            self.import_own_device_sync(engine, pool, &expected, &sync, None).await?;
+        }
+        Ok(())
+    }
     pub(crate) async fn apply_routed_entry(
         &mut self,
         engine: &mut GatewaySessionEngine,
@@ -38,9 +89,7 @@ impl RamfluxClient {
     ) -> Result<Delivery, SdkError> {
         self.ensure_inbound_device(&engine.config, entry).await?;
         let commit = super::committed_key(entry)?;
-        if let Some(receipt) =
-            self.account_db()?.load_actor_state::<super::committed::Committed>(&commit)?
-        {
+        if let Some(receipt) = self.account_db()?.load_actor_state::<Committed>(&commit)? {
             if receipt.entry.envelope.payload_hash != entry.envelope.payload_hash {
                 return Err(invalid("envelope id reused with a different authenticated payload"));
             }
@@ -58,6 +107,7 @@ impl RamfluxClient {
         } else {
             (opened.body.clone(), Vec::new())
         };
+        self.prepare_routed_surface_projection(&mut opened, entry, &body)?;
         let envelope = decode(&entry.envelope)?;
         let aad = associated_data(
             &entry.envelope.envelope_id,
@@ -65,6 +115,7 @@ impl RamfluxClient {
             &opened.local_device,
             &opened.bundle_hash,
         )?;
+        self.import_routed_own_history(engine, pool, entry, &opened, &body).await?;
         let metadata = if opened.routing.kind == Kind::Direct {
             franking_report_metadata_for_delivery(
                 &opened.routing.conversation_id,
@@ -343,10 +394,7 @@ impl RamfluxClient {
             self.append_gateway_delivery(entry)?;
             self.account_db()?.persist_actor_state(
                 receipt,
-                &super::committed::Committed {
-                    routing: opened.routing.clone(),
-                    entry: entry.clone(),
-                },
+                &Committed { routing: opened.routing.clone(), entry: entry.clone() },
             )?;
             Ok(plaintext)
         })

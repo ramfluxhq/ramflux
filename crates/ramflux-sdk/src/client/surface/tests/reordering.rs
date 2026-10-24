@@ -125,7 +125,7 @@ fn bounded_queue_reports_backpressure_and_rejected_gap_can_be_retried() -> TestR
 }
 
 #[test]
-fn expired_gap_is_visible_then_recovers_from_the_next_author_snapshot() -> TestResult {
+fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> TestResult {
     let f = Fixture::new()?;
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "one")?;
@@ -147,7 +147,9 @@ fn expired_gap_is_visible_then_recovers_from_the_next_author_snapshot() -> TestR
     four = f.author.sign_surface_carrier(four)?;
     assert!(four.snapshot.is_some());
     assert!(project(&f.author, &four, "v4")?.accepted);
-    assert!(project(&f.human, &four, "v4")?.accepted);
+    let reference = four.surface_reference()?;
+    let resync = f.author.prepare_surface_resync(&reference, "resync-v4")?;
+    assert!(project(&f.human, &resync, "resync-v4")?.accepted);
     let recovered = f.human.surface_get("s", 0, None)?;
     assert_eq!(recovered["version"], 4);
     assert_eq!(recovered["out_of_sync"], false);
@@ -249,7 +251,7 @@ fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResult {
 }
 
 #[test]
-fn latest_signed_snapshot_fills_a_gap_without_waiting_for_holdback_expiry() -> TestResult {
+fn explicit_signed_resync_fills_a_gap_without_waiting_for_holdback_expiry() -> TestResult {
     let f = Fixture::new()?;
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "one")?;
@@ -258,7 +260,9 @@ fn latest_signed_snapshot_fills_a_gap_without_waiting_for_holdback_expiry() -> T
     f.author.attach_surface_snapshot(&mut three)?;
     three = f.author.sign_surface_carrier(three)?;
     assert!(project(&f.author, &three, "three-author")?.accepted);
-    assert!(project(&f.human, &three, "three-human")?.accepted);
+    assert!(project(&f.human, &three, "three-human")?.queued);
+    let resync = f.author.prepare_surface_resync(&three.surface_reference()?, "resync-v3")?;
+    assert!(project(&f.human, &resync, "resync-v3")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 3);
     assert_eq!(
         f.human.surface_get("s", 0, None)?["surface_hash"],

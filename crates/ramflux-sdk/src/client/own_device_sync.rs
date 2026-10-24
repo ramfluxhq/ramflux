@@ -34,8 +34,12 @@ impl RamfluxClient {
         if source_device.principal_commitment != target_device.principal_commitment {
             return Err(SdkError::LocalBus("own-device sync principal mismatch".to_owned()));
         }
-        let snapshot_id =
-            format!("own-sync:{}:{}:{}", source_device_id, target_device_id, now_unix_timestamp());
+        let snapshot_id = format!(
+            "own-sync:{}:{}:{}",
+            source_device_id,
+            target_device_id,
+            crate::new_surface_message_id()?
+        );
         let bundle = self.own_device_history_bundle(
             principal_commitment,
             &source_device_id,
@@ -145,18 +149,64 @@ impl RamfluxClient {
             envelope,
         )
         .await?;
-        let import = self
-            .import_dm_attachment_from_relay_via_gateway(
-                engine,
-                pool,
-                &envelope.history_ref,
-                relay_service_key_base64,
-            )
-            .await?;
-        let plaintext = ramflux_protocol::decode_base64url(&import.plaintext_base64)
-            .map_err(|error| SdkError::LocalBus(format!("invalid sync bundle body: {error}")))?;
+        let receipt = Self::own_sync_receipt_key(envelope)?;
+        if let Some(result) =
+            self.account_db()?.load_actor_state::<SdkOwnDeviceSyncImportResponse>(&receipt)?
+        {
+            return Ok(result);
+        }
+        let cached = self
+            .object_store_object(&envelope.history_ref.object_id)?
+            .is_some_and(|object| object.manifest_hash == envelope.history_ref.manifest_hash);
+        let plaintext = if cached {
+            self.decrypt_object(&envelope.history_ref.object_id)?
+        } else {
+            let import = self
+                .import_dm_attachment_from_relay_via_gateway(
+                    engine,
+                    pool,
+                    &envelope.history_ref,
+                    relay_service_key_base64,
+                )
+                .await?;
+            ramflux_protocol::decode_base64url(&import.plaintext_base64).map_err(|_| {
+                SdkError::InboundRejected("invalid own-device history encoding".into())
+            })?
+        };
+        let plaintext = zeroize::Zeroizing::new(plaintext);
         let bundle: SdkOwnDeviceHistoryBundle = serde_json::from_slice(&plaintext)?;
-        self.import_own_device_history_bundle(envelope, &bundle)
+        self.account_db()?.write_transaction(|| {
+            let result = self.import_own_device_history_bundle(envelope, &bundle)?;
+            self.account_db()?.persist_actor_state(&receipt, &result)?;
+            self.account_db()?.prune_surface_records(
+                "own-device/imported/",
+                512,
+                256 * 1024,
+                &receipt,
+            )?;
+            Ok(result)
+        })
+    }
+    pub(crate) fn own_sync_receipt_key(
+        envelope: &SdkOwnDeviceSyncEnvelope,
+    ) -> Result<String, SdkError> {
+        Ok(format!(
+            "own-device/imported/{}",
+            ramflux_protocol::hash_base64url(
+                "ramflux.own_device.import_receipt.v1",
+                &ramflux_protocol::canonical_json_bytes(envelope)?
+            )
+        ))
+    }
+    pub(crate) fn mark_own_history_changed(&self) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let revision = db
+            .load_actor_state::<u64>("own-device/history_revision")?
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| SdkError::LocalBus("own-device history revision exhausted".into()))?;
+        db.persist_actor_state("own-device/history_revision", &revision)?;
+        Ok(())
     }
 
     fn own_device_history_bundle(

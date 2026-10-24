@@ -19,6 +19,18 @@ impl RamfluxClient {
         )? {
             return Ok(None);
         }
+        let value: Value = serde_json::from_slice(body)?;
+        if value["schema"] == "ramflux.sdk.own_device_sync.v1" {
+            let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
+                ramflux_protocol::parse_i_json(body)?;
+            if sync.source_device_id != entry.envelope.source_device_id
+                || sync.target_device_id != opened.local_device
+                || !self.account_db()?.actor_state_exists(&Self::own_sync_receipt_key(&sync)?)?
+            {
+                return Err(invalid("own-device history has not been authenticated and imported"));
+            }
+            return Ok(None);
+        }
         if let Ok(mut event) = serde_json::from_slice::<A2iControlEvent>(body) {
             if event.source_device_id != opened.remote_device
                 || event.target_device_id != opened.local_device

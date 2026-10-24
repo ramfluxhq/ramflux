@@ -39,7 +39,7 @@ impl Fixture {
         let human = client(&root.join("human"), "human", 35)?;
         for (local, remote) in [(&author, &human), (&human, &author)] {
             let device = remote.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            local.account_db()?.persist_client_record("device",&device.device_id,&json!({"principal_id":device.principal_id,"signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())}))?;
+            local.account_db()?.persist_client_record("device",&device.device_id,&json!({"principal_id":device.principal_id,"principal_commitment":remote.surface_local_root_commitment()?,"signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())}))?;
             local.account_db()?.persist_client_record(
                 "conversation",
                 "thread",

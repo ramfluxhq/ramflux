@@ -84,7 +84,9 @@ impl RamfluxClient {
                 .and_then(|history| {
                     serde_json::from_value::<Carrier>(history["carrier"].clone()).ok()
                 })
-                .filter(|carrier| carrier.snapshot.is_some())
+                .filter(|carrier| {
+                    carrier.snapshot.as_ref().is_some_and(super::snapshot::SnapshotProof::is_full)
+                })
                 .and_then(|carrier| {
                     self.surface_control_packet(&carrier, ControlKind::Own, checkpoint.group_epoch)
                         .ok()
@@ -349,8 +351,8 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn thousands_of_controls_trim_with_a_single_retained_suffix() -> Result<(), SdkError> {
-        let controls = (0..4000)
+    fn two_thousand_and_one_controls_trim_with_a_single_retained_suffix() -> Result<(), SdkError> {
+        let controls = (0..2001)
             .map(|index| SurfaceControl {
                 kind: ControlKind::Own,
                 carrier_base64: format!("{index:04}{}", "x".repeat(1996)),
@@ -362,13 +364,14 @@ mod tests {
         let mut page = SurfaceHistoryExport { controls, ..SurfaceHistoryExport::default() };
         let budget = serde_json::to_vec(&page)?.len() / 2;
         fit_export(&mut page, budget)?;
-        assert!(page.controls.len() > 1900 && page.controls.len() < 2100);
+        assert!(page.controls.len() > 990 && page.controls.len() < 1010);
         assert!(
-            page.controls.first().is_some_and(|control| control.carrier_base64.starts_with("200"))
+            page.controls.first().is_some_and(|control| control.carrier_base64.starts_with("100"))
         );
         assert_eq!(
-            page.metadata.skipped["serialized_history_byte_budget"] as usize,
-            4000 - page.controls.len()
+            usize::try_from(page.metadata.skipped["serialized_history_byte_budget"])
+                .map_err(|_| invalid("skip count"))?,
+            2001 - page.controls.len()
         );
         assert!(serde_json::to_vec(&page)?.len() <= budget);
         Ok(())

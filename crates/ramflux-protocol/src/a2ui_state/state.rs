@@ -297,6 +297,9 @@ fn append_text(
         return Err(SurfaceReject::BlockNotStreamable);
     };
     // Bound allocation before appending; scalar count is checked below.
+    if text.len().saturating_add(append.text_delta.len()) > super::MAX_SURFACE_DATA_BYTES {
+        return Err(limits::exceeded(SurfaceLimit::DataBytes));
+    }
     if text.chars().count() + append.text_delta.chars().count() > MAX_SURFACE_TEXT_CHARS {
         return Err(limits::exceeded(SurfaceLimit::TextCharacters));
     }

@@ -72,7 +72,15 @@ impl Carrier {
         if self.payload_kind == PayloadKind::Action && self.snapshot.is_some() {
             return Err(invalid("actions cannot carry state attestations"));
         }
-        if let (Some(proof), Payload::Event(event)) = (&self.snapshot, &payload) {
+        if let (Some(proof), Payload::Event(event)) = (&self.snapshot, &payload)
+            && proof.is_full()
+        {
+            if !matches!(
+                event.command(),
+                ramflux_protocol::A2uiConversationCommand::CreateSurface(_)
+            ) {
+                return Err(invalid("delta events cannot include a full snapshot"));
+            }
             proof.restore(self, &ramflux_protocol::SurfaceState::default(), event.version())?;
         }
         let (conversation, surface) = match &payload {

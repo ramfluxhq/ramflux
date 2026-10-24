@@ -340,7 +340,7 @@ fn result_patch_updates_fallback_and_binds_it_into_the_snapshot_hash() {
         (" ".into(), SurfaceReject::MissingFallback),
         (
             "x".repeat(MAX_SURFACE_TEXT_CHARS + 1),
-            SurfaceReject::LimitExceeded { limit: SurfaceLimit::TextCharacters },
+            SurfaceReject::LimitExceeded { limit: SurfaceLimit::DataBytes },
         ),
         (
             "𐀀".repeat(MAX_SURFACE_TEXT_CHARS),

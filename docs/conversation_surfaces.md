@@ -22,7 +22,10 @@ distribution, gateway submission and message journaling as text. Transport failu
 returns an error. The caller owns durable retry, as for text; the agent host
 persists requests and a desktop can display a failed send with retry. A completed
 identical request returns `replayed: true` without executing an action twice.
-The retained authored carrier preserves its original signed snapshot proof.
+The retained authored carrier preserves its original signed event and result hash.
+A failed send retains the quoted fallback in one logical timeline row and exposes
+`delivery_state: "failed"` on the surface view. Per-device ciphertexts share that
+logical ID; retrying does not add another timeline row.
 Changing bytes under an existing ID is rejected.
 
 `surface.get` accepts `surface_ref`, or `surface_id` with optional
@@ -42,7 +45,9 @@ notifications never contain snapshots, fallback text or action arguments.
 ## All-terminal delivery and action decisions
 
 DM events fan out to every active verified peer device. The author's own
-siblings recover through authenticated own-device history sync, as for text. Group publications use the same sender-key ciphertext, distribution
+siblings receive live authenticated own-device history sync copies. The account
+sync driver retries a pending history revision; this uses the existing encrypted
+history object/export/import protocol, with no per-surface transport queue. Group publications use the same sender-key ciphertext, distribution
 controls and verified member routes as group text. Physical delivery wraps that
 ciphertext for each member; it does not encrypt separate peer surface controls.
 Group actions use the same group adapter restricted to the author's member
@@ -84,7 +89,7 @@ automatic handoff in this version.
 
 There is no surface-specific outbox, coalescing queue or delivery scheduler.
 Delivery guarantees match text. A behind recipient is marked `out_of_sync` and
-recovers from the next signed full snapshot, preserving finality checks.
+recovers through an explicit signed full-state resync, preserving finality checks.
 
 The carrier admission cap is `(MAX_GATEWAY_FRAME_BYTES - 64 KiB) / 32`, currently
 30 KiB, using the shared 1 MiB transport frame limit. The conservative 32x bound
@@ -109,16 +114,20 @@ holdback is capped at 32 entries / 1 MiB per surface, 64 entries / 4 MiB per aut
 and 64 versions of lookahead. TTL is 600 seconds, capped by original envelope
 expiry. Aggregate storage scales with the number of authorized authors; expiry
 sweeps inspect at most 65 rows per tick with a persisted cursor. Future events do not receive permanent rejection receipts. Expiry or
-backpressure marks `out_of_sync`; the next author-signed full snapshot can recover
-it while preserving known stream-finality commitments. Until that snapshot arrives,
-the last valid snapshot remains visible. There is no active resync request.
+backpressure marks `out_of_sync`; an author-signed explicit resync can recover
+it while preserving known stream-finality commitments. Until that resync arrives,
+the last valid snapshot remains visible. The author calls `surface.resync` with
+`surface_ref` and an optional durable `message_id`, or `rf surface resync`.
 
-Every normal authored event includes a signed full-state proof, including the
-bounded checkpoint and original create-shaped snapshot bytes. This is distinct
-from a patch: the original patch still enters through `from_wire_bytes`. Snapshot
-recovery rejects rollback, same-version conflicts, reopening closed state, executor
-changes, and changes to known finalized stream blocks. Private finality tombstones
-use domain-separated BLAKE3 commitments; checkpoint decoding is capped at 256 KiB.
+Normal authored patches, stream appends and closes contain the original delta
+plus the resulting snapshot hash. They carry no full snapshot or checkpoint.
+Full state travels in creates and explicit resyncs; resync carries one create-shaped
+wire payload and compact content-free finality metadata. The canonical snapshot
+cap and per-block stream accumulation cap are 16,384 bytes. JCS and domain-separated
+BLAKE3 hashing remain unchanged. Resync rejects rollback, same-version conflicts,
+reopening closed state, executor changes, and changes to known finalized blocks.
+Private finality tombstones use BLAKE3 commitments; local checkpoint decoding is
+capped at 256 KiB.
 
 A history retains at most 256 events / 4 MiB per surface, evicting oldest versions.
 Holdback adds at most 1 MiB to that history budget. Actions retain at most 128 rows /
@@ -154,3 +163,8 @@ Fallback fields retain printable Unicode, including ideographic/nonbreaking spac
 variation selectors and ordinary combining marks. Leading combining marks are escaped.
 Hangul fillers, private-use and unassigned code points, controls, format characters,
 line separators, quotes and backslashes are escaped by the shared protocol renderer.
+
+The DM lifetime remains 600 seconds. JSON byte-array ciphertext expansion is a
+shared transport framing limitation; changing that versioned envelope is separate
+from the surface delivery change. History trimming measures each item once and
+accounts incrementally for framing and omission metadata.

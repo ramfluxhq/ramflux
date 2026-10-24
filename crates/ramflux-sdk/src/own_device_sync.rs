@@ -111,7 +111,7 @@ pub(crate) struct SdkOwnDeviceSyncExportResponse {
     pub(crate) envelope: SdkOwnDeviceSyncEnvelope,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SdkOwnDeviceSyncImportResponse {
     pub(crate) snapshot_id: String,
     pub(crate) imported_messages: usize,

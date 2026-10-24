@@ -11,20 +11,35 @@ type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
 pub(super) struct RecordingGateway {
     last: Option<GatewayClientFrame>,
+    pub fail_after: Option<usize>,
+    pub frame_lengths: Arc<Mutex<Vec<usize>>>,
     pub delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
 }
 impl RecordingGateway {
     pub fn new(delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>) -> Self {
-        Self { last: None, delivered }
+        Self { last: None, fail_after: None, frame_lengths: Arc::default(), delivered }
     }
 }
 impl GatewaySessionFrameSink for RecordingGateway {
     fn send_frame<'a>(&'a mut self, bytes: &'a [u8]) -> FrameFuture<'a, ()> {
         Box::pin(async move {
             assert!(
-                bytes.len() < ramflux_transport::MAX_GATEWAY_FRAME_BYTES,
+                bytes.len() + 64 * 1024 < ramflux_transport::MAX_GATEWAY_FRAME_BYTES,
                 "actual encoded gateway frame exceeds transport limit"
             );
+            if self.fail_after.is_some_and(|limit| {
+                matches!(
+                    serde_json::from_slice::<GatewayClientFrame>(bytes),
+                    Ok(GatewayClientFrame::Submit { .. })
+                ) && self.delivered.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+                    >= limit
+            }) {
+                return Err(TransportError::Quic("injected submit failure".into()));
+            }
+            self.frame_lengths
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(bytes.len());
             self.last = Some(
                 serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?,
             );

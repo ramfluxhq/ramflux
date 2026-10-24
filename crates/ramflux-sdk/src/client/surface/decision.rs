@@ -113,6 +113,7 @@ impl RamfluxClient {
             db.persist_client_record("surface", &reference, &view)?;
         }
         if actionable {
+            self.mark_own_history_changed()?;
             self.retain_surface_receipt(original)?;
         }
         Ok(())

@@ -26,6 +26,9 @@ pub(crate) async fn handle_surface(
             "surface.list",
             json!({"conversation_id":conversation,"limit":limit,"cursor":cursor}),
         ),
+        SurfaceAction::Resync { account, surface_ref, message } => {
+            (account, "surface.resync", json!({"surface_ref":surface_ref,"message_id":message}))
+        }
         action => {
             let (send, method) = match action {
                 SurfaceAction::Send(send) => (send, "surface.send"),

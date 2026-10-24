@@ -114,10 +114,7 @@ impl RamfluxClient {
             &carrier.surface_id,
         )?;
         let state = saved.map_or_else(SurfaceState::default, |(_, state)| state);
-        if carrier.snapshot.is_some()
-            && (self.surface_is_out_of_sync(&carrier.surface_reference()?)?
-                || event.version() > state.version().saturating_add(1))
-        {
+        if carrier.snapshot.as_ref().is_some_and(super::SnapshotProof::is_full) {
             return match self.restore_surface_proof(carrier, &state, event.version()) {
                 Ok(Some(next)) => Ok(Ok(next)),
                 Ok(None) => Ok(Err(Outcome::rejected(json!({"code":"snapshot_required"})))),
@@ -129,15 +126,10 @@ impl RamfluxClient {
         }
         let next = state.apply(event).map_err(|error| Outcome::protocol_rejected(&error));
         if let Ok(next) = &next
-            && carrier.snapshot.is_some()
+            && let Some(proof) = &carrier.snapshot
+            && !proof.matches_hash(next)
         {
-            match self.restore_surface_proof(carrier, &state, event.version()) {
-                Ok(Some(attested)) if &attested == next => {}
-                Err(error @ (SdkError::Storage(_) | SdkError::SurfaceCheckpointMismatch)) => {
-                    return Err(error);
-                }
-                _ => return Ok(Err(Outcome::rejected(json!({"code":"snapshot_rejected"})))),
-            }
+            return Ok(Err(Outcome::rejected(json!({"code":"surface_hash_mismatch"}))));
         }
         Ok(next)
     }
@@ -155,12 +147,8 @@ impl RamfluxClient {
         let db = self.account_db()?;
         match payload {
             Payload::Event(event) => {
-                let previous_version = self
-                    .surface_state_ref(&carrier.surface_reference()?)?
-                    .map_or(0, |(_, s)| s.version());
-                let recovering = carrier.snapshot.is_some()
-                    && (self.surface_is_out_of_sync(&carrier.surface_reference()?)?
-                        || event.version() > previous_version.saturating_add(1));
+                let recovering =
+                    carrier.snapshot.as_ref().is_some_and(super::SnapshotProof::is_full);
                 let state = self
                     .next_surface_event(carrier, &event)?
                     .map_err(|_| invalid("surface changed during writer transaction"))?;

@@ -630,6 +630,10 @@ pub(crate) async fn dispatch_group_send_request(
     } else {
         Some(super::super::group_delivery::resolve(account, &body)?)
     };
+    let group_state = account.client.group_state(&body.group_id)?;
+    if !group_state.members.contains(&body.sender_id) {
+        return Err(StorageError::GroupPermissionDenied.into());
+    }
     let plaintext_body_base64 =
         body.plaintext_body_base64.as_deref().unwrap_or(&body.encrypted_body_base64);
     let plaintext_body = ramflux_protocol::decode_base64url(plaintext_body_base64)
@@ -672,15 +676,43 @@ pub(crate) async fn dispatch_group_send_request(
         account.put_engine(engine);
         checked?;
     }
+    let surface = crate::client::surface::Carrier::decode(&plaintext_body)?;
     let existing = account.client.direct_message_by_id(&body.message_id)?;
-    let encrypted_body = if let Some(existing) = existing {
-        if account.client.account_db()?.message_content(&body.message_id)?.as_deref()
-            != Some(plaintext_body.as_slice())
+    if let Some(carrier) = &surface {
+        if existing.is_some() && account.client.reuse_authored_surface(carrier)?.is_none() {
+            return Err(SdkError::LocalBus("surface message id has no retained payload".into()));
+        }
+        if let Some(previous) = account.client.reuse_authored_surface(carrier)?
+            && previous.bytes()? != plaintext_body
+        {
+            return Err(SdkError::LocalBus("surface logical message id collision".into()));
+        }
+        account.client.retain_authored_surface(carrier)?;
+    }
+    let encrypted_body = if let Some(existing) =
+        existing.filter(|row| !row.encrypted_body.is_empty())
+    {
+        if existing.conversation_id != body.conversation_id || existing.sender_id != body.sender_id
+        {
+            return Err(SdkError::LocalBus("group message scope collision".into()));
+        }
+        if surface.is_none()
+            && account.client.account_db()?.message_content(&body.message_id)?.as_deref()
+                != Some(plaintext_body.as_slice())
         {
             return Err(SdkError::LocalBus(format!(
                 "group message id collision for {}",
                 body.message_id
             )));
+        }
+        let stored: SdkGroupEncryptedEnvelope = serde_json::from_slice(&existing.encrypted_body)?;
+        if stored.group_id != body.group_id
+            || stored.sender_id != body.sender_id
+            || stored.group_key_epoch != group_state.group_epoch
+        {
+            return Err(SdkError::LocalBus(
+                "group epoch changed; retry requires a fresh message id".into(),
+            ));
         }
         existing.encrypted_body
     } else {
@@ -691,13 +723,16 @@ pub(crate) async fn dispatch_group_send_request(
         "conversation_id": body.conversation_id,
         "message_id": body.message_id,
     });
-    let existing_message = account.client.direct_message_by_id(&body.message_id)?;
-    if let Some(existing_message) = existing_message {
-        if existing_message.encrypted_body != encrypted_body {
-            return Err(SdkError::LocalBus(format!(
-                "group message id collision for {}",
-                body.message_id
-            )));
+    if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
+        if existing.encrypted_body.is_empty() {
+            account.client.account_db()?.fill_pending_message_body(
+                &body.conversation_id,
+                &body.message_id,
+                &body.sender_id,
+                &encrypted_body,
+            )?;
+        } else if existing.encrypted_body != encrypted_body {
+            return Err(SdkError::LocalBus("group message id collision".into()));
         }
     } else {
         account.client.send_direct_message(
@@ -707,11 +742,24 @@ pub(crate) async fn dispatch_group_send_request(
             &encrypted_body,
         )?;
     }
-    account.client.account_db()?.store_message_content(
-        &body.conversation_id,
-        &body.message_id,
-        &plaintext_body,
-    )?;
+    if let Some(carrier) = &surface {
+        let outcome = if let Some(outcome) = account.client.surface_delivery_receipt(carrier)? {
+            outcome
+        } else {
+            account.client.preflight_surface(carrier)?
+        };
+        account.client.account_db()?.replace_surface_message_content(
+            &body.conversation_id,
+            &body.message_id,
+            outcome.fallback_text.as_bytes(),
+        )?;
+    } else {
+        account.client.account_db()?.store_message_content(
+            &body.conversation_id,
+            &body.message_id,
+            &plaintext_body,
+        )?;
+    }
     if let (Some(envelope_id), Some(source_principal_id), Some(target_delivery_id)) = (
         body.envelope_id.clone(),
         body.source_principal_id.clone(),
@@ -729,6 +777,14 @@ pub(crate) async fn dispatch_group_send_request(
         if recipient.len() != 1 {
             return Err(SdkError::LocalBus(
                 "group override requires one verified recipient device route".to_owned(),
+            ));
+        }
+        if surface.as_ref().is_some_and(|carrier| {
+            carrier.payload_kind == crate::client::surface::PayloadKind::Action
+                && recipient[0]["principal_id"] != carrier.author_principal_id
+        }) {
+            return Err(SdkError::LocalBus(
+                "surface action override is not an author route".into(),
             ));
         }
         let recipient_device = recipient[0]
