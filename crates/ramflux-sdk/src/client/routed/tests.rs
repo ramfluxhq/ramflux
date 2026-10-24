@@ -340,7 +340,11 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
                 .verifying_key()
                 .to_bytes(),
         );
-        client.account_db()?.persist_group_member_device_key(group, "alice", &key)?;
+        client.account_db()?.persist_group_member_device_key(
+            group,
+            &crate::client::identity_authority::test_support::group_device(client, group, "alice")?,
+            &key,
+        )?;
     }
     let distribution = a.client.export_group_sender_key_distribution(group, "alice")?;
     let wrapper = SdkGroupSenderKeyDistributionEnvelope {
@@ -466,7 +470,15 @@ async fn group_message_before_distribution_keeps_content_retryable() -> Result<(
                 .verifying_key()
                 .to_bytes(),
         );
-        client.account_db()?.persist_group_member_device_key("pending-group", "alice", &key)?;
+        client.account_db()?.persist_group_member_device_key(
+            "pending-group",
+            &crate::client::identity_authority::test_support::group_device(
+                client,
+                "pending-group",
+                "alice",
+            )?,
+            &key,
+        )?;
     }
     let distribution = a.client.export_group_sender_key_distribution("pending-group", "alice")?;
     let inner =

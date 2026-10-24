@@ -69,8 +69,17 @@ fn copied_name_cannot_pin_first_claimer_and_signed_member_root_chooses_bob() -> 
         observer.client.group_device_reference("g", "shared")?,
         ramflux_protocol::qualified_device_id(&b.principal_commitment, "shared")?
     );
-    observer.client.require_group_sender_pin("g", "bob", "shared")?;
-    assert!(observer.client.require_group_sender_pin("g", "mallory", "shared").is_err());
+    observer.client.require_group_sender_pin(
+        "g",
+        "bob",
+        &test_support::group_device(&observer.client, "g", "shared")?,
+    )?;
+    assert!(
+        observer
+            .client
+            .require_group_sender_pin("g", "mallory", &mallory.client.owned_device_identity()?)
+            .is_err()
+    );
     let before = observer.client.group_state("g")?;
     let mut forged = event.clone();
     forged.ext.ext.get_mut(ramflux_protocol::GROUP_DEVICE_ROOTS_EXTENSION).ok_or("roots")?["member_principal_commitment"] =
@@ -120,7 +129,11 @@ fn legacy_join_uses_its_groups_invite_root_and_ambiguous_invites_wait_for_v2() -
         &a.principal_commitment,
     )?;
     observer.client.apply_group_control_event(&legacy_join(&alice, &joined)?)?;
-    observer.client.require_group_sender_pin("g", "bob", "shared")?;
+    observer.client.require_group_sender_pin(
+        "g",
+        "bob",
+        &test_support::group_device(&observer.client, "g", "shared")?,
+    )?;
     // A second group demonstrates that conflicting invite roots never select the last directory row.
     alice.client.create_group("h", "alice")?;
     observer.client.create_group(
@@ -153,6 +166,10 @@ fn legacy_join_uses_its_groups_invite_root_and_ambiguous_invites_wait_for_v2() -
     ));
     assert_eq!(observer.client.group_state("h")?.group_epoch, 1);
     observer.client.apply_group_control_event(&joined)?;
-    observer.client.require_group_sender_pin("h", "bob", "shared")?;
+    observer.client.require_group_sender_pin(
+        "h",
+        "bob",
+        &test_support::group_device(&observer.client, "h", "shared")?,
+    )?;
     Ok(())
 }

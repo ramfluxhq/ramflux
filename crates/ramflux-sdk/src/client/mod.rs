@@ -20,6 +20,7 @@ pub mod group_delivery;
 mod group_identity;
 mod group_key_safety;
 pub(crate) mod group_quarantine;
+mod group_pending;
 pub mod group_session;
 pub mod identity;
 pub(crate) mod inbox_failure;

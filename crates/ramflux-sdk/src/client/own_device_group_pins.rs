@@ -16,7 +16,7 @@ impl RamfluxClient {
             for member in &group.members {
                 if let Some(binding) = self
                     .account_db()?
-                    .group_member_key_binding_by_name(&group.group_id, &member.member_id)?
+                    .group_member_identity_metadata(&group.group_id, &member.member_id)?
                 {
                     pins.push(SdkOwnDeviceGroupMemberPin {
                         group_id: group.group_id.clone(),
@@ -115,7 +115,12 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("invalid member pin".into()));
         }
-        let reference=pin.principal_commitment.as_ref().map(|root|ramflux_protocol::qualified_device_id(root,&pin.device_id)).transpose()?.unwrap_or_else(||pin.device_id.clone());
+        let reference = self.device_identity_for_root(
+            pin.principal_commitment.as_deref().ok_or_else(|| {
+                SdkError::InboundPending("unbound snapshot pin requires member re-add".into())
+            })?,
+            &pin.device_id,
+        )?;
         if let Some(old) = db.group_member_key_binding(&pin.group_id, &reference)?
             && (old.signing_public_key != pin.signing_public_key
                 || old.principal_id.as_ref().is_some_and(|p| Some(p) != pin.principal_id.as_ref())

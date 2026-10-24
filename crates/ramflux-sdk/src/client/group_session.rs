@@ -155,7 +155,13 @@ impl RamfluxClient {
             })?;
         if self
             .account_db()?
-            .group_member_device_key_by_name(&distribution.group_id, &distribution.sender_id)?
+            .group_member_device_key(
+                &distribution.group_id,
+                &self.device_identity(
+                    &self
+                        .group_device_reference(&distribution.group_id, &distribution.sender_id)?,
+                )?,
+            )?
             .as_ref()
             != Some(public_key)
         {
@@ -223,21 +229,19 @@ impl RamfluxClient {
                 self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
                 continue;
             }
-            let entry: GatewayInboxEntry = serde_json::from_slice(&record.envelope_json)?;
-            if let Err(error) = self.require_group_sender_pin(
-                group_id,
-                &entry.envelope.source_principal_id,
-                &entry.envelope.source_device_id,
-            ) {
+            let (entry, encrypted_body) = super::group_pending::decode(&record.envelope_json)?;
+            if let Err(error) = self.authenticated_device_identity(&entry).and_then(|source| {
+                self.require_group_sender_pin(
+                    group_id,
+                    &entry.envelope.source_principal_id,
+                    &source,
+                )
+            }) {
                 if matches!(error, SdkError::InboundPending(_) | SdkError::InboundRejected(_)) {
                     continue;
                 }
                 return Err(error);
             }
-            let encrypted_body =
-                ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload).map_err(
-                    |error| SdkError::LocalBus(format!("invalid pending group payload: {error}")),
-                )?;
             let envelope: SdkGroupEncryptedEnvelope = serde_json::from_slice(&encrypted_body)?;
             if envelope.group_id != group_id || envelope.group_key_epoch != group_key_epoch {
                 continue;

@@ -289,7 +289,7 @@ pub struct GroupMemberKeyBinding {
 #[derive(Clone, Copy, Debug)]
 pub struct RootAuthorizedGroupKeyRotation<'a> {
     pub group_id: &'a str,
-    pub device_id: &'a str,
+    pub device_id: &'a ramflux_crypto::RootQualifiedDeviceRef,
     pub principal_id: &'a str,
     pub principal_commitment: &'a str,
     pub previous_key: &'a str,

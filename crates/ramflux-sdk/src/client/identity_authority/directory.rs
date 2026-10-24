@@ -183,16 +183,14 @@ impl RamfluxClient {
         device: &crate::prekey::SdkDeviceManifestEntry,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let reference = ramflux_protocol::qualified_device_id(
-            &manifest.principal_commitment,
-            &device.device_id,
-        )?;
-        let old = db.client_record("device", &reference)?;
-        for (group, pin) in db.pinned_group_device_keys(&reference)? {
+        let identity = Self::device_identity_from_manifest(manifest, &device.device_id)?;
+        let reference = identity.storage_key();
+        let old = db.client_record("device", reference)?;
+        for (group, pin) in db.pinned_group_device_keys(&identity)? {
             if pin == device.branch_public_key {
                 db.bind_group_member_key_identity(
                     &group,
-                    &reference,
+                    &identity,
                     &manifest.principal_id,
                     &manifest.principal_commitment,
                     &pin,
@@ -200,7 +198,7 @@ impl RamfluxClient {
                 continue;
             }
             let bound = db
-                .group_member_key_binding(&group, &reference)?
+                .group_member_key_binding(&group, &identity)?
                 .ok_or_else(|| invalid("pin absent"))?;
             if bound.principal_id.is_none() {
                 let old = old.as_ref().ok_or_else(|| invalid("legacy pin owner is unverified"))?;
@@ -211,7 +209,7 @@ impl RamfluxClient {
                 }
                 db.bind_group_member_key_identity(
                     &group,
-                    &reference,
+                    &identity,
                     &manifest.principal_id,
                     &manifest.principal_commitment,
                     &pin,
@@ -220,7 +218,7 @@ impl RamfluxClient {
             db.rotate_root_authorized_group_device_key(
                 ramflux_storage::RootAuthorizedGroupKeyRotation {
                     group_id: &group,
-                    device_id: &reference,
+                    device_id: &identity,
                     principal_id: &manifest.principal_id,
                     principal_commitment: &manifest.principal_commitment,
                     previous_key: &pin,

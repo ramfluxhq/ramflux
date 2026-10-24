@@ -81,9 +81,10 @@ impl RamfluxClient {
             return Ok(RootQualifiedDeviceRef::for_owned_account_device(own, device)?);
         }
         let db = self.account_db()?;
-        let record: SignedDeviceSetRecord = db
-            .load_actor_state(&record_key(root))?
-            .ok_or_else(|| invalid("signed device authority unavailable"))?;
+        let record: SignedDeviceSetRecord =
+            db.load_actor_state(&record_key(root))?.ok_or_else(|| {
+                SdkError::InboundPending("signed device authority unavailable".into())
+            })?;
         let public = if let Some(own) = &self.identity_root
             && ramflux_crypto::identity_root_commitment(&own.signing_key.verifying_key()) == root
         {
@@ -91,7 +92,9 @@ impl RamfluxClient {
         } else {
             let manifest: SdkDeviceManifestResponse = db
                 .load_actor_state(&format!("identity/manifest/{}", record.principal_id))?
-                .ok_or_else(|| invalid("verified root manifest unavailable"))?;
+                .ok_or_else(|| {
+                    SdkError::InboundPending("verified root manifest unavailable".into())
+                })?;
             if manifest.principal_commitment != root {
                 return Err(invalid("manifest root mismatch"));
             }
@@ -101,6 +104,18 @@ impl RamfluxClient {
             return Err(invalid("signed authority root mismatch"));
         }
         Ok(RootQualifiedDeviceRef::from_signed_device_set(&public, &record, device)?)
+    }
+    pub(crate) fn device_identity_from_manifest(
+        manifest: &SdkDeviceManifestResponse,
+        name: &str,
+    ) -> Result<RootQualifiedDeviceRef, SdkError> {
+        super::verify_manifest(manifest, &manifest.principal_commitment)?;
+        let public = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
+        Ok(RootQualifiedDeviceRef::from_signed_device_set(
+            &public,
+            manifest.signed_device_set.as_ref().ok_or_else(|| invalid("missing signed set"))?,
+            name,
+        )?)
     }
     pub(crate) fn authenticated_device_identity(
         &self,

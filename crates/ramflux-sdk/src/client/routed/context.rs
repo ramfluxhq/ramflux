@@ -23,7 +23,7 @@ impl RamfluxClient {
         self.require_group_sender_pin(
             group,
             &entry.envelope.source_principal_id,
-            &entry.envelope.source_device_id,
+            &self.authenticated_device_identity(entry)?,
         )?;
         Ok(())
     }

@@ -1335,7 +1335,11 @@ mod tests {
         let first = initial.devices[0].branch_public_key.clone();
         client.account_db()?.persist_group_member_device_key(
             "rotation_group",
-            &reference,
+            &crate::client::identity_authority::test_support::group_device(
+                &client,
+                "rotation_group",
+                &reference,
+            )?,
             &first,
         )?;
         let replacement = manifest_fixture(
@@ -1350,7 +1354,15 @@ mod tests {
         assert!(
             client
                 .account_db()?
-                .persist_group_member_device_key("rotation_group", &reference, &new_key)
+                .persist_group_member_device_key(
+                    "rotation_group",
+                    &crate::client::identity_authority::test_support::group_device(
+                        &client,
+                        "rotation_group",
+                        &reference
+                    )?,
+                    &new_key
+                )
                 .is_err()
         );
         RamfluxClient::verify_device_manifest_json(
@@ -1359,7 +1371,14 @@ mod tests {
         )?;
         assert!(client.persist_identity_directory(&replacement).is_err());
         assert_eq!(
-            client.account_db()?.group_member_device_key("rotation_group", &reference)?,
+            client.account_db()?.group_member_device_key(
+                "rotation_group",
+                &crate::client::identity_authority::test_support::group_device(
+                    &client,
+                    "rotation_group",
+                    &reference
+                )?
+            )?,
             Some(first)
         );
         assert_eq!(
@@ -1400,7 +1419,14 @@ mod tests {
         )?;
         client.account_db()?.persist_group_member_device_key(
             "pinned",
-            &ramflux_protocol::qualified_device_id(&initial.principal_commitment, "victim_device")?,
+            &crate::client::identity_authority::test_support::group_device(
+                &client,
+                "pinned",
+                &ramflux_protocol::qualified_device_id(
+                    &initial.principal_commitment,
+                    "victim_device",
+                )?,
+            )?,
             &initial.devices[0].branch_public_key,
         )?;
         let impostor = manifest_fixture(
@@ -1426,7 +1452,12 @@ mod tests {
             initial.devices[0].branch_public_key
         );
         assert_eq!(
-            client.account_db()?.group_member_device_key("pinned", &victim)?,
+            client.account_db()?.group_member_device_key(
+                "pinned",
+                &crate::client::identity_authority::test_support::group_device(
+                    &client, "pinned", &victim
+                )?
+            )?,
             Some(initial.devices[0].branch_public_key.clone())
         );
         assert!(
@@ -1452,7 +1483,9 @@ mod tests {
         client.create_group("group", &reference)?;
         client.account_db()?.persist_group_member_device_key(
             "group",
-            &reference,
+            &crate::client::identity_authority::test_support::group_device(
+                &client, "group", &reference,
+            )?,
             &initial.devices[0].branch_public_key,
         )?;
         let mut first = None;

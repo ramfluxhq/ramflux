@@ -336,8 +336,8 @@ impl RamfluxClient {
         }
         self.bootstrap_group_member_reference(event)?;
         self.account_db()?.write_transaction(|| {
-            let state =
-                self.account_db()?.apply_bootstrap_group_member_join(&GroupMemberJoinWrite {
+            let state = self.account_db()?.apply_bootstrap_group_member_join(
+                &GroupMemberJoinWrite {
                     group_id: group_id.clone(),
                     event_id: event.event_id.clone(),
                     actor_device_id: event.actor_device_id.clone(),
@@ -350,7 +350,10 @@ impl RamfluxClient {
                     new_group_epoch: *new_group_epoch,
                     max_members: *max_members,
                     new_member_history: new_member_history.clone(),
-                })?;
+                },
+                &self
+                    .device_identity_for_root(actor_principal_commitment, &event.actor_device_id)?,
+            )?;
             self.pin_local_group_member(group_id)?;
             self.pin_joined_group_member(
                 group_id,
@@ -432,20 +435,24 @@ impl RamfluxClient {
             .group_event_member_reference(event)?
             .ok_or_else(|| SdkError::InboundPending("joined member root unavailable".into()))?;
         self.account_db()?.write_transaction(|| {
-            let state = self.account_db()?.apply_group_member_join(&GroupMemberJoinWrite {
-                group_id: group_id.to_owned(),
-                event_id: event.event_id.clone(),
-                actor_device_id: event.actor_device_id.clone(),
-                joined_identity: joined_identity.to_owned(),
-                joined_role: joined_role.to_owned(),
-                actor_role: actor_role.to_owned(),
-                actor_principal_commitment: actor_principal_commitment.to_owned(),
-                actor_device_signing_public_key: actor_device_signing_public_key.to_owned(),
-                previous_epoch,
-                new_group_epoch,
-                max_members,
-                new_member_history: new_member_history.to_owned(),
-            })?;
+            let state = self.account_db()?.apply_group_member_join(
+                &GroupMemberJoinWrite {
+                    group_id: group_id.to_owned(),
+                    event_id: event.event_id.clone(),
+                    actor_device_id: event.actor_device_id.clone(),
+                    joined_identity: joined_identity.to_owned(),
+                    joined_role: joined_role.to_owned(),
+                    actor_role: actor_role.to_owned(),
+                    actor_principal_commitment: actor_principal_commitment.to_owned(),
+                    actor_device_signing_public_key: actor_device_signing_public_key.to_owned(),
+                    previous_epoch,
+                    new_group_epoch,
+                    max_members,
+                    new_member_history: new_member_history.to_owned(),
+                },
+                &self
+                    .device_identity_for_root(actor_principal_commitment, &event.actor_device_id)?,
+            )?;
             self.pin_joined_group_member(group_id, &reference)?;
             Ok(state)
         })
@@ -564,17 +571,20 @@ impl RamfluxClient {
             .group_event_member_reference(event)?
             .ok_or_else(|| SdkError::InboundPending("accepted member root absent".into()))?;
         self.account_db()?.write_transaction(|| {
-            let state = self.account_db()?.apply_group_member_accept(&GroupInviteAcceptWrite {
-                group_id: group_id.to_owned(),
-                event_id: event.event_id.clone(),
-                actor_device_id: event.actor_device_id.clone(),
-                invite_id: invite_id.to_owned(),
-                invitee_identity: invitee_identity.to_owned(),
-                accepted_role: accepted_role.to_owned(),
-                previous_epoch,
-                new_group_epoch,
-                now: now_unix_timestamp(),
-            })?;
+            let state = self.account_db()?.apply_group_member_accept(
+                &GroupInviteAcceptWrite {
+                    group_id: group_id.to_owned(),
+                    event_id: event.event_id.clone(),
+                    actor_device_id: event.actor_device_id.clone(),
+                    invite_id: invite_id.to_owned(),
+                    invitee_identity: invitee_identity.to_owned(),
+                    accepted_role: accepted_role.to_owned(),
+                    previous_epoch,
+                    new_group_epoch,
+                    now: now_unix_timestamp(),
+                },
+                &self.device_identity(&reference)?,
+            )?;
             self.pin_joined_group_member(group_id, &reference)?;
             self.remember_group_invite_root(event, group_id, invitee_identity, invite_id)?;
             Ok(state)
@@ -929,18 +939,40 @@ impl RamfluxClient {
         group_id: &str,
         route: &LocalBusGroupMemberRoute,
     ) -> Result<(), SdkError> {
-        let event_id = group_member_route_event_id(group_id, &route.member_id);
-        if self.event_body(&event_id)?.is_some() {
-            return Ok(());
-        }
-        if let Some(public_key) = route.device_signing_public_key.as_ref() {
-            self.account_db()?.persist_group_member_device_key(
-                group_id,
-                &route.member_id,
-                public_key,
-            )?;
-        }
-        self.append_event(&event_id, "group.member.route", &serde_json::to_vec(route)?)
+        let device = if let Some(root) = &route.member_principal_commitment {
+            self.device_identity_for_root(root, &route.member_id)?
+        } else {
+            self.device_identity(&self.group_device_reference(group_id, &route.member_id)?)?
+        };
+        let id = group_member_route_event_id(group_id, &device)?;
+        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            let db = self.account_db()?;
+            if db.group_member_requires_readd(group_id, &device)? {
+                return Err(SdkError::InboundPending(
+                    "legacy group member pin requires re-add".into(),
+                ));
+            }
+            // Existing routes retain their original idempotent first-write behavior.
+            if let Some(bytes) = self.event_body(&id)? {
+                let old: LocalBusGroupMemberRoute = serde_json::from_slice(&bytes)?;
+                if old.member_id != device.device_id()
+                    || old.member_principal_commitment.as_deref() != Some(device.root_commitment())
+                {
+                    return Err(SdkError::InboundRejected(
+                        "retained group route root mismatch".into(),
+                    ));
+                }
+                db.persist_actor_state(&id, &old)?;
+                return Ok(());
+            }
+            let mut route = route.clone();
+            route.member_principal_commitment = Some(device.root_commitment().into());
+            if let Some(public) = &route.device_signing_public_key {
+                db.persist_group_member_device_key(group_id, &device, public)?;
+            }
+            db.persist_actor_state(&id, &route)?;
+            self.append_event(&id, "group.member.route", &serde_json::to_vec(&route)?)
+        })
     }
 
     /// # Errors
@@ -952,9 +984,24 @@ impl RamfluxClient {
         let group = self.group_state(group_id)?;
         let mut routes = Vec::new();
         for member_id in group.members {
-            let event_id = group_member_route_event_id(group_id, &member_id);
+            let Some(device) = self.group_route_identity(group_id, &member_id)? else { continue };
+            let event_id = group_member_route_event_id(group_id, &device)?;
             if let Some(bytes) = self.event_body(&event_id)? {
-                routes.push(serde_json::from_slice(&bytes)?);
+                let route: LocalBusGroupMemberRoute = serde_json::from_slice(&bytes)?;
+                if route.member_id != device.device_id()
+                    || route
+                        .member_principal_commitment
+                        .as_deref()
+                        .is_some_and(|root| root != device.root_commitment())
+                {
+                    return Err(SdkError::InboundRejected("group route root mismatch".into()));
+                }
+                routes.push(route);
+            } else if let Some((legacy_device, route)) =
+                self.legacy_group_member_route(group_id, &member_id)?
+                && legacy_device == device
+            {
+                routes.push(route);
             }
         }
         Ok(routes)

@@ -208,7 +208,9 @@ impl RamfluxClient {
             }
             invite.invitee_signing_public_key
         } else {
-            self.account_db()?.group_member_device_key(group, &actor)?.ok_or_else(pending)?
+            self.account_db()?
+                .group_member_device_key(group, &self.device_identity(&actor)?)?
+                .ok_or_else(pending)?
         };
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if actor == self.local_device_reference(&local.device_id)? {
@@ -239,12 +241,13 @@ impl RamfluxClient {
     fn check_group_event_target(&self, event: &GroupEvent, group: &str) -> Result<(), SdkError> {
         let Some(reference) = self.group_event_member_reference(event)? else { return Ok(()) };
         let member = group_event_member(&event.body).ok_or_else(pending)?;
-        let previous = self.account_db()?.group_member_key_binding_by_name(group, member).map_err(
-            |error| match error {
-                StorageError::AmbiguousDeviceId(_) => pending(),
-                other => other.into(),
-            },
-        )?;
+        let previous =
+            self.account_db()?.group_member_identity_metadata(group, member).map_err(|error| {
+                match error {
+                    StorageError::AmbiguousDeviceId(_) => pending(),
+                    other => other.into(),
+                }
+            })?;
         if let Some(previous) = previous
             && previous
                 .principal_commitment

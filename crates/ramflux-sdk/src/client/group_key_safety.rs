@@ -13,16 +13,14 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let at = now_unix_timestamp();
         for device in &manifest.devices {
-            let reference = ramflux_protocol::qualified_device_id(
-                &manifest.principal_commitment,
-                &device.device_id,
-            )?;
-            for (group, pinned) in db.pinned_group_device_keys(&reference)? {
+            let identity = Self::device_identity_from_manifest(manifest, &device.device_id)?;
+            let reference = identity.storage_key();
+            for (group, pinned) in db.pinned_group_device_keys(&identity)? {
                 if pinned == device.branch_public_key {
                     continue;
                 }
                 let bound = db
-                    .group_member_key_binding(&group, &reference)?
+                    .group_member_key_binding(&group, &identity)?
                     .ok_or_else(|| SdkError::InboundPending("group pin changed".into()))?;
                 // Use the pinned owner, never the manifest claimant, as the admission bucket.
                 let observed_owner = bound.principal_id.as_deref().unwrap_or(&pinned);

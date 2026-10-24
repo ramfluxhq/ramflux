@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Test-only root-owned fixture authorizations; never a production migration shortcut.
+use super::invalid;
 use crate::{RamfluxClient, SdkError, prekey::SdkDeviceManifestResponse};
 use ramflux_protocol::{DeviceKeyBinding, DeviceSetStatus, PrincipalKind, SignedDeviceSetEntry};
 pub(crate) fn sign_manifest(
@@ -88,5 +89,88 @@ pub(crate) fn manifest(client: &RamfluxClient) -> Result<SdkDeviceManifestRespon
         }],
     };
     sign_manifest(root, &mut manifest, 1)?;
+    Ok(manifest)
+}
+
+pub(crate) fn group_device(
+    client: &RamfluxClient,
+    group: &str,
+    selector: &str,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
+    if let Ok(device) = client.device_identity(selector) {
+        return Ok(device);
+    }
+    if let Ok(reference) = client.group_device_reference(group, selector) {
+        return client.device_identity(&reference);
+    }
+    // These fixtures explicitly name principals like their device. The signed cached set,
+    // rather than a by-device directory candidate, supplies the expected root.
+    let owner = client
+        .account_db()?
+        .client_record("identity", selector)?
+        .ok_or_else(|| invalid("fixture group owner"))?;
+    client.device_identity_for_root(
+        owner["contact_identity_commitment"]
+            .as_str()
+            .ok_or_else(|| invalid("fixture group root"))?,
+        selector,
+    )
+}
+
+pub(crate) fn remote_manifest(
+    principal: &str,
+    name: &str,
+    seed: [u8; 32],
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let root = ramflux_crypto::create_identity_root(
+        principal,
+        ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &seed),
+    );
+    let branch = ramflux_crypto::create_device_branch(principal, name, 1, seed);
+    let identity = ramflux_crypto::X25519KeyPair::from_seed(ramflux_crypto::blake3_256(
+        "ramflux.test.remote.identity.v1",
+        &seed,
+    ));
+    let signed = ramflux_crypto::X25519KeyPair::from_seed(ramflux_crypto::blake3_256(
+        "ramflux.test.remote.prekey.v1",
+        &seed,
+    ));
+    let commitment = ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
+    let now = crate::prelude::now_unix_timestamp();
+    let mut manifest = SdkDeviceManifestResponse {
+        principal_id: principal.into(),
+        principal_commitment: commitment.clone(),
+        root_public_key: ramflux_protocol::encode_base64url(
+            root.signing_key.verifying_key().to_bytes(),
+        ),
+        signed_device_set: None,
+        devices: vec![crate::prekey::SdkDeviceManifestEntry {
+            principal_id: principal.into(),
+            principal_commitment: commitment,
+            device_id: name.into(),
+            device_epoch: 1,
+            branch_public_key: ramflux_protocol::encode_base64url(
+                branch.signing_key.verifying_key().to_bytes(),
+            ),
+            target_delivery_id: format!("delivery-{name}"),
+            branch_authorized_event_id: format!("authorized:{name}"),
+            branch_proof: ramflux_crypto::authorize_device_branch_v2(
+                &root,
+                &branch,
+                ramflux_crypto::BranchAuthorization {
+                    audience: "ramflux-node",
+                    capability_scope: vec!["device.delivery.bind".into()],
+                    issued_at: now,
+                    expires_at: now + 3600,
+                    principal_kind: PrincipalKind::Human,
+                    agreement_identity_public_key: identity.public,
+                },
+            )?,
+            prekey_bundle: ramflux_crypto::create_prekey_bundle(
+                &branch, &identity, "signed", &signed, None, None,
+            )?,
+        }],
+    };
+    sign_manifest(&root, &mut manifest, 1)?;
     Ok(manifest)
 }

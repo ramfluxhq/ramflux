@@ -104,7 +104,26 @@ pub(crate) fn group_sender_key_distribution_conversation_id(
     format!("group.sender_key.distribution:{group_id}:{sender_id}:{recipient_device_id}")
 }
 
-pub(crate) fn group_member_route_event_id(group_id: &str, member_id: &str) -> String {
+pub(crate) fn group_route_prefix(group: &str) -> String {
+    format!(
+        "group.member.route:v2/{}/",
+        ramflux_protocol::hash_base64url("ramflux.sdk.group.route.group.v2", group.as_bytes())
+    )
+}
+pub(crate) fn group_member_route_event_id(
+    group: &str,
+    device: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> Result<String, crate::SdkError> {
+    Ok(format!(
+        "{}{}",
+        group_route_prefix(group),
+        ramflux_protocol::hash_base64url(
+            "ramflux.sdk.group.route.device.v2",
+            &ramflux_protocol::canonical_json_bytes(&device.storage_key())?
+        )
+    ))
+}
+pub(crate) fn legacy_group_member_route_event_id(group_id: &str, member_id: &str) -> String {
     format!("group.member.route:{group_id}:{member_id}")
 }
 

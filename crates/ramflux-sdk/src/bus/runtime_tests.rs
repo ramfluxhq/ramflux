@@ -889,14 +889,21 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
     let account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
     account.client.create_group("group", "device-alice")?;
     account.client.account_db()?.add_group_member("group", "device-bob", "member")?;
-    let db = account.client.account_db()?;
-    db.persist_client_record("device", "device-bob", &serde_json::json!({"principal_id":"bob","principal_commitment":"commitment-bob","device_id":"device-bob"}))?;
-    db.persist_client_record("identity","bob",&serde_json::json!({"contact_identity_commitment":"commitment-bob","devices":[{"device_id":"device-bob","signing_public_key":"public-key","target_delivery_id":"delivery-bob"}]}))?;
+    let mut manifest = crate::client::identity_authority::test_support::remote_manifest(
+        "bob",
+        "device-bob",
+        [81; 32],
+    )?;
+    manifest.devices[0].target_delivery_id = "delivery-bob".into();
+    account.client.observe_device_manifest_json(
+        serde_json::to_value(&manifest)?,
+        &manifest.principal_commitment,
+    )?;
     account.client.persist_group_member_route(
         "group",
         &LocalBusGroupMemberRoute {
             member_id: "device-bob".into(),
-            member_principal_commitment: Some("commitment-bob".into()),
+            member_principal_commitment: Some(manifest.principal_commitment.clone()),
             device_signing_public_key: None,
             target_delivery_id: None,
             federation: None,
@@ -908,7 +915,10 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
     let routes = super::group_delivery::resolve(&account, &body)?;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].target_delivery_id.as_deref(), Some("delivery-bob"));
-    assert_eq!(routes[0].member_principal_commitment.as_deref(), Some("commitment-bob"));
+    assert_eq!(
+        routes[0].member_principal_commitment.as_deref(),
+        Some(manifest.principal_commitment.as_str())
+    );
     drop(account);
     std::fs::remove_dir_all(root)?;
     Ok(())

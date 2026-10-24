@@ -41,30 +41,35 @@ impl AccountDb {
         member_id: &str,
         role: &str,
     ) -> Result<GroupState, StorageError> {
-        validate_group_role(role)?;
-        let state = self.group_state(group_id)?;
-        let max_members = match usize::try_from(state.max_members) {
-            Ok(value) => value,
-            Err(_err) => return Err(StorageError::GroupMemberLimitExceeded),
-        };
-        if state.members.len() >= max_members {
-            return Err(StorageError::GroupMemberLimitExceeded);
-        }
-        if self.group_member_banned(group_id, member_id)? {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        let new_epoch = state.group_epoch + 1;
-        self.connection.execute(
-            "UPDATE group_projection SET group_epoch = ?2 WHERE group_id = ?1",
-            params![group_id, new_epoch],
-        )?;
-        self.connection.execute(
-            "INSERT OR REPLACE INTO group_member_projection
+        self.write_transaction(|| {
+            validate_group_role(role)?;
+            let state = self.group_state(group_id)?;
+            let max_members = match usize::try_from(state.max_members) {
+                Ok(value) => value,
+                Err(_err) => return Err(StorageError::GroupMemberLimitExceeded),
+            };
+            if state.members.len() >= max_members {
+                return Err(StorageError::GroupMemberLimitExceeded);
+            }
+            if self.group_member_banned(group_id, member_id)? {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            if !state.members.iter().any(|member| member == member_id) {
+                self.legacy_archive_group_pin(group_id, member_id)?;
+            }
+            let new_epoch = state.group_epoch + 1;
+            self.connection.execute(
+                "UPDATE group_projection SET group_epoch = ?2 WHERE group_id = ?1",
+                params![group_id, new_epoch],
+            )?;
+            self.connection.execute(
+                "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at)
              VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5)",
-            params![group_id, member_id, role, new_epoch, self.now_unix()],
-        )?;
-        self.group_state(group_id)
+                params![group_id, member_id, role, new_epoch, self.now_unix()],
+            )?;
+            self.group_state(group_id)
+        })
     }
 
     /// # Errors
@@ -73,8 +78,9 @@ impl AccountDb {
     pub fn apply_group_member_join(
         &self,
         join: &GroupMemberJoinWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        self.write_transaction(|| self.apply_group_member_join_inner(join, false))
+        self.write_transaction(|| self.apply_group_member_join_inner(join, actor, false))
     }
     /// Applies authenticated first-seen onboarding only to a group absent from local state.
     /// # Errors
@@ -82,8 +88,9 @@ impl AccountDb {
     pub fn apply_bootstrap_group_member_join(
         &self,
         join: &GroupMemberJoinWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        self.write_transaction(|| self.apply_group_member_join_inner(join, true))
+        self.write_transaction(|| self.apply_group_member_join_inner(join, actor, true))
     }
     fn authorize_group_join(
         &self,
@@ -123,8 +130,14 @@ impl AccountDb {
     fn apply_group_member_join_inner(
         &self,
         join: &GroupMemberJoinWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
         bootstrap: bool,
     ) -> Result<GroupState, StorageError> {
+        if join.actor_device_id != actor.device_id()
+            || join.actor_principal_commitment != actor.root_commitment()
+        {
+            return Err(StorageError::GroupPermissionDenied);
+        }
         self.authorize_group_join(join, bootstrap)?;
         self.ensure_group_control_not_seen(&join.group_id, &join.event_id)?;
         if !is_group_admin_role(&join.actor_role) {
@@ -139,6 +152,7 @@ impl AccountDb {
         if self.group_member_banned(&join.group_id, &join.joined_identity)? {
             return Err(StorageError::GroupPermissionDenied);
         }
+        self.legacy_archive_group_pin(&join.group_id, &join.joined_identity)?;
         let applied_at = self.now_unix();
         self.insert_group_control_seen(
             &join.group_id,
@@ -172,7 +186,7 @@ impl AccountDb {
         if bootstrap {
             self.persist_group_member_device_key(
                 &join.group_id,
-                &join.actor_device_id,
+                actor,
                 &join.actor_device_signing_public_key,
             )?;
             self.connection.execute(
@@ -305,28 +319,20 @@ impl AccountDb {
     pub fn persist_group_member_device_key(
         &self,
         group_id: &str,
-        member_id: &str,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
         device_signing_public_key: &str,
     ) -> Result<(), StorageError> {
-        let (address, raw, root) = Self::pin_address_for_write(member_id)?;
         self.write_transaction(|| {
-            let lookup=if root.is_some() {address.as_str()} else {raw.as_str()};
-            let stored=self.group_pin_key(group_id,lookup)?.unwrap_or_else(||address.clone());
-            let bound: bool = self.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE group_id=?1 AND member_id=?2 AND principal_commitment IS NOT NULL)",
-                params![group_id, stored], |row| row.get(0),
-            )?;
-            // A bare write cannot replace an established root's key, including after removal.
-            if ((root.is_none() && bound) || self.group_member_role(group_id,&raw)?.is_some())
-                && self.group_member_device_key(group_id,lookup)?.is_some_and(|old|old!=device_signing_public_key) {
+            if self.group_member_requires_readd(group_id,member)? { return Err(StorageError::GroupPermissionDenied); }
+            let stored = self.group_pin_key(group_id, member)?.unwrap_or_else(|| member.storage_key().to_owned());
+            if self.group_member_role(group_id,member.device_id())?.is_some()
+                && self.group_member_device_key(group_id,member)?.is_some_and(|old|old!=device_signing_public_key) {
                 return Err(StorageError::GroupPermissionDenied);
             }
-            if let Some(root)=&root {
-                let other:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 AND principal_commitment IS NOT NULL AND principal_commitment<>?3)",params![group_id,raw,root],|row|row.get(0))?;
-                if other {return Err(StorageError::GroupPermissionDenied);}
-            }
-            self.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,raw_device_id,principal_commitment) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?5 AND active=1)",params![group_id,stored,device_signing_public_key,self.now_unix(),raw,root])?;
-            self.bind_group_key_from_directory(group_id,&address,device_signing_public_key)
+            let other:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 AND principal_commitment IS NOT NULL AND principal_commitment<>?3)",params![group_id,member.device_id(),member.root_commitment()],|row|row.get(0))?;
+            if other {return Err(StorageError::GroupPermissionDenied);}
+            self.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,raw_device_id,principal_commitment) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?5 AND active=1)",params![group_id,stored,device_signing_public_key,self.now_unix(),member.device_id(),member.root_commitment()])?;
+            self.bind_group_key_from_directory(group_id,member,device_signing_public_key)
         })
     }
 
@@ -335,7 +341,7 @@ impl AccountDb {
     pub fn group_member_device_key(
         &self,
         group_id: &str,
-        member_id: &str,
+        member_id: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Option<String>, StorageError> {
         let Some(member_id) = self.group_pin_key(group_id, member_id)? else { return Ok(None) };
         Ok(self
@@ -589,7 +595,13 @@ impl AccountDb {
     pub fn apply_group_member_accept(
         &self,
         accept: &GroupInviteAcceptWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        if accept.actor_device_id != actor.device_id()
+            || accept.invitee_identity != actor.device_id()
+        {
+            return Err(StorageError::GroupPermissionDenied);
+        }
         self.write_transaction(|| {
             validate_group_role(&accept.accepted_role)?;
             self.ensure_group_control_not_seen(&accept.group_id, &accept.event_id)?;
@@ -651,9 +663,10 @@ impl AccountDb {
                 "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
                 params![accept.group_id, accept.new_group_epoch, applied_at],
             )?;
+            self.legacy_archive_group_pin(&accept.group_id, actor.device_id())?;
             self.persist_group_member_device_key(
                 &accept.group_id,
-                &invite.invitee_identity,
+                actor,
                 &invite.invitee_signing_public_key,
             )?;
             self.connection.execute(
@@ -676,7 +689,7 @@ impl AccountDb {
             )?;
             self.bind_group_key_from_directory(
                 &accept.group_id,
-                &accept.invitee_identity,
+                actor,
                 &invite.invitee_signing_public_key,
             )?;
             self.group_state(&accept.group_id)

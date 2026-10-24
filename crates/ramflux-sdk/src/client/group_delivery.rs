@@ -279,6 +279,7 @@ impl RamfluxClient {
             if self.group_sender_key_counter_seen(envelope)? {
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
                 return Ok(Vec::new());
+
             }
             match self.decrypt_group_envelope(envelope, message_id) {
                 Ok(plaintext) => self.account_db()?.write_transaction(|| {
@@ -306,7 +307,7 @@ impl RamfluxClient {
                             message_id: message_id.to_owned(),
                             sender_id: envelope.sender_id.clone(),
                             inbox_seq: entry.inbox_seq,
-                            envelope_json: serde_json::to_vec(entry)?,
+                            envelope_json: super::group_pending::encode(entry, encrypted_body)?,
                             created_at: now_unix_timestamp(),
                         },
                     )?;

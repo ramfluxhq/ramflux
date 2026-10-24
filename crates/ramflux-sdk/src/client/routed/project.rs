@@ -153,13 +153,11 @@ impl RamfluxClient {
         if group.sender_id != entry.envelope.source_device_id {
             return Err(invalid("group sender differs from authenticated device"));
         }
-        let mut inner = entry.clone();
-        inner.envelope.encrypted_payload = ramflux_protocol::encode_base64url(body);
         self.record_surface_origin(&route.message_id, entry, Some(group.group_key_epoch))?;
         let plaintext = self.append_or_pending_group_message(
             &route.conversation_id,
             &route.message_id,
-            &inner,
+            entry,
             body,
             &group,
         )?;

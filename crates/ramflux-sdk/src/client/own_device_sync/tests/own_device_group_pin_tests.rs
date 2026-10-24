@@ -50,11 +50,25 @@ fn own_device_history_restores_member_pins_before_sender_keys_without_conflating
     );
     assert_ne!(source_public, target_public);
     assert_eq!(
-        target.account_db()?.group_member_device_key("sync_group", "source_device_sync")?,
+        target.account_db()?.group_member_device_key(
+            "sync_group",
+            &crate::client::identity_authority::test_support::group_device(
+                &target,
+                "sync_group",
+                "source_device_sync"
+            )?
+        )?,
         Some(source_public)
     );
     assert_eq!(
-        target.account_db()?.group_member_device_key("sync_group", "target_device_sync")?,
+        target.account_db()?.group_member_device_key(
+            "sync_group",
+            &crate::client::identity_authority::test_support::group_device(
+                &target,
+                "sync_group",
+                "target_device_sync"
+            )?
+        )?,
         Some(target_public)
     );
     assert_eq!(
@@ -111,7 +125,7 @@ fn conflicting_own_device_member_pins_skip_unsafe_history_and_preserve_local_mem
             .verifying_key()
             .to_bytes(),
     );
-    db.persist_group_member_device_key("sync_group", "source_device_sync", &existing_key)?;
+    db.persist_group_member_device_key("sync_group", &target.owned_account_device_identity("source_device_sync")?, &existing_key)?;
     source.send_direct_message("dm", "safe-direct", "source_device_sync", b"safe")?;
     let mut history = history;
     history.groups[0].group_epoch = 5;
@@ -127,7 +141,13 @@ fn conflicting_own_device_member_pins_skip_unsafe_history_and_preserve_local_mem
         Vec::<serde_json::Value>::new()
     );
     assert_eq!(target.group_state("sync_group")?.group_epoch, 5);
-    assert_eq!(db.group_member_device_key("sync_group", "source_device_sync")?, Some(existing_key));
+    assert_eq!(
+        db.group_member_device_key(
+            "sync_group",
+            &target.owned_account_device_identity("source_device_sync")?
+        )?,
+        Some(existing_key)
+    );
     assert!(target.direct_message_by_id("snapshot_message")?.is_none());
     drop(source);
     drop(target);
