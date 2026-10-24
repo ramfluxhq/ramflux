@@ -306,10 +306,29 @@ without a root uses only its group's invite provenance. Missing or conflicting
 provenance leaves the event pending and does not pin a directory candidate.
 
 New enrollment and ready-proof verification reject `root~` and `legacy~` device
-name prefixes, empty names, control characters and names over 256 bytes. Storage
+name prefixes, blank names, Unicode control/format and line/paragraph separator characters,
+and names over 256 bytes. Printable Unicode names remain supported. Storage
 address encoding continues to preserve historical literal names. Historical
 message sender names never acquire a new principal from today's device directory;
 receipts resolve roots through their conversation's explicit route or participant
 relationship, or a group-specific pin. Pending own-root revocations are checked
 explicitly before sibling history imports. A failed scheduled proof refresh
 surfaces `OwnDeviceAuthorizationRefreshFailed` in the sync status reason code.
+
+
+Direct-conversation authorization compares the verified sender principal (or an
+explicit root-qualified participant address), never a sender-selected literal
+device name. Delivered/read receipt payloads must name their authenticated route
+and literal sending device. Root-bound receive stores receipt deduplication and
+read/delivery state under the verified root-qualified device reference, so peers
+with equal device names remain distinct. Legacy receipts remain in their original
+namespace and do not acquire new root attribution. Self-conversation receipts use
+the account's own root, including when a foreign peer reuses a sibling's name.
+
+Root-qualified group-pin reads exclude unscoped legacy rows even if their public
+key matches. Explicit qualified pin creation stores its root at insertion; it does
+not adopt an old by-name pin. Sender admission still verifies that key's root
+proof and active signed set. Old unscoped rows remain historical data. Direct-add
+v1 joins from administrators without the signed-root extension/invite witness
+stay pending; later epoch changes may wait too. Administrators must upgrade and
+provide a root-bound join/invite to resume that group's control sequence.

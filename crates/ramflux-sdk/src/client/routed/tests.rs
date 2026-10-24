@@ -678,3 +678,5 @@ mod legacy_admission;
 #[path = "discovery_tests.rs"]
 mod discovery;
 
+#[path = "participant_tests.rs"]
+mod participants;

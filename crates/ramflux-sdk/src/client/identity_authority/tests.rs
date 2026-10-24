@@ -323,6 +323,7 @@ fn mode(
 ) -> Result<(), SdkError> {
     let branch = actor.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let body = LocalBusAccountCreateRequest {
+        label: None,
         kind: Some(kind),
         node_id: None,
         local_account_id: actor.id.clone(),

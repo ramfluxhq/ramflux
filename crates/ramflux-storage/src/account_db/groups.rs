@@ -325,7 +325,7 @@ impl AccountDb {
                 let other:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 AND principal_commitment IS NOT NULL AND principal_commitment<>?3)",params![group_id,raw,root],|row|row.get(0))?;
                 if other {return Err(StorageError::GroupPermissionDenied);}
             }
-            self.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,raw_device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?5 AND active=1)",params![group_id,stored,device_signing_public_key,self.now_unix(),raw])?;
+            self.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,raw_device_id,principal_commitment) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?5 AND active=1)",params![group_id,stored,device_signing_public_key,self.now_unix(),raw,root])?;
             self.bind_group_key_from_directory(group_id,&address,device_signing_public_key)
         })
     }

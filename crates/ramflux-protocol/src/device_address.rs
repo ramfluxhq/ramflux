@@ -6,11 +6,11 @@ use crate::ProtocolError;
 /// Reject address-shaped names at live device enrollment and group-control ingress.
 /// The address codec itself still preserves historical literal names without recursive decoding.
 /// # Errors
-/// Rejects empty, oversized, control-containing or reserved-prefix device names.
+/// Rejects empty, oversized, control/format-containing, blank or reserved-prefix device names.
 pub fn validate_device_name(name: &str) -> Result<(), ProtocolError> {
-    if name.is_empty()
+    if name.trim().is_empty()
         || name.len() > 256
-        || name.chars().any(char::is_control)
+        || !crate::text_safety::single_line_is_safe(name)
         || name.starts_with("root~")
         || name.starts_with("legacy~")
     {
@@ -48,6 +48,25 @@ pub fn parse_qualified_device_id(value: &str) -> Result<Option<(String, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_names_reject_controls_formats_and_blank_names_but_keep_printable_unicode() {
+        for name in [
+            "",
+            " ",
+            "\u{3000}",
+            "phone\n",
+            "a\u{202e}b",
+            "a\u{200b}b",
+            "a\u{200d}b",
+            "root~x",
+            "legacy~x",
+        ] {
+            assert!(validate_device_name(name).is_err(), "{name:?}");
+        }
+        for name in ["中文", "téléphone", "🦀", "phone 2"] {
+            assert!(validate_device_name(name).is_ok(), "{name:?}");
+        }
+    }
     #[test]
     fn qualified_addresses_preserve_literal_address_shaped_names_and_decode_once()
     -> Result<(), ProtocolError> {

@@ -658,3 +658,24 @@ fn an_unscoped_group_pin_never_selects_the_only_directory_roots_authority()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    db.create_group("legacy", "owner")?;
+    db.add_group_member("legacy", "shared", "member")?;
+    db.persist_group_member_device_key("legacy", "shared", "same-key")?;
+    let qualified = ramflux_protocol::qualified_device_id("bob-root", "shared")?;
+    let foreign = ramflux_protocol::qualified_device_id("mallory-root", "shared")?;
+    assert_eq!(db.group_member_device_key("legacy", &qualified)?, None);
+    assert_eq!(db.group_member_key_binding("legacy", &qualified)?, None);
+    assert_eq!(db.group_member_device_key("legacy", &foreign)?, None);
+    // A separate explicit qualified pin does not adopt or delete the unproven legacy row.
+    db.persist_group_member_device_key("legacy", &qualified, "same-key")?;
+    assert_eq!(db.group_member_device_key("legacy", &qualified)?.as_deref(), Some("same-key"));
+    assert_eq!(db.group_member_device_key("legacy", &foreign)?, None);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

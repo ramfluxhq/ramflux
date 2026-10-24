@@ -20,8 +20,12 @@ impl RamfluxClient {
             Kind::Direct => self.project_routed_direct(opened, entry, body, metadata),
             Kind::Receipt => {
                 self.authorize_routed_receipt(opened, entry, body)?;
-                self.apply_receipt_event_plaintext(body, &entry.envelope.source_device_id)?
-                    .ok_or_else(|| invalid("invalid routed receipt"))?;
+                self.apply_receipt_event_plaintext(
+                    body,
+                    &self.inbound_device_reference(entry)?,
+                    &opened.routing.conversation_id,
+                )?
+                .ok_or_else(|| invalid("invalid routed receipt"))?;
                 Ok(None)
             }
             Kind::GroupControl => self.project_routed_group_control(opened, entry, body),
@@ -236,12 +240,7 @@ impl RamfluxClient {
                 entry,
             );
         }
-        let participant = thread["participants"].as_array().is_some_and(|ids| {
-            ids.iter().any(|id| {
-                id.as_str() == Some(&entry.envelope.source_principal_id)
-                    || id.as_str() == Some(&entry.envelope.source_device_id)
-            })
-        });
+        let participant = self.authenticated_direct_participant(&thread, entry)?;
         if !participant {
             return Err(invalid("receipt sender is not a conversation participant"));
         }

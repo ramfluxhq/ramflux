@@ -317,6 +317,15 @@ impl RamfluxClient {
         Ok(plaintext)
     }
 
+    fn catch_up_legacy_cursor(&self,conversation_id: &str,entry: &GatewayInboxEntry,target: &str) -> Result<bool,SdkError> {
+        if self.legacy_receive_checkpoint_current(conversation_id,entry)? {
+            self.account_db()?.persist_actor_state(&format!("legacy/committed/{}",entry.envelope.envelope_id),&conversation_id)?;
+            self.persist_gateway_receive_cursor(target,entry.inbox_seq)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(crate) async fn receive_legacy_entry(
         &mut self,
         engine: &mut GatewaySessionEngine,
@@ -334,9 +343,7 @@ impl RamfluxClient {
             return self.plaintext_projection_delivery(conversation_id, &entry);
         }
         self.append_gateway_delivery(&entry)?;
-        if self.legacy_receive_checkpoint_current(conversation_id, &entry)? {
-            self.account_db()?.persist_actor_state(&terminal, &conversation_id)?;
-            self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+        if self.catch_up_legacy_cursor(conversation_id, &entry, engine.target_delivery_id())? {
             return Ok(None);
         }
         let (envelope, session, decrypted) = self.decrypt_legacy_entry(conversation_id, &entry)?;
@@ -358,7 +365,7 @@ impl RamfluxClient {
             )?;
             return Ok(None);
         }
-        if self.apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id)?.is_some() {
+        if self.apply_receipt_event_plaintext(&body, &entry.envelope.source_device_id,conversation_id)?.is_some() {
             // Receipt applied: commit the advanced recv ratchet, then the cursor.
             self.commit_legacy_receive(
                 conversation_id,
@@ -683,6 +690,7 @@ impl RamfluxClient {
         &self,
         body: &[u8],
         authenticated_source_device_id: &str,
+        authenticated_conversation: &str,
     ) -> Result<Option<SdkReceiptEventEnvelope>, SdkError> {
         let Ok(mut envelope) = serde_json::from_slice::<SdkReceiptEventEnvelope>(body) else {
             return Ok(None);
@@ -690,7 +698,20 @@ impl RamfluxClient {
         if envelope.schema != "ramflux.sdk.receipt_event.v1" {
             return Ok(None);
         }
-        if envelope.reader_device_id != authenticated_source_device_id {
+        let raw_device = crate::client::identity_authority::device_namespace::wire_device_id(
+            authenticated_source_device_id,
+        )?;
+        let conversation = match &envelope.event {
+            SdkReceiptEventBody::Delivered { conversation_id, .. }
+            | SdkReceiptEventBody::ReadPrivate { conversation_id, .. }
+            | SdkReceiptEventBody::ReadPublic { conversation_id, .. } => conversation_id,
+        };
+        if conversation != authenticated_conversation {
+            return Err(SdkError::InboundRejected(
+                "receipt conversation differs from authenticated route".into(),
+            ));
+        }
+        if envelope.reader_device_id != raw_device {
             return Err(SdkError::LocalBus(format!(
                 "receipt reader_device_id mismatch: claimed {}, authenticated {}",
                 envelope.reader_device_id, authenticated_source_device_id
@@ -721,7 +742,7 @@ impl RamfluxClient {
                 ttl_seconds,
                 ..
             } => {
-                if receiver_device_id != authenticated_source_device_id {
+                if receiver_device_id != &raw_device {
                     return Err(SdkError::LocalBus(format!(
                         "receipt receiver_device_id mismatch: claimed {receiver_device_id}, authenticated {authenticated_source_device_id}"
                     )));
@@ -731,13 +752,13 @@ impl RamfluxClient {
                     conversation_id,
                     message_id,
                     receipt_type: "delivered",
-                    actor_device_id: receiver_device_id,
+                    actor_device_id: authenticated_source_device_id,
                     created_at: *delivered_at,
                 })?;
                 if inserted {
                     self.mark_delivered(
                         conversation_id,
-                        receiver_device_id,
+                        authenticated_source_device_id,
                         message_id,
                         *delivered_at,
                         i64::from(*ttl_seconds),
@@ -752,7 +773,7 @@ impl RamfluxClient {
                 read_at,
                 ..
             } => {
-                if reader_identity != authenticated_source_device_id {
+                if reader_identity != &raw_device {
                     return Err(SdkError::LocalBus(format!(
                         "receipt reader identity mismatch: claimed {reader_identity}, authenticated {authenticated_source_device_id}"
                     )));
@@ -762,11 +783,11 @@ impl RamfluxClient {
                     conversation_id,
                     message_id,
                     receipt_type: "read",
-                    actor_device_id: reader_identity,
+                    actor_device_id: authenticated_source_device_id,
                     created_at: *read_at,
                 })?;
                 if inserted {
-                    self.mark_read(conversation_id, reader_identity, message_id)?;
+                    self.mark_read(conversation_id, authenticated_source_device_id, message_id)?;
                 }
                 inserted
             }
