@@ -55,27 +55,31 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
         tracing::warn!(%error,"task approval request admission deferred; decision courier continues");
     }
     let now = now_unix_timestamp();
-    let mut rows = account.client.account_db()?.task_record_page::<Job>(
+    let mut rows = account.client.account_db()?.task_record_page::<Value>(
         "task/approval_decision_out/",
         "task/approval_decision_out/",
         65,
     )?;
-    rows.extend(account.client.account_db()?.task_record_page::<Job>(
+    rows.extend(account.client.account_db()?.task_record_page::<Value>(
         "task/approval_out/",
         "task/approval_out/",
         65,
     )?);
     let mut sent = 0;
-    for (storage, mut job) in rows
-        .into_iter()
-        .filter(|(_, j)| j.next_at <= now && j.attempts < 8 && j.packet.deadline() > now)
-        .take(2)
-    {
-        let request = job.packet.request();
-        if job.packet.deadline() <= now || job.attempts >= 8 {
+    let mut attempted = 0;
+    for (storage, row) in rows {
+        let Some(mut job) = crate::error_policy::task_scan(
+            serde_json::from_value::<Job>(row).map_err(SdkError::from),
+        )?
+        else {
+            continue;
+        };
+        if job.next_at > now || job.packet.deadline() <= now || job.attempts >= 8 {
             continue;
         }
-        let bytes = job.packet.bytes()?;
+        let Some(bytes) = crate::error_policy::task_scan(job.packet.bytes())? else { continue };
+        let request = job.packet.request();
+        attempted += 1;
         let result = super::task_approval_transport::send(
             account,
             &request.binding.conversation_id,
@@ -83,9 +87,18 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
             &bytes,
         )
         .await;
-        record_delivery(account, &storage, &mut job, result.is_ok(), now)?;
+        crate::error_policy::task_scan(record_delivery(
+            account,
+            &storage,
+            &mut job,
+            result.is_ok(),
+            now,
+        ))?;
         if result.is_ok() {
             sent += 1;
+        }
+        if attempted >= 2 {
+            break;
         }
     }
     Ok(sent)
@@ -104,75 +117,83 @@ fn queue_requests(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
         let done = rows.len() < 101;
         for (row_key, row) in rows {
             cursor = row_key;
-            if row["assignee"] != local.principal_id {
-                continue;
-            }
-            let Some(conv) = row["conversation_id"].as_str() else { continue };
-            let Some(id) = row["task_id"].as_str() else { continue };
-            let history = account.client.task_history(conv, id)?;
-            let state = history.state()?;
-            let Some(task) = state.task() else { continue };
-            for step in &task.steps {
-                let Some(ramflux_protocol::NeedsMe::Approval { grant_id }) = &step.needs_me else {
-                    continue;
-                };
-                let binding = account.client.task_approval_binding(
-                    conv,
-                    id,
-                    &step.id,
-                    step.needs_me.as_ref().ok_or_else(|| invalid("approval target missing"))?,
-                )?;
-                if binding.executor_device_id != local.device_id {
-                    continue;
-                }
-                let Some(mut approval) = pending
-                    .iter()
-                    .find(|a| {
-                        a.details["requested_grant_id"].as_str() == Some(grant_id.as_str())
-                            || format!("grant_{}", a.approval_id) == *grant_id
-                    })
-                    .cloned()
-                else {
-                    continue;
-                };
-                if approval.expires_at <= now_unix_timestamp() {
-                    continue;
-                }
-                approval.details["task_binding"] = serde_json::to_value(&binding)?;
-                approval.details["single_use"] = json!(true);
-                approval.details["full_delegation"] = json!(false);
-                let body = super::grant_mcp::mcp_grant_signing_body(account, &approval)?;
-                let packet = account.client.sign_task_approval(Payload::Request {
-                    request: Box::new(Request {
-                        binding,
-                        approval: approval.clone(),
-                        grant_body: body,
-                    }),
-                })?;
-                let source_key = key("approval_source", &packet.id()?);
-                if account.client.account_db()?.actor_state_exists(&source_key)?
-                    || account.client.task_approval_receipt(&packet.id()?)?.is_some()
-                {
-                    continue;
-                }
-                let queued = account.client.account_db()?.write_transaction(|| {
-                    account.client.queue_task_approval(&packet)?;
-                    account.client.remember_task_approval_source(&packet)?;
-                    Ok::<_, SdkError>(())
-                });
-                match queued {
-                    Ok(()) => {}
-                    Err(SdkError::TaskRefused {
-                        reason: crate::TaskRefusalCode::PeerQuotaExhausted,
-                        ..
-                    }) => continue,
-                    Err(error) => return Err(error),
-                }
-                account.mcp_pending_approvals.insert(approval.approval_id.clone(), approval);
-                made += 1;
-                if made >= 2 {
+            let result = (|| {
+                if row["assignee"] != local.principal_id {
                     return Ok(());
                 }
+                let Some(conv) = row["conversation_id"].as_str() else { return Ok(()) };
+                let Some(id) = row["task_id"].as_str() else { return Ok(()) };
+                let history = account.client.task_history(conv, id)?;
+                let state = history.state()?;
+                let Some(task) = state.task() else { return Ok(()) };
+                for step in &task.steps {
+                    let Some(ramflux_protocol::NeedsMe::Approval { grant_id }) = &step.needs_me
+                    else {
+                        continue;
+                    };
+                    let binding = account.client.task_approval_binding(
+                        conv,
+                        id,
+                        &step.id,
+                        step.needs_me.as_ref().ok_or_else(|| invalid("approval target missing"))?,
+                    )?;
+                    if binding.executor_device_id != local.device_id {
+                        continue;
+                    }
+                    let Some(mut approval) = pending
+                        .iter()
+                        .find(|a| {
+                            a.details["requested_grant_id"].as_str() == Some(grant_id.as_str())
+                                || format!("grant_{}", a.approval_id) == *grant_id
+                        })
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    if approval.expires_at <= now_unix_timestamp() {
+                        continue;
+                    }
+                    approval.details["task_binding"] = serde_json::to_value(&binding)?;
+                    approval.details["single_use"] = json!(true);
+                    approval.details["full_delegation"] = json!(false);
+                    let body = super::grant_mcp::mcp_grant_signing_body(account, &approval)?;
+                    let packet = account.client.sign_task_approval(Payload::Request {
+                        request: Box::new(Request {
+                            binding,
+                            approval: approval.clone(),
+                            grant_body: body,
+                        }),
+                    })?;
+                    let source_key = key("approval_source", &packet.id()?);
+                    if account.client.account_db()?.actor_state_exists(&source_key)?
+                        || account.client.task_approval_receipt(&packet.id()?)?.is_some()
+                    {
+                        continue;
+                    }
+                    let queued = account.client.account_db()?.write_transaction(|| {
+                        account.client.queue_task_approval(&packet)?;
+                        account.client.remember_task_approval_source(&packet)?;
+                        Ok::<_, SdkError>(())
+                    });
+                    match queued {
+                        Ok(()) => {}
+                        Err(SdkError::TaskRefused {
+                            reason: crate::TaskRefusalCode::PeerQuotaExhausted,
+                            ..
+                        }) => continue,
+                        Err(error) => return Err(error),
+                    }
+                    account.mcp_pending_approvals.insert(approval.approval_id.clone(), approval);
+                    made += 1;
+                    if made >= 2 {
+                        return Ok(());
+                    }
+                }
+                Ok::<_, SdkError>(())
+            })();
+            crate::error_policy::task_scan(result)?;
+            if made >= 2 {
+                return Ok(());
             }
         }
         if done {

@@ -71,7 +71,7 @@ impl RamfluxClient {
             });
             let Some((index, _)) = victim else { break };
             let victim = candidates.swap_remove(index);
-            self.compact_task(&victim, false)?;
+            crate::error_policy::task_scan(self.compact_task(&victim, false))?;
         }
         Err(crate::task_refusal::refused(
             TaskRefusalCode::TaskQuotaExhausted,

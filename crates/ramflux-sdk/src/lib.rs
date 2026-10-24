@@ -18,6 +18,7 @@ pub use contact_card::{
 pub use contact_identity::{ContactRootChange, ContactRootSource};
 mod dm;
 mod error;
+mod error_policy;
 mod federation;
 mod gateway;
 mod group;

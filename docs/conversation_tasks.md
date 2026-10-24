@@ -283,3 +283,5 @@ The 4,096-event per-conversation signer limit can still mark that assignee's
 other tasks stalled (M-r3-2 conversation edge). Distinguishing this conversation
 limit from the account-wide assignee limit remains a follow-up; requester recovery
 controls retain their separate admission budgets.
+
+See [Local bus error codes and retries](local_bus_errors.md) for transport refusal and approval retry policy.

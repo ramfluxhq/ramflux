@@ -334,3 +334,6 @@ fn r5_an_applied_grant_keeps_the_executors_receiver_deadline_without_rewriting_i
 
 #[path = "task_approval_r6.rs"]
 mod r6;
+
+#[path = "task_approval_r7.rs"]
+mod r7;

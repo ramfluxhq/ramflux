@@ -116,8 +116,8 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::GrantInvalidated | SdkError::Sync(SyncError::GrantInvalidated) => {
             "GrantInvalidated"
         }
-        SdkError::Transport(_)
-        | SdkError::ContactUnavailable(_)
+        SdkError::Transport(error) => crate::error_policy::transport_code(error),
+        SdkError::ContactUnavailable(_)
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => "Unavailable",
         SdkError::SignatureVerificationFailed(_) => "SignatureVerificationFailed",
         SdkError::RemoteAppApprovalRequired => "RemoteAppApprovalRequired",
@@ -357,6 +357,103 @@ mod transport_refusal_tests {
         let error = response.error.ok_or_else(|| SdkError::LocalBus("missing refusal".into()))?;
         assert_eq!(error.code, "Unavailable");
         assert!(error.message.contains("deadline has elapsed"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod transport_retry_tests {
+    use super::*;
+    use ramflux_transport::TransportError as T;
+    #[test]
+    fn r7_authentication_and_security_failures_are_not_retryable_transport_outages()
+    -> Result<(), SdkError> {
+        let cases = [
+            (T::NotAuthenticated, "Unauthenticated"),
+            (T::Protocol(ramflux_protocol::ProtocolError::NotObject), "ValidationFailed"),
+            (
+                T::Codec(
+                    serde_json::from_str::<serde_json::Value>("{")
+                        .err()
+                        .ok_or_else(|| SdkError::LocalBus("invalid JSON accepted".into()))?,
+                ),
+                "ValidationFailed",
+            ),
+            (T::Tls("certificate pin mismatch".into()), "TransportSecurity"),
+            (T::Quic("deadline has elapsed".into()), "Unavailable"),
+            (T::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)), "Unavailable"),
+            (T::NotOpen, "Unavailable"),
+            (T::BackpressureRejected { capacity: 1, in_flight: 1 }, "Unavailable"),
+            (T::ShutdownDraining, "Unavailable"),
+            (T::ShutdownTimeout { in_flight: 1 }, "Unavailable"),
+            (T::RetryExhausted { attempts: 3 }, "Unavailable"),
+            (T::Http("HTTP 503: busy".into()), "Unavailable"),
+            (T::Http("HTTP/2 502 Bad Gateway".into()), "Unavailable"),
+            (T::Http("HTTP 403: denied".into()), "ValidationFailed"),
+            (T::Http("bad endpoint: response body mentions HTTP 503".into()), "ValidationFailed"),
+            (T::InvalidDnsName("bad name".into()), "ValidationFailed"),
+            (T::FrameTooLarge { len: 2_000_000 }, "ValidationFailed"),
+            (T::BackendMismatch { expected: "quic", actual: "test" }, "ValidationFailed"),
+            (T::NonProductionBackend { backend: "test", reason: "test only" }, "ValidationFailed"),
+            (T::UnsupportedOperation { operation: "unsupported" }, "ValidationFailed"),
+        ];
+        for (error, code) in cases {
+            let error = SdkError::Transport(error);
+            assert_eq!(local_bus_error_code(&error), code, "{error}");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod http_client_refusal_tests {
+    use super::*;
+    #[tokio::test]
+    async fn r7_http_client_statuses_and_deadlines_use_the_transport_retry_policy()
+    -> Result<(), SdkError> {
+        for (status, expected) in [(403, "ValidationFailed"), (503, "Unavailable")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await?;
+                let mut request = [0; 4096];
+                tokio::io::AsyncReadExt::read(&mut stream, &mut request).await?;
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .map_err(ramflux_transport::TransportError::from)?
+                .get(format!("http://{addr}/"))
+                .send()
+                .await
+                .map_err(ramflux_transport::TransportError::from)?;
+            let error = response
+                .error_for_status()
+                .err()
+                .ok_or_else(|| SdkError::LocalBus("error status accepted".into()))?;
+            assert_eq!(local_bus_error_code(&SdkError::Transport(error.into())), expected);
+            server.await.map_err(|e| SdkError::LocalBus(e.to_string()))??;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        // A listening endpoint with no accept/response keeps the request pending until its deadline.
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .map_err(ramflux_transport::TransportError::from)?
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .err()
+            .ok_or_else(|| SdkError::LocalBus("deadline did not fire".into()))?;
+        assert!(error.is_timeout());
+        assert_eq!(local_bus_error_code(&SdkError::Transport(error.into())), "Unavailable");
+        drop(listener);
         Ok(())
     }
 }

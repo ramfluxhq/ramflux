@@ -22,6 +22,7 @@ pub enum TaskRefusalCode {
     NoLocalRole,
     SignerQuotaExhausted,
     PeerQuotaExhausted,
+    AccountQuotaExhausted,
     TaskQuotaExhausted,
     DecisionConsumed,
     DecisionMismatch,
@@ -44,9 +45,10 @@ impl TaskRefusalCode {
             Self::NotFound => "not_found",
             Self::AlreadyExists => "already_exists",
             Self::NoLocalRole => "no_local_role",
-            Self::SignerQuotaExhausted | Self::TaskQuotaExhausted | Self::PeerQuotaExhausted => {
-                "quota_exhausted"
-            }
+            Self::SignerQuotaExhausted
+            | Self::TaskQuotaExhausted
+            | Self::PeerQuotaExhausted
+            | Self::AccountQuotaExhausted => "quota_exhausted",
             Self::DecisionConsumed => "decision_consumed",
             Self::DecisionMismatch => "decision_mismatch",
         }

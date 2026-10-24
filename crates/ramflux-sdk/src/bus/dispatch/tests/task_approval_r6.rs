@@ -57,7 +57,10 @@ fn r6_transient_application_errors_preserve_the_decision_until_a_later_successfu
     for error in [
         SdkError::InboundPending("dependency restoring".into()),
         SdkError::GatewaySessionNotEstablished,
-        SdkError::LocalBus("worker temporarily unavailable".into()),
+        SdkError::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "worker temporarily unavailable",
+        )),
     ] {
         let mut error = Some(error);
         apply_using(&mut agent, |_, _| {
