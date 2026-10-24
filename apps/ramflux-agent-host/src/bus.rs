@@ -77,7 +77,9 @@ impl AgentBus for RfdBus {
         frame.deadline_ms = Some(now_ms().saturating_add(30_000));
         let response = self.client.request_frame_response(frame).await.map_err(|_| Error::Bus)?;
         if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
-            let error = response.error.ok_or(Error::Bus)?;
+            let error = response
+                .error
+                .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::InvalidRequest))?;
             if error.code == "resync_required" {
                 return Err(Error::Resync);
             }

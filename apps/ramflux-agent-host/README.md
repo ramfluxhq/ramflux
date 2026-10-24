@@ -114,8 +114,12 @@ directory (a 10,000-cursor ceiling and cycle detection bound a corrupt pager).
 Recent conversation keys also have a 64 KiB budget; prepared output bodies are
 bounded to 256 KiB so an individual output cannot exhaust checkpoint space.
 
-Message, action and resync triggers inside the configured interval are dropped with
-rate_limited; the event loop never sleeps for a conversation interval. A peer losing
+Message triggers inside the configured interval are dropped with rate_limited.
+User actions and resync notifications are deferred durably and rechecked by the next
+poll after the interval ends. The queue holds at most 64 scoped references / 32 KiB,
+with no copied action values; current author/executor/actionability is read again
+before use. It survives restart and keeps the account cursor moving. Its timestamp
+records the actual recheck time. The event loop never sleeps for a conversation interval. A peer losing
 its devices, a stale executor notification, an unusable surface or an invalid provider
 output records a typed last_refusal and advances the cursor. Lost transport replies
 retain the exact durable pending request and reconnect. Only loss of the host's own
@@ -130,3 +134,10 @@ and group replies and host restart without duplicate replies. The QA controller 
 that gated slice on a container host; unit tests do not claim realnet acceptance.
 `k5a2_realnet_agent_surface` adds a group checklist, streaming, human choice, result
 fallback and host-restart equivalence.
+
+Malformed read-model fields are permanent typed refusals, never transport retries.
+Only connection failures and explicit Unavailable/Busy/DeadlineExceeded refusals
+reconnect the host. Per-poll validation failures are recorded without abandoning the
+event stream; the first poll waits one interval. Foreign-account, non-event and
+unsequenced data frames are logged without consuming an account cursor. Error logs
+contain only fixed error classes and field names, never field values or reply bodies.

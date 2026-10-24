@@ -155,7 +155,11 @@ snapshot or checkpoint.
 Full state travels in creates and explicit resyncs; resync carries one create-shaped
 wire payload and compact content-free finality metadata. The canonical snapshot
 cap and per-block stream accumulation cap are 16,384 bytes. JCS and domain-separated
-BLAKE3 hashing remain unchanged. Resync rejects rollback, same-version conflicts,
+BLAKE3 hashing remain unchanged. Create-shaped canonical snapshots omit empty
+`components`, `dataModel` and `allowedActions` collections. Typed readers restore
+an absent collection to its empty default; explicit null is not an empty collection.
+`surface.get` exposes that canonical representation, so clients must not insert an
+empty array into the bytes used for snapshot hashing. Resync rejects rollback, same-version conflicts,
 reopening closed state, executor changes, and changes to known finalized blocks.
 Private finality tombstones use BLAKE3 commitments; local checkpoint decoding is
 capped at 256 KiB.

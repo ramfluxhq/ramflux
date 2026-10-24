@@ -45,6 +45,7 @@ impl SurfaceRule {
             && self.choices.iter().all(|c| {
                 !c.id.is_empty()
                     && c.id.len() <= 128
+                    && ramflux_protocol::text_safety::free_text_is_safe(&c.id)
                     && !c.label.is_empty()
                     && c.label.len() <= 256
                     && ramflux_protocol::text_safety::free_text_is_safe(&c.label)
@@ -104,6 +105,7 @@ impl Config {
             || self.rules.iter().any(|r| {
                 r.pattern.is_empty()
                     || r.pattern.len() > 1024
+                    || !ramflux_protocol::text_safety::free_text_is_safe(&r.pattern)
                     || r.reply.is_empty()
                     || r.reply.len() > MAX_TEXT_BYTES
                     || !ramflux_protocol::text_safety::free_text_is_safe(&r.reply)

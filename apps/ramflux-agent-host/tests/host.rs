@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 mod host {
+    mod deferred_actions;
+    mod malformed_events;
     mod principal_routing;
     mod recovery;
     mod resilience;

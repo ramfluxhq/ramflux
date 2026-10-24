@@ -22,7 +22,8 @@ impl<E: EngineProvider> AgentHost<E> {
         config.validate()?;
         let store = CheckpointStore::new(config.state_file.clone())?;
         let state = store.load()?;
-        if state.handled_actions.len() > 2048
+        if !crate::runner_deferred::valid(&state)
+            || state.handled_actions.len() > 2048
             || state.pending.as_ref().is_some_and(|p| {
                 !matches!(
                     p.method.as_str(),
@@ -73,7 +74,7 @@ impl<E: EngineProvider> AgentHost<E> {
             Err(error) => return Err(error),
         };
         if self.state.cursor.is_none() {
-            self.state.cursor = Some(ack["head_seq"].as_u64().ok_or(Error::Bus)?);
+            self.state.cursor = Some(ack["head_seq"].as_u64().ok_or(Error::State)?);
         }
         participant::snapshot(bus, "conversation.directory", "conversations").await?;
         participant::snapshot(bus, "group.list", "groups").await?;
@@ -93,12 +94,16 @@ impl<E: EngineProvider> AgentHost<E> {
         if event.account_id.as_deref() != Some(&self.config.account_id)
             || event.kind != LocalBusFrameKind::Event
         {
-            return Err(Error::Unauthorized);
+            eprintln!("agent host ignored an unscoped or non-event frame");
+            return Ok(());
         }
         if event.method == "stream.lagged" {
             return Err(Error::Resync);
         }
-        let seq = event.seq.ok_or(Error::Bus)?;
+        let Some(seq) = event.seq else {
+            eprintln!("agent host ignored an event without a sequence");
+            return Ok(());
+        };
         if self.state.cursor.is_some_and(|cursor| seq <= cursor) {
             return Ok(());
         }
@@ -252,12 +257,12 @@ impl<E: EngineProvider> AgentHost<E> {
         let mut tick =
             tokio::time::interval(std::time::Duration::from_millis(self.config.poll_interval_ms));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Consume the immediate interval tick; ordinary events can arrive before the first poll.
+        tick.tick().await;
         loop {
             tokio::select! {
                 event=bus.next_event()=>self.apply(bus,event?,crate::bus::now_ms()).await?,
-                _=tick.tick()=>{
-                    bus.request("message.receive",json!({"limit":32,"auto_fetch_attachments":false}),None).await?;
-                }
+                _=tick.tick()=>self.poll(bus, crate::bus::now_ms()).await?,
             }
         }
     }

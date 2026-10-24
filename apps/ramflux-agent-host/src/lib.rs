@@ -8,6 +8,7 @@ mod config;
 mod engine;
 mod participant;
 mod runner;
+mod runner_deferred;
 mod runner_output;
 mod runner_policy;
 mod runner_refusal;
@@ -29,6 +30,8 @@ pub enum Error {
     IdentityLost,
     #[error("durable host storage is unavailable")]
     Storage,
+    #[error("malformed local row field: {0}")]
+    MalformedField(&'static str),
     #[error("invalid host configuration")]
     Config,
     #[error("host state could not be read or persisted")]

@@ -82,7 +82,8 @@ async fn lagged_foreign_and_revoked_events_fail_closed() -> TestResult {
     assert!(matches!(host.apply(&mut bus, event, 2000).await, Err(Error::Resync)));
     let mut event = incoming(11, false);
     event.account_id = Some("human".into());
-    assert!(matches!(host.apply(&mut bus, event, 2000).await, Err(Error::Unauthorized)));
+    host.apply(&mut bus, event, 2000).await?;
+    assert_eq!(host.checkpoint().cursor, Some(10));
     let mut event = incoming(11, false);
     event.method = "identity.device_branch.revoked".into();
     event.body["device_id"] = serde_json::json!("agent-device");

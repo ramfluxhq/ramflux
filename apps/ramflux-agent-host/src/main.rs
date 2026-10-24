@@ -30,12 +30,11 @@ async fn run() -> ramflux_agent_host::Result<()> {
         };
         tokio::select! {
             result=attempt=>match result{
-                Err(error) if !error.stops_host()=>{},other=>return other,
+                Err(error) if !error.stops_host()=>{eprintln!("agent host reconnecting: {error}");},other=>return other,
             },
-            result=tokio::signal::ctrl_c()=>{result.map_err(|_|Error::Bus)?;return Ok(());}
+            result=tokio::signal::ctrl_c()=>{result.map_err(|_|Error::State)?;return Ok(());}
         }
         // No response bodies, plaintext, credentials or endpoint paths enter logs.
-        eprintln!("agent host reconnecting");
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }

@@ -44,14 +44,14 @@ impl<E: EngineProvider> AgentHost<E> {
                 last.saturating_add(self.config.per_conversation_interval_ms)
             });
         if now_ms < ready_at {
-            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
+            return self.defer_surface(event, seq, ready_at);
         }
         let work =
             ActionWork { surface_ref: reference.into(), action_id: action.into(), attempts: 0 };
         if !self.rate_history_has_capacity(conversation) {
             return Err(Error::Limit);
         }
-        self.state.last_reply_ms.insert(conversation.into(), ready_at);
+        self.state.last_reply_ms.insert(conversation.into(), now_ms);
         let original = Pending {
             seq,
             conversation_id: conversation.into(),
@@ -109,7 +109,7 @@ impl<E: EngineProvider> AgentHost<E> {
                 last.saturating_add(self.config.per_conversation_interval_ms)
             });
         if now_ms < ready {
-            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
+            return self.defer_surface(event, seq, ready);
         }
         let id = ramflux_sdk::new_surface_message_id().map_err(|_| Error::State)?;
         let pending = Pending {
@@ -130,7 +130,7 @@ impl<E: EngineProvider> AgentHost<E> {
         if !self.rate_history_has_capacity(conversation) {
             return Err(Error::Limit);
         }
-        self.state.last_reply_ms.insert(conversation.into(), ready);
+        self.state.last_reply_ms.insert(conversation.into(), now_ms);
         self.state.pending = Some(pending);
         self.store.save(&self.state)?;
         self.recover_pending(bus).await

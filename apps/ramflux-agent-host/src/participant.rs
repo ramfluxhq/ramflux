@@ -47,9 +47,9 @@ pub(crate) async fn identity(
     if status["client_mode"] != "headless_ai" || status["local_device_authorized"] != true {
         return Err(Error::IdentityLost);
     }
-    let principal = field(&status, "principal_id")?;
+    let principal = field(&status, "principal_id").map_err(|_| Error::IdentityLost)?;
     let devices = bus.request("device.list", json!({}), None).await?;
-    let device = field(&devices, "local_device_id")?;
+    let device = field(&devices, "local_device_id").map_err(|_| Error::IdentityLost)?;
     if devices["principal_id"] != principal || !contains(&devices["devices"], "device_id", device) {
         return Err(Error::IdentityLost);
     }
@@ -106,12 +106,12 @@ pub(crate) fn array_has(value: &Value, id: &str) -> bool {
 fn contains(value: &Value, key: &str, id: &str) -> bool {
     value.as_array().is_some_and(|values| values.iter().any(|v| v[key] == id))
 }
-pub(crate) fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+pub(crate) fn field<'a>(value: &'a Value, key: &'static str) -> Result<&'a str> {
     value
         .get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty() && s.len() <= 1024)
-        .ok_or(Error::Bus)
+        .ok_or(Error::MalformedField(key))
 }
 
 pub(crate) async fn reply_outputs(
@@ -132,7 +132,7 @@ pub(crate) async fn reply_outputs(
             input_id,
             index,
         ))
-        .map_err(|_| Error::Bus)?,
+        .map_err(|_| Error::State)?,
     );
     let message_id = format!("agent-{operation}");
     let mut body = json!({"conversation_id":conversation_id,"message_id":message_id,"sender_id":state.device_id,"encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(text.as_bytes())});

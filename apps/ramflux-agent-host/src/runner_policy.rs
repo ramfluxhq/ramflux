@@ -40,6 +40,7 @@ impl<E: EngineProvider> AgentHost<E> {
                 Err(error)
             }
             Err(error) => {
+                eprintln!("agent host skipped event: {error}");
                 if let Some(pending) = self.state.pending.clone() {
                     self.stop_surface_output(&pending, refusal(&error))?;
                 } else {

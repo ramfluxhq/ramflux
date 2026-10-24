@@ -47,6 +47,7 @@ impl<E: EngineProvider> AgentHost<E> {
         let result = self.recover_outputs(bus).await;
         match result {
             Err(error) if !error.stops_host() && !matches!(error, Error::Bus | Error::Resync) => {
+                eprintln!("agent host retired output: {error}");
                 if let Some(pending) = self.state.pending.clone() {
                     self.stop_surface_output(&pending, crate::runner_policy::refusal(&error))?;
                 }

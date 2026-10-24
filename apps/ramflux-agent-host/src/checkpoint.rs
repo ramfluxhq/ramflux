@@ -9,7 +9,7 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
 };
-const MAX_STATE_BYTES: u64 = 524_288;
+pub(crate) const MAX_STATE_BYTES: u64 = 524_288;
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
@@ -23,6 +23,17 @@ pub struct Checkpoint {
     pub(crate) pending: Option<Pending>,
     #[serde(default)]
     pub(crate) handled_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) deferred_surfaces: BTreeMap<String, DeferredSurface>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeferredSurface {
+    pub seq: u64,
+    pub conversation: String,
+    pub reference: String,
+    pub action: Option<String>,
+    pub ready_at: u64,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

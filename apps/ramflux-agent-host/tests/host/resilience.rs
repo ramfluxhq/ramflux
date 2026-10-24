@@ -135,7 +135,8 @@ async fn r3_rate_limited_actions_do_not_sleep_or_block_the_next_event() -> TestR
         host.apply(&mut bus, event(20, false), 2001),
     )
     .await??;
-    assert_eq!(host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason, Code::RateLimited);
+    let queued = serde_json::to_value(host.checkpoint())?;
+    assert_eq!(queued["deferred_surfaces"].as_object().ok_or("deferred")?.len(), 1);
     let mut next = event(21, false);
     next.method = "device.changed".into();
     host.apply(&mut bus, next, 2002).await?;
