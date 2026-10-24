@@ -411,9 +411,10 @@ pub(crate) fn dm_associated_data(conversation_id: &str) -> &[u8] {
 }
 pub(crate) fn gateway_ack(
     envelope_id: &str,
-    receiver_device_id: &str,
+    receiver: &ramflux_crypto::RootQualifiedDeviceRef,
     received_at: i64,
-) -> Result<ramflux_protocol::Ack, SdkError> {
+) -> ramflux_protocol::Ack {
+    let receiver_device_id = receiver.device_id();
     let mut ack = ramflux_protocol::Ack {
         schema: "ramflux.ack.v1".to_owned(),
         version: 1,
@@ -426,8 +427,10 @@ pub(crate) fn gateway_ack(
         received_at,
         cursor_after: None,
     };
-    ack.signed.signature = ramflux_crypto::sign_protocol_object(&ack)?;
-    Ok(ack)
+    ack.ext
+        .ext
+        .insert("receiver_root_commitment".into(), serde_json::json!(receiver.root_commitment()));
+    ack
 }
 
 pub(crate) fn gateway_direct_message_envelope(

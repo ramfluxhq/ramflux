@@ -7,6 +7,16 @@ use crate::{GatewayInboxEntry, RamfluxClient, SdkError, prekey::SdkDeviceManifes
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::SignedDeviceSetRecord;
 impl RamfluxClient {
+    /// Return the current device identity authenticated by this account's owned root.
+    /// # Errors
+    /// Rejects missing owned root/branch state or inconsistent account ownership.
+    pub fn owned_device_identity(&self) -> Result<RootQualifiedDeviceRef, SdkError> {
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        Ok(RootQualifiedDeviceRef::for_owned_device(
+            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            branch,
+        )?)
+    }
     pub(crate) fn local_device_identity(
         &self,
         device: &str,

@@ -33,6 +33,8 @@ pub enum NodeCoreError {
     SessionNotFound(String),
     #[error("envelope not found: {0}")]
     EnvelopeNotFound(String),
+    #[error("ambiguous envelope id {0}; an inbox sequence is required")]
+    AmbiguousEnvelopeId(String),
     #[error(
         "envelope target mismatch for {envelope_id}: expected {expected_target_delivery_id}, actual {actual_target_delivery_id}"
     )]

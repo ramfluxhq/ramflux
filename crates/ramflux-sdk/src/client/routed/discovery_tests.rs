@@ -118,3 +118,14 @@ fn signed_root_hint_cannot_override_an_existing_verified_owner() -> TestResult {
     assert!(receiver.client.authenticated_envelope_sender(&entry).is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_non_string_signed_root_hint_is_rejected_before_manifest_discovery() -> TestResult {
+    let sender = Fixture::new("alice", 91)?;
+    let receiver = Fixture::new("bob", 101)?;
+    let mut entry = seal(&sender, &receiver, message("malformed-root-header", "thread"), b"body")?;
+    entry.envelope.ext.ext.insert("source_root_commitment".into(), serde_json::json!(true));
+    assert!(matches!(receiver.client.ensure_inbound_device(&receiver.config()?,&entry).await,
+        Err(SdkError::InboundRejected(reason)) if reason.ends_with("invalid sender root hint")));
+    Ok(())
+}

@@ -214,6 +214,10 @@ fn record_replay_tuple_in_txn(
     Ok(())
 }
 
+#[path = "router_store/mailbox_keys.rs"]
+mod mailbox_keys;
+use mailbox_keys::storage_key as inbox_entry_storage_key;
+
 fn record_inbox_entry_in_txn(
     write_txn: &redb::WriteTransaction,
     entry: &InboxEntry,
@@ -223,7 +227,10 @@ fn record_inbox_entry_in_txn(
         .open_table(ROUTER_INBOX_ENTRY_TABLE)
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     inbox_table
-        .insert(entry.envelope.envelope_id.as_str(), entry_bytes.as_slice())
+        .insert(
+            inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq).as_str(),
+            entry_bytes.as_slice(),
+        )
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     Ok(())
 }
@@ -304,6 +311,7 @@ impl RouterRedbStore {
                 .open_table(ROUTER_ABUSE_REPORT_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
+        mailbox_keys::upgrade(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let commit_writer = if router_group_commit_enabled() {
             Some(RouterCommitWriter::start(Arc::clone(&db))?)
@@ -564,7 +572,7 @@ impl RouterRedbStore {
     pub fn record_ack_increment(
         &self,
         cursor: &CursorAckState,
-        envelope_id: &str,
+        _envelope_id: &str,
     ) -> Result<(), NodeCoreError> {
         let save_started = Instant::now();
         let inbox_started = Instant::now();
@@ -581,9 +589,11 @@ impl RouterRedbStore {
             let mut inbox_table = write_txn
                 .open_table(ROUTER_INBOX_ENTRY_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let _removed = inbox_table
-                .remove(envelope_id)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
+                NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
+            })?;
+            let key = inbox_entry_storage_key(&cursor.target_delivery_id, sequence);
+            inbox_table.remove(key.as_str()).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
@@ -916,16 +926,16 @@ impl RouterRedbStore {
             let Some(entry) = submission.entry else {
                 continue;
             };
-            if incremental_cursors
-                .iter()
-                .any(|cursor| cursor.acked_envelope_ids.contains(&entry.envelope.envelope_id))
-            {
+            if incremental_cursors.iter().any(|cursor| {
+                cursor.target_delivery_id == entry.target_delivery_id
+                    && cursor.acked_inbox_seqs.contains(&entry.inbox_seq)
+            }) {
                 continue;
             }
-            if incremental_entries
-                .iter()
-                .any(|existing| existing.envelope.envelope_id == entry.envelope.envelope_id)
-            {
+            if incremental_entries.iter().any(|existing| {
+                existing.target_delivery_id == entry.target_delivery_id
+                    && existing.inbox_seq == entry.inbox_seq
+            }) {
                 continue;
             }
             incremental_entries.push(entry);
@@ -973,7 +983,11 @@ impl RouterRedbStore {
             }
             for (entry, bytes) in pending_entries.iter().zip(pending_entry_bytes.iter()) {
                 inbox_table
-                    .insert(entry.envelope.envelope_id.as_str(), bytes.as_slice())
+                    .insert(
+                        inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq)
+                            .as_str(),
+                        bytes.as_slice(),
+                    )
                     .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             }
 

@@ -108,13 +108,7 @@ async fn receive(
                 false
             }
         };
-        let device = engine.config.device_id.clone();
-        if account
-            .client
-            .ack_gateway_delivery(engine, &entry.envelope.envelope_id, &device, now)
-            .await
-            .is_err()
-        {
+        if account.client.ack_gateway_entry(engine, &entry, now).await.is_err() {
             let bytes = serde_json::to_vec(&entry)?;
             if bytes.len() <= 1024 * 1024 {
                 account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)?;

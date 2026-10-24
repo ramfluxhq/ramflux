@@ -493,7 +493,7 @@ fn federation_forward_request(
     }
 }
 
-fn root_bound_forward(
+pub(super) fn root_bound_forward(
     root: &ramflux_crypto::IdentityRoot,
     device: &str,
     record: Option<ramflux_protocol::SignedDeviceSetRecord>,
