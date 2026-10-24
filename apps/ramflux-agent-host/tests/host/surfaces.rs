@@ -6,7 +6,7 @@ use super::{
     surface_bus::{SurfaceBus, event},
 };
 use ramflux_agent_host::{AgentHost, Choice, Error, Rule, RuleEngine, SurfaceRule};
-fn fixture() -> std::io::Result<Fixture> {
+pub(super) fn fixture() -> std::io::Result<Fixture> {
     let mut f = Fixture::new()?;
     f.config.rules = vec![Rule {
         pattern: "@agent checklist".into(),
@@ -33,6 +33,7 @@ async fn streamed_reply_choice_result_and_restart_have_no_duplicate_surfaces() -
     assert_eq!(content.components[0]["text"], f.config.rules[0].reply);
     assert_eq!(content.fallback_text, f.config.rules[0].reply);
     assert!(!bus.state.is_closed());
+    assert_eq!(bus.state.stream_states()["reply"], ramflux_protocol::SurfaceStreamState::Final);
     assert!(bus.sent.len() > 3);
     for body in &bus.sent {
         assert_eq!(

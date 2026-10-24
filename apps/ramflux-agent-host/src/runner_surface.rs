@@ -20,6 +20,9 @@ impl<E: EngineProvider> AgentHost<E> {
         {
             return Ok(());
         }
+        if event.body["out_of_sync"] == true && event.body["last_action_id"].as_str().is_none() {
+            return self.resync_owned_surface(bus, event, seq, now_ms).await;
+        }
         let Some(action) = event.body["last_action_id"].as_str() else {
             return Ok(());
         };
@@ -51,11 +54,6 @@ impl<E: EngineProvider> AgentHost<E> {
         }
         let work =
             ActionWork { surface_ref: reference.into(), action_id: action.into(), attempts: 0 };
-        let outputs = self.derive_action_outputs(bus, conversation, &work).await?;
-        if outputs.is_empty() {
-            self.state.handled_actions.push(key);
-            return Ok(());
-        }
         if !self.state.last_reply_ms.contains_key(conversation)
             && self.state.last_reply_ms.len() >= self.config.max_conversations
         {
@@ -70,8 +68,84 @@ impl<E: EngineProvider> AgentHost<E> {
             body: json!(null),
             remaining: Vec::new(),
             action: None,
+            plan: None,
+            needs_rederive: None,
         };
+        let outputs = match self.derive_action_outputs(bus, conversation, &work).await {
+            Ok(outputs) => outputs,
+            Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::OutOfSync)) => {
+                let mut original = original;
+                original.body =
+                    json!({"conversation_id":conversation,"surface_ref":work.surface_ref});
+                original.method = "surface.send".into();
+                original.action = Some(work);
+                self.handle_surface_refusal(
+                    bus,
+                    &original,
+                    ramflux_sdk::SurfaceRefusalCode::OutOfSync,
+                )
+                .await?;
+                return self.recover_pending(bus).await;
+            }
+            Err(error) => return Err(error),
+        };
+        if outputs.is_empty() {
+            self.state.handled_actions.push(key);
+            return Ok(());
+        }
         self.replace_action_pending(&original, outputs, work)?;
+        self.recover_pending(bus).await
+    }
+    async fn resync_owned_surface(
+        &mut self,
+        bus: &mut impl AgentBus,
+        event: &LocalBusFrame,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<()> {
+        let reference = participant::field(&event.body, "surface_ref")?;
+        let conversation = participant::field(&event.body, "conversation_id")?;
+        participant::identity(bus, &mut self.state, &self.config.account_id).await?;
+        if participant::conversation(bus, &self.state, conversation, self.config.max_conversations)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let ready = self.state.last_reply_ms.get(conversation).map_or(now_ms, |last| {
+            last.saturating_add(self.config.per_conversation_interval_ms).max(now_ms)
+        });
+        let delay = ready.saturating_sub(now_ms);
+        if delay > self.config.per_conversation_interval_ms {
+            return Err(Error::State);
+        }
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        let id = ramflux_sdk::new_surface_message_id().map_err(|_| Error::State)?;
+        let pending = Pending {
+            seq,
+            conversation_id: conversation.into(),
+            method: "surface.resync".into(),
+            operation_id: id.clone(),
+            body: json!({"conversation_id":conversation,"surface_ref":reference,"message_id":id}),
+            remaining: Vec::new(),
+            action: None,
+            plan: None,
+            needs_rederive: None,
+        };
+        let view = self.current_surface(bus, &pending).await?;
+        if view["out_of_sync"] != true {
+            return Ok(());
+        }
+        if !self.state.last_reply_ms.contains_key(conversation)
+            && self.state.last_reply_ms.len() >= self.config.max_conversations
+        {
+            return Err(Error::Limit);
+        }
+        self.state.last_reply_ms.insert(conversation.into(), ready);
+        self.state.pending = Some(pending);
+        self.store.save(&self.state)?;
         self.recover_pending(bus).await
     }
     pub(crate) fn replace_action_pending(
@@ -92,6 +166,8 @@ impl<E: EngineProvider> AgentHost<E> {
             body: first.body,
             remaining: outputs,
             action: Some(work),
+            plan: None,
+            needs_rederive: None,
         });
         self.store.save(&self.state)
     }
@@ -112,9 +188,11 @@ impl<E: EngineProvider> AgentHost<E> {
             || view["author_principal_id"] != self.state.principal_id
             || view["executor_device_id"] != self.state.device_id
             || view["is_action_executor"] != true
-            || view["out_of_sync"] == true
         {
             return Err(Error::Unauthorized);
+        }
+        if view["out_of_sync"] == true {
+            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::OutOfSync));
         }
         let Some(row) = view["actions"].as_array().and_then(|rows| {
             rows.iter().find(|row| row["id"] == work.action_id && row["actionable"] == true)

@@ -25,8 +25,10 @@ impl<E: EngineProvider> AgentHost<E> {
         if state.handled_actions.len() > 2048
             || state.last_reply_ms.len() > config.max_conversations
             || state.pending.as_ref().is_some_and(|p| {
-                !matches!(p.method.as_str(), "message.submit" | "group.send" | "surface.send")
-                    || p.remaining.len() > 95
+                !matches!(
+                    p.method.as_str(),
+                    "message.submit" | "group.send" | "surface.send" | "surface.resync"
+                ) || p.remaining.len() > 95
                     || p.remaining.iter().any(|o| {
                         o.method != "surface.send" || o.body["conversation_id"] != p.conversation_id
                     })
@@ -182,6 +184,26 @@ impl<E: EngineProvider> AgentHost<E> {
         if intents.is_empty() {
             return Ok(());
         }
+        let plan = if matches!(intents.first(), Some(Intent::CreateSurface(_))) {
+            match crate::surface_plan::SurfacePlan::new(conversation_id, &intents) {
+                Ok(plan) => Some(plan),
+                Err(Error::SurfaceRefused(reason)) => {
+                    self.state.last_refusal = Some(crate::OutputRefusal {
+                        conversation_id: conversation_id.into(),
+                        surface_id: intents
+                            .first()
+                            .and_then(Intent::command)
+                            .map(|command| crate::runner_output::command_id(&command).to_owned()),
+                        reason,
+                    });
+                    self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
+                    return self.store.save(&self.state);
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         let mut outputs = if let [Intent::ReplyText(text)] = intents.as_slice() {
             if text.is_empty() || text.len() > crate::config::MAX_TEXT_BYTES {
                 return Err(Error::Limit);
@@ -204,6 +226,8 @@ impl<E: EngineProvider> AgentHost<E> {
             body: first.body,
             remaining: outputs,
             action: None,
+            plan,
+            needs_rederive: None,
         });
         self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
         self.store.save(&self.state)?;

@@ -9,9 +9,11 @@ mod engine;
 mod participant;
 mod runner;
 mod runner_output;
+mod runner_refusal;
 mod runner_surface;
+mod surface_plan;
 pub use bus::{AgentBus, RfdBus};
-pub use checkpoint::{Checkpoint, CheckpointStore};
+pub use checkpoint::{Checkpoint, CheckpointStore, OutputRefusal};
 pub use config::{Choice, Config, Rule, SurfaceRule};
 pub use engine::{ActionInput, ConversationInput, EngineProvider, Intent, RuleEngine};
 pub use runner::AgentHost;
@@ -20,6 +22,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors intentionally omit rfd bodies, message text, paths and credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("surface output refused: {0:?}")]
+    SurfaceRefused(ramflux_sdk::SurfaceRefusalCode),
     #[error("invalid host configuration")]
     Config,
     #[error("host state could not be read or persisted")]

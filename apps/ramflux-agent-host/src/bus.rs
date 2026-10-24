@@ -61,6 +61,7 @@ impl AgentBus for RfdBus {
                 | "group.send"
                 | "surface.send"
                 | "surface.get"
+                | "surface.resync"
         ) {
             return Err(Error::Unauthorized);
         }
@@ -74,9 +75,20 @@ impl AgentBus for RfdBus {
         );
         frame.operation_id = operation.map(str::to_owned);
         frame.deadline_ms = Some(now_ms().saturating_add(30_000));
-        self.client.request_frame(frame).await.map_err(|error| {
-            if error.to_string().contains("resync_required") { Error::Resync } else { Error::Bus }
-        })
+        let response = self.client.request_frame_response(frame).await.map_err(|_| Error::Bus)?;
+        if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
+            let error = response.error.ok_or(Error::Bus)?;
+            if error.code == "resync_required" {
+                return Err(Error::Resync);
+            }
+            if method.starts_with("surface.")
+                && let Ok(reason) = serde_json::from_value(serde_json::json!(error.code))
+            {
+                return Err(Error::SurfaceRefused(reason));
+            }
+            return Err(Error::Bus);
+        }
+        Ok(response.body)
     }
     async fn next_event(&mut self) -> Result<LocalBusFrame> {
         self.client.next_event().await.map_err(|_| Error::Bus)

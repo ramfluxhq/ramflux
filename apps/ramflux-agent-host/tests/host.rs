@@ -5,5 +5,7 @@ mod host {
     mod safety;
     mod support;
     mod surface_bus;
+    mod surface_recovery;
     mod surfaces;
+    mod typed_bus;
 }

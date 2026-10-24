@@ -4,7 +4,6 @@
 //! Crash-safe typed surface batches and stable logical request retries.
 use crate::checkpoint::{Output, Pending};
 use crate::{AgentBus, AgentHost, EngineProvider, Error, Intent, Result, participant};
-use serde_json::json;
 pub(crate) fn surface_outputs(
     conversation: &str,
     intents: &[Intent],
@@ -57,7 +56,15 @@ impl<E: EngineProvider> AgentHost<E> {
                 self.complete_pending(&pending)?;
                 return Ok(());
             };
-            if pending.method == "surface.send" {
+            if let Some(reason) = pending.needs_rederive {
+                if self.resume_refused_pending(bus, &pending, reason).await? {
+                    continue;
+                }
+                return Ok(());
+            }
+            if pending.method == "surface.resync" {
+                participant::field(&pending.body, "surface_ref")?;
+            } else if pending.method == "surface.send" {
                 let bytes = ramflux_protocol::decode_base64url(
                     pending.body["wire_base64"].as_str().ok_or(Error::State)?,
                 )
@@ -80,39 +87,44 @@ impl<E: EngineProvider> AgentHost<E> {
             }
             let result = bus
                 .request(&pending.method, pending.body.clone(), Some(&pending.operation_id))
-                .await?;
-            if pending.method == "surface.send" && result["accepted"] != true {
-                if let Some(mut work) = pending.action.clone() {
-                    if work.attempts >= 2 {
-                        work.attempts = 3;
-                        pending.action = Some(work);
-                        self.state.pending = Some(pending);
-                        self.store.save(&self.state)?;
-                        return Err(Error::Limit);
-                    }
-                    work.attempts += 1;
-                    let outputs =
-                        self.derive_action_outputs(bus, &pending.conversation_id, &work).await?;
-                    if outputs.is_empty() {
-                        self.complete_pending(&pending)?;
-                        return Ok(());
-                    }
-                    self.replace_action_pending(&pending, outputs, work)?;
+                .await;
+            let (value, refusal) = match result {
+                Err(Error::SurfaceRefused(code)) => (serde_json::Value::Null, Some(code)),
+                Err(error) => return Err(error),
+                Ok(value)
+                    if pending.method.starts_with("surface.") && value["accepted"] != true =>
+                {
+                    let code = serde_json::from_value(value["reason_code"].clone())
+                        .unwrap_or(ramflux_sdk::SurfaceRefusalCode::InvalidRequest);
+                    (value, Some(code))
+                }
+                Ok(value) => (value, None),
+            };
+            if let Some(code) = refusal {
+                if self.handle_surface_refusal(bus, &pending, code).await? {
                     continue;
                 }
-                // Reload explicitly before abandoning a conflicting streamed plan. Never replay
-                // its old patch/hash against a newly observed state.
-                let raw = ramflux_protocol::decode_base64url(
-                    pending.body["wire_base64"].as_str().ok_or(Error::State)?,
-                )
-                .map_err(|_| Error::State)?;
-                let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&raw)
-                    .map_err(|_| Error::State)?;
-                let id = command_id(event.command());
-                bus.request("surface.get",json!({"surface_id":id,"conversation_id":pending.conversation_id,"author_principal_id":self.state.principal_id}),None).await?;
-                self.complete_pending(&pending)?;
                 return Ok(());
             }
+            if pending.method == "surface.resync"
+                && (pending.action.is_some() || pending.plan.is_some())
+            {
+                pending.needs_rederive = Some(ramflux_sdk::SurfaceRefusalCode::StaleHash);
+                self.state.pending = Some(pending.clone());
+                self.store.save(&self.state)?;
+                if self
+                    .resume_refused_pending(
+                        bus,
+                        &pending,
+                        ramflux_sdk::SurfaceRefusalCode::StaleHash,
+                    )
+                    .await?
+                {
+                    continue;
+                }
+                return Ok(());
+            }
+            drop(value);
             if pending.remaining.is_empty() {
                 self.complete_pending(&pending)?;
                 return Ok(());
@@ -126,7 +138,7 @@ impl<E: EngineProvider> AgentHost<E> {
         }
         Ok(())
     }
-    fn complete_pending(&mut self, pending: &Pending) -> Result<()> {
+    pub(crate) fn complete_pending(&mut self, pending: &Pending) -> Result<()> {
         if let Some(work) = &pending.action {
             let id = action_key(&work.surface_ref, &work.action_id);
             if !self.state.handled_actions.contains(&id) {

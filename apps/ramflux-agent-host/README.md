@@ -12,7 +12,7 @@ normal rfd flows. The host verifies both persisted `client_mode` and self identi
 kind before acting. Persisted local-device authorization is checked independently of
 the display device list, which always includes the active device. Conversation
 membership and device authorization are checked again
-before every output. Surface output uses only `surface.send` and typed protocol
+before every output. Surface output uses `surface.send`, the author `surface.resync` RPC and typed protocol
 builders; the host sends no task/tool/approval operations.
 
 Copy `example.json` and set the socket, account and durable state paths. Create the
@@ -79,8 +79,25 @@ A conflicting result is rebuilt from a fresh `surface.get` with a new request ID
 the old patch/hash is not resent. At most two rebuilds are allowed. Persistent
 conflicts leave a terminal bounded-error checkpoint requiring operator review;
 restart does not submit that rejected result again. An interrupted successful batch
-reuses its exact pending bytes. A conflicting ordinary stream is explicitly re-read
-and abandoned, without synthesizing missing content or replaying old patches.
+reuses its exact pending bytes. A conflicting ordinary stream reloads its scoped snapshot and validates its hash.
+The prepared target may resume only an unchanged reply whose current text is a
+prefix of the target: it appends the missing suffix, finalizes the stream, and
+recomputes the fallback patch. Changes to choices or unrelated content stop that
+output rather than overwriting newer decisions. At most two rebuilds are allowed.
+The complete target is checked against the protocol's whole-snapshot size budget
+before its first create, including both reply text and fallback.
+
+Daemon refusal codes are preserved as typed fields; diagnostic text is neither
+parsed nor logged. `not_author`, `too_large` and other terminal refusals stop the
+batch and persist one bounded `last_refusal` record (conversation, surface and code).
+Stale refusals checkpoint the need to reload before doing I/O, so a disconnect or
+restart cannot replay a request already known to be stale. Own out-of-sync surface
+notifications and interrupted action batches use the existing author resync RPC
+with a durable message ID before rederiving from the recovered snapshot. Lost
+resync responses retry the same ID. If a completed resync leaves the prepared surface
+out of sync, the batch stops with a recorded refusal rather than sending another
+resync in a loop. Older checkpoints without prepared target
+metadata remain readable; stale legacy streams stop instead of guessing a target.
 
 Handled action IDs are scoped and persisted, capped at 2048 without eviction. Action
 output observes the conversation interval; the sequential host waits until that

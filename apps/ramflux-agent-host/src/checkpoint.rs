@@ -17,6 +17,8 @@ pub struct Checkpoint {
     pub principal_id: String,
     pub device_id: String,
     pub cursor: Option<u64>,
+    #[serde(default)]
+    pub last_refusal: Option<OutputRefusal>,
     pub last_reply_ms: BTreeMap<String, u64>,
     pub(crate) pending: Option<Pending>,
     #[serde(default)]
@@ -34,6 +36,10 @@ pub(crate) struct Pending {
     pub remaining: Vec<Output>,
     #[serde(default)]
     pub action: Option<ActionWork>,
+    #[serde(default)]
+    pub plan: Option<crate::surface_plan::SurfacePlan>,
+    #[serde(default)]
+    pub needs_rederive: Option<ramflux_sdk::SurfaceRefusalCode>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +54,13 @@ pub(crate) struct ActionWork {
     pub surface_ref: String,
     pub action_id: String,
     pub attempts: u8,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputRefusal {
+    pub conversation_id: String,
+    pub surface_id: Option<String>,
+    pub reason: ramflux_sdk::SurfaceRefusalCode,
 }
 pub struct CheckpointStore {
     path: PathBuf,
