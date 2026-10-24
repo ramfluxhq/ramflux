@@ -48,6 +48,18 @@ pub(crate) async fn dispatch_quic_json_request(
                 router_post_json(router, "/mvp0/ack", &ack)?;
             serde_json::to_value(response)?
         }
+        ("POST", "/mvp2/device-set") => {
+            let request: ramflux_node_core::DeviceSetPublishRequest =
+                serde_json::from_value(request.body)?;
+            let response: ramflux_protocol::SignedDeviceSetRecord =
+                router_post_json(router, "/mvp2/device-set", &request)?;
+            serde_json::to_value(response)?
+        }
+        ("GET", path) if path.starts_with("/mvp2/device-set/") => {
+            let response: Option<ramflux_protocol::SignedDeviceSetRecord> =
+                router_get_json_async(router, path).await?;
+            serde_json::to_value(response)?
+        }
         ("POST", "/mvp1/identity/register") => {
             let mut registration: ramflux_node_core::IdentityRegisterRequest =
                 serde_json::from_value(request.body)?;

@@ -16,6 +16,8 @@ mod fixtures;
 mod header;
 mod home_node_migration;
 mod i_json;
+pub mod identity_keys;
+pub use identity_keys::*;
 pub mod object_relay_v3;
 mod protocol_object;
 mod replay;
