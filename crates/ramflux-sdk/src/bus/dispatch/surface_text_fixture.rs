@@ -21,6 +21,10 @@ impl RecordingGateway {
 impl GatewaySessionFrameSink for RecordingGateway {
     fn send_frame<'a>(&'a mut self, bytes: &'a [u8]) -> FrameFuture<'a, ()> {
         Box::pin(async move {
+            assert!(
+                bytes.len() < ramflux_transport::MAX_GATEWAY_FRAME_BYTES,
+                "actual encoded gateway frame exceeds transport limit"
+            );
             self.last = Some(
                 serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?,
             );
@@ -48,6 +52,16 @@ impl GatewaySessionFrameSource for RecordingGateway {
                         },
                     }
                 }
+                Some(GatewayClientFrame::PrekeyFetch { device_id }) => GatewayServerFrame::Prekey {
+                    response: crate::prekey::SdkPrekeyResponse {
+                        target_delivery_id: Some(
+                            device_id.trim_start_matches("device-").to_owned(),
+                        ),
+                        device_id,
+                        bundle: None,
+                        principal_commitment: String::new(),
+                    },
+                },
                 Some(GatewayClientFrame::Resume { .. }) => {
                     GatewayServerFrame::Resume { entries: Vec::new() }
                 }

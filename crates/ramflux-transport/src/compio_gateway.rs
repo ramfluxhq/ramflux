@@ -9,7 +9,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::tls_config::compio_quic_gateway_server_config;
 use crate::{MeshTlsConfig, TransportError};
 
-const COMP_IO_GATEWAY_FRAME_MAX_BYTES: usize = 1024 * 1024;
+const COMP_IO_GATEWAY_FRAME_MAX_BYTES: usize = crate::MAX_GATEWAY_FRAME_BYTES;
 
 pub struct CompioGatewayQuicServer {
     endpoint: compio_quic::Endpoint,

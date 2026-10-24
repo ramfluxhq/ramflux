@@ -113,7 +113,7 @@ impl RamfluxClient {
             db.persist_client_record("surface", &reference, &view)?;
         }
         if actionable {
-            self.queue_surface_receipt(original, &id)?;
+            self.retain_surface_receipt(original)?;
         }
         Ok(())
     }
@@ -142,7 +142,7 @@ impl RamfluxClient {
         db.prune_surface_records(&prefix, 128, 4 * 1024 * 1024, &actor_key)?;
         Ok(())
     }
-    fn queue_surface_receipt(&self, original: &Carrier, id: &str) -> Result<(), SdkError> {
+    fn retain_surface_receipt(&self, original: &Carrier) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let (record, state) = self
             .surface_state_ref(&original.surface_reference()?)?
@@ -165,12 +165,6 @@ impl RamfluxClient {
             signature: String::new(),
         })?;
         self.store_surface_action_attestation(original, &receipt)?;
-        let epoch = self
-            .account_db()?
-            .client_record("conversation", &original.conversation_id)?
-            .and_then(|v| v["group_id"].as_str().map(str::to_owned))
-            .map(|id| self.group_state(&id).map(|g| g.group_epoch))
-            .transpose()?;
-        self.queue_surface_logical("receipt_job", id, &receipt, epoch)
+        Ok(())
     }
 }

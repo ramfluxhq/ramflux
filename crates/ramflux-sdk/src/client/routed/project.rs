@@ -163,12 +163,6 @@ impl RamfluxClient {
                 &plaintext,
                 false,
             )?;
-            if surface.as_ref().is_some_and(|result| result.accepted)
-                && let Ok(Some(carrier)) = crate::client::surface::Carrier::decode(&plaintext)
-                && carrier.payload_kind == crate::client::surface::PayloadKind::Event
-            {
-                self.queue_surface_forward(&carrier, Some(group.group_key_epoch))?;
-            }
             let is_surface = surface.is_some();
             let display = surface.map_or(plaintext, |result| result.fallback_text.into_bytes());
             if is_surface {

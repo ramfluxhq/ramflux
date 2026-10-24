@@ -911,8 +911,7 @@ mod stream;
 
 mod group_legacy;
 #[tokio::test]
-async fn inbound_resume_runs_even_when_outbox_and_forwarding_rows_are_corrupt()
--> Result<(), SdkError> {
+async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), SdkError> {
     let root = root("surface-outbound-isolation");
     let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
     account.client.account_db()?.persist_actor_state(
@@ -923,7 +922,7 @@ async fn inbound_resume_runs_even_when_outbox_and_forwarding_rows_are_corrupt()
         .client
         .account_db()?
         .persist_actor_state("surface/forward_job/corrupt", &serde_json::json!({"corrupt":true}))?;
-    // The injected gateway handles Resume, but neither malformed outbound queue can be decoded.
+    // Obsolete surface-specific queues are never decoded or scheduled.
     assert_eq!(super::sync_driver::run(&mut account).await?, 0);
     assert!(account.take_live_engine().await.is_ok());
     drop(account);

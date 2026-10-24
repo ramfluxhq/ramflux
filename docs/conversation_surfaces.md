@@ -15,11 +15,15 @@ original bytes using `from_wire_bytes`. Local Rust callers can use the output-on
 the request before sending and reuse its ID and bytes for retries. `rf surface`
 commands read `--wire-file`; `--message` is optional and otherwise generates an ID.
 
-The response reports `accepted`, `renderer_error`, and `delivery_state: "queued"`.
-Acceptance commits local projection and a durable outbox atomically;
-it does not claim remote delivery. Identical committed requests return
-`replayed: true`. The retained authored carrier preserves its original signed
-snapshot proof on retry. Changing bytes under an existing ID is rejected.
+The response reports `accepted`, `renderer_error`, and `delivery_state: "submitted"`.
+Surface carriers have `content_type: "surface"` and use the same synchronous
+`message.submit` and `group.send` adapters, encryption, routes, pins, sender-key
+distribution, gateway submission and message journaling as text. Transport failure
+returns an error. The caller owns durable retry, as for text; the agent host
+persists requests and a desktop can display a failed send with retry. A completed
+identical request returns `replayed: true` without executing an action twice.
+The retained authored carrier preserves its original signed snapshot proof.
+Changing bytes under an existing ID is rejected.
 
 `surface.get` accepts `surface_ref`, or `surface_id` with optional
 `conversation_id` and `author_principal_id`. An ambiguous short ID fails explicitly.
@@ -37,13 +41,13 @@ notifications never contain snapshots, fallback text or action arguments.
 
 ## All-terminal delivery and action decisions
 
-DM events fan out to every active verified peer device and the author's own
-siblings. Group publications use the same sender-key ciphertext, distribution
+DM events fan out to every active verified peer device. The author's own
+siblings recover through authenticated own-device history sync, as for text. Group publications use the same sender-key ciphertext, distribution
 controls and verified member routes as group text. Physical delivery wraps that
 ciphertext for each member; it does not encrypt separate peer surface controls.
-Group actions are private direct returns to the author, rather than broadcasts
-of the human's arguments. Group members forward accepted events to their own
-siblings. Own forwarding requires the same verified identity root, preserves the
+Group actions use the same group adapter restricted to the author's member
+routes, keeping arguments off unrelated recipients. Group members copy accepted
+events to their own siblings through history sync. Own forwarding requires the same verified identity root, preserves the
 original signed carrier, and never copies DM ratchet state. Existing
 blocked/revoked contacts are preserved.
 
@@ -78,21 +82,17 @@ not elect another executor or execute it independently. A revoked/lost creator
 requires a newly authored surface. There is no distributed executor lease or
 automatic handoff in this version.
 
-Prepared ciphertext envelopes are committed before transport submission and
-reused unchanged on retries. Count and conservative byte admission run before
-pair or group encryption. The account transport queue holds at most 64 logical
-jobs / 32 MiB. The latest publication of one group surface occupies one logical
-job, preparing member delivery envelopes lazily, so 100 devices do not exhaust
-the job-count limit. A very large payload
-or group can still hit the byte bound. Own-forward/decision preparation holds at
-most 64 entries / 8 MiB. Preparation congestion records
-`surface.forward_deferred`, with own-device history as the recovery path. Retries
-are bounded by 8 attempts per prepared recipient packet and a 600-second window
-from the latest coalesced enqueue; expired group work regenerates the retained
-full snapshot. A recipient waiting for retry does not block other members; its
-distribution stays ahead of its messages. Inbound receive/commit/ACK runs first,
-followed by a 200 ms / 4 MiB outbound budget. Local asynchronous requests use the
-remaining tick time. Queue/preparation errors are deferred without aborting receive.
+There is no surface-specific outbox, coalescing queue or delivery scheduler.
+Delivery guarantees match text. A behind recipient is marked `out_of_sync` and
+recovers from the next signed full snapshot, preserving finality checks.
+
+The carrier admission cap is `(MAX_GATEWAY_FRAME_BYTES - 64 KiB) / 32`, currently
+30 KiB, using the shared 1 MiB transport frame limit. The conservative 32x bound
+covers JSON byte arrays, group wrapping, encrypted pair framing and base64; a
+100-device cryptographic test measures real envelope sizes. Oversize carriers
+return typed `SurfaceDeliveryTooLarge` before group or pair sealing, including
+when submitted through the normal text methods. Identifiers and routing have
+64 KiB reserved headroom; normal transport framing remains the final bound.
 
 ## Ordering, integrity and retention
 
@@ -124,7 +124,7 @@ A history retains at most 256 events / 4 MiB per surface, evicting oldest versio
 Holdback adds at most 1 MiB to that history budget. Actions retain at most 128 rows /
 4 MiB; response pagination never exposes private carrier/proof records. Authored
 retry records retain at most 256 rows / 4 MiB. SQL savepoints cover state, history,
-receipts, decisions and outbox writes so failures cannot leave partial transitions.
+receipts and decisions so failures cannot leave partial transitions.
 
 Text clients receive `content_type: "surface"` and a fixed single-line body:
 `Surface author="..." fallback_text="..."`. The verified author's label and
@@ -141,27 +141,16 @@ The legacy sync `legacy_a2ui_render_profile_hash` hashes a different v1 recursiv
 permission/profile object under `A2I_CONTROL`; it is not a conversation hash.
 
 
-### Bounded history and superseding group publications
+### Serialized history budgets
 
-History export reads validated state rather than transient hold-back directory placeholders.
-It prioritizes the account's own authored state, then pages peer state in batches of 64,
-with up to 64 pages and an 8 MiB total surface budget. Truncation and skipped-item reasons
-are explicit metadata. Unknown-surface placeholders expire with their pending events.
-Checkpoint and control imports isolate each item in a savepoint; conflicting local state
-survives, is marked out of sync, and records a skip reason without blocking honest surfaces.
-Repeated imports use the existing idempotent group/message projections and surface keys.
-
-A queued group publication retains only the latest author-signed full-state proof for its
-surface scope. Group and pair encryption are deferred until delivery, with the same explicit
-root commitment/membership checks used by group text. One shared sender-key ciphertext is
-wrapped per recipient; failed submissions retain the exact prepared ciphertext for retry.
-The scheduler uses a 200 ms deadline and a 4 MiB send budget per tick. Failed recipients
-back off while other members proceed. The 600-second retry age starts when the latest job
-is enqueued; expiry regenerates a full snapshot with current membership and fresh packet
-lifetimes, rather than losing the final state. A verified full-state proof can fill a version
-gap immediately, including when no earlier state reached the recipient.
+History pages count the serialized controls, checkpoints, metadata, commas and
+outer array against the 8 MiB total. Individual items are omitted with counted
+skip reasons and explicit truncation when the remaining budget cannot hold them;
+an oversized first page cannot turn into an unmarked empty export. Imports use
+page-scoped skip records. Reimporting an equal version validates its hash and
+leaves the existing history carrier intact.
 
 Fallback fields retain printable Unicode, including ideographic/nonbreaking spaces,
-variation selectors and ordinary combining marks. Leading combining marks are escaped so
-they cannot combine with the opening quote. Controls, format characters, line separators,
-quotes and backslashes are escaped by the shared protocol renderer.
+variation selectors and ordinary combining marks. Leading combining marks are escaped.
+Hangul fillers, private-use and unassigned code points, controls, format characters,
+line separators, quotes and backslashes are escaped by the shared protocol renderer.
