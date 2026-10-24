@@ -113,6 +113,11 @@ fn exercise(input: bool) -> TestResult {
         decision_id: decision_id.into(),
         decision: TaskDecision::Resume,
     };
+    let mut wrong = resolution.clone();
+    wrong.decision = TaskDecision::Deny;
+    let rejected = sign(&f.human, "thread", "wrong-outcome", TaskEventBody::Resolve(wrong))?;
+    assert!(!project(&f.agent, &rejected)?.accepted);
+    assert_eq!(f.agent.task_get(Some("thread"), "task")?["version"], 2);
     let intent =
         sign(&f.human, "thread", "resolve-form", TaskEventBody::Resolve(resolution.clone()))?;
     assert!(project(&f.human, &intent)?.pending);

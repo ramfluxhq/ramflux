@@ -23,7 +23,8 @@ impl GatewaySessionFrameSink for RecordingGateway {
         Box::pin(async move {
             assert!(
                 bytes.len() < ramflux_transport::MAX_GATEWAY_FRAME_BYTES,
-                "actual encoded gateway frame exceeds transport limit"
+                "actual encoded gateway frame exceeds transport limit: {}",
+                bytes.len()
             );
             self.last = Some(
                 serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?,

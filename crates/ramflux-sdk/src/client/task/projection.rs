@@ -217,7 +217,9 @@ impl RamfluxClient {
             if old.carrier.bytes()? != body {
                 return Err(invalid("task pending message id collision"));
             }
-        } else {
+        } else if forward_owned {
+            // Same-root history has separate page, count and byte bounds. Charging old
+            // verified events as new peer traffic would make long histories unrestorable.
             self.admit_task_event(&carrier, crate::time::now_unix_timestamp())?;
         }
         if self.task_event_is_future(&carrier)? {
@@ -225,6 +227,9 @@ impl RamfluxClient {
         }
         let outcome = match self.evaluate_task(&carrier) {
             Ok(applied) => self.record_task_applied(delivery, carrier, applied, forward_owned)?,
+            Err(SdkError::InboundPending(_)) => {
+                return self.hold_task_message(delivery, &carrier, already_pending.is_some());
+            }
             Err(error) => Outcome {
                 accepted: false,
                 fallback_text: "[Task rejected]".into(),
@@ -289,6 +294,7 @@ impl RamfluxClient {
         }
         db.persist_actor_state(&history_key, &history)?;
         if let Some(key) = decision_key {
+            db.delete_task_state(&super::key("decision_reserved", &key))?;
             db.persist_actor_state(&key,&json!({"conversation_id":task.conversation_id,"task_id":task.task_id,"version":task.version}))?;
         }
         let mut view = serde_json::to_value(&task)?;

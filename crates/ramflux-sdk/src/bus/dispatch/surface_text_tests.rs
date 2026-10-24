@@ -97,8 +97,16 @@ fn members(
     root: &std::path::Path,
     source: &LocalBusAccountState,
 ) -> Result<Vec<LocalBusAccountState>, SdkError> {
+    members_count(root, source, 99)
+}
+fn members_count(
+    root: &std::path::Path,
+    source: &LocalBusAccountState,
+    count: u8,
+) -> Result<Vec<LocalBusAccountState>, SdkError> {
     source.client.create_group("group", "device-sender")?;
     let mut peers = Vec::new();
+    let sender_root = super::fixture::manifest(&source.client)?.principal_commitment;
     let sender_key = ramflux_protocol::encode_base64url(
         source
             .client
@@ -109,7 +117,7 @@ fn members(
             .verifying_key()
             .to_bytes(),
     );
-    for i in 0..99u8 {
+    for i in 0..count {
         let id = format!("peer-{i}");
         let device = format!("device-{id}");
         let mut peer =
@@ -151,7 +159,7 @@ fn members(
         peer.client.account_db()?.persist_client_record(
             "device",
             "device-sender",
-            &json!({"principal_id":"sender","signing_public_key":sender_key}),
+            &json!({"principal_id":"sender","principal_commitment":sender_root,"signing_public_key":sender_key}),
         )?;
         peers.push(peer);
     }
@@ -195,6 +203,7 @@ fn assert_receivers(
             "thread",
             &json!({"kind":"group","group_id":"group"}),
         )?;
+        peer.client.pin_joined_group_member("group", "device-sender")?;
         for (index, delivery) in pair.iter().enumerate() {
             let entry = GatewayInboxEntry {
                 inbox_seq: u64::try_from(index + 1)
@@ -335,5 +344,95 @@ async fn assert_admission(
         )?)?,
         before
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::super::task_transport;
+    use ramflux_protocol::{TaskEvent, TaskEventBody, TaskStart};
+    let root = runtime_tests::root("task-frame-budget");
+    let mut source = runtime_tests::account(
+        &root.join("sender"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let peers = members_count(&root, &source, 1)?;
+    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    source.put_engine(GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(super::fixture::RecordingGateway::new(captured.clone())),
+    ));
+    source.client.account_db()?.persist_client_record(
+        "conversation",
+        "thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    let peer = &peers[0];
+    let manifest = super::fixture::manifest(&peer.client)?;
+    source.client.persist_identity_directory(&manifest)?;
+    source.client.pin_joined_group_member("group", "device-peer-0")?;
+    let event = TaskEvent::new(
+        "thread".into(),
+        TaskEventBody::Start(TaskStart {
+            task_id: "task".into(),
+            conversation_id: "thread".into(),
+            requester: "sender".into(),
+            assignee: "peer-0".into(),
+            text: "🦀".repeat(1800),
+            constraints: None,
+        }),
+        sdk_device_signed_fields("device-sender", ""),
+    )?;
+    let c = source.client.sign_task_event(event, "large-task".into(), None)?;
+    let result = task_transport::send(&mut source, &c).await?;
+    assert_eq!(result["accepted"], true);
+    let before = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len();
+    assert_eq!(before, 2);
+    let mut engine = source.take_live_engine().await?;
+    let target = task_transport::Target {
+        device: "device-peer-0".into(),
+        delivery: "peer-0".into(),
+        federation: None,
+        own: true,
+    };
+    let page = vec![b'"'; crate::client::task::MAX_DELIVERY_BYTES];
+    let delivery = task_transport::seal(
+        &source,
+        &mut engine,
+        &target,
+        "thread",
+        &page,
+        crate::client::routed::Route {
+            kind: crate::client::routed::Kind::Control,
+            group_id: Some("group".into()),
+            attachments: false,
+        },
+    )
+    .await?;
+    source.put_engine(engine);
+    crate::bus::task_delivery::submit_all(&mut source, vec![delivery]).await?;
+    assert_eq!(
+        captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+        before + 1
+    );
+    let mut oversized = c.clone();
+    oversized.wire_base64 = "x".repeat(crate::client::task::MAX_DELIVERY_BYTES);
+    assert!(matches!(
+        task_transport::send(&mut source, &oversized).await,
+        Err(SdkError::TaskDeliveryTooLarge { .. })
+    ));
+    assert_eq!(
+        captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+        before + 1,
+        "over-cap rejection must precede sealing and submission"
+    );
+    directory.abort();
+    drop(peers);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -130,7 +130,7 @@ impl RamfluxClient {
         body: &[u8],
     ) -> Result<bool, SdkError> {
         let Some(raw) = body.strip_prefix(PREFIX) else { return Ok(false) };
-        if body.len() > 128 * 1024 {
+        if body.len() > super::MAX_DELIVERY_BYTES {
             return Err(invalid("own task history budget exceeded"));
         }
         let source = self
@@ -303,7 +303,7 @@ fn task_packet_pages(mut packet: TaskOwnPacket) -> Result<Vec<Vec<u8>>, SdkError
     let mut pages = Vec::new();
     for event in &events {
         packet.history.events.push(event.clone());
-        if PREFIX.len() + serde_json::to_vec(&packet)?.len() > 128 * 1024 {
+        if PREFIX.len() + serde_json::to_vec(&packet)?.len() > super::MAX_DELIVERY_BYTES {
             packet.history.events.pop();
             if packet.history.events.is_empty() {
                 return Err(invalid("task snapshot item exceeds the transport byte budget"));
@@ -314,7 +314,7 @@ fn task_packet_pages(mut packet: TaskOwnPacket) -> Result<Vec<Vec<u8>>, SdkError
             packet.base += packet.history.events.len();
             packet.prefix_hash = task_prefix_hash(&events[..packet.base])?;
             packet.history.events = vec![event.clone()];
-            if PREFIX.len() + serde_json::to_vec(&packet)?.len() > 128 * 1024 {
+            if PREFIX.len() + serde_json::to_vec(&packet)?.len() > super::MAX_DELIVERY_BYTES {
                 return Err(invalid("task snapshot item exceeds the transport byte budget"));
             }
         }

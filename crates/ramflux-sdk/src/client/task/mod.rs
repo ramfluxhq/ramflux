@@ -57,3 +57,13 @@ pub(crate) fn timeline_id(carrier: &carrier::Carrier) -> Result<String, SdkError
 
 #[cfg(test)]
 mod tests;
+
+/// Conservative budget for nested encrypted JSON frames, including bootstrap overhead.
+pub(crate) const MAX_DELIVERY_BYTES: usize =
+    (ramflux_transport::MAX_GATEWAY_FRAME_BYTES - 64 * 1024) / 32;
+pub(crate) fn check_delivery_size(bytes: usize) -> Result<(), SdkError> {
+    if bytes > MAX_DELIVERY_BYTES {
+        return Err(SdkError::TaskDeliveryTooLarge { bytes, limit: MAX_DELIVERY_BYTES });
+    }
+    Ok(())
+}

@@ -12,7 +12,8 @@ impl AccountDb {
     pub fn delete_task_state(&self, key: &str) -> Result<(), StorageError> {
         if !(key.starts_with("task/pending/")
             || key.starts_with("task/ack/")
-            || key.starts_with("task/forward/"))
+            || key.starts_with("task/forward/")
+            || key.starts_with("task/decision_reserved/"))
         {
             return Err(StorageError::AuthorizationRejected);
         }

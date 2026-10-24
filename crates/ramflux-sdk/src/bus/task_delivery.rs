@@ -3,20 +3,15 @@
 
 //! Ordinary gateway submission and bounded executor-confirmation retries.
 use crate::prelude::*;
-use serde::{Deserialize, Serialize};
-#[derive(Serialize, Deserialize)]
 pub(super) struct Destination {
     pub route: LocalBusFederationRoute,
     pub conversation_id: String,
     pub message_id: String,
     pub device_id: String,
 }
-#[derive(Serialize, Deserialize)]
 pub(super) struct Delivery {
     pub envelope: ramflux_protocol::Envelope,
     pub federation: Option<Destination>,
-    pub attempts: u32,
-    pub next_at: i64,
 }
 pub(super) async fn submit_all(
     account: &mut LocalBusAccountState,

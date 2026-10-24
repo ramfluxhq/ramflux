@@ -392,3 +392,6 @@ mod surfaces;
 
 #[path = "own_tests.rs"]
 mod own;
+
+#[path = "control_tests.rs"]
+mod controls;

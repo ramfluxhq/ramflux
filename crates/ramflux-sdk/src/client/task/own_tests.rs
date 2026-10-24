@@ -116,7 +116,7 @@ fn own_device_history_pages_fit_the_transport_budget_and_require_the_causal_pref
                 steps: (0..64)
                     .map(|i| TaskStep {
                         id: format!("step-{i}"),
-                        title: "x".repeat(240),
+                        title: "x".repeat(128),
                         state: TaskStatus::Running,
                         needs_me: None,
                     })
@@ -130,7 +130,7 @@ fn own_device_history_pages_fit_the_transport_budget_and_require_the_causal_pref
     let last = &history.events.last().ok_or("history")?.carrier;
     let pages = f.agent.task_own_packets(last)?;
     assert!(pages.len() > 1);
-    assert!(pages.iter().all(|p| p.len() <= 128 * 1024));
+    assert!(pages.iter().all(|p| p.len() <= super::super::MAX_DELIVERY_BYTES));
     let packets = f.agent.own_task_packets()?;
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
@@ -138,6 +138,51 @@ fn own_device_history_pages_fit_the_transport_budget_and_require_the_causal_pref
     assert!(sibling.task_get(Some("thread"), "task")?.is_null());
     sibling.import_own_task_packets(&packets, "agent-device")?;
     assert_eq!(sibling.task_get(Some("thread"), "task")?["version"], 10);
+    drop(sibling);
+    Ok(())
+}
+
+#[test]
+fn importing_old_verified_history_does_not_charge_eighty_events_as_new_peer_traffic() -> TestResult
+{
+    let f = Fixture::new()?;
+    manifests(&f)?;
+    let first = sign(&f.human, "thread", "start", start("task", "thread"))?;
+    let mut history = TaskHistory { events: Vec::new(), created_at: 1, updated_at: 80 };
+    for version in 1..=80 {
+        let c = if version == 1 {
+            first.clone()
+        } else {
+            sign(
+                &f.agent,
+                "thread",
+                &format!("update-{version}"),
+                TaskEventBody::Update(TaskUpdate {
+                    task_id: "task".into(),
+                    version,
+                    state: TaskStatus::Running,
+                    steps: Vec::new(),
+                    result_ref: None,
+                }),
+            )?
+        };
+        let public = f.agent.task_signer_key(&c.principal_id, &c.device_id)?;
+        history.events.push(AcceptedEvent {
+            carrier: c,
+            public_key: public,
+            actor_kind_verified: false,
+            received_at: i64::try_from(version)?,
+            decision_certificate: None,
+        });
+    }
+    assert_eq!(history.state()?.task().ok_or("task")?.version, 80);
+    f.agent.account_db()?.persist_actor_state(&scoped("history", "thread", "task")?, &history)?;
+    let packets = f.agent.own_task_packets()?;
+    let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
+    sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
+    sibling.import_own_task_packets(&packets, "agent-device")?;
+    assert_eq!(sibling.task_get(Some("thread"), "task")?["version"], 80);
+    assert_eq!(sibling.account_db()?.task_state_usage("task/rate/")?.0, 0);
     drop(sibling);
     Ok(())
 }

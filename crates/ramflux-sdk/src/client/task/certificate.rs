@@ -109,10 +109,17 @@ impl RamfluxClient {
                 "task commit certificate does not match the current intervention and revision",
             ));
         }
-        if let ramflux_protocol::NeedsMe::Approval { grant_id } = &resolution.target
-            && certificate.decision_key
-                != super::decision::key_for_decision("grant", &(&task.assignee, grant_id))?
-        {
+        let expected = match &resolution.target {
+            ramflux_protocol::NeedsMe::Approval { grant_id } => {
+                super::decision::key_for_decision("grant", &(&task.assignee, grant_id))?
+            }
+            ramflux_protocol::NeedsMe::Choice { surface_id }
+            | ramflux_protocol::NeedsMe::Input { surface_id } => super::decision::key_for_decision(
+                "surface",
+                &(&task.conversation_id, &task.assignee, surface_id, &resolution.decision_id),
+            )?,
+        };
+        if certificate.decision_key != expected {
             return Err(invalid("task certificate external decision identity mismatch"));
         }
         self.require_task_member(&task.conversation_id, &task.assignee, Some(&executor))?;

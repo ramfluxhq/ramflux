@@ -115,6 +115,16 @@ impl RamfluxClient {
                     ),
                     signature: String::new(),
                 })?);
+            let (count, bytes) = self.account_db()?.task_state_usage("task/decision_reserved/")?;
+            if count >= 64
+                || bytes.saturating_add(
+                    u64::try_from(serde_json::to_vec(&proof)?.len()).unwrap_or(u64::MAX),
+                ) > 8 * 1024 * 1024
+            {
+                return Err(SdkError::InboundPending(
+                    "task decision reservation capacity reached".into(),
+                ));
+            }
             self.account_db()?.persist_actor_state(&reservation, &proof)?;
             Ok(proof)
         })
@@ -317,7 +327,7 @@ impl RamfluxClient {
                 NeedsMe::Choice { surface_id } | NeedsMe::Input { surface_id },
                 Evidence::Surface { receipt_base64 },
             ) => {
-                let identity = self.verify_task_surface_decision(
+                self.verify_task_surface_decision(
                     &task.conversation_id,
                     surface_id,
                     &task.assignee,
@@ -326,7 +336,10 @@ impl RamfluxClient {
                     receipt_base64,
                     require_stored,
                 )?;
-                Ok(key("decision_used", &identity))
+                key_for_decision(
+                    "surface",
+                    &(&task.conversation_id, &task.assignee, surface_id, &resolution.decision_id),
+                )
             }
             _ => Err(invalid("task decision evidence does not match needs_me target")),
         }

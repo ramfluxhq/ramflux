@@ -17,6 +17,7 @@ pub(crate) async fn send(
     account: &mut LocalBusAccountState,
     c: &Carrier,
 ) -> Result<Value, SdkError> {
+    crate::client::task::check_delivery_size(c.bytes()?.len())?;
     if let Some(outcome) = account.client.task_delivery_receipt(c)?
         && !outcome.accepted
     {
@@ -31,11 +32,21 @@ pub(crate) async fn send(
     let result = prepare(account, &mut engine, c, &thread, Mode::Event).await;
     account.put_engine(engine);
     let deliveries = result?;
-    let response = account.client.account_db()?.write_transaction(||{
-        let timeline=crate::client::task::timeline_id(c)?;
-        let outcome=account.client.project_task_message(&Delivery{conversation:&c.conversation_id,message:&timeline,principal:&c.principal_id,device:&c.device_id,at:now_unix_timestamp()},&c.bytes()?)?.ok_or_else(||invalid("task projection absent"))?;
-        if !outcome.accepted && !outcome.pending{return Err(invalid(outcome.reject.unwrap_or_else(||"task rejected".into())));}
-        if account.client.direct_message_by_id(&timeline)?.is_none(){account.client.send_direct_message(&c.conversation_id,&timeline,&c.device_id,&[])?;}
+    let response = account.client.account_db()?.write_transaction(|| {
+        let timeline = crate::client::task::timeline_id(c)?;
+        let outcome = account.client.project_task_message(&Delivery {
+            conversation: &c.conversation_id,
+            message: &timeline,
+            principal: &c.principal_id,
+            device: &c.device_id,
+            at: now_unix_timestamp(),
+        }, &c.bytes()?)?.ok_or_else(|| invalid("task projection absent"))?;
+        if !outcome.accepted && !outcome.pending {
+            return Err(invalid(outcome.reject.unwrap_or_else(|| "task rejected".into())));
+        }
+        if account.client.direct_message_by_id(&timeline)?.is_none() {
+            account.client.send_direct_message(&c.conversation_id,&timeline,&c.device_id,&[])?;
+        }
         account.client.account_db()?.replace_surface_message_content(&c.conversation_id,&timeline,outcome.fallback_text.as_bytes())?;
         account.client.set_task_delivery_state(&c.conversation_id,c.event()?.event().task_id(),"sending",None)?;
         Ok(json!({"accepted":outcome.accepted,"pending":outcome.pending,"task_id":c.event()?.event().task_id(),"message_id":c.message_id,"delivery_state":"submitted","actor_kind_verified":false}))
@@ -71,23 +82,7 @@ pub(super) async fn prepare(
 ) -> Result<Vec<SealedDelivery>, SdkError> {
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let own = client
-        .cache_verified_device_manifest(&engine.config, &account.principal_commitment, "task_own")
-        .await?;
-    if !own.devices.iter().any(|d| d.device_id == local.device_id) {
-        return Err(invalid("task source device is not in the active manifest"));
-    }
-    let mut own_targets = own
-        .devices
-        .into_iter()
-        .filter(|d| d.device_id != local.device_id)
-        .map(|d| Target {
-            device: d.device_id,
-            delivery: d.target_delivery_id,
-            federation: None,
-            own: true,
-        })
-        .collect::<Vec<_>>();
+    let mut own_targets = own_targets(account, &engine.config).await?;
     let mut group_plan = None;
     let mut peers = Vec::new();
     if !matches!(mode, Mode::Own) {
@@ -135,8 +130,21 @@ pub(super) async fn prepare(
         }
     }
     let own_packet = if own_targets.is_empty() { None } else { Some(client.task_own_packets(c)?) };
-    if task_body.len() > 128 * 1024 {
-        return Err(invalid("task payload exceeds the transport byte budget"));
+    crate::client::task::check_delivery_size(task_body.len())?;
+    let own_bytes =
+        own_packet.as_ref().map_or(0, |pages| pages.iter().map(Vec::len).sum::<usize>());
+    let group_targets = group_plan.as_ref().map_or(0, |plan| plan.targets.len().saturating_mul(2));
+    let budget = own_bytes
+        .saturating_mul(own_targets.len())
+        .saturating_add(
+            task_body
+                .len()
+                .saturating_add(4096)
+                .saturating_mul(peers.len().saturating_add(group_targets)),
+        )
+        .saturating_mul(32);
+    if budget > 32 * 1024 * 1024 {
+        return Err(invalid("task fanout preparation byte budget exceeded"));
     }
     let mut deliveries = Vec::new();
     if let Some(plan) = group_plan {
@@ -220,8 +228,6 @@ pub(super) async fn seal(
             message_id: message.message_id,
             device_id: target.device.clone(),
         }),
-        attempts: 0,
-        next_at: 0,
     })
 }
 
@@ -373,6 +379,31 @@ async fn direct_targets(
             delivery: d.target_delivery_id,
             federation: federation.clone(),
             own: false,
+        })
+        .collect())
+}
+
+async fn own_targets(
+    account: &LocalBusAccountState,
+    gateway: &GatewaySessionConfig,
+) -> Result<Vec<Target>, SdkError> {
+    let client = &account.client;
+    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let own = client
+        .cache_verified_device_manifest(gateway, &account.principal_commitment, "task_own")
+        .await?;
+    if !own.devices.iter().any(|d| d.device_id == local.device_id) {
+        return Err(invalid("task source device is not in the active manifest"));
+    }
+    Ok(own
+        .devices
+        .into_iter()
+        .filter(|d| d.device_id != local.device_id)
+        .map(|d| Target {
+            device: d.device_id,
+            delivery: d.target_delivery_id,
+            federation: None,
+            own: true,
         })
         .collect())
 }
