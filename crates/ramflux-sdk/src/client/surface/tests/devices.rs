@@ -164,7 +164,6 @@ fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> Te
 
 #[test]
 fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() -> TestResult {
-    use crate::client::surface::control::CONTROL_PREFIX;
     let t = Terminals::new()?;
     let source = &t.clients[0];
     let target = &t.clients[1];
@@ -182,13 +181,11 @@ fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() 
     source.attach_surface_snapshot(&mut close)?;
     close = source.sign_surface_carrier(close)?;
     project(source, &close, "close")?;
-    let controls = source.own_surface_history_controls()?;
-    assert_eq!(controls.len(), 1);
-    for c in controls {
-        let bytes = c.bytes()?;
-        assert!(bytes.starts_with(CONTROL_PREFIX));
-        target.receive_surface_control(&entry(source, "history")?, "thread", None, &bytes)?;
-    }
+    let exported = source.own_surface_history_export(None)?;
+    assert!(exported.controls.is_empty());
+    assert_eq!(exported.checkpoints.len(), 1);
+    // The enclosing root-authenticated own-device bundle carries the validated checkpoint.
+    target.import_owned_surface_checkpoints(&exported.checkpoints)?;
     let view = target.surface_get("s", 0, None)?;
     assert_eq!(view["version"], 2);
     assert_eq!(view["closed"], true);
@@ -222,7 +219,7 @@ fn own_surface_history_omits_group_state_below_the_current_membership_floor() ->
         &first.bytes()?,
         false,
     )?;
-    assert_eq!(source.own_surface_history_controls()?.len(), 1);
+    assert_eq!(source.own_surface_history_export(None)?.checkpoints.len(), 1);
     db.upsert_group_local_membership_snapshot("g", 5, 128, "none", "author-device", "owner", 5)?;
     assert_eq!(source.own_surface_history_controls()?.len(), 0);
     Ok(())

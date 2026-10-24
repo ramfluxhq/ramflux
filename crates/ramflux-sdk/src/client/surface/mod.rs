@@ -9,6 +9,7 @@ mod control;
 mod control_context;
 mod decision;
 mod group;
+mod outgoing;
 mod own_checkpoint;
 mod own_history;
 pub(crate) use control::{ControlKind, SurfaceControl};

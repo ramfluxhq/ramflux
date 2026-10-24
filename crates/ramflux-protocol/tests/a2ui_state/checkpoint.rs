@@ -84,3 +84,35 @@ fn full_state_recovery_preserves_known_finality_and_closed_state() {
         Err(SurfaceReject::WrongSurface)
     );
 }
+
+#[test]
+fn compact_resync_preserves_closed_state_and_finality_without_duplicating_content() {
+    let state = created().apply(&stream(2, "frozen", true)).unwrap().apply(&close(3)).unwrap();
+    let wire = ramflux_protocol::encode_a2ui_conversation_event(
+        state.conversation_id().unwrap(),
+        state.version(),
+        &ramflux_protocol::A2uiConversationCommand::CreateSurface(state.content().unwrap().clone()),
+    )
+    .unwrap();
+    let event = A2uiConversationEvent::from_wire_bytes(&wire).unwrap();
+    let metadata = state.resync_metadata_bytes().unwrap();
+    let restored = SurfaceState::default().resynchronize_compact(&event, &metadata).unwrap();
+    assert_eq!(restored, state);
+    assert_eq!(restored.apply(&stream(4, "forged", false)), Err(SurfaceReject::Closed));
+    let mut value: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+    assert!(value.get("content").is_none());
+    for (key, changed) in [
+        ("conversation_id", json!("other")),
+        ("version", json!(4)),
+        ("finality_base64", json!(ramflux_protocol::encode_base64url([0; 64]))),
+    ] {
+        let original = value[key].clone();
+        value[key] = changed;
+        assert!(
+            SurfaceState::default()
+                .resynchronize_compact(&event, &serde_json::to_vec(&value).unwrap())
+                .is_err()
+        );
+        value[key] = original;
+    }
+}

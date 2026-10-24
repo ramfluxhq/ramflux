@@ -114,26 +114,36 @@ impl RamfluxClient {
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let attachments = route.attachments;
+        let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)
+            && serde_json::from_slice::<serde_json::Value>(plaintext)
+                .is_ok_and(|value| value["schema"] == "ramflux.sdk.own_device_sync.v1");
         let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
         let franking = include_franking_ext
             .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
         message.encrypted_body = serde_json::to_vec(&sealed)?;
-        self.send_direct_message(
-            &message.conversation_id,
-            &message.message_id,
-            &message.sender_id,
-            &message.encrypted_body,
-        )?;
-        let content = zeroize::Zeroizing::new(if attachments {
-            crate::client::dm::decode_dm_attachment_body(plaintext)?.0
-        } else {
-            plaintext.to_vec()
-        });
-        self.account_db()?.store_message_content(
-            &message.conversation_id,
-            &message.message_id,
-            &content,
-        )?;
+        // History replication controls must not become history messages themselves.
+        if !own_history_control {
+            if let Some(carrier) = crate::client::surface::Carrier::decode(plaintext)? {
+                self.journal_surface_frame(&message, &carrier, &message.encrypted_body)?;
+            } else {
+                self.send_direct_message(
+                    &message.conversation_id,
+                    &message.message_id,
+                    &message.sender_id,
+                    &message.encrypted_body,
+                )?;
+                let content = zeroize::Zeroizing::new(if attachments {
+                    crate::client::dm::decode_dm_attachment_body(plaintext)?.0
+                } else {
+                    plaintext.to_vec()
+                });
+                self.account_db()?.store_message_content(
+                    &message.conversation_id,
+                    &message.message_id,
+                    &content,
+                )?;
+            }
+        }
         let envelope =
             gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
         // Persist the advanced send ratchet before the remote submit. A process death after the

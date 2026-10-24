@@ -62,6 +62,20 @@ impl AccountDb {
         self.insert_direct_message_projection(message)
     }
 
+    /// Bind the first physical envelope to a pending logical message without replacing an earlier body.
+    /// # Errors
+    /// Returns storage errors while preserving the original logical message scope.
+    pub fn fill_pending_message_body(
+        &self,
+        conversation: &str,
+        message: &str,
+        sender: &str,
+        encrypted: &[u8],
+    ) -> Result<(), StorageError> {
+        self.connection.execute("UPDATE direct_message_projection SET encrypted_body=?1 WHERE conversation_id=?2 AND message_id=?3 AND sender_id=?4 AND length(encrypted_body)=0", params![encrypted, conversation, message, sender])?;
+        Ok(())
+    }
+
     fn insert_direct_message_projection(
         &self,
         message: DirectMessageWrite<'_>,

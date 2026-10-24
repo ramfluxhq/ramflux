@@ -36,6 +36,9 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     let result = receive(account, &mut engine).await;
     account.put_engine(engine);
     let received = result?;
+    if let Err(error) = super::device_history::push(account).await {
+        tracing::warn!(%error, "own-device history copy failed");
+    }
     Ok(received)
 }
 

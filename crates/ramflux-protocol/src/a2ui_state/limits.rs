@@ -10,7 +10,7 @@ pub const MAX_SURFACE_BLOCKS: usize = 64;
 pub const MAX_SURFACE_ACTIONS: usize = 16;
 pub const MAX_SURFACE_TEXT_CHARS: usize = 16_384;
 /// The entire canonical typed snapshot, including actions, fallback strings and JSON syntax.
-pub const MAX_SURFACE_DATA_BYTES: usize = 65_536;
+pub const MAX_SURFACE_DATA_BYTES: usize = 16_384;
 pub const MAX_SURFACE_TEXT_DELTA_BYTES: usize = 4_096;
 /// At most one block-sized batch per atomic patch.
 pub const MAX_SURFACE_PATCH_OPS: usize = MAX_SURFACE_BLOCKS;
@@ -24,6 +24,9 @@ pub(super) const fn exceeded(limit: SurfaceLimit) -> SurfaceReject {
 }
 
 pub(super) fn text(value: &str) -> Result<(), SurfaceReject> {
+    if value.len() > MAX_SURFACE_DATA_BYTES {
+        return Err(exceeded(SurfaceLimit::DataBytes));
+    }
     if value.chars().take(MAX_SURFACE_TEXT_CHARS + 1).count() > MAX_SURFACE_TEXT_CHARS {
         Err(exceeded(SurfaceLimit::TextCharacters))
     } else {

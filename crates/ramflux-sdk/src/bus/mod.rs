@@ -9,6 +9,7 @@ pub mod client;
 mod connection;
 mod control_state;
 pub mod daemon;
+mod device_history;
 pub mod dispatch;
 mod events;
 mod group_delivery;

@@ -24,6 +24,16 @@ struct FinalEntry {
     nested: bool,
     text_hash: String,
 }
+/// Finality metadata accompanies an explicit create-shaped resync, without duplicating its content.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResyncMetadata {
+    schema: String,
+    conversation_id: String,
+    version: u64,
+    closed: bool,
+    finality_base64: String,
+}
 impl SurfaceState {
     /// Checkpoint for local persistence or a signed full-state proof, never a standalone event.
     /// # Errors
@@ -46,6 +56,82 @@ impl SurfaceState {
                 .collect(),
         };
         crate::canonical_json_bytes(&checkpoint).map_err(|_| SurfaceReject::Encoding)
+    }
+    /// Compact finality metadata for a separately authenticated full-state resync event.
+    /// # Errors
+    /// Rejects absent state or an invalid persisted finality commitment.
+    pub fn resync_metadata_bytes(&self) -> Result<Vec<u8>, SurfaceReject> {
+        let mut finality = Vec::with_capacity(self.final_components.len() * 65);
+        for (id, entry) in &self.final_components {
+            let id = crate::decode_base64url(id).map_err(|_| SurfaceReject::InvalidJson)?;
+            let text = crate::decode_base64url(&entry.text_hash)
+                .map_err(|_| SurfaceReject::InvalidJson)?;
+            if id.len() != 32 || text.len() != 32 {
+                return Err(SurfaceReject::InvalidJson);
+            }
+            finality.extend(id);
+            finality.push(u8::from(entry.nested));
+            finality.extend(text);
+        }
+        crate::canonical_json_bytes(&ResyncMetadata {
+            schema: "ramflux.a2ui.resync_metadata.v1".into(),
+            conversation_id: self.conversation_id.clone().ok_or(SurfaceReject::NotCreated)?,
+            version: self.version,
+            closed: self.closed,
+            finality_base64: crate::encode_base64url(finality),
+        })
+        .map_err(|_| SurfaceReject::Encoding)
+    }
+    /// Restore an authenticated original create-shaped event plus content-free finality metadata.
+    /// # Errors
+    /// Rejects malformed metadata and the same scope, rollback or finality violations as `resynchronize`.
+    pub fn resynchronize_compact(
+        &self,
+        event: &super::A2uiConversationEvent,
+        metadata: &[u8],
+    ) -> Result<Self, SurfaceReject> {
+        if metadata.len() > super::MAX_SURFACE_DATA_BYTES {
+            return Err(SurfaceReject::InvalidJson);
+        }
+        let metadata: ResyncMetadata =
+            crate::parse_i_json(metadata).map_err(|_| SurfaceReject::InvalidJson)?;
+        let super::A2uiConversationCommand::CreateSurface(content) = event.command() else {
+            return Err(SurfaceReject::WrongSurface);
+        };
+        if metadata.schema != "ramflux.a2ui.resync_metadata.v1"
+            || metadata.conversation_id != event.conversation_id()
+            || metadata.version != event.version()
+        {
+            return Err(SurfaceReject::WrongSurface);
+        }
+        let packed = crate::decode_base64url(&metadata.finality_base64)
+            .map_err(|_| SurfaceReject::InvalidJson)?;
+        if packed.len() % 65 != 0 || packed.len() / 65 > super::MAX_SURFACE_FINALIZED_BLOCKS {
+            return Err(SurfaceReject::InvalidJson);
+        }
+        let mut final_text = Vec::with_capacity(packed.len() / 65);
+        for entry in packed.as_chunks::<65>().0 {
+            if entry[32] > 1 {
+                return Err(SurfaceReject::InvalidJson);
+            }
+            final_text.push(FinalEntry {
+                id: crate::encode_base64url(&entry[..32]),
+                nested: entry[32] == 1,
+                text_hash: crate::encode_base64url(&entry[33..]),
+            });
+        }
+        let checkpoint = Checkpoint {
+            schema: "ramflux.a2ui.checkpoint.v2".into(),
+            content: Some(content.clone()),
+            conversation_id: Some(metadata.conversation_id),
+            version: metadata.version,
+            closed: metadata.closed,
+            final_text,
+        };
+        self.resynchronize(
+            event,
+            &crate::canonical_json_bytes(&checkpoint).map_err(|_| SurfaceReject::Encoding)?,
+        )
     }
     /// Restore trusted persistence. Remote snapshot proofs must use `resynchronize` after
     /// authenticating their author and decoding their original event bytes.

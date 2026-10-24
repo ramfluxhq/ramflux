@@ -52,7 +52,7 @@ mod tests {
     use serde_json::json;
     #[test]
     fn sixty_four_op_work_is_linear() -> Result<(), Box<dyn std::error::Error>> {
-        let snapshot = CreateSurfaceCommand {
+        let mut snapshot = CreateSurfaceCommand {
             surface_id: "s".into(),
             surface_type: SurfaceType::StatusPanel,
             catalog: "basic".into(),
@@ -60,15 +60,17 @@ mod tests {
             fallback_text: "f".repeat(1000),
             fallback_markdown: None,
             components: (0..32)
-                .map(|i| json!({"id":format!("c{i}"),"text":"t".repeat(1000)}))
+                .map(|i| json!({"id":format!("c{i}"),"text":"t".repeat(250)}))
                 .collect(),
             data_model: serde_json::Map::default(),
             allowed_actions: (0..16)
-                .map(|i| json!({"name":format!("a{i}"),"label":"a".repeat(1000)}))
+                .map(|i| json!({"name":format!("a{i}"),"label":"a".repeat(250)}))
                 .collect(),
         };
+        let padding = crate::MAX_SURFACE_DATA_BYTES - canonical_json_bytes(&snapshot)?.len();
+        snapshot.fallback_text.push_str(&"f".repeat(padding));
         let bytes = canonical_json_bytes(&snapshot)?.len();
-        assert!((45_000..65_537).contains(&bytes));
+        assert_eq!(bytes, crate::MAX_SURFACE_DATA_BYTES);
         let create = json!({"schema":A2UI_CONVERSATION_SCHEMA,"conversationId":"c","version":1,"command":{"command":"createSurface","surfaceId":snapshot.surface_id,"surfaceType":snapshot.surface_type,"catalog":snapshot.catalog,"catalogVersion":snapshot.catalog_version,"fallbackText":snapshot.fallback_text,"components":snapshot.components,"allowedActions":snapshot.allowed_actions}});
         let state = SurfaceState::default()
             .apply(&A2uiConversationEvent::from_wire_bytes(&serde_json::to_vec(&create)?)?)?;

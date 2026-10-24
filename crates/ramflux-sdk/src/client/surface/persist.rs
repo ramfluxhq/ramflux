@@ -51,7 +51,7 @@ impl RamfluxClient {
         Ok(())
     }
     pub(super) fn bootstrap_owned_surface(&self, carrier: &Carrier) -> Result<(), SdkError> {
-        let Some(proof) = &carrier.snapshot else {
+        let Some(proof) = carrier.snapshot.as_ref().filter(|proof| proof.is_full()) else {
             return Ok(());
         };
         let version = match carrier.payload()? {

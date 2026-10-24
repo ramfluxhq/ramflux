@@ -33,6 +33,14 @@ pub(crate) enum SurfaceAction {
         #[arg(long)]
         cursor: Option<String>,
     },
+    Resync {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        surface_ref: String,
+        #[arg(long)]
+        message: Option<String>,
+    },
     Send(SurfaceSend),
     Action(SurfaceSend),
 }

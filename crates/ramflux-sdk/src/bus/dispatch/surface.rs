@@ -21,6 +21,18 @@ pub(crate) async fn dispatch_surface(
     _connection: &LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let id = request_account_id(request)?;
+    if request.method == "surface.resync" {
+        let reference = required(&request.body, "surface_ref")?;
+        let message = request.body["message_id"]
+            .as_str()
+            .map(str::to_owned)
+            .map_or_else(crate::new_surface_message_id, Ok)?;
+        let account = local_bus_account_mut(state, id)?;
+        let candidate = account.client.prepare_surface_resync(reference, &message)?;
+        let carrier = account.client.reuse_authored_surface(&candidate)?.unwrap_or(candidate);
+        let response = super::surface_transport::send(account, &carrier).await?;
+        return Ok(local_bus_ok(response));
+    }
     let body: Send = serde_json::from_value(request.body.clone())?;
     let raw = ramflux_protocol::decode_base64url(&body.wire_base64)
         .map_err(|_| invalid("invalid surface wire encoding"))?;
@@ -44,11 +56,17 @@ pub(crate) async fn dispatch_surface(
             .client_record("conversation", &body.conversation_id)?
             .ok_or_else(|| invalid("surface requires an existing conversation"))?;
         let carrier = prepare_carrier(client, &body, kind.clone(), &raw, &surface_id)?;
-        let preflight = client.preflight_surface(&carrier)?;
+        let preflight = if let Some(outcome) = client.surface_delivery_receipt(&carrier)? {
+            outcome
+        } else {
+            client.preflight_surface(&carrier)?
+        };
         (carrier, preflight)
     };
     if let Some(receipt) =
         local_bus_account(state, id)?.client.surface_delivery_receipt(&carrier)?
+        && (!receipt.accepted
+            || local_bus_account(state, id)?.client.surface_outgoing_submitted(&carrier)?)
     {
         let mut response = serde_json::to_value(receipt)?;
         response["replayed"] = json!(true);

@@ -22,7 +22,7 @@ fn snapshot_limits_and_identifiers_have_typed_rejections() {
     rejects(c, SurfaceReject::InvalidIdentifier);
     let mut c = snapshot();
     c.fallback_text = "a".repeat(MAX_SURFACE_TEXT_CHARS + 1);
-    rejects(c, limit(SurfaceLimit::TextCharacters));
+    rejects(c, limit(SurfaceLimit::DataBytes));
     let mut c = snapshot();
     c.components = vec![c.components[0].clone(); 65];
     rejects(c, limit(SurfaceLimit::Blocks));
@@ -62,11 +62,12 @@ fn scalar_and_utf8_stream_budgets_are_distinct() {
         Err(limit(SurfaceLimit::TextDeltaBytes))
     );
     let mut c = snapshot();
-    c.components[0]["text"] = json!("x".repeat(MAX_SURFACE_TEXT_CHARS));
+    let overhead = canonical_json_bytes(&c).unwrap().len();
+    c.components[0]["text"] = json!("x".repeat(MAX_SURFACE_DATA_BYTES - overhead));
     let full = SurfaceState::default()
         .apply(&event(1, A2uiConversationCommand::CreateSurface(c)))
         .unwrap();
-    assert_eq!(full.apply(&stream(2, "x", false)), Err(limit(SurfaceLimit::TextCharacters)));
+    assert_eq!(full.apply(&stream(2, "x", false)), Err(limit(SurfaceLimit::DataBytes)));
     assert!(full.apply(&stream(2, "", true)).is_ok());
 }
 #[test]
@@ -140,7 +141,7 @@ fn retirement_tombstones_have_a_finite_budget() {
 fn exact_jcs_data_budget_is_accepted_then_one_stream_byte_is_rejected() {
     let mut content = snapshot();
     content.components = (0..4)
-        .map(|i| json!({"id":if i==0{"text".into()}else{format!("c{i}")},"text":"x".repeat(16000)}))
+        .map(|i| json!({"id":if i==0{"text".into()}else{format!("c{i}")},"text":"x".repeat(3000)}))
         .collect();
     let used = canonical_json_bytes(&content).unwrap().len();
     let mut remaining = MAX_SURFACE_DATA_BYTES - used;
