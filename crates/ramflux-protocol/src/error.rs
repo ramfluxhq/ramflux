@@ -7,6 +7,8 @@ pub enum ProtocolError {
     TransportProtocol(String),
     #[error("invalid identity record: {0}")]
     InvalidIdentityRecord(&'static str),
+    #[error("invalid group state: {0}")]
+    InvalidGroupState(&'static str),
     #[error("core error: {0}")]
     Core(#[from] ramflux_core::CoreError),
     #[error("canonical serialization failed: {0}")]

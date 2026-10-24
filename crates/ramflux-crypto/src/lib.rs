@@ -11,6 +11,12 @@ mod double_ratchet;
 mod error;
 mod franking;
 mod group_sender;
+mod group_state;
+pub use group_state::{
+    VerifiedGroupState, certify_group_state_actor, group_state_head_hash,
+    sign_group_state_operation, sign_group_state_snapshot, verify_group_state_actor,
+    verify_group_state_snapshot,
+};
 mod home_node_migration;
 mod identity;
 mod identity_binding;
