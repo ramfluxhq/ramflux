@@ -7,13 +7,14 @@ use crate::client::surface::{Carrier, PayloadKind};
 use crate::prelude::*;
 use serde_json::json;
 
-pub(super) struct Plan {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(in crate::bus) struct Plan {
     group: String,
     epoch: u64,
     routes: Vec<LocalBusGroupMemberRoute>,
     pub bytes: usize,
 }
-pub(super) fn plan(
+pub(in crate::bus) fn plan(
     account: &LocalBusAccountState,
     carrier: &Carrier,
 ) -> Result<Option<Plan>, SdkError> {
@@ -58,75 +59,85 @@ pub(super) fn plan(
         bytes,
     }))
 }
-pub(super) async fn prepare(
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(in crate::bus) struct QueuedGroup {
+    pub carrier: Carrier,
+    plan: Plan,
+    pub enqueued_at: i64,
+    encrypted: Option<Vec<u8>>,
+    distribution: Option<Vec<u8>>,
+    cursor: usize,
+}
+impl QueuedGroup {
+    pub fn new(carrier: Carrier, plan: Plan) -> Self {
+        Self {
+            carrier,
+            plan,
+            enqueued_at: now_unix_timestamp(),
+            encrypted: None,
+            distribution: None,
+            cursor: 0,
+        }
+    }
+    pub fn finished(&self) -> bool {
+        self.cursor >= self.plan.routes.len()
+    }
+    pub fn restart(&mut self, account: &LocalBusAccountState) -> Result<(), SdkError> {
+        self.plan = plan(account, &self.carrier)?
+            .ok_or_else(|| SdkError::LocalBus("surface group no longer exists".into()))?;
+        self.enqueued_at = now_unix_timestamp();
+        self.encrypted = None;
+        self.distribution = None;
+        self.cursor = 0;
+        Ok(())
+    }
+}
+#[cfg(test)]
+pub(in crate::bus) async fn prepare(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
     plan: Plan,
 ) -> Result<Vec<Delivery>, SdkError> {
-    super::super::surface_jobs::admit(account, 1, plan.bytes)?;
-    let encrypted = account.client.encrypt_group_message(
-        &plan.group,
-        &carrier.sender_device_id,
-        &carrier.bytes()?,
-    )?;
-    let distribution = account
-        .client
-        .export_group_sender_key_distribution(&plan.group, &carrier.sender_device_id)?;
-    let distribution_body = serde_json::to_vec(
-        &json!({"schema":"ramflux.sdk.group_sender_key.distribution_envelope.v1","version":1,"membership_event_base64":null,"actor_manifest_url":null,"distribution_base64":ramflux_protocol::encode_base64url(&distribution)}),
-    )?;
-    let mut engine = account.take_live_engine().await?;
-    let result = async {
-        let mut deliveries = Vec::new();
-        for route in plan.routes {
-            let ack = format!(
-                "surface/group_distribution/{}/{}/{}/{}",
-                plan.group, carrier.sender_device_id, route.member_id, plan.epoch
-            );
-            if !account.client.account_db()?.load_actor_state::<bool>(&ack)?.unwrap_or(false) {
-                let conversation = group_sender_key_distribution_conversation_id(
-                    &plan.group,
-                    &carrier.sender_device_id,
-                    &route.member_id,
-                );
-                deliveries.push(
-                    seal_packet(
-                        account,
-                        &mut engine,
-                        carrier,
-                        &route,
-                        Packet {
-                            conversation: &conversation,
-                            body: &distribution_body,
-                            group: &plan.group,
-                            control: true,
-                            ack: Some(ack),
-                        },
-                    )
-                    .await?,
-                );
-            }
-            deliveries.push(
-                seal_packet(
-                    account,
-                    &mut engine,
-                    carrier,
-                    &route,
-                    Packet {
-                        conversation: &carrier.conversation_id,
-                        body: &encrypted,
-                        group: &plan.group,
-                        control: false,
-                        ack: None,
-                    },
-                )
-                .await?,
-            );
-        }
-        Ok::<_, SdkError>(deliveries)
+    super::super::surface_jobs::admit_group(account, carrier, plan.bytes)?;
+    let mut group = QueuedGroup::new(carrier.clone(), plan);
+    let mut deliveries = Vec::new();
+    while !group.finished() {
+        deliveries.extend(prepare_next(account, &mut group, Duration::from_secs(2)).await?);
     }
-    .await;
+    Ok(deliveries)
+}
+pub(in crate::bus) async fn prepare_next(
+    account: &mut LocalBusAccountState,
+    job: &mut QueuedGroup,
+    budget: Duration,
+) -> Result<Vec<Delivery>, SdkError> {
+    let Some(route) = job.plan.routes.get(job.cursor) else {
+        return Ok(Vec::new());
+    };
+    let mut engine = account.take_live_engine().await?;
+    let result = tokio::time::timeout(budget, async {
+        super::group::resolve_group_route_principal_commitment(&account.client, &engine.config, route, &route.member_id).await?;
+        if job.encrypted.is_none() {
+            job.encrypted = Some(account.client.encrypt_group_message(&job.plan.group, &job.carrier.sender_device_id, &job.carrier.bytes()?)?);
+            let distribution = account.client.export_group_sender_key_distribution(&job.plan.group, &job.carrier.sender_device_id)?;
+            job.distribution = Some(serde_json::to_vec(&json!({"schema":"ramflux.sdk.group_sender_key.distribution_envelope.v1","version":1,"membership_event_base64":null,"actor_manifest_url":null,"distribution_base64":ramflux_protocol::encode_base64url(distribution)}))?);
+        }
+        let mut deliveries = Vec::new();
+        let ack = format!("surface/group_distribution/{}/{}/{}/{}", job.plan.group, job.carrier.sender_device_id, route.member_id, job.plan.epoch);
+        if !account.client.account_db()?.load_actor_state::<bool>(&ack)?.unwrap_or(false) {
+            let conversation = group_sender_key_distribution_conversation_id(&job.plan.group, &job.carrier.sender_device_id, &route.member_id);
+            deliveries.push(seal_packet(account, &mut engine, &job.carrier, route, Packet { conversation: &conversation, body: job.distribution.as_deref().ok_or_else(|| SdkError::LocalBus("distribution absent".into()))?, group: &job.plan.group, control: true, ack: Some(ack) }).await?);
+        }
+        deliveries.push(seal_packet(account, &mut engine, &job.carrier, route, Packet { conversation: &job.carrier.conversation_id, body: job.encrypted.as_deref().ok_or_else(|| SdkError::LocalBus("group ciphertext absent".into()))?, group: &job.plan.group, control: false, ack: None }).await?);
+        job.cursor += 1;
+        Ok::<_, SdkError>(deliveries)
+    }).await.map_err(|_| SdkError::InboundPending("surface packet preparation timed out".into())).and_then(std::convert::identity);
     account.put_engine(engine);
+    if result.is_err() {
+        // A temporarily unavailable recipient must not hold healthy group members behind it.
+        let failed = job.plan.routes.remove(job.cursor);
+        job.plan.routes.push(failed);
+    }
     result
 }
 struct Packet<'a> {
@@ -194,3 +205,7 @@ async fn seal_packet(
 #[cfg(test)]
 #[path = "surface_group_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "surface_group_fixture.rs"]
+mod fixture;

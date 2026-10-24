@@ -28,4 +28,4 @@ pub(crate) use object::*;
 
 pub(crate) mod surface_transport;
 
-mod surface_group;
+pub(super) mod surface_group;

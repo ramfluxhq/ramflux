@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Durable already-encrypted surface delivery; retries never re-seal or reuse a ratchet key.
+//! Bounded surface outbox with latest-snapshot group coalescing and retained ciphertext retries.
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -27,6 +27,8 @@ pub(super) struct FederatedTarget {
 }
 #[derive(Serialize, Deserialize)]
 struct Job {
+    #[serde(default)]
+    group: Option<super::dispatch::surface_group::QueuedGroup>,
     sequence: u64,
     #[serde(default)]
     envelope: Option<ramflux_protocol::Envelope>,
@@ -67,6 +69,7 @@ pub(super) fn enqueue(
             &format!("{PREFIX}{sequence:020}"),
             &Job {
                 sequence,
+                group: None,
                 envelope: Some(envelope),
                 deliveries: Vec::new(),
                 attempts: 0,
@@ -77,6 +80,7 @@ pub(super) fn enqueue(
     db.persist_actor_state("surface/transport_sequence", &sequence)?;
     Ok(())
 }
+#[cfg(test)]
 pub(super) fn enqueue_group(
     account: &LocalBusAccountState,
     deliveries: Vec<Delivery>,
@@ -93,96 +97,190 @@ pub(super) fn enqueue_group(
         .ok_or_else(|| SdkError::LocalBus("surface transport sequence exhausted".into()))?;
     db.persist_actor_state(
         &format!("{PREFIX}{sequence:020}"),
-        &Job { sequence, envelope: None, deliveries, attempts: 0, next_at: 0 },
+        &Job { sequence, group: None, envelope: None, deliveries, attempts: 0, next_at: 0 },
     )?;
     db.persist_actor_state("surface/transport_sequence", &sequence)?;
     Ok(())
 }
-pub(super) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    let now = now_unix_timestamp();
-    let jobs = account.client.account_db()?.surface_history_page::<Job>(PREFIX, PREFIX, 65)?;
-    let mut blocked = BTreeSet::new();
-    let mut sent = 0;
-    let mut attempted = 0;
-    for mut job in jobs {
-        let key = format!("{PREFIX}{:020}", job.sequence);
-        if let Some(envelope) = job.envelope.take() {
-            job.deliveries.insert(
-                0,
-                Delivery {
-                    envelope,
-                    federation: None,
-                    ack_key: None,
-                    attempts: job.attempts,
-                    next_at: job.next_at,
-                },
-            );
-        }
-        let failed = job
-            .deliveries
-            .iter()
-            .filter(|d| {
-                d.envelope.created_at.saturating_add(i64::from(d.envelope.ttl)) <= now
-                    || d.attempts >= 8
-            })
-            .map(|d| d.envelope.target_delivery_id.clone())
-            .collect::<BTreeSet<_>>();
-        if !failed.is_empty() {
+fn group_key(carrier: &crate::client::surface::Carrier) -> Result<String, SdkError> {
+    Ok(format!(
+        "{PREFIX}group-{}",
+        ramflux_protocol::hash_base64url(
+            "ramflux.surface.queued_group.v1",
+            carrier.surface_reference()?.as_bytes()
+        )
+    ))
+}
+pub(super) fn admit_group(
+    account: &LocalBusAccountState,
+    carrier: &crate::client::surface::Carrier,
+    bytes: usize,
+) -> Result<(), SdkError> {
+    let key = group_key(carrier)?;
+    let rows = account.client.account_db()?.surface_record_page::<Job>(PREFIX, PREFIX, 65)?;
+    let others = rows.iter().filter(|(k, _)| k != &key).collect::<Vec<_>>();
+    let total = others.iter().try_fold(bytes, |sum, (_, j)| {
+        serde_json::to_vec(j).map(|b| sum.saturating_add(b.len()))
+    })?;
+    if others.len() >= MAX_JOBS || total > MAX_BYTES {
+        return Err(SdkError::InboundPending("surface transport outbox is full".into()));
+    }
+    Ok(())
+}
+pub(super) fn enqueue_latest_group(
+    account: &LocalBusAccountState,
+    carrier: &crate::client::surface::Carrier,
+    plan: super::dispatch::surface_group::Plan,
+) -> Result<(), SdkError> {
+    if carrier.snapshot.is_none() {
+        return Err(SdkError::LocalBus(
+            "coalesced group publication requires signed full-state proof".into(),
+        ));
+    }
+    admit_group(account, carrier, plan.bytes)?;
+    account.client.account_db()?.persist_actor_state(
+        &group_key(carrier)?,
+        &Job {
+            sequence: 0,
+            group: Some(super::dispatch::surface_group::QueuedGroup::new(carrier.clone(), plan)),
+            envelope: None,
+            deliveries: Vec::new(),
+            attempts: 0,
+            next_at: 0,
+        },
+    )?;
+    Ok(())
+}
+fn refresh_job(
+    account: &LocalBusAccountState,
+    key: &str,
+    job: &mut Job,
+    now: i64,
+) -> Result<(), SdkError> {
+    if let Some(envelope) = job.envelope.take() {
+        job.deliveries.insert(
+            0,
+            Delivery {
+                envelope,
+                federation: None,
+                ack_key: None,
+                attempts: job.attempts,
+                next_at: job.next_at,
+            },
+        );
+    }
+    if let Some(group) = &mut job.group {
+        if group.enqueued_at.saturating_add(600) <= now
+            || job.deliveries.iter().any(|d| d.attempts >= 8)
+        {
+            // Keep the signed full state and restart with current membership and fresh packet TTLs.
+            // This never drops the final publication solely because its old ciphertext expired.
+            group.restart(account)?;
+            job.deliveries.clear();
+            job.next_at = 0;
             account.client.account_db()?.append_journal(
-                &format!("surface-transport-expired:{}:{}", job.sequence, job.deliveries.len()),
-                "surface.delivery_failed",
-                &json!({"sequence":job.sequence,"target_delivery_ids":failed}),
+                &format!("surface-snapshot-retry:{key}:{now}"),
+                "surface.full_snapshot_retry",
+                &json!({"surface_ref":group.carrier.surface_reference()?}),
                 now,
                 None,
             )?;
-            job.deliveries.retain(|d| !failed.contains(&d.envelope.target_delivery_id));
-            account.client.account_db()?.persist_actor_state(&key, &job)?;
         }
-        if job.deliveries.is_empty() {
-            account.client.account_db()?.delete_surface_state(&key)?;
-            continue;
-        }
-        // Skip a backed-off recipient while preserving its distribution-before-message order.
-        let index = job.deliveries.iter().position(|d| {
-            blocked.insert(d.envelope.target_delivery_id.clone()) && d.next_at <= now
+    } else {
+        job.deliveries.retain(|d| {
+            d.envelope.created_at.saturating_add(i64::from(d.envelope.ttl)) > now && d.attempts < 8
         });
-        let Some(index) = index else {
-            continue;
-        };
-        let delivery = &job.deliveries[index];
-        if attempted >= 2 {
+    }
+    Ok(())
+}
+pub(super) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    let now = now_unix_timestamp();
+    let jobs = account.client.account_db()?.surface_record_page::<Job>(PREFIX, PREFIX, 65)?;
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    let mut bytes = 0usize;
+    let mut sent = 0;
+    for (key, mut job) in jobs {
+        if std::time::Instant::now() >= deadline || bytes >= 4 * 1024 * 1024 {
             break;
         }
-        attempted += 1;
-        let result = submit(account, delivery).await;
-        let ack_key = delivery.ack_key.clone();
-        if result.is_ok() {
-            account.client.account_db()?.surface_transaction(|| {
-                if let Some(ack) = &ack_key {
+        refresh_job(account, &key, &mut job, now)?;
+        loop {
+            if std::time::Instant::now() >= deadline
+                || bytes >= 4 * 1024 * 1024
+                || job.next_at > now
+            {
+                break;
+            }
+            let mut seen = BTreeSet::new();
+            let mut index = job.deliveries.iter().position(|d| {
+                seen.insert(d.envelope.target_delivery_id.clone()) && d.next_at <= now
+            });
+            if index.is_none() {
+                let Some(group) = &mut job.group else {
+                    break;
+                };
+                if group.finished() {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if let Ok(deliveries) =
+                    super::dispatch::surface_group::prepare_next(account, group, remaining).await
+                {
+                    index = Some(job.deliveries.len());
+                    job.deliveries.extend(deliveries);
+                    job.attempts = 0;
+                } else {
+                    job.attempts = job.attempts.saturating_add(1);
+                    job.next_at = now.saturating_add(2_i64.pow(job.attempts.min(6)));
+                    break;
+                }
+                account.client.account_db()?.persist_actor_state(&key, &job)?;
+            }
+            let Some(index) = index else {
+                break;
+            };
+            let Some(delivery) = job.deliveries.get(index) else {
+                break;
+            };
+            let size = serde_json::to_vec(delivery)?.len();
+            if bytes.saturating_add(size) > 4 * 1024 * 1024 {
+                break;
+            }
+            bytes = bytes.saturating_add(size);
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let result = submit(account, delivery, remaining).await;
+            if result.is_ok() {
+                if let Some(ack) = &delivery.ack_key {
                     account.client.account_db()?.persist_actor_state(ack, &true)?;
                 }
                 job.deliveries.remove(index);
-                job.attempts = 0;
-                job.next_at = 0;
-                if job.deliveries.is_empty() {
-                    account.client.account_db()?.delete_surface_state(&key)?;
-                } else {
-                    account.client.account_db()?.persist_actor_state(&key, &job)?;
-                }
-                Ok::<_, SdkError>(())
-            })?;
-            sent += 1;
+                sent += 1;
+            } else {
+                let delivery = &mut job.deliveries[index];
+                delivery.attempts = delivery.attempts.saturating_add(1);
+                delivery.next_at = now.saturating_add(2_i64.pow(delivery.attempts.min(6)));
+            }
+            account.client.account_db()?.persist_actor_state(&key, &job)?;
+        }
+        if job.deliveries.is_empty()
+            && job.group.as_ref().is_none_or(super::dispatch::surface_group::QueuedGroup::finished)
+        {
+            account.client.account_db()?.delete_surface_state(&key)?;
         } else {
-            let delivery = &mut job.deliveries[index];
-            delivery.attempts += 1;
-            delivery.next_at = now.saturating_add(2_i64.pow(delivery.attempts.min(6)));
             account.client.account_db()?.persist_actor_state(&key, &job)?;
         }
     }
     Ok(sent)
 }
 
-async fn submit(account: &mut LocalBusAccountState, delivery: &Delivery) -> Result<(), SdkError> {
+async fn submit(
+    account: &mut LocalBusAccountState,
+    delivery: &Delivery,
+    budget: Duration,
+) -> Result<(), SdkError> {
     let mut engine = account.take_live_engine().await?;
     let result = async {
         if let Some(target) = &delivery.federation {
@@ -207,7 +305,7 @@ async fn submit(account: &mut LocalBusAccountState, delivery: &Delivery) -> Resu
                 .map(|_| ())
         } else {
             match tokio::time::timeout(
-                Duration::from_secs(2),
+                budget.min(Duration::from_secs(2)),
                 engine.submit_envelope(delivery.envelope.clone()),
             )
             .await
