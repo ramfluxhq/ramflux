@@ -18,9 +18,12 @@ impl AccountDb {
         if self.group_member_device_key(group, device)?.as_deref() != Some(key) {
             return Err(StorageError::GroupPermissionDenied);
         }
-        let changed=self.connection.execute("UPDATE group_member_device_key SET member_principal_id=?3,principal_commitment=?4 WHERE group_id=?1 AND member_id=?2 AND (member_principal_id IS NULL OR (member_principal_id=?3 AND principal_commitment=?4))",params![group,device,principal,commitment])?;
+        let changed=self.connection.execute("UPDATE group_member_device_key SET member_principal_id=?3,principal_commitment=?4 WHERE group_id=?1 AND member_id=?2 AND member_principal_id IS NULL AND device_signing_public_key=?5",params![group,device,principal,commitment,key])?;
         if changed == 0 {
-            return Err(StorageError::GroupPermissionDenied);
+            let same:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE group_id=?1 AND member_id=?2 AND member_principal_id=?3 AND principal_commitment=?4 AND device_signing_public_key=?5)",params![group,device,principal,commitment,key],|r|r.get(0))?;
+            if !same {
+                return Err(StorageError::GroupPermissionDenied);
+            }
         }
         Ok(())
     }
@@ -40,6 +43,34 @@ impl AccountDb {
         Ok(())
     }
 
+    /// Returns an active member's pinned device key and optional legacy identity binding.
+    /// # Errors
+    /// Returns SQL errors; absent/inactive membership returns None.
+    pub fn group_member_key_binding(
+        &self,
+        group: &str,
+        device: &str,
+    ) -> Result<Option<GroupMemberKeyBinding>, StorageError> {
+        use rusqlite::OptionalExtension;
+        Ok(self.connection.query_row("SELECT k.device_signing_public_key,k.member_principal_id,k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=k.member_id WHERE k.group_id=?1 AND k.member_id=?2 AND m.active=1",params![group,device],|r|Ok(GroupMemberKeyBinding{signing_public_key:r.get(0)?,principal_id:r.get(1)?,principal_commitment:r.get(2)?})).optional()?)
+    }
+    /// Rejects a directory claim that conflicts with any existing member pin's identity.
+    /// An unbound legacy pin can only acquire an identity through its unchanged key.
+    /// # Errors
+    /// Returns permission or SQL errors.
+    pub fn check_group_device_directory_identity(
+        &self,
+        device: &str,
+        principal: &str,
+        commitment: &str,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        let conflicts:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE member_id=?1 AND ((member_principal_id IS NOT NULL AND (member_principal_id IS NOT ?2 OR principal_commitment IS NOT ?3)) OR (member_principal_id IS NULL AND device_signing_public_key IS NOT ?4)))",params![device,principal,commitment,key],|r|r.get(0))?;
+        if conflicts {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        Ok(())
+    }
     /// Lists pinned group keys for one device, without granting a directory any write authority.
     /// # Errors
     /// Returns SQL errors.

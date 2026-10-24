@@ -565,3 +565,6 @@ mod device_revocation;
 
 #[path = "retirement_guard_tests.rs"]
 mod retirement_guard;
+
+#[path = "r9_tests.rs"]
+mod r9;

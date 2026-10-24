@@ -14,12 +14,17 @@ impl RamfluxClient {
         let state =
             self.group_state(group).map_err(|error| SdkError::InboundPending(error.to_string()))?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if !state.members.contains(&entry.envelope.source_device_id)
-            || !(state.members.contains(&local.device_id)
-                || state.members.contains(&local.principal_id))
-        {
-            return Err(SdkError::InboundPending("group membership not yet available".to_owned()));
+        if !state.members.contains(&local.device_id) {
+            return Err(SdkError::InboundPending(
+                "local group membership not yet available".to_owned(),
+            ));
         }
+        self.pin_local_group_member(group)?;
+        self.require_group_sender_pin(
+            group,
+            &entry.envelope.source_principal_id,
+            &entry.envelope.source_device_id,
+        )?;
         Ok(())
     }
     pub(super) fn merge_routed_group_link(

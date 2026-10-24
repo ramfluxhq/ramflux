@@ -290,6 +290,9 @@ mod tests {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SdkDmX3dhHeader {
+    /// Version 2 binds an HLC sequence and uses principal-scoped replay marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_ordering_version: Option<u32>,
     /// Version-1 bootstrap sequence, bound into the v2 X3DH transcript associated data.
     /// Missing on legacy sessions; unknown unsequenced v2 sessions fail closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]

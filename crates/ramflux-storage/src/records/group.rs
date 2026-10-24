@@ -276,3 +276,11 @@ impl GroupKeyEpochState {
         self.conflict_pending
     }
 }
+
+/// Immutable group-member key with an optional legacy principal binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupMemberKeyBinding {
+    pub signing_public_key: String,
+    pub principal_id: Option<String>,
+    pub principal_commitment: Option<String>,
+}

@@ -99,6 +99,7 @@ impl RamfluxClient {
         let bootstrap_aad = super::routed::bootstrap_sequence::bootstrap_aad(
             aad.unwrap_or_else(|| dm_associated_data(&message.conversation_id)),
             bootstrap_sequence,
+            aad.map(|_| 2),
         )?;
         let output = ramflux_crypto::x3dh_initiator(&X3dhInitiatorInput {
             initiator_identity: &own_identity,
@@ -120,6 +121,7 @@ impl RamfluxClient {
         )?;
         let header = SdkDmX3dhHeader {
             bootstrap_sequence,
+            bootstrap_ordering_version: aad.map(|_| 2),
             bootstrap_envelope_id: None,
             initiator_identity_public: own_identity.public,
             initiator_ephemeral_public: ephemeral.public,
@@ -165,8 +167,11 @@ impl RamfluxClient {
         }
         let identity = X25519KeyPair::from_seed(own_state.identity_seed);
         let signed_prekey = X25519KeyPair::from_seed(own_state.signed_prekey_seed);
-        let bootstrap_aad =
-            super::routed::bootstrap_sequence::bootstrap_aad(aad, header.bootstrap_sequence)?;
+        let bootstrap_aad = super::routed::bootstrap_sequence::bootstrap_aad(
+            aad,
+            header.bootstrap_sequence,
+            header.bootstrap_ordering_version,
+        )?;
         let output = ramflux_crypto::x3dh_recipient(&X3dhRecipientInput {
             recipient_identity: &identity,
             recipient_signed_prekey: &signed_prekey,

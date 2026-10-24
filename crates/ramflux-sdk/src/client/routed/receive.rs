@@ -91,7 +91,7 @@ impl RamfluxClient {
             references.push((attachment, prepared));
         }
         let membership = if opened.routing.kind == Kind::GroupControl {
-            self.prepare_routed_group_control(engine, &opened).await?
+            self.prepare_routed_group_control(engine, &opened, entry).await?
         } else {
             None
         };
@@ -228,7 +228,13 @@ impl RamfluxClient {
         &self,
         engine: &GatewaySessionEngine,
         opened: &Opened,
+        entry: &GatewayInboxEntry,
     ) -> Result<Option<(ramflux_protocol::GroupEvent, String)>, SdkError> {
+        if let Some(group) = opened.routing.group_id.as_deref()
+            && self.group_state(group).is_ok()
+        {
+            self.require_routed_group_member(group, entry)?;
+        }
         if let Ok(control) =
             serde_json::from_slice::<crate::group::SdkGroupControlEnvelope>(&opened.body)
         {
@@ -238,6 +244,7 @@ impl RamfluxClient {
             {
                 return Err(invalid("group control routing mismatch"));
             }
+            self.prepare_group_join_identity(&engine.config, &control.event).await?;
             return Ok(None);
         }
         let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(&opened.body)?;

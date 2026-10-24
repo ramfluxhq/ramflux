@@ -36,6 +36,12 @@ impl RamfluxClient {
             ));
         }
         for device in &manifest.devices {
+            db.check_group_device_directory_identity(
+                &device.device_id,
+                &manifest.principal_id,
+                &manifest.principal_commitment,
+                &device.branch_public_key,
+            )?;
             if db
                 .client_record("device", &device.device_id)?
                 .as_ref()
@@ -911,6 +917,7 @@ fn verify_device_manifest(
             || device.branch_proof.principal_id != manifest.principal_id
             || device.branch_proof.device_id != device.device_id
             || device.branch_proof.device_epoch != device.device_epoch
+            || device.prekey_bundle.identity_commitment != manifest.principal_id
             || device.prekey_bundle.device_id != device.device_id
             || device.prekey_bundle.device_epoch != device.device_epoch
         {
@@ -1401,6 +1408,7 @@ mod tests {
             [0x53; 32],
             [0x54; 32],
         )?;
+        client.persist_identity_directory(&initial)?;
         client.create_group("rotation_group", "peer_device")?;
         let first = initial.devices[0].branch_public_key.clone();
         client.account_db()?.persist_group_member_device_key(
@@ -1463,6 +1471,7 @@ mod tests {
             [0x53; 32],
             [0x54; 32],
         )?;
+        client.persist_identity_directory(&initial)?;
         client.create_group("pinned", "victim_device")?;
         client.account_db()?.persist_group_member_device_key(
             "pinned",
@@ -1481,7 +1490,9 @@ mod tests {
             serde_json::to_value(&impostor)?,
             &impostor.principal_commitment,
         )?;
-        client.persist_identity_directory(&impostor)?;
+        client.account_db()?.remove_actor_state("directory/device/victim_device")?;
+        assert!(client.persist_identity_directory(&impostor).is_err());
+        assert!(client.account_db()?.client_record("device", "victim_device")?.is_none());
         assert_eq!(
             client.account_db()?.group_member_device_key("pinned", "victim_device")?,
             Some(initial.devices[0].branch_public_key.clone())
@@ -1500,6 +1511,85 @@ mod tests {
                 .iter()
                 .any(|event| event.topic == "safety.changed")
         );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn safety_change_floods_keep_the_first_unacknowledged_notice_and_bounded_history()
+    -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("safety-flood")?;
+        let initial =
+            manifest_fixture("peer", "device", [0x51; 32], [0x52; 32], [0x53; 32], [0x54; 32])?;
+        client.persist_identity_directory(&initial)?;
+        client.create_group("group", "device")?;
+        client.account_db()?.persist_group_member_device_key(
+            "group",
+            "device",
+            &initial.devices[0].branch_public_key,
+        )?;
+        let mut first = None;
+        for n in 0..12_u8 {
+            let claim = manifest_fixture(
+                &format!("claim-{n}"),
+                "device",
+                [n + 0x60; 32],
+                [n + 0x80; 32],
+                [n + 0xa0; 32],
+                [n + 0xb0; 32],
+            )?;
+            let _ = client.persist_identity_directory(&claim);
+            let record = client
+                .account_db()?
+                .client_record("group", "group")?
+                .ok_or_else(|| SdkError::LocalBus("safety notice missing".into()))?;
+            if let Some(first) = &first {
+                assert_eq!(&record["safety_change"], first);
+            } else {
+                first = Some(record["safety_change"].clone());
+            }
+        }
+        assert_eq!(
+            client
+                .account_db()?
+                .journal_after(0, 128)?
+                .iter()
+                .filter(|event| event.topic == "safety.changed")
+                .count(),
+            1
+        );
+        for n in 12..24_u8 {
+            for key in client.account_db()?.actor_state_keys("safety/member/")? {
+                let mut value = client
+                    .account_db()?
+                    .load_actor_state::<serde_json::Value>(&key)?
+                    .ok_or_else(|| SdkError::LocalBus("bucket".into()))?;
+                value["at"] = serde_json::json!(now_unix_timestamp() - 60);
+                client.account_db()?.persist_actor_state(&key, &value)?;
+            }
+            let claim = manifest_fixture(
+                &format!("claim-{n}"),
+                "device",
+                [n + 0x60; 32],
+                [n + 0x80; 32],
+                [n + 0xa0; 32],
+                [n + 0xb0; 32],
+            )?;
+            let _ = client.persist_identity_directory(&claim);
+        }
+        let record = client
+            .account_db()?
+            .client_record("group", "group")?
+            .ok_or_else(|| SdkError::LocalBus("notice".into()))?;
+        assert_eq!(Some(record["safety_change"].clone()), first);
+        assert!(record["safety_changes"].as_array().is_some_and(|items| items.len() <= 4));
+        for key in client.account_db()?.actor_state_keys("safety/member/")? {
+            let value = client
+                .account_db()?
+                .load_actor_state::<serde_json::Value>(&key)?
+                .ok_or_else(|| SdkError::LocalBus("bucket".into()))?;
+            assert!(value["history"].as_array().is_some_and(|items| items.len() <= 4));
+        }
         drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())

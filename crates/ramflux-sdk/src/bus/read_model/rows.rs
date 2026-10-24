@@ -82,6 +82,8 @@ pub(crate) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<V
         "group" => {
             let mut group = serde_json::to_value(client.group_state(id)?)?;
             group["id"] = json!(id);
+            group["safety_changes"] =
+                saved.get("safety_changes").cloned().unwrap_or_else(|| json!([]));
             group["safety_change"] = saved.get("safety_change").cloned().unwrap_or(Value::Null);
             group["member_routes"] = json!(super::super::group_delivery::directory(client, id)?);
             group["conversation_id"] = saved.get("conversation_id").cloned().unwrap_or(Value::Null);

@@ -62,7 +62,7 @@ impl RamfluxClient {
             .seal_routed_as(
                 engine,
                 &message,
-                &serde_json::to_vec(&serde_json::json!({"type":kind}))?,
+                &serde_json::to_vec(&serde_json::json!({"type":kind,"rejected_bootstrap_floor":if kind=="pair.session.reset.v1"{self.bootstrap_high_water(&engine.config.device_id,remote)?}else{0}}))?,
                 Route::control(),
             )
             .await?;

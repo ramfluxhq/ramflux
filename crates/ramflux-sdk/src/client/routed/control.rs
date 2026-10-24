@@ -43,6 +43,15 @@ impl RamfluxClient {
                 if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {
                     return Err(invalid("pair recovery forbidden for removed or blocked contact"));
                 }
+                if event["type"] == "pair.session.reset.v1"
+                    && let Some(floor) = event["rejected_bootstrap_floor"].as_u64()
+                {
+                    self.abandon_unconfirmed_candidate(
+                        &opened.local_device,
+                        &opened.remote_device,
+                        floor,
+                    )?;
+                }
                 self.account_db()?.append_journal(&format!("pair-reset:{}", super::committed_key(entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device,"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
             } else {
                 self.project_contact_control(entry, &event)?;

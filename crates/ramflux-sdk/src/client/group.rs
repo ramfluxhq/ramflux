@@ -32,6 +32,9 @@ impl RamfluxClient {
                 )?;
             }
         }
+        if self.account_db()?.client_record("device", creator_id)?.is_some() {
+            self.pin_joined_group_member(group_id, creator_id)?;
+        }
         Ok(group)
     }
 
@@ -43,7 +46,15 @@ impl RamfluxClient {
         member_id: &str,
         role: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.add_group_member(group_id, member_id, role)?)
+        self.account_db()?.write_transaction(|| {
+            let state = self.account_db()?.add_group_member(group_id, member_id, role)?;
+            if self.device_branch.as_ref().is_some_and(|own| own.device_id == member_id)
+                || self.account_db()?.client_record("device", member_id)?.is_some()
+            {
+                self.pin_joined_group_member(group_id, member_id)?;
+            }
+            Ok(state)
+        })
     }
 
     /// # Errors
@@ -321,22 +332,51 @@ impl RamfluxClient {
         if joined_identity != &local.device_id {
             return Err(SdkError::LocalBus("bootstrap joined identity is not local".into()));
         }
-        Ok(self.account_db()?.apply_bootstrap_group_member_join(&GroupMemberJoinWrite {
-            group_id: group_id.clone(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            joined_identity: joined_identity.clone(),
-            joined_role: joined_role.clone(),
-            actor_role: actor_role.clone(),
-            actor_principal_commitment: actor_principal_commitment.clone(),
-            actor_device_signing_public_key: actor_device_signing_public_key.clone(),
-            previous_epoch: *previous_epoch,
-            new_group_epoch: *new_group_epoch,
-            max_members: *max_members,
-            new_member_history: new_member_history.clone(),
-        })?)
+        self.account_db()?.write_transaction(|| {
+            let state =
+                self.account_db()?.apply_bootstrap_group_member_join(&GroupMemberJoinWrite {
+                    group_id: group_id.clone(),
+                    event_id: event.event_id.clone(),
+                    actor_device_id: event.actor_device_id.clone(),
+                    joined_identity: joined_identity.clone(),
+                    joined_role: joined_role.clone(),
+                    actor_role: actor_role.clone(),
+                    actor_principal_commitment: actor_principal_commitment.clone(),
+                    actor_device_signing_public_key: actor_device_signing_public_key.clone(),
+                    previous_epoch: *previous_epoch,
+                    new_group_epoch: *new_group_epoch,
+                    max_members: *max_members,
+                    new_member_history: new_member_history.clone(),
+                })?;
+            self.pin_local_group_member(group_id)?;
+            Ok(state)
+        })
     }
 
+    pub(crate) async fn prepare_group_join_identity(
+        &self,
+        gateway: &GatewaySessionConfig,
+        event: &ramflux_protocol::GroupEvent,
+    ) -> Result<(), SdkError> {
+        if let ramflux_protocol::GroupEventBody::MemberJoined {
+            group_id, joined_identity, ..
+        } = &event.body
+        {
+            self.verify_group_control_event(event)?;
+            if !matches!(
+                self.account_db()?.group_member_role(group_id, &event.actor_device_id)?.as_deref(),
+                Some("owner" | "admin")
+            ) {
+                return Err(StorageError::GroupPermissionDenied.into());
+            }
+            if self.account_db()?.client_record("device", joined_identity)?.is_none()
+                && self.device_branch.as_ref().is_none_or(|own| own.device_id != *joined_identity)
+            {
+                self.resolve_target_principal_commitment(gateway, None, joined_identity).await?;
+            }
+        }
+        Ok(())
+    }
     #[allow(clippy::too_many_arguments)]
     fn apply_verified_group_role_change(
         &self,
@@ -373,20 +413,24 @@ impl RamfluxClient {
         max_members: u32,
         new_member_history: &str,
     ) -> Result<GroupState, SdkError> {
-        Ok(self.account_db()?.apply_group_member_join(&GroupMemberJoinWrite {
-            group_id: group_id.to_owned(),
-            event_id: event.event_id.clone(),
-            actor_device_id: event.actor_device_id.clone(),
-            joined_identity: joined_identity.to_owned(),
-            joined_role: joined_role.to_owned(),
-            actor_role: actor_role.to_owned(),
-            actor_principal_commitment: actor_principal_commitment.to_owned(),
-            actor_device_signing_public_key: actor_device_signing_public_key.to_owned(),
-            previous_epoch,
-            new_group_epoch,
-            max_members,
-            new_member_history: new_member_history.to_owned(),
-        })?)
+        self.account_db()?.write_transaction(|| {
+            let state = self.account_db()?.apply_group_member_join(&GroupMemberJoinWrite {
+                group_id: group_id.to_owned(),
+                event_id: event.event_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                joined_identity: joined_identity.to_owned(),
+                joined_role: joined_role.to_owned(),
+                actor_role: actor_role.to_owned(),
+                actor_principal_commitment: actor_principal_commitment.to_owned(),
+                actor_device_signing_public_key: actor_device_signing_public_key.to_owned(),
+                previous_epoch,
+                new_group_epoch,
+                max_members,
+                new_member_history: new_member_history.to_owned(),
+            })?;
+            self.pin_joined_group_member(group_id, joined_identity)?;
+            Ok(state)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

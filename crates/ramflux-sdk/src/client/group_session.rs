@@ -98,9 +98,14 @@ impl RamfluxClient {
             .map(|branch| {
                 ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
             });
+        if sender_device_signing_public_key.is_none() {
+            return Err(SdkError::LocalBus(
+                "distribution requires the local sender signing key".into(),
+            ));
+        }
         let distribution = SdkGroupSenderKeyDistribution {
-            schema: "ramflux.sdk.group_sender_key.distribution.v1".to_owned(),
-            version: 1,
+            schema: "ramflux.sdk.group_sender_key.distribution.v2".to_owned(),
+            version: 2,
             group_id: group_id.to_owned(),
             sender_id: sender_id.to_owned(),
             group_key_epoch: group.group_epoch,
@@ -128,19 +133,35 @@ impl RamfluxClient {
     ) -> Result<(SdkGroupSenderKeyDistribution, Vec<SdkGroupPendingPlaintext>), SdkError> {
         let distribution: SdkGroupSenderKeyDistribution =
             serde_json::from_slice(distribution_bytes)?;
-        if distribution.schema != "ramflux.sdk.group_sender_key.distribution.v1" {
+        if !matches!(
+            (distribution.schema.as_str(), distribution.version),
+            ("ramflux.sdk.group_sender_key.distribution.v2", 2)
+                | ("ramflux.sdk.group_sender_key.distribution.v1", 1)
+        ) {
             return Err(SdkError::LocalBus(format!(
                 "unsupported group sender key distribution schema: {}",
                 distribution.schema
             )));
         }
         self.assert_group_sender_key_epoch_allowed(&distribution)?;
-        if let Some(public_key) = distribution.sender_device_signing_public_key.as_ref() {
-            self.account_db()?.persist_group_member_device_key(
-                &distribution.group_id,
-                &distribution.sender_id,
-                public_key,
-            )?;
+        let public_key = distribution
+            .sender_device_signing_public_key
+            .as_ref()
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| {
+                SdkError::InboundRejected(
+                    "distribution requires a pinned sender signing key".into(),
+                )
+            })?;
+        if self
+            .account_db()?
+            .group_member_device_key(&distribution.group_id, &distribution.sender_id)?
+            .as_ref()
+            != Some(public_key)
+        {
+            return Err(SdkError::InboundRejected(
+                "safety: distribution signing key differs from member pin".into(),
+            ));
         }
         let state = SdkGroupSenderKeyState {
             group_id: distribution.group_id.clone(),
@@ -203,6 +224,16 @@ impl RamfluxClient {
                 continue;
             }
             let entry: GatewayInboxEntry = serde_json::from_slice(&record.envelope_json)?;
+            if let Err(error) = self.require_group_sender_pin(
+                group_id,
+                &entry.envelope.source_principal_id,
+                &entry.envelope.source_device_id,
+            ) {
+                if matches!(error, SdkError::InboundPending(_) | SdkError::InboundRejected(_)) {
+                    continue;
+                }
+                return Err(error);
+            }
             let encrypted_body =
                 ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload).map_err(
                     |error| SdkError::LocalBus(format!("invalid pending group payload: {error}")),

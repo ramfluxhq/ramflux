@@ -126,12 +126,8 @@ impl RamfluxClient {
             .recipient_device_id
             .as_deref()
             .ok_or_else(|| invalid("recipient device required"))?;
-        if let Some((session, bundle)) = self.active_pair(&engine.config.device_id, recipient)? {
-            let header = self.account_db()?.load_actor_state::<SdkDmX3dhHeader>(&format!(
-                "dm-pair/bootstrap/{}",
-                session.session_id
-            ))?;
-            return Ok((session, header, bundle));
+        if let Some(pair) = self.sendable_pair(&engine.config.device_id, recipient)? {
+            return Ok(pair);
         }
         if self
             .account_db()?
@@ -159,12 +155,8 @@ impl RamfluxClient {
             .recipient_device_id
             .as_deref()
             .ok_or_else(|| invalid("recipient device required"))?;
-        if let Some((session, bundle)) = self.active_pair(local, remote)? {
-            let header = self.account_db()?.load_actor_state::<SdkDmX3dhHeader>(&format!(
-                "dm-pair/bootstrap/{}",
-                session.session_id
-            ))?;
-            return Ok((session, header, bundle));
+        if let Some(pair) = self.sendable_pair(local, remote)? {
+            return Ok(pair);
         }
         let bundle =
             sdk_fetch_prekey_bundle(url.ok_or_else(|| invalid("prekey url missing"))?, remote)?

@@ -21,6 +21,7 @@ mod pair_lifecycle;
 mod recovery;
 mod reset_policy;
 mod reset_work;
+mod send_candidate;
 mod session;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -80,7 +80,9 @@ impl RamfluxClient {
             let bytes = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
                 .map_err(|_| invalid("invalid distribution"))?;
             let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&bytes)?;
-            if distribution.sender_id != entry.envelope.source_device_id {
+            if Some(distribution.group_id.as_str()) != route.group_id.as_deref()
+                || distribution.sender_id != entry.envelope.source_device_id
+            {
                 return Err(invalid("distribution sender differs from authenticated device"));
             }
             self.require_routed_group_member(&distribution.group_id, entry)?;
