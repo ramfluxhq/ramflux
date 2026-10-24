@@ -144,3 +144,13 @@ Device IDs and delivery aliases cannot be reassigned to a different root, even
 after revocation or metadata removal. This interim reservation guard precedes
 root-scoped device namespaces. Card import currently requires a configured home
 node profile; hand-configured accounts must configure one first.
+
+Registration admission operator notes: saved legacy unlimited/zero source limits and
+zero windows are normalized on load to the current defaults (120 attempts / 60 seconds);
+finite operator limits are preserved. Enable registration proof-of-work on public nodes.
+The per-source quota is an admission bound, not a Sybil defense: a cheap IPv6 /48 can
+supply many /64 buckets and churn the bounded source table, while an IPv4 NAT shares
+one quota. Stronger anti-abuse policy is an accepted follow-up. Registration PoW
+currently binds the principal name rather than the transport source or time; source/time
+binding for challenges is also an accepted follow-up. These limitations do not bypass
+the charged source quota or the permanent ownership guard.

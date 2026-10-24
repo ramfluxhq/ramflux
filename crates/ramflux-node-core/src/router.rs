@@ -381,6 +381,8 @@ impl RouterCore {
         let local_home_node_id = self.local_home_node_id();
         let (mut session, registration_trust_tier) = {
             let mut control = lock_unpoisoned(&self.control);
+            let registration_trust_tier =
+                control.mvp1_identities.validate_registration_policy(request)?;
             if let Some(migration) = effective_migration_for_registration(
                 &control,
                 local_home_node_id.as_deref(),
@@ -391,7 +393,9 @@ impl RouterCore {
                     migration.migration_proof_hash, migration.new_home_node
                 )));
             }
-            let registered = control.mvp1_identities.register_identity(request)?;
+            let registered = control
+                .mvp1_identities
+                .register_admitted_identity(request, registration_trust_tier)?;
             self.refresh_migration_read_snapshot_from_control(&control);
             registered
         };

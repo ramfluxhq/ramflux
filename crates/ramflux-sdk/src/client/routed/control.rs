@@ -142,7 +142,11 @@ impl RamfluxClient {
         let existing = if matches!(kind, "friend.requested" | "friend.accepted") {
             None
         } else {
-            Some(self.account_db()?.friend_link(id)?)
+            Some(
+                self.account_db()?
+                    .find_friend_link(id)?
+                    .ok_or_else(|| invalid("friend control link not found"))?,
+            )
         };
         let requester = event
             .get("requester")

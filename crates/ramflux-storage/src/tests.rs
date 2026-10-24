@@ -1215,3 +1215,17 @@ fn test_recovery_quorum() -> ramflux_protocol::RecoveryQuorumConfigured {
 
 #[path = "runtime_tests.rs"]
 mod runtime_tests;
+
+#[test]
+fn optional_friend_lookup_distinguishes_absent_links_from_real_sql_failures()
+-> Result<(), StorageError> {
+    let (root, db) = test_db("optional-friend-lookup")?;
+    assert!(db.find_friend_link("unknown")?.is_none());
+    db.establish_friend_link("known", "alice", "bob")?;
+    assert_eq!(db.find_friend_link("known")?.map(|link| link.link_id), Some("known".into()));
+    db.connection.execute_batch("DROP TABLE friend_link_projection")?;
+    assert!(matches!(db.find_friend_link("unknown"), Err(StorageError::Sqlite(_))));
+    drop(db);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -330,3 +330,54 @@ fn legacy_devices_are_owned_by_their_signed_root_even_when_a_principal_name_is_a
     assert!(matches!(registry.register_identity(&claim), Err(NodeCoreError::DeviceIdTaken)));
     Ok(())
 }
+
+#[test]
+fn reopening_legacy_registration_policies_restores_finite_admission_and_keeps_operator_limits()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (limit, window, expected_limit, expected_window) in
+        [(u32::MAX, 60, 120, 60), (0, 60, 120, 60), (3, 0, 3, 60), (3, 90, 3, 90)]
+    {
+        let path = temp_store_path(&format!("registration-upgrade-{limit}-{window}"))?;
+        let router = RouterCore::new();
+        router.mvp6_set_registration_policy(RegistrationPolicy {
+            per_source_ip_registration_limit: limit,
+            registration_window_seconds: window,
+            ..RegistrationPolicy::default()
+        });
+        let store = RouterRedbStore::open(&path)?;
+        store.save_router(&router)?;
+        drop(store);
+        let store = RouterRedbStore::open(&path)?;
+        let restored = store.load_router()?.ok_or("missing router")?;
+        let mut request = registration_request("upgrade", "device", 1, None, "same-source")?;
+        request.root_public_key.clear();
+        for _ in 0..expected_limit {
+            let error = restored.mvp1_register_identity(&request).err().ok_or("invalid root")?;
+            assert!(
+                !error.to_string().contains("registration source rate exceeded"),
+                "limit cut off too early: {error}"
+            );
+        }
+        assert!(
+            restored
+                .mvp1_register_identity(&request)
+                .err()
+                .ok_or("budget exhausted")?
+                .to_string()
+                .contains("registration source rate exceeded"),
+            "legacy snapshot must not retain unlimited admission"
+        );
+        assert_eq!(
+            restored.mvp6_registration_policy().per_source_ip_registration_limit,
+            expected_limit
+        );
+        assert_eq!(
+            restored.mvp6_registration_policy().registration_window_seconds,
+            expected_window
+        );
+        drop(restored);
+        drop(store);
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}

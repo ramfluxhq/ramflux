@@ -158,13 +158,25 @@ impl AccountDb {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, StorageError> {
+        self.find_friend_link(link_id)?
+            .ok_or_else(|| StorageError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Looks up a friend link without treating an absent peer-supplied ID as a storage failure.
+    ///
+    /// # Errors
+    /// Returns real SQL, I/O, or row decoding errors.
+    pub fn find_friend_link(
+        &self,
+        link_id: &str,
+    ) -> Result<Option<FriendLinkRecord>, StorageError> {
         Ok(self.connection.query_row(
             "SELECT link_id, requester_id, target_id, state, remove_scope, blocked, capability_revoked_at
                FROM friend_link_projection
               WHERE link_id = ?1",
             params![link_id],
             friend_link_from_row,
-        )?)
+        ).optional()?)
     }
 
     /// # Errors

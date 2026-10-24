@@ -70,17 +70,7 @@ pub(crate) fn registration_context(
     request: &mut ramflux_node_core::IdentityRegisterRequest,
     source: std::net::IpAddr,
 ) -> anyhow::Result<()> {
-    let source = match source {
-        std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or_else(
-            || {
-                let s = ip.segments();
-                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
-            },
-            |v| v.to_string(),
-        ),
-        std::net::IpAddr::V4(ip) => ip.to_string(),
-    };
-    request.source_ip_hash = Some(source);
+    request.source_ip_hash = Some(ramflux_node_core::source_ip_hash(&source.to_string()));
     request.now = i64::try_from(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
     )?;
@@ -115,7 +105,18 @@ mod registration_tests {
             source_ip_hash: Some("forged".into()),
         };
         super::registration_context(&mut request, "2001:db8:1:2::1".parse()?)?;
-        assert_eq!(request.source_ip_hash.as_deref(), Some("2001:db8:1:2::/64"));
+        assert_eq!(
+            request.source_ip_hash,
+            Some(ramflux_node_core::source_ip_hash("2001:db8:1:2::1"))
+        );
+        assert_eq!(
+            request.source_ip_hash,
+            Some(ramflux_node_core::source_ip_hash("2001:db8:1:2::ffff"))
+        );
+        super::registration_context(&mut request, "192.0.2.1".parse()?)?;
+        assert_eq!(request.source_ip_hash, Some(ramflux_node_core::source_ip_hash("192.0.2.1")));
+        super::registration_context(&mut request, "::ffff:192.0.2.1".parse()?)?;
+        assert_eq!(request.source_ip_hash, Some(ramflux_node_core::source_ip_hash("192.0.2.1")));
         assert!(request.now > 1);
         Ok(())
     }

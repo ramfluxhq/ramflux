@@ -1009,3 +1009,45 @@ fn registration_pow_tier_and_budgets_are_enforced() -> Result<(), Box<dyn std::e
     );
     Ok(())
 }
+
+#[test]
+fn migration_registration_probes_are_charged_before_returning_the_new_home_node()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = RouterCore::new();
+    let initial = registration_request("migrated", "migrated-device", 811, None, "owner-source")?;
+    router.mvp1_register_identity(&initial)?;
+    let proof = migration_proof_for_registration(
+        &initial,
+        811,
+        "migration-probe",
+        initial.now,
+        initial.now,
+        "new-node.example",
+    )?;
+    router.apply_home_node_migration(&proof, &initial.proof, initial.now + 1)?;
+    router.mvp6_set_registration_policy(RegistrationPolicy {
+        per_source_ip_registration_limit: 2,
+        ..RegistrationPolicy::default()
+    });
+    let mut probe = initial.clone();
+    probe.source_ip_hash = Some("probe-source".into());
+    probe.now = initial.now + 2;
+    for _ in 0..2 {
+        assert!(
+            router
+                .mvp1_register_identity(&probe)
+                .err()
+                .ok_or("migrated")?
+                .to_string()
+                .contains("home node migrated")
+        );
+    }
+    let error =
+        router.mvp1_register_identity(&probe).err().ok_or("probe budget exhausted")?.to_string();
+    assert!(
+        error.contains("registration source rate exceeded"),
+        "uncharged migration oracle: {error}"
+    );
+    assert!(!error.contains("new-node.example"));
+    Ok(())
+}

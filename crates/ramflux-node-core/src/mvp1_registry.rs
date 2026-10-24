@@ -230,7 +230,7 @@ pub struct IdentityRegistry {
     delivery_root_bindings: BTreeMap<String, (String, String, String)>,
     seen_proofs: BTreeSet<String>,
     prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "load_registration_policy")]
     registration_policy: RegistrationPolicy,
     #[serde(default)]
     registration_trust_tiers: BTreeMap<String, RegistrationTrustTier>,
@@ -238,6 +238,21 @@ pub struct IdentityRegistry {
     registration_times_by_source_ip: BTreeMap<String, Vec<i64>>,
     #[serde(default)]
     friend_request_times_by_principal: BTreeMap<String, Vec<i64>>,
+}
+
+fn load_registration_policy<'de, D>(deserializer: D) -> Result<RegistrationPolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut policy = RegistrationPolicy::deserialize(deserializer)?;
+    let defaults = RegistrationPolicy::default();
+    if matches!(policy.per_source_ip_registration_limit, 0 | u32::MAX) {
+        policy.per_source_ip_registration_limit = defaults.per_source_ip_registration_limit;
+    }
+    if policy.registration_window_seconds == 0 {
+        policy.registration_window_seconds = defaults.registration_window_seconds;
+    }
+    Ok(policy)
 }
 
 impl IdentityRegistry {
@@ -253,6 +268,14 @@ impl IdentityRegistry {
         request: &IdentityRegisterRequest,
     ) -> Result<(SessionDescriptor, RegistrationTrustTier), NodeCoreError> {
         let registration_trust_tier = self.validate_registration_policy(request)?;
+        self.register_admitted_identity(request, registration_trust_tier)
+    }
+
+    pub(crate) fn register_admitted_identity(
+        &mut self,
+        request: &IdentityRegisterRequest,
+        registration_trust_tier: RegistrationTrustTier,
+    ) -> Result<(SessionDescriptor, RegistrationTrustTier), NodeCoreError> {
         let root_public_key =
             ramflux_crypto::verifying_key_from_base64url(&request.root_public_key)
                 .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
@@ -393,7 +416,7 @@ impl IdentityRegistry {
         })
     }
 
-    fn validate_registration_policy(
+    pub(crate) fn validate_registration_policy(
         &mut self,
         request: &IdentityRegisterRequest,
     ) -> Result<RegistrationTrustTier, NodeCoreError> {

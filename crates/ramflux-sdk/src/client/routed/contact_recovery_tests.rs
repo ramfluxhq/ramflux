@@ -353,3 +353,60 @@ async fn valid_delivery_after_rejected_control(
 
     Ok(())
 }
+
+#[tokio::test]
+async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arrives()
+-> Result<(), SdkError> {
+    let a = Fixture::new("alice", 21)?;
+    let mut b = Fixture::new("bob", 31)?;
+    super::super::review::trust(&b, &a)?;
+    b.client.establish_friend_link("prior-friend", "alice", "bob")?;
+    let mut message = message("legacy-control", "history");
+    let bundle = b.client.load_x3dh_private_state("bob")?.bundle;
+    let (mut session, header) =
+        a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
+    let body = serde_json::to_vec(
+        &json!({"type":"friend.removed","link_id":"incoming-request","requester":"alice","target":"bob"}),
+    )?;
+    let ciphertext = session.encrypt(&body, dm_associated_data("history"))?;
+    message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
+        version: 1,
+        x3dh: header.clone(),
+        ciphertext,
+    })?;
+    let entry = GatewayInboxEntry {
+        inbox_seq: 1,
+        target_delivery_id: "bob".into(),
+        envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
+    };
+    let receiving = b.client.load_or_create_recv_dm_session("history", header.as_ref())?;
+    b.client.send_direct_message("history", "old-history", "alice", b"prior bound thread")?;
+    b.client.persist_dm_session("history", "old-history", "recv", &receiving)?;
+    let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
+    let result = b
+        .client
+        .receive_legacy_entry(
+            &mut engine,
+            &super::super::review::pool()?,
+            entry,
+            crate::client::dm::LegacyReceive {
+                conversation_id: "history",
+                auto_fetch_attachments: false,
+                relay_service_key_base64: None,
+            },
+        )
+        .await;
+    assert!(result?.is_none());
+    assert_eq!(b.client.gateway_receive_cursor("bob")?, 1);
+    assert!(
+        b.client
+            .account_db()?
+            .journal_after(0, 128)?
+            .iter()
+            .any(|event| event.body["error_code"] == "legacy_control_rejected")
+    );
+    valid_delivery_after_rejected_control(&a, &mut b, &mut engine, &mut session).await?;
+    assert!(!b.client.friend_links()?.iter().any(|l| l.link_id == "incoming-request"));
+    Ok(())
+}
