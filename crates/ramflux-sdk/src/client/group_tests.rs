@@ -101,7 +101,10 @@ fn device_public_key(principal: &str, device: &str, seed: [u8; 32]) -> Result<St
     manifests()
         .lock()
         .map_err(|_| SdkError::LocalBus("fixture manifest lock".into()))?
-        .insert((public.clone(), device.into()), manifest);
+        // Repeated seeds denote one fixture authority, including across parallel tests.
+        // Preserve its first signed epoch instead of creating time-dependent same-epoch forks.
+        .entry((public.clone(), device.into()))
+        .or_insert(manifest);
     Ok(public)
 }
 fn seed_group_named(
