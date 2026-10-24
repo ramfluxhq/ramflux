@@ -144,7 +144,10 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.account_db()?.persist_actor_state(&slot_receipt(slot)?, &true)?;
         self.account_db()?.persist_actor_state(
-            &super::object_watermark(&slot.object_id, &slot.recipient_device_id)?,
+            &super::object_watermark(
+                &slot.object_id,
+                &self.local_device_identity(&slot.recipient_device_id)?,
+            )?,
             &slot_receipt(slot)?,
         )?;
         Ok(())

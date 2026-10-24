@@ -139,3 +139,40 @@ async fn outgoing_a2i_refuses_forged_identity_and_engine_principal_before_peer_i
     assert_eq!(alice.client.account_db()?.actor_state_keys("a2i/")?, Vec::<String>::new());
     Ok(())
 }
+
+#[tokio::test]
+async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_root()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::new("alice", 11)?;
+    let bob = Fixture::new("bob", 31)?;
+    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    trust(&alice, &bob)?;
+    trust(&alice, &mallory)?;
+    alice.client.establish_friend_link("bob-link", "alice", "bob")?;
+    let mut engine =
+        GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
+    let entry = seal(&bob, &alice, super::r5::outgoing(&bob, &alice, "migrate-id"), b"body")?;
+    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    let source = alice.client.authenticated_device_identity(&entry)?;
+    let key = alice.client.authenticated_committed_key(&entry)?;
+    let db = alice.client.account_db()?;
+    let receipt =
+        db.load_actor_state::<serde_json::Value>(&key)?.ok_or_else(|| invalid("receipt"))?;
+    db.remove_actor_state(&key)?;
+    db.remove_actor_state(&format!("identity/replay-upgrade/v3/{}", source.storage_key()))?;
+    db.persist_actor_state("routed/committed/old-name-digest", &receipt)?;
+    db.persist_actor_state("legacy/committed/migrate-id", &"mallory-thread")?;
+    assert_eq!(alice.client.committed_direct_context(&entry)?, None);
+    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    let db = alice.client.account_db()?;
+    assert!(db.actor_state_exists(&key)?);
+    assert!(!db.actor_state_exists("routed/committed/old-name-digest")?);
+    let attack =
+        seal(&mallory, &alice, super::r5::outgoing(&mallory, &alice, "migrate-id"), b"attack")?;
+    assert_eq!(alice.client.committed_direct_context(&attack)?, None);
+    let messages = alice.client.direct_messages(
+        receipt["routing"]["conversation_id"].as_str().ok_or_else(|| invalid("route"))?,
+    )?;
+    assert_eq!(messages.len(), 1);
+    Ok(())
+}
