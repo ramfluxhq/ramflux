@@ -20,14 +20,6 @@ pub(super) fn validate_label(value: &str) -> Result<(), &'static str> {
     if value.chars().count() > 64 { Err("label exceeds 64 characters") } else { Ok(()) }
 }
 
-pub(super) fn validate_kind(value: &str) -> Result<(), &'static str> {
-    if matches!(value, "human" | "headless_ai" | "bot") {
-        Ok(())
-    } else {
-        Err("invalid account kind")
-    }
-}
-
 fn validate_name(value: &str) -> Result<(), &'static str> {
     if value.len() > 255 || value.chars().any(|c| c == '/' || c == '\\' || c.is_control()) {
         Err("name must be at most 255 bytes without path separators or control characters")
@@ -54,9 +46,6 @@ fn validate_mime(value: &str) -> Result<(), &'static str> {
 
 pub(super) fn label<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     optional(d, validate_label)
-}
-pub(super) fn kind<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    optional(d, validate_kind)
 }
 pub(super) fn name<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     optional(d, validate_name)

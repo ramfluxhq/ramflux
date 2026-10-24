@@ -11,81 +11,7 @@ impl RamfluxClient {
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        // Retain the safety observation even when ownership validation rejects the directory.
-        db.write_transaction(|| self.record_pinned_group_key_changes(manifest))?;
-        db.write_transaction(|| self.persist_verified_directory_rows(manifest))?;
-        self.finish_pair_retirement()
-    }
-    pub(crate) fn persist_verified_directory_rows(
-        &self,
-        manifest: &SdkDeviceManifestResponse,
-    ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let old = db
-            .client_record("identity", &manifest.principal_id)?
-            .unwrap_or_else(|| serde_json::json!({}));
-        if old.get("device_set_hash").is_some()
-            && old
-                .get("contact_identity_commitment")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|commitment| commitment != manifest.principal_commitment)
-        {
-            return Err(SdkError::InboundRejected(
-                "verified principal root commitment changed".to_owned(),
-            ));
-        }
-        for device in &manifest.devices {
-            db.check_group_device_directory_identity(
-                &device.device_id,
-                &manifest.principal_id,
-                &manifest.principal_commitment,
-                &device.branch_public_key,
-            )?;
-            if db
-                .client_record("device", &device.device_id)?
-                .as_ref()
-                .and_then(|record| record.get("principal_commitment"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|commitment| commitment != manifest.principal_commitment)
-            {
-                return Err(SdkError::InboundRejected(
-                    "verified device owner commitment changed".to_owned(),
-                ));
-            }
-        }
-        db.persist_actor_state(&format!("identity/manifest/{}", manifest.principal_id), manifest)?;
-        let material = contact_safety_material_from_manifest(manifest)?;
-        let device_set_hash =
-            ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&material.devices));
-        let safety_number = if old.get("device_set_hash").and_then(serde_json::Value::as_str)
-            == Some(device_set_hash.as_str())
-        {
-            old.get("safety_number").cloned().unwrap_or(serde_json::Value::Null)
-        } else {
-            serde_json::Value::Null
-        };
-        let devices=manifest.devices.iter().map(|device|serde_json::json!({"id":device.device_id,"device_id":device.device_id,"label":null,"last_seen":null,"verified_at":now_unix_timestamp(),"target_delivery_id":device.target_delivery_id,"signing_public_key":device.branch_public_key})).collect::<Vec<_>>();
-        db.persist_client_record("identity",&manifest.principal_id,&serde_json::json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":old.get("kind"),"root_source":old.get("root_source"),"kind_asserted":old.get("kind_asserted"),"node":old.get("node"),"is_self":self.device_branch.as_ref().is_some_and(|branch|branch.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":device_set_hash,"safety_number":safety_number}))?;
-        db.persist_client_record(
-            "commitment",
-            &manifest.principal_commitment,
-            &serde_json::json!({"principal_id":manifest.principal_id}),
-        )?;
-        for device in &manifest.devices {
-            if db
-                .load_actor_state::<bool>(&format!("device/revoked/{}", device.device_id))?
-                .unwrap_or(false)
-                && self
-                    .device_branch
-                    .as_ref()
-                    .is_some_and(|own| own.principal_id == manifest.principal_id)
-            {
-                continue;
-            }
-            db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id}))?;
-        }
-        Ok(())
+        self.persist_root_verified_directory(manifest)
     }
 
     /// # Errors
@@ -889,58 +815,9 @@ pub(crate) async fn assert_target_manifest_active_device(
 
 pub(crate) fn verify_device_manifest(
     manifest: &SdkDeviceManifestResponse,
-    expected_identity_commitment: &str,
+    expected: &str,
 ) -> Result<(), SdkError> {
-    if manifest.principal_commitment != expected_identity_commitment {
-        return Err(SdkError::LocalBus(format!(
-            "device manifest principal commitment mismatch for {expected_identity_commitment}"
-        )));
-    }
-    let root_commitment = identity_root_public_key_commitment(&manifest.root_public_key)?;
-    if root_commitment != expected_identity_commitment {
-        return Err(SdkError::LocalBus(format!(
-            "device manifest root commitment mismatch for {expected_identity_commitment}"
-        )));
-    }
-    if manifest.devices.is_empty() {
-        return Err(SdkError::LocalBus(format!(
-            "device manifest has no devices for {expected_identity_commitment}"
-        )));
-    }
-    let root_public_key = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
-    let now = now_unix_timestamp();
-    for device in &manifest.devices {
-        if device.principal_id != manifest.principal_id
-            || device.principal_commitment != expected_identity_commitment
-            || device.branch_proof.principal_id != manifest.principal_id
-            || device.branch_proof.device_id != device.device_id
-            || device.branch_proof.device_epoch != device.device_epoch
-            || device.prekey_bundle.identity_commitment != manifest.principal_id
-            || device.prekey_bundle.device_id != device.device_id
-            || device.prekey_bundle.device_epoch != device.device_epoch
-        {
-            return Err(SdkError::LocalBus(format!(
-                "device manifest record mismatch for {}",
-                device.device_id
-            )));
-        }
-        ramflux_crypto::verify_branch_proof(
-            &root_public_key,
-            &device.branch_proof,
-            "ramflux-node",
-            "device.delivery.bind",
-            now,
-        )
-        .map_err(|error| {
-            SdkError::LocalBus(format!("branch proof invalid for {}: {error}", device.device_id))
-        })?;
-        let branch_public_key =
-            ramflux_crypto::verifying_key_from_base64url(&device.branch_public_key)?;
-        ramflux_crypto::verify_prekey_bundle(&branch_public_key, &device.prekey_bundle).map_err(
-            |error| SdkError::LocalBus(format!("prekey invalid for {}: {error}", device.device_id)),
-        )?;
-    }
-    Ok(())
+    super::identity_authority::verify_manifest(manifest, expected)
 }
 
 pub(crate) fn contact_safety_material_from_manifest(
@@ -1044,7 +921,8 @@ mod tests {
             None,
             None,
         )?;
-        Ok(SdkDeviceManifestResponse {
+        let mut manifest = SdkDeviceManifestResponse {
+            signed_device_set: None,
             principal_id: principal_id.to_owned(),
             principal_commitment: principal_commitment.clone(),
             root_public_key,
@@ -1059,7 +937,9 @@ mod tests {
                 prekey_bundle,
                 branch_authorized_event_id: format!("device.branch_authorized:{device_id}:1"),
             }],
-        })
+        };
+        crate::client::identity_authority::test_support::sign_manifest(&root, &mut manifest, 1)?;
+        Ok(manifest)
     }
 
     #[test]

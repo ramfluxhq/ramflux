@@ -107,10 +107,6 @@ pub(crate) async fn local_bus_account_create(
         crate::bus::metadata::validate_label(label)
             .map_err(|message| SdkError::LocalBus(message.to_owned()))?;
     }
-    if let Some(kind) = &body.kind {
-        crate::bus::metadata::validate_kind(kind)
-            .map_err(|message| SdkError::LocalBus(message.to_owned()))?;
-    }
     let data_root = state.config.data_root.clone();
     let manifest_path = local_bus_account_manifest_path(&data_root, &body.local_account_id);
     if manifest_path.exists() {
@@ -224,6 +220,11 @@ fn initialize_created_account(
     client: &mut RamfluxClient,
     body: &mut LocalBusAccountCreateRequest,
 ) -> Result<(), SdkError> {
+    if body.client_mode == LocalBusClientMode::HeadlessAi
+        && body.kind == Some(ramflux_protocol::PrincipalKind::Human)
+    {
+        return Err(SdkError::InboundRejected("headless account cannot claim human kind".into()));
+    }
     let root = client.create_identity_root(&body.principal_id, body.root_seed);
     let root_public_key =
         ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());

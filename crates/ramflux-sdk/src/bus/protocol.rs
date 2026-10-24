@@ -78,12 +78,8 @@ pub struct LocalBusAccountCreateRequest {
         deserialize_with = "super::metadata::label"
     )]
     pub label: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "super::metadata::kind"
-    )]
-    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ramflux_protocol::PrincipalKind>,
     #[serde(default)]
     pub node_id: Option<String>,
     pub local_account_id: String,
@@ -248,16 +244,16 @@ impl LocalBusPersistedAccount {
         Self {
             activation_pending: true,
             label: body.label.clone(),
-            kind: body.kind.clone().or_else(|| {
-                Some(
+            kind: Some(
+                serde_json::to_value(body.kind.unwrap_or(
                     if body.client_mode == LocalBusClientMode::HeadlessAi {
-                        "headless_ai"
+                        ramflux_protocol::PrincipalKind::HeadlessAi
                     } else {
-                        "human"
-                    }
-                    .to_owned(),
-                )
-            }),
+                        ramflux_protocol::PrincipalKind::Human
+                    },
+                ))
+                .map_or_else(|_| String::new(), |v| v.as_str().unwrap_or_default().to_owned()),
+            ),
             schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
             local_account_id: body.local_account_id.clone(),
             principal_id: body.principal_id.clone(),

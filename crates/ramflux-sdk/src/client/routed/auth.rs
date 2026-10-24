@@ -16,7 +16,9 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let remote = &entry.envelope.source_device_id;
         let known = self.account_db()?.client_record("device", remote)?;
-        if known.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none()) {
+        if known.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none())
+            || self.require_cached_root_authority(remote).is_err()
+        {
             let pinned = self
                 .account_db()?
                 .device_directory_entry(remote)?
@@ -44,6 +46,7 @@ impl RamfluxClient {
             let manifest =
                 crate::client::contact::fetch_verified_device_manifest(gateway, &commitment)
                     .await?;
+            self.persist_identity_directory(&manifest)?;
             let device =
                 manifest.devices.iter().find(|device| device.device_id == *remote).ok_or_else(
                     || {
@@ -83,6 +86,7 @@ impl RamfluxClient {
             return Err(SdkError::InboundRejected("revoked device".to_owned()));
         }
 
+        self.require_cached_root_authority(remote)?;
         self.account_db()?.client_record("device", remote)?.ok_or_else(|| {
             SdkError::InboundPending("sender device has no verified manifest".to_owned())
         })

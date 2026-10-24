@@ -11,6 +11,9 @@ pub(crate) async fn dispatch_device_bus_request(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
         "device.list" => dispatch_device_list(request, state),
+        "device.authorize" | "device.migrate" | "device.refresh" => {
+            super::identity_authority::dispatch_identity_authority(request, state).await
+        }
         "device.activate" => {
             let body: LocalBusDeviceActivateRequest = serde_json::from_value(request.body.clone())?;
             dispatch_device_activate(request, state, body).await
@@ -154,30 +157,13 @@ async fn dispatch_device_revoke(
         return Err(SdkError::LocalBus("account manifest root commitment mismatch".to_owned()));
     }
     let revoked_at = now_unix_timestamp();
-    let signing_body = SdkDeviceRevokeSigningBody {
-        device_id: &body.device_id,
-        principal_commitment: &manifest.principal_commitment,
-        revoked_at,
-    };
-    let signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-        &ramflux_protocol::canonical_json_bytes(&signing_body)?,
-        manifest.root_seed,
-    );
-    let revoke = SdkDeviceRevokeRequest {
-        device_id: body.device_id.clone(),
-        principal_commitment: manifest.principal_commitment.clone(),
-        root_public_key,
-        revoked_at,
-        signature,
-    };
-    let gateway = GatewaySessionConfig::auto(manifest.gateway.clone());
-    let response: SdkDeviceRevokeResponse =
-        sdk_gateway_post_json(&gateway, "/mvp1/device/revoke", &revoke).await?;
-    if response.revoked {
-        account.client.apply_verified_device_revocation(&body.device_id, &manifest.principal_id)?;
-        manifest.devices.retain(|device| device.device_id != body.device_id);
-        write_local_bus_account_manifest(&data_root, &manifest)?;
+    let mut gateway = GatewaySessionConfig::auto(manifest.gateway.clone());
+    if let Some(addr) = manifest.node_tcp_addr {
+        gateway = gateway.with_tcp_gateway_addr(addr);
     }
+    let record = account.client.revoke_owned_device(&gateway, &body.device_id).await?;
+    manifest.devices.retain(|device| device.device_id != body.device_id);
+    write_local_bus_account_manifest(&data_root, &manifest)?;
     account.client.append_event(
         &format!("device.branch_revoked:{}", body.device_id),
         "identity.device_branch.revoked",
@@ -186,7 +172,9 @@ async fn dispatch_device_revoke(
             "revoked_at": revoked_at,
         }))?,
     )?;
-    Ok(local_bus_ok(serde_json::to_value(response)?))
+    Ok(local_bus_ok(
+        serde_json::json!({"device_id":body.device_id,"revoked":true,"device_set_epoch":record.device_set_epoch}),
+    ))
 }
 
 async fn dispatch_device_sync_export(

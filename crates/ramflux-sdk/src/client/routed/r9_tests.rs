@@ -8,35 +8,7 @@ use super::session_record::{Wire, active, last};
 use super::*;
 use serde_json::json;
 pub(super) fn manifest(f: &Fixture) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
-    let root = f.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let branch = f.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let public = ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let commitment = crate::prekey::identity_root_public_key_commitment(&public)?;
-    Ok(crate::prekey::SdkDeviceManifestResponse {
-        principal_id: branch.principal_id.clone(),
-        principal_commitment: commitment.clone(),
-        root_public_key: public,
-        devices: vec![crate::prekey::SdkDeviceManifestEntry {
-            principal_id: branch.principal_id.clone(),
-            principal_commitment: commitment,
-            device_id: f.id.clone(),
-            device_epoch: 1,
-            branch_public_key: ramflux_protocol::encode_base64url(
-                branch.signing_key.verifying_key().to_bytes(),
-            ),
-            target_delivery_id: f.id.clone(),
-            branch_proof: ramflux_crypto::authorize_device_branch(
-                root,
-                branch,
-                "ramflux-node",
-                vec!["device.delivery.bind".into()],
-                1_700_000_000,
-                4_000_000_000,
-            )?,
-            prekey_bundle: f.client.load_x3dh_private_state(&f.id)?.bundle,
-            branch_authorized_event_id: "branch".into(),
-        }],
-    })
+    crate::client::identity_authority::test_support::manifest(&f.client)
 }
 async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     let alice = Fixture::new("alice", 41)?;
