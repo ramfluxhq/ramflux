@@ -41,18 +41,17 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         message: &GatewayDirectMessage,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
-        if let Ok(session) = self.load_dm_session(&message.conversation_id, "send") {
-            return Ok((session, None));
-        }
         let recipient_device_id = message.recipient_device_id.as_deref().ok_or_else(|| {
             SdkError::LocalBus(
                 "recipient_device_id is required to bootstrap a new X3DH DM session".to_owned(),
             )
         })?;
+        let lookup = self.root_qualified_device_lookup(recipient_device_id)?;
         let recipient_bundle =
-            engine.fetch_prekey_bundle(recipient_device_id).await?.bundle.ok_or_else(|| {
+            engine.fetch_prekey_bundle(&lookup).await?.bundle.ok_or_else(|| {
                 SdkError::LocalBus(format!("missing prekey bundle for {recipient_device_id}"))
             })?;
+        self.verify_root_bound_prekey(recipient_device_id, &recipient_bundle)?;
         self.create_send_dm_session_from_bundle(
             message,
             recipient_device_id,

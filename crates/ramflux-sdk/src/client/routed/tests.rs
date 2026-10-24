@@ -343,6 +343,7 @@ fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(
         a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
     let ciphertext = sending.encrypt(b"legacy body", dm_associated_data("legacy-conversation"))?;
     message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: None,
         schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
         version: 1,
         x3dh: header.clone(),
@@ -609,3 +610,5 @@ mod legacy_group_auth;
 mod contact_resolution;
 #[path = "legacy_admission_tests.rs"]
 mod legacy_admission;
+#[path = "discovery_tests.rs"]
+mod discovery;

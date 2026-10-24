@@ -12,7 +12,15 @@ impl RamfluxClient {
         event: &A2iControlEvent,
         target_delivery_id: Option<String>,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let prekey = engine.fetch_prekey_bundle(&event.target_device_id).await?;
+        self.resolve_target_principal_commitment(&engine.config, None, &event.target_device_id)
+            .await?;
+        let lookup = self.root_qualified_device_lookup(&event.target_device_id)?;
+        let prekey = engine.fetch_prekey_bundle(&lookup).await?;
+        let bundle = prekey
+            .bundle
+            .as_ref()
+            .ok_or_else(|| SdkError::LocalBus("A2I target prekey missing".to_owned()))?;
+        self.verify_root_bound_prekey(&event.target_device_id, bundle)?;
         let target_delivery_id =
             target_delivery_id.or(prekey.target_delivery_id).ok_or_else(|| {
                 SdkError::LocalBus(format!(

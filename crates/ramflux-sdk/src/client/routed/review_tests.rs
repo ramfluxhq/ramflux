@@ -58,6 +58,7 @@ pub(super) fn legacy(sender: &Fixture, receiver: &Fixture) -> Result<GatewayInbo
         sender.client.create_send_dm_session_from_bundle(&msg, &receiver.id, bundle, &sender.id)?;
     let ciphertext = session.encrypt(b"old message", dm_associated_data("thread"))?;
     msg.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: None,
         schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
         version: 1,
         x3dh: header,
@@ -471,6 +472,7 @@ fn a_lower_peer_session_id_cannot_displace_a_locally_initiated_session() -> Resu
         )?;
         let ciphertext = session.encrypt(&plaintext, &aad)?;
         msg.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+            source_principal_commitment: None,
             schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
             version: 2,
             x3dh: header,

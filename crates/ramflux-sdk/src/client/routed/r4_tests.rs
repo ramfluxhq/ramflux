@@ -259,6 +259,7 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
     bob.client.send_direct_message(&conversation, "prior", "alice", b"prior")?;
     bob.client.persist_dm_session(&conversation, "prior", "recv", &receiving)?;
     msg.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: None,
         schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
         version: 1,
         x3dh: header,
