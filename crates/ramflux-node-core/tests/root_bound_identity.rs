@@ -204,7 +204,7 @@ fn highest_signed_epoch_and_revocation_survive_durable_restart() -> TestResult {
     let store = RouterRedbStore::open(&path)?;
     let restored = store.load_router()?.ok_or("restored router")?;
     assert_eq!(restored.signed_device_set(&f.request.principal_commitment), Some(revoked));
-    assert!(restored.mvp1_device_auth_key(&qualified(&f)?).ok_or("device")?.revoked);
+    assert!(restored.mvp1_device_auth_key_checked(&qualified(&f)?)?.ok_or("device")?.revoked);
     assert!(
         restored
             .publish_signed_device_set(&f.publish(f.record(1, DeviceSetStatus::Active)?), &store)

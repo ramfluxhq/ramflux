@@ -29,18 +29,6 @@ impl RouterCore {
         self.refresh_migration_read_snapshot_from_control(&control);
         Ok(request.record.clone())
     }
-    /// Persist deletion cleanup from the current authority while holding its writer lock.
-    /// # Errors
-    /// Returns durable storage errors without allowing a stale snapshot to replace signed epochs.
-    pub fn persist_deleted_target(
-        &self,
-        store: &RouterRedbStore,
-        target: &str,
-        lifecycle: &crate::AccountLifecycleRecord,
-    ) -> Result<(), NodeCoreError> {
-        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        store.record_target_deleted_cleanup(Some(target), &control.mvp1_identities, lifecycle)
-    }
     /// Persist the current registry under its writer lock so concurrent metadata updates cannot
     /// overwrite a newer signed epoch using a previously captured snapshot.
     /// # Errors
