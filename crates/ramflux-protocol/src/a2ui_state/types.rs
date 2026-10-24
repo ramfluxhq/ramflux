@@ -229,6 +229,8 @@ pub enum SurfaceReject {
     InvalidIdentifier,
     #[error("fallback text is required")]
     MissingFallback,
+    #[error("fallback text contains unsafe control characters")]
+    UnsafeFallback,
     #[error("duplicate component")]
     DuplicateBlock,
     #[error("duplicate action")]

@@ -120,30 +120,7 @@ impl TaskState {
                 if self.decisions.contains(&resolution.decision_id) {
                     return Err(TaskReject::DecisionReplay);
                 }
-                let step = task
-                    .steps
-                    .iter()
-                    .find(|s| s.id == resolution.step_id)
-                    .ok_or(TaskReject::DecisionMismatch)?;
-                let change = if step.needs_me.is_none() {
-                    Some(super::TaskDecisionChange::Closed)
-                } else if step.needs_me.as_ref() != Some(&resolution.target) {
-                    Some(super::TaskDecisionChange::TargetChanged)
-                } else if self
-                    .pending_since
-                    .get(&resolution.step_id)
-                    .is_none_or(|opened| resolution.base_revision < *opened)
-                {
-                    Some(super::TaskDecisionChange::NewerThanObserved)
-                } else {
-                    None
-                };
-                if let Some(change) = change {
-                    return Err(TaskReject::StaleDecision {
-                        step_id: resolution.step_id.clone(),
-                        change,
-                    });
-                }
+                validate_resolution(task, resolution, &self.pending_since)?;
                 resolve(task, resolution)?;
                 self.decisions.insert(resolution.decision_id.clone());
                 if let NeedsMe::Approval { grant_id } = &resolution.target {
@@ -175,7 +152,15 @@ impl TaskState {
                     requester: Some(v.requester.clone()),
                     proposer: None,
                     assignee: v.assignee.clone(),
-                    title: v.text.trim().chars().take(256).collect(),
+                    title: v
+                        .text
+                        .trim()
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(256)
+                        .collect(),
                     text: Some(v.text.clone()),
                     constraints: v.constraints.clone(),
                     version: 1,
@@ -285,6 +270,30 @@ fn update_task(
     task.state = update.state;
     task.steps.clone_from(&update.steps);
     task.result_ref.clone_from(&update.result_ref);
+    Ok(())
+}
+fn validate_resolution(
+    task: &Task,
+    decision: &TaskResolve,
+    pending_since: &BTreeMap<String, u64>,
+) -> Result<(), TaskReject> {
+    let step =
+        task.steps.iter().find(|s| s.id == decision.step_id).ok_or(TaskReject::DecisionMismatch)?;
+    let change = if step.needs_me.is_none() {
+        Some(super::TaskDecisionChange::Closed)
+    } else if step.needs_me.as_ref() != Some(&decision.target) {
+        Some(super::TaskDecisionChange::TargetChanged)
+    } else if pending_since
+        .get(&decision.step_id)
+        .is_none_or(|opened| decision.base_revision < *opened)
+    {
+        Some(super::TaskDecisionChange::NewerThanObserved)
+    } else {
+        None
+    };
+    if let Some(change) = change {
+        return Err(TaskReject::StaleDecision { step_id: decision.step_id.clone(), change });
+    }
     Ok(())
 }
 fn resolve(task: &mut Task, decision: &TaskResolve) -> Result<(), TaskReject> {

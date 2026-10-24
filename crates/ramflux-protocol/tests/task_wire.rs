@@ -39,7 +39,7 @@ fn every_event_round_trips_and_rejects_unknown_fields_at_each_wire_layer() -> Re
                 .insert("unknown".into(), json!(true));
             assert!(decode(&bad).is_err());
         }
-        assert!(!event.fallback_text().is_empty());
+        assert_ne!(event.fallback_text(), "");
     }
     let mut nested = serde_json::to_value(a.event(update(
         2,

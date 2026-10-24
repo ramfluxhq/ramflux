@@ -21,7 +21,7 @@ pub fn free_text_is_safe(value: &str) -> bool {
         .chars()
         .any(|ch| (get_general_category(ch) == C::Control && ch != '\n') || is_bidi_control(ch))
 }
-/// Unicode Bidi_Control property (directional marks, embeddings/overrides and isolates).
+/// Unicode `Bidi_Control` property (directional marks, embeddings/overrides and isolates).
 #[must_use]
 pub const fn is_bidi_control(ch: char) -> bool {
     matches!(ch,'\u{061c}'|'\u{200e}'..='\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
@@ -43,6 +43,15 @@ pub fn render_text_fallback(signer: &str, kind: &str, content: &str) -> String {
         quote_fallback_field(content)
     )
 }
+
+impl crate::CreateSurfaceCommand {
+    /// Safe P5 text rendering using the caller's verified signer identity.
+    #[must_use]
+    pub fn safe_fallback_text(&self, signer: &str) -> String {
+        render_text_fallback(signer, "surface", &self.fallback_text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,24 +67,20 @@ mod tests {
     }
     #[test]
     fn every_control_and_format_character_is_rejected_in_single_line_fields() {
-        for code in 0..=0x10ffff {
+        for code in 0..=0x0010_ffff {
             if let Some(ch) = char::from_u32(code)
                 && matches!(get_general_category(ch), C::Control | C::Format)
             {
                 assert!(!single_line_is_safe(&format!("x{ch}y")), "U+{code:04X}");
+                assert!(
+                    !quote_fallback_field(&format!("x{ch}y")).contains(ch),
+                    "unescaped U+{code:04X}"
+                );
             }
         }
         assert!(free_text_is_safe("one\ntwo 👩\u{200d}💻"));
         for ch in ['\t', '\r', '\u{061c}', '\u{200e}', '\u{202e}', '\u{2069}'] {
             assert!(!free_text_is_safe(&format!("x{ch}y")));
         }
-    }
-}
-
-impl crate::CreateSurfaceCommand {
-    /// Safe P5 text rendering using the caller's verified signer identity.
-    #[must_use]
-    pub fn safe_fallback_text(&self, signer: &str) -> String {
-        render_text_fallback(signer, "surface", &self.fallback_text)
     }
 }

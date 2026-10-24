@@ -168,7 +168,7 @@ impl TaskEventBody {
         }
     }
     /// Ordered event revision, or the observed base revision for Cancel/Resolve.
-    /// The resulting projection revision is assigned atomically by TaskState.
+    /// The resulting projection revision is assigned atomically by `TaskState`.
     #[must_use]
     pub const fn version(&self) -> u64 {
         match self {
