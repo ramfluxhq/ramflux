@@ -33,7 +33,7 @@ async fn subscription_refusals_preserve_replay_bounds_in_the_sdk_error() -> Resu
             serde_json::json!({"since_seq":0,"topics":["*"]}),
         )
         .await;
-    let refusal = result.err().ok_or_else(|| closed())?;
+    let refusal = result.err().ok_or_else(closed)?;
     let details = format!("{refusal:?}");
     assert!(details.contains("floor_seq"), "structured refusal lost replay floor: {details}");
     assert!(details.contains("head_seq"), "structured refusal lost replay head: {details}");
