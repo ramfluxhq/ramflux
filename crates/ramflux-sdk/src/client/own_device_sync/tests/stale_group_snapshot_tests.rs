@@ -681,7 +681,9 @@ fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_of
         .iter_mut()
         .find(|m| m.principal_commitment == commitment)
         .ok_or(SdkError::IdentityRootMissing)?;
-    foreign.devices[0].branch_public_key = ramflux_crypto::public_key_base64url_from_seed([99; 32]);
+    let substitute = ramflux_crypto::public_key_base64url_from_seed([0xa9; 32]);
+    assert_ne!(foreign.devices[0].branch_public_key, substitute);
+    foreign.devices[0].branch_public_key = substitute;
     assert!(
         target
             .import_own_device_history_bundle(
