@@ -210,10 +210,6 @@ fn deletion_cleanup_cannot_persist_a_snapshot_older_than_a_concurrent_publicatio
         recovery_quorum: None,
         recovery_quorum_proof: None,
     })?;
-    let deleted = router.mvp7_finalize_delete(&LifecycleFinalizeRequest {
-        principal_id: "alice".into(),
-        now: 1202,
-    })?;
     let _stale = router.mvp1_identities_snapshot();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
@@ -227,7 +223,10 @@ fn deletion_cleanup_cannot_persist_a_snapshot_older_than_a_concurrent_publicatio
             tx.send(()).map_err(|e| e.to_string())
         });
         rx.recv()?;
-        router.persist_deleted_target(&store, "target", &deleted.record)?;
+        router.mvp7_finalize_delete_durable(
+            &LifecycleFinalizeRequest { principal_id: "alice".into(), now: 1202 },
+            &store,
+        )?;
         publication.join().map_err(|_| "publication thread")??;
         Ok::<_, Box<dyn std::error::Error>>(())
     })?;
@@ -239,7 +238,7 @@ fn deletion_cleanup_cannot_persist_a_snapshot_older_than_a_concurrent_publicatio
         restored.signed_device_set(&b.request.principal_commitment).ok_or("set")?.device_set_epoch,
         2
     );
-    assert!(restored.mvp1_device_auth_key(&lookup(&b)?).ok_or("device")?.revoked);
+    assert!(restored.mvp1_device_auth_key_checked(&lookup(&b)?)?.ok_or("device")?.revoked);
     drop(restored);
     drop(store);
     std::fs::remove_file(path)?;
