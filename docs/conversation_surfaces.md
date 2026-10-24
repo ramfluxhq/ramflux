@@ -1,67 +1,112 @@
 # Conversation surfaces
 
-A conversation surface is an authored, versioned A2UI v2 snapshot carried through
-ordinary encrypted direct or group messages. Only its author can change or close
-it. The authoritative hash is `ramflux_protocol::surface_snapshot_hash`; actions
-bind the current version, surface hash, action name and argument hash.
+A conversation surface is an authored A2UI v2 snapshot carried through encrypted
+DMs or groups. Its identity is `(conversation_id, author_principal_id, surface_id)`;
+`surface_ref` is an opaque commitment to that tuple. Equal surface IDs from other
+authors or conversations coexist. Only the authenticated author changes or closes
+a surface. `ramflux_protocol::surface_snapshot_hash` is authoritative.
 
-## Local bus methods
+## Local bus and CLI
 
-`surface.send` and `surface.action` accept `conversation_id`, `message_id` and
-`wire_base64` (base64url of the original protocol event or action bytes). The
-conversation must already exist. The response reports `accepted` and
-`renderer_error`; an identical committed request returns `replayed: true` without
-another transport submission. A rejected request must use a new message ID after
-its cause is corrected. Group actions are delivered only to the author's device.
+`surface.send` and `surface.action` take `conversation_id`, `message_id`,
+`wire_base64` and optional `author_principal_id`. Protocol ingress parses the exact
+original bytes using `from_wire_bytes`. Local Rust callers can use the output-only
+`SurfaceSendRequest` typed builder. Builder IDs contain 128 random bits; persist
+the request before sending and reuse its ID and bytes for retries. `rf surface`
+commands read `--wire-file`; `--message` is optional and otherwise generates an ID.
 
-`surface.get` accepts `surface_id`, optional `history_after` (exclusive version)
-and optional `action_id`. It returns the current snapshot, version, hash, closed
-state, renderer error, bounded hash history and accepted actions. History pages
-contain at most 100 entries; `history_next_version` continues the page. For large
-action payloads, select one `action_id` from the change notification.
+The response reports `accepted`, `renderer_error`, and `delivery_state: "queued"`.
+Acceptance commits local projection and a durable encrypted outbox atomically;
+it does not claim remote delivery. Identical committed requests return
+`replayed: true`. The retained authored carrier preserves its original signed
+snapshot proof on retry. Changing bytes under an existing ID is rejected.
 
-`surface.list` accepts `conversation_id`, optional `cursor` and `limit` (1–100).
-It returns metadata under `surfaces` and a `next_cursor`. The `surface.changed`
-subscription topic also contains metadata only: clients fetch content explicitly
-with `surface.get`. Snapshot text, fallback text and action arguments are absent
-from change notifications.
+`surface.get` accepts `surface_ref`, or `surface_id` with optional
+`conversation_id` and `author_principal_id`. An ambiguous short ID fails explicitly.
+It returns the snapshot, version, hash, closed/out-of-sync state and history.
+`history_after` is an exclusive version cursor; `history_next_version` continues
+pages of at most 100 hashes. `history_first_version` and `history_truncated` expose
+eviction. Select `action_id` for a large action; `action_missing` reports eviction.
+A public response is capped at 512 KiB. The CLI supports scoped selectors too.
 
-The CLI exposes `rf surface send`, `action`, `get` and `list`. Sending commands
-read the untouched JSON bytes from `--wire-file`. Message pages expose surface
-content as `content_type: "surface"`, `surface_id` and the current `body_utf8`
-fallback, so text clients display the authored fallback without interpreting UI.
+`surface.list` takes `conversation_id`, optional `cursor`, and `limit` (1–100).
+`surface.changed` contains metadata only. A foreign reject emits
+`surface.rejected` against its authenticated sender/envelope, without changing
+the author's view or emitting a change for it. Clients fetch content explicitly;
+notifications never contain snapshots, fallback text or action arguments.
 
-## Integrity and persistence
+## All-terminal delivery and action decisions
 
-The encrypted plaintext has a `ramflux.surface.v2` discriminator followed by a
-signed carrier. Its device signature uses `ramflux.surface.carrier.v2`, covering
-the exact payload bytes encoded in `wire_base64` and all conversation, sender,
-author, surface and logical message identifiers. Peer signing keys come from
-verified device records, and the transport-authenticated sender must match.
-Protocol ingress uses only `from_wire_bytes`, retaining I-JSON rejection rules.
+Events fan out to every active verified peer device and the author's own sibling
+devices. Group routing preserves membership epochs and join floors; sibling
+membership follows the same verified identity root. Own forwarding is permitted
+only from the same verified root, preserves the original signed carrier, and
+never copies DM ratchet state. Existing blocked/revoked contacts are preserved.
+The existing own-device history bundle includes bounded signed surface proofs and
+decision attestations, with group-epoch filtering for surface messages. Historical
+signer manifests must still pass current verification; unavailable/expired trust
+material fails explicitly rather than granting stale authority.
 
-The account writer atomically stores the checkpoint (including closed state and
-stream-finality tombstones), hash history, receipts and consumed decisions.
-Rejected transitions preserve the last valid checkpoint and record a renderer
-error. Delivery deduplication uses sender principal plus logical message ID;
-reusing that ID with different bytes is rejected. Accepted decisions additionally
-consume the sender/surface/version/action-name tuple, even if arguments change.
-These records survive account restart. A network failure follows the existing
-message transport's retry semantics; logical-message receipts become durable
-when local projection commits.
+Actions fan out to all verified author devices. The surface's creator device is
+the sole decision executor, pinned when the surface is created. It consumes a
+principal/version/action-name once, validates version/hash/arguments, and signs a
+receipt containing the original action and a state proof. Siblings authenticate
+that receipt and mirror the consumed decision. Only the creator exposes
+`actions[].actionable: true`; replicas expose `false`, with
+`is_action_executor: false`. Consumers must check those fields. Single use is
+account-wide even when the human retries from another terminal with another ID.
 
-The legacy recursive render-profile digest in `ramflux-sync` is named
-`legacy_a2ui_render_profile_hash`. It hashes a different v1 object (recursive
-component permissions and snake_case profile fields) under `A2I_CONTROL` and
-retains that wire contract. It is not a conversation snapshot hash.
+This deliberately favors single execution over failover availability: when the
+creator is offline, siblings hold the action for up to the retry window. They do
+not elect another executor or execute it independently. A revoked/lost creator
+requires a newly authored surface. There is no distributed executor lease or
+automatic handoff in this version.
 
-Text message presentation uses one adapter in the SDK surface module. It prints
-`Surface author="..." fallback_text="..."`, with each untrusted field quoted and
-all controls and non-ASCII characters escaped. This conservative ASCII rendering
-prevents embedded newlines, terminal escapes and Unicode direction controls from
-creating or rearranging status lines. The author comes from the authenticated
-surface record. Signed snapshot data and canonical hashes remain unchanged;
-the `surface.get` snapshot is structured data, while its top-level fallback is
-rendered text. Unicode text remains
-available in its original form in that snapshot. The adapter is the integration
-point for a shared protocol text-rendering rule.
+Prepared ciphertext envelopes are committed before transport submission and
+reused unchanged on retries. The account transport queue holds at most 64 jobs /
+32 MiB; fanout backpressure rejects admission before local acceptance. Logical
+own-forward/decision jobs hold at most 64 entries / 8 MiB. Retries are bounded by
+8 attempts, the original envelope expiry and a 600-second window.
+
+## Ordering, integrity and retention
+
+The signed `ramflux.surface.v2` carrier uses `ramflux.surface.carrier.v2`. Its
+signature covers conversation, author, actual sender, logical ID, original payload
+bytes and any full-state proof. Sender principals come from authenticated device
+records, not carrier claims. No receipt is stored before authentication succeeds.
+Rejected deliveries are keyed by authenticated device/envelope; they cannot reserve
+a victim's logical ID. All private keys, receipts, decisions and events are scoped
+by the full surface identity. Checkpoint/row disagreement is a typed storage error.
+
+Future versions are held durably and replayed in order when the gap fills. The
+holdback is capped at 32 entries / 1 MiB per surface, 64 entries / 4 MiB per account,
+and 64 versions of lookahead. TTL is 600 seconds, capped by original envelope
+expiry. Future events do not receive permanent rejection receipts. Expiry or
+backpressure marks `out_of_sync`; the next author-signed full snapshot can recover
+it while preserving known stream-finality commitments. Until that snapshot arrives,
+the last valid snapshot remains visible. There is no active resync request.
+
+Every normal authored event includes a signed full-state proof, including the
+bounded checkpoint and original create-shaped snapshot bytes. This is distinct
+from a patch: the original patch still enters through `from_wire_bytes`. Snapshot
+recovery rejects rollback, same-version conflicts, reopening closed state, executor
+changes, and changes to known finalized stream blocks. Private finality tombstones
+use domain-separated BLAKE3 commitments; checkpoint decoding is capped at 256 KiB.
+
+A history retains at most 256 events / 4 MiB per surface, evicting oldest versions.
+Holdback adds at most 1 MiB to that history budget. Actions retain at most 128 rows /
+4 MiB; response pagination never exposes private carrier/proof records. Authored
+retry records retain at most 256 rows / 4 MiB. SQL savepoints cover state, history,
+receipts, decisions and outbox writes so failures cannot leave partial transitions.
+
+Text clients receive `content_type: "surface"` and a fixed single-line body:
+`Surface author="..." fallback_text="..."`. The verified author's label and
+untrusted text are quoted, with controls and non-ASCII escaped. Embedded status
+lines, terminal escapes and bidi controls therefore cannot forge terminal output.
+The original text remains in the structured snapshot and signed hash. One SDK
+adapter is the integration point for the shared protocol sanitizer.
+
+This pre-merge revision changes private checkpoint/storage scoping; use fresh
+prototype account roots rather than importing unscoped development databases.
+The legacy sync `legacy_a2ui_render_profile_hash` hashes a different v1 recursive
+permission/profile object under `A2I_CONTROL`; it is not a conversation hash.

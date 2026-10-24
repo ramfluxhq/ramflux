@@ -12,11 +12,23 @@ impl RamfluxClient {
         history_after: u64,
         action_id: Option<&str>,
     ) -> Result<Value, SdkError> {
+        let Some(reference) = self.resolve_surface_reference(id, None, None)? else {
+            return Ok(Value::Null);
+        };
+        self.surface_get_ref(&reference, history_after, action_id)
+    }
+    pub(crate) fn surface_get_ref(
+        &self,
+        reference: &str,
+        history_after: u64,
+        action_id: Option<&str>,
+    ) -> Result<Value, SdkError> {
+        let id = reference;
         let db = self.account_db()?;
         let Some(mut view) = db.client_record("surface", id)? else {
             return Ok(Value::Null);
         };
-        if let Some((record, state)) = self.surface_state(id)? {
+        if let Some((record, state)) = self.surface_state_ref(id)? {
             view["snapshot"] = serde_json::to_value(state.content())?;
             view["author_device_id"] = json!(record.author_device_id);
         } else {
@@ -29,6 +41,13 @@ impl RamfluxClient {
             view["fallback_text"] = json!(rendered);
         }
         let prefix = key("history", id) + "/";
+        let first = db
+            .surface_history_page::<Value>(&prefix, &prefix, 1)?
+            .into_iter()
+            .next()
+            .and_then(|v| v["version"].as_u64());
+        view["history_first_version"] = json!(first);
+        view["history_truncated"] = json!(first.is_some_and(|v| v > 1));
         let mut history: Vec<Value> =
             db.surface_history_page(&prefix, &format!("{prefix}{history_after:020}"), 101)?;
         let more = history.len() > 100;
@@ -46,18 +65,28 @@ impl RamfluxClient {
                 .collect::<Vec<_>>()
         );
         let actions_prefix = key("actions", id) + "/";
-        view["actions"] = if let Some(action) = action_id {
+        let mut actions: Vec<Value> = if let Some(action) = action_id {
             if action.is_empty() || action.len() > 128 {
                 return Err(invalid("invalid action cursor"));
             }
-            json!(
-                db.load_actor_state::<Value>(&format!("{actions_prefix}{action}"))?
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            )
+            db.load_actor_state::<Value>(&format!("{actions_prefix}{action}"))?
+                .into_iter()
+                .collect()
         } else {
-            json!(db.surface_history_page::<Value>(&actions_prefix, &actions_prefix, 100)?)
+            db.surface_history_page::<Value>(&actions_prefix, &actions_prefix, 100)?
         };
+        view["action_missing"] = json!(action_id.is_some() && actions.is_empty());
+        for action in &mut actions {
+            if let Some(row) = action.as_object_mut() {
+                row.remove("attestation");
+            }
+            if let Some(mut carrier) = action.as_object_mut().and_then(|row| row.remove("carrier"))
+            {
+                action["wire_base64"] = carrier["wire_base64"].take();
+                action["signature"] = carrier["signature"].take();
+            }
+        }
+        view["actions"] = json!(actions);
         if serde_json::to_vec(&view)?.len() > 512 * 1024 {
             return Err(invalid("surface response budget exceeded; select one action"));
         }
@@ -112,7 +141,11 @@ impl RamfluxClient {
         let id = reference["surface_id"]
             .as_str()
             .ok_or_else(|| invalid("surface message binding absent"))?;
-        let current = db.client_record("surface", id)?;
+        let current = if let Some(reference) = reference["surface_ref"].as_str() {
+            db.client_record("surface", reference)?
+        } else {
+            None
+        };
         if reference["accepted"] == true
             && let Some(view) = &current
             && let (Some(author), Some(text)) =
@@ -134,11 +167,18 @@ pub(crate) fn surface_metadata(view: &Value) -> Value {
     let mut out = serde_json::Map::new();
     for field in [
         "surface_id",
+        "surface_ref",
+        "message_id",
+        "sender_device_id",
+        "envelope_id",
         "conversation_id",
         "author_principal_id",
         "version",
         "surface_hash",
         "closed",
+        "out_of_sync",
+        "executor_device_id",
+        "is_action_executor",
         "renderer_error",
         "last_action_id",
         "last_action_message_id",

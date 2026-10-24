@@ -12,8 +12,14 @@ pub(crate) enum SurfaceAction {
     Get {
         #[arg(long)]
         account: String,
+        #[arg(long, required_unless_present = "surface_ref", conflicts_with = "surface_ref")]
+        surface_id: Option<String>,
         #[arg(long)]
-        surface_id: String,
+        surface_ref: Option<String>,
+        #[arg(long)]
+        conversation: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
         #[arg(long)]
         action_id: Option<String>,
     },
@@ -37,7 +43,9 @@ pub(crate) struct SurfaceSend {
     #[arg(long)]
     pub(crate) conversation: String,
     #[arg(long)]
-    pub(crate) message: String,
+    pub(crate) message: Option<String>,
     #[arg(long)]
     pub(crate) wire_file: PathBuf,
+    #[arg(long)]
+    pub(crate) author: Option<String>,
 }

@@ -5,12 +5,14 @@
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{A2uiConversationEvent, A2uiSurfaceAction};
 use serde::{Deserialize, Serialize};
+pub(crate) const MAX_CARRIER_BYTES: usize = 1024 * 1024;
 pub(crate) const PREFIX: &[u8] = b"ramflux.surface.v2\n";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PayloadKind {
     Event,
     Action,
+    ActionReceipt,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +28,8 @@ pub(crate) struct Carrier {
     pub author_principal_id: String,
     pub wire_base64: String,
     pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<super::SnapshotProof>,
 }
 #[derive(Serialize)]
 struct Signing {
@@ -35,6 +39,7 @@ struct Signing {
 pub(crate) enum Payload {
     Event(A2uiConversationEvent),
     Action(A2uiSurfaceAction),
+    ActionReceipt { original: Box<Carrier>, action: A2uiSurfaceAction },
 }
 impl Carrier {
     fn signing(&self) -> Result<Signing, SdkError> {
@@ -50,11 +55,35 @@ impl Carrier {
         let payload = match self.payload_kind {
             PayloadKind::Event => Payload::Event(A2uiConversationEvent::from_wire_bytes(&bytes)?),
             PayloadKind::Action => Payload::Action(A2uiSurfaceAction::from_wire_bytes(&bytes)?),
+            PayloadKind::ActionReceipt => {
+                let original = Self::decode(&bytes)?
+                    .ok_or_else(|| invalid("action receipt lacks original carrier"))?;
+                if original.payload_kind != PayloadKind::Action
+                    || original.author_principal_id != self.author_principal_id
+                {
+                    return Err(invalid("action receipt binding mismatch"));
+                }
+                let Payload::Action(action) = original.payload()? else {
+                    return Err(invalid("action receipt payload mismatch"));
+                };
+                Payload::ActionReceipt { original: Box::new(original), action }
+            }
         };
+        if self.payload_kind == PayloadKind::Action && self.snapshot.is_some() {
+            return Err(invalid("actions cannot carry state attestations"));
+        }
+        if let (Some(proof), Payload::Event(event)) = (&self.snapshot, &payload) {
+            proof.restore(self, &ramflux_protocol::SurfaceState::default(), event.version())?;
+        }
         let (conversation, surface) = match &payload {
             Payload::Event(event) => (event.conversation_id(), command_id(event.command())),
-            Payload::Action(action) => (action.conversation_id(), action.surface_id()),
+            Payload::Action(action) | Payload::ActionReceipt { action, .. } => {
+                (action.conversation_id(), action.surface_id())
+            }
         };
+        if let (Some(proof), Payload::ActionReceipt { action, .. }) = (&self.snapshot, &payload) {
+            proof.restore(self, &ramflux_protocol::SurfaceState::default(), action.version())?;
+        }
         if self.schema != "ramflux.surface.carrier.v2"
             || self.content_type != "surface"
             || conversation != self.conversation_id
@@ -71,26 +100,35 @@ impl Carrier {
         bytes.extend(serde_json::to_vec(self)?);
         Ok(bytes)
     }
-    pub fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
-        let Some(json) = bytes.strip_prefix(PREFIX) else {
-            return Ok(None);
-        };
-        if json.len() > 1024 * 1024 {
-            return Err(invalid("surface carrier exceeds byte budget"));
-        }
-        let carrier: Self = ramflux_protocol::parse_i_json(json)?;
+    fn validate_identifiers(&self) -> Result<(), SdkError> {
         for id in [
-            &carrier.conversation_id,
-            &carrier.surface_id,
-            &carrier.message_id,
-            &carrier.sender_principal_id,
-            &carrier.sender_device_id,
-            &carrier.author_principal_id,
+            &self.conversation_id,
+            &self.surface_id,
+            &self.message_id,
+            &self.sender_principal_id,
+            &self.sender_device_id,
+            &self.author_principal_id,
         ] {
             if id.is_empty() || id.len() > 256 {
                 return Err(invalid("surface carrier identifier exceeds budget"));
             }
         }
+        Ok(())
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
+        let Some(json) = bytes.strip_prefix(PREFIX) else {
+            return Ok(None);
+        };
+        if bytes.len() > MAX_CARRIER_BYTES {
+            return Err(invalid("surface carrier exceeds byte budget"));
+        }
+        let carrier: Self = ramflux_protocol::parse_i_json(json)?;
+        if (carrier.payload_kind == PayloadKind::Action && bytes.len() > 256 * 1024)
+            || (carrier.payload_kind == PayloadKind::Event && bytes.len() > 512 * 1024)
+        {
+            return Err(invalid("surface action carrier exceeds byte budget"));
+        }
+        carrier.validate_identifiers()?;
         Ok(Some(carrier))
     }
 }
@@ -119,9 +157,16 @@ impl RamfluxClient {
         }
         carrier.signature = ramflux_crypto::sign_with_device_branch(device, &carrier.signing()?)?;
         // Apply the same transport budget before sending as on receive.
-        if carrier.bytes()?.len() > 1024 * 1024 {
+        if carrier.bytes()?.len()
+            > match carrier.payload_kind {
+                PayloadKind::Action => 256 * 1024,
+                PayloadKind::Event => 512 * 1024,
+                PayloadKind::ActionReceipt => MAX_CARRIER_BYTES,
+            }
+        {
             return Err(invalid("surface carrier exceeds byte budget"));
         }
+        carrier.validate_identifiers()?;
         Ok(carrier)
     }
     pub(crate) fn verify_surface_carrier(
