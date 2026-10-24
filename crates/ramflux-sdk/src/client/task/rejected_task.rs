@@ -12,7 +12,11 @@ impl RamfluxClient {
             return Ok(());
         }
         let db = self.account_db()?;
-        let key = scoped("no_role", &c.conversation_id, c.event()?.event().task_id())?;
+        let key = scoped(
+            "no_role",
+            &c.conversation_id,
+            &serde_json::to_string(&(c.event()?.event().task_id(), &c.principal_id))?,
+        )?;
         if db.load_actor_state::<Value>(&key)?.is_none() {
             db.persist_actor_state(
                 &key,
@@ -23,12 +27,20 @@ impl RamfluxClient {
         Ok(())
     }
     pub(super) fn task_has_no_local_role(&self, c: &Carrier) -> Result<bool, SdkError> {
+        if self
+            .task_history(&c.conversation_id, c.event()?.event().task_id())?
+            .state()?
+            .task()
+            .is_some()
+        {
+            return Ok(false);
+        }
         Ok(self
             .account_db()?
             .load_actor_state::<Value>(&scoped(
                 "no_role",
                 &c.conversation_id,
-                c.event()?.event().task_id(),
+                &serde_json::to_string(&(c.event()?.event().task_id(), &c.principal_id))?,
             )?)?
             .is_some_and(|v| {
                 v["at"].as_i64().is_some_and(|at| {

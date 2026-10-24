@@ -968,8 +968,23 @@ pub struct LocalBusMcpApprovalGrantRequest {
     pub signature: String,
 }
 
+/// Authenticated task intervention to which an MCP approval grants authority.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskApprovalBinding {
+    pub conversation_id: String,
+    pub task_id: String,
+    pub step_id: String,
+    pub opening_revision: u64,
+    pub requester: String,
+    pub assignee: String,
+    pub executor_device_id: String,
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalMcpGrantSigningBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_binding: Option<TaskApprovalBinding>,
     pub approval_id: String,
     pub grant_id: String,
     pub server_id: String,

@@ -6,11 +6,33 @@ use super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
 impl AccountDb {
+    /// Sums retained regular events across all signers and identifies the largest consumer.
+    /// Requester recovery decision reserves remain separate.
+    /// # Errors
+    /// Returns database errors.
+    pub fn task_aggregate_history_usage(
+        &self,
+        excluded: &str,
+    ) -> Result<(u64, u64, Option<String>), StorageError> {
+        use rusqlite::OptionalExtension;
+        let (bytes,events)=self.connection.query_row("SELECT coalesce(sum(json_extract(u.value,'$.bytes')),0),coalesce(sum(json_extract(u.value,'$.events')),0) FROM runtime_actor_state l,json_each(CAST(l.state_json AS TEXT),'$.usage') u WHERE substr(l.state_kind,1,15)='task/lifecycle/' AND l.state_kind!=?1",params![excluded],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let largest=self.connection.query_row("SELECT u.key FROM runtime_actor_state l,json_each(CAST(l.state_json AS TEXT),'$.usage') u WHERE substr(l.state_kind,1,15)='task/lifecycle/' AND l.state_kind!=?1 GROUP BY u.key HAVING sum(json_extract(u.value,'$.bytes'))>0 OR sum(json_extract(u.value,'$.events'))>0 ORDER BY sum(json_extract(u.value,'$.bytes')) DESC,u.key LIMIT 1",params![excluded],|r|r.get(0)).optional()?;
+        Ok((bytes, events, largest))
+    }
+    /// Reads bounded pending-resolution metadata, selecting no event wire or grant payload.
+    /// # Errors
+    /// Returns database or metadata JSON errors.
+    pub fn task_pending_metadata(&self) -> Result<Vec<serde_json::Value>, StorageError> {
+        let mut query=self.connection.prepare("SELECT json_object('task_id',json_extract(CAST(state_json AS TEXT),'$.task_id'),'conversation_id',coalesce(json_extract(CAST(state_json AS TEXT),'$.conversation_id'),json_extract(CAST(state_json AS TEXT),'$.conversation')),'message_id',json_extract(CAST(state_json AS TEXT),'$.message'),'executor_device_id',json_extract(CAST(state_json AS TEXT),'$.executor'),'queued_at',json_extract(CAST(state_json AS TEXT),'$.at'),'state',CASE WHEN substr(state_kind,1,19)='task/local_pending/' THEN 'awaiting_executor' ELSE 'executor_timeout' END) FROM runtime_actor_state WHERE substr(state_kind,1,19)='task/local_pending/' OR substr(state_kind,1,25)='task/local_intent_status/' ORDER BY coalesce(json_extract(CAST(state_json AS TEXT),'$.start'),json_extract(CAST(state_json AS TEXT),'$.at')) DESC LIMIT 1024")?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    }
     /// Deletes a private task delivery or holdback job after completion or expiry.
     /// # Errors
     /// Rejects keys outside task delivery/holdback or returns database errors.
     pub fn delete_task_state(&self, key: &str) -> Result<(), StorageError> {
-        if !(key.starts_with("task/pending/")
+        if !(key.starts_with("task/approval_")
+            || key.starts_with("task/pending/")
             || key.starts_with("task/ack/")
             || key.starts_with("task/forward/")
             || key.starts_with("task/decision_reserved/")

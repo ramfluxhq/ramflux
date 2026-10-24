@@ -13,6 +13,7 @@ pub(super) fn open(f: &Fixture, id: &str) -> Result<(), SdkError> {
         "thread",
         &format!("needs-{id}"),
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: id.into(),
             version: 2,
             state: TaskStatus::NeedsMe,
@@ -44,6 +45,19 @@ pub(super) fn resolution(id: &str, decision: TaskDecision) -> TaskResolve {
 pub(super) fn grant(f: &Fixture) -> Result<LocalMcpGrantRecord, SdkError> {
     let d = f.human.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let body = LocalMcpGrantSigningBody {
+        task_binding: Some(crate::TaskApprovalBinding {
+            conversation_id: "thread".into(),
+            task_id: if f.agent.task_get(Some("thread"), "task")?.is_null() {
+                "one".into()
+            } else {
+                "task".into()
+            },
+            step_id: "step".into(),
+            opening_revision: 2,
+            requester: "human".into(),
+            assignee: "agent".into(),
+            executor_device_id: "agent-device".into(),
+        }),
         approval_id: "approval".into(),
         grant_id: "grant".into(),
         server_id: "server".into(),
@@ -107,7 +121,7 @@ fn signed_resolution(
         TaskEventBody::Resolve(resolution),
         crate::prelude::sdk_device_signed_fields(&d.device_id, ""),
     )
-    .map_err(|e| invalid(e.to_string()))?;
+    .map_err(|error| crate::task_refusal::protocol(&error))?;
     client.sign_task_event(event, "resolve".into(), Some(proof.encoded()?))
 }
 #[test]

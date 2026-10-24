@@ -12,7 +12,7 @@ mod group;
 mod outgoing;
 mod own_checkpoint;
 mod own_history;
-pub(crate) use control::{CONTROL_PREFIX, ControlKind, SurfaceControl};
+pub(crate) use control::{CONTROL_PREFIX, ControlKind, OwnContext, SurfaceControl};
 pub(crate) use own_checkpoint::OwnedSurfaceCheckpoint;
 pub(crate) use own_history::{SurfaceExportMetadata, SurfaceHistoryExport};
 mod delivery;

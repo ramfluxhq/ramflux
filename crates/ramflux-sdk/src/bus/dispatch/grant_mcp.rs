@@ -72,7 +72,7 @@ pub(crate) fn dispatch_mcp_bus_request(
         "mcp.approval.list" => {
             let account = local_bus_account(state, account_id)?;
             Ok(local_bus_ok(serde_json::json!({
-                "approvals": account.mcp_pending_approvals.values().collect::<Vec<_>>(),
+                "approvals": super::task_approval::list(account)?,
             })))
         }
         "mcp.approval.granted" => {
@@ -97,6 +97,9 @@ fn dispatch_mcp_approval_granted(
     connection: &mut LocalBusConnectionState,
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if let Some(result) = super::task_approval::decide(request, state, account_id, true)? {
+        return Ok(local_bus_ok(result));
+    }
     let account = local_bus_account_mut(state, account_id)?;
     if request.body.get("signature").is_some() {
         let body: LocalBusMcpApprovalGrantRequest = serde_json::from_value(request.body.clone())?;
@@ -143,6 +146,9 @@ fn dispatch_mcp_approval_denied(
     connection: &mut LocalBusConnectionState,
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if let Some(result) = super::task_approval::decide(request, state, account_id, false)? {
+        return Ok(local_bus_ok(result));
+    }
     let body: LocalBusMcpApprovalDecisionRequest = serde_json::from_value(request.body.clone())?;
     let account = local_bus_account_mut(state, account_id)?;
     let mut approval = account
@@ -177,6 +183,7 @@ pub(crate) fn dispatch_grant_bus_request(
             let account = local_bus_account(state, account_id)?;
             Ok(local_bus_ok(serde_json::json!({
                 "grants": account.mcp_grants.values().collect::<Vec<_>>(),
+                "approvals": super::task_approval::list(account)?,
             })))
         }
         "grant.request" => {
@@ -329,6 +336,9 @@ fn dispatch_grant_approve(
     account_id: &str,
     body: &LocalBusMcpApprovalDecisionRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if let Some(result) = super::task_approval::decide(request, state, account_id, true)? {
+        return Ok(local_bus_ok(result));
+    }
     let account = local_bus_account_mut(state, account_id)?;
     let approval = account
         .mcp_pending_approvals
@@ -354,6 +364,9 @@ fn dispatch_grant_deny(
     account_id: &str,
     body: &LocalBusMcpApprovalDecisionRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if let Some(result) = super::task_approval::decide(request, state, account_id, false)? {
+        return Ok(local_bus_ok(result));
+    }
     let account = local_bus_account_mut(state, account_id)?;
     let mut approval = account
         .mcp_pending_approvals
@@ -1170,7 +1183,7 @@ fn mcp_local_grant_from_approval(
     mcp_store_grant(account, approval, body, device.device_id.clone(), public_key, signature)
 }
 
-fn mcp_remote_grant_from_approval(
+pub(super) fn mcp_remote_grant_from_approval(
     account: &mut LocalBusAccountState,
     approval: LocalMcpApprovalRecord,
     signed: LocalBusMcpApprovalGrantRequest,
@@ -1192,7 +1205,7 @@ fn mcp_remote_grant_from_approval(
     )
 }
 
-fn mcp_grant_signing_body(
+pub(super) fn mcp_grant_signing_body(
     account: &LocalBusAccountState,
     approval: &LocalMcpApprovalRecord,
 ) -> Result<LocalMcpGrantSigningBody, SdkError> {
@@ -1223,6 +1236,12 @@ fn mcp_grant_signing_body(
         None
     };
     Ok(LocalMcpGrantSigningBody {
+        task_binding: approval
+            .details
+            .get("task_binding")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?,
         approval_id: approval.approval_id.clone(),
         grant_id: requested_grant_id,
         server_id: approval.server_id.clone(),
@@ -2220,6 +2239,7 @@ mod tests {
                 signer_public_key: String::new(),
                 signature: String::new(),
                 signing_body: LocalMcpGrantSigningBody {
+                    task_binding: None,
                     approval_id: "approval_full".to_owned(),
                     grant_id: "grant_full".to_owned(),
                     server_id: "wildcard".to_owned(),

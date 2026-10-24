@@ -9,6 +9,7 @@ fn early(c: &RamfluxClient, thread: &str, id: &str) -> Result<carrier::Carrier, 
         thread,
         id,
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: id.into(),
             version: 2,
             state: TaskStatus::Running,

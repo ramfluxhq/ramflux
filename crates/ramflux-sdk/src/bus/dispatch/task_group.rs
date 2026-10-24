@@ -13,14 +13,15 @@ pub(super) struct Plan {
 }
 pub(super) async fn plan(
     account: &LocalBusAccountState,
-    c: &Carrier,
+    conversation: &str,
+    message: &str,
     group: &str,
     gateway: &GatewaySessionConfig,
 ) -> Result<Plan, SdkError> {
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     account.client.pin_local_group_member(group)?;
     let body: LocalBusGroupSendRequest = serde_json::from_value(
-        json!({"group_id":group,"conversation_id":c.conversation_id,"message_id":c.message_id,"sender_id":local.device_id,"encrypted_body_base64":""}),
+        json!({"group_id":group,"conversation_id":conversation,"message_id":message,"sender_id":local.device_id,"encrypted_body_base64":""}),
     )?;
     let routes = super::super::group_delivery::resolve(account, &body)?;
     let mut targets = Vec::new();

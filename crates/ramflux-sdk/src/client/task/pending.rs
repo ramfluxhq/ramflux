@@ -8,6 +8,8 @@ use ramflux_protocol::TaskEventBody;
 use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub(super) struct Pending {
+    #[serde(default)]
+    pub task_id: String,
     pub carrier: Carrier,
     pub(super) conversation: String,
     pub(super) message: String,
@@ -45,6 +47,7 @@ impl RamfluxClient {
         if let Err(error) = self.authorize_task_relations(c, Some(task)) {
             return match error {
                 SdkError::LocalBus(_)
+                | SdkError::TaskRefused { .. }
                 | SdkError::InboundPending(_)
                 | SdkError::InboundRejected(_) => Ok(false),
                 other => Err(other),
@@ -83,6 +86,7 @@ impl RamfluxClient {
                 self.admit_peer_task_hold(c)?;
             }
             let pending = Pending {
+                task_id: c.event()?.event().task_id().into(),
                 carrier: c.clone(),
                 conversation: delivery.conversation.into(),
                 message: delivery.message.into(),
@@ -97,6 +101,8 @@ impl RamfluxClient {
             db.persist_actor_state(&self.task_pending_key(c)?, &pending)?;
         }
         let outcome = Outcome {
+            task_id: Some(c.event()?.event().task_id().into()),
+            reason_code: None,
             accepted: false,
             pending: true,
             fallback_text: if matches!(c.event()?.event(), TaskEventBody::Resolve(_)) {
@@ -128,6 +134,8 @@ impl RamfluxClient {
             if now >= p.expires_at {
                 self.account_db()?.delete_task_state(&key)?;
                 let outcome = Outcome {
+                    task_id: Some(p.carrier.event()?.event().task_id().into()),
+                    reason_code: None,
                     accepted: false,
                     pending: false,
                     fallback_text: "[Task requires resync: earlier revisions unavailable]".into(),
@@ -169,6 +177,8 @@ impl RamfluxClient {
                 Err(error) => {
                     self.account_db()?.delete_task_state(&key)?;
                     let outcome = Outcome {
+                        task_id: Some(p.carrier.event()?.event().task_id().into()),
+                        reason_code: None,
                         accepted: false,
                         pending: false,
                         fallback_text: "[Task rejected]".into(),

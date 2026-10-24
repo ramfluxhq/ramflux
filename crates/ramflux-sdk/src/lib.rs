@@ -75,7 +75,8 @@ pub use bus::{
     LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest,
     LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
-    LocalMcpStandingApprovalSigningBody, serve_local_bus, serve_local_bus_until,
+    LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,
+    serve_local_bus_until,
 };
 pub use client::RamfluxClient;
 pub use client::contact::SdkContactSafetyNumber;
@@ -119,3 +120,6 @@ pub use records::{
     LocalMcpAuditRecord, LocalMcpGrantRecord, LocalMcpStandingApprovalRecord,
 };
 pub use surface_refusal::SurfaceRefusalCode;
+
+mod task_refusal;
+pub use task_refusal::TaskRefusalCode;

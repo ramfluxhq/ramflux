@@ -93,6 +93,8 @@ pub struct TaskUpdate {
     pub steps: Vec<TaskStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

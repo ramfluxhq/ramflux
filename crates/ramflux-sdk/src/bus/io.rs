@@ -106,6 +106,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     match error {
+        SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::SurfaceDeliveryTooLarge { .. } => "too_large",
         SdkError::SurfaceRefused { reason, .. } => reason.as_str(),

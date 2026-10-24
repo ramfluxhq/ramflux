@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
-pub(super) struct RecordingGateway {
+pub(in crate::bus::dispatch) struct RecordingGateway {
     last: Option<GatewayClientFrame>,
     cursor: Option<GatewayCursor>,
     pub inbox: Vec<GatewayInboxEntry>,
@@ -161,7 +161,7 @@ impl GatewaySessionFrameSource for RecordingGateway {
         })
     }
 }
-pub(super) fn manifest(
+pub(in crate::bus::dispatch) fn manifest(
     client: &RamfluxClient,
 ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
     let root = client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -205,7 +205,7 @@ pub(super) fn manifest(
         }],
     })
 }
-pub(super) async fn directory(
+pub(in crate::bus::dispatch) async fn directory(
     root: &Path,
     manifests: BTreeMap<String, serde_json::Value>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {

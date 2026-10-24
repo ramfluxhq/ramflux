@@ -25,6 +25,8 @@ fn surface_carrier(
         wire_base64: ramflux_protocol::encode_base64url(wire),
         signature: String::new(),
         snapshot: None,
+        posted_at: None,
+        updated_at: None,
     })
 }
 fn surface_project(
@@ -80,6 +82,7 @@ fn exercise(input: bool, read_only: bool) -> TestResult {
         "thread",
         "needs",
         TaskEventBody::Update(TaskUpdate {
+            result_summary: None,
             task_id: "task".into(),
             version: 2,
             state: TaskStatus::NeedsMe,
@@ -104,7 +107,9 @@ fn exercise(input: bool, read_only: bool) -> TestResult {
     let action = surface_carrier(&f.human, PayloadKind::Action, "answer-form", &action)?;
     assert!(surface_project(&f.agent, &action)?.accepted);
     let view = f.agent.surface_get("form", 0, None)?;
-    let decision_id = view["actions"][0]["id"].as_str().ok_or("decision id")?;
+    let decision_id = view["actions"][0]["action_receipt_id"].as_str().ok_or("decision id")?;
+    assert_eq!(view["action_receipt_id"], decision_id);
+    assert_eq!(view["actions"][0]["receipt_verified"], true);
     if read_only {
         mark_read_only(&f.agent, &action, decision_id)?;
     }

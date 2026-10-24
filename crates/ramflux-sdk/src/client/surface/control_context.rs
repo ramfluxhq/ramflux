@@ -75,7 +75,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    pub(super) fn authorize_owned_surface_source(&self, source: &Value) -> Result<(), SdkError> {
+    pub(crate) fn authorize_owned_surface_source(&self, source: &Value) -> Result<(), SdkError> {
         let commitment = self.surface_local_root_commitment()?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if source["principal_id"] != local.principal_id
@@ -145,7 +145,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    pub(super) fn import_surface_context(
+    pub(crate) fn import_surface_context(
         &self,
         context: &OwnContext,
         source_device: &str,

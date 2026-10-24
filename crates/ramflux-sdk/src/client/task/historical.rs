@@ -32,7 +32,6 @@ impl RamfluxClient {
             .as_deref()
             .map(|g| {
                 let state = self.group_state(g)?;
-                self.record_verified_task_roster(&state)?;
                 Ok::<_, SdkError>(state.group_epoch)
             })
             .transpose()?;
@@ -59,7 +58,7 @@ impl RamfluxClient {
         let previous = state.task().cloned();
         state
             .apply(&event, &c.signer(&accepted.public_key, &event))
-            .map_err(|e| invalid(e.to_string()))?;
+            .map_err(|error| crate::task_refusal::protocol(&error))?;
         let task = state.task().cloned().ok_or_else(|| invalid("historical task is absent"))?;
         self.check_task_historical_membership(accepted, context, &task)?;
         self.check_task_capacity(c, &history)?;

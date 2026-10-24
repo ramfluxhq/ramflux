@@ -56,7 +56,9 @@ impl RamfluxClient {
         let (executor, opened) =
             history.intervention_source(&resolution.step_id, &resolution.target)?;
         let state = history.state()?;
-        let task = state.task().ok_or_else(|| invalid("task not found"))?;
+        let task = state.task().ok_or_else(|| {
+            crate::task_refusal::refused(crate::TaskRefusalCode::NotFound, "task not found")
+        })?;
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if task.assignee != device.principal_id
             || device.device_id != executor
@@ -261,39 +263,8 @@ impl RamfluxClient {
             return Err(invalid("task intervention closed"));
         }
         match (&resolution.target, &proof.evidence) {
-            (NeedsMe::Approval { grant_id }, Evidence::Grant { record }) => {
-                let body = &record.signing_body;
-                if resolution.decision != TaskDecision::Resume
-                    || body.grant_id != *grant_id
-                    || record.grant_id != *grant_id
-                    || resolution.decision_id != body.approval_id
-                    || !body.single_use
-                    || body.full_delegation
-                    || body.arguments_hash.as_deref().is_none_or(str::is_empty)
-                    || body.expires_at < proof.issued_at
-                    || record.state.revoked
-                {
-                    return Err(invalid(
-                        "task approval requires a live single-use bound grant decision",
-                    ));
-                }
-                let key = self.task_signer_key(requester, &record.signed_by_device_id)?;
-                if key != record.signer_public_key {
-                    return Err(invalid("task grant signer is not the requester device"));
-                }
-                ramflux_crypto::verify_device_branch_signature(&key, body, &record.signature)?;
-                if require_stored {
-                    let stored = self
-                        .account_db()?
-                        .load_mcp_grant::<LocalMcpGrantRecord>(grant_id)?
-                        .ok_or_else(|| {
-                            invalid("task grant was not accepted by the existing MCP flow")
-                        })?;
-                    if serde_json::to_vec(&stored)? != serde_json::to_vec(record)? {
-                        return Err(invalid("task grant differs from the stored MCP decision"));
-                    }
-                }
-                Ok(key_for_decision("grant", &(&task.assignee, grant_id))?)
+            (NeedsMe::Approval { .. }, Evidence::Grant { record }) => {
+                self.verify_task_grant(proof, task, record, require_stored)
             }
             (NeedsMe::Approval { grant_id }, Evidence::Denied { record }) => {
                 let grant_reference = record.details["requested_grant_id"]
@@ -343,6 +314,55 @@ impl RamfluxClient {
             }
             _ => Err(invalid("task decision evidence does not match needs_me target")),
         }
+    }
+    fn verify_task_grant(
+        &self,
+        proof: &DecisionProof,
+        task: &Task,
+        record: &LocalMcpGrantRecord,
+        require_stored: bool,
+    ) -> Result<String, SdkError> {
+        let resolution = &proof.resolution;
+        let NeedsMe::Approval { grant_id } = &resolution.target else {
+            return Err(invalid("approval expected"));
+        };
+        let requester =
+            task.requester.as_deref().ok_or_else(|| invalid("task requester missing"))?;
+        let body = &record.signing_body;
+        if resolution.decision != TaskDecision::Resume
+            || body.grant_id != *grant_id
+            || record.grant_id != *grant_id
+            || resolution.decision_id != body.approval_id
+            || body.task_binding.as_ref()
+                != Some(&self.task_approval_binding(
+                    &task.conversation_id,
+                    &task.task_id,
+                    &resolution.step_id,
+                    &resolution.target,
+                )?)
+            || !body.single_use
+            || body.full_delegation
+            || body.arguments_hash.as_deref().is_none_or(str::is_empty)
+            || body.expires_at < proof.issued_at
+            || record.state.revoked
+        {
+            return Err(invalid("task approval requires a live single-use bound grant decision"));
+        }
+        let key = self.task_signer_key(requester, &record.signed_by_device_id)?;
+        if key != record.signer_public_key {
+            return Err(invalid("task grant signer is not the requester device"));
+        }
+        ramflux_crypto::verify_device_branch_signature(&key, body, &record.signature)?;
+        if require_stored {
+            let stored = self
+                .account_db()?
+                .load_mcp_grant::<LocalMcpGrantRecord>(grant_id)?
+                .ok_or_else(|| invalid("task grant was not accepted by the existing MCP flow"))?;
+            if serde_json::to_vec(&stored)? != serde_json::to_vec(record)? {
+                return Err(invalid("task grant differs from the stored MCP decision"));
+            }
+        }
+        key_for_decision("grant", &(&task.assignee, grant_id))
     }
 }
 pub(super) fn key_for_decision(kind: &str, value: &impl Serialize) -> Result<String, SdkError> {

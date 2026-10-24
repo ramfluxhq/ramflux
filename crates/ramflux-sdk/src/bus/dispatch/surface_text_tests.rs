@@ -7,8 +7,8 @@ use crate::bus::runtime_tests;
 use crate::client::surface::SurfaceSender;
 use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
-pub(super) struct Delivery {
-    pub(super) envelope: ramflux_protocol::Envelope,
+pub(in crate::bus::dispatch) struct Delivery {
+    pub(in crate::bus::dispatch) envelope: ramflux_protocol::Envelope,
 }
 
 #[tokio::test]
@@ -95,7 +95,7 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
     Ok(())
 }
 
-pub(super) fn members(
+pub(in crate::bus::dispatch) fn members(
     root: &std::path::Path,
     source: &LocalBusAccountState,
     count: u8,
@@ -160,7 +160,7 @@ pub(super) fn members(
     }
     Ok(peers)
 }
-pub(super) fn assert_receivers(
+pub(in crate::bus::dispatch) fn assert_receivers(
     peers: &[LocalBusAccountState],
     deliveries: &[Delivery],
     epoch: u64,
@@ -253,7 +253,7 @@ pub(super) fn assert_receivers(
     Ok(())
 }
 
-pub(super) async fn directory_config(
+pub(in crate::bus::dispatch) async fn directory_config(
     root: &std::path::Path,
     source: &mut LocalBusAccountState,
     peers: &[LocalBusAccountState],

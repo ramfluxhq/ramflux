@@ -24,6 +24,8 @@ pub struct Task {
     pub state: TaskStatus,
     pub steps: Vec<TaskStep>,
     pub result_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
     pub accepted: bool,
 }
 /// One task's verified state. Rejected events leave every field unchanged.
@@ -169,6 +171,7 @@ impl TaskState {
                     state: TaskStatus::Running,
                     steps: Vec::new(),
                     result_ref: None,
+                    result_summary: None,
                     accepted: true,
                 }
             }
@@ -195,6 +198,7 @@ impl TaskState {
                     state: TaskStatus::Proposed,
                     steps: v.steps.clone(),
                     result_ref: None,
+                    result_summary: None,
                     accepted: false,
                 }
             }
@@ -266,12 +270,15 @@ fn update_task(
     if update.state == TaskStatus::Failed && update.steps.iter().any(|s| !s.state.is_terminal()) {
         return Err(TaskReject::IllegalTransition);
     }
-    if update.result_ref.is_some() && !update.state.is_terminal() {
+    if (update.result_ref.is_some() || update.result_summary.is_some())
+        && !update.state.is_terminal()
+    {
         return Err(TaskReject::IllegalTransition);
     }
     task.state = update.state;
     task.steps.clone_from(&update.steps);
     task.result_ref.clone_from(&update.result_ref);
+    task.result_summary.clone_from(&update.result_summary);
     Ok(())
 }
 fn validate_resolution(

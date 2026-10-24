@@ -89,6 +89,8 @@ impl RamfluxClient {
                 .min_by_key(|(key, p)| (p.at, key.as_str()));
             if let Some((key, pending)) = victim {
                 let outcome = Outcome {
+                    task_id: Some(pending.carrier.event()?.event().task_id().into()),
+                    reason_code: None,
                     accepted: false,
                     pending: false,
                     fallback_text: "[Task requires resync: fair holdback capacity]".into(),
@@ -217,6 +219,8 @@ impl RamfluxClient {
                     )?;
                     db.delete_task_state(&key)?;
                     let outcome = Outcome {
+                        task_id: Some(p.carrier.event()?.event().task_id().into()),
+                        reason_code: None,
                         accepted: false,
                         pending: true,
                         fallback_text: "[Task decision pending: executor confirmation timed out]"

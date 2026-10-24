@@ -19,7 +19,10 @@ pub(crate) fn require_local_human(
     kind: Option<&str>,
 ) -> Result<(), SdkError> {
     if *mode != LocalBusClientMode::AttendedCli || kind != Some("human") {
-        return Err(invalid("task human decision requires attended human account"));
+        return Err(crate::task_refusal::refused(
+            crate::TaskRefusalCode::HumanRequired,
+            "task human decision requires attended human account",
+        ));
     }
     Ok(())
 }
@@ -36,7 +39,7 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("task requires a known conversation"))?;
         if let Some(group) = thread["group_id"].as_str() {
             let state = self.group_state(group)?;
-            for member in &state.members {
+            for member in &self.task_current_roster(&state) {
                 let record = db.client_record("device", member)?;
                 let owner = record.as_ref().and_then(|v| v["principal_id"].as_str());
                 let local = self.device_branch.as_ref().filter(|d| d.device_id == *member);
@@ -51,17 +54,26 @@ impl RamfluxClient {
                     return Ok(());
                 }
             }
-            return Err(invalid("task actor is not a current pinned group member"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::NotMember,
+                "task actor is not a current pinned group member",
+            ));
         }
         if thread["kind"] != "direct"
             || !thread["participants"]
                 .as_array()
                 .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(principal)))
         {
-            return Err(invalid("task actor is not a conversation participant"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::NotMember,
+                "task actor is not a conversation participant",
+            ));
         }
         if self.friend_rejection_reason(principal)?.is_some() {
-            return Err(invalid("task actor contact is blocked or revoked"));
+            return Err(crate::task_refusal::refused(
+                crate::TaskRefusalCode::NotMember,
+                "task actor contact is blocked or revoked",
+            ));
         }
         Ok(())
     }
@@ -85,7 +97,10 @@ impl RamfluxClient {
                 let local =
                     &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
                 if local != &start.requester && local != &start.assignee {
-                    return Err(invalid("local account has no role in this task"));
+                    return Err(crate::task_refusal::refused(
+                        crate::TaskRefusalCode::NoLocalRole,
+                        "local account has no role in this task",
+                    ));
                 }
             }
             TaskEventBody::Proposal(proposal) => {
@@ -95,7 +110,9 @@ impl RamfluxClient {
                 self.require_task_member(&carrier.conversation_id, &proposal.assignee, None)?;
             }
             action => {
-                let task = current.ok_or_else(|| invalid("task not found"))?;
+                let task = current.ok_or_else(|| {
+                    crate::task_refusal::refused(crate::TaskRefusalCode::NotFound, "task not found")
+                })?;
                 if !matches!(action, TaskEventBody::Cancel(_)) {
                     self.require_task_member(&carrier.conversation_id, &task.assignee, None)?;
                 }
@@ -111,7 +128,17 @@ impl RamfluxClient {
                     _ => false,
                 };
                 if !allowed {
-                    return Err(invalid("task actor lacks the required verified relation"));
+                    let reason = match action {
+                        TaskEventBody::Update(_) => crate::TaskRefusalCode::NotAssignee,
+                        TaskEventBody::Accept(_) | TaskEventBody::Decline(_) => {
+                            crate::TaskRefusalCode::NotEligibleAcceptor
+                        }
+                        _ => crate::TaskRefusalCode::NotRequester,
+                    };
+                    return Err(crate::task_refusal::refused(
+                        reason,
+                        "task actor lacks the required verified relation",
+                    ));
                 }
             }
         }

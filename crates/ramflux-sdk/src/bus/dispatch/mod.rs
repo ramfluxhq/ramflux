@@ -29,5 +29,7 @@ pub(crate) use object::*;
 
 pub(crate) mod surface_transport;
 pub(crate) mod task;
+pub(crate) mod task_approval;
+mod task_approval_transport;
 mod task_group;
 pub(crate) mod task_transport;

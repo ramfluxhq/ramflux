@@ -81,6 +81,8 @@ impl RamfluxClient {
         };
         view["action_missing"] = json!(action_id.is_some() && actions.is_empty());
         for action in &mut actions {
+            action["action_receipt_id"] = action["id"].clone();
+            action["receipt_verified"] = json!(!action["attestation"].is_null());
             if let Some(row) = action.as_object_mut() {
                 row.remove("attestation");
             }
@@ -90,6 +92,7 @@ impl RamfluxClient {
                 action["signature"] = carrier["signature"].take();
             }
         }
+        view["action_receipt_id"] = view["last_action_id"].clone();
         view["actions"] = json!(actions);
         if serde_json::to_vec(&view)?.len() > 512 * 1024 {
             return Err(invalid("surface response budget exceeded; select one action"));
