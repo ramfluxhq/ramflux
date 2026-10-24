@@ -3,7 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
-use crate::prekey::{SdkDeviceManifestEntry, SdkPrekeyResponse};
+use crate::prekey::SdkDeviceManifestEntry;
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -165,7 +165,7 @@ impl RamfluxClient {
             return Ok(principal_commitment.to_owned());
         }
         let Some(entry) = self.account_db()?.device_directory_entry(device_id)? else {
-            return self.resolve_target_principal_commitment_from_prekey(gateway, device_id).await;
+            return self.resolve_target_principal_commitment_from_cache(gateway, device_id).await;
         };
         self.assert_manifest_active_device_cached(
             gateway,
@@ -177,28 +177,24 @@ impl RamfluxClient {
         Ok(entry.principal_commitment)
     }
 
-    async fn resolve_target_principal_commitment_from_prekey(
+    async fn resolve_target_principal_commitment_from_cache(
         &self,
         gateway: &GatewaySessionConfig,
         device_id: &str,
     ) -> Result<String, SdkError> {
-        let prekey: SdkPrekeyResponse =
-            sdk_gateway_get_json(gateway, &format!("/mvp1/prekey/{device_id}")).await?;
-        if prekey.principal_commitment.is_empty() {
-            return Err(SdkError::LocalBus(format!(
-                "cannot resolve principal commitment for target device {device_id} from local trusted device directory or prekey registry"
-            )));
-        }
-        let manifest = self
-            .cache_verified_device_manifest(gateway, &prekey.principal_commitment, "prekey_resolve")
-            .await?;
-        if !manifest.devices.iter().any(|device| device.device_id == device_id) {
-            return Err(SdkError::LocalBus(format!(
-                "recipient device {device_id} is not in verified manifest for {}",
-                prekey.principal_commitment
-            )));
-        }
-        Ok(prekey.principal_commitment)
+        let commitment = self.account_db()?.client_record("device", device_id)?
+            .and_then(|row| row["principal_commitment"].as_str().map(str::to_owned))
+            .ok_or_else(|| SdkError::LocalBus(
+                "recipient Root context required; supply recipient_principal_commitment or refresh the contact".to_owned()
+            ))?;
+        self.assert_manifest_active_device_cached(
+            gateway,
+            &commitment,
+            device_id,
+            "cached_root_resolve",
+        )
+        .await?;
+        Ok(commitment)
     }
 
     /// Resolve and verify the recipient principal commitment for a federated (cross-node) send.

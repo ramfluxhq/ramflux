@@ -32,17 +32,14 @@ impl RamfluxClient {
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                     }));
-            let commitment = if let Some(commitment) = pinned {
-                commitment
-            } else {
-                let prekey: crate::prekey::SdkPrekeyResponse =
-                    crate::prelude::sdk_gateway_get_json(
-                        gateway,
-                        &format!("/mvp1/prekey/{remote}"),
-                    )
-                    .await?;
-                prekey.principal_commitment
-            };
+            let hint = decode(&entry.envelope)
+                .ok()
+                .and_then(|wrapper| wrapper.source_principal_commitment);
+            let commitment = pinned.or(hint).ok_or_else(|| {
+                SdkError::InboundPending(
+                    "sender Root context required; refresh the contact".to_owned(),
+                )
+            })?;
             let manifest =
                 crate::client::contact::fetch_verified_device_manifest(gateway, &commitment)
                     .await?;
@@ -97,6 +94,12 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
         let record = self.trusted_device(&entry.envelope.source_device_id)?;
+        if let Some(hint) =
+            decode(&entry.envelope).ok().and_then(|wrapper| wrapper.source_principal_commitment)
+            && record["principal_commitment"] != hint
+        {
+            return Err(invalid("sender Root hint differs from verified device owner"));
+        }
         verify_sender_record(entry, &record)
     }
 

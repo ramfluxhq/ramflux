@@ -9,6 +9,8 @@ use crate::prelude::*;
 pub(crate) struct SdkDmEncryptedEnvelope {
     pub(crate) schema: String,
     pub(crate) version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_principal_commitment: Option<String>,
     pub(crate) x3dh: Option<SdkDmX3dhHeader>,
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
 }
@@ -218,6 +220,7 @@ mod tests {
             ramflux_crypto::DmSession::initiator([7_u8; 32], [1_u8; 32], [2_u8; 32], [3_u8; 32])?;
         let ciphertext = session.encrypt(b"hello dm", dm_associated_data("conv_franking"))?;
         let encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+            source_principal_commitment: None,
             schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
             version: 1,
             x3dh: None,

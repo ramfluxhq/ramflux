@@ -80,3 +80,42 @@ pub(crate) fn verify_manifest(
     // never means revocation: only the complete signed record can authorize retirement.
     Ok(())
 }
+
+impl crate::RamfluxClient {
+    pub(crate) fn verify_root_bound_prekey(
+        &self,
+        remote: &str,
+        bundle: &ramflux_crypto::PrekeyBundle,
+    ) -> Result<(), SdkError> {
+        let record = {
+            self.require_cached_root_authority(remote)?;
+            self.account_db()?
+                .client_record("device", remote)?
+                .ok_or_else(|| invalid("recipient missing"))?
+        };
+        let identity: [u8; 32] = serde_json::from_value(
+            record
+                .get("x25519_identity_public")
+                .cloned()
+                .ok_or_else(|| invalid("recipient identity missing"))?,
+        )?;
+        if bundle.device_id != remote
+            || bundle.identity_key != identity
+            || bundle.device_agreement_x25519_public != identity
+            || record["device_epoch"] != bundle.device_epoch
+            || record["principal_id"] != bundle.identity_commitment
+            || record["signing_public_key"] != bundle.device_identity_ed25519_public
+        {
+            return Err(invalid("recipient prekey differs from verified device identity"));
+        }
+        let key = record
+            .get("signing_public_key")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid("recipient signing key missing"))?;
+        ramflux_crypto::verify_prekey_bundle(
+            &ramflux_crypto::verifying_key_from_base64url(key)?,
+            bundle,
+        )?;
+        Ok(())
+    }
+}

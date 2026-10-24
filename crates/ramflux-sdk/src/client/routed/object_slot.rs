@@ -72,6 +72,7 @@ impl RamfluxClient {
             return Err(invalid("object slot recipient mismatch"));
         }
         let envelope = SdkDmEncryptedEnvelope {
+            source_principal_commitment: None,
             schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
             version: 2,
             x3dh: slot.x3dh.clone(),
@@ -147,6 +148,7 @@ impl RamfluxClient {
         }
         let remote = self.slot_remote(slot)?;
         let envelope = SdkDmEncryptedEnvelope {
+            source_principal_commitment: None,
             schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
             version: 2,
             x3dh: slot.x3dh.clone(),

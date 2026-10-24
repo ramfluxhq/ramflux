@@ -17,6 +17,12 @@ impl RamfluxClient {
         relay_service_key_base64: Option<String>,
         chunk_size: usize,
     ) -> Result<SdkOwnDeviceSyncExportResponse, SdkError> {
+        self.cache_verified_device_manifest(
+            &engine.config,
+            principal_commitment,
+            "own_device_sync",
+        )
+        .await?;
         let source_branch = self.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?;
         let source_device_id = source_branch.device_id.clone();
         let source_device = assert_target_manifest_active_device(

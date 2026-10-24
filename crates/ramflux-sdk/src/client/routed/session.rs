@@ -178,30 +178,7 @@ impl RamfluxClient {
             .recipient_device_id
             .as_deref()
             .ok_or_else(|| invalid("recipient device required"))?;
-        let record = self.trusted_device(remote)?;
-        let identity: [u8; 32] = serde_json::from_value(
-            record
-                .get("x25519_identity_public")
-                .cloned()
-                .ok_or_else(|| invalid("recipient identity missing"))?,
-        )?;
-        if bundle.device_id != remote
-            || bundle.identity_key != identity
-            || bundle.device_agreement_x25519_public != identity
-            || record["device_epoch"] != bundle.device_epoch
-            || record["principal_id"] != bundle.identity_commitment
-            || record["signing_public_key"] != bundle.device_identity_ed25519_public
-        {
-            return Err(invalid("recipient prekey differs from verified device identity"));
-        }
-        let key = record
-            .get("signing_public_key")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| invalid("recipient signing key missing"))?;
-        ramflux_crypto::verify_prekey_bundle(
-            &ramflux_crypto::verifying_key_from_base64url(key)?,
-            &bundle,
-        )?;
+        self.verify_root_bound_prekey(remote, &bundle)?;
         let hash = prekey_bundle_hash(&bundle)?;
         let aad = associated_data(&message.envelope_id, local, remote, &hash)?;
         let (session, header) =

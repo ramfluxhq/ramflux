@@ -206,6 +206,9 @@ impl RamfluxClient {
         self.finish_pair_retirement()?;
 
         Ok(SdkDmEncryptedEnvelope {
+            source_principal_commitment: self.identity_root.as_ref().map(|root| {
+                ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())
+            }),
             schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
             version: 2,
             x3dh: header,
