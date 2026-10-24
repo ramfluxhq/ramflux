@@ -67,16 +67,55 @@ the executor. Reserved certificates cannot advance peer projections.
 `task.decision.prove` is an optional diagnostic reservation method; normal
 `task.resolve` does not require manually transporting proof bytes.
 
-Accepted and pending copies survive restart. Future revisions use a bounded
-holdback and expire after ten minutes with `resync_required`. Admission uses
-receiver time: 64 events per task/sender, 128 per principal and 512 per account
-per minute. The holdback allows 32 events/5 MiB per account and eight per sender.
-Executor confirmation and own-device forwarding retry at most eight times
-within ten minutes; inbound receive and ACK do not depend on their success.
-Own-device task history uses causal pages capped at 30 KiB, original signer
-verification and current group pins. A snapshot cannot reactivate known removed
-local group membership. Offline task snapshot export is bounded to 100 histories
-and 4 MiB and reports an error when the bound is exceeded.
+Accepted and pending copies survive restart. Future peer revisions use a fair
+holdback with at most 32 events/5 MiB per account, eight per
+(source principal, conversation), and 16 per source. A less represented source
+can displace held work from an overrepresented pair; displaced or expired work
+is marked as requiring resync. Unknown-task events still require current
+conversation membership. Peer holds expire after ten minutes.
+
+Local requester resolution intents use a separate durable pool, capped at eight
+active intents per executor principal and 512/8 MiB per account. After 60
+seconds without confirmation an intent releases its slot and byte budget,
+compacting into a pending-status record. Status records retain at most 64 per
+executor / 512 per account for 30 days; the conversation fallback stays pending. A later executor acknowledgement can
+still commit it. This timeout does not authorize or reject the external decision.
+Admission uses receiver time: 64 events per task/sender, 128 per principal and
+512 per account per minute. Executor confirmation and own-device forwarding
+retry at most eight times within ten minutes; inbound receive and ACK do not
+depend on their success.
+
+New active tasks have per-source quotas: 32 across the account, 16 per
+conversation, and 8 MiB of retained history per source. Starts in which the
+local account is neither requester nor assignee are rejected. Proposals can
+also involve the local account as an eligible acceptor. Quota failures produce
+rejection receipts instead of disabling intake for other sources.
+Terminal histories compact after seven days, or beyond the newest 16 per
+conversation / 32 per source. Compaction retains the projection and certificate
+hashes and removes signed history bodies. Older projections are fully pruned
+after 90 days or beyond 128 terminal tasks per conversation / source.
+Consumed external-decision keys are preserved independently. Certificate caches
+retain at most 32 per executor principal, 64 per conversation and 256 per
+account, expire after seven days, and follow task compaction. Existing histories
+acquire lifecycle indexes in bounded upgrade pages.
+
+Own-device task history uses causal pages capped at 30 KiB and original signer
+verification. Committed events carry same-root membership witnesses from their
+event position (group epoch or direct participant/time context); importing
+history does not rejudge those events by today's membership or blocked state.
+These witnesses are trusted only within authenticated same-root history, never
+as peer authority. Older direct histories can use their committed participant
+context; a group history without an epoch witness is skipped with a reason.
+Snapshots cannot reactivate known removed local group membership or inactive
+member pins. Task import is best effort per causal page; rejected pages are
+recorded and do not abort ordinary history restoration.
+
+Offline export scans bounded history pages with a persisted continuation cursor.
+Each snapshot includes at most 100 task pages / 4 MiB and optional
+`task_export_metadata` (`truncated`, `skipped_items`, `next_cursor`). Oversized or
+unavailable task items are skipped; task capacity does not fail the surrounding
+ordinary-message snapshot. Later exports resume at the cursor and cycle after
+the final history. Snapshot pages can be incomplete when the budget is reached.
 
 ## Read models
 

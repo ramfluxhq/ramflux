@@ -92,6 +92,25 @@ impl RamfluxClient {
         resolution: &TaskResolve,
         certificate: &Certificate,
     ) -> Result<(), SdkError> {
+        self.check_task_certificate_at(c, task, resolution, certificate, false)
+    }
+    pub(super) fn check_historical_task_certificate(
+        &self,
+        c: &Carrier,
+        task: &Task,
+        resolution: &TaskResolve,
+        certificate: &Certificate,
+    ) -> Result<(), SdkError> {
+        self.check_task_certificate_at(c, task, resolution, certificate, true)
+    }
+    fn check_task_certificate_at(
+        &self,
+        c: &Carrier,
+        task: &Task,
+        resolution: &TaskResolve,
+        certificate: &Certificate,
+        historical: bool,
+    ) -> Result<(), SdkError> {
         let (executor, opened) = self
             .task_history(&task.conversation_id, &task.task_id)?
             .intervention_source(&resolution.step_id, &resolution.target)?;
@@ -122,7 +141,9 @@ impl RamfluxClient {
         if certificate.decision_key != expected {
             return Err(invalid("task certificate external decision identity mismatch"));
         }
-        self.require_task_member(&task.conversation_id, &task.assignee, Some(&executor))?;
+        if !historical {
+            self.require_task_member(&task.conversation_id, &task.assignee, Some(&executor))?;
+        }
         self.check_task_certificate_signature(certificate)
     }
     pub(super) fn save_task_commit_certificate(
@@ -137,13 +158,34 @@ impl RamfluxClient {
         {
             return Err(invalid("task commit certificate carrier mismatch"));
         }
+        self.account_db()?.prune_task_certificates(crate::time::now_unix_timestamp())?;
         let key = committed_key(c, &certificate.assignee, &certificate.issuer_device)?;
         if let Some(old) = self.account_db()?.load_actor_state::<Certificate>(&key)? {
             if old.encoded()? != certificate.encoded()? {
                 return Err(invalid("task commit certificate collision"));
             }
         } else {
+            let history = self.task_history(&c.conversation_id, c.event()?.event().task_id())?;
+            if history
+                .events
+                .iter()
+                .filter_map(|e| e.decision_certificate.as_ref())
+                .any(|old| old.encoded().ok() == certificate.encoded().ok())
+            {
+                return Ok(());
+            }
+            let state = history.state()?;
+            let task =
+                state.task().ok_or_else(|| invalid("task certificate has no current task"))?;
+            self.check_committed_task_certificate(c, task, &certificate.resolution, certificate)?;
+            let now = crate::time::now_unix_timestamp();
+            if certificate.issued_at > now.saturating_add(300)
+                || certificate.issued_at < now.saturating_sub(7 * 24 * 60 * 60)
+            {
+                return Err(invalid("task certificate is outside the live retention window"));
+            }
             self.account_db()?.persist_actor_state(&key, certificate)?;
+            self.account_db()?.prune_task_certificates(crate::time::now_unix_timestamp())?;
         }
         Ok(())
     }

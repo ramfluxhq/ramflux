@@ -395,3 +395,8 @@ mod own;
 
 #[path = "control_tests.rs"]
 mod controls;
+
+#[path = "holdback_tests.rs"]
+mod holdback_regressions;
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_regressions;

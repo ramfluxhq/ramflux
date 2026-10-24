@@ -217,6 +217,10 @@ impl RamfluxClient {
             snapshot_id: snapshot_id.to_owned(),
             messages,
             task_packets: self.own_task_packets()?,
+            task_export_metadata: self
+                .account_db()?
+                .load_actor_state("task/export_metadata")?
+                .unwrap_or_default(),
             surface_pages,
             surface_controls: surfaces.controls,
             surface_checkpoints: surfaces.checkpoints,
@@ -768,9 +772,47 @@ mod tests {
             dm_sessions: Vec::new(),
             groups,
             task_packets: Vec::new(),
+            task_export_metadata: crate::client::task::own_history::TaskExportMetadata::default(),
             group_member_pins: Vec::new(),
             sender_key_distributions_base64: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rejected_task_history_items_do_not_abort_ordinary_message_restore() -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("task-best-effort", "principal_sync", "target_device_sync")?;
+        let message = DirectMessageRecord {
+            conversation_id: "direct".into(),
+            message_id: "safe".into(),
+            sender_id: "source_device_sync".into(),
+            encrypted_body: b"safe history".to_vec(),
+            metadata: MessageMetadata::default(),
+            deleted: false,
+            created_at: 1,
+            receipts: Vec::new(),
+        };
+        let mut history =
+            bundle("source_device_sync", "target_device_sync", vec![message], Vec::new());
+        history.task_packets.push(serde_json::from_value(serde_json::json!({
+            "context":{"conversation_id":"missing-task-thread","participants":["principal_sync","peer"],"group":null,"friend":null},
+            "history":{"events":[],"created_at":1,"updated_at":1},"manifests":[],"pins":[],"base":0,"prefix_hash":"invalid"
+        }))?);
+        let result = client.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(result.imported_messages, 1);
+        assert_eq!(
+            client
+                .direct_message_by_id("safe")?
+                .ok_or_else(|| SdkError::LocalBus("message absent".into()))?
+                .encrypted_body,
+            b"safe history"
+        );
+        assert_eq!(client.account_db()?.task_state_usage("task/import_skip/")?.0, 1);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

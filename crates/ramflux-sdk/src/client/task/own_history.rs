@@ -2,13 +2,20 @@
 // Copyright (c) 2026 Span Brain
 
 //! Same-root task history forwarding, with causal-prefix and original-signer verification.
-use super::{AcceptedEvent, Delivery, TaskHistory, carrier::Carrier, invalid};
+use super::{AcceptedEvent, TaskHistory, carrier::Carrier, invalid};
 use crate::client::surface::OwnContext;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub(crate) const PREFIX: &[u8] = b"ramflux.task.own.v1\n";
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct TaskExportMetadata {
+    pub truncated: bool,
+    pub skipped_items: u32,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TaskOwnPacket {
@@ -86,12 +93,29 @@ impl RamfluxClient {
             e.carrier.message_id == carrier.message_id
                 && e.carrier.principal_id == carrier.principal_id
         }) {
+            let event = carrier.verify(&public)?;
+            let mut state = history.state()?;
+            self.authorize_task_relations(carrier, state.task())?;
+            state
+                .apply(&event, &carrier.signer(&public, &event))
+                .map_err(|e| invalid(e.to_string()))?;
+            let at = crate::time::now_unix_timestamp();
+            let membership = self.task_membership_witness(
+                carrier,
+                state.task().ok_or_else(|| invalid("own task state missing"))?,
+                at,
+            )?;
             history.events.push(AcceptedEvent {
                 carrier: carrier.clone(),
                 public_key: public,
-                actor_kind_verified: false,
-                received_at: crate::time::now_unix_timestamp(),
+                actor_kind_verified: super::actor_kind_verified(
+                    self,
+                    &carrier.principal_id,
+                    &carrier.device_id,
+                ),
+                received_at: at,
                 decision_certificate: None,
+                membership: Some(membership),
             });
         }
         let principals = history
@@ -181,7 +205,13 @@ impl RamfluxClient {
                 self.persist_identity_directory(manifest)?;
             }
             self.import_surface_context(&packet.context, source_device)?;
-            self.restore_own_group_pins(packet.context.group.as_slice(), &packet.pins)?;
+            let mut active_pins = Vec::new();
+            for pin in &packet.pins {
+                if self.account_db()?.group_member_role(&pin.group_id, &pin.device_id)?.is_some() {
+                    active_pins.push(pin.clone());
+                }
+            }
+            self.restore_own_group_pins(packet.context.group.as_slice(), &active_pins)?;
             let first =
                 packet.history.events.first().ok_or_else(|| invalid("own task history empty"))?;
             let id = first.carrier.event()?.event().task_id().to_owned();
@@ -208,39 +238,15 @@ impl RamfluxClient {
                 {
                     return Err(invalid("own task event context mismatch"));
                 }
-                if self.task_signer_key(&carrier.principal_id, &carrier.device_id)?
-                    != accepted.public_key
-                {
-                    return Err(invalid("own task key differs from verified device"));
-                }
-                if let Some(certificate) = &accepted.decision_certificate {
-                    self.save_task_commit_certificate(carrier, certificate)?;
-                }
                 let timeline = super::timeline_id(carrier)?;
-                let outcome = self
-                    .project_owned_task_message(
-                        &Delivery {
-                            conversation,
-                            message: &timeline,
-                            principal: &carrier.principal_id,
-                            device: &carrier.device_id,
-                            at: accepted.received_at,
-                        },
-                        &carrier.bytes()?,
-                    )?
-                    .ok_or_else(|| invalid("own task projection absent"))?;
-                if !outcome.accepted {
-                    return Err(invalid(
-                        outcome.reject.unwrap_or_else(|| "own task event rejected".into()),
-                    ));
-                }
+                let fallback = self.project_historical_task_event(accepted, &packet.context)?;
                 if self.direct_message_by_id(&timeline)?.is_none() {
                     self.send_direct_message(conversation, &timeline, &carrier.device_id, &[])?;
                 }
                 self.account_db()?.replace_surface_message_content(
                     conversation,
                     &timeline,
-                    outcome.fallback_text.as_bytes(),
+                    fallback.as_bytes(),
                 )?;
             }
             Ok::<_, SdkError>(())
@@ -250,31 +256,88 @@ impl RamfluxClient {
 
 impl RamfluxClient {
     pub(crate) fn own_task_packets(&self) -> Result<Vec<TaskOwnPacket>, SdkError> {
-        let rows = self.account_db()?.task_record_page::<TaskHistory>(
-            "task/history/",
-            "task/history/",
-            101,
-        )?;
-        if rows.len() > 100 {
-            return Err(invalid("task snapshot exceeds history page capacity"));
-        }
+        self.maintain_task_lifecycle(crate::time::now_unix_timestamp())?;
+        let db = self.account_db()?;
+        let mut cursor = db
+            .load_actor_state::<String>("task/export_cursor")?
+            .unwrap_or_else(|| "task/history/".into());
         let mut packets = Vec::new();
+        let mut metadata = TaskExportMetadata::default();
         let mut size = 0usize;
-        for (_, history) in rows {
-            if let Some(last) = history.events.last() {
-                for body in self.task_own_packets(&last.carrier)? {
-                    size = size.saturating_add(body.len());
-                    if size > 4 * 1024 * 1024 {
-                        return Err(invalid("task snapshot byte budget exceeded"));
+        for _ in 0..32 {
+            let rows = db.task_record_page::<TaskHistory>("task/history/", &cursor, 101)?;
+            let done = rows.len() < 101;
+            for (key, history) in rows {
+                let previous = cursor.clone();
+                cursor = key;
+                if let Some(last) = history.events.last() {
+                    let bodies = match self.task_own_packets(&last.carrier) {
+                        Ok(bodies) => bodies,
+                        Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
+                        Err(_) => {
+                            metadata.skipped_items += 1;
+                            metadata.truncated = true;
+                            self.record_task_history_skip(&cursor, "task_export_item_unavailable")?;
+                            continue;
+                        }
+                    };
+                    let bytes: usize = bodies.iter().map(Vec::len).sum();
+                    if size.saturating_add(bytes) > 4 * 1024 * 1024
+                        || packets.len().saturating_add(bodies.len()) > 100
+                    {
+                        self.record_task_history_skip(&cursor, "task_export_page_budget")?;
+                        metadata.truncated = true;
+                        if packets.is_empty() {
+                            metadata.skipped_items += 1;
+                        } else {
+                            cursor = previous;
+                        }
+                        metadata.next_cursor = Some(cursor.clone());
+                        db.persist_actor_state("task/export_metadata", &metadata)?;
+                        db.persist_actor_state("task/export_cursor", &cursor)?;
+                        return Ok(packets);
                     }
-                    packets.push(ramflux_protocol::parse_i_json(
-                        body.strip_prefix(PREFIX)
-                            .ok_or_else(|| invalid("task snapshot prefix missing"))?,
-                    )?);
+                    for body in bodies {
+                        packets.push(ramflux_protocol::parse_i_json(
+                            body.strip_prefix(PREFIX)
+                                .ok_or_else(|| invalid("task snapshot prefix missing"))?,
+                        )?);
+                    }
+                    size += bytes;
+                }
+                if packets.len() >= 100 {
+                    metadata.truncated = true;
+                    metadata.next_cursor = Some(cursor.clone());
+                    db.persist_actor_state("task/export_metadata", &metadata)?;
+                    db.persist_actor_state("task/export_cursor", &cursor)?;
+                    return Ok(packets);
                 }
             }
+            if done {
+                cursor = "task/history/".into();
+                break;
+            }
         }
+        if cursor != "task/history/" {
+            metadata.truncated = true;
+            metadata.next_cursor = Some(cursor.clone());
+        }
+        db.persist_actor_state("task/export_metadata", &metadata)?;
+        db.persist_actor_state("task/export_cursor", &cursor)?;
         Ok(packets)
+    }
+    pub(super) fn record_task_history_skip(
+        &self,
+        item: &str,
+        reason: &str,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        db.persist_actor_state(
+            &super::key("import_skip", item),
+            &serde_json::json!({"item":item,"reason":reason}),
+        )?;
+        db.prune_task_diagnostics("task/import_skip/", 256)?;
+        Ok(())
     }
     pub(crate) fn import_own_task_packets(
         &self,
@@ -282,10 +345,25 @@ impl RamfluxClient {
         source: &str,
     ) -> Result<(), SdkError> {
         if packets.len() > 100 || serde_json::to_vec(packets)?.len() > 4 * 1024 * 1024 {
-            return Err(invalid("task snapshot byte or count budget exceeded"));
+            self.record_task_history_skip("task_import", "task_snapshot_budget_exceeded")?;
+            return Ok(());
         }
         for packet in packets {
-            self.account_db()?.write_transaction(|| self.import_task_own_packet(packet, source))?;
+            match self
+                .account_db()?
+                .write_transaction(|| self.import_task_own_packet(packet, source))
+            {
+                Ok(()) => {}
+                Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
+                Err(_) => {
+                    let item = packet
+                        .history
+                        .events
+                        .first()
+                        .map_or_else(|| "empty".into(), |e| e.carrier.message_id.clone());
+                    self.record_task_history_skip(&item, "task_history_item_rejected")?;
+                }
+            }
         }
         Ok(())
     }

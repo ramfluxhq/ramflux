@@ -98,3 +98,58 @@ fn an_identical_intent_retry_requeues_a_lost_confirmation_without_reconsuming_th
     assert_eq!(f.agent.task_history("thread", "task")?.events.len(), 3);
     Ok(())
 }
+
+#[test]
+fn a_late_executor_ack_commits_a_compacted_local_intent_and_preserves_its_original_message()
+-> TestResult {
+    let f = Fixture::new()?;
+    decisions::open(&f, "task")?;
+    let intent = sign(
+        &f.human,
+        "thread",
+        "intent",
+        TaskEventBody::Resolve(decisions::resolution(
+            "task",
+            ramflux_protocol::TaskDecision::Resume,
+        )),
+    )?;
+    assert!(project(&f.human, &intent)?.pending);
+    f.human.retry_pending_tasks(crate::time::now_unix_timestamp() + 61)?;
+    assert_eq!(f.human.account_db()?.task_state_usage("task/local_pending/")?.0, 0);
+    assert_eq!(f.human.account_db()?.task_state_usage("task/local_intent_status/")?.0, 1);
+    decisions::store(&f, &decisions::grant(&f)?)?;
+    assert!(project(&f.agent, &intent)?.accepted);
+    let jobs =
+        f.agent.account_db()?.task_record_page::<control::AckJob>("task/ack/", "task/ack/", 65)?;
+    let ack = control::Control::Ack(Box::new(jobs[0].1.ack.clone())).bytes()?;
+    assert!(f.human.receive_task_control(&entry("agent", "agent-device"), "thread", None, &ack)?);
+    assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 3);
+    assert_eq!(f.human.account_db()?.task_state_usage("task/local_intent_status/")?.0, 0);
+    assert_eq!(
+        f.human.task_message_metadata("thread", "intent")?.ok_or("metadata")?["pending"],
+        false
+    );
+    Ok(())
+}
+#[test]
+fn compacted_local_intents_still_reject_message_id_collisions_from_a_different_event() -> TestResult
+{
+    let f = Fixture::new()?;
+    decisions::open(&f, "task")?;
+    let intent = sign(
+        &f.human,
+        "thread",
+        "intent",
+        TaskEventBody::Resolve(decisions::resolution(
+            "task",
+            ramflux_protocol::TaskDecision::Resume,
+        )),
+    )?;
+    assert!(project(&f.human, &intent)?.pending);
+    f.human.retry_pending_tasks(crate::time::now_unix_timestamp() + 61)?;
+    let collision = sign(&f.human, "thread", "intent", start("different-task", "thread"))?;
+    assert!(project(&f.human, &collision).is_err());
+    assert!(f.human.task_get(Some("thread"), "different-task")?.is_null());
+    assert_eq!(f.human.account_db()?.task_state_usage("task/local_intent_status/")?.0, 1);
+    Ok(())
+}

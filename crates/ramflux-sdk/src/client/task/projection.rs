@@ -42,13 +42,14 @@ impl TaskHistory {
         Ok(state)
     }
 }
-struct Applied {
-    history: TaskHistory,
-    event: TaskEvent,
-    public: String,
-    task: Task,
-    decision_key: Option<String>,
-    decision_proof: Option<super::certificate::Certificate>,
+pub(super) struct Applied {
+    pub(super) history: TaskHistory,
+    pub(super) event: TaskEvent,
+    pub(super) public: String,
+    pub(super) task: Task,
+    pub(super) decision_key: Option<String>,
+    pub(super) decision_proof: Option<super::certificate::Certificate>,
+    pub(super) membership: Option<super::historical::Membership>,
 }
 impl RamfluxClient {
     pub(crate) fn task_history(
@@ -68,8 +69,13 @@ impl RamfluxClient {
         if history.events.len() >= 256 {
             return Err(invalid("task event history limit reached"));
         }
-        let mut state = history.state()?;
+        let state = history.state()?;
         self.authorize_task_relations(carrier, state.task())?;
+        self.check_task_capacity(carrier, &history)?;
+        let mut candidate = state.clone();
+        candidate
+            .apply(&event, &carrier.signer(&public, &event))
+            .map_err(|e| invalid(e.to_string()))?;
         let (decision_key, decision_proof) =
             if let TaskEventBody::Resolve(resolution) = event.event() {
                 let task = state.task().ok_or_else(|| invalid("task not found"))?;
@@ -84,11 +90,8 @@ impl RamfluxClient {
                 }
                 (None, None)
             };
-        state
-            .apply(&event, &carrier.signer(&public, &event))
-            .map_err(|e| invalid(e.to_string()))?;
-        let task = state.task().cloned().ok_or_else(|| invalid("task missing after apply"))?;
-        Ok(Applied { history, event, public, task, decision_key, decision_proof })
+        let task = candidate.task().cloned().ok_or_else(|| invalid("task missing after apply"))?;
+        Ok(Applied { history, event, public, task, decision_key, decision_proof, membership: None })
     }
     pub(crate) fn task_delivery_receipt(&self, c: &Carrier) -> Result<Option<Outcome>, SdkError> {
         let receipt = scoped(
@@ -144,14 +147,6 @@ impl RamfluxClient {
         self.account_db()?
             .write_transaction(|| self.apply_task_message(delivery, body, true).map(Some))
     }
-    pub(super) fn project_owned_task_message(
-        &self,
-        delivery: &Delivery<'_>,
-        body: &[u8],
-    ) -> Result<Option<Outcome>, SdkError> {
-        self.account_db()?
-            .write_transaction(|| self.apply_task_message(delivery, body, false).map(Some))
-    }
     fn apply_task_message(
         &self,
         delivery: &Delivery<'_>,
@@ -165,6 +160,7 @@ impl RamfluxClient {
         {
             return Err(invalid("task source or conversation mismatch"));
         }
+        self.migrate_task_lifecycle(crate::time::now_unix_timestamp())?;
         let public = self.task_signer_key(delivery.principal, delivery.device)?;
         carrier.verify(&public)?;
         let db = self.account_db()?;
@@ -211,7 +207,8 @@ impl RamfluxClient {
             &carrier.principal_id,
             Some(&carrier.device_id),
         )?;
-        let pending_key = super::pending::pending_key(&carrier)?;
+        self.check_task_pending_collision(&carrier)?;
+        let pending_key = self.task_pending_key(&carrier)?;
         let already_pending = db.load_actor_state::<super::pending::Pending>(&pending_key)?;
         if let Some(old) = &already_pending {
             if old.carrier.bytes()? != body {
@@ -225,11 +222,17 @@ impl RamfluxClient {
         if self.task_event_is_future(&carrier)? {
             return self.hold_task_message(delivery, &carrier, already_pending.is_some());
         }
-        let outcome = match self.evaluate_task(&carrier) {
-            Ok(applied) => self.record_task_applied(delivery, carrier, applied, forward_owned)?,
+        let applied = db.write_transaction(|| {
+            let applied = self.evaluate_task(&carrier)?;
+            self.record_task_applied(delivery, carrier.clone(), applied, forward_owned)
+        });
+        let outcome = match applied {
+            Ok(outcome) => outcome,
             Err(SdkError::InboundPending(_)) => {
                 return self.hold_task_message(delivery, &carrier, already_pending.is_some());
             }
+            Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
+            Err(SdkError::Io(error)) => return Err(SdkError::Io(error)),
             Err(error) => Outcome {
                 accepted: false,
                 fallback_text: "[Task rejected]".into(),
@@ -238,6 +241,11 @@ impl RamfluxClient {
             },
         };
         db.delete_task_state(&pending_key)?;
+        if pending_key.starts_with("task/local_pending/") {
+            db.delete_task_state(
+                &pending_key.replace("task/local_pending/", "task/local_intent_status/"),
+            )?;
+        }
         db.persist_actor_state(
             if outcome.accepted { &receipt_key } else { &rejected_key },
             &Receipt { fingerprint, outcome: outcome.clone() },
@@ -248,50 +256,51 @@ impl RamfluxClient {
         self.store_task_message_metadata(delivery, &outcome)?;
         Ok(outcome)
     }
-    fn record_task_applied(
+    pub(super) fn record_task_applied(
         &self,
         delivery: &Delivery<'_>,
         carrier: Carrier,
         applied: Applied,
         forward_owned: bool,
     ) -> Result<Outcome, SdkError> {
-        let Applied { mut history, event, public, task, decision_key, decision_proof } = applied;
+        let Applied { mut history, event, public, task, decision_key, decision_proof, membership } =
+            applied;
         let db = self.account_db()?;
         if history.events.is_empty() {
             history.created_at = delivery.at;
         }
         history.updated_at = delivery.at;
-        let fallback = format!("{} (actor kind unverified)", event.fallback_text());
-        if let Some(proof) = &decision_proof {
+        let kind_verified =
+            super::actor_kind_verified(self, &carrier.principal_id, &carrier.device_id);
+        let mut fallback = event.fallback_text();
+        if !kind_verified && !fallback.contains("(actor kind unverified)") {
+            fallback.push_str(" (actor kind unverified)");
+        }
+        if forward_owned && let Some(proof) = &decision_proof {
             self.queue_task_decision_ack(&carrier, proof)?;
             self.save_task_commit_certificate(&carrier, proof)?;
         }
+        let membership = if forward_owned {
+            Some(self.task_membership_witness(&carrier, &task, delivery.at)?)
+        } else {
+            membership
+        };
         history.events.push(AcceptedEvent {
             carrier,
             public_key: public,
-            actor_kind_verified: false,
+            actor_kind_verified: kind_verified,
             received_at: delivery.at,
             decision_certificate: decision_proof,
+            membership,
         });
+        self.check_task_capacity(
+            &history.events.last().ok_or_else(|| invalid("empty history"))?.carrier,
+            &history,
+        )?;
         if serde_json::to_vec(&history)?.len() > 2 * 1024 * 1024 {
             return Err(invalid("task history byte budget exceeded"));
         }
         let history_key = scoped("history", &task.conversation_id, &task.task_id)?;
-        let (count, bytes) = db.task_state_usage("task/history/")?;
-        let old_bytes = db
-            .load_actor_state::<TaskHistory>(&history_key)?
-            .map(|h| serde_json::to_vec(&h))
-            .transpose()?
-            .map_or(0, |b| b.len());
-        let new_bytes = serde_json::to_vec(&history)?.len();
-        if (count >= 1000 && old_bytes == 0)
-            || bytes
-                .saturating_sub(u64::try_from(old_bytes).unwrap_or(u64::MAX))
-                .saturating_add(u64::try_from(new_bytes).unwrap_or(u64::MAX))
-                > 32 * 1024 * 1024
-        {
-            return Err(invalid("account task history capacity reached"));
-        }
         db.persist_actor_state(&history_key, &history)?;
         if let Some(key) = decision_key {
             db.delete_task_state(&super::key("decision_reserved", &key))?;
@@ -299,11 +308,12 @@ impl RamfluxClient {
         }
         let mut view = serde_json::to_value(&task)?;
         view["id"] = json!(task.task_id);
-        view["actor_kind_verified"] = json!(false);
+        view["actor_kind_verified"] = json!(kind_verified);
         view["created_at"] = json!(history.created_at);
         view["updated_at"] = json!(history.updated_at);
         db.persist_actor_state(&scoped("view", &task.conversation_id, &task.task_id)?, &view)?;
-        db.append_journal(&format!("task:{}:{}",scoped("event",&task.conversation_id,&task.task_id)?,task.version),"task.changed",&json!({"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state,"actor_kind_verified":false}),delivery.at,None)?;
+        db.append_journal(&format!("task:{}:{}",scoped("event",&task.conversation_id,&task.task_id)?,task.version),"task.changed",&json!({"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state,"actor_kind_verified":kind_verified}),delivery.at,None)?;
+        self.record_task_lifecycle(&task, &history)?;
         if forward_owned {
             self.queue_task_owned_forward(
                 &task.conversation_id,
@@ -344,7 +354,7 @@ impl RamfluxClient {
         delivery: &Delivery<'_>,
         outcome: &Outcome,
     ) -> Result<(), SdkError> {
-        self.account_db()?.persist_actor_state(&scoped("message",delivery.conversation,delivery.message)?,&json!({"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind_verified":false}))?;
+        self.account_db()?.persist_actor_state(&scoped("message",delivery.conversation,delivery.message)?,&json!({"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind_verified":super::actor_kind_verified(self, delivery.principal, delivery.device)}))?;
         Ok(())
     }
     pub(crate) fn task_message_metadata(

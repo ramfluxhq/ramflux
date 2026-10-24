@@ -222,10 +222,25 @@ impl RamfluxClient {
     pub(super) fn project_task_control_carrier(&self, c: &Carrier) -> Result<(), SdkError> {
         let pending = self
             .account_db()?
-            .load_actor_state::<super::pending::Pending>(&super::pending::pending_key(c)?)?;
-        let timeline =
-            pending.as_ref().map_or_else(|| super::timeline_id(c), |p| Ok(p.message.clone()))?;
-        let at = pending.as_ref().map_or_else(crate::time::now_unix_timestamp, |p| p.at);
+            .load_actor_state::<super::pending::Pending>(&self.task_pending_key(c)?)?;
+        let status =
+            self.account_db()?.load_actor_state::<super::local_pending::LocalIntentStatus>(
+                &self
+                    .task_pending_key(c)?
+                    .replace("task/local_pending/", "task/local_intent_status/"),
+            )?;
+        let timeline = if let Some(p) = &pending {
+            p.message.clone()
+        } else if let Some(s) = &status {
+            s.message.clone()
+        } else {
+            super::timeline_id(c)?
+        };
+        let at = pending
+            .as_ref()
+            .map(|p| p.at)
+            .or_else(|| status.as_ref().map(|s| s.at))
+            .unwrap_or_else(crate::time::now_unix_timestamp);
         let outcome = self
             .project_task_message(
                 &Delivery {
@@ -247,7 +262,7 @@ impl RamfluxClient {
             outcome.fallback_text.as_bytes(),
         )?;
         if !outcome.accepted && !outcome.pending {
-            self.account_db()?.append_journal(&format!("task-decision-rejected:{}",super::certificate::carrier_hash(c)?),"task.changed",&json!({"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"decision_rejected":true,"actor_kind_verified":false}),crate::time::now_unix_timestamp(),None)?;
+            self.account_db()?.append_journal(&format!("task-decision-rejected:{}",super::certificate::carrier_hash(c)?),"task.changed",&json!({"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"decision_rejected":true,"actor_kind_verified":super::actor_kind_verified(self, &c.principal_id, &c.device_id)}),crate::time::now_unix_timestamp(),None)?;
         }
         Ok(())
     }

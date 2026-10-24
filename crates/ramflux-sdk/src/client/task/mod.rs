@@ -7,7 +7,10 @@ pub(crate) mod carrier;
 pub(crate) mod certificate;
 pub(crate) mod control;
 pub(crate) mod decision;
+mod historical;
 mod intervention;
+mod lifecycle;
+mod local_pending;
 pub(crate) mod pending;
 mod projection;
 pub(crate) use authority::require_local_human;
@@ -26,6 +29,8 @@ pub(crate) struct AcceptedEvent {
     pub received_at: i64,
     #[serde(default)]
     pub decision_certificate: Option<certificate::Certificate>,
+    #[serde(default)]
+    pub membership: Option<historical::Membership>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct TaskHistory {
@@ -66,4 +71,13 @@ pub(crate) fn check_delivery_size(bytes: usize) -> Result<(), SdkError> {
         return Err(SdkError::TaskDeliveryTooLarge { bytes, limit: MAX_DELIVERY_BYTES });
     }
     Ok(())
+}
+
+/// Peer kinds remain unauthenticated until root-signed kind metadata is available.
+pub(crate) const fn actor_kind_verified(
+    _client: &crate::RamfluxClient,
+    _principal: &str,
+    _device: &str,
+) -> bool {
+    false
 }

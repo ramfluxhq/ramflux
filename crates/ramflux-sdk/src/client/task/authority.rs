@@ -82,6 +82,11 @@ impl RamfluxClient {
                     return Err(invalid("task start requester differs from authenticated actor"));
                 }
                 self.require_task_member(&carrier.conversation_id, &start.assignee, None)?;
+                let local =
+                    &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id;
+                if local != &start.requester && local != &start.assignee {
+                    return Err(invalid("local account has no role in this task"));
+                }
             }
             TaskEventBody::Proposal(proposal) => {
                 if proposal.proposer != carrier.principal_id {
@@ -91,7 +96,9 @@ impl RamfluxClient {
             }
             action => {
                 let task = current.ok_or_else(|| invalid("task not found"))?;
-                self.require_task_member(&carrier.conversation_id, &task.assignee, None)?;
+                if !matches!(action, TaskEventBody::Cancel(_)) {
+                    self.require_task_member(&carrier.conversation_id, &task.assignee, None)?;
+                }
                 let allowed = match action {
                     TaskEventBody::Accept(_) | TaskEventBody::Decline(_) => {
                         task.proposer.as_deref() != Some(carrier.principal_id.as_str())

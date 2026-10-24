@@ -9,21 +9,26 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub(super) struct Pending {
     pub carrier: Carrier,
-    conversation: String,
+    pub(super) conversation: String,
     pub(super) message: String,
     pub(super) at: i64,
-    expires_at: i64,
-}
-pub(super) fn pending_key(c: &Carrier) -> Result<String, SdkError> {
-    scoped(
-        "pending",
-        &c.conversation_id,
-        &serde_json::to_string(&(&c.principal_id, &c.message_id))?,
-    )
+    pub(super) expires_at: i64,
+    #[serde(default)]
+    pub(super) executor: Option<String>,
 }
 impl RamfluxClient {
+    pub(super) fn task_pending_key(&self, c: &Carrier) -> Result<String, SdkError> {
+        scoped(
+            if self.is_local_task_intent(c)? { "local_pending" } else { "pending" },
+            &c.conversation_id,
+            &serde_json::to_string(&(&c.principal_id, &c.message_id))?,
+        )
+    }
     pub(super) fn task_event_is_future(&self, c: &Carrier) -> Result<bool, SdkError> {
         let event = c.event()?;
+        if self.task_is_archived(&c.conversation_id, event.event().task_id())? {
+            return Ok(false);
+        }
         let state = self.task_history(&c.conversation_id, event.event().task_id())?.state()?;
         let Some(task) = state.task() else {
             return Ok(!matches!(
@@ -67,25 +72,26 @@ impl RamfluxClient {
         existing: bool,
     ) -> Result<Outcome, SdkError> {
         let db = self.account_db()?;
-        let (count, bytes) = db.task_state_usage("task/pending/")?;
         if !existing {
-            let rows = db.task_record_page::<Pending>("task/pending/", "task/pending/", 33)?;
-            if count >= 32
-                || bytes.saturating_add(u64::try_from(c.bytes()?.len()).unwrap_or(u64::MAX))
-                    > 5 * 1024 * 1024
-                || rows.iter().filter(|(_, p)| p.carrier.principal_id == c.principal_id).count()
-                    >= 8
-            {
-                return Err(SdkError::InboundPending("task holdback capacity reached".into()));
+            let local = self.is_local_task_intent(c)?;
+            if local {
+                self.admit_local_task_intent(c)?;
+            } else {
+                self.admit_peer_task_hold(c)?;
             }
             let pending = Pending {
                 carrier: c.clone(),
                 conversation: delivery.conversation.into(),
                 message: delivery.message.into(),
                 at: delivery.at,
-                expires_at: crate::time::now_unix_timestamp().saturating_add(600),
+                expires_at: crate::time::now_unix_timestamp().saturating_add(if local {
+                    60
+                } else {
+                    600
+                }),
+                executor: if local { Some(self.local_task_executor(c)?) } else { None },
             };
-            db.persist_actor_state(&pending_key(c)?, &pending)?;
+            db.persist_actor_state(&self.task_pending_key(c)?, &pending)?;
         }
         let outcome = Outcome {
             accepted: false,
@@ -102,8 +108,15 @@ impl RamfluxClient {
         Ok(outcome)
     }
     pub(crate) fn retry_pending_tasks(&self, now: i64) -> Result<usize, SdkError> {
-        let rows =
+        self.maintain_task_lifecycle(now)?;
+        self.release_local_task_slots(now)?;
+        let mut rows =
             self.account_db()?.task_record_page::<Pending>("task/pending/", "task/pending/", 33)?;
+        rows.extend(self.account_db()?.task_record_page::<Pending>(
+            "task/local_pending/",
+            "task/local_pending/",
+            101,
+        )?);
         let mut applied = 0;
         for (key, p) in rows {
             if applied >= 8 {
@@ -128,7 +141,7 @@ impl RamfluxClient {
                     &outcome,
                 )?;
                 self.replace_task_pending_fallback(&p, &outcome)?;
-                self.account_db()?.append_journal(&format!("task-hold-expired:{key}"),"task.changed",&serde_json::json!({"conversation_id":p.conversation,"task_id":p.carrier.event()?.event().task_id(),"resync_required":true,"actor_kind_verified":false}),now,None)?;
+                self.account_db()?.append_journal(&format!("task-hold-expired:{key}"),"task.changed",&serde_json::json!({"conversation_id":p.conversation,"task_id":p.carrier.event()?.event().task_id(),"resync_required":true,"actor_kind_verified":super::actor_kind_verified(self, &p.carrier.principal_id, &p.carrier.device_id)}),now,None)?;
                 continue;
             }
             if self.task_event_is_future(&p.carrier)? {
@@ -174,7 +187,7 @@ impl RamfluxClient {
         }
         Ok(applied)
     }
-    fn replace_task_pending_fallback(
+    pub(super) fn replace_task_pending_fallback(
         &self,
         p: &Pending,
         outcome: &Outcome,

@@ -163,7 +163,7 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
             && let Some(task) = client.task_message_metadata(conversation, &message.message_id)?
         {
             value["content_type"] = serde_json::json!("task");
-            value["actor_kind_verified"] = serde_json::json!(false);
+            value["actor_kind_verified"] = task["actor_kind_verified"].clone();
             value["body_utf8"] = task["fallback_text"].clone();
         }
         messages.push(value);

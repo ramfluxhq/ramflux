@@ -134,7 +134,8 @@ fn own_device_history_pages_fit_the_transport_budget_and_require_the_causal_pref
     let packets = f.agent.own_task_packets()?;
     let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
     sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
-    assert!(sibling.import_own_task_packets(&packets[1..], "agent-device").is_err());
+    sibling.import_own_task_packets(&packets[1..], "agent-device")?;
+    assert_ne!(sibling.account_db()?.task_state_usage("task/import_skip/")?.0, 0);
     assert!(sibling.task_get(Some("thread"), "task")?.is_null());
     sibling.import_own_task_packets(&packets, "agent-device")?;
     assert_eq!(sibling.task_get(Some("thread"), "task")?["version"], 10);
@@ -170,9 +171,10 @@ fn importing_old_verified_history_does_not_charge_eighty_events_as_new_peer_traf
         history.events.push(AcceptedEvent {
             carrier: c,
             public_key: public,
-            actor_kind_verified: false,
+            actor_kind_verified: actor_kind_verified(&f.agent, "human", "human-device"),
             received_at: i64::try_from(version)?,
             decision_certificate: None,
+            membership: None,
         });
     }
     assert_eq!(history.state()?.task().ok_or("task")?.version, 80);
@@ -220,5 +222,152 @@ fn own_device_snapshot_exports_task_packets_without_duplicate_transport_message_
     assert_eq!(bundle.messages[0].message_id, "ordinary-row");
     assert_eq!(bundle.task_packets.len(), 1);
     assert!(!bundle.contents.contains_key("transport-row"));
+    Ok(())
+}
+
+#[test]
+fn later_blocking_a_contact_does_not_reject_its_previously_committed_task_history() -> TestResult {
+    let f = Fixture::new()?;
+    manifests(&f)?;
+    assert!(
+        project(&f.agent, &sign(&f.human, "thread", "start", start("task", "thread"))?)?.accepted
+    );
+    f.agent.account_db()?.establish_friend_link("link", "agent", "human")?;
+    f.agent.account_db()?.block_friend_link("link", crate::time::now_unix_timestamp())?;
+    let packets = f.agent.own_task_packets()?;
+    let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
+    sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
+    sibling.account_db()?.establish_friend_link("link", "agent", "human")?;
+    sibling.account_db()?.block_friend_link("link", crate::time::now_unix_timestamp())?;
+    sibling.import_own_task_packets(&packets, "agent-device")?;
+    assert_eq!(sibling.task_get(Some("thread"), "task")?["requester"], "human");
+    assert_eq!(sibling.account_db()?.friend_link("link")?.state, "blocked");
+    let live = sign(&f.human, "thread", "new-task", start("new-task", "thread"))?;
+    assert!(project(&sibling, &live).is_err());
+    drop(sibling);
+    Ok(())
+}
+#[test]
+fn departed_group_participants_remain_valid_in_witnessed_history_without_regaining_membership()
+-> TestResult {
+    let f = Fixture::new()?;
+    manifests(&f)?;
+    f.agent.create_group("group", "agent-device")?;
+    f.agent.add_group_member("group", "human-device", "member")?;
+    f.agent.account_db()?.persist_client_record(
+        "conversation",
+        "group-thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    let event = sign(&f.human, "group-thread", "start", start("task", "group-thread"))?;
+    assert!(project(&f.agent, &event)?.accepted);
+    f.agent.remove_group_member("group", "agent-device", "human-device")?;
+    let packets = f.agent.own_task_packets()?;
+    assert_eq!(packets.len(), 1);
+    let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
+    sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
+    sibling.import_own_task_packets(&packets, "agent-device")?;
+    assert_eq!(sibling.task_get(Some("group-thread"), "task")?["requester"], "human");
+    assert!(sibling.account_db()?.group_member_role("group", "human-device")?.is_none());
+    assert!(sibling.account_db()?.group_member_key_binding("group", "human-device")?.is_none());
+    assert!(
+        project(
+            &sibling,
+            &sign(&f.human, "group-thread", "new-task", start("new-task", "group-thread"))?
+        )
+        .is_err()
+    );
+    drop(sibling);
+    Ok(())
+}
+#[test]
+fn a_bad_own_task_item_is_recorded_and_does_not_block_other_histories() -> TestResult {
+    let f = Fixture::new()?;
+    manifests(&f)?;
+    assert!(
+        project(&f.agent, &sign(&f.human, "thread", "start", start("task", "thread"))?)?.accepted
+    );
+    let packets = f.agent.own_task_packets()?;
+    let mut bad = serde_json::to_value(&packets[0])?;
+    bad["history"]["events"][0]["carrier"]["signature"] = json!("invalid");
+    let bad = serde_json::from_value(bad)?;
+    let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
+    sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
+    sibling.import_own_task_packets(&[bad, packets[0].clone()], "agent-device")?;
+    assert_eq!(sibling.task_get(Some("thread"), "task")?["version"], 1);
+    assert_eq!(sibling.account_db()?.task_state_usage("task/import_skip/")?.0, 1);
+    drop(sibling);
+    Ok(())
+}
+fn seed_legacy_terminal_histories(f: &Fixture, total: usize) -> Result<(), SdkError> {
+    f.agent.account_db()?.write_transaction(|| {
+        for index in 0..total {
+            let id = format!("legacy-{index}");
+            let events = [
+                sign(&f.human, "thread", &format!("start-{index}"), start(&id, "thread"))?,
+                sign(
+                    &f.human,
+                    "thread",
+                    &format!("cancel-{index}"),
+                    TaskEventBody::Cancel(ramflux_protocol::TaskCancel {
+                        task_id: id.clone(),
+                        base_revision: 1,
+                    }),
+                )?,
+            ]
+            .into_iter()
+            .map(|c| {
+                Ok(AcceptedEvent {
+                    public_key: f.agent.task_signer_key(&c.principal_id, &c.device_id)?,
+                    carrier: c,
+                    actor_kind_verified: actor_kind_verified(&f.human, "human", "human-device"),
+                    received_at: crate::time::now_unix_timestamp(),
+                    decision_certificate: None,
+                    membership: None,
+                })
+            })
+            .collect::<Result<Vec<_>, SdkError>>()?;
+            let history = TaskHistory {
+                events,
+                created_at: 1,
+                updated_at: crate::time::now_unix_timestamp(),
+            };
+            f.agent
+                .account_db()?
+                .persist_actor_state(&scoped("history", "thread", &id)?, &history)?;
+        }
+        Ok(())
+    })
+}
+#[test]
+fn accounts_with_over_one_hundred_and_one_thousand_tasks_still_export_bounded_new_device_snapshots()
+-> TestResult {
+    for total in [101, 1001] {
+        let f = Fixture::new()?;
+        manifests(&f)?;
+        seed_legacy_terminal_histories(&f, total)?;
+        f.agent.send_direct_message("thread", "ordinary", "human-device", b"ordinary history")?;
+        let commitment = manifest(&f.agent)?.principal_commitment;
+        let bundle = f.agent.own_device_history_bundle(
+            &commitment,
+            "agent-device",
+            "agent2-device",
+            "snapshot",
+        )?;
+        assert_eq!(bundle.messages.len(), 1);
+        assert_eq!(bundle.messages[0].message_id, "ordinary");
+        assert!(!bundle.task_packets.is_empty());
+        assert!(bundle.task_packets.len() <= 100);
+        assert!(serde_json::to_vec(&bundle.task_packets)?.len() <= 4 * 1024 * 1024);
+        let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
+        sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
+        sibling.import_own_task_packets(&bundle.task_packets, "agent-device")?;
+        assert_ne!(sibling.account_db()?.task_state_usage("task/view/")?.0, 0);
+        if total == 1001 {
+            assert!(bundle.task_export_metadata.truncated);
+            assert!(bundle.task_export_metadata.next_cursor.is_some());
+        }
+        drop(sibling);
+    }
     Ok(())
 }
