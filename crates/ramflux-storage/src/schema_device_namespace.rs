@@ -22,8 +22,10 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
     directory(connection)?;
     pins(connection)?;
     // An unscoped secret cannot be attributed to a root by guessing from a raw name.
-    // Retire it and old unscoped pointers/recovery work; authenticated bootstrap establishes
-    // a new scoped pair. Opening an already upgraded account never repeats this retirement.
+    // Archive unscoped secrets without granting them live authority. Drop old pointers and
+    // recovery work; authenticated bootstrap establishes a new scoped pair. An upgraded
+    // account never repeats this migration. Archive collisions abort rather than overwrite.
+    connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) SELECT 'legacy-device-pair/session/' || substr(state_kind,length('dm-pair/session/')+1),state_json FROM runtime_actor_state WHERE state_kind GLOB 'dm-pair/session/*' AND COALESCE(json_extract(CAST(state_json AS TEXT),'$.root_addressed'),0)<>1",[])?;
     connection.execute("DELETE FROM runtime_actor_state WHERE state_kind GLOB 'dm-pair/*' AND (state_kind NOT GLOB 'dm-pair/session/*' OR COALESCE(json_extract(CAST(state_json AS TEXT),'$.root_addressed'),0)<>1)",[])?;
     connection.execute("INSERT INTO device_namespace_upgrade VALUES(1)", [])?;
     transaction.commit()?;
@@ -118,7 +120,7 @@ fn pins(connection: &Connection) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use crate::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
     #[test]
     fn legacy_address_shaped_names_cannot_alias_another_roots_rows() -> Result<(), StorageError> {
         let (path, db) = crate::tests::test_db("device-namespace-upgrade")?;
@@ -144,6 +146,11 @@ mod tests {
         )?;
         super::upgrade(&db.connection)?;
         assert!(!db.actor_state_exists("dm-pair/session/old")?);
+        assert_eq!(
+            db.load_actor_state::<Value>("legacy-device-pair/session/old")?
+                .ok_or(StorageError::AuthorizationRejected)?["snapshot"]["secret"],
+            "old"
+        );
         assert!(db.actor_state_exists("dm-pair/session/scoped")?);
         db.persist_client_record("device", "phone", &json!({"device_id":"phone","principal_commitment":"bob-root","signing_public_key":"bob"}))?;
         db.upsert_device_directory_entry("phone", "bob-root", "verified", 2)?;
