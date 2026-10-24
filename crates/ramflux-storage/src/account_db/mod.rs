@@ -21,6 +21,7 @@ pub mod conversation_projection;
 pub mod conversation_state;
 pub mod device_directory;
 pub mod friend;
+mod group_key_safety;
 pub mod group_pending;
 pub mod groups;
 pub mod history;

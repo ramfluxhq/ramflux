@@ -229,6 +229,7 @@ impl RamfluxClient {
             return Ok(record);
         }
         let header = envelope.x3dh.as_ref().ok_or(SdkError::PairRecoveryRequired)?;
+        self.check_bootstrap_sequence(local, remote, header)?;
         if header.recipient_device_id != local
             || header.initiator_device_id_hash != dm_device_id_hash(remote)
             || header.recipient_device_id_hash != dm_device_id_hash(local)

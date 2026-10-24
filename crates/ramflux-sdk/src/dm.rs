@@ -290,6 +290,10 @@ mod tests {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SdkDmX3dhHeader {
+    /// Version-1 bootstrap sequence, bound into the v2 X3DH transcript associated data.
+    /// Missing on legacy sessions; unknown unsequenced v2 sessions fail closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_sequence: Option<u64>,
     /// Initial envelope identifier retained when a pair is bootstrapped by an object slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_envelope_id: Option<String>,

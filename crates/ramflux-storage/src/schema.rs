@@ -1096,6 +1096,18 @@ fn ensure_group_control_tables(connection: &Connection) -> Result<(), StorageErr
             PRIMARY KEY(group_id, invite_id)
         );",
     )?;
+    ensure_column(
+        connection,
+        "group_member_device_key",
+        "member_principal_id",
+        "member_principal_id TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "group_member_device_key",
+        "principal_commitment",
+        "principal_commitment TEXT",
+    )?;
     Ok(())
 }
 

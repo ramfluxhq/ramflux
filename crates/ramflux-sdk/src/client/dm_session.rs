@@ -91,13 +91,22 @@ impl RamfluxClient {
         let bundle_hash = prekey_bundle_hash(&recipient_bundle)?;
         let initiator_device_id_hash = dm_device_id_hash(own_device_id);
         let recipient_device_id_hash = dm_device_id_hash(recipient_device_id);
+        let bootstrap_sequence = if aad.is_some() {
+            Some(self.allocate_bootstrap_sequence(own_device_id)?)
+        } else {
+            None
+        };
+        let bootstrap_aad = super::routed::bootstrap_sequence::bootstrap_aad(
+            aad.unwrap_or_else(|| dm_associated_data(&message.conversation_id)),
+            bootstrap_sequence,
+        )?;
         let output = ramflux_crypto::x3dh_initiator(&X3dhInitiatorInput {
             initiator_identity: &own_identity,
             initiator_ephemeral: &ephemeral,
             initiator_device_id_hash,
             recipient_device_id_hash,
             recipient_bundle: &recipient_bundle,
-            associated_data: aad.unwrap_or_else(|| dm_associated_data(&message.conversation_id)),
+            associated_data: &bootstrap_aad,
             prekey_bundle_hash: &bundle_hash,
             initial_ratchet_public: ephemeral.public,
         })?;
@@ -110,6 +119,7 @@ impl RamfluxClient {
             recipient_bundle.signed_prekey,
         )?;
         let header = SdkDmX3dhHeader {
+            bootstrap_sequence,
             bootstrap_envelope_id: None,
             initiator_identity_public: own_identity.public,
             initiator_ephemeral_public: ephemeral.public,
@@ -155,6 +165,8 @@ impl RamfluxClient {
         }
         let identity = X25519KeyPair::from_seed(own_state.identity_seed);
         let signed_prekey = X25519KeyPair::from_seed(own_state.signed_prekey_seed);
+        let bootstrap_aad =
+            super::routed::bootstrap_sequence::bootstrap_aad(aad, header.bootstrap_sequence)?;
         let output = ramflux_crypto::x3dh_recipient(&X3dhRecipientInput {
             recipient_identity: &identity,
             recipient_signed_prekey: &signed_prekey,
@@ -165,7 +177,7 @@ impl RamfluxClient {
             recipient_device_id_hash: header.recipient_device_id_hash,
             recipient_signed_prekey_id: &header.recipient_signed_prekey_id,
             recipient_one_time_prekey_id: header.recipient_one_time_prekey_id.as_deref(),
-            associated_data: aad,
+            associated_data: &bootstrap_aad,
             prekey_bundle_hash: &header.prekey_bundle_hash,
             initial_ratchet_public: header.initiator_ephemeral_public,
         })?;

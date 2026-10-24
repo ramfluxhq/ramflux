@@ -134,7 +134,7 @@ async fn blocking_a_contact_ends_reset_work_through_the_production_path() -> Res
     Box::pin(relationship_end(true)).await
 }
 #[tokio::test]
-async fn a_verified_manifest_without_the_old_device_erases_its_pair_and_stops_retries()
+async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_work()
 -> Result<(), SdkError> {
     let mut alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
@@ -183,10 +183,22 @@ async fn a_verified_manifest_without_the_old_device_erases_its_pair_and_stops_re
         }],
     };
     RamfluxClient::verify_device_manifest_json(serde_json::to_value(&manifest)?, &commitment)?;
-    bob.client.persist_identity_directory(&manifest)?;
-    assert!(!has_work(&bob)?);
-    assert!(bob.client.active_pair("bob", "alice")?.is_none());
-    assert!(bob.client.account_db()?.client_record("device", "alice")?.is_none());
+    let before =
+        bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?;
+    let pending = bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work()?)?;
+    for _ in 0..2 {
+        bob.client.persist_identity_directory(&manifest)?;
+        assert!(has_work(&bob)?);
+        assert_eq!(
+            bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?,
+            before
+        );
+        assert_eq!(
+            bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work()?)?,
+            pending
+        );
+        assert!(bob.client.account_db()?.client_record("device", "alice")?.is_some());
+    }
     Ok(())
 }
 #[tokio::test]

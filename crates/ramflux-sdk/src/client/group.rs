@@ -20,6 +20,17 @@ impl RamfluxClient {
                 creator_id,
                 &public_key,
             )?;
+            if let Some(root) = self.identity_root.as_ref() {
+                let public =
+                    ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
+                self.account_db()?.bind_group_member_key_identity(
+                    group_id,
+                    creator_id,
+                    &branch.principal_id,
+                    &crate::prekey::identity_root_public_key_commitment(&public)?,
+                    &public_key,
+                )?;
+            }
         }
         Ok(group)
     }
@@ -291,7 +302,39 @@ impl RamfluxClient {
             ));
         }
         ramflux_protocol::verify_signed_fields(event, &event.signed, verified_actor_public_key)?;
-        self.apply_verified_group_member_join_from_event(event)
+        let ramflux_protocol::GroupEventBody::MemberJoined {
+            group_id,
+            previous_epoch,
+            new_group_epoch,
+            joined_identity,
+            joined_role,
+            actor_role,
+            actor_principal_commitment,
+            actor_device_signing_public_key,
+            max_members,
+            new_member_history,
+        } = &event.body
+        else {
+            return Err(SdkError::LocalBus("expected group join".into()));
+        };
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if joined_identity != &local.device_id {
+            return Err(SdkError::LocalBus("bootstrap joined identity is not local".into()));
+        }
+        Ok(self.account_db()?.apply_bootstrap_group_member_join(&GroupMemberJoinWrite {
+            group_id: group_id.clone(),
+            event_id: event.event_id.clone(),
+            actor_device_id: event.actor_device_id.clone(),
+            joined_identity: joined_identity.clone(),
+            joined_role: joined_role.clone(),
+            actor_role: actor_role.clone(),
+            actor_principal_commitment: actor_principal_commitment.clone(),
+            actor_device_signing_public_key: actor_device_signing_public_key.clone(),
+            previous_epoch: *previous_epoch,
+            new_group_epoch: *new_group_epoch,
+            max_members: *max_members,
+            new_member_history: new_member_history.clone(),
+        })?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -344,40 +387,6 @@ impl RamfluxClient {
             max_members,
             new_member_history: new_member_history.to_owned(),
         })?)
-    }
-
-    fn apply_verified_group_member_join_from_event(
-        &self,
-        event: &ramflux_protocol::GroupEvent,
-    ) -> Result<GroupState, SdkError> {
-        let ramflux_protocol::GroupEventBody::MemberJoined {
-            group_id,
-            previous_epoch,
-            new_group_epoch,
-            joined_identity,
-            joined_role,
-            actor_role,
-            actor_principal_commitment,
-            actor_device_signing_public_key,
-            max_members,
-            new_member_history,
-        } = &event.body
-        else {
-            return Err(SdkError::LocalBus("expected group member joined event".to_owned()));
-        };
-        self.apply_verified_group_member_join(
-            event,
-            group_id,
-            *previous_epoch,
-            *new_group_epoch,
-            joined_identity,
-            joined_role,
-            actor_role,
-            actor_principal_commitment,
-            actor_device_signing_public_key,
-            *max_members,
-            new_member_history,
-        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1354,6 +1363,88 @@ mod tests {
             alice.account_db()?.group_member_device_key("group_test", "victim_device")?,
             Some(genuine)
         );
+        Ok(())
+    }
+    #[test]
+    fn member_and_admin_join_events_cannot_promote_the_actor_or_demote_the_owner()
+    -> Result<(), SdkError> {
+        for role in ["member", "admin"] {
+            let owner = group_client("join-owner-guard", "alice", "alice_device", [71; 32])?;
+            let attacker = ramflux_crypto::create_device_branch("bob", "bob_device", 1, [72; 32]);
+            let owner_key = device_public_key("alice", "alice_device", [71; 32]);
+            seed_group(&owner, &owner_key)?;
+            if role == "admin" {
+                owner.account_db()?.upsert_group_member_snapshot(
+                    "group_test",
+                    "bob_device",
+                    "admin",
+                    2,
+                )?;
+            }
+            seed_member_key(
+                &owner,
+                "bob_device",
+                &ramflux_protocol::encode_base64url(
+                    attacker.signing_key.verifying_key().to_bytes(),
+                ),
+            )?;
+            let mut event = owner.create_signed_group_member_join_event(
+                "group_test",
+                "alice_device",
+                "bob_device",
+                "member",
+                "owner-commitment",
+            )?;
+            event.actor_device_id = "bob_device".into();
+            event.signed.signing_key_id = "device:bob_device".into();
+            if let ramflux_protocol::GroupEventBody::MemberJoined {
+                actor_role,
+                joined_identity,
+                joined_role,
+                actor_device_signing_public_key,
+                ..
+            } = &mut event.body
+            {
+                *actor_role = "owner".into();
+                *joined_identity = "alice_device".into();
+                *joined_role = "member".into();
+                *actor_device_signing_public_key = ramflux_protocol::encode_base64url(
+                    attacker.signing_key.verifying_key().to_bytes(),
+                );
+            }
+            event.signed.signature =
+                ramflux_crypto::sign_protocol_object_with_device_branch(&attacker, &event)?;
+            let before = owner.group_state("group_test")?;
+            assert!(owner.apply_group_control_event(&event).is_err());
+            assert_eq!(owner.group_state("group_test")?, before);
+        }
+        Ok(())
+    }
+    #[test]
+    fn bootstrap_join_cannot_replace_membership_of_an_already_known_group() -> Result<(), SdkError>
+    {
+        let owner = group_client("bootstrap-existing", "alice", "alice_device", [73; 32])?;
+        owner.create_group("known", "alice_device")?;
+        owner.add_group_member("known", "bob_device", "member")?;
+        let event = owner.create_signed_group_member_join_event(
+            "known",
+            "alice_device",
+            "bob_device",
+            "member",
+            "owner-commitment",
+        )?;
+        let bob = group_client("bootstrap-target", "bob", "bob_device", [74; 32])?;
+        bob.create_group("known", "bob_device")?;
+        let before = bob.group_state("known")?;
+        assert!(
+            bob.apply_bootstrap_group_member_join_event(
+                &event,
+                "alice_device",
+                &device_public_key("alice", "alice_device", [73; 32])
+            )
+            .is_err()
+        );
+        assert_eq!(bob.group_state("known")?, before);
         Ok(())
     }
 }

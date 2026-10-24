@@ -11,6 +11,7 @@ pub mod dm_session;
 pub mod federation;
 pub mod group;
 pub mod group_delivery;
+mod group_key_safety;
 pub mod group_session;
 pub mod identity;
 pub mod mcp_a2ui;

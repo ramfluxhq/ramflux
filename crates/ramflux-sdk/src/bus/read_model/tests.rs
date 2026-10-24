@@ -232,3 +232,19 @@ fn identity_directory_exposes_manual_pair_recovery_without_private_state() -> Re
     assert_eq!(bob["pair_recovery"][0]["device_id"], "bob-phone");
     Ok(())
 }
+
+#[test]
+fn pinned_member_safety_changes_are_visible_in_group_list() -> Result<(), SdkError> {
+    let f = Fixture::new()?;
+    f.client.create_group("group", "alice-phone")?;
+    let change =
+        json!({"state":"key_changed","device_id":"bob","reason":"pinned_group_member_key_changed"});
+    f.client.account_db()?.persist_client_record(
+        "group",
+        "group",
+        &json!({"safety_change":change}),
+    )?;
+    let row = f.read("group.list", json!({}))?;
+    assert_eq!(row["groups"][0]["safety_change"], change);
+    Ok(())
+}

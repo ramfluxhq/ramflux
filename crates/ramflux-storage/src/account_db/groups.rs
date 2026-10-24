@@ -74,8 +74,58 @@ impl AccountDb {
         &self,
         join: &GroupMemberJoinWrite,
     ) -> Result<GroupState, StorageError> {
+        self.write_transaction(|| self.apply_group_member_join_inner(join, false))
+    }
+    /// Applies authenticated first-seen onboarding only to a group absent from local state.
+    /// # Errors
+    /// Rejects existing groups, unauthorized roles or invalid storage transitions.
+    pub fn apply_bootstrap_group_member_join(
+        &self,
+        join: &GroupMemberJoinWrite,
+    ) -> Result<GroupState, StorageError> {
+        self.write_transaction(|| self.apply_group_member_join_inner(join, true))
+    }
+    fn authorize_group_join(
+        &self,
+        join: &GroupMemberJoinWrite,
+        bootstrap: bool,
+    ) -> Result<(), StorageError> {
         validate_group_role(&join.joined_role)?;
         validate_group_role(&join.actor_role)?;
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM group_projection WHERE group_id=?1)",
+            params![join.group_id],
+            |r| r.get(0),
+        )?;
+        let actor_role = if bootstrap {
+            if exists {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            join.actor_role.clone()
+        } else {
+            self.group_member_role(&join.group_id, &join.actor_device_id)?
+                .ok_or(StorageError::GroupPermissionDenied)?
+        };
+        if actor_role != join.actor_role
+            || !can_invite_group_member(&actor_role, &join.joined_role)
+            || self.group_member_role(&join.group_id, &join.joined_identity)?.is_some()
+        {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        if exists && self.group_state(&join.group_id)?.group_epoch != join.previous_epoch {
+            return Err(StorageError::GroupControlEpochMismatch {
+                expected: self.group_state(&join.group_id)?.group_epoch,
+                actual: join.previous_epoch,
+            });
+        }
+        Ok(())
+    }
+    fn apply_group_member_join_inner(
+        &self,
+        join: &GroupMemberJoinWrite,
+        bootstrap: bool,
+    ) -> Result<GroupState, StorageError> {
+        self.authorize_group_join(join, bootstrap)?;
         self.ensure_group_control_not_seen(&join.group_id, &join.event_id)?;
         if !is_group_admin_role(&join.actor_role) {
             return Err(StorageError::GroupPermissionDenied);
@@ -119,24 +169,26 @@ impl AccountDb {
                 applied_at
             ],
         )?;
-        self.persist_group_member_device_key(
-            &join.group_id,
-            &join.actor_device_id,
-            &join.actor_device_signing_public_key,
-        )?;
-        self.connection.execute(
-            "INSERT OR REPLACE INTO group_member_projection
+        if bootstrap {
+            self.persist_group_member_device_key(
+                &join.group_id,
+                &join.actor_device_id,
+                &join.actor_device_signing_public_key,
+            )?;
+            self.connection.execute(
+                "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at)
              VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5)",
-            params![
-                join.group_id,
-                join.actor_device_id,
-                join.actor_role,
-                i64::try_from(join.previous_epoch)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?,
-                applied_at
-            ],
-        )?;
+                params![
+                    join.group_id,
+                    join.actor_device_id,
+                    join.actor_role,
+                    i64::try_from(join.previous_epoch)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?,
+                    applied_at
+                ],
+            )?;
+        }
         self.connection.execute(
             "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at)
@@ -256,6 +308,7 @@ impl AccountDb {
         member_id: &str,
         device_signing_public_key: &str,
     ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
         if self.group_member_role(group_id, member_id)?.is_some()
             && self
                 .group_member_device_key(group_id, member_id)?
@@ -269,19 +322,8 @@ impl AccountDb {
              VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=excluded.group_id AND m.member_id=excluded.member_id AND m.active=1)",
             params![group_id, member_id, device_signing_public_key, self.now_unix()],
         )?;
-        Ok(())
-    }
-
-    /// Refreshes an active member key only after the caller verifies its device manifest.
-    /// # Errors
-    /// Returns SQLite errors.
-    pub fn refresh_group_keys_from_verified_manifest(
-        &self,
-        member_id: &str,
-        key: &str,
-    ) -> Result<(), StorageError> {
-        self.connection.execute("UPDATE group_member_device_key SET device_signing_public_key=?2,verified_at=?3 WHERE member_id=?1 AND device_signing_public_key IS NOT ?2 AND EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=group_member_device_key.group_id AND m.member_id=group_member_device_key.member_id AND m.active=1)",params![member_id,key,self.now_unix()])?;
-        Ok(())
+        self.bind_group_key_from_directory(group_id, member_id, device_signing_public_key)
+        })
     }
 
     /// # Errors
@@ -543,6 +585,7 @@ impl AccountDb {
         &self,
         accept: &GroupInviteAcceptWrite,
     ) -> Result<GroupState, StorageError> {
+        self.write_transaction(|| {
         validate_group_role(&accept.accepted_role)?;
         self.ensure_group_control_not_seen(&accept.group_id, &accept.event_id)?;
         let invite = self.group_invite(&accept.group_id, &accept.invite_id)?;
@@ -632,7 +675,13 @@ impl AccountDb {
               WHERE group_id = ?1 AND invite_id = ?2 AND state = 'pending'",
             params![accept.group_id, accept.invite_id, applied_at],
         )?;
+        self.bind_group_key_from_directory(
+            &accept.group_id,
+            &accept.invitee_identity,
+            &invite.invitee_signing_public_key,
+        )?;
         self.group_state(&accept.group_id)
+        })
     }
 
     /// # Errors

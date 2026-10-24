@@ -33,12 +33,6 @@ impl RamfluxClient {
         if record["revoked"] == true || self.friend_rejection_reason(principal)?.is_some() {
             return Ok(false);
         }
-        if let Some(identity) = db.client_record("identity", principal)?
-            && let Some(devices) = identity["devices"].as_array()
-            && !devices.iter().any(|device| device["device_id"] == remote || device["id"] == remote)
-        {
-            return Ok(false);
-        }
         let own =
             self.device_branch.as_ref().is_some_and(|device| device.principal_id == principal);
         Ok(own
@@ -123,23 +117,6 @@ impl RamfluxClient {
                 && record["principal_id"].as_str() != own
             {
                 self.remove_device_pair(device, "contact_removed_or_blocked")?;
-            }
-        }
-        Ok(())
-    }
-    pub(crate) fn retire_devices_absent_from_manifest(
-        &self,
-        manifest: &crate::prekey::SdkDeviceManifestResponse,
-    ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        for key in db.actor_state_keys("directory/device/")? {
-            let device = key.trim_start_matches("directory/device/");
-            let record = db.client_record("device", device)?.unwrap_or(Value::Null);
-            if record["principal_id"] == manifest.principal_id
-                && !manifest.devices.iter().any(|entry| entry.device_id == device)
-            {
-                self.remove_device_pair(device, "verified_manifest_device_removed")?;
-                db.remove_actor_state(&key)?;
             }
         }
         Ok(())

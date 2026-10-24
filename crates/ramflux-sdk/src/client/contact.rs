@@ -12,6 +12,8 @@ impl RamfluxClient {
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
+        // Retain the safety observation even when ownership validation rejects the directory.
+        db.write_transaction(|| self.record_pinned_group_key_changes(manifest))?;
         db.write_transaction(|| self.persist_verified_directory_rows(manifest))?;
         self.finish_pair_retirement()
     }
@@ -35,14 +37,6 @@ impl RamfluxClient {
         }
         for device in &manifest.devices {
             if db
-                .load_actor_state::<bool>(&format!("device/revoked/{}", device.device_id))?
-                .unwrap_or(false)
-            {
-                return Err(SdkError::InboundRejected(
-                    "verified manifest includes a locally revoked device".to_owned(),
-                ));
-            }
-            if db
                 .client_record("device", &device.device_id)?
                 .as_ref()
                 .and_then(|record| record.get("principal_commitment"))
@@ -54,7 +48,7 @@ impl RamfluxClient {
                 ));
             }
         }
-        self.retire_devices_absent_from_manifest(manifest)?;
+
         let material = contact_safety_material_from_manifest(manifest)?;
         let device_set_hash =
             ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&material.devices));
@@ -73,10 +67,16 @@ impl RamfluxClient {
             &serde_json::json!({"principal_id":manifest.principal_id}),
         )?;
         for device in &manifest.devices {
-            db.refresh_group_keys_from_verified_manifest(
-                &device.device_id,
-                &device.branch_public_key,
-            )?;
+            if db
+                .load_actor_state::<bool>(&format!("device/revoked/{}", device.device_id))?
+                .unwrap_or(false)
+                && self
+                    .device_branch
+                    .as_ref()
+                    .is_some_and(|own| own.principal_id == manifest.principal_id)
+            {
+                continue;
+            }
             db.persist_client_record("device",&device.device_id,&serde_json::json!({"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id}))?;
         }
         Ok(())
@@ -1390,7 +1390,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn only_a_verified_manifest_refresh_can_rotate_an_active_group_member_key()
+    fn a_same_principal_manifest_key_change_preserves_the_pin_and_reports_safety()
     -> Result<(), SdkError> {
         let (client, root) = unlocked_client("manifest_group_rotation")?;
         let initial = manifest_fixture(
@@ -1430,7 +1430,75 @@ mod tests {
         client.persist_identity_directory(&replacement)?;
         assert_eq!(
             client.account_db()?.group_member_device_key("rotation_group", "peer_device")?,
-            Some(new_key)
+            Some(first)
+        );
+        assert_eq!(
+            client
+                .account_db()?
+                .client_record("group", "rotation_group")?
+                .ok_or_else(|| SdkError::LocalBus("safety change missing".into()))?["safety_change"]
+                ["state"],
+            "key_changed"
+        );
+        assert!(
+            client
+                .account_db()?
+                .journal_after(0, 128)?
+                .iter()
+                .any(|event| event.topic == "safety.changed")
+        );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn another_principals_manifest_cannot_replace_a_pinned_member_key_and_raises_safety()
+    -> Result<(), SdkError> {
+        let (client, root) = unlocked_client("cross-principal-key-change")?;
+        let initial = manifest_fixture(
+            "victim",
+            "victim_device",
+            [0x51; 32],
+            [0x52; 32],
+            [0x53; 32],
+            [0x54; 32],
+        )?;
+        client.create_group("pinned", "victim_device")?;
+        client.account_db()?.persist_group_member_device_key(
+            "pinned",
+            "victim_device",
+            &initial.devices[0].branch_public_key,
+        )?;
+        let impostor = manifest_fixture(
+            "mallory",
+            "victim_device",
+            [0x61; 32],
+            [0x62; 32],
+            [0x63; 32],
+            [0x64; 32],
+        )?;
+        RamfluxClient::verify_device_manifest_json(
+            serde_json::to_value(&impostor)?,
+            &impostor.principal_commitment,
+        )?;
+        client.persist_identity_directory(&impostor)?;
+        assert_eq!(
+            client.account_db()?.group_member_device_key("pinned", "victim_device")?,
+            Some(initial.devices[0].branch_public_key.clone())
+        );
+        assert_eq!(
+            client
+                .account_db()?
+                .client_record("group", "pinned")?
+                .ok_or_else(|| SdkError::LocalBus("safety missing".into()))?["safety_change"]["state"],
+            "key_changed"
+        );
+        assert!(
+            client
+                .account_db()?
+                .journal_after(0, 128)?
+                .iter()
+                .any(|event| event.topic == "safety.changed")
         );
         drop(client);
         std::fs::remove_dir_all(root)?;

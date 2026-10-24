@@ -7,6 +7,7 @@ use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 mod archive;
 mod auth;
+pub(crate) mod bootstrap_sequence;
 mod committed;
 mod context;
 pub(crate) mod control;

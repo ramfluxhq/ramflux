@@ -138,6 +138,12 @@ impl RamfluxClient {
         let (_, bundle) =
             self.recv_pair_session(&slot.recipient_device_id, &remote, "object-slot", &envelope)?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            self.commit_bootstrap_sequence(
+                &slot.recipient_device_id,
+                &remote,
+                slot.x3dh.as_ref(),
+                &slot.ciphertext.session_id,
+            )?;
             self.persist_pair(
                 &slot.recipient_device_id,
                 &remote,

@@ -292,6 +292,12 @@ impl RamfluxClient {
             if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
                 || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
             {
+                self.commit_bootstrap_sequence(
+                    &opened.local_device,
+                    &opened.remote_device,
+                    decode(&entry.envelope)?.x3dh.as_ref(),
+                    &opened.session.session_id,
+                )?;
                 self.persist_pair(
                     &opened.local_device,
                     &opened.remote_device,

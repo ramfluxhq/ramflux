@@ -562,3 +562,6 @@ mod recovery_policy;
 
 #[path = "device_revocation_tests.rs"]
 mod device_revocation;
+
+#[path = "retirement_guard_tests.rs"]
+mod retirement_guard;
