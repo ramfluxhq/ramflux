@@ -45,7 +45,7 @@ pub(crate) fn handle_mvp7_lifecycle_finalize(
         )?;
     } else {
         store.record_lifecycle_record(&response.record)?;
-        store.record_identity_registry(&state.mvp1_identities_snapshot())?;
+        state.persist_identity_registry(store)?;
     }
     Ok(response)
 }

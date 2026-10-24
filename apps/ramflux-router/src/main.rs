@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 mod handlers;
+mod identity_authority;
 mod lifecycle;
 mod router_engine;
 mod router_runtime;

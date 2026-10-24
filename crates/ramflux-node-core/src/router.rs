@@ -378,6 +378,23 @@ impl RouterCore {
         &self,
         request: &IdentityRegisterRequest,
     ) -> Result<IdentityRegistrationResponse, NodeCoreError> {
+        self.register_identity_with_store(request, None)
+    }
+    /// Register root-bound keys and persist their authority before making them visible.
+    /// # Errors
+    /// Rejects invalid registrations or storage failures before publishing the new authority.
+    pub fn register_identity_durable(
+        &self,
+        request: &IdentityRegisterRequest,
+        store: &crate::RouterRedbStore,
+    ) -> Result<IdentityRegistrationResponse, NodeCoreError> {
+        self.register_identity_with_store(request, Some(store))
+    }
+    fn register_identity_with_store(
+        &self,
+        request: &IdentityRegisterRequest,
+        store: Option<&crate::RouterRedbStore>,
+    ) -> Result<IdentityRegistrationResponse, NodeCoreError> {
         let local_home_node_id = self.local_home_node_id();
         let (mut session, registration_trust_tier) = {
             let mut control = lock_unpoisoned(&self.control);
@@ -393,9 +410,11 @@ impl RouterCore {
                     migration.migration_proof_hash, migration.new_home_node
                 )));
             }
-            let registered = control
-                .mvp1_identities
-                .register_admitted_identity(request, registration_trust_tier)?;
+            let mut candidate = control.mvp1_identities.clone();
+            candidate.authorize_root_bound_registration(request)?;
+            let registered=candidate.register_admitted_identity(request,registration_trust_tier)?;
+            if let Some(store)=store { store.record_identity_registry(&candidate)?; }
+            control.mvp1_identities=candidate;
             self.refresh_migration_read_snapshot_from_control(&control);
             registered
         };
@@ -1166,7 +1185,10 @@ impl RouterCore {
         )
     }
 
-    fn refresh_migration_read_snapshot_from_control(&self, control: &RouterControlState) {
+    pub(crate) fn refresh_migration_read_snapshot_from_control(
+        &self,
+        control: &RouterControlState,
+    ) {
         self.migration_read_snapshot
             .store(Arc::new(RouterMigrationReadSnapshot::from_control(control)));
     }

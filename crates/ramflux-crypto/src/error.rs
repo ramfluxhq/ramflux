@@ -5,6 +5,8 @@ use ramflux_protocol::ProtocolError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
+    #[error("identity authority rejected: {0}")]
+    IdentityAuthority(&'static str),
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
     #[error("base64url decode failed: {0}")]

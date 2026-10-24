@@ -87,6 +87,8 @@ pub struct BranchProofDocument {
     pub issued_at: i64,
     pub expires_at: i64,
     pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_binding: Option<ramflux_protocol::DeviceKeyBinding>,
 }
 
 /// # Errors
@@ -136,8 +138,10 @@ pub fn create_device_branch(
     }
 }
 
+/// Historical v1 proof constructor retained for legacy state/fixture compatibility. Its signature
+/// does not authorize any public key. New registrations require `authorize_device_branch_v2`.
 /// # Errors
-/// Returns an error when validation, serialization, storage, or state checks fail.
+/// Returns canonical serialization errors.
 pub fn authorize_device_branch(
     root: &IdentityRoot,
     device: &DeviceBranch,
@@ -176,11 +180,14 @@ pub fn authorize_device_branch(
         issued_at,
         expires_at,
         signature: encode_base64url(signature.to_bytes()),
+        key_binding: None,
     })
 }
 
+/// Verify historical metadata or the signed v2 document. This does not compare advertised keys.
+/// Live key authority requires `verify_root_bound_branch_proof` and an authenticated device set.
 /// # Errors
-/// Returns an error when validation, serialization, storage, or state checks fail.
+/// Rejects invalid signatures, audience, expiry or capabilities.
 pub fn verify_branch_proof(
     root_public_key: &VerifyingKey,
     proof: &BranchProofDocument,
@@ -194,17 +201,7 @@ pub fn verify_branch_proof(
     if !proof.capability_scope.iter().any(|capability| capability == required_capability) {
         return Err(CryptoError::VerifyFailed);
     }
-    let body = BranchProofSigningBody {
-        proof_id: &proof.proof_id,
-        principal_id: &proof.principal_id,
-        device_id: &proof.device_id,
-        device_epoch: proof.device_epoch,
-        audience: &proof.audience,
-        capability_scope: &proof.capability_scope,
-        issued_at: proof.issued_at,
-        expires_at: proof.expires_at,
-    };
-    let canonical = ramflux_protocol::canonical_json_bytes(&body)?;
+    let canonical = crate::branch_proof_signing_bytes(proof)?;
     verify_canonical_signature(
         &canonical,
         &proof.signature,

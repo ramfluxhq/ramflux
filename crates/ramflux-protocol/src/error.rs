@@ -5,6 +5,8 @@
 pub enum ProtocolError {
     #[error("transport protocol error: {0}")]
     TransportProtocol(String),
+    #[error("invalid identity record: {0}")]
+    InvalidIdentityRecord(&'static str),
     #[error("core error: {0}")]
     Core(#[from] ramflux_core::CoreError),
     #[error("canonical serialization failed: {0}")]
