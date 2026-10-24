@@ -111,7 +111,7 @@ impl RamfluxClient {
         let envelope = decode(&entry.envelope)?;
         let aad = associated_data(
             &entry.envelope.envelope_id,
-            &opened.remote_device,
+            &entry.envelope.source_device_id,
             &opened.local_device,
             &opened.bundle_hash,
         )?;

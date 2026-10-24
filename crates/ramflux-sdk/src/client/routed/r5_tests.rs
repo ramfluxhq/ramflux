@@ -13,6 +13,10 @@ pub(super) fn outgoing(sender: &Fixture, receiver: &Fixture, id: &str) -> Gatewa
         .map_or_else(|| sender.id.clone(), |b| b.principal_id.clone());
     msg.sender_id.clone_from(&sender.id);
     msg.recipient_device_id = Some(receiver.id.clone());
+    msg.recipient_principal_commitment =
+        receiver.client.identity_root.as_ref().map(|root| {
+            ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())
+        });
     msg.target_delivery_id.clone_from(&receiver.id);
     msg
 }
@@ -57,9 +61,7 @@ async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair() -> Resul
     settle(&mut alice, &mut bob).await?;
     let old =
         alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
-    bob.client
-        .account_db()?
-        .remove_actor_state(&super::super::session::pair_key("bob", "alice")?)?;
+    bob.client.account_db()?.remove_actor_state(&bob.client.pair_key("bob", "alice")?)?;
     bob.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&bob, &alice, "after-state-loss")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
@@ -224,6 +226,7 @@ fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), Sd
         object_id: "object".to_owned(),
         conversation_id: "recovery-thread".to_owned(),
         recipient_device_id: "bob".to_owned(),
+        source_principal_commitment: None,
         x3dh: decode(&entry.envelope)?.x3dh,
         ciphertext,
     };
@@ -240,10 +243,7 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
     settle(&mut alice, &mut bob).await?;
     let old =
         alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
-    alice
-        .client
-        .account_db()?
-        .remove_actor_state(&super::super::session::pair_key("alice", "bob")?)?;
+    alice.client.account_db()?.remove_actor_state(&alice.client.pair_key("alice", "bob")?)?;
     alice.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&alice, &bob, "alice-state-loss")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
@@ -291,5 +291,17 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
             .load_actor_state::<serde_json::Value>(&format!("dm-pair/session/{old}"))?
             .is_some()
     );
+    Ok(())
+}
+
+#[test]
+fn a_literal_address_shaped_device_name_bootstraps_under_its_actual_root() -> Result<(), SdkError> {
+    let literal = ramflux_protocol::qualified_device_id("unrelated-root", "phone")?;
+    let sender = Fixture::new(&literal, 41)?;
+    let receiver = Fixture::new("bob", 61)?;
+    let entry = fresh(&sender, &receiver, "literal-address")?;
+    let opened = receiver.client.open_routed(&entry, "bob")?;
+    assert_eq!(opened.body.as_slice(), b"fresh");
+    assert_eq!(opened.remote_device, sender.client.local_device_reference(&literal)?);
     Ok(())
 }

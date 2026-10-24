@@ -77,7 +77,8 @@ fn unverified_initiator_cannot_replace_a_known_devices_pair_session() -> Result<
     let impostor = Fixture::new("alice", 20)?;
     let bob = Fixture::new("bob", 30)?;
     trust(&bob, &alice)?;
-    let mut forged = seal(&impostor, &bob, message("forged-bootstrap", "thread"), b"attack")?;
+    let staging = Fixture::new("bob", 30)?;
+    let mut forged = seal(&impostor, &staging, message("forged-bootstrap", "thread"), b"attack")?;
     forged.envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
         alice.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &forged.envelope,
@@ -445,7 +446,7 @@ fn a_lower_peer_session_id_cannot_displace_a_locally_initiated_session() -> Resu
     let alice = Fixture::new("alice", 11)?;
     let bob = Fixture::new("bob", 31)?;
     trust(&bob, &alice)?;
-    let mut outbound = message("local-first", "thread");
+    let mut outbound = super::r5::outgoing(&bob, &alice, "local-first");
     outbound.source_principal_id = "bob".to_owned();
     outbound.sender_id = "bob".to_owned();
     outbound.recipient_device_id = Some("alice".to_owned());
@@ -525,8 +526,9 @@ async fn an_object_share_and_later_messages_keep_one_device_pair_ratchet() -> Re
         writes: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
     };
     let mut engine = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(inbox));
+    let recipient = bob.client.local_device_reference("bob")?;
     let request = serde_json::from_value(
-        serde_json::json!({"object_id":"shared","conversation_id":"thread","recipient_device_id":"bob","target_delivery_id":"bob"}),
+        serde_json::json!({"object_id":"shared","conversation_id":"thread","recipient_device_id":recipient,"target_delivery_id":"bob"}),
     )?;
     let package = alice.client.share_object_key_with_dm_recipient(&mut engine, request).await?;
     let entry = seal(&alice, &bob, message("after-share", "thread"), b"after share")?;
@@ -608,11 +610,18 @@ async fn transient_sender_lookup_retries_with_backoff_while_later_messages_progr
     remote.source_principal_id = "carol".to_owned();
     remote.sender_id = "carol".to_owned();
     let pending = seal(&carol, &bob, remote, b"retry me")?;
-    bob.client.account_db()?.persist_client_record(
-        "device",
-        "carol",
-        &serde_json::json!({"principal_id":"carol"}),
-    )?;
+    let carol_root = ramflux_crypto::identity_root_commitment(
+        &carol
+            .client
+            .identity_root
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_key
+            .verifying_key(),
+    );
+    let carol_address = ramflux_protocol::qualified_device_id(&carol_root, "carol")?;
+    bob.client.account_db()?.remove_actor_state(&format!("directory/device/{carol_address}"))?;
+    bob.client.establish_friend_link("carol-friend", "bob", &carol_root)?;
     let mut good = seal(&alice, &bob, message("later-good", "thread"), b"works")?;
     good.inbox_seq = 2;
     let (engine, _) = Inbox::engine(bob.config()?, vec![pending.clone(), good])?;
@@ -733,7 +742,7 @@ fn a_substituted_recipient_prekey_cannot_bootstrap_a_known_device() -> Result<()
     });
     let result = alice.client.send_pair_session_from_url(
         "alice",
-        &message("substitution", "thread"),
+        &super::r5::outgoing(&alice, &bob, "substitution"),
         Some(&url),
     );
     server.join().map_err(|_| invalid("prekey test server stopped"))??;
@@ -1024,7 +1033,11 @@ fn live_pair_bootstrap_rejects_a_signed_prekey_from_an_older_device_epoch() -> R
     assert!(
         sender
             .client
-            .new_send_pair("alice", &message("old-device-epoch", "thread"), bundle)
+            .new_send_pair(
+                "alice",
+                &super::r5::outgoing(&sender, &current, "old-device-epoch"),
+                bundle
+            )
             .is_err()
     );
     Ok(())

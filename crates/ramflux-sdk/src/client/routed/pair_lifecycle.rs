@@ -2,14 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Pair erasure and retry eligibility driven by verified device and relationship lifecycle.
-use super::session::pair_key;
 use super::{RamfluxClient, SdkError, now_unix_timestamp};
 use serde_json::{Value, json};
 impl RamfluxClient {
     pub(super) fn require_pair_device_active(&self, local: &str) -> Result<(), SdkError> {
         if self
             .account_db()?
-            .load_actor_state::<bool>(&format!("device/revoked/{local}"))?
+            .load_actor_state::<bool>(
+                &self.device_revocation_key(&self.local_device_reference(local)?)?,
+            )?
             .unwrap_or(false)
         {
             return Err(SdkError::InboundRejected("local device is revoked".to_owned()));
@@ -22,10 +23,15 @@ impl RamfluxClient {
         remote: &str,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
-        if db.load_actor_state::<bool>(&format!("device/revoked/{local}"))?.unwrap_or(false) {
+        if db
+            .load_actor_state::<bool>(
+                &self.device_revocation_key(&self.local_device_reference(local)?)?,
+            )?
+            .unwrap_or(false)
+        {
             return Ok(false);
         }
-        if db.load_actor_state::<bool>(&format!("device/revoked/{remote}"))?.unwrap_or(false) {
+        if db.load_actor_state::<bool>(&self.device_revocation_key(remote)?)?.unwrap_or(false) {
             return Ok(false);
         }
         let Some(record) = db.client_record("device", remote)? else { return Ok(false) };
@@ -37,7 +43,7 @@ impl RamfluxClient {
             self.device_branch.as_ref().is_some_and(|device| device.principal_id == principal);
         Ok(own
             || self.friend_link_peer_is_accepted(principal)?
-            || db.actor_state_exists(&pair_key(local, remote)?)?
+            || db.actor_state_exists(&self.pair_key(local, remote)?)?
             || self.pair_recovery_pending(local, remote)?)
     }
     pub(crate) fn apply_verified_device_revocation(
@@ -64,24 +70,31 @@ impl RamfluxClient {
                 "identity/signed_set/{commitment}"
             ))?
             .ok_or_else(|| super::invalid("revocation requires signed authority"))?;
+        let raw = crate::client::identity_authority::device_namespace::wire_device_id(remote)?;
+        let reference = ramflux_protocol::qualified_device_id(&commitment, &raw)?;
+        if ramflux_protocol::parse_qualified_device_id(remote)?
+            .is_some_and(|(root, _)| root != commitment)
+        {
+            return Err(super::invalid("revocation root address mismatch"));
+        }
         if record.principal_id != principal
             || !record.devices.iter().any(|d| {
-                d.device_id == remote && d.status == ramflux_protocol::DeviceSetStatus::Revoked
+                d.device_id == raw && d.status == ramflux_protocol::DeviceSetStatus::Revoked
             })
         {
             return Err(super::invalid("revocation is not root-authorized"));
         }
         let db = self.account_db()?;
         db.write_transaction(|| -> Result<(), SdkError> {
-            if remote == own.device_id {
+            if raw == own.device_id && principal == own.principal_id {
                 for peer in db.pair_peer_devices(&own.device_id)? {
                     self.remove_device_pair(&peer, "root_signed_device_revoked")?;
                 }
             } else {
-                self.remove_device_pair(remote, "root_signed_device_revoked")?;
+                self.remove_device_pair(&reference, "root_signed_device_revoked")?;
             }
-            db.remove_actor_state(&format!("directory/device/{remote}"))?;
-            db.persist_actor_state(&format!("device/revoked/{remote}"), &true)?;
+            db.remove_actor_state(&format!("directory/device/{reference}"))?;
+            db.persist_actor_state(&self.device_revocation_key(&reference)?, &true)?;
             Ok(())
         })?;
         self.finish_pair_retirement()
@@ -95,7 +108,7 @@ impl RamfluxClient {
             for id in db.pair_session_ids(&local, remote)? {
                 self.retire_pair(&local, remote, &id)?;
             }
-            let pair = pair_key(&local, remote)?;
+            let pair = self.pair_key(&local, remote)?;
             db.remove_actor_state(&pair)?;
             db.remove_actor_state(&format!("{pair}/archive"))?;
             db.remove_actor_state(&format!("{pair}/reset-pending"))?;
@@ -120,11 +133,13 @@ impl RamfluxClient {
         remote: &str,
         at: i64,
     ) -> Result<(), SdkError> {
+        let remote = self.device_reference(remote)?;
+        let remote = remote.as_str();
         let db = self.account_db()?;
         db.write_transaction(||->Result<(),SdkError>{
             self.remove_device_pair(remote,"retry_lifetime_exhausted")?;
-            db.persist_actor_state(&format!("{}/manual",pair_key(local,remote)?),&json!({"local_device_id":local,"device_id":remote,"state":"needs_manual_recovery","at":at}))?;
-            db.append_journal(&format!("pair-manual:{}:{at}",pair_key(local,remote)?),"session.reset",&json!({"device_id":remote,"state":"needs_manual_recovery","reason":"retry_lifetime_exhausted"}),at,None)?;
+            db.persist_actor_state(&format!("{}/manual",self.pair_key(local,remote)?),&json!({"local_device_id":local,"device_id":remote,"state":"needs_manual_recovery","at":at}))?;
+            db.append_journal(&format!("pair-manual:{}:{at}",self.pair_key(local,remote)?),"session.reset",&json!({"device_id":remote,"state":"needs_manual_recovery","reason":"retry_lifetime_exhausted"}),at,None)?;
             Ok(())
         })?;
         self.finish_pair_retirement()

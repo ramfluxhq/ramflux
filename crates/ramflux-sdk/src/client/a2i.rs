@@ -28,6 +28,10 @@ impl RamfluxClient {
                     event.target_device_id
                 ))
             })?;
+        let root = self.device_root(&event.target_device_id)?;
+        let mut event = event.clone();
+        event.target_device_id =
+            super::identity_authority::device_namespace::wire_device_id(&event.target_device_id)?;
         let conversation_id =
             a2i_control_conversation_id(&event.source_device_id, &event.target_device_id);
         let message = GatewayDirectMessage {
@@ -37,6 +41,7 @@ impl RamfluxClient {
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: event.source_device_id.clone(),
             recipient_device_id: Some(event.target_device_id.clone()),
+            recipient_principal_commitment: Some(root),
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: event.created_at,
@@ -45,7 +50,7 @@ impl RamfluxClient {
         self.send_plaintext_direct_message_without_franking(
             engine,
             message,
-            &serde_json::to_vec(event)?,
+            &serde_json::to_vec(&event)?,
             crate::client::routed::Route::control(),
         )
         .await

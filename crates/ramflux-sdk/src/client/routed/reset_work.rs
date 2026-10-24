@@ -45,14 +45,18 @@ impl RamfluxClient {
             "pair-control-{}",
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         );
-        let target_delivery_id = self.pair_delivery_id(remote)?;
+        let reference = self.device_reference(remote)?;
+        let (root, wire_remote) = ramflux_protocol::parse_qualified_device_id(&reference)?
+            .ok_or_else(|| super::invalid("reset requires a root-qualified peer"))?;
+        let target_delivery_id = self.pair_delivery_id(&reference)?;
         let mut message = GatewayDirectMessage {
             conversation_id: id.clone(),
             message_id: id.clone(),
             envelope_id: id,
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: engine.config.principal_id.clone(),
-            recipient_device_id: Some(remote.to_owned()),
+            recipient_device_id: Some(wire_remote),
+            recipient_principal_commitment: Some(root),
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: super::now_unix_timestamp(),

@@ -9,24 +9,10 @@ pub(crate) fn verify_manifest(
     manifest: &SdkDeviceManifestResponse,
     expected: &str,
 ) -> Result<(), SdkError> {
-    if manifest.devices.len() > 1024 || serde_json::to_vec(manifest)?.len() > 8 * 1024 * 1024 {
-        return Err(invalid("manifest budget exceeded"));
-    }
+    verify_manifest_authority(manifest, expected)?;
     let root = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
-    if manifest.principal_commitment != expected
-        || ramflux_crypto::identity_root_commitment(&root) != expected
-        || ramflux_protocol::encode_base64url(root.to_bytes()) != manifest.root_public_key
-    {
-        return Err(invalid("root commitment mismatch"));
-    }
-    let record = manifest
-        .signed_device_set
-        .as_ref()
-        .ok_or_else(|| invalid("legacy manifest is read-only; signed device set required"))?;
-    ramflux_crypto::verify_signed_device_set(&root, record)?;
-    if record.principal_id != manifest.principal_id || record.principal_commitment != expected {
-        return Err(invalid("principal or signed-set binding mismatch"));
-    }
+    let record =
+        manifest.signed_device_set.as_ref().ok_or_else(|| invalid("missing signed set"))?;
     let mut seen = std::collections::BTreeSet::new();
     for device in &manifest.devices {
         if !seen.insert(&device.device_id) {
@@ -52,7 +38,7 @@ pub(crate) fn verify_manifest(
             branch_signing_public_key: device.branch_public_key.clone(),
             agreement_identity_public_key: ramflux_protocol::encode_base64url(bundle.identity_key),
         };
-        ramflux_crypto::verify_root_bound_branch_proof(
+        ramflux_crypto::verify_root_bound_key_authorization(
             &root,
             &device.branch_proof,
             &binding,
@@ -81,7 +67,45 @@ pub(crate) fn verify_manifest(
     Ok(())
 }
 
+pub(crate) fn verify_manifest_authority(
+    manifest: &SdkDeviceManifestResponse,
+    expected: &str,
+) -> Result<(), SdkError> {
+    if manifest.devices.len() > 1024 || serde_json::to_vec(manifest)?.len() > 8 * 1024 * 1024 {
+        return Err(invalid("manifest budget exceeded"));
+    }
+    let root = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
+    if manifest.principal_commitment != expected
+        || ramflux_crypto::identity_root_commitment(&root) != expected
+        || ramflux_protocol::encode_base64url(root.to_bytes()) != manifest.root_public_key
+    {
+        return Err(invalid("root commitment mismatch"));
+    }
+    let record = manifest
+        .signed_device_set
+        .as_ref()
+        .ok_or_else(|| invalid("legacy manifest is read-only; signed device set required"))?;
+    ramflux_crypto::verify_signed_device_set(&root, record)?;
+    if record.principal_id != manifest.principal_id || record.principal_commitment != expected {
+        return Err(invalid("principal or signed-set binding mismatch"));
+    }
+    Ok(())
+}
+
 impl crate::RamfluxClient {
+    pub(crate) fn require_fresh_device_authorization(&self, remote: &str) -> Result<(), SdkError> {
+        let row = self
+            .account_db()?
+            .client_record("device", remote)?
+            .ok_or_else(|| invalid("device absent"))?;
+        if row["proof_expires_at"]
+            .as_i64()
+            .is_none_or(|expiry| expiry < crate::prelude::now_unix_timestamp())
+        {
+            return Err(invalid("device session proof expired; refresh required"));
+        }
+        Ok(())
+    }
     pub(crate) fn verify_root_bound_prekey(
         &self,
         remote: &str,
@@ -93,13 +117,14 @@ impl crate::RamfluxClient {
                 .client_record("device", remote)?
                 .ok_or_else(|| invalid("recipient missing"))?
         };
+        self.require_fresh_device_authorization(remote)?;
         let identity: [u8; 32] = serde_json::from_value(
             record
                 .get("x25519_identity_public")
                 .cloned()
                 .ok_or_else(|| invalid("recipient identity missing"))?,
         )?;
-        if bundle.device_id != remote
+        if bundle.device_id != super::device_namespace::wire_device_id(remote)?
             || bundle.identity_key != identity
             || bundle.device_agreement_x25519_public != identity
             || record["device_epoch"] != bundle.device_epoch

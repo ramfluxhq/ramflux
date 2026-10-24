@@ -774,6 +774,20 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 ON object_operation(operation_id);
         ",
     },
+    AccountMigration {
+        schema_version: 8,
+        app_version: "v1-root-device-addresses",
+        checksum: "2026-10-24-root-qualified-device-directory-v1",
+        notes: "device directory raw-name index for root-qualified storage keys",
+        sql: "ALTER TABLE device_directory ADD COLUMN raw_device_id TEXT; UPDATE device_directory SET raw_device_id=device_id; CREATE INDEX idx_device_directory_raw ON device_directory(raw_device_id);",
+    },
+    AccountMigration {
+        schema_version: 9,
+        app_version: "v1-root-device-pins",
+        checksum: "2026-10-24-root-qualified-group-pins-v1",
+        notes: "literal member names indexed beside root-qualified key pins",
+        sql: "ALTER TABLE group_member_device_key ADD COLUMN raw_device_id TEXT; UPDATE group_member_device_key SET raw_device_id=member_id; CREATE INDEX idx_group_device_raw ON group_member_device_key(group_id,raw_device_id);",
+    },
 ];
 
 pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageError> {

@@ -283,6 +283,7 @@ mod tests {
             source_principal_id: "principal_alice".to_owned(),
             sender_id: "alice_device".to_owned(),
             recipient_device_id: Some("bob_device".to_owned()),
+            recipient_principal_commitment: None,
             target_delivery_id: "target_bob".to_owned(),
             encrypted_body,
             created_at: 1_900_000_000,

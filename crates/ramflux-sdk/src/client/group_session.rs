@@ -155,7 +155,7 @@ impl RamfluxClient {
             })?;
         if self
             .account_db()?
-            .group_member_device_key(&distribution.group_id, &distribution.sender_id)?
+            .group_member_device_key_by_name(&distribution.group_id, &distribution.sender_id)?
             .as_ref()
             != Some(public_key)
         {

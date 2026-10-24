@@ -25,7 +25,7 @@ async fn pruned_tombstones_cannot_revive_a_held_bootstrap_or_clear_manual_recove
     assert!(bob.client.open_routed(&held, "bob").is_err());
     assert_eq!(super::session_record::active(&bob, "alice")?, current);
     bob.client.mark_pair_manual("bob", "alice", now_unix_timestamp())?;
-    let pair = super::super::session::pair_key("bob", "alice")?;
+    let pair = bob.client.pair_key("bob", "alice")?;
     let marker = db.load_actor_state::<serde_json::Value>(&format!("{pair}/manual"))?;
     for key in db.actor_state_keys("dm-pair/retired/")? {
         db.remove_actor_state(&key)?;

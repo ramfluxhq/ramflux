@@ -55,6 +55,9 @@ impl AccountDb {
     /// # Errors
     /// Returns errors querying or decoding the record.
     pub fn client_record(&self, directory: &str, id: &str) -> Result<Option<Value>, StorageError> {
+        if directory == "device" {
+            return self.device_record(id);
+        }
         self.load_actor_state(&format!("directory/{directory}/{id}"))
     }
 
@@ -68,6 +71,9 @@ impl AccountDb {
         id: &str,
         value: &Value,
     ) -> Result<(), StorageError> {
+        if directory == "device" {
+            return self.persist_device_metadata(id, value);
+        }
         self.persist_actor_state(&format!("directory/{directory}/{id}"), value)
     }
 

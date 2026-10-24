@@ -372,12 +372,21 @@ fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
     db.add_group_member("group", "device", "member")?;
     db.persist_client_record("device","device",&serde_json::json!({"principal_id":"alice","principal_commitment":"alice-root","signing_public_key":"alice-key"}))?;
     db.persist_group_member_device_key("group", "device", "alice-key")?;
-    let owner:(String,String)=db.connection.query_row("SELECT member_principal_id,principal_commitment FROM group_member_device_key WHERE group_id='group' AND member_id='device'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let address = ramflux_protocol::qualified_device_id("alice-root", "device")?;
+    let owner:(String,String)=db.connection.query_row("SELECT member_principal_id,principal_commitment FROM group_member_device_key WHERE group_id='group' AND member_id=?1",params![address],|r|Ok((r.get(0)?,r.get(1)?)))?;
     assert_eq!(owner, ("alice".into(), "alice-root".into()));
     db.remove_group_member("group", "owner", "device")?;
     db.persist_client_record("device","device",&serde_json::json!({"principal_id":"mallory","principal_commitment":"mallory-root","signing_public_key":"mallory-key"}))?;
     assert!(db.persist_group_member_device_key("group", "device", "mallory-key").is_err());
-    assert_eq!(db.group_member_device_key("group", "device")?.as_deref(), Some("alice-key"));
+    assert!(
+        db.persist_group_member_device_key(
+            "group",
+            &ramflux_protocol::qualified_device_id("mallory-root", "device")?,
+            "mallory-key"
+        )
+        .is_err()
+    );
+    assert_eq!(db.group_member_device_key("group", &address)?.as_deref(), Some("alice-key"));
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

@@ -31,7 +31,7 @@ impl RamfluxClient {
             self.account_db()?
                 .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
         }
-        self.persist_pair(local, remote, &bundle, &session)?;
+        self.persist_pair(local, &Self::qualified_recipient(message)?, &bundle, &session)?;
         self.finish_pair_retirement()?;
         Ok(SdkObjectKeySlot {
             schema: "ramflux.sdk.object_key_slot.dm.v2".to_owned(),
@@ -39,24 +39,52 @@ impl RamfluxClient {
             object_id: object_id.to_owned(),
             conversation_id: conversation.to_owned(),
             recipient_device_id: remote.to_owned(),
+            source_principal_commitment: self.identity_root.as_ref().map(|root| {
+                ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())
+            }),
             x3dh: header,
             ciphertext,
         })
     }
     fn slot_remote(&self, slot: &SdkObjectKeySlot) -> Result<String, SdkError> {
-        let mut after = String::new();
-        loop {
-            let ids = self.account_db()?.client_directory_ids("device", &after, 128)?;
-            if ids.is_empty() {
-                return Err(invalid("object slot sender has no verified device record"));
+        let mut candidates = std::collections::BTreeSet::new();
+        if let Some(record) = self.account_db()?.load_actor_state::<serde_json::Value>(&format!(
+            "dm-pair/session/{}",
+            slot.ciphertext.session_id
+        ))? && let Some(remote) = record["remote"].as_str()
+        {
+            let remote = self.device_reference(remote)?;
+            if self.require_cached_root_authority(&remote).is_ok() {
+                candidates.insert(remote);
             }
-            for id in &ids {
-                if dm_device_id_hash(id) == slot.ciphertext.sender_device_id_hash {
-                    return Ok(id.clone());
-                }
-            }
-            after = ids.last().cloned().ok_or_else(|| invalid("device page empty"))?;
         }
+        if candidates.is_empty() || slot.source_principal_commitment.is_some() {
+            candidates.clear();
+            let mut after = String::new();
+            loop {
+                let ids = self.account_db()?.client_directory_ids("device", &after, 128)?;
+                if ids.is_empty() {
+                    break;
+                }
+                for id in &ids {
+                    let raw =
+                        crate::client::identity_authority::device_namespace::wire_device_id(id)?;
+                    if dm_device_id_hash(&raw) == slot.ciphertext.sender_device_id_hash
+                        && self.require_cached_root_authority(id).is_ok()
+                        && slot.source_principal_commitment.as_ref().is_none_or(|expected| {
+                            self.device_root(id).is_ok_and(|root| root == *expected)
+                        })
+                    {
+                        candidates.insert(self.device_reference(id)?);
+                    }
+                }
+                after = ids.last().cloned().ok_or_else(|| invalid("empty device page"))?;
+            }
+        }
+        if candidates.len() != 1 {
+            return Err(invalid("object slot requires an unambiguous root-qualified sender"));
+        }
+        candidates.into_iter().next().ok_or_else(|| invalid("object sender absent"))
     }
     pub(crate) fn decrypt_pair_object_slot(
         &self,
@@ -87,10 +115,15 @@ impl RamfluxClient {
             session = (**current).clone();
         }
         let active = &mut session;
-        let key = zeroize::Zeroizing::new(
-            active
-                .decrypt(&slot.ciphertext, &slot_aad(&slot.object_id, &remote, local, &bundle)?)?,
-        );
+        let key = zeroize::Zeroizing::new(active.decrypt(
+            &slot.ciphertext,
+            &slot_aad(
+                &slot.object_id,
+                &crate::client::identity_authority::device_namespace::wire_device_id(&remote)?,
+                local,
+                &bundle,
+            )?,
+        )?);
         let object_key: [u8; 32] =
             key.as_slice().try_into().map_err(|_| invalid("invalid pair object key length"))?;
         if let Some(current) = current {

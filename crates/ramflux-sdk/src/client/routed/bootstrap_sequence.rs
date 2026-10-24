@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Durable sender allocation and authenticated receive high-water marks survive secret erasure.
-use super::session::pair_key;
 use super::{RamfluxClient, SdkDmX3dhHeader, SdkError, invalid};
 const MAX_SEQUENCE: u64 = 9_007_199_254_740_991;
 pub(crate) fn bootstrap_aad(
@@ -72,6 +71,8 @@ impl RamfluxClient {
         local: &str,
         remote: &str,
     ) -> Result<String, SdkError> {
+        let remote = self.device_reference(remote)?;
+        let remote = remote.as_str();
         let record = self.trusted_device(remote)?;
         let principal = record["principal_id"]
             .as_str()
@@ -79,7 +80,7 @@ impl RamfluxClient {
         let commitment = record["principal_commitment"]
             .as_str()
             .ok_or_else(|| invalid("bootstrap commitment missing"))?;
-        let pair = pair_key(local, remote)?;
+        let pair = self.pair_key(local, remote)?;
         let hash = ramflux_protocol::hash_base64url(
             "ramflux.sdk.bootstrap.owner.v2",
             &ramflux_protocol::canonical_json_bytes(&(principal, commitment, remote))?,

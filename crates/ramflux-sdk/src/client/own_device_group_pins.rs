@@ -16,7 +16,7 @@ impl RamfluxClient {
             for member in &group.members {
                 if let Some(binding) = self
                     .account_db()?
-                    .group_member_key_binding(&group.group_id, &member.member_id)?
+                    .group_member_key_binding_by_name(&group.group_id, &member.member_id)?
                 {
                     pins.push(SdkOwnDeviceGroupMemberPin {
                         group_id: group.group_id.clone(),
@@ -115,7 +115,8 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("invalid member pin".into()));
         }
-        if let Some(old) = db.group_member_key_binding(&pin.group_id, &pin.device_id)?
+        let reference=pin.principal_commitment.as_ref().map(|root|ramflux_protocol::qualified_device_id(root,&pin.device_id)).transpose()?.unwrap_or_else(||pin.device_id.clone());
+        if let Some(old) = db.group_member_key_binding(&pin.group_id, &reference)?
             && (old.signing_public_key != pin.signing_public_key
                 || old.principal_id.as_ref().is_some_and(|p| Some(p) != pin.principal_id.as_ref())
                 || old
@@ -125,12 +126,12 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("member pin conflict".into()));
         }
-        db.persist_group_member_device_key(&pin.group_id, &pin.device_id, &pin.signing_public_key)?;
+        db.persist_group_member_device_key(&pin.group_id, &reference, &pin.signing_public_key)?;
         if let (Some(principal), Some(commitment)) = (&pin.principal_id, &pin.principal_commitment)
         {
             db.bind_group_member_key_identity(
                 &pin.group_id,
-                &pin.device_id,
+                &reference,
                 principal,
                 commitment,
                 &pin.signing_public_key,

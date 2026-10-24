@@ -11,7 +11,8 @@ fn from(
     id: &str,
     conversation: &str,
 ) -> GatewayDirectMessage {
-    let mut msg = message(id, conversation);
+    let mut msg = super::r5::outgoing(sender, receiver, id);
+    msg.conversation_id = conversation.into();
     msg.source_principal_id.clone_from(&sender.id);
     msg.sender_id.clone_from(&sender.id);
     msg.recipient_device_id = Some(receiver.id.clone());
@@ -327,6 +328,7 @@ fn reference(entry: &GatewayInboxEntry) -> Result<crate::dm::SdkDmAttachmentRef,
             object_id: "same-object".to_owned(),
             conversation_id: "slot".to_owned(),
             recipient_device_id: "bob".to_owned(),
+            source_principal_commitment: None,
             x3dh: wrapper.x3dh,
             ciphertext: wrapper.ciphertext,
         },

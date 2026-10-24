@@ -35,7 +35,7 @@ impl RamfluxClient {
             return Ok(None);
         }
         if let Ok(mut event) = serde_json::from_slice::<A2iControlEvent>(body) {
-            if event.source_device_id != opened.remote_device
+            if event.source_device_id != entry.envelope.source_device_id
                 || event.target_device_id != opened.local_device
             {
                 return Err(invalid("control event device binding mismatch"));
@@ -105,7 +105,7 @@ impl RamfluxClient {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("unknown control event type"))?;
-        let device = self.trusted_device(&entry.envelope.source_device_id)?;
+        let device = self.trusted_device(&self.inbound_device_reference(entry)?)?;
         let remote = [
             Some(entry.envelope.source_principal_id.as_str()),
             device.get("principal_commitment").and_then(Value::as_str),

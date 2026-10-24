@@ -65,9 +65,9 @@ pub(crate) use crate::bus::protocol::{LocalBusPersistedAccount, default_device_c
 pub(crate) use crate::bus::state::{
     LocalBusAccountState, LocalBusConnectionState, LocalBusDaemonState, LocalBusSubscriber,
 };
-pub(crate) use crate::client::contact::{
-    assert_manifest_active_device, assert_target_manifest_active_device,
-};
+pub(crate) use crate::client::contact::assert_manifest_active_device;
+#[cfg(test)]
+pub(crate) use crate::client::contact::assert_target_manifest_active_device;
 pub(crate) use crate::dm::*;
 pub(crate) use crate::gateway::{
     GatewayRelayTokenIssueBody, GatewayRelayTokenIssueRequest, GatewayRelayTokenIssueResponse,

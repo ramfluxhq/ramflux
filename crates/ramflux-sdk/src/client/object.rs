@@ -70,7 +70,7 @@ impl RamfluxClient {
         let target_delivery_id = request.target_delivery_id.clone().ok_or_else(|| {
             SdkError::LocalBus("object.share requires target_delivery_id".to_owned())
         })?;
-        let message = GatewayDirectMessage {
+        let mut message = GatewayDirectMessage {
             conversation_id: request.conversation_id.clone(),
             message_id: format!("object.slot:{}:{recipient_device_id}", object.object_id),
             envelope_id: format!(
@@ -80,11 +80,13 @@ impl RamfluxClient {
             source_principal_id: sender_id.clone(),
             sender_id,
             recipient_device_id: Some(recipient_device_id.clone()),
+            recipient_principal_commitment: request.recipient_principal_commitment.clone(),
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
             ttl: 3_600,
         };
+        Self::normalize_recipient(&mut message)?;
         let key_slot = self
             .make_pair_object_slot(
                 engine,
@@ -2473,6 +2475,7 @@ mod t21a1_tests {
             object_id: object_id.to_owned(),
             conversation_id: slot_conversation_id.to_owned(),
             recipient_device_id: recipient_device_id.to_owned(),
+            source_principal_commitment: None,
             x3dh: None,
             ciphertext,
         };

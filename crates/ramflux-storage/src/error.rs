@@ -5,6 +5,10 @@ use crate::EncryptionMode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    #[error("protocol error: {0}")]
+    Protocol(#[from] ramflux_protocol::ProtocolError),
+    #[error("ambiguous device ID: {0}; root-qualified address required")]
+    AmbiguousDeviceId(String),
     #[error("core error: {0}")]
     Core(#[from] ramflux_core::CoreError),
     #[error("crypto error: {0}")]

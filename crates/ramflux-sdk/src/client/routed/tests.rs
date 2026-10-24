@@ -73,6 +73,7 @@ fn message(id: &str, conversation: &str) -> GatewayDirectMessage {
         source_principal_id: "alice".to_owned(),
         sender_id: "alice".to_owned(),
         recipient_device_id: Some("bob".to_owned()),
+        recipient_principal_commitment: None,
         target_delivery_id: "bob".to_owned(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
@@ -94,12 +95,31 @@ fn seal_as(
     body: &[u8],
     route: Route,
 ) -> Result<GatewayInboxEntry, SdkError> {
-    if receiver.client.account_db()?.client_record("device", &sender.id)?.is_none() {
+    if receiver
+        .client
+        .account_db()?
+        .client_record("device", &sender.client.local_device_reference(&sender.id)?)?
+        .is_none()
+    {
         review::trust(receiver, sender)?;
     }
-    if sender.client.account_db()?.client_record("device", &receiver.id)?.is_none() {
+    if sender
+        .client
+        .account_db()?
+        .client_record("device", &receiver.client.local_device_reference(&receiver.id)?)?
+        .is_none()
+    {
         review::trust(sender, receiver)?;
     }
+    message.recipient_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
+        &receiver
+            .client
+            .identity_root
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .signing_key
+            .verifying_key(),
+    ));
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
     let hash = prekey_bundle_hash(&bundle)?;
     let existing = sender.client.send_pair_session_from_url(&sender.id, &message, None);
@@ -612,3 +632,4 @@ mod contact_resolution;
 mod legacy_admission;
 #[path = "discovery_tests.rs"]
 mod discovery;
+

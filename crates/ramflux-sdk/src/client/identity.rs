@@ -103,6 +103,7 @@ impl RamfluxClient {
                 &format!("session_for_{device_id}"),
             )?;
             sdk_publish_prekey_bundle(url, device_id, &bundle)?;
+            self.record_owned_proof_published(now_unix_timestamp())?;
         }
         Ok(())
     }
@@ -119,29 +120,17 @@ impl RamfluxClient {
         device_seed: [u8; 32],
     ) -> Result<(), SdkError> {
         let bundle = self.create_and_store_prekey_bundle(device_id, device_seed)?;
-        let record = self.prepare_owned_authority_via_gateway(&engine.config).await?;
-        self.account_db()?.persist_actor_state("identity/registration_set", &record)?;
-        let request = self.mvp1_identity_registration_request(
-            device_id,
-            target_delivery_id,
-            &engine.session().session_id,
-            principal_commitment,
-        )?;
-        let response = engine.register_identity(request).await?;
-        if !response.session_bound
-            || response.device_id != device_id
-            || response.principal_id
-                != self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id
-            || response.target_delivery_id != target_delivery_id
-            || response.device_epoch
-                != self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch
-        {
-            return Err(SdkError::GatewaySessionRejected(
-                "identity registration did not bind the gateway session".to_owned(),
-            ));
-        }
-        self.accept_owned_record(&record)?;
+        self.register_owned_via_session(
+            engine,
+            super::identity_authority::registration::RegistrationTarget {
+                commitment: principal_commitment,
+                device: device_id,
+                delivery: target_delivery_id,
+            },
+        )
+        .await?;
         engine.publish_prekey_bundle(device_id, &bundle).await?;
+        self.record_owned_proof_published(now_unix_timestamp())?;
         Ok(())
     }
 
@@ -157,35 +146,22 @@ impl RamfluxClient {
         device_seed: [u8; 32],
     ) -> Result<(), SdkError> {
         let bundle = self.create_and_store_prekey_bundle(device_id, device_seed)?;
-        let record = self.prepare_owned_authority_via_gateway(gateway).await?;
-        self.account_db()?.persist_actor_state("identity/registration_set", &record)?;
-        let request = self.mvp1_identity_registration_request(
-            device_id,
-            target_delivery_id,
-            &format!("pre_session_for_{device_id}"),
-            principal_commitment,
-        )?;
-        let response: SdkIdentityRegistrationResponse =
-            sdk_gateway_post_json(gateway, "/mvp1/identity/register", &request).await?;
-        if !response.session_bound
-            || response.device_id != device_id
-            || response.principal_id
-                != self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id
-            || response.target_delivery_id != target_delivery_id
-            || response.device_epoch
-                != self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch
-        {
-            return Err(SdkError::GatewaySessionRejected(
-                "identity registration did not bind the gateway session".to_owned(),
-            ));
-        }
-        self.accept_owned_record(&record)?;
+        self.register_owned_via_request(
+            gateway,
+            super::identity_authority::registration::RegistrationTarget {
+                commitment: principal_commitment,
+                device: device_id,
+                delivery: target_delivery_id,
+            },
+        )
+        .await?;
         let _response: SdkPrekeyResponse = sdk_gateway_post_json(
             gateway,
             "/mvp1/prekey/publish",
             &SdkPrekeyPublishRequest { device_id: device_id.to_owned(), bundle },
         )
         .await?;
+        self.record_owned_proof_published(now_unix_timestamp())?;
         Ok(())
     }
 
@@ -230,34 +206,15 @@ impl RamfluxClient {
         target_delivery_id: &str,
         session_id: &str,
     ) -> Result<(), SdkError> {
-        let commitment = identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(
-            self.identity_root
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .signing_key
-                .verifying_key()
-                .to_bytes(),
-        ))?;
-        let remote: Option<SdkDeviceManifestResponse> =
-            sdk_http_get_json(gateway_url, &format!("/mvp1/device-manifest/{commitment}"))?;
-        let record = self.prepare_owned_authority(remote.as_ref())?;
-        self.account_db()?.persist_actor_state("identity/registration_set", &record)?;
-        let request = self.mvp1_identity_registration_request(
-            device_id,
-            target_delivery_id,
+        self.register_owned_via_http(
+            gateway_url,
+            super::identity_authority::registration::RegistrationTarget {
+                commitment: principal_commitment,
+                device: device_id,
+                delivery: target_delivery_id,
+            },
             session_id,
-            principal_commitment,
-        )?;
-        let response: SdkIdentityRegistrationResponse =
-            sdk_http_post_json(gateway_url, "/mvp1/identity/register", &request)?;
-        if !response.session_bound
-            || response.device_id != device_id
-            || response.target_delivery_id != target_delivery_id
-        {
-            return Err(SdkError::InboundRejected("registration ACK mismatch".into()));
-        }
-        self.accept_owned_record(&record)?;
-        Ok(())
+        )
     }
 
     pub(crate) fn mvp1_identity_registration_request(

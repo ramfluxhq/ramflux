@@ -46,12 +46,13 @@ impl RamfluxClient {
                 "recipient_device_id is required to bootstrap a new X3DH DM session".to_owned(),
             )
         })?;
-        let lookup = self.root_qualified_device_lookup(recipient_device_id)?;
+        let reference = Self::qualified_recipient(message)?;
+        let lookup = self.root_qualified_device_lookup(&reference)?;
         let recipient_bundle =
             engine.fetch_prekey_bundle(&lookup).await?.bundle.ok_or_else(|| {
                 SdkError::LocalBus(format!("missing prekey bundle for {recipient_device_id}"))
             })?;
-        self.verify_root_bound_prekey(recipient_device_id, &recipient_bundle)?;
+        self.verify_root_bound_prekey(&reference, &recipient_bundle)?;
         self.create_send_dm_session_from_bundle(
             message,
             recipient_device_id,

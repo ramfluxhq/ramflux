@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Per-device session record: one sending state plus bounded receive-only previous states.
-use super::session::pair_key;
 use super::{RamfluxClient, SdkError, now_unix_timestamp};
 /// Eight previous ratchets limit encrypted client storage while tolerating several overlapping
 /// bootstraps. Eviction, unlike archiving, destroys the old private state.
@@ -15,7 +14,7 @@ impl RamfluxClient {
     ) -> Result<Vec<String>, SdkError> {
         Ok(self
             .account_db()?
-            .load_actor_state::<Vec<String>>(&format!("{}/archive", pair_key(local, remote)?))?
+            .load_actor_state::<Vec<String>>(&format!("{}/archive", self.pair_key(local, remote)?))?
             .unwrap_or_default())
     }
     pub(super) fn archive_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
@@ -30,12 +29,12 @@ impl RamfluxClient {
             }
         }
         self.account_db()?
-            .persist_actor_state(&format!("{}/archive", pair_key(local, remote)?), &archive)?;
+            .persist_actor_state(&format!("{}/archive", self.pair_key(local, remote)?), &archive)?;
         Ok(())
     }
     pub(super) fn promote_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let key = pair_key(local, remote)?;
+        let key = self.pair_key(local, remote)?;
         if let Some(old) = db.load_actor_state::<String>(&key)?
             && old != id
         {
@@ -62,7 +61,7 @@ impl RamfluxClient {
         let archived = self.archived_pairs(local, remote)?.contains(id);
         let fresh =
             !db.load_actor_state::<bool>(&format!("dm-pair/confirmed/{id}"))?.unwrap_or(false);
-        let key = pair_key(local, remote)?;
+        let key = self.pair_key(local, remote)?;
         let current = db.load_actor_state::<String>(&key)?;
         let current_confirmed = current
             .as_ref()
@@ -109,7 +108,10 @@ impl RamfluxClient {
                 )?;
             }
             db.remove_actor_state(&format!("{key}/reset-pending"))?;
-            db.remove_actor_state(&format!("dm-pair/reset-work/{}", pair_key(local, remote)?))?;
+            db.remove_actor_state(&format!(
+                "dm-pair/reset-work/{}",
+                self.pair_key(local, remote)?
+            ))?;
         }
         Ok(())
     }

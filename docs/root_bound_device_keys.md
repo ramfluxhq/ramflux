@@ -182,9 +182,9 @@ conversation checkpoint after remote key rotation.
 
 
 Registration/prekey writes use v2 proofs and a complete signed set. A pending root
-proposal is persisted before network submission and retried unchanged; a differing
-unacknowledged proposal requires reconciliation instead of signing a conflicting
-epoch. Observed signed revocations are retained even if local reenrollment fails.
+proposal is persisted before network submission and retried unchanged while the
+remote epoch remains unchanged. A differing own-root fork is reconciled before
+re-proposing the retained intent at a later epoch. Observed signed revocations are retained even if local reenrollment fails.
 Standalone revocation publishes a newer signed set and requires an exact record
 acknowledgement. Upgrade the compatible client/node chain together.
 
@@ -241,3 +241,52 @@ alone. Local source, restore and peer paths must retain that distinction.
 All gateway framed runtimes (quinn QUIC, TCP-TLS and compio QUIC) share strict
 I-JSON parsing, a 1 MiB frame limit and signed-publication admission before router
 dispatch. The compio transport's later JSON frames also use the strict parser.
+
+## Device address and authority lifecycle
+
+Local device metadata, directory entries, pair references, revocation fences and
+bound group pins distinguish `(root commitment, literal device id)`. SDK-owned
+sends require `recipient_principal_commitment` alongside the literal id, or a
+qualified `root~` address. Names inside an address are decoded exactly once.
+Bare ambiguous names return an error. Historical unsigned metadata and orphan
+sessions cannot supply live key authority. Account opening atomically migrates
+metadata and pins into separate scoped and legacy storage namespaces; it does
+not endorse old unsigned keys. Unscoped pair secrets are retired instead of
+guessing their root ownership; authenticated automatic bootstrap/recovery creates
+a fresh pair. Scoped pair pointers use a separate hash domain and records carry
+an explicit root-addressed marker. Unsolicited root hints cannot establish contacts:
+an accepted relationship naming that root and a verified envelope signature must
+precede first-contact persistence.
+
+Signed device-set authority is independent of a ready device's proof expiry.
+An expired authorization prevents a new session to that device; existing sessions
+remain subject to the newest accepted signed set and local revocation fences.
+The daemon's live-account maintenance re-registers proofs after 55 minutes for
+the one-hour proof lifetime. Library embedders must drive the live-session
+maintenance or explicitly re-register; creating a client does not start a
+background scheduler. Own-device history imports apply the same monotonic set
+and revocation checks before verifying a sibling's signature or fetching history.
+
+Concurrent own-root publications reconcile against the latest verified node
+record. A stale pending proposal is discarded with a safety event, its revocation
+intents are retained, and a successor is re-proposed within three attempts.
+Submission acknowledgements are echoes, not independently witnessed storage
+receipts. A successful submission does not prove that a malicious node serves the
+record to peers. Withholding and peer freshness still require independent checks.
+
+## Current root custody boundary
+
+Each enrolled terminal currently retains the root seed in its protected local
+account material. A compromised terminal therefore has root authority, even
+after its device entry is revoked: it can sign newer sets, rotate other devices,
+revoke siblings, or enroll another id. Device revocation fences the removed
+branch under the highest observed set; it cannot revoke a stolen root seed.
+Moving the root offline or introducing constrained enrollment subkeys requires
+an owner decision and a separate migration. This implementation does not change
+root custody or claim recovery from root compromise.
+
+Peer revocation does not itself rotate existing group sender keys. A previously
+issued group key remains known to that terminal until the group advances its key
+epoch; delivery filtering alone cannot erase that knowledge. Legacy migration
+still requires independently root-authorized material for every listed device;
+a lost or phantom legacy entry can block migration and needs explicit recovery.

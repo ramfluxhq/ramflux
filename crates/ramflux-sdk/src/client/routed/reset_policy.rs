@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Persistent reset budgets and a hard recovery lifetime, independent of confirmation cleanup.
-use super::session::pair_key;
 use super::{RamfluxClient, SdkError};
 use serde_json::json;
 pub(super) const MAX_RESET_LIFETIME: i64 = 7 * 24 * 60 * 60;
@@ -16,10 +15,10 @@ pub(super) struct ResetWork {
     #[serde(default)]
     pub first_at: Option<i64>,
 }
-pub(super) fn work_key(local: &str, remote: &str) -> Result<String, SdkError> {
-    Ok(format!("dm-pair/reset-work/{}", pair_key(local, remote)?))
-}
 impl RamfluxClient {
+    pub(super) fn reset_work_key(&self, local: &str, remote: &str) -> Result<String, SdkError> {
+        Ok(format!("dm-pair/reset-work/{}", self.pair_key(local, remote)?))
+    }
     pub(super) fn normalize_reset_work(&self, work: &mut ResetWork) -> Result<i64, SdkError> {
         if let Some(first) = work.first_at {
             return Ok(first);
@@ -28,10 +27,11 @@ impl RamfluxClient {
         // If retention removed the original attempt, fail closed to manual recovery.
         let first = self
             .account_db()?
-            .legacy_pair_reset_first_at(&pair_key(&work.local, &work.remote)?)?
+            .legacy_pair_reset_first_at(&self.pair_key(&work.local, &work.remote)?)?
             .unwrap_or(0);
         work.first_at = Some(first);
-        self.account_db()?.persist_actor_state(&work_key(&work.local, &work.remote)?, work)?;
+        self.account_db()?
+            .persist_actor_state(&self.reset_work_key(&work.local, &work.remote)?, work)?;
         Ok(first)
     }
 
@@ -41,12 +41,14 @@ impl RamfluxClient {
         remote: &str,
         at: i64,
     ) -> Result<bool, SdkError> {
+        let remote = self.device_reference(remote)?;
+        let remote = remote.as_str();
         let db = self.account_db()?;
-        let pair = pair_key(local, remote)?;
+        let pair = self.pair_key(local, remote)?;
         if db.actor_state_exists(&format!("{pair}/manual"))? {
             return Ok(false);
         }
-        let key = work_key(local, remote)?;
+        let key = self.reset_work_key(local, remote)?;
         let mut existing = db.load_actor_state::<ResetWork>(&key)?;
         if let Some(work) = &mut existing
             && at >= self.normalize_reset_work(work)?.saturating_add(MAX_RESET_LIFETIME)

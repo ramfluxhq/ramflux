@@ -46,8 +46,18 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
             db.persist_client_record("identity", &config.principal_id, &value)?;
         }
     }
-    let mut device = db.client_record("device", &config.device_id)?.unwrap_or_else(|| json!({}));
+    let mut device = db
+        .client_record(
+            "device",
+            &ramflux_protocol::qualified_device_id(
+                &account.principal_commitment,
+                &config.device_id,
+            )?,
+        )?
+        .unwrap_or_else(|| json!({}));
     device["principal_id"] = json!(config.principal_id);
+    device["principal_commitment"] = json!(account.principal_commitment);
+    device["device_id"] = json!(config.device_id);
     db.persist_client_record("device", &config.device_id, &device)?;
     Ok(())
 }
@@ -85,7 +95,14 @@ pub(crate) fn capture(
         let peer = body
             .get("recipient_device_id")
             .and_then(Value::as_str)
-            .map(|device| db.client_record("device", device))
+            .map(|device| {
+                let reference = body["recipient_principal_commitment"]
+                    .as_str()
+                    .map(|root| ramflux_protocol::qualified_device_id(root, device))
+                    .transpose()?
+                    .unwrap_or_else(|| device.to_owned());
+                db.client_record("device", &reference)
+            })
             .transpose()?
             .flatten();
         let principal =
@@ -223,7 +240,7 @@ fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Res
         let members = account.client.group_state(group)?.members;
         let mut principals = std::collections::BTreeSet::new();
         for device in members {
-            if let Some(peer) = db.client_record("device", &device)?
+            if let Some(peer) = account.client.group_device_metadata(group, &device)?
                 && let Some(principal) = peer.get("principal_id").and_then(Value::as_str)
             {
                 principals.insert(principal.to_owned());

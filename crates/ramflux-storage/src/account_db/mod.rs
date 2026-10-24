@@ -20,7 +20,9 @@ pub mod conversation_list;
 pub mod conversation_projection;
 pub mod conversation_state;
 pub mod device_directory;
+mod device_metadata;
 pub mod friend;
+mod group_device_address;
 mod group_key_safety;
 pub mod group_pending;
 mod group_snapshot;
@@ -77,6 +79,7 @@ impl AccountDb {
             volatile_presence: RefCell::new(BTreeMap::new()),
         };
         db.enable_runtime()?;
+        crate::schema_device_namespace::upgrade(&db.connection)?;
         Ok(db)
     }
 

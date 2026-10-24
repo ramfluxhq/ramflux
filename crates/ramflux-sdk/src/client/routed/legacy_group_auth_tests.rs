@@ -118,6 +118,7 @@ fn legacy_group_distribution_sender_is_bound_to_the_authenticated_device() -> Re
     let encrypted = serde_json::to_vec(&SdkDmEncryptedEnvelope {
         schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
         version: 1,
+        source_principal_commitment: None,
         x3dh,
         ciphertext: session.encrypt(&body, dm_associated_data(&conversation))?,
     })?;

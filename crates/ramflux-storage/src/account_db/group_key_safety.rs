@@ -3,6 +3,7 @@
 
 //! Pinned group key observations never rotate keys from directory claims.
 use super::*;
+use rusqlite::OptionalExtension;
 impl AccountDb {
     /// Binds a pinned key to its known principal; a different principal cannot claim the device id.
     /// # Errors
@@ -15,6 +16,13 @@ impl AccountDb {
         commitment: &str,
         key: &str,
     ) -> Result<(), StorageError> {
+        let raw = ramflux_protocol::parse_qualified_device_id(device)?
+            .map_or_else(|| device.to_owned(), |(_, raw)| raw);
+        let address = ramflux_protocol::qualified_device_id(commitment, &raw)?;
+        let Some(device) = self.group_pin_key(group, &address)? else {
+            return Err(StorageError::GroupPermissionDenied);
+        };
+        let device = device.as_str();
         if self.group_member_device_key(group, device)?.as_deref() != Some(key) {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -24,6 +32,9 @@ impl AccountDb {
             if !same {
                 return Err(StorageError::GroupPermissionDenied);
             }
+        }
+        if device != address {
+            self.connection.execute("UPDATE group_member_device_key SET member_id=?3,raw_device_id=?4 WHERE group_id=?1 AND member_id=?2 AND principal_commitment=?5",params![group,device,address,raw,commitment])?;
         }
         Ok(())
     }
@@ -51,8 +62,40 @@ impl AccountDb {
         group: &str,
         device: &str,
     ) -> Result<Option<GroupMemberKeyBinding>, StorageError> {
-        use rusqlite::OptionalExtension;
-        Ok(self.connection.query_row("SELECT k.device_signing_public_key,k.member_principal_id,k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=k.member_id WHERE k.group_id=?1 AND k.member_id=?2 AND m.active=1",params![group,device],|r|Ok(GroupMemberKeyBinding{signing_public_key:r.get(0)?,principal_id:r.get(1)?,principal_commitment:r.get(2)?})).optional()?)
+        let Some(device) = self.group_pin_key(group, device)? else { return Ok(None) };
+        Ok(self.connection.query_row("SELECT k.device_signing_public_key,k.member_principal_id,k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) WHERE k.group_id=?1 AND k.member_id=?2 AND m.active=1",params![group,device],|r|Ok(GroupMemberKeyBinding{signing_public_key:r.get(0)?,principal_id:r.get(1)?,principal_commitment:r.get(2)?})).optional()?)
+    }
+    /// Read the pin belonging to a literal active membership slot, without parsing it as an address.
+    /// # Errors
+    /// Returns SQL errors or rejects ambiguous historical pins.
+    pub fn group_member_key_binding_by_name(
+        &self,
+        group: &str,
+        raw: &str,
+    ) -> Result<Option<GroupMemberKeyBinding>, StorageError> {
+        let mut query=self.connection.prepare("SELECT k.member_id FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) WHERE k.group_id=?1 AND COALESCE(k.raw_device_id,k.member_id)=?2 AND m.active=1 LIMIT 2")?;
+        let keys = query
+            .query_map(params![group, raw], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if keys.len() > 1 {
+            return Err(StorageError::AmbiguousDeviceId(raw.into()));
+        }
+        keys.first()
+            .map(|key| self.group_member_key_binding(group, key))
+            .transpose()
+            .map(Option::flatten)
+    }
+    /// Read a literal member slot's key, independent of any global device-name aliases.
+    /// # Errors
+    /// Returns SQL/ambiguity errors.
+    pub fn group_member_device_key_by_name(
+        &self,
+        group: &str,
+        raw: &str,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(self
+            .group_member_key_binding_by_name(group, raw)?
+            .map(|binding| binding.signing_public_key))
     }
     /// Rejects a directory claim that conflicts with any existing member pin's identity.
     /// An unbound legacy pin can only acquire an identity through its unchanged key.
@@ -78,11 +121,16 @@ impl AccountDb {
         &self,
         device: &str,
     ) -> Result<Vec<(String, String)>, StorageError> {
-        let mut query=self.connection.prepare("SELECT k.group_id,k.device_signing_public_key FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=k.member_id WHERE k.member_id=?1 AND m.active=1 ORDER BY k.group_id")?;
+        let qualified = ramflux_protocol::parse_qualified_device_id(device)?;
+        let (root, raw) = qualified
+            .as_ref()
+            .map_or((None, device), |(root, raw)| (Some(root.as_str()), raw.as_str()));
+        let mut query=self.connection.prepare("SELECT k.group_id,k.device_signing_public_key FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) WHERE m.active=1 AND (COALESCE(k.raw_device_id,k.member_id)=?2 AND (?3 IS NULL OR k.principal_commitment=?3 OR k.principal_commitment IS NULL)) AND (?1 IS NOT NULL) ORDER BY k.group_id")?;
         Ok(query
-            .query_map(params![device], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map(params![device, raw, root], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
     /// Update an existing ownership-bound pin after the caller verifies a newer root-signed set.
     /// # Errors
     /// Rejects ownership/key races and returns SQL failures. This grants no authority to a directory.
@@ -98,10 +146,27 @@ impl AccountDb {
             previous_key: old,
             next_key: new,
         } = rotation;
+        let Some(device) = self.group_pin_key(group, device)? else {
+            return Err(StorageError::GroupPermissionDenied);
+        };
         let changed=self.connection.execute("UPDATE group_member_device_key SET device_signing_public_key=?6 WHERE group_id=?1 AND member_id=?2 AND member_principal_id=?3 AND principal_commitment=?4 AND device_signing_public_key=?5",params![group,device,principal,commitment,old,new])?;
         if changed != 1 {
             return Err(StorageError::GroupPermissionDenied);
         }
         Ok(())
+    }
+}
+
+impl AccountDb {
+    /// Whether active local group membership already binds this principal/root/device tuple.
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn has_group_device_relationship(
+        &self,
+        principal: &str,
+        root: &str,
+        device: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) WHERE m.active=1 AND COALESCE(k.raw_device_id,k.member_id)=?1 AND k.member_principal_id=?2 AND k.principal_commitment=?3)",params![device,principal,root],|row|row.get(0))?)
     }
 }

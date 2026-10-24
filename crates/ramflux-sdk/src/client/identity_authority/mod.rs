@@ -2,13 +2,16 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
+pub(crate) mod device_namespace;
 mod directory;
 mod owned;
 mod publication;
+mod reconcile;
+pub(crate) mod registration;
 mod verify;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{PrincipalKind, SignedDeviceSetRecord};
-pub(crate) use verify::verify_manifest;
+pub(crate) use verify::{verify_manifest, verify_manifest_authority};
 pub(crate) fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(format!("identity authority: {reason}"))
 }
@@ -85,7 +88,7 @@ impl RamfluxClient {
         expected: &str,
     ) -> Result<(), SdkError> {
         let manifest = serde_json::from_value(value)?;
-        verify_manifest(&manifest, expected)?;
+        verify::verify_manifest_authority(&manifest, expected)?;
         self.persist_identity_directory(&manifest)
     }
 }
@@ -93,9 +96,13 @@ impl RamfluxClient {
 impl RamfluxClient {
     pub(crate) fn root_qualified_device_lookup(&self, device: &str) -> Result<String, SdkError> {
         self.require_cached_root_authority(device)?;
+        let device = self.device_reference(device)?;
+        if ramflux_protocol::parse_qualified_device_id(&device)?.is_some() {
+            return Ok(device);
+        }
         let row = self
             .account_db()?
-            .client_record("device", device)?
+            .client_record("device", &device)?
             .ok_or_else(|| invalid("device absent"))?;
         let root = row["principal_commitment"].as_str().ok_or_else(|| invalid("root absent"))?;
         Ok(format!(
@@ -104,9 +111,12 @@ impl RamfluxClient {
         ))
     }
     pub(crate) fn require_cached_root_authority(&self, device: &str) -> Result<(), SdkError> {
+        let device = self.device_reference(device)?;
+        let raw = device_namespace::wire_device_id(&device)?;
         let db = self.account_db()?;
-        let row =
-            db.client_record("device", device)?.ok_or_else(|| invalid("device metadata absent"))?;
+        let row = db
+            .client_record("device", &device)?
+            .ok_or_else(|| invalid("device metadata absent"))?;
         let commitment = row["principal_commitment"]
             .as_str()
             .ok_or_else(|| invalid("legacy device has no root authority"))?;
@@ -122,7 +132,7 @@ impl RamfluxClient {
         )?;
         if record.principal_id != row["principal_id"]
             || !record.devices.iter().any(|e| {
-                e.device_id == device
+                e.device_id == raw
                     && e.status == ramflux_protocol::DeviceSetStatus::Active
                     && e.signing_key_commitment == keys.0
                     && e.agreement_key_commitment == keys.1

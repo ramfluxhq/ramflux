@@ -127,10 +127,7 @@ impl RamfluxClient {
         body: &[u8],
         route: Route,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
-        let recipient = message
-            .recipient_device_id
-            .as_deref()
-            .ok_or_else(|| invalid("v2 requires recipient device id"))?;
+        let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
         self.seal_routed_with_route(
             message,
@@ -138,7 +135,7 @@ impl RamfluxClient {
             route,
             SealPair {
                 local: &engine.config.device_id,
-                remote: recipient,
+                remote: &recipient,
                 session: &mut session,
                 header,
                 bundle,
@@ -154,10 +151,7 @@ impl RamfluxClient {
         url: Option<&str>,
         route: Route,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
-        let recipient = message
-            .recipient_device_id
-            .as_deref()
-            .ok_or_else(|| invalid("v2 requires recipient device id"))?;
+        let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) =
             self.send_pair_session_from_url(&engine.config.device_id, message, url)?;
         self.seal_routed_with_route(
@@ -166,7 +160,7 @@ impl RamfluxClient {
             route,
             SealPair {
                 local: &engine.config.device_id,
-                remote: recipient,
+                remote: &recipient,
                 session: &mut session,
                 header,
                 bundle,
@@ -182,6 +176,9 @@ impl RamfluxClient {
         pair: SealPair<'_>,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
         let SealPair { local, remote, session, header, bundle } = pair;
+        let remote = self.device_reference(remote)?;
+        let wire_remote =
+            crate::client::identity_authority::device_namespace::wire_device_id(&remote)?;
         let mut route = routing(message, route);
         if route.kind == Kind::GroupControl
             && let Some(group) = route.group_id.as_deref()
@@ -195,14 +192,14 @@ impl RamfluxClient {
             routing: route,
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
         })?);
-        let aad = associated_data(&message.envelope_id, local, remote, &bundle)?;
+        let aad = associated_data(&message.envelope_id, local, &wire_remote, &bundle)?;
         let ciphertext = session.encrypt(&plaintext, &aad)?;
         // Never reuse a send key after transport cancellation or a process crash.
         if header.is_some() {
             self.account_db()?
                 .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
         }
-        self.persist_pair(local, remote, &bundle, session)?;
+        self.persist_pair(local, &remote, &bundle, session)?;
         self.finish_pair_retirement()?;
 
         Ok(SdkDmEncryptedEnvelope {
@@ -223,10 +220,15 @@ impl RamfluxClient {
     ) -> Result<Opened, SdkError> {
         self.authenticated_envelope_sender(entry)?;
         let envelope = decode(&entry.envelope)?;
-        let remote = &entry.envelope.source_device_id;
+        let remote = self.inbound_device_reference(entry)?;
         let (mut session, bundle) =
-            self.recv_pair_session(local, remote, &entry.envelope.envelope_id, &envelope)?;
-        let aad = associated_data(&entry.envelope.envelope_id, remote, local, &bundle)?;
+            self.recv_pair_session(local, &remote, &entry.envelope.envelope_id, &envelope)?;
+        let aad = associated_data(
+            &entry.envelope.envelope_id,
+            &entry.envelope.source_device_id,
+            local,
+            &bundle,
+        )?;
         let decrypted = zeroize::Zeroizing::new(
             session.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?,
         );

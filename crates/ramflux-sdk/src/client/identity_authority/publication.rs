@@ -17,6 +17,40 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         device: &str,
     ) -> Result<SignedDeviceSetRecord, SdkError> {
+        let owned = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let device = if let Some((root, raw)) = ramflux_protocol::parse_qualified_device_id(device)?
+        {
+            if root != ramflux_crypto::identity_root_commitment(&owned.signing_key.verifying_key())
+            {
+                return Err(invalid("revocation address belongs to another root"));
+            }
+            raw
+        } else {
+            device.to_owned()
+        };
+        let device = device.as_str();
+        let mut last = None;
+        for _ in 0..3 {
+            match self.revoke_owned_device_once(gateway, device).await {
+                Ok(record)
+                    if record.devices.iter().any(|entry| {
+                        entry.device_id == device && entry.status == DeviceSetStatus::Revoked
+                    }) =>
+                {
+                    return Ok(record);
+                }
+                Ok(_) => {}
+                Err(error @ SdkError::InboundRejected(_)) => return Err(error),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| invalid("own publication reconciliation retry limit reached")))
+    }
+    async fn revoke_owned_device_once(
+        &self,
+        gateway: &GatewaySessionConfig,
+        device: &str,
+    ) -> Result<SignedDeviceSetRecord, SdkError> {
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let commitment =
             ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
@@ -27,15 +61,18 @@ impl RamfluxClient {
         ramflux_crypto::verify_signed_device_set(&root.signing_key.verifying_key(), &old)?;
         self.accept_owned_record(&old)?;
         let mut entries = old.devices.clone();
+        self.apply_owned_revocation_intents(&mut entries)?;
         let entry = entries
             .iter_mut()
             .find(|e| e.device_id == device)
             .ok_or_else(|| invalid("device not in own signed set"))?;
-        let mut next = if entry.status == DeviceSetStatus::Revoked {
-            old.clone()
-        } else {
+        if entry.status != DeviceSetStatus::Revoked {
             entry.status = DeviceSetStatus::Revoked;
             entry.revoked_at = Some(now_unix_timestamp());
+        }
+        let mut next = if entries == old.devices {
+            old.clone()
+        } else {
             ramflux_crypto::sign_device_set(
                 root,
                 ramflux_crypto::DeviceSetSigningInput {
@@ -53,13 +90,6 @@ impl RamfluxClient {
             .account_db()?
             .load_actor_state::<SignedDeviceSetRecord>("identity/owned_pending_set")?
         {
-            if !pending
-                .devices
-                .iter()
-                .any(|e| e.device_id == device && e.status == DeviceSetStatus::Revoked)
-            {
-                return Err(invalid("unacknowledged root publication requires reconciliation"));
-            }
             ramflux_crypto::validate_device_set_transition(&old, &pending)?;
             next = pending;
         }
@@ -102,7 +132,13 @@ impl RamfluxClient {
                 } else {
                     self.remove_device_pair(&entry.device_id, "root_signed_revocation_pending")?;
                 }
-                db.persist_actor_state(&format!("device/revoked/{}", entry.device_id), &true)?;
+                db.persist_actor_state(
+                    &self.device_revocation_key(&ramflux_protocol::qualified_device_id(
+                        &record.principal_commitment,
+                        &entry.device_id,
+                    )?)?,
+                    &true,
+                )?;
             }
             Ok::<_, SdkError>(())
         })?;

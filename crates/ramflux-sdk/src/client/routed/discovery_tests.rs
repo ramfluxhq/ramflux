@@ -20,8 +20,15 @@ async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_ch
     malformed.envelope.encrypted_payload =
         ramflux_protocol::encode_base64url(serde_json::to_vec(&wrapper)?);
     assert!(matches!(receiver.client.ensure_inbound_device(&receiver.config()?, &malformed).await,
-        Err(SdkError::InboundRejected(reason)) if reason == "invalid sender Root hint"));
+        Err(SdkError::InboundRejected(reason)) if reason.ends_with("invalid sender root hint")));
     let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    assert!(receiver.client.ensure_inbound_device(&receiver.config()?, &entry).await.is_err());
+    assert!(receiver.client.account_db()?.client_record("device", "alice")?.is_none());
+    receiver.client.establish_friend_link(
+        "accepted-root",
+        "bob",
+        &manifest.principal_commitment,
+    )?;
     let expected_path = format!("/mvp1/device-manifest/{}", manifest.principal_commitment);
     assert_eq!(
         decode(&entry.envelope)?.source_principal_commitment.as_deref(),
@@ -40,27 +47,32 @@ async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_ch
         vec![certified.cert.der().clone()],
         rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()).into(),
     )?;
+    let config = Arc::new(config);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await?;
-        let mut stream = tokio_rustls::TlsAcceptor::from(Arc::new(config)).accept(socket).await?;
-        let len = stream.read_u32().await?;
-        if len > 65536 {
-            return Err(std::io::Error::other("oversized request"));
+        for _ in 0..2 {
+            let (socket, _) =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await??;
+            let mut stream =
+                tokio_rustls::TlsAcceptor::from(Arc::clone(&config)).accept(socket).await?;
+            let len = stream.read_u32().await?;
+            if len > 65536 {
+                return Err(std::io::Error::other("oversized request"));
+            }
+            let mut bytes = vec![0; len as usize];
+            stream.read_exact(&mut bytes).await?;
+            let request: ramflux_transport::GatewayQuicRequest = serde_json::from_slice(&bytes)?;
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, expected_path);
+            let bytes = serde_json::to_vec(&ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(&manifest)?,
+            })?;
+            stream.write_u32(u32::try_from(bytes.len()).map_err(std::io::Error::other)?).await?;
+            stream.write_all(&bytes).await?;
+            stream.flush().await?;
         }
-        let mut bytes = vec![0; len as usize];
-        stream.read_exact(&mut bytes).await?;
-        let request: ramflux_transport::GatewayQuicRequest = serde_json::from_slice(&bytes)?;
-        assert_eq!(request.method, "GET");
-        assert_eq!(request.path, expected_path);
-        let bytes = serde_json::to_vec(&ramflux_transport::GatewayQuicResponse {
-            status: 200,
-            body: serde_json::to_value(manifest)?,
-        })?;
-        stream.write_u32(u32::try_from(bytes.len()).map_err(std::io::Error::other)?).await?;
-        stream.write_all(&bytes).await?;
-        stream.flush().await?;
         Ok::<_, std::io::Error>(())
     });
     let gateway = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
@@ -73,6 +85,11 @@ async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_ch
         target_delivery_id: "bob".into(),
         prekey_http_url: None,
     });
+    let mut unsigned = entry.clone();
+    unsigned.envelope.signed.signature = "invalid".into();
+    assert!(receiver.client.ensure_inbound_device(&gateway, &unsigned).await.is_err());
+    assert!(receiver.client.account_db()?.client_record("device", "alice")?.is_none());
+    assert!(receiver.client.account_db()?.client_record("identity", "alice")?.is_none());
     receiver.client.ensure_inbound_device(&gateway, &entry).await?;
     server.await??;
     let opened = receiver.client.open_routed(&entry, "bob")?;

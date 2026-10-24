@@ -384,3 +384,6 @@ fn signed_kind_is_asserted_until_user_verification_and_complete_set_changes_inva
 
 #[path = "gateway_tests.rs"]
 mod gateway;
+
+#[path = "review_r2_tests.rs"]
+mod review_r2;
