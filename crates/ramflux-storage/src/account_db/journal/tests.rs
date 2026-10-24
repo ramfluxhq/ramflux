@@ -371,8 +371,8 @@ fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
     db.create_group("group", "owner")?;
     db.add_group_member("group", "device", "member")?;
     db.persist_client_record("device","device",&serde_json::json!({"principal_id":"alice","principal_commitment":"alice-root","signing_public_key":"alice-key"}))?;
-    db.persist_group_member_device_key("group", "device", "alice-key")?;
     let address = ramflux_protocol::qualified_device_id("alice-root", "device")?;
+    db.persist_group_member_device_key("group", &address, "alice-key")?;
     let owner:(String,String)=db.connection.query_row("SELECT member_principal_id,principal_commitment FROM group_member_device_key WHERE group_id='group' AND member_id=?1",params![address],|r|Ok((r.get(0)?,r.get(1)?)))?;
     assert_eq!(owner, ("alice".into(), "alice-root".into()));
     db.remove_group_member("group", "owner", "device")?;
@@ -635,6 +635,25 @@ fn status_transitions_never_spend_the_message_retention_budget() -> Result<(), S
     assert_eq!(messages[0].body["message_id"], 2);
     assert_eq!(messages[1].body["message_id"], 3);
     assert!(events.iter().filter(|e| e.topic == "sync.status").count() <= 128);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn an_unscoped_group_pin_never_selects_the_only_directory_roots_authority()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    db.create_group("unscoped", "owner")?;
+    db.add_group_member("unscoped", "shared", "member")?;
+    db.persist_client_record("device", "shared", &serde_json::json!({"principal_id":"mallory", "principal_commitment":"mallory-root", "signing_public_key":"mallory-key"}))?;
+    db.persist_group_member_device_key("unscoped", "shared", "mallory-key")?;
+    let pin = db
+        .group_member_key_binding_by_name("unscoped", "shared")?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(pin.principal_id, None);
+    assert_eq!(pin.principal_commitment, None);
+
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
