@@ -7,11 +7,11 @@ use super::{
     branch_matches, group_state_head_hash, identity_valid, invalid, sign_snapshot_parts,
     verify_group_state_actor,
 };
-use ramflux_protocol::encode_base64url;
 use ramflux_protocol::group_state::{
     GROUP_STATE_CHECKPOINT_DOMAIN, GroupStateCheckpoint, MAX_GROUP_STATE_EXCLUSIONS,
     MAX_GROUP_STATE_MEMBERS, SharedGroupRole, SharedGroupState,
 };
+use ramflux_protocol::{canonical_json_bytes, encode_base64url};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -109,6 +109,34 @@ pub(super) fn verify_checkpoint(
 }
 
 impl VerifiedGroupState {
+    /// Root-qualified storage identifier, admitted only by this verified group's membership.
+    /// This is a storage codec, not an authentication credential.
+    /// # Errors
+    /// Rejects malformed identities, principal aliases and a key conflicting with an explicit pin.
+    pub fn member_storage_key(
+        &self,
+        identity: &ramflux_protocol::group_state::GroupMemberIdentity,
+    ) -> Result<Option<String>, CryptoError> {
+        identity_valid(identity)?;
+        if self.view.members.iter().any(|member| {
+            member.identity.root_commitment == identity.root_commitment
+                && (member.identity.principal_id != identity.principal_id
+                    || (member.identity.device_id == identity.device_id
+                        && member.identity.signing_public_key != identity.signing_public_key))
+        }) {
+            return Err(invalid("identity conflicts with verified group membership"));
+        }
+        if self.view.effective_role(&identity.root_commitment, &identity.device_id).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "root~{}",
+            encode_base64url(canonical_json_bytes(&(
+                &identity.root_commitment,
+                &identity.device_id
+            ))?)
+        )))
+    }
     /// Compare authenticated ancestry; a newer creator-root checkpoint resolves older forks.
     #[must_use]
     pub fn extends(&self, previous: &Self) -> bool {

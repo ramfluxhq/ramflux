@@ -1242,3 +1242,5 @@ fn optional_friend_lookup_distinguishes_absent_links_from_real_sql_failures()
     fs::remove_dir_all(root)?;
     Ok(())
 }
+#[path = "shared_group_state_tests.rs"]
+mod shared_group_state_tests;

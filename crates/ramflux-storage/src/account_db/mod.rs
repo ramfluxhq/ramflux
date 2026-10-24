@@ -47,6 +47,7 @@ mod object_payload;
 pub mod read_model;
 pub mod recovery;
 pub mod runtime;
+mod shared_group_state;
 pub mod surface;
 mod task;
 #[cfg(test)]
