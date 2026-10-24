@@ -51,6 +51,8 @@ pub enum SdkError {
     IdentityRootMissing,
     #[error("gateway session rejected: {0}")]
     GatewaySessionRejected(String),
+    #[error("own-device authorization refresh failed: {0}")]
+    OwnDeviceAuthorizationRefreshFailed(String),
     #[error("gateway session is not established")]
     GatewaySessionNotEstablished,
     #[error("invalid gateway cursor checkpoint: {0}")]

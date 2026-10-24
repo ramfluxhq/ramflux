@@ -166,6 +166,11 @@ impl AccountRuntime {
         };
         let result =
             tokio::time::timeout(Duration::from_secs(20), super::sync_driver::run(account)).await;
+        let reason = match &result {
+            Ok(Err(error)) => Some(local_bus_error_code(error)),
+            Err(_) => Some("SyncTimeout"),
+            _ => None,
+        };
         let (state, activity) = match result {
             Ok(Ok(count)) => (if count == 0 { "idle" } else { "running" }, count > 0),
             Ok(Err(error)) => {
@@ -181,7 +186,7 @@ impl AccountRuntime {
         db.append_journal(
             &format!("sync:{tick}"),
             "sync.status",
-            &serde_json::json!({"state":state,"last_run":at,"unrouted":db.unrouted_count()?}),
+            &serde_json::json!({"state":state,"last_run":at,"reason_code":reason,"unrouted":db.unrouted_count()?}),
             at,
             None,
         )?;

@@ -254,7 +254,7 @@ fn ambiguous_legacy_sender_names_do_not_block_directory_reads_or_select_a_root()
 -> Result<(), SdkError> {
     let f = Fixture::new()?;
     let db = f.client.account_db()?;
-    for (root, principal) in [("bob-root", "bob"), ("mallory-root", "mallory")] {
+    for (root, principal) in [("mallory-root", "mallory"), ("bob-root", "bob")] {
         db.persist_client_record(
             "device",
             "shared",
@@ -274,5 +274,17 @@ fn ambiguous_legacy_sender_names_do_not_block_directory_reads_or_select_a_root()
             .iter()
             .any(|route| route["member_id"] == "shared" && route["delivery_target_known"] == false)
     );
+    Ok(())
+}
+
+#[test]
+fn historical_sender_with_only_a_foreign_live_name_stays_unattributed() -> Result<(), SdkError> {
+    let f = Fixture::new()?;
+    let db = f.client.account_db()?;
+    // The original sender has been removed; the sole live row belongs to a different root.
+    db.persist_client_record("device", "shared", &json!({"device_id":"shared", "principal_commitment":"mallory-root", "principal_id":"mallory"}))?;
+    db.send_direct_message("legacy", "old-message", "shared", b"original history")?;
+    let rows = f.read("conversation.directory", json!({}))?;
+    assert_eq!(rows["conversations"][0]["participants"], json!(["alice"]));
     Ok(())
 }

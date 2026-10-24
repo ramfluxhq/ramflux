@@ -118,6 +118,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => "Unavailable",
         SdkError::SignatureVerificationFailed(_) => "SignatureVerificationFailed",
         SdkError::RemoteAppApprovalRequired => "RemoteAppApprovalRequired",
+        SdkError::OwnDeviceAuthorizationRefreshFailed(_) => "OwnDeviceAuthorizationRefreshFailed",
         _ => "ValidationFailed",
     }
 }

@@ -162,18 +162,8 @@ fn conversation(
         if let Some(id) = own.get("principal_id").and_then(Value::as_str) {
             participants.insert(id.to_owned());
         }
-        for sender in db.client_conversation_senders(id)? {
-            let identity = match db.client_device_record_by_name(&sender) {
-                Ok(value) => value,
-                Err(ramflux_storage::StorageError::AmbiguousDeviceId(_)) => None,
-                Err(error) => return Err(error.into()),
-            };
-            if let Some(identity) = identity
-                && let Some(principal) = identity.get("principal_id").and_then(Value::as_str)
-            {
-                participants.insert(principal.to_owned());
-            }
-        }
+        // Legacy sender ids have no authenticated principal/root provenance. Keep them
+        // unattributed instead of interpreting them through today's directory aliases.
         value["participants"] = json!(participants);
     }
     Ok(value)

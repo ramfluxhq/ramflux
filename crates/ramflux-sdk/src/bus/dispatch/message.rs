@@ -470,7 +470,53 @@ fn receipt_gateway_message(
     target_delivery_id: &str,
     created_at: i64,
 ) -> Result<GatewayDirectMessage, SdkError> {
-    let reference = account.client.device_reference(recipient_device_id)?;
+    let reference = if ramflux_protocol::parse_qualified_device_id(recipient_device_id)?.is_some() {
+        recipient_device_id.to_owned()
+    } else {
+        let thread = account
+            .client
+            .account_db()?
+            .client_record("conversation", conversation_id)?
+            .ok_or_else(|| {
+            SdkError::InboundPending("receipt conversation root unavailable".into())
+        })?;
+        if let Some(group) = thread["group_id"].as_str() {
+            account.client.group_device_reference(group, recipient_device_id)?
+        } else {
+            let local =
+                account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+            let root = thread
+                .pointer("/direct_route/recipient_principal_commitment")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let root = if let Some(root) = root {
+                root
+            } else {
+                let participants = thread["participants"].as_array().ok_or_else(|| {
+                    SdkError::InboundPending("receipt peer root unavailable".into())
+                })?;
+                let peers: Vec<_> = participants
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|id| *id != local.principal_id)
+                    .collect();
+                if peers.len() != 1 {
+                    return Err(SdkError::InboundPending("receipt peer root is ambiguous".into()));
+                }
+                account
+                    .client
+                    .account_db()?
+                    .client_record("identity", peers[0])?
+                    .and_then(|identity| {
+                        identity["contact_identity_commitment"].as_str().map(str::to_owned)
+                    })
+                    .ok_or_else(|| {
+                        SdkError::InboundPending("receipt peer root unavailable".into())
+                    })?
+            };
+            ramflux_protocol::qualified_device_id(&root, recipient_device_id)?
+        }
+    };
     let root = account.client.device_root(&reference)?;
     let raw = crate::client::identity_authority::device_namespace::wire_device_id(&reference)?;
     Ok(GatewayDirectMessage {
@@ -721,4 +767,60 @@ fn compat_attachments(
         });
     }
     Ok(attachments)
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+    #[test]
+    fn receipts_use_the_conversation_root_despite_equal_device_names() -> Result<(), SdkError> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-receipt-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let mut client = RamfluxClient::new();
+        client.create_identity_root("alice", [1; 32]);
+        client.create_device_branch("alice", "phone", 1, [2; 32]);
+        client.open_account_index(&root)?;
+        client.create_account("alice", "alice")?;
+        client.unlock_account("alice", b"receipt-fixture")?;
+        let db = client.account_db()?;
+        for (principal, commitment) in [("bob", "bob-root"), ("mallory", "mallory-root")] {
+            db.persist_client_record("device", "shared", &serde_json::json!({"device_id":"shared", "principal_id":principal, "principal_commitment":commitment}))?;
+            db.persist_client_record(
+                "identity",
+                principal,
+                &serde_json::json!({"contact_identity_commitment":commitment}),
+            )?;
+        }
+        db.persist_client_record(
+            "conversation",
+            "direct",
+            &serde_json::json!({"participants":["alice", "bob"]}),
+        )?;
+        let config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+            bind_addr: "127.0.0.1:0".parse().map_err(|e| SdkError::LocalBus(format!("{e}")))?,
+            gateway_addr: "127.0.0.1:1".parse().map_err(|e| SdkError::LocalBus(format!("{e}")))?,
+            server_name: "fixture".into(),
+            ca_cert: root.join("ca.pem"),
+            principal_id: "alice".into(),
+            device_id: "phone".into(),
+            target_delivery_id: "alice".into(),
+            prekey_http_url: None,
+        });
+        let account = LocalBusAccountState::disconnected(client, config, "alice-root".into());
+        let receipt =
+            receipt_gateway_message(&account, "direct", "receipt", "shared", "target", 1)?;
+        assert_eq!(receipt.recipient_principal_commitment.as_deref(), Some("bob-root"));
+        assert_eq!(receipt.recipient_device_id.as_deref(), Some("shared"));
+        assert!(
+            receipt_gateway_message(&account, "unknown", "receipt", "shared", "target", 1).is_err()
+        );
+        drop(account);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

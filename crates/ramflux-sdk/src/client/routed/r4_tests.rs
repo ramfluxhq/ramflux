@@ -34,7 +34,13 @@ fn bootstrap(
         &msg,
         b"bootstrap",
         Route::direct(),
-        SealPair { local: &sender.id, remote: &receiver.id, session: &mut session, header, bundle },
+        SealPair {
+            local: &sender.id,
+            remote: &receiver.reference()?,
+            session: &mut session,
+            header,
+            bundle,
+        },
     )?;
     msg.encrypted_body = serde_json::to_vec(&sealed)?;
     Ok(GatewayInboxEntry {
@@ -57,10 +63,18 @@ async fn simultaneous_verified_bootstraps_converge_and_retire_x3dh_after_peer_co
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     alice.client.apply_routed_entry(&mut ae, &pool()?, &b, false).await?;
     bob.client.apply_routed_entry(&mut be, &pool()?, &a, false).await?;
-    let active_a =
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
-    let active_b =
-        bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id;
+    let active_a = alice
+        .client
+        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .ok_or_else(|| invalid("pair"))?
+        .0
+        .session_id;
+    let active_b = bob
+        .client
+        .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        .ok_or_else(|| invalid("pair"))?
+        .0
+        .session_id;
     assert_eq!(active_a, active_b);
     let reply = seal(&alice, &bob, from(&alice, &bob, "reply-a", "simultaneous"), b"reply")?;
     bob.client.apply_routed_entry(&mut be, &pool()?, &reply, false).await?;
@@ -76,7 +90,11 @@ async fn simultaneous_verified_bootstraps_converge_and_retire_x3dh_after_peer_co
         None,
     )?;
     let snapshot = serde_json::to_value(
-        bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.snapshot(),
+        bob.client
+            .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .ok_or_else(|| invalid("pair"))?
+            .0
+            .snapshot(),
     )?;
     assert!(snapshot["dh_ratchet_step"].as_u64().is_some_and(|step| step > 0));
     Ok(())
@@ -88,8 +106,8 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
     let alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     trust(&bob, &alice)?;
-    alice.client.create_group("ordered", "alice")?;
-    alice.client.add_group_member("ordered", "bob", "member")?;
+    fixture_group(&alice.client, "ordered", &alice)?;
+    fixture_member(&alice.client, "ordered", &bob)?;
     bob.client.create_group("ordered", "bob")?;
     let body =
         alice.client.encrypt_group_message("ordered", "alice", b"membership arrives later")?;
@@ -103,7 +121,7 @@ async fn group_message_before_membership_update_retries_then_delivers_without_ac
     );
     crate::bus::sync_driver::run(&mut account).await?;
     assert!(!writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
-    account.client.add_group_member("ordered", "alice", "member")?;
+    fixture_member(&account.client, "ordered", &alice)?;
     account.client.import_group_sender_key_distribution(
         &alice.client.export_group_sender_key_distribution("ordered", "alice")?,
     )?;
@@ -130,9 +148,9 @@ async fn a_group_member_cannot_preclaim_another_senders_message_identity() -> Re
     trust(&bob, &carol)?;
     bob.client.establish_friend_link("friend", "bob", "carol")?;
     for client in [&alice.client, &bob.client] {
-        client.create_group("group", "alice")?;
-        client.add_group_member("group", "bob", "member")?;
-        client.add_group_member("group", "carol", "member")?;
+        fixture_group(client, "group", &alice)?;
+        fixture_member(client, "group", &bob)?;
+        fixture_member(client, "group", &carol)?;
     }
     bob.client.import_group_sender_key_distribution(
         &alice.client.export_group_sender_key_distribution("group", "alice")?,
@@ -176,7 +194,12 @@ async fn legacy_quarantine_survives_v2_upgrade_without_ack_or_dead_letter() -> R
     )?;
     let entry = seal(&alice, &bob, message("v2", "new-thread"), b"new")?;
     let opened = bob.client.open_routed(&entry, "bob")?;
-    bob.client.persist_pair("bob", "alice", &opened.bundle_hash, &opened.session)?;
+    bob.client.persist_pair(
+        "bob",
+        &fixture_peer_reference(&bob.client, "alice")?,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
     let (engine, writes) = Inbox::engine(bob.config()?, Vec::new())?;
     let mut account = crate::bus::state::LocalBusAccountState::new(
         std::mem::take(&mut bob.client),

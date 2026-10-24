@@ -22,6 +22,9 @@ impl RamfluxClient {
         local: &str,
         remote: &str,
     ) -> Result<bool, SdkError> {
+        if ramflux_protocol::parse_qualified_device_id(remote)?.is_none() {
+            return Ok(false);
+        }
         let db = self.account_db()?;
         if db
             .load_actor_state::<bool>(
@@ -100,6 +103,8 @@ impl RamfluxClient {
         self.finish_pair_retirement()
     }
     pub(crate) fn remove_device_pair(&self, remote: &str, reason: &str) -> Result<(), SdkError> {
+        let reference = self.device_reference(remote)?;
+        let remote = reference.as_str();
         let Some(local) = self.device_branch.as_ref().map(|device| device.device_id.clone()) else {
             return Ok(());
         };
@@ -166,6 +171,7 @@ impl RamfluxClient {
         {
             if let Some(marker) = db.load_actor_state::<Value>(&key)?
                 && let Some(remote) = marker["device_id"].as_str()
+                && ramflux_protocol::parse_qualified_device_id(remote)?.is_some()
                 && db
                     .client_record("device", remote)?
                     .is_some_and(|device| device["principal_id"] == principal)

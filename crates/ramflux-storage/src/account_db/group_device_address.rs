@@ -24,20 +24,10 @@ impl AccountDb {
         Ok(rows.into_iter().next())
     }
     pub(super) fn pin_address_for_write(
-        &self,
         device: &str,
     ) -> Result<(String, String, Option<String>), StorageError> {
         if let Some((root, raw)) = ramflux_protocol::parse_qualified_device_id(device)? {
             return Ok((device.into(), raw, Some(root)));
-        }
-        if let Some(row) = self.client_record("device", device)?
-            && let Some(root) = row["principal_commitment"].as_str()
-        {
-            return Ok((
-                ramflux_protocol::qualified_device_id(root, device)?,
-                device.into(),
-                Some(root.into()),
-            ));
         }
         Ok((crate::schema_device_namespace::legacy_address(device), device.into(), None))
     }

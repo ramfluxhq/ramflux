@@ -248,7 +248,7 @@ Local device metadata, directory entries, pair references, revocation fences and
 bound group pins distinguish `(root commitment, literal device id)`. SDK-owned
 sends require `recipient_principal_commitment` alongside the literal id, or a
 qualified `root~` address. Names inside an address are decoded exactly once.
-Bare ambiguous names return an error. Historical unsigned metadata and orphan
+Bare foreign names never select live authority, even when only one directory row matches. Historical unsigned metadata and orphan
 sessions cannot supply live key authority. Account opening atomically migrates
 metadata and pins into separate scoped and legacy storage namespaces; it does
 not endorse old unsigned keys. Unscoped pair secrets move to a separate read-only
@@ -293,3 +293,23 @@ issued group key remains known to that terminal until the group advances its key
 epoch; delivery filtering alone cannot erase that knowledge. Legacy migration
 still requires independently root-authorized material for every listed device;
 a lost or phantom legacy entry can block migration and needs explicit recovery.
+
+
+## Group controls and literal device names
+
+New group controls use `ramflux.client_event.v2` with the existing group signature
+domain. The signed `group_device_roots` extension binds the actor and each member
+selector to their root commitments; the body retains literal device names. The
+actor must match a pinned group key and current root authority. An accepted
+invite must also match the root recorded for that exact invite. A legacy join
+without a root uses only its group's invite provenance. Missing or conflicting
+provenance leaves the event pending and does not pin a directory candidate.
+
+New enrollment and ready-proof verification reject `root~` and `legacy~` device
+name prefixes, empty names, control characters and names over 256 bytes. Storage
+address encoding continues to preserve historical literal names. Historical
+message sender names never acquire a new principal from today's device directory;
+receipts resolve roots through their conversation's explicit route or participant
+relationship, or a group-specific pin. Pending own-root revocations are checked
+explicitly before sibling history imports. A failed scheduled proof refresh
+surfaces `OwnDeviceAuthorizationRefreshFailed` in the sync status reason code.

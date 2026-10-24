@@ -142,7 +142,7 @@ async fn mismatching_revocation_ack_fences_local_traffic_and_retries_the_identic
     Ok(())
 }
 
-async fn manifest_server(
+pub(super) async fn manifest_server(
     path: &std::path::Path,
     forged: crate::prekey::SdkDeviceManifestResponse,
 ) -> Result<

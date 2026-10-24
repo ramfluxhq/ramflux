@@ -86,7 +86,7 @@ async fn revoked_fixture(target: &str) -> Result<(Fixture, Fixture), SdkError> {
     let mut alice = Fixture::owned("alice", "bob", 61, 42)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
-    assert!(bob.client.begin_pair_recovery("bob", "alice", now_unix_timestamp())?);
+    assert!(bob.client.begin_pair_recovery("bob", &alice.reference()?, now_unix_timestamp())?);
     let public = ramflux_crypto::public_key_base64url_from_seed([61; 32]);
     let commitment = crate::prekey::identity_root_public_key_commitment(&public)?;
     let old =
@@ -147,15 +147,18 @@ async fn revoked_fixture(target: &str) -> Result<(Fixture, Fixture), SdkError> {
 async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_rejects_stale_cache()
 -> Result<(), SdkError> {
     let (alice, bob) = Box::pin(revoked_fixture("alice")).await?;
-    let work = format!("dm-pair/reset-work/{}", bob.client.pair_key("bob", "alice")?);
+    let work = format!("dm-pair/reset-work/{}", bob.client.pair_key("bob", &alice.reference()?)?);
     assert!(bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work)?.is_none());
-    assert!(bob.client.active_pair("bob", "alice")?.is_none());
+    assert!(bob.client.active_pair("bob", &alice.reference()?)?.is_none());
     assert_eq!(
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?.len(),
         0
     );
     assert!(super::review::trust(&bob, &alice).is_err());
-    assert!(matches!(bob.client.trusted_device("alice"), Err(SdkError::InboundRejected(_))));
+    assert!(matches!(
+        bob.client.trusted_device(&alice.reference()?),
+        Err(SdkError::InboundRejected(_))
+    ));
     Ok(())
 }
 

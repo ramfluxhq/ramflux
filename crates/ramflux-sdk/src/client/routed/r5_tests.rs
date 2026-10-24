@@ -34,7 +34,13 @@ pub(super) fn fresh(
         &msg,
         b"fresh",
         Route::direct(),
-        SealPair { local: &sender.id, remote: &receiver.id, session: &mut session, header, bundle },
+        SealPair {
+            local: &sender.id,
+            remote: &receiver.reference()?,
+            session: &mut session,
+            header,
+            bundle,
+        },
     )?;
     msg.encrypted_body = serde_json::to_vec(&encrypted)?;
     Ok(GatewayInboxEntry {
@@ -59,15 +65,25 @@ async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair() -> Resul
     let mut alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
-    let old =
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
-    bob.client.account_db()?.remove_actor_state(&bob.client.pair_key("bob", "alice")?)?;
+    let old = alice
+        .client
+        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .ok_or_else(|| invalid("pair"))?
+        .0
+        .session_id;
+    bob.client.account_db()?.remove_actor_state(
+        &bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?,
+    )?;
     bob.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&bob, &alice, "after-state-loss")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     alice.client.apply_routed_entry(&mut ae, &pool()?, &entry, false).await?;
-    let active =
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
+    let active = alice
+        .client
+        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .ok_or_else(|| invalid("pair"))?
+        .0
+        .session_id;
     assert_ne!(active, old);
     assert_eq!(active, decode(&entry.envelope)?.ciphertext.session_id);
     let reply = seal(&alice, &bob, outgoing(&alice, &bob, "after-recovery"), b"recovered")?;
@@ -79,14 +95,23 @@ async fn unverified_fresh_bootstrap_cannot_displace_a_settled_pair() -> Result<(
     let mut alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
-    let old =
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
+    let old = alice
+        .client
+        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .ok_or_else(|| invalid("pair"))?
+        .0
+        .session_id;
     let mut entry = fresh(&bob, &alice, "forged")?;
     entry.envelope.signed.signature = "invalid".to_owned();
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     assert!(alice.client.apply_routed_entry(&mut ae, &pool()?, &entry, false).await.is_err());
     assert_eq!(
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id,
+        alice
+            .client
+            .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+            .ok_or_else(|| invalid("pair"))?
+            .0
+            .session_id,
         old
     );
     Ok(())
@@ -159,12 +184,19 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
     let mut alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
-    let (mut session, bundle) =
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?;
+    let (mut session, bundle) = alice
+        .client
+        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .ok_or_else(|| invalid("pair"))?;
     for _ in 0..1001 {
         session.encrypt(b"lost", b"discarded")?;
     }
-    alice.client.persist_pair("alice", "bob", &bundle, &session)?;
+    alice.client.persist_pair(
+        "alice",
+        &fixture_peer_reference(&alice.client, "bob")?,
+        &bundle,
+        &session,
+    )?;
     let gap = seal(&alice, &bob, outgoing(&alice, &bob, "gap"), b"past-gap")?;
     assert!(matches!(
         bob.client.open_routed(&gap, "bob"),
@@ -214,8 +246,10 @@ fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), Sd
     let entry = fresh(&alice, &bob, "slot-bootstrap")?;
     let mut opened = bob.client.open_routed(&entry, "bob")?;
     let before = opened.session.clone();
-    let (mut send, bundle) =
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?;
+    let (mut send, bundle) = alice
+        .client
+        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .ok_or_else(|| invalid("pair"))?;
     for _ in 0..3 {
         send.encrypt(b"lost", b"discarded")?;
     }
@@ -230,7 +264,12 @@ fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), Sd
         x3dh: decode(&entry.envelope)?.x3dh,
         ciphertext,
     };
-    bob.client.persist_pair("bob", "alice", &bundle, &opened.session)?;
+    bob.client.persist_pair(
+        "bob",
+        &fixture_peer_reference(&bob.client, "alice")?,
+        &bundle,
+        &opened.session,
+    )?;
     assert!(bob.client.decrypt_pair_object_slot(&slot, Some(&mut opened.session)).is_err());
     assert_eq!(opened.session, before);
     Ok(())
@@ -241,18 +280,32 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
     let mut alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
-    let old =
-        alice.client.active_pair("alice", "bob")?.ok_or_else(|| invalid("pair"))?.0.session_id;
-    alice.client.account_db()?.remove_actor_state(&alice.client.pair_key("alice", "bob")?)?;
+    let old = alice
+        .client
+        .active_pair("alice", &fixture_peer_reference(&alice.client, "bob")?)?
+        .ok_or_else(|| invalid("pair"))?
+        .0
+        .session_id;
+    alice.client.account_db()?.remove_actor_state(
+        &alice.client.pair_key("alice", &fixture_peer_reference(&alice.client, "bob")?)?,
+    )?;
     alice.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&alice, &bob, "alice-state-loss")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await?;
     assert_eq!(
-        bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id,
+        bob.client
+            .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .ok_or_else(|| invalid("pair"))?
+            .0
+            .session_id,
         decode(&entry.envelope)?.ciphertext.session_id
     );
-    assert!(bob.client.archived_pairs("bob", "alice")?.contains(&old));
+    assert!(
+        bob.client
+            .archived_pairs("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .contains(&old)
+    );
     assert!(
         bob.client
             .account_db()?
@@ -281,10 +334,18 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
     bob.client.apply_routed_entry(&mut be, &pool()?, &reset, false).await?;
     let incoming = decode(&reset.envelope)?.ciphertext.session_id;
     assert_eq!(
-        bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?.0.session_id,
+        bob.client
+            .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .ok_or_else(|| invalid("pair"))?
+            .0
+            .session_id,
         old.clone().min(incoming.clone())
     );
-    assert!(bob.client.archived_pairs("bob", "alice")?.contains(&old.clone().max(incoming)));
+    assert!(
+        bob.client
+            .archived_pairs("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            .contains(&old.clone().max(incoming))
+    );
     assert!(
         bob.client
             .account_db()?
@@ -295,13 +356,18 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
 }
 
 #[test]
-fn a_literal_address_shaped_device_name_bootstraps_under_its_actual_root() -> Result<(), SdkError> {
+fn an_address_shaped_device_name_is_rejected_at_live_enrollment() -> Result<(), SdkError> {
     let literal = ramflux_protocol::qualified_device_id("unrelated-root", "phone")?;
-    let sender = Fixture::new(&literal, 41)?;
-    let receiver = Fixture::new("bob", 61)?;
-    let entry = fresh(&sender, &receiver, "literal-address")?;
-    let opened = receiver.client.open_routed(&entry, "bob")?;
-    assert_eq!(opened.body.as_slice(), b"fresh");
-    assert_eq!(opened.remote_device, sender.client.local_device_reference(&literal)?);
+    let fixture = Fixture::new(&literal, 41)?;
+    assert!(matches!(
+        crate::client::identity_authority::test_support::manifest(&fixture.client),
+        Err(SdkError::Crypto(_))
+    ));
+    // The address codec still preserves historical literal names without aliasing.
+    let historical = ramflux_protocol::qualified_device_id("actual-root", &literal)?;
+    assert_eq!(
+        ramflux_protocol::parse_qualified_device_id(&historical)?,
+        Some(("actual-root".into(), literal))
+    );
     Ok(())
 }

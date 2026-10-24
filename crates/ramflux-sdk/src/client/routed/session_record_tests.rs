@@ -93,12 +93,19 @@ impl ramflux_transport::GatewaySessionFrameSource for Wire {
     }
 }
 pub(super) fn active(f: &Fixture, remote: &str) -> Result<String, SdkError> {
-    Ok(f.client.active_pair(&f.id, remote)?.ok_or_else(|| invalid("current pair"))?.0.session_id)
+    Ok(f.client
+        .active_pair(&f.id, &fixture_peer_reference(&f.client, remote)?)?
+        .ok_or_else(|| invalid("current pair"))?
+        .0
+        .session_id)
 }
 pub(super) fn archive(f: &Fixture, remote: &str) -> Result<Vec<String>, SdkError> {
     Ok(f.client
         .account_db()?
-        .load_actor_state::<Vec<String>>(&format!("{}/archive", f.client.pair_key(&f.id, remote)?))?
+        .load_actor_state::<Vec<String>>(&format!(
+            "{}/archive",
+            f.client.pair_key(&f.id, &fixture_peer_reference(&f.client, remote)?)?
+        ))?
         .unwrap_or_default())
 }
 pub(super) fn gap(
@@ -106,12 +113,14 @@ pub(super) fn gap(
     receiver: &Fixture,
     id: &str,
 ) -> Result<GatewayInboxEntry, SdkError> {
-    let (mut session, bundle) =
-        sender.client.active_pair(&sender.id, &receiver.id)?.ok_or_else(|| invalid("pair"))?;
+    let (mut session, bundle) = sender
+        .client
+        .active_pair(&sender.id, &receiver.reference()?)?
+        .ok_or_else(|| invalid("pair"))?;
     for _ in 0..1001 {
         session.encrypt(b"lost", b"discarded")?;
     }
-    sender.client.persist_pair(&sender.id, &receiver.id, &bundle, &session)?;
+    sender.client.persist_pair(&sender.id, &receiver.reference()?, &bundle, &session)?;
     seal(sender, receiver, outgoing(sender, receiver, id), b"past gap")
 }
 pub(super) fn last(sent: &Sent) -> Result<GatewayInboxEntry, SdkError> {
@@ -130,7 +139,7 @@ fn group_bootstrap(
     trust(sender, receiver)?;
     trust(receiver, sender)?;
     sender.client.create_group(group, &sender.id)?;
-    sender.client.add_group_member(group, &receiver.id, "member")?;
+    fixture_member(&sender.client, group, receiver)?;
     let body = sender.client.encrypt_group_message(group, &sender.id, b"delayed group packet")?;
     let mut message = outgoing(sender, receiver, id);
     message.conversation_id = format!("thread-{group}");
@@ -141,7 +150,13 @@ fn group_bootstrap(
         &message,
         &body,
         Route::group_message(group),
-        SealPair { local: &sender.id, remote: &receiver.id, session: &mut session, header, bundle },
+        SealPair {
+            local: &sender.id,
+            remote: &receiver.reference()?,
+            session: &mut session,
+            header,
+            bundle,
+        },
     )?;
     message.encrypted_body = serde_json::to_vec(&wrapper)?;
     Ok(GatewayInboxEntry {
@@ -152,7 +167,7 @@ fn group_bootstrap(
 }
 fn membership(receiver: &Fixture, sender: &Fixture, group: &str) -> Result<(), SdkError> {
     receiver.client.create_group(group, &receiver.id)?;
-    receiver.client.add_group_member(group, &sender.id, "member")?;
+    fixture_member(&receiver.client, group, sender)?;
     receiver.client.import_group_sender_key_distribution(
         &sender.client.export_group_sender_key_distribution(group, &sender.id)?,
     )?;
@@ -243,7 +258,10 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await.is_err());
     let lost = last(&sent)?;
-    let key = format!("dm-pair/reset-work/{}", bob.client.pair_key("bob", "alice")?);
+    let key = format!(
+        "dm-pair/reset-work/{}",
+        bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+    );
     let mut work = bob
         .client
         .account_db()?
@@ -251,7 +269,10 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
         .ok_or_else(|| invalid("accepted transport lost its durable reset"))?;
     work["next_at"] = serde_json::json!(0);
     bob.client.account_db()?.persist_actor_state(
-        &format!("{}/reset-at", bob.client.pair_key("bob", "alice")?),
+        &format!(
+            "{}/reset-at",
+            bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        ),
         &(now_unix_timestamp() - 60),
     )?;
     bob.client.account_db()?.persist_actor_state(&key, &work)?;
@@ -315,13 +336,23 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await.is_err());
     let first = last(&sent)?;
-    let (mut session, bundle) =
-        bob.client.active_pair("bob", "alice")?.ok_or_else(|| invalid("pair"))?;
+    let (mut session, bundle) = bob
+        .client
+        .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        .ok_or_else(|| invalid("pair"))?;
     for _ in 0..1001 {
         session.encrypt(b"unacknowledged", b"discarded")?;
     }
-    bob.client.persist_pair("bob", "alice", &bundle, &session)?;
-    let key = format!("dm-pair/reset-work/{}", bob.client.pair_key("bob", "alice")?);
+    bob.client.persist_pair(
+        "bob",
+        &fixture_peer_reference(&bob.client, "alice")?,
+        &bundle,
+        &session,
+    )?;
+    let key = format!(
+        "dm-pair/reset-work/{}",
+        bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+    );
     let mut work = bob
         .client
         .account_db()?
@@ -329,7 +360,10 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
         .ok_or_else(|| invalid("no durable reset"))?;
     work["next_at"] = serde_json::json!(0);
     bob.client.account_db()?.persist_actor_state(
-        &format!("{}/reset-at", bob.client.pair_key("bob", "alice")?),
+        &format!(
+            "{}/reset-at",
+            bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        ),
         &(now_unix_timestamp() - 60),
     )?;
     bob.client.account_db()?.persist_actor_state(&key, &work)?;

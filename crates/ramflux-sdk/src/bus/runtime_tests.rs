@@ -873,7 +873,7 @@ async fn group_send_lists_every_missing_member_before_writing_a_message() -> Res
         let root=root("group-routes");let initialize=actor_account(&root,"alice",None,Arc::new(AtomicBool::new(false)));
         let initialize:AccountInitializer=Box::new(move |index| {
             let account=initialize(index)?;account.client.create_group("group","device-alice")?;
-            account.client.add_group_member("group","device-bob","member")?;account.client.add_group_member("group","device-charlie","member")?;Ok(account)
+            account.client.account_db()?.add_group_member("group","device-bob","member")?;account.client.account_db()?.add_group_member("group","device-charlie","member")?;Ok(account)
         });
         let supervisor=supervisor(&root,BTreeMap::from([("alice".to_owned(),initialize)]))?;let (socket,server)=client(Rc::clone(&supervisor),1).await?;
         let response=socket.request_frame(request("send","alice","group.send",serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"group message")}))).await;
@@ -889,10 +889,20 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
     let root = root("group-directory-routes");
     let account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
     account.client.create_group("group", "device-alice")?;
-    account.client.add_group_member("group", "device-bob", "member")?;
+    account.client.account_db()?.add_group_member("group", "device-bob", "member")?;
     let db = account.client.account_db()?;
     db.persist_client_record("device", "device-bob", &serde_json::json!({"principal_id":"bob","principal_commitment":"commitment-bob","device_id":"device-bob"}))?;
     db.persist_client_record("identity","bob",&serde_json::json!({"contact_identity_commitment":"commitment-bob","devices":[{"device_id":"device-bob","signing_public_key":"public-key","target_delivery_id":"delivery-bob"}]}))?;
+    account.client.persist_group_member_route(
+        "group",
+        &LocalBusGroupMemberRoute {
+            member_id: "device-bob".into(),
+            member_principal_commitment: Some("commitment-bob".into()),
+            device_signing_public_key: None,
+            target_delivery_id: None,
+            federation: None,
+        },
+    )?;
     let body: LocalBusGroupSendRequest = serde_json::from_value(
         serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":""}),
     )?;
@@ -924,6 +934,25 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
     // Obsolete surface-specific queues are never decoded or scheduled.
     assert_eq!(super::sync_driver::run(&mut account).await?, 0);
     assert!(account.take_live_engine().await.is_ok());
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn own_authorization_refresh_failure_has_a_distinct_error_code() -> Result<(), SdkError> {
+    let root = root("proof-refresh-status");
+    let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+    account.gateway_config.timeout = Duration::from_millis(20);
+    account.gateway_config.quic_fallback_timeout = Duration::from_millis(20);
+    account.client.record_owned_proof_published(now_unix_timestamp() - 3600)?;
+    let error = account
+        .ensure_gateway_live()
+        .await
+        .err()
+        .ok_or_else(|| SdkError::LocalBus("expected refresh failure".into()))?;
+    assert!(matches!(error, SdkError::OwnDeviceAuthorizationRefreshFailed(_)));
+    assert_eq!(local_bus_error_code(&error), "OwnDeviceAuthorizationRefreshFailed");
     drop(account);
     std::fs::remove_dir_all(root)?;
     Ok(())

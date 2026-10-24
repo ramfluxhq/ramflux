@@ -1392,10 +1392,13 @@ mod tests {
             [0x54; 32],
         )?;
         client.persist_identity_directory(&initial)?;
-        client.create_group("pinned", "victim_device")?;
+        client.create_group(
+            "pinned",
+            &ramflux_protocol::qualified_device_id(&initial.principal_commitment, "victim_device")?,
+        )?;
         client.account_db()?.persist_group_member_device_key(
             "pinned",
-            "victim_device",
+            &ramflux_protocol::qualified_device_id(&initial.principal_commitment, "victim_device")?,
             &initial.devices[0].branch_public_key,
         )?;
         let impostor = manifest_fixture(

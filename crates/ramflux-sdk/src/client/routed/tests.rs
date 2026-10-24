@@ -37,6 +37,9 @@ impl Fixture {
         client.initialize_and_publish_prekey_bundle(principal, id, id, [device_seed; 32], None)?;
         Ok(Self { root, client, id: id.to_owned() })
     }
+    fn reference(&self) -> Result<String, SdkError> {
+        self.client.local_device_reference(&self.id)
+    }
     fn config(&self) -> Result<GatewaySessionConfig, SdkError> {
         Ok(GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("address"))?,
@@ -65,6 +68,37 @@ impl Drop for Fixture {
     }
 }
 
+// These fixtures name the expected principal and its device identically. Resolve the
+// pinned principal relationship, never a directory's by-device-name candidate.
+fn fixture_peer_reference(client: &RamfluxClient, principal: &str) -> Result<String, SdkError> {
+    let owner = client
+        .account_db()?
+        .client_record("identity", principal)?
+        .ok_or_else(|| invalid("fixture peer identity"))?;
+    let root = owner["contact_identity_commitment"]
+        .as_str()
+        .ok_or_else(|| invalid("fixture peer root"))?;
+    Ok(ramflux_protocol::qualified_device_id(root, principal)?)
+}
+// Fixture callers name the intended member explicitly; no directory name lookup grants authority.
+fn fixture_member(client: &RamfluxClient, group: &str, member: &Fixture) -> Result<(), SdkError> {
+    let manifest = crate::client::identity_authority::test_support::manifest(&member.client)?;
+    client.observe_device_manifest_json(
+        serde_json::to_value(&manifest)?,
+        &manifest.principal_commitment,
+    )?;
+    client.add_group_member(group, &member.reference()?, "member")?;
+    Ok(())
+}
+fn fixture_group(client: &RamfluxClient, group: &str, owner: &Fixture) -> Result<(), SdkError> {
+    let manifest = crate::client::identity_authority::test_support::manifest(&owner.client)?;
+    client.observe_device_manifest_json(
+        serde_json::to_value(&manifest)?,
+        &manifest.principal_commitment,
+    )?;
+    client.create_group(group, &owner.reference()?)?;
+    Ok(())
+}
 fn message(id: &str, conversation: &str) -> GatewayDirectMessage {
     GatewayDirectMessage {
         conversation_id: conversation.to_owned(),
@@ -142,7 +176,7 @@ fn seal_as(
         route,
         SealPair {
             local: &sender.id,
-            remote: &receiver.id,
+            remote: &receiver.reference()?,
             session: &mut session,
             header,
             bundle: hash,
@@ -185,7 +219,12 @@ fn device_pair_session_spans_conversations_and_rejects_replay_and_tampering() ->
     let first = seal(&a, &b, message("first", "conversation-one"), b"one")?;
     let opened = b.client.open_routed(&first, "bob")?;
     let session_id = opened.session.session_id.clone();
-    b.client.persist_pair("bob", "alice", &opened.bundle_hash, &opened.session)?;
+    b.client.persist_pair(
+        "bob",
+        &fixture_peer_reference(&b.client, "alice")?,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
     assert!(b.client.open_routed(&first, "bob").is_err());
     let second = seal(&a, &b, message("second", "different-conversation"), b"two")?;
     let opened = b.client.open_routed(&second, "bob")?;
@@ -209,7 +248,12 @@ fn device_pair_session_supports_reply_direction() -> Result<(), SdkError> {
     let b = Fixture::new("bob", 71)?;
     let first = seal(&a, &b, message("first", "c"), b"hello")?;
     let opened = b.client.open_routed(&first, "bob")?;
-    b.client.persist_pair("bob", "alice", &opened.bundle_hash, &opened.session)?;
+    b.client.persist_pair(
+        "bob",
+        &fixture_peer_reference(&b.client, "alice")?,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
     let mut reply = message("reply", "another-private-conversation");
     reply.source_principal_id = "bob".to_owned();
     reply.sender_id = "bob".to_owned();
@@ -280,8 +324,8 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     let group = "private-group";
     let conversation = "private-group-conversation";
     for client in [&a.client, &b.client] {
-        client.create_group(group, "alice")?;
-        client.add_group_member(group, "bob", "member")?;
+        fixture_group(client, group, &a)?;
+        fixture_member(client, group, &b)?;
         let key = ramflux_protocol::encode_base64url(
             a.client
                 .device_branch
@@ -357,6 +401,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
 fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(), SdkError> {
     let a = Fixture::new("alice", 121)?;
     let b = Fixture::new("bob", 131)?;
+    review::trust(&b, &a)?;
     let mut message = message("legacy-envelope", "legacy-conversation");
     let bundle = b.client.load_x3dh_private_state("bob")?.bundle;
     let (mut sending, header) =
@@ -401,8 +446,8 @@ async fn group_message_before_distribution_keeps_content_retryable() -> Result<(
     let a = Fixture::new("alice", 141)?;
     let mut b = Fixture::new("bob", 151)?;
     for client in [&a.client, &b.client] {
-        client.create_group("pending-group", "alice")?;
-        client.add_group_member("pending-group", "bob", "member")?;
+        fixture_group(client, "pending-group", &a)?;
+        fixture_member(client, "pending-group", &b)?;
         let key = ramflux_protocol::encode_base64url(
             a.client
                 .device_branch
