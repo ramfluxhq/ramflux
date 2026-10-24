@@ -23,7 +23,14 @@ impl RamfluxClient {
         own_gateway: &GatewaySessionConfig,
         input: ContactResolution<'_>,
     ) -> Result<Value, SdkError> {
-        let ContactResolution { selector, expected_root, card, link_id, allow_commitment } = input;
+        let ContactResolution {
+            selector,
+            expected_root,
+            card,
+            link_id,
+            allow_commitment,
+            requester_is_peer,
+        } = input;
         if !crate::contact_card::valid_principal(selector) {
             return Err(ContactReason::UnknownPrincipal.into());
         }
@@ -82,7 +89,12 @@ impl RamfluxClient {
                 identity["node"] = json!(card.node);
             }
             db.persist_client_record("identity", principal, &identity)?;
-            self.establish_friend_link(&link_id, &own_commitment, &manifest.principal_commitment)?;
+            let (requester, target) = if requester_is_peer {
+                (&manifest.principal_commitment, &own_commitment)
+            } else {
+                (&own_commitment, &manifest.principal_commitment)
+            };
+            self.establish_friend_link(&link_id, requester, target)?;
             let own_material =
                 super::contact::contact_safety_material_from_manifest(&own_manifest)?;
             let contact_material =
@@ -127,4 +139,5 @@ pub(crate) struct ContactResolution<'a> {
     pub card: Option<&'a crate::ContactCardBody>,
     pub link_id: String,
     pub allow_commitment: bool,
+    pub requester_is_peer: bool,
 }

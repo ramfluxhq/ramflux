@@ -19,7 +19,7 @@ pub(super) async fn add(
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let Selection { legacy, card, selector } =
+    let Selection { legacy, card, selector, requester_is_peer } =
         parse_selector(request, local_bus_account(state, account_id)?)?;
     let account = local_bus_account(state, account_id)?;
     let own = account.gateway_config.clone();
@@ -78,6 +78,7 @@ pub(super) async fn add(
                 card: card.as_ref(),
                 link_id: link.clone(),
                 allow_commitment: legacy.is_some(),
+                requester_is_peer,
             },
         )
         .await?;
@@ -193,6 +194,7 @@ struct Selection {
     legacy: Option<LocalBusContactAddRequest>,
     card: Option<ContactCardBody>,
     selector: String,
+    requester_is_peer: bool,
 }
 fn parse_selector(
     request: &LocalBusFrame,
@@ -206,17 +208,13 @@ fn parse_selector(
         let id = request.body["link_id"].as_str().ok_or(ContactReason::InvalidCard)?;
         let stored = account.client.account_db()?.friend_link(id)?;
         let own = [&account.gateway_config.principal_id, &account.principal_commitment];
-        let peer = if own.contains(&&stored.requester_id) {
-            stored.target_id
-        } else if own.contains(&&stored.target_id) {
-            stored.requester_id
-        } else {
+        if !own.contains(&&stored.requester_id) && !own.contains(&&stored.target_id) {
             return Err(ContactReason::InvalidCard.into());
-        };
+        }
         Some(LocalBusContactAddRequest {
             link_id: id.to_owned(),
-            requester_id: account.principal_commitment.clone(),
-            target_id: peer,
+            requester_id: stored.requester_id,
+            target_id: stored.target_id,
         })
     } else if request.body.get("link_id").is_some()
         && request.body.get("principal_id").is_none()
@@ -251,7 +249,9 @@ fn parse_selector(
         }
         _ => return Err(ContactReason::InvalidCard.into()),
     };
-    Ok(Selection { legacy, card, selector })
+    let requester_is_peer = request.method == "contact.accept"
+        && legacy.as_ref().is_none_or(|old| old.requester_id == selector);
+    Ok(Selection { legacy, card, selector, requester_is_peer })
 }
 
 fn account_home(

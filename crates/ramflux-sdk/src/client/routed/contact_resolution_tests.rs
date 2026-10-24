@@ -227,6 +227,14 @@ async fn accepting_a_pending_request_resolves_the_requester_without_device_hints
     assert_eq!(accepted["contact"]["principal_id"], "alice");
     assert_eq!(accepted["contact"]["reachable"], true);
     assert_eq!(accepted["state"], "accepted");
+    let bob = s.accounts.get("bob").ok_or_else(|| invalid("bob"))?;
+    let alice = bob
+        .client
+        .account_db()?
+        .client_record("identity", "alice")?
+        .ok_or_else(|| invalid("alice"))?;
+    assert_eq!(accepted["requester_id"], alice["contact_identity_commitment"]);
+    assert_eq!(accepted["target_id"], bob.principal_commitment);
     Ok(())
 }
 
