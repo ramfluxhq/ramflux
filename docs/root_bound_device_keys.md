@@ -316,9 +316,9 @@ explicitly before sibling history imports. A failed scheduled proof refresh
 surfaces `OwnDeviceAuthorizationRefreshFailed` in the sync status reason code.
 
 
-Direct-conversation authorization compares the verified sender principal (or an
-explicit root-qualified participant address), never a sender-selected literal
-device name. Delivered/read receipt payloads must name their authenticated route
+Direct-conversation authorization verifies the sender under its root-qualified
+device reference and compares its principal with participant principals. Neither
+literal nor qualified device names substitute for principal identities. Delivered/read receipt payloads must name their authenticated route
 and literal sending device. Root-bound receive stores receipt deduplication and
 read/delivery state under the verified root-qualified device reference, so peers
 with equal device names remain distinct. Legacy receipts remain in their original

@@ -18,12 +18,20 @@ fn receipt(device: &str, id: &str) -> Result<Vec<u8>, SdkError> {
 #[tokio::test]
 async fn a_friend_named_like_another_principal_cannot_write_or_ack_their_thread()
 -> Result<(), SdkError> {
+    Box::pin(assert_copied_device_cannot_change_thread("bob")).await
+}
+#[tokio::test]
+async fn a_qualified_device_address_is_not_a_principal_participant_alias() -> Result<(), SdkError> {
+    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    Box::pin(assert_copied_device_cannot_change_thread(&mallory.reference()?)).await
+}
+async fn assert_copied_device_cannot_change_thread(victim_principal: &str) -> Result<(), SdkError> {
     let mut alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::new("bob", 31)?;
+    let bob = Fixture::owned("bob", victim_principal, 31, 32)?;
     let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
     trust(&alice, &bob)?;
     trust(&alice, &mallory)?;
-    alice.client.establish_friend_link("bob-link", "alice", "bob")?;
+    alice.client.establish_friend_link("bob-link", "alice", victim_principal)?;
     alice.client.establish_friend_link("mallory-link", "alice", "mallory")?;
     let mut engine =
         GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
