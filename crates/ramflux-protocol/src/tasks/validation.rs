@@ -12,6 +12,14 @@ pub const MAX_TASK_EVENT_BYTES: usize = 65_536;
 /// Largest exactly representable interoperable JSON integer.
 pub const MAX_TASK_VERSION: u64 = 9_007_199_254_740_991;
 
+/// Why a human receipt no longer matches its observed intervention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskDecisionChange {
+    Closed,
+    TargetChanged,
+    NewerThanObserved,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TaskReject {
     #[error("unsupported task schema or schema version")]
@@ -56,6 +64,8 @@ pub enum TaskReject {
     HumanDecisionPending,
     #[error("human decision does not match the current step and intervention")]
     DecisionMismatch,
+    #[error("stale decision for step {step_id}: {change:?}")]
+    StaleDecision { step_id: String, change: TaskDecisionChange },
     #[error("human decision or single-use approval was already consumed")]
     DecisionReplay,
     #[error("protocol encoding failed: {0}")]
@@ -63,7 +73,20 @@ pub enum TaskReject {
 }
 
 pub(super) fn field(value: &str, name: &'static str, max: usize) -> Result<(), TaskReject> {
-    if value.trim().is_empty() || value.chars().count() > max {
+    if value.trim().is_empty()
+        || value.chars().count() > max
+        || !crate::text_safety::single_line_is_safe(value)
+    {
+        Err(TaskReject::InvalidField(name))
+    } else {
+        Ok(())
+    }
+}
+pub(super) fn free_text(value: &str, name: &'static str) -> Result<(), TaskReject> {
+    if value.trim().is_empty()
+        || value.chars().count() > MAX_TASK_TEXT_CHARS
+        || !crate::text_safety::free_text_is_safe(value)
+    {
         Err(TaskReject::InvalidField(name))
     } else {
         Ok(())
@@ -99,32 +122,32 @@ impl TaskEvent {
     /// # Errors
     /// Returns a typed reject for malformed framing, payload limits, or critical extensions.
     pub fn validate(&self) -> Result<(), TaskReject> {
-        if self.schema != TASK_EVENT_SCHEMA || self.version != 1 {
+        if self.fields().schema != TASK_EVENT_SCHEMA || self.fields().version != 1 {
             return Err(TaskReject::InvalidSchema);
         }
-        if self.domain != domain::TASK_EVENT {
+        if self.fields().domain != domain::TASK_EVENT {
             return Err(TaskReject::InvalidDomain);
         }
-        field(&self.conversation_id, "conversation_id", 256)?;
-        field(self.event.task_id(), "task_id", 256)?;
-        field(&self.signed.signing_key_id, "signing_key_id", 256)?;
-        if !(1..=MAX_TASK_VERSION).contains(&self.event.version()) {
+        field(&self.fields().conversation_id, "conversation_id", 256)?;
+        field(self.fields().event.task_id(), "task_id", 256)?;
+        field(&self.fields().signed.signing_key_id, "signing_key_id", 256)?;
+        if !(1..=MAX_TASK_VERSION).contains(&self.fields().event.version()) {
             return Err(TaskReject::InvalidVersion);
         }
-        match &self.event {
+        match &self.fields().event {
             TaskEventBody::Start(v) => {
-                if v.conversation_id != self.conversation_id {
+                if v.conversation_id != self.fields().conversation_id {
                     return Err(TaskReject::ContextMismatch);
                 }
                 field(&v.requester, "requester", 256)?;
                 field(&v.assignee, "assignee", 256)?;
-                field(&v.text, "text", MAX_TASK_TEXT_CHARS)?;
+                free_text(&v.text, "text")?;
                 if let Some(text) = &v.constraints {
-                    field(text, "constraints", MAX_TASK_TEXT_CHARS)?;
+                    free_text(text, "constraints")?;
                 }
             }
             TaskEventBody::Proposal(v) => {
-                if v.conversation_id != self.conversation_id {
+                if v.conversation_id != self.fields().conversation_id {
                     return Err(TaskReject::ContextMismatch);
                 }
                 field(&v.proposer, "proposer", 256)?;

@@ -34,7 +34,7 @@ impl Actor {
             public_key_base64url: &self.public,
         }
     }
-    pub fn event(&self, body: TaskEventBody) -> Result<TaskEvent> {
+    pub fn event(&self, body: TaskEventBody) -> std::result::Result<TaskEvent, TaskReject> {
         self.sign(TaskEvent::new(
             "chat".to_owned(),
             body,
@@ -43,11 +43,11 @@ impl Actor {
                 signature_alg: SignatureAlg::Ed25519,
                 signature: String::new(),
             },
-        ))
+        )?)
     }
-    pub fn sign(&self, mut event: TaskEvent) -> Result<TaskEvent> {
-        event.signed.signature = encode_base64url(self.key.sign(&signed_bytes(&event)?).to_bytes());
-        Ok(event)
+    pub fn sign(&self, event: TaskEvent) -> std::result::Result<TaskEvent, TaskReject> {
+        let signature = encode_base64url(self.key.sign(&signed_bytes(&event)?).to_bytes());
+        event.with_signature(signature)
     }
 }
 pub fn start() -> TaskEventBody {
@@ -91,7 +91,7 @@ pub fn update(version: u64, state: TaskStatus, steps: Vec<TaskStep>) -> TaskEven
 pub fn resolve(version: u64, target: NeedsMe, decision: TaskDecision) -> TaskEventBody {
     TaskEventBody::Resolve(TaskResolve {
         task_id: "task".to_owned(),
-        version,
+        base_revision: version - 1,
         step_id: "s".to_owned(),
         target,
         decision_id: "decision".to_owned(),
@@ -128,6 +128,13 @@ pub fn reject(
     ) = (&error, expected)
     {
         assert_eq!((expected, actual), (want, received));
+    }
+    if let (
+        TaskReject::StaleDecision { step_id, change },
+        TaskReject::StaleDecision { step_id: want, change: reason },
+    ) = (&error, expected)
+    {
+        assert_eq!((step_id, change), (want, reason));
     }
     assert_eq!(*state, before);
     Ok(())

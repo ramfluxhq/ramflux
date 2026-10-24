@@ -31,7 +31,9 @@ pub(super) fn validated_hash(content: &CreateSurfaceCommand) -> Result<String, S
         return Err(limits::exceeded(SurfaceLimit::Actions));
     }
     limits::identifier(&content.surface_id)?;
-    if content.fallback_text.trim().is_empty() {
+    if content.fallback_text.trim().is_empty()
+        || !crate::text_safety::free_text_is_safe(&content.fallback_text)
+    {
         return Err(SurfaceReject::MissingFallback);
     }
     let mut ids = BTreeSet::new();

@@ -15,5 +15,5 @@ pub use state::{Task, TaskState};
 pub use types::*;
 pub use validation::{
     MAX_TASK_EVENT_BYTES, MAX_TASK_STEPS, MAX_TASK_TEXT_CHARS, MAX_TASK_TITLE_CHARS,
-    MAX_TASK_VERSION, TaskReject,
+    MAX_TASK_VERSION, TaskDecisionChange, TaskReject,
 };

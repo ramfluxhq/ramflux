@@ -98,7 +98,7 @@ pub struct TaskUpdate {
 #[serde(deny_unknown_fields)]
 pub struct TaskCancel {
     pub task_id: String,
-    pub version: u64,
+    pub base_revision: u64,
 }
 
 /// Result of the existing human decision flow; this receipt grants no tool capability.
@@ -116,7 +116,7 @@ pub enum TaskDecision {
 #[serde(deny_unknown_fields)]
 pub struct TaskResolve {
     pub task_id: String,
-    pub version: u64,
+    pub base_revision: u64,
     pub step_id: String,
     pub target: NeedsMe,
     pub decision_id: String,
@@ -136,6 +136,26 @@ pub enum TaskEventBody {
 }
 impl TaskEventBody {
     #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Start(_) => "start",
+            Self::Proposal(_) => "proposal",
+            Self::Accept(_) => "accept",
+            Self::Decline(_) => "decline",
+            Self::Update(_) => "update",
+            Self::Cancel(_) => "cancel",
+            Self::Resolve(_) => "resolve",
+        }
+    }
+    #[must_use]
+    pub const fn base_revision(&self) -> Option<u64> {
+        match self {
+            Self::Cancel(v) => Some(v.base_revision),
+            Self::Resolve(v) => Some(v.base_revision),
+            _ => None,
+        }
+    }
+    #[must_use]
     pub fn task_id(&self) -> &str {
         match self {
             Self::Start(v) => &v.task_id,
@@ -147,7 +167,8 @@ impl TaskEventBody {
             Self::Resolve(v) => &v.task_id,
         }
     }
-    /// Task revision; the enclosing event's `version` is the schema version instead.
+    /// Ordered event revision, or the observed base revision for Cancel/Resolve.
+    /// The resulting projection revision is assigned atomically by TaskState.
     #[must_use]
     pub const fn version(&self) -> u64 {
         match self {
@@ -155,8 +176,8 @@ impl TaskEventBody {
             Self::Accept(v) => v.version,
             Self::Decline(v) => v.version,
             Self::Update(v) => v.version,
-            Self::Cancel(v) => v.version,
-            Self::Resolve(v) => v.version,
+            Self::Cancel(v) => v.base_revision,
+            Self::Resolve(v) => v.base_revision,
         }
     }
 }

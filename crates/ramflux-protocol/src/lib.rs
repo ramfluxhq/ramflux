@@ -23,6 +23,7 @@ mod signature;
 mod state;
 mod surfaces;
 pub mod tasks;
+pub mod text_safety;
 pub use a2ui_state::*;
 pub use i_json::{MAX_SAFE_JSON_INTEGER, parse_i_json, validate_i_json_value};
 pub use tasks::*;

@@ -25,7 +25,7 @@ fn canonical_task_events_and_fixed_key_signatures_match_v1_goldens() -> Result {
         (
             "cancel",
             &h,
-            TaskEventBody::Cancel(TaskCancel { task_id: "task".to_owned(), version: 4 }),
+            TaskEventBody::Cancel(TaskCancel { task_id: "task".to_owned(), base_revision: 3 }),
         ),
         ("resolve", &h, resolve(4, approval(), TaskDecision::Resume)),
     ];
@@ -38,7 +38,7 @@ fn canonical_task_events_and_fixed_key_signatures_match_v1_goldens() -> Result {
             "{name}\npublic_key={}\njcs={}\nsignature={}\nfallback={}\n",
             actor.public,
             String::from_utf8(event.signing_bytes()?)?,
-            event.signed.signature,
+            event.signed().signature,
             event.fallback_text()
         )?;
     }

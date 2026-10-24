@@ -4,11 +4,11 @@
 //! Plain-text task event summaries for text-only clients.
 use super::{TaskDecision, TaskEvent, TaskEventBody, TaskStatus, TaskStep};
 impl TaskEvent {
-    /// Deterministic plain-text derivation; control characters cannot become terminal escapes.
+    /// Deterministic quoted display after verification against the caller-pinned signing key.
     #[must_use]
     pub fn fallback_text(&self) -> String {
-        let id = self.event.task_id();
-        let lines = match &self.event {
+        let id = self.event().task_id();
+        let lines = match self.event() {
             TaskEventBody::Start(v) => {
                 let mut lines = vec![format!("Task {id} requested for {}: {}", v.assignee, v.text)];
                 if let Some(c) = &v.constraints {
@@ -46,11 +46,11 @@ impl TaskEvent {
                 v.decision_id
             )],
         };
-        lines
-            .join("\n")
-            .chars()
-            .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
-            .collect()
+        crate::text_safety::render_text_fallback(
+            &self.signed().signing_key_id,
+            self.event().kind(),
+            &lines.join("\n"),
+        )
     }
 }
 fn step_lines(steps: &[TaskStep]) -> Vec<String> {

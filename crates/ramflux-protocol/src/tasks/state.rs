@@ -7,7 +7,7 @@ use super::{
     TaskSigner, TaskStatus, TaskStep,
 };
 use crate::ActorType;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Read-only snapshot; a proposal is provisional until `accepted` is true.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -32,6 +32,7 @@ pub struct TaskState {
     task: Option<Task>,
     decisions: BTreeSet<String>,
     approvals: BTreeSet<String>,
+    pending_since: BTreeMap<String, u64>,
 }
 impl TaskState {
     #[must_use]
@@ -56,14 +57,16 @@ impl TaskState {
         self.task.as_ref().ok_or(TaskReject::NotFound)
     }
     fn reduce(&mut self, event: &TaskEvent, signer: &TaskSigner<'_>) -> Result<(), TaskReject> {
-        if matches!(event.event, TaskEventBody::Start(_) | TaskEventBody::Proposal(_)) {
+        if matches!(event.event(), TaskEventBody::Start(_) | TaskEventBody::Proposal(_)) {
             if self.task.is_some() {
                 return Err(TaskReject::AlreadyExists);
             }
             return self.initialize(event, signer);
         }
         let task = self.task.as_mut().ok_or(TaskReject::NotFound)?;
-        if task.task_id != event.event.task_id() || task.conversation_id != event.conversation_id {
+        if task.task_id != event.event().task_id()
+            || task.conversation_id != event.conversation_id()
+        {
             return Err(TaskReject::ContextMismatch);
         }
         if task.state.is_terminal() {
@@ -74,10 +77,14 @@ impl TaskState {
             .checked_add(1)
             .filter(|n| *n <= MAX_TASK_VERSION)
             .ok_or(TaskReject::InvalidVersion)?;
-        if event.event.version() != expected {
-            return Err(TaskReject::StaleVersion { expected, actual: event.event.version() });
+        if let Some(base) = event.event().base_revision() {
+            if base > task.version {
+                return Err(TaskReject::StaleVersion { expected: task.version, actual: base });
+            }
+        } else if event.event().version() != expected {
+            return Err(TaskReject::StaleVersion { expected, actual: event.event().version() });
         }
-        match &event.event {
+        match event.event() {
             TaskEventBody::Accept(_) | TaskEventBody::Decline(_) => {
                 human(signer)?;
                 if task.state != TaskStatus::Proposed {
@@ -87,7 +94,7 @@ impl TaskState {
                     return Err(TaskReject::WrongSigner);
                 }
                 task.requester = Some(signer.principal_id.to_owned());
-                task.accepted = matches!(event.event, TaskEventBody::Accept(_));
+                task.accepted = matches!(event.event(), TaskEventBody::Accept(_));
                 task.state =
                     if task.accepted { TaskStatus::Running } else { TaskStatus::Cancelled };
                 if !task.accepted {
@@ -113,6 +120,30 @@ impl TaskState {
                 if self.decisions.contains(&resolution.decision_id) {
                     return Err(TaskReject::DecisionReplay);
                 }
+                let step = task
+                    .steps
+                    .iter()
+                    .find(|s| s.id == resolution.step_id)
+                    .ok_or(TaskReject::DecisionMismatch)?;
+                let change = if step.needs_me.is_none() {
+                    Some(super::TaskDecisionChange::Closed)
+                } else if step.needs_me.as_ref() != Some(&resolution.target) {
+                    Some(super::TaskDecisionChange::TargetChanged)
+                } else if self
+                    .pending_since
+                    .get(&resolution.step_id)
+                    .is_none_or(|opened| resolution.base_revision < *opened)
+                {
+                    Some(super::TaskDecisionChange::NewerThanObserved)
+                } else {
+                    None
+                };
+                if let Some(change) = change {
+                    return Err(TaskReject::StaleDecision {
+                        step_id: resolution.step_id.clone(),
+                        change,
+                    });
+                }
                 resolve(task, resolution)?;
                 self.decisions.insert(resolution.decision_id.clone());
                 if let NeedsMe::Approval { grant_id } = &resolution.target {
@@ -123,11 +154,16 @@ impl TaskState {
                 return Err(TaskReject::AlreadyExists);
             }
         }
-        task.version = event.event.version();
+        self.pending_since
+            .retain(|id, _| task.steps.iter().any(|s| &s.id == id && s.needs_me.is_some()));
+        for step in task.steps.iter().filter(|s| s.needs_me.is_some()) {
+            self.pending_since.entry(step.id.clone()).or_insert(expected);
+        }
+        task.version = expected;
         Ok(())
     }
     fn initialize(&mut self, event: &TaskEvent, signer: &TaskSigner<'_>) -> Result<(), TaskReject> {
-        let task = match &event.event {
+        let task = match event.event() {
             TaskEventBody::Start(v) => {
                 human(signer)?;
                 if signer.principal_id != v.requester {
@@ -288,7 +324,7 @@ mod tests {
             signing_key_id: "key",
             public_key_base64url: &public,
         };
-        let mut start = TaskEvent::new(
+        let start = TaskEvent::new(
             "chat".to_owned(),
             TaskEventBody::Start(super::super::TaskStart {
                 task_id: "task".to_owned(),
@@ -303,18 +339,25 @@ mod tests {
                 signature_alg: SignatureAlg::Ed25519,
                 signature: String::new(),
             },
-        );
-        start.signed.signature = encode_base64url(key.sign(&signed_bytes(&start)?).to_bytes());
+        )?;
+        let start = start
+            .clone()
+            .with_signature(encode_base64url(key.sign(&signed_bytes(&start)?).to_bytes()))?;
         let mut state = TaskState::default();
         state.apply(&start, &signer)?;
         state.task.as_mut().ok_or("task")?.version = MAX_TASK_VERSION;
         let before = state.clone();
-        let mut event = start;
-        event.event = TaskEventBody::Cancel(super::super::TaskCancel {
-            task_id: "task".to_owned(),
-            version: MAX_TASK_VERSION,
-        });
-        event.signed.signature = encode_base64url(key.sign(&signed_bytes(&event)?).to_bytes());
+        let event = TaskEvent::new(
+            "chat".into(),
+            TaskEventBody::Cancel(super::super::TaskCancel {
+                task_id: "task".into(),
+                base_revision: MAX_TASK_VERSION,
+            }),
+            start.signed().clone(),
+        )?;
+        let event = event
+            .clone()
+            .with_signature(encode_base64url(key.sign(&signed_bytes(&event)?).to_bytes()))?;
         assert!(matches!(state.apply(&event, &signer), Err(TaskReject::InvalidVersion)));
         assert_eq!(state, before);
         Ok(())

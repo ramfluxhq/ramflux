@@ -60,7 +60,7 @@ fn only_the_assignee_updates_and_only_the_human_requester_cancels() -> Result {
         &other.signer(),
         &TaskReject::WrongSigner,
     )?;
-    let cancel = TaskEventBody::Cancel(TaskCancel { task_id: "task".to_owned(), version: 2 });
+    let cancel = TaskEventBody::Cancel(TaskCancel { task_id: "task".to_owned(), base_revision: 1 });
     reject(&mut state, &agent.event(cancel.clone())?, &agent.signer(), &TaskReject::HumanRequired)?;
     reject(&mut state, &other.event(cancel.clone())?, &other.signer(), &TaskReject::WrongSigner)?;
     reject(
@@ -132,7 +132,7 @@ fn task_and_conversation_binding_and_exact_revisions_reject_replays_and_gaps() -
     }
     reject(&mut state, &agent.event(mismatch)?, &agent.signer(), &TaskReject::ContextMismatch)?;
     let mut event = agent.event(update(2, TaskStatus::Running, vec![]))?;
-    event.conversation_id = "elsewhere".to_owned();
+    event = TaskEvent::new("elsewhere".to_owned(), event.event().clone(), event.signed().clone())?;
     event = agent.sign(event)?;
     reject(&mut state, &event, &agent.signer(), &TaskReject::ContextMismatch)?;
     state.apply(&agent.event(update(2, TaskStatus::Running, vec![]))?, &agent.signer())?;
@@ -196,7 +196,10 @@ fn human_resolution_is_bound_to_requester_step_target_and_single_use_decision() 
             TaskDecision::Resume,
         ))?,
         &human.signer(),
-        &TaskReject::DecisionMismatch,
+        &TaskReject::StaleDecision {
+            step_id: "s".into(),
+            change: TaskDecisionChange::TargetChanged,
+        },
     )?;
     let mut wrong_step = resolve(3, approval(), TaskDecision::Resume);
     if let TaskEventBody::Resolve(v) = &mut wrong_step {
@@ -214,7 +217,12 @@ fn human_resolution_is_bound_to_requester_step_target_and_single_use_decision() 
     if let TaskEventBody::Resolve(v) = &mut different {
         v.decision_id = "new".to_owned();
     }
-    reject(&mut state, &human.event(different)?, &human.signer(), &TaskReject::DecisionMismatch)?;
+    reject(
+        &mut state,
+        &human.event(different)?,
+        &human.signer(),
+        &TaskReject::StaleDecision { step_id: "s".into(), change: TaskDecisionChange::Closed },
+    )?;
     reject(
         &mut state,
         &agent.event(update(4, TaskStatus::NeedsMe, vec![blocked("s", approval())]))?,
@@ -244,8 +252,10 @@ fn denied_decisions_and_requester_cancellation_close_interventions() -> Result {
     )?;
     let mut cancelled = waiting()?;
     cancelled.apply(
-        &human
-            .event(TaskEventBody::Cancel(TaskCancel { task_id: "task".to_owned(), version: 3 }))?,
+        &human.event(TaskEventBody::Cancel(TaskCancel {
+            task_id: "task".to_owned(),
+            base_revision: 2,
+        }))?,
         &human.signer(),
     )?;
     assert!(
