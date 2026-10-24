@@ -250,6 +250,7 @@ impl RamfluxClient {
         }
         entries.retain(|e| e.device_id != local.device_id);
         entries.push(local);
+        self.apply_owned_revocation_intents(&mut entries)?;
         entries.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         let pending = self
             .account_db()?
@@ -300,17 +301,7 @@ impl RamfluxClient {
             self.account_db()?
                 .persist_actor_state(&record_key(&record.principal_commitment), record)?;
             self.apply_record_retirements(record)?;
-            if let Some(pending) = self
-                .account_db()?
-                .load_actor_state::<SignedDeviceSetRecord>("identity/owned_pending_set")?
-            {
-                if record.device_set_epoch < pending.device_set_epoch {
-                    ramflux_crypto::validate_device_set_transition(record, &pending)?;
-                } else {
-                    ramflux_crypto::validate_device_set_transition(&pending, record)?;
-                    self.account_db()?.remove_actor_state("identity/owned_pending_set")?;
-                }
-            }
+            self.reconcile_owned_pending(record)?;
             Ok::<_, SdkError>(())
         })?;
         self.finish_pair_retirement()

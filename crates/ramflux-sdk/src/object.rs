@@ -21,6 +21,8 @@ pub struct SdkObjectKeySlot {
     pub object_id: String,
     pub conversation_id: String,
     pub recipient_device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_principal_commitment: Option<String>,
     pub x3dh: Option<SdkDmX3dhHeader>,
     pub ciphertext: ramflux_crypto::DmCiphertext,
 }
@@ -1280,6 +1282,7 @@ mod tests {
                 object_id: "object_a2".to_owned(),
                 conversation_id: "conv_a2".to_owned(),
                 recipient_device_id: "rcpt_dev_a2".to_owned(),
+                source_principal_commitment: None,
                 x3dh: None,
                 ciphertext: serde_json::from_value(serde_json::json!({
                     "session_id": "session_a2",

@@ -148,9 +148,18 @@ async fn dispatch_group_member_add_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusGroupMemberAddRequest = serde_json::from_value(request.body.clone())?;
-    let group = account.client.add_group_member(&body.group_id, &body.member_id, &body.role)?;
     let member_principal_commitment =
         resolve_group_member_principal_commitment(account, &body).await?;
+    let group = if let Some(root) = member_principal_commitment.as_deref() {
+        account.client.add_group_member_with_root(
+            &body.group_id,
+            &body.member_id,
+            &body.role,
+            root,
+        )?
+    } else {
+        account.client.add_group_member(&body.group_id, &body.member_id, &body.role)?
+    };
     let route = LocalBusGroupMemberRoute {
         member_id: body.member_id.clone(),
         member_principal_commitment,
@@ -556,6 +565,7 @@ async fn dispatch_group_control_delivery(
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: delivery.actor_id.to_owned(),
             recipient_device_id: Some(delivery.route.member_id.clone()),
+            recipient_principal_commitment: delivery.route.member_principal_commitment.clone(),
             target_delivery_id: delivery.target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
@@ -799,6 +809,9 @@ pub(crate) async fn dispatch_group_send_request(
             source_principal_id,
             sender_id: body.sender_id,
             recipient_device_id: Some(recipient_device),
+            recipient_principal_commitment: recipient[0]["member_principal_commitment"]
+                .as_str()
+                .map(str::to_owned),
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at,
@@ -880,6 +893,7 @@ pub(crate) async fn dispatch_group_send_request(
                     .unwrap_or_else(|| account.gateway_config.principal_id.clone()),
                 sender_id: body.sender_id.clone(),
                 recipient_device_id: Some(route.member_id.clone()),
+                recipient_principal_commitment: route.member_principal_commitment.clone(),
                 target_delivery_id,
                 encrypted_body: encrypted_body.clone(),
                 created_at,
@@ -949,7 +963,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
         if sender_id == recipient_device_id {
             return Ok(None);
         }
-        let _member_principal_commitment = resolve_group_route_principal_commitment(
+        let member_principal_commitment = resolve_group_route_principal_commitment(
             &account.client,
             &engine.config,
             &route,
@@ -1017,6 +1031,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: sender_id.clone(),
             recipient_device_id: Some(recipient_device_id.to_owned()),
+            recipient_principal_commitment: Some(member_principal_commitment.clone()),
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),

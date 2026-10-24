@@ -17,7 +17,7 @@ fn temp_root(test_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ramflux-storage-{test_name}-{}-{nanos}", std::process::id()))
 }
 
-fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageError> {
+pub(crate) fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageError> {
     let root = temp_root(test_name);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;
@@ -327,10 +327,14 @@ fn device_directory_upserts_verified_device_mapping() -> Result<(), StorageError
     assert_eq!(second.principal_commitment, "principal_b");
     assert_eq!(second.source, "device_directory");
     assert_eq!(second.verified_at, 2_000);
-    assert_eq!(
-        db.device_directory_entry("device_a")?.map(|entry| entry.principal_commitment),
-        Some("principal_b".to_owned())
-    );
+    assert!(matches!(
+        db.device_directory_entry("device_a"),
+        Err(StorageError::AmbiguousDeviceId(_))
+    ));
+    let alice = ramflux_protocol::qualified_device_id("principal_a", "device_a")?;
+    let bob = ramflux_protocol::qualified_device_id("principal_b", "device_a")?;
+    assert_eq!(db.device_directory_entry(&alice)?, Some(first));
+    assert_eq!(db.device_directory_entry(&bob)?, Some(second));
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -881,7 +885,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

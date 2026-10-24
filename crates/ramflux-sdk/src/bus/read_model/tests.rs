@@ -248,3 +248,31 @@ fn pinned_member_safety_changes_are_visible_in_group_list() -> Result<(), SdkErr
     assert_eq!(row["groups"][0]["safety_change"], change);
     Ok(())
 }
+
+#[test]
+fn ambiguous_legacy_sender_names_do_not_block_directory_reads_or_select_a_root()
+-> Result<(), SdkError> {
+    let f = Fixture::new()?;
+    let db = f.client.account_db()?;
+    for (root, principal) in [("bob-root", "bob"), ("mallory-root", "mallory")] {
+        db.persist_client_record(
+            "device",
+            "shared",
+            &json!({"device_id":"shared","principal_commitment":root,"principal_id":principal}),
+        )?;
+    }
+    db.send_direct_message("legacy", "message", "shared", b"stored history")?;
+    let rows = f.read("conversation.directory", json!({}))?;
+    assert_eq!(rows["conversations"][0]["participants"], json!(["alice"]));
+    f.client.create_group("unresolved", "alice-phone")?;
+    // Historical memberships can predate root-bound pins. Display them as unresolved.
+    db.add_group_member("unresolved", "shared", "member")?;
+    let group = f.client.group_device_metadata("unresolved", "shared")?;
+    assert!(group.is_none());
+    assert!(
+        crate::bus::group_delivery::directory(&f.client, "unresolved")?
+            .iter()
+            .any(|route| route["member_id"] == "shared" && route["delivery_target_known"] == false)
+    );
+    Ok(())
+}

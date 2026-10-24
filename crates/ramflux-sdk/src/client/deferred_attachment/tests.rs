@@ -30,6 +30,7 @@ impl Fixture {
             object_id: object.object_id.clone(),
             conversation_id: "attachment-slot".to_owned(),
             recipient_device_id: "recipient-device".to_owned(),
+            source_principal_commitment: None,
             x3dh: None,
             ciphertext: sender.encrypt(
                 &key,

@@ -17,6 +17,7 @@ mod history_hash;
 mod records;
 mod row_mappers;
 mod schema;
+mod schema_device_namespace;
 
 pub use account_db::AccountDb;
 pub use account_db::journal::{InboxFailurePolicy, JournalBounds, JournalEvent};

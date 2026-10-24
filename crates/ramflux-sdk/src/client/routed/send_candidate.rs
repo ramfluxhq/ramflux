@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Abandon unsupported unconfirmed send candidates while retaining receive-only state.
-use super::session::pair_key;
 use super::{RamfluxClient, SdkDmX3dhHeader, SdkError};
 pub(super) type SendPair = (ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]);
 impl RamfluxClient {
@@ -13,7 +12,7 @@ impl RamfluxClient {
     ) -> Result<Option<SendPair>, SdkError> {
         if self
             .account_db()?
-            .load_actor_state::<bool>(&format!("device/revoked/{remote}"))?
+            .load_actor_state::<bool>(&self.device_revocation_key(remote)?)?
             .unwrap_or(false)
         {
             return Err(SdkError::InboundRejected("recipient device is revoked".into()));
@@ -42,7 +41,7 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| {
-            let pair = pair_key(local, remote)?;
+            let pair = self.pair_key(local, remote)?;
             let Some(id) = db.load_actor_state::<String>(&pair)? else { return Ok(false) };
             if !db.load_actor_state::<bool>(&format!("dm-pair/local/{id}"))?.unwrap_or(false)
                 || db.load_actor_state::<bool>(&format!("dm-pair/confirmed/{id}"))?.unwrap_or(false)

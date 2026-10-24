@@ -173,7 +173,7 @@ async fn dispatch_device_revoke(
         }))?,
     )?;
     Ok(local_bus_ok(
-        serde_json::json!({"device_id":body.device_id,"revoked":true,"device_set_epoch":record.device_set_epoch}),
+        serde_json::json!({"device_id":body.device_id,"revoked":true,"publication_state":"submitted","device_set_epoch":record.device_set_epoch}),
     ))
 }
 

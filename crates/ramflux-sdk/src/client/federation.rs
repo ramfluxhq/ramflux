@@ -52,6 +52,7 @@ impl RamfluxClient {
         federation: &LocalBusFederationRoute,
         options: FederatedSendOptions,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
+        Self::normalize_recipient(&mut message)?;
         let attachments = options.route.attachments;
         let prekey_url =
             federation.recipient_prekey_url.as_deref().or(engine.config.prekey_http_url.as_deref());
@@ -136,6 +137,11 @@ impl RamfluxClient {
                 source_principal_id: request.source_principal_id.clone(),
                 sender_id: request.sender_id.clone(),
                 recipient_device_id: Some(request.recipient_device_id.clone()),
+                recipient_principal_commitment: Some(if event_type == "friend.requested" {
+                    request.target_id.clone()
+                } else {
+                    request.requester_id.clone()
+                }),
                 target_delivery_id: request.target_delivery_id.clone(),
                 encrypted_body: Vec::new(),
                 created_at: now_unix_timestamp(),

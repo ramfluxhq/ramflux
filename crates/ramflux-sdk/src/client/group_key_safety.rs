@@ -13,12 +13,16 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let at = now_unix_timestamp();
         for device in &manifest.devices {
-            for (group, pinned) in db.pinned_group_device_keys(&device.device_id)? {
+            let reference = ramflux_protocol::qualified_device_id(
+                &manifest.principal_commitment,
+                &device.device_id,
+            )?;
+            for (group, pinned) in db.pinned_group_device_keys(&reference)? {
                 if pinned == device.branch_public_key {
                     continue;
                 }
                 let bound = db
-                    .group_member_key_binding(&group, &device.device_id)?
+                    .group_member_key_binding(&group, &reference)?
                     .ok_or_else(|| SdkError::InboundPending("group pin changed".into()))?;
                 // Use the pinned owner, never the manifest claimant, as the admission bucket.
                 let observed_owner = bound.principal_id.as_deref().unwrap_or(&pinned);
@@ -26,7 +30,7 @@ impl RamfluxClient {
                     "safety/member-owner/{}",
                     ramflux_protocol::hash_base64url(
                         "ramflux.sdk.safety.device.v1",
-                        device.device_id.as_bytes()
+                        reference.as_bytes()
                     )
                 );
                 let owner = if let Some(owner) = db.load_actor_state::<String>(&owner_key)? {
@@ -39,7 +43,7 @@ impl RamfluxClient {
                     "safety/member/{}",
                     ramflux_protocol::hash_base64url(
                         "ramflux.sdk.safety.member.v1",
-                        &ramflux_protocol::canonical_json_bytes(&(owner, &device.device_id))?
+                        &ramflux_protocol::canonical_json_bytes(&(owner, &reference))?
                     )
                 );
                 let previous = db.load_actor_state::<serde_json::Value>(&bucket)?;

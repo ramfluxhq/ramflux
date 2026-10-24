@@ -891,7 +891,7 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
     account.client.create_group("group", "device-alice")?;
     account.client.add_group_member("group", "device-bob", "member")?;
     let db = account.client.account_db()?;
-    db.persist_client_record("device", "device-bob", &serde_json::json!({"principal_id":"bob"}))?;
+    db.persist_client_record("device", "device-bob", &serde_json::json!({"principal_id":"bob","principal_commitment":"commitment-bob","device_id":"device-bob"}))?;
     db.persist_client_record("identity","bob",&serde_json::json!({"contact_identity_commitment":"commitment-bob","devices":[{"device_id":"device-bob","signing_public_key":"public-key","target_delivery_id":"delivery-bob"}]}))?;
     let body: LocalBusGroupSendRequest = serde_json::from_value(
         serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":""}),

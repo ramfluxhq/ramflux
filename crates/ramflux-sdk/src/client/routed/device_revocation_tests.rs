@@ -147,7 +147,7 @@ async fn revoked_fixture(target: &str) -> Result<(Fixture, Fixture), SdkError> {
 async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_rejects_stale_cache()
 -> Result<(), SdkError> {
     let (alice, bob) = Box::pin(revoked_fixture("alice")).await?;
-    let work = format!("dm-pair/reset-work/{}", super::super::session::pair_key("bob", "alice")?);
+    let work = format!("dm-pair/reset-work/{}", bob.client.pair_key("bob", "alice")?);
     assert!(bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work)?.is_none());
     assert!(bob.client.active_pair("bob", "alice")?.is_none());
     assert_eq!(

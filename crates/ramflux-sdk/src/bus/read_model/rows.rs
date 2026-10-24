@@ -148,7 +148,7 @@ fn conversation(
         let routes = super::super::group_delivery::directory(client, group)?;
         let mut participants = std::collections::BTreeSet::new();
         for member in client.group_state(group)?.members {
-            if let Some(peer) = db.client_record("device", &member)?
+            if let Some(peer) = client.group_device_metadata(group, &member)?
                 && let Some(id) = peer.get("principal_id").and_then(Value::as_str)
             {
                 participants.insert(id.to_owned());
@@ -163,7 +163,12 @@ fn conversation(
             participants.insert(id.to_owned());
         }
         for sender in db.client_conversation_senders(id)? {
-            if let Some(identity) = db.client_record("device", &sender)?
+            let identity = match db.client_device_record_by_name(&sender) {
+                Ok(value) => value,
+                Err(ramflux_storage::StorageError::AmbiguousDeviceId(_)) => None,
+                Err(error) => return Err(error.into()),
+            };
+            if let Some(identity) = identity
                 && let Some(principal) = identity.get("principal_id").and_then(Value::as_str)
             {
                 participants.insert(principal.to_owned());

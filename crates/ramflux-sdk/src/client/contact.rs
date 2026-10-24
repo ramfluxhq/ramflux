@@ -129,7 +129,14 @@ impl RamfluxClient {
         principal_commitment: &str,
         source: &str,
     ) -> Result<SdkDeviceManifestResponse, SdkError> {
-        let manifest = fetch_verified_device_manifest(gateway, principal_commitment).await?;
+        let manifest: SdkDeviceManifestResponse =
+            sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(
+                gateway,
+                &format!("/mvp1/device-manifest/{principal_commitment}"),
+            )
+            .await?
+            .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?;
+        super::identity_authority::verify_manifest_authority(&manifest, principal_commitment)?;
         self.persist_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
         for device in &manifest.devices {
@@ -164,37 +171,12 @@ impl RamfluxClient {
             .await?;
             return Ok(principal_commitment.to_owned());
         }
-        let Some(entry) = self.account_db()?.device_directory_entry(device_id)? else {
-            return self.resolve_target_principal_commitment_from_cache(gateway, device_id).await;
-        };
-        self.assert_manifest_active_device_cached(
-            gateway,
-            &entry.principal_commitment,
-            device_id,
-            "device_directory",
-        )
-        .await?;
-        Ok(entry.principal_commitment)
-    }
-
-    async fn resolve_target_principal_commitment_from_cache(
-        &self,
-        gateway: &GatewaySessionConfig,
-        device_id: &str,
-    ) -> Result<String, SdkError> {
-        let commitment = self.account_db()?.client_record("device", device_id)?
-            .and_then(|row| row["principal_commitment"].as_str().map(str::to_owned))
-            .ok_or_else(|| SdkError::LocalBus(
-                "recipient Root context required; supply recipient_principal_commitment or refresh the contact".to_owned()
-            ))?;
-        self.assert_manifest_active_device_cached(
-            gateway,
-            &commitment,
-            device_id,
-            "cached_root_resolve",
-        )
-        .await?;
-        Ok(commitment)
+        if let Some((root, raw)) = ramflux_protocol::parse_qualified_device_id(device_id)? {
+            self.assert_manifest_active_device_cached(gateway, &root, &raw, "qualified_recipient")
+                .await?;
+            return Ok(root);
+        }
+        Err(SdkError::LocalBus("recipient root context required; supply recipient_principal_commitment or a root-qualified device address".into()))
     }
 
     /// Resolve and verify the recipient principal commitment for a federated (cross-node) send.
@@ -218,14 +200,16 @@ impl RamfluxClient {
         explicit_principal_commitment: Option<&str>,
         device_id: &str,
     ) -> Result<String, SdkError> {
+        let qualified = if explicit_principal_commitment.is_none_or(str::is_empty) {
+            ramflux_protocol::parse_qualified_device_id(device_id)?
+        } else {
+            None
+        };
         let principal_commitment = explicit_principal_commitment
             .filter(|commitment| !commitment.is_empty())
-            .ok_or_else(|| {
-                SdkError::LocalBus(
-                    "federated direct messages require an explicit recipient principal commitment to verify the remote device manifest"
-                        .to_owned(),
-                )
-            })?;
+            .or_else(||qualified.as_ref().map(|(root,_)|root.as_str()))
+            .ok_or_else(|| SdkError::LocalBus("federated direct messages require an explicit root or root-qualified device address".into()))?;
+        let device_id = qualified.as_ref().map_or(device_id, |(_, raw)| raw.as_str());
         let manifest = fetch_verified_device_manifest_from_url(manifest_url, principal_commitment)?;
         self.persist_identity_directory(&manifest)?;
         let verified_at = now_unix_timestamp();
@@ -836,6 +820,7 @@ pub(crate) async fn assert_manifest_active_device(
 /// # Errors
 /// Returns an error when a targeted device fanout does not carry the principal commitment needed
 /// to verify manifest membership, or when the verified manifest check fails.
+#[cfg(test)]
 pub(crate) async fn assert_target_manifest_active_device(
     gateway: &GatewaySessionConfig,
     principal_commitment: Option<&str>,
@@ -1395,7 +1380,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn another_principals_manifest_cannot_replace_a_pinned_member_key_and_raises_safety()
+    fn another_roots_equal_device_name_cannot_replace_a_pin_or_raise_false_safety()
     -> Result<(), SdkError> {
         let (client, root) = unlocked_client("cross-principal-key-change")?;
         let initial = manifest_fixture(
@@ -1425,22 +1410,22 @@ mod tests {
             serde_json::to_value(&impostor)?,
             &impostor.principal_commitment,
         )?;
-        client.account_db()?.remove_actor_state("directory/device/victim_device")?;
-        assert!(client.persist_identity_directory(&impostor).is_err());
-        assert!(client.account_db()?.client_record("device", "victim_device")?.is_none());
-        assert_eq!(
-            client.account_db()?.group_member_device_key("pinned", "victim_device")?,
-            Some(initial.devices[0].branch_public_key.clone())
-        );
+        client.persist_identity_directory(&impostor)?;
+        let victim =
+            ramflux_protocol::qualified_device_id(&initial.principal_commitment, "victim_device")?;
         assert_eq!(
             client
                 .account_db()?
-                .client_record("group", "pinned")?
-                .ok_or_else(|| SdkError::LocalBus("safety missing".into()))?["safety_change"]["state"],
-            "key_changed"
+                .client_record("device", &victim)?
+                .ok_or_else(|| SdkError::LocalBus("victim missing".into()))?["signing_public_key"],
+            initial.devices[0].branch_public_key
+        );
+        assert_eq!(
+            client.account_db()?.group_member_device_key("pinned", &victim)?,
+            Some(initial.devices[0].branch_public_key.clone())
         );
         assert!(
-            client
+            !client
                 .account_db()?
                 .journal_after(0, 128)?
                 .iter()
@@ -1466,9 +1451,9 @@ mod tests {
         let mut first = None;
         for n in 0..12_u8 {
             let claim = manifest_fixture(
-                &format!("claim-{n}"),
+                "peer",
                 "device",
-                [n + 0x60; 32],
+                [0x51; 32],
                 [n + 0x80; 32],
                 [n + 0xa0; 32],
                 [n + 0xb0; 32],
@@ -1489,7 +1474,8 @@ mod tests {
                 .account_db()?
                 .journal_after(0, 128)?
                 .iter()
-                .filter(|event| event.topic == "safety.changed")
+                .filter(|event| event.topic == "safety.changed"
+                    && event.body["reason"] == "pinned_group_member_key_changed")
                 .count(),
             1
         );
@@ -1503,9 +1489,9 @@ mod tests {
                 client.account_db()?.persist_actor_state(&key, &value)?;
             }
             let claim = manifest_fixture(
-                &format!("claim-{n}"),
+                "peer",
                 "device",
-                [n + 0x60; 32],
+                [0x51; 32],
                 [n + 0x80; 32],
                 [n + 0xa0; 32],
                 [n + 0xb0; 32],

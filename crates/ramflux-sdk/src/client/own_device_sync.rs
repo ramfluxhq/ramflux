@@ -25,18 +25,29 @@ impl RamfluxClient {
         .await?;
         let source_branch = self.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?;
         let source_device_id = source_branch.device_id.clone();
-        let source_device = assert_target_manifest_active_device(
-            &engine.config,
-            Some(principal_commitment),
+        let manifest = self
+            .cache_verified_device_manifest(
+                &engine.config,
+                principal_commitment,
+                "own_device_sync_export",
+            )
+            .await?;
+        let source_device =
+            manifest.devices.iter().find(|d| d.device_id == source_device_id).ok_or_else(|| {
+                SdkError::InboundRejected("own sync source revoked or unavailable".into())
+            })?;
+        let target_device =
+            manifest.devices.iter().find(|d| d.device_id == target_device_id).ok_or_else(|| {
+                SdkError::InboundRejected("own sync target revoked or unavailable".into())
+            })?;
+        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+            principal_commitment,
             &source_device_id,
-        )
-        .await?;
-        let target_device = assert_target_manifest_active_device(
-            &engine.config,
-            Some(principal_commitment),
+        )?)?;
+        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+            principal_commitment,
             target_device_id,
-        )
-        .await?;
+        )?)?;
         if source_device.principal_commitment != target_device.principal_commitment {
             return Err(SdkError::LocalBus("own-device sync principal mismatch".to_owned()));
         }
@@ -83,7 +94,8 @@ impl RamfluxClient {
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: source_device_id.clone(),
             recipient_device_id: Some(target_device_id.to_owned()),
-            target_delivery_id: target_device.target_delivery_id,
+            recipient_principal_commitment: Some(principal_commitment.into()),
+            target_delivery_id: target_device.target_delivery_id.clone(),
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
             ttl: 3_600,
@@ -372,7 +384,7 @@ impl RamfluxClient {
         floor_by_group.get(&group_id).is_some_and(|floor| group_key_epoch >= *floor)
     }
 
-    async fn verify_own_device_sync_envelope(
+    pub(crate) async fn verify_own_device_sync_envelope(
         &self,
         gateway: &GatewaySessionConfig,
         expected_principal_commitment: &str,
@@ -411,12 +423,13 @@ impl RamfluxClient {
                 "own-device sync key slot conversation mismatch".to_owned(),
             ));
         }
-        let manifest = crate::client::contact::fetch_verified_device_manifest(
-            gateway,
-            &envelope.principal_commitment,
-        )
-        .await?;
-        self.persist_identity_directory(&manifest)?;
+        let manifest = self
+            .cache_verified_device_manifest(
+                gateway,
+                &envelope.principal_commitment,
+                "own_device_sync_import",
+            )
+            .await?;
         let source = manifest
             .devices
             .iter()
@@ -437,6 +450,14 @@ impl RamfluxClient {
                     envelope.target_device_id
                 ))
             })?;
+        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+            &envelope.principal_commitment,
+            &source.device_id,
+        )?)?;
+        self.require_cached_root_authority(&ramflux_protocol::qualified_device_id(
+            &envelope.principal_commitment,
+            &target.device_id,
+        )?)?;
         if source.principal_commitment != envelope.principal_commitment
             || target.principal_commitment != envelope.principal_commitment
         {
@@ -625,6 +646,7 @@ pub(crate) fn own_device_history_ref(
             object_id: object.object_id.clone(),
             conversation_id: slot_conversation_id,
             recipient_device_id: target_device_id.to_owned(),
+            source_principal_commitment: None,
             x3dh,
             ciphertext,
         },
@@ -632,7 +654,7 @@ pub(crate) fn own_device_history_ref(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -731,7 +753,10 @@ mod tests {
         Ok((client, root))
     }
 
-    fn envelope(source_device_id: &str, target_device_id: &str) -> SdkOwnDeviceSyncEnvelope {
+    pub(crate) fn envelope(
+        source_device_id: &str,
+        target_device_id: &str,
+    ) -> SdkOwnDeviceSyncEnvelope {
         SdkOwnDeviceSyncEnvelope {
             schema: "ramflux.sdk.own_device_sync.v1".to_owned(),
             version: 1,
@@ -764,6 +789,7 @@ mod tests {
                     object_id: "object_sync".to_owned(),
                     conversation_id: "slot_sync".to_owned(),
                     recipient_device_id: target_device_id.to_owned(),
+                    source_principal_commitment: None,
                     x3dh: None,
                     ciphertext: ramflux_crypto::DmCiphertext {
                         session_id: "slot_sync".to_owned(),

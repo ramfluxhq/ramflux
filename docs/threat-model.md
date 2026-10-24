@@ -67,8 +67,12 @@ Ramflux considers the following attackers in scope:
   handshakes, attempt key substitution, and send malformed cross-node delivery
   requests.
 - **Compromised client device.** Can access that device's local plaintext,
-  local secrets, and delegated grants, and can sign as that device until the
-  device is removed or rotated.
+  local secrets, and delegated grants. Current terminals also retain the identity
+  root seed in protected account material. Compromise therefore includes root
+  authority: device removal or rotation cannot revoke a stolen root seed. A
+  removed terminal can sign newer device sets or enroll another device. Offline
+  root custody or constrained enrollment authority requires an owner decision;
+  device revocation alone does not provide recovery from root compromise.
 - **Malicious local agent or tool.** Can request broad capabilities, attempt to
   reuse approvals, or submit misleading tool metadata through the local bus.
 - **Storage attacker without live keys.** Can read or copy persisted node state

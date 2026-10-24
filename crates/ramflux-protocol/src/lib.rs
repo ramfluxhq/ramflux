@@ -8,6 +8,8 @@ pub mod client_discovery;
 pub use client_discovery::*;
 pub mod a2ui_state;
 mod core_types;
+mod device_address;
+pub use device_address::{parse_qualified_device_id, qualified_device_id};
 pub mod domain;
 mod encoding;
 mod error;

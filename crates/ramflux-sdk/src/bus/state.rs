@@ -206,7 +206,9 @@ impl LocalBusAccountState {
             let path = local_bus_account_manifest_path(&root, &id);
             let mut pending =
                 if path.exists() { Some(read_local_bus_account_manifest(&path)?) } else { None };
-            if let Some(manifest) = pending.as_ref().filter(|manifest| manifest.activation_pending)
+            let refresh_due = self.client.own_proof_refresh_due(now_unix_timestamp())?;
+            if let Some(manifest) =
+                pending.as_ref().filter(|manifest| manifest.activation_pending || refresh_due)
             {
                 self.client
                     .initialize_and_publish_prekey_bundle_via_gateway_request(

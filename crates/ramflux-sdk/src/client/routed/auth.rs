@@ -15,60 +15,42 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         let remote = &entry.envelope.source_device_id;
-        let hint =
-            decode(&entry.envelope).ok().and_then(|wrapper| wrapper.source_principal_commitment);
-        if let Some(hint) = &hint {
-            let bytes = ramflux_protocol::decode_base64url(hint)
-                .map_err(|_| invalid("invalid sender Root hint"))?;
-            if bytes.len() != 32 || ramflux_protocol::encode_base64url(&bytes) != *hint {
-                return Err(invalid("invalid sender Root hint"));
-            }
+        let reference = self.inbound_device_reference(entry)?;
+        let (commitment, _) = ramflux_protocol::parse_qualified_device_id(&reference)?
+            .ok_or_else(|| invalid("sender root address required"))?;
+        if self.observed_device_set(&commitment)?.is_some_and(|set| {
+            set.devices.iter().any(|device| {
+                device.device_id == *remote
+                    && device.status == ramflux_protocol::DeviceSetStatus::Revoked
+            })
+        }) {
+            return Err(invalid("sender device is revoked"));
         }
-
-        let known = self.account_db()?.client_record("device", remote)?;
-        if known.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none())
-            || self.require_cached_root_authority(remote).is_err()
-        {
-            let pinned = self
-                .account_db()?
-                .device_directory_entry(remote)?
-                .map(|entry| entry.principal_commitment)
-                .or(self
-                    .account_db()?
-                    .client_record("identity", &entry.envelope.source_principal_id)?
-                    .and_then(|record| {
-                        record
-                            .get("contact_identity_commitment")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    }));
-            let commitment = pinned.or(hint).ok_or_else(|| {
-                SdkError::InboundPending(
-                    "sender Root context required; refresh the contact".to_owned(),
-                )
-            })?;
+        if self.require_cached_root_authority(&reference).is_err() {
+            if !self.inbound_relationship_names_root(
+                &entry.envelope.source_principal_id,
+                &commitment,
+                remote,
+            )? {
+                return Err(invalid("unsolicited sender root has no accepted relationship"));
+            }
             let manifest =
                 crate::client::contact::fetch_verified_device_manifest(gateway, &commitment)
                     .await?;
-            self.persist_identity_directory(&manifest)?;
-            let device =
-                manifest.devices.iter().find(|device| device.device_id == *remote).ok_or_else(
-                    || {
-                        SdkError::InboundPending(
-                            "sender device absent from verified manifest".to_owned(),
-                        )
-                    },
-                )?;
+            let device = manifest
+                .devices
+                .iter()
+                .find(|device| device.device_id == *remote)
+                .ok_or_else(|| invalid("sender absent from active root manifest"))?;
             let record = serde_json::json!({"principal_id":manifest.principal_id,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key});
             verify_sender_record(entry, &record)?;
-            if let Ok(wrapper) = decode(&entry.envelope)
-                && let Some(header) = wrapper.x3dh
+            if let Ok(packet) = decode(&entry.envelope)
+                && let Some(header) = packet.x3dh
+                && header.initiator_identity_public != device.prekey_bundle.identity_key
             {
-                let expected = serde_json::to_value(device.prekey_bundle.identity_key)?;
-                if serde_json::to_value(header.initiator_identity_public)? != expected {
-                    return Err(invalid("X3DH initiator differs from verified device identity"));
-                }
+                return Err(invalid("X3DH initiator differs from verified device identity"));
             }
+            // Both the signature chain and the accepted root relationship precede persistence.
             self.persist_identity_directory(&manifest)?;
             self.account_db()?.upsert_device_directory_entry(
                 remote,
@@ -84,7 +66,7 @@ impl RamfluxClient {
     pub(crate) fn trusted_device(&self, remote: &str) -> Result<Value, SdkError> {
         if self
             .account_db()?
-            .load_actor_state::<bool>(&format!("device/revoked/{remote}"))?
+            .load_actor_state::<bool>(&self.device_revocation_key(remote)?)?
             .unwrap_or(false)
         {
             return Err(SdkError::InboundRejected("revoked device".to_owned()));
@@ -100,7 +82,7 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<String, SdkError> {
-        let record = self.trusted_device(&entry.envelope.source_device_id)?;
+        let record = self.trusted_device(&self.inbound_device_reference(entry)?)?;
         if let Some(hint) =
             decode(&entry.envelope).ok().and_then(|wrapper| wrapper.source_principal_commitment)
             && record["principal_commitment"] != hint

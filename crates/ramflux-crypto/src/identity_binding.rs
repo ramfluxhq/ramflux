@@ -118,6 +118,25 @@ pub fn verify_root_bound_branch_proof(
     capability: &str,
     now: i64,
 ) -> Result<(), CryptoError> {
+    verify_root_bound_key_authorization(root, proof, expected, audience, capability, now)?;
+    if proof.expires_at < now {
+        return Err(invalid("expired device session proof"));
+    }
+    Ok(())
+}
+/// Verify durable root authorization of exact keys independently of session-proof expiry.
+/// Signed-set admission uses this together with the latest active-set record. New sessions
+/// must additionally use `verify_root_bound_branch_proof` to enforce proof freshness.
+/// # Errors
+/// Rejects legacy/malformed proofs, future issuance, substitution, kind, capability or signature.
+pub fn verify_root_bound_key_authorization(
+    root: &VerifyingKey,
+    proof: &BranchProofDocument,
+    expected: &DeviceKeyBinding,
+    audience: &str,
+    capability: &str,
+    now: i64,
+) -> Result<(), CryptoError> {
     let binding =
         proof.key_binding.as_ref().ok_or_else(|| invalid("legacy branch proof is read-only"))?;
     if binding != expected
@@ -126,8 +145,11 @@ pub fn verify_root_bound_branch_proof(
     {
         return Err(invalid("branch key, kind or time mismatch"));
     }
-    crate::verify_branch_proof(root, proof, audience, capability, now)
+    // Signature verification still authenticates the original issue/expiry interval. Only
+    // its liveness check is evaluated at issuance; malformed intervals remain invalid.
+    crate::verify_branch_proof(root, proof, audience, capability, proof.issued_at)
 }
+
 pub(super) fn invalid(reason: &'static str) -> CryptoError {
     CryptoError::IdentityAuthority(reason)
 }

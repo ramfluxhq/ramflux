@@ -6,14 +6,14 @@ use super::r5::{fresh, outgoing, settle};
 use super::review::pool;
 use super::session_record::{Wire, active, archive, gap, last};
 use super::*;
-fn pair() -> Result<String, SdkError> {
-    super::super::session::pair_key("bob", "alice")
+fn pair(bob: &Fixture) -> Result<String, SdkError> {
+    bob.client.pair_key("bob", "alice")
 }
-fn work() -> Result<String, SdkError> {
-    Ok(format!("dm-pair/reset-work/{}", pair()?))
+fn work(bob: &Fixture) -> Result<String, SdkError> {
+    Ok(format!("dm-pair/reset-work/{}", pair(bob)?))
 }
 fn has_work(bob: &Fixture) -> Result<bool, SdkError> {
-    Ok(bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work()?)?.is_some())
+    Ok(bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work(bob)?)?.is_some())
 }
 #[tokio::test]
 async fn confirming_a_reset_does_not_remove_its_persistent_minimum_interval() -> Result<(), SdkError>
@@ -67,11 +67,11 @@ async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_witho
     let mut pending = bob
         .client
         .account_db()?
-        .load_actor_state::<serde_json::Value>(&work()?)?
+        .load_actor_state::<serde_json::Value>(&work(&bob)?)?
         .ok_or_else(|| invalid("work"))?;
     pending["first_at"] = serde_json::json!(now - 7 * 86400);
     pending["next_at"] = serde_json::json!(now + 86400);
-    bob.client.account_db()?.persist_actor_state(&work()?, &pending)?;
+    bob.client.account_db()?.persist_actor_state(&work(&bob)?, &pending)?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     bob.client.retry_pair_resets(&mut be, now).await?;
     assert!(!has_work(&bob)?);
@@ -83,7 +83,7 @@ async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_witho
     let marker = bob
         .client
         .account_db()?
-        .load_actor_state::<serde_json::Value>(&format!("{}/manual", pair()?))?
+        .load_actor_state::<serde_json::Value>(&format!("{}/manual", pair(&bob)?))?
         .ok_or_else(|| invalid("manual recovery marker missing"))?;
     assert_eq!(marker["state"], "needs_manual_recovery");
     assert!(
@@ -193,7 +193,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
     RamfluxClient::verify_device_manifest_json(serde_json::to_value(&manifest)?, &commitment)?;
     let before =
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?;
-    let pending = bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work()?)?;
+    let pending = bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work(&bob)?)?;
     for _ in 0..2 {
         bob.client.persist_identity_directory(&manifest)?;
         assert!(has_work(&bob)?);
@@ -202,7 +202,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
             before
         );
         assert_eq!(
-            bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work()?)?,
+            bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work(&bob)?)?,
             pending
         );
         assert!(bob.client.account_db()?.client_record("device", "alice")?.is_some());
@@ -310,15 +310,16 @@ async fn upgrading_legacy_work_uses_its_original_attempt_instead_of_renewing_fro
         let now = now_unix_timestamp();
         assert!(bob.client.begin_pair_recovery("bob", "alice", now)?);
         let db = bob.client.account_db()?;
-        let mut legacy =
-            db.load_actor_state::<serde_json::Value>(&work()?)?.ok_or_else(|| invalid("work"))?;
+        let mut legacy = db
+            .load_actor_state::<serde_json::Value>(&work(&bob)?)?
+            .ok_or_else(|| invalid("work"))?;
         let _ = legacy.as_object_mut().ok_or_else(|| invalid("work object"))?.remove("first_at");
         legacy["next_at"] = serde_json::json!(now + 300);
-        db.persist_actor_state(&work()?, &legacy)?;
+        db.persist_actor_state(&work(&bob)?, &legacy)?;
         let first = now - 7 * 86400;
         if retained_start {
             db.append_journal(
-                &format!("pair-reset-attempt:{}:{first}", work()?),
+                &format!("pair-reset-attempt:{}:{first}", work(&bob)?),
                 "session.reset",
                 &serde_json::json!({"device_id":"alice","attempt":1}),
                 first,
@@ -331,7 +332,7 @@ async fn upgrading_legacy_work_uses_its_original_attempt_instead_of_renewing_fro
         assert!(
             bob.client
                 .account_db()?
-                .load_actor_state::<serde_json::Value>(&format!("{}/manual", pair()?))?
+                .load_actor_state::<serde_json::Value>(&format!("{}/manual", pair(&bob)?))?
                 .is_some()
         );
         assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());

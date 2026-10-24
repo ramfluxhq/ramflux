@@ -34,6 +34,8 @@ pub struct GatewayDirectMessage {
     pub source_principal_id: String,
     pub sender_id: String,
     pub recipient_device_id: Option<String>,
+    /// The expected root is required whenever SDK-owned encryption admits a recipient key.
+    pub recipient_principal_commitment: Option<String>,
     pub target_delivery_id: String,
     pub encrypted_body: Vec<u8>,
     pub created_at: i64,

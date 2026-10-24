@@ -20,7 +20,8 @@ pub(super) fn directory(client: &RamfluxClient, group_id: &str) -> Result<Vec<Va
             .map(serde_json::to_value)
             .transpose()?
             .unwrap_or_else(|| json!({"member_id":member}));
-        if let Some(peer) = db.client_record("device", &member)?
+        let peer = client.group_device_metadata(group_id, &member)?;
+        if let Some(peer) = peer
             && let Some(principal) = peer.get("principal_id").and_then(Value::as_str)
             && let Some(identity) = db.client_record("identity", principal)?
         {

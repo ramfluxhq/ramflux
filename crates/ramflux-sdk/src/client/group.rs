@@ -10,27 +10,9 @@ impl RamfluxClient {
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn create_group(&self, group_id: &str, creator_id: &str) -> Result<GroupState, SdkError> {
         let group = self.account_db()?.create_group(group_id, creator_id)?;
-        if let Some(branch) = self.device_branch.as_ref()
-            && branch.device_id == creator_id
-        {
-            let public_key =
-                ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
-            self.account_db()?.persist_group_member_device_key(
-                group_id,
-                creator_id,
-                &public_key,
-            )?;
-            if let Some(root) = self.identity_root.as_ref() {
-                let public =
-                    ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-                self.account_db()?.bind_group_member_key_identity(
-                    group_id,
-                    creator_id,
-                    &branch.principal_id,
-                    &crate::prekey::identity_root_public_key_commitment(&public)?,
-                    &public_key,
-                )?;
-            }
+        if self.device_branch.as_ref().is_some_and(|own| own.device_id == creator_id) {
+            self.pin_local_group_member(group_id)?;
+            return Ok(group);
         }
         if self.account_db()?.client_record("device", creator_id)?.is_some() {
             self.pin_joined_group_member(group_id, creator_id)?;
@@ -46,12 +28,34 @@ impl RamfluxClient {
         member_id: &str,
         role: &str,
     ) -> Result<GroupState, SdkError> {
+        self.add_group_member_address(group_id, member_id, role, None)
+    }
+    pub(crate) fn add_group_member_with_root(
+        &self,
+        group: &str,
+        member: &str,
+        role: &str,
+        root: &str,
+    ) -> Result<GroupState, SdkError> {
+        self.add_group_member_address(group, member, role, Some(root))
+    }
+    fn add_group_member_address(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        role: &str,
+        root: Option<&str>,
+    ) -> Result<GroupState, SdkError> {
+        let reference = root
+            .map(|root| ramflux_protocol::qualified_device_id(root, member_id))
+            .transpose()?
+            .unwrap_or_else(|| member_id.into());
         self.account_db()?.write_transaction(|| {
             let state = self.account_db()?.add_group_member(group_id, member_id, role)?;
             if self.device_branch.as_ref().is_some_and(|own| own.device_id == member_id)
-                || self.account_db()?.client_record("device", member_id)?.is_some()
+                || self.account_db()?.client_record("device", &reference)?.is_some()
             {
-                self.pin_joined_group_member(group_id, member_id)?;
+                self.pin_joined_group_member(group_id, &reference)?;
             }
             Ok(state)
         })
@@ -265,7 +269,7 @@ impl RamfluxClient {
                 self.account_db()?.group_invite(group_id, invite_id)?.invitee_signing_public_key
             } else {
                 self.account_db()?
-                    .group_member_device_key(group_id, &event.actor_device_id)?
+                    .group_member_device_key_by_name(group_id, &event.actor_device_id)?
                     .ok_or_else(|| {
                         StorageError::GroupControlSigningKeyMissing(event.actor_device_id.clone())
                     })?
@@ -1037,7 +1041,7 @@ mod tests {
         assert_eq!(state.roles.get("alice_device").map(String::as_str), Some("owner"));
         assert_eq!(state.roles.get("bob_device").map(String::as_str), Some("member"));
         assert_eq!(
-            bob.account_db()?.group_member_device_key("group_join", "alice_device")?,
+            bob.account_db()?.group_member_device_key_by_name("group_join", "alice_device")?,
             Some(alice_key)
         );
         assert_ne!(bob_key, carol_key);
@@ -1303,7 +1307,7 @@ mod tests {
         assert_eq!(state, carol.group_state("group_test")?);
         for client in [&alice, &bob, &carol] {
             assert_eq!(
-                client.account_db()?.group_member_device_key("group_test", "bob_device")?,
+                client.account_db()?.group_member_device_key_by_name("group_test", "bob_device")?,
                 Some(bob_key.clone())
             );
         }
@@ -1355,7 +1359,7 @@ mod tests {
         ));
         assert_eq!(alice.group_state("group_test")?, before);
         assert_eq!(
-            alice.account_db()?.group_member_device_key("group_test", "alice_device")?,
+            alice.account_db()?.group_member_device_key_by_name("group_test", "alice_device")?,
             Some(alice_key)
         );
         Ok(())
@@ -1406,7 +1410,7 @@ mod tests {
         ));
         assert_eq!(alice.group_state("group_test")?, before);
         assert_eq!(
-            alice.account_db()?.group_member_device_key("group_test", "victim_device")?,
+            alice.account_db()?.group_member_device_key_by_name("group_test", "victim_device")?,
             Some(genuine)
         );
         Ok(())

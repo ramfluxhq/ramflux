@@ -98,10 +98,7 @@ pub(super) fn active(f: &Fixture, remote: &str) -> Result<String, SdkError> {
 pub(super) fn archive(f: &Fixture, remote: &str) -> Result<Vec<String>, SdkError> {
     Ok(f.client
         .account_db()?
-        .load_actor_state::<Vec<String>>(&format!(
-            "{}/archive",
-            super::super::session::pair_key(&f.id, remote)?
-        ))?
+        .load_actor_state::<Vec<String>>(&format!("{}/archive", f.client.pair_key(&f.id, remote)?))?
         .unwrap_or_default())
 }
 pub(super) fn gap(
@@ -246,7 +243,7 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await.is_err());
     let lost = last(&sent)?;
-    let key = format!("dm-pair/reset-work/{}", super::super::session::pair_key("bob", "alice")?);
+    let key = format!("dm-pair/reset-work/{}", bob.client.pair_key("bob", "alice")?);
     let mut work = bob
         .client
         .account_db()?
@@ -254,7 +251,7 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
         .ok_or_else(|| invalid("accepted transport lost its durable reset"))?;
     work["next_at"] = serde_json::json!(0);
     bob.client.account_db()?.persist_actor_state(
-        &format!("{}/reset-at", super::super::session::pair_key("bob", "alice")?),
+        &format!("{}/reset-at", bob.client.pair_key("bob", "alice")?),
         &(now_unix_timestamp() - 60),
     )?;
     bob.client.account_db()?.persist_actor_state(&key, &work)?;
@@ -324,7 +321,7 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
         session.encrypt(b"unacknowledged", b"discarded")?;
     }
     bob.client.persist_pair("bob", "alice", &bundle, &session)?;
-    let key = format!("dm-pair/reset-work/{}", super::super::session::pair_key("bob", "alice")?);
+    let key = format!("dm-pair/reset-work/{}", bob.client.pair_key("bob", "alice")?);
     let mut work = bob
         .client
         .account_db()?
@@ -332,7 +329,7 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
         .ok_or_else(|| invalid("no durable reset"))?;
     work["next_at"] = serde_json::json!(0);
     bob.client.account_db()?.persist_actor_state(
-        &format!("{}/reset-at", super::super::session::pair_key("bob", "alice")?),
+        &format!("{}/reset-at", bob.client.pair_key("bob", "alice")?),
         &(now_unix_timestamp() - 60),
     )?;
     bob.client.account_db()?.persist_actor_state(&key, &work)?;

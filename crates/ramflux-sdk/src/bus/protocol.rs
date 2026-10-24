@@ -1089,6 +1089,7 @@ impl LocalBusMessageSubmitRequest {
             source_principal_id: self.source_principal_id,
             sender_id: self.sender_id,
             recipient_device_id: self.recipient_device_id,
+            recipient_principal_commitment: self.recipient_principal_commitment,
             target_delivery_id: self.target_delivery_id,
             encrypted_body,
             created_at: self.created_at,

@@ -308,21 +308,19 @@ impl AccountDb {
         member_id: &str,
         device_signing_public_key: &str,
     ) -> Result<(), StorageError> {
+        let (address, raw, root) = self.pin_address_for_write(member_id)?;
         self.write_transaction(|| {
-        if self.group_member_role(group_id, member_id)?.is_some()
-            && self
-                .group_member_device_key(group_id, member_id)?
-                .is_some_and(|old| old != device_signing_public_key)
-        {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        self.connection.execute(
-            "INSERT INTO group_member_device_key
-                (group_id, member_id, device_signing_public_key, verified_at)
-             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=excluded.group_id AND m.member_id=excluded.member_id AND m.active=1)",
-            params![group_id, member_id, device_signing_public_key, self.now_unix()],
-        )?;
-        self.bind_group_key_from_directory(group_id, member_id, device_signing_public_key)
+            let lookup=if root.is_some() {address.as_str()} else {raw.as_str()};
+            let stored=self.group_pin_key(group_id,lookup)?.unwrap_or_else(||address.clone());
+            if self.group_member_role(group_id,&raw)?.is_some() && self.group_member_device_key(group_id,lookup)?.is_some_and(|old|old!=device_signing_public_key) {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            if let Some(root)=&root {
+                let other:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key WHERE group_id=?1 AND COALESCE(raw_device_id,member_id)=?2 AND principal_commitment IS NOT NULL AND principal_commitment<>?3)",params![group_id,raw,root],|row|row.get(0))?;
+                if other {return Err(StorageError::GroupPermissionDenied);}
+            }
+            self.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,raw_device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?5 AND active=1)",params![group_id,stored,device_signing_public_key,self.now_unix(),raw])?;
+            self.bind_group_key_from_directory(group_id,&address,device_signing_public_key)
         })
     }
 
@@ -333,6 +331,7 @@ impl AccountDb {
         group_id: &str,
         member_id: &str,
     ) -> Result<Option<String>, StorageError> {
+        let Some(member_id) = self.group_pin_key(group_id, member_id)? else { return Ok(None) };
         Ok(self
             .connection
             .query_row(
@@ -586,101 +585,95 @@ impl AccountDb {
         accept: &GroupInviteAcceptWrite,
     ) -> Result<GroupState, StorageError> {
         self.write_transaction(|| {
-        validate_group_role(&accept.accepted_role)?;
-        self.ensure_group_control_not_seen(&accept.group_id, &accept.event_id)?;
-        let invite = self.group_invite(&accept.group_id, &accept.invite_id)?;
-        if invite.state != "pending" {
-            return Err(StorageError::GroupInviteInvalidState {
-                invite_id: accept.invite_id.clone(),
-                expected: "pending".to_owned(),
-                actual: invite.state,
-            });
-        }
-        if accept.now > invite.expires_at {
-            return Err(StorageError::GroupInviteExpired(accept.invite_id.clone()));
-        }
-        if accept.invitee_identity != invite.invitee_identity
-            || accept.actor_device_id != invite.invitee_identity
-        {
-            return Err(StorageError::GroupInviteAcceptorMismatch(accept.invite_id.clone()));
-        }
-        if accept.accepted_role != invite.invited_role {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        if self.group_member_role(&accept.group_id, &accept.invitee_identity)?.is_some() {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        if self.group_member_banned(&accept.group_id, &accept.invitee_identity)? {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        let state = self.group_state(&accept.group_id)?;
-        if state.group_epoch != accept.previous_epoch {
-            return Err(StorageError::GroupControlEpochMismatch {
-                expected: state.group_epoch,
-                actual: accept.previous_epoch,
-            });
-        }
-        if accept.new_group_epoch != accept.previous_epoch.saturating_add(1) {
-            return Err(StorageError::GroupControlEpochMismatch {
-                expected: accept.previous_epoch.saturating_add(1),
-                actual: accept.new_group_epoch,
-            });
-        }
-        let max_members = usize::try_from(state.max_members)
-            .map_err(|_err| StorageError::GroupMemberLimitExceeded)?;
-        if state.members.len() >= max_members {
-            return Err(StorageError::GroupMemberLimitExceeded);
-        }
-        let applied_at = self.now_unix();
-        self.insert_group_control_seen(
-            &accept.group_id,
-            &accept.event_id,
-            "member_accepted",
-            &accept.actor_device_id,
-            &accept.invitee_identity,
-            accept.previous_epoch,
-            accept.new_group_epoch,
-            applied_at,
-        )?;
-        self.connection.execute(
-            "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
-            params![accept.group_id, accept.new_group_epoch, applied_at],
-        )?;
-        self.connection.execute(
-            "INSERT INTO group_member_device_key
-                (group_id, member_id, device_signing_public_key, verified_at)
-             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(group_id,member_id) DO UPDATE SET device_signing_public_key=excluded.device_signing_public_key,verified_at=excluded.verified_at WHERE group_member_device_key.device_signing_public_key IS NOT excluded.device_signing_public_key AND NOT EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=excluded.group_id AND m.member_id=excluded.member_id AND m.active=1)",
-            params![
-                accept.group_id,
-                invite.invitee_identity,
-                invite.invitee_signing_public_key,
-                applied_at
-            ],
-        )?;
-        self.connection.execute(
-            "INSERT OR REPLACE INTO group_member_projection
+            validate_group_role(&accept.accepted_role)?;
+            self.ensure_group_control_not_seen(&accept.group_id, &accept.event_id)?;
+            let invite = self.group_invite(&accept.group_id, &accept.invite_id)?;
+            if invite.state != "pending" {
+                return Err(StorageError::GroupInviteInvalidState {
+                    invite_id: accept.invite_id.clone(),
+                    expected: "pending".to_owned(),
+                    actual: invite.state,
+                });
+            }
+            if accept.now > invite.expires_at {
+                return Err(StorageError::GroupInviteExpired(accept.invite_id.clone()));
+            }
+            if accept.invitee_identity != invite.invitee_identity
+                || accept.actor_device_id != invite.invitee_identity
+            {
+                return Err(StorageError::GroupInviteAcceptorMismatch(accept.invite_id.clone()));
+            }
+            if accept.accepted_role != invite.invited_role {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            if self.group_member_role(&accept.group_id, &accept.invitee_identity)?.is_some() {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            if self.group_member_banned(&accept.group_id, &accept.invitee_identity)? {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let state = self.group_state(&accept.group_id)?;
+            if state.group_epoch != accept.previous_epoch {
+                return Err(StorageError::GroupControlEpochMismatch {
+                    expected: state.group_epoch,
+                    actual: accept.previous_epoch,
+                });
+            }
+            if accept.new_group_epoch != accept.previous_epoch.saturating_add(1) {
+                return Err(StorageError::GroupControlEpochMismatch {
+                    expected: accept.previous_epoch.saturating_add(1),
+                    actual: accept.new_group_epoch,
+                });
+            }
+            let max_members = usize::try_from(state.max_members)
+                .map_err(|_err| StorageError::GroupMemberLimitExceeded)?;
+            if state.members.len() >= max_members {
+                return Err(StorageError::GroupMemberLimitExceeded);
+            }
+            let applied_at = self.now_unix();
+            self.insert_group_control_seen(
+                &accept.group_id,
+                &accept.event_id,
+                "member_accepted",
+                &accept.actor_device_id,
+                &accept.invitee_identity,
+                accept.previous_epoch,
+                accept.new_group_epoch,
+                applied_at,
+            )?;
+            self.connection.execute(
+                "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
+                params![accept.group_id, accept.new_group_epoch, applied_at],
+            )?;
+            self.persist_group_member_device_key(
+                &accept.group_id,
+                &invite.invitee_identity,
+                &invite.invitee_signing_public_key,
+            )?;
+            self.connection.execute(
+                "INSERT OR REPLACE INTO group_member_projection
                 (group_id, member_principal_id, member_id, role, joined_epoch, active, updated_at)
              VALUES (?1, ?2, ?2, ?3, ?4, 1, ?5)",
-            params![
-                accept.group_id,
-                accept.invitee_identity,
-                accept.accepted_role,
-                accept.new_group_epoch,
-                applied_at
-            ],
-        )?;
-        self.connection.execute(
-            "UPDATE group_invite_projection
+                params![
+                    accept.group_id,
+                    accept.invitee_identity,
+                    accept.accepted_role,
+                    accept.new_group_epoch,
+                    applied_at
+                ],
+            )?;
+            self.connection.execute(
+                "UPDATE group_invite_projection
                 SET state = 'accepted', updated_at = ?3
               WHERE group_id = ?1 AND invite_id = ?2 AND state = 'pending'",
-            params![accept.group_id, accept.invite_id, applied_at],
-        )?;
-        self.bind_group_key_from_directory(
-            &accept.group_id,
-            &accept.invitee_identity,
-            &invite.invitee_signing_public_key,
-        )?;
-        self.group_state(&accept.group_id)
+                params![accept.group_id, accept.invite_id, applied_at],
+            )?;
+            self.bind_group_key_from_directory(
+                &accept.group_id,
+                &accept.invitee_identity,
+                &invite.invitee_signing_public_key,
+            )?;
+            self.group_state(&accept.group_id)
         })
     }
 

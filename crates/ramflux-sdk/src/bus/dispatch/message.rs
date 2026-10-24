@@ -221,12 +221,17 @@ async fn resolve_local_message_recipient_principal_commitment(
             .client
             .resolve_target_principal_commitment(gateway, explicit_principal_commitment, device_id)
             .await?;
+        let raw = if explicit_principal_commitment.is_none() {
+            crate::client::identity_authority::device_namespace::wire_device_id(device_id)?
+        } else {
+            device_id.to_owned()
+        };
         let device = account
             .client
             .assert_manifest_active_device_cached(
                 gateway,
                 &principal_commitment,
-                device_id,
+                &raw,
                 "message_submit_friend_gate",
             )
             .await?;
@@ -406,7 +411,7 @@ async fn dispatch_message_receipt_delivered(
             &recipient_device_id,
             &target_delivery_id,
             delivered_at,
-        );
+        )?;
         let entry =
             account.client.send_receipt_event_via_gateway(&mut engine, message, event).await;
         account.put_engine(engine);
@@ -457,7 +462,7 @@ async fn dispatch_message_receipt_read(
             &recipient_device_id,
             &target_delivery_id,
             read_at,
-        );
+        )?;
         let entry =
             account.client.send_receipt_event_via_gateway(&mut engine, message, event).await;
         account.put_engine(engine);
@@ -474,19 +479,23 @@ fn receipt_gateway_message(
     recipient_device_id: &str,
     target_delivery_id: &str,
     created_at: i64,
-) -> GatewayDirectMessage {
-    GatewayDirectMessage {
+) -> Result<GatewayDirectMessage, SdkError> {
+    let reference = account.client.device_reference(recipient_device_id)?;
+    let root = account.client.device_root(&reference)?;
+    let raw = crate::client::identity_authority::device_namespace::wire_device_id(&reference)?;
+    Ok(GatewayDirectMessage {
         conversation_id: conversation_id.to_owned(),
         message_id: receipt_id.to_owned(),
         envelope_id: receipt_id.to_owned(),
         source_principal_id: account.gateway_config.principal_id.clone(),
         sender_id: account.gateway_config.device_id.clone(),
-        recipient_device_id: Some(recipient_device_id.to_owned()),
+        recipient_device_id: Some(raw),
+        recipient_principal_commitment: Some(root),
         target_delivery_id: target_delivery_id.to_owned(),
         encrypted_body: Vec::new(),
         created_at,
         ttl: 300,
-    }
+    })
 }
 
 fn receipt_visible_envelope_id(receipt_id: &str) -> String {

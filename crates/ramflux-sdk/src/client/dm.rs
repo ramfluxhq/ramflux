@@ -113,6 +113,7 @@ impl RamfluxClient {
         include_franking_ext: bool,
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
+        Self::normalize_recipient(&mut message)?;
         let attachments = route.attachments;
         let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)
             && serde_json::from_slice::<serde_json::Value>(plaintext)
