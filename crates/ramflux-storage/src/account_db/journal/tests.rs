@@ -555,3 +555,36 @@ fn parked_and_expired_legacy_holds_release_shared_stranger_source_and_retry_slot
     }
     Ok(())
 }
+
+#[test]
+fn parking_a_legacy_hold_keeps_only_ciphertext_and_marker_even_after_an_old_rejection()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let packet = br#"{"envelope":{"source_device_id":"uncached"}}"#;
+    db.hold_unrouted("legacy-upgrade", 1, packet, 100)?;
+    db.retain_legacy_inbox("legacy-upgrade")?;
+    db.dead_letter_inbox(
+        "legacy-upgrade",
+        packet,
+        &serde_json::json!({"error_code":"old_schema_rejection"}),
+        100,
+    )?;
+    let journal = db.journal_after(0, 100)?;
+    db.park_legacy_inbox_retry("legacy-upgrade")?;
+    assert_eq!(db.unrouted_entries()?, vec![packet.to_vec()]);
+    for table in ["runtime_inbox_retry", "runtime_inbox_policy", "runtime_inbox_dead_letter"] {
+        let sql = format!("SELECT count(*) FROM {table}");
+        assert_eq!(db.connection.query_row(&sql, [], |r| r.get::<_, u32>(0))?, 0);
+    }
+    assert_eq!(db.journal_after(0, 100)?, journal);
+    assert!(!db.set_inbox_failure_policy(
+        "legacy-upgrade",
+        packet,
+        false,
+        ("manifest", "uncached"),
+        101
+    )?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

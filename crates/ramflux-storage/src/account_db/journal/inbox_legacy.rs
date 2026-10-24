@@ -53,12 +53,20 @@ impl AccountDb {
     pub fn park_legacy_inbox_retry(&self, key: &str) -> Result<(), StorageError> {
         self.write_transaction(|| {
             let name = format!("inbox/legacy-held/{key}");
-            let Some(value) = self.load_actor_state::<serde_json::Value>(&name)? else { return Err(StorageError::AuthorizationRejected); };
+            let Some(value) = self.load_actor_state::<serde_json::Value>(&name)? else {
+                return Err(StorageError::AuthorizationRejected);
+            };
             let mut marker = if value.is_object() { value } else { serde_json::json!({}) };
             marker["parked"] = serde_json::json!(true);
-            self.persist_actor_state(&name,&marker)?;
-            self.connection.execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1",params![key])?;
-            self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key=?1 AND envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_dead_letter)",params![key])?;
+            self.persist_actor_state(&name, &marker)?;
+            self.connection
+                .execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1", params![key])?;
+            self.connection.execute(
+                "DELETE FROM runtime_inbox_dead_letter WHERE envelope_key=?1",
+                params![key],
+            )?;
+            self.connection
+                .execute("DELETE FROM runtime_inbox_policy WHERE envelope_key=?1", params![key])?;
             Ok(())
         })
     }
