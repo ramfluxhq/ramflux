@@ -18,9 +18,10 @@ mod records;
 mod row_mappers;
 mod schema;
 mod schema_device_namespace;
+mod schema_identity_keys;
 
 pub use account_db::AccountDb;
-pub use account_db::journal::{InboxFailurePolicy, JournalBounds, JournalEvent};
+pub use account_db::journal::{InboxFailurePolicy,InboxFailureSource,JournalBounds,JournalEvent};
 pub use account_db::runtime::AccountOutboxEntry;
 pub use account_index::AccountIndex;
 pub use clock::{AccountClock, unix_now};

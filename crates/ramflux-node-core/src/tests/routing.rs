@@ -69,6 +69,7 @@ fn envelope_routing_uses_target_delivery_id() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn router_sessions_preserve_gateway_instance_ids() -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     let mut east = session("target_gateway_east", SessionLifecycle::Live, 1, 1);
     east.gateway_id = "gateway-east-1".to_owned();
@@ -89,11 +90,10 @@ fn router_sessions_preserve_gateway_instance_ids() -> Result<(), Box<dyn std::er
         "gateway-west-1"
     );
 
-    let submit_outcome = router.submit_envelope(envelope(
-        "env_gateway_west",
-        "target_gateway_west",
-        DeliveryClass::OpaqueEvent,
-    ));
+    let submit_outcome = router.submit_envelope(
+        &source_identity,
+        envelope("env_gateway_west", "target_gateway_west", DeliveryClass::OpaqueEvent),
+    );
     let RouterSubmitOutcome::Online(delivery) = submit_outcome else {
         return Err("expected online delivery".into());
     };
@@ -159,18 +159,17 @@ fn nack_after_ack_returns_existing_cursor_idempotently() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn bound_ack_and_nack_reject_other_target_envelope() {
+fn bound_ack_and_nack_reject_other_target_envelope() -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
-    let _accepted_a = router.submit_envelope(envelope(
-        "env_bound_target_a",
-        "target_a",
-        DeliveryClass::OpaqueEvent,
-    ));
-    let _accepted_b = router.submit_envelope(envelope(
-        "env_bound_target_b",
-        "target_b",
-        DeliveryClass::OpaqueEvent,
-    ));
+    let _accepted_a = router.submit_envelope(
+        &source_identity,
+        envelope("env_bound_target_a", "target_a", DeliveryClass::OpaqueEvent),
+    );
+    let _accepted_b = router.submit_envelope(
+        &source_identity,
+        envelope("env_bound_target_b", "target_b", DeliveryClass::OpaqueEvent),
+    );
 
     let ack_rejected = router.apply_ack_for_target("target_a", &ack("env_bound_target_b"));
     assert!(matches!(ack_rejected, Err(NodeCoreError::EnvelopeTargetMismatch { .. })));
@@ -180,26 +179,28 @@ fn bound_ack_and_nack_reject_other_target_envelope() {
         .apply_nack_for_target("target_a", &nack("env_bound_target_b", NackReason::RateLimited));
     assert!(matches!(nack_rejected, Err(NodeCoreError::EnvelopeTargetMismatch { .. })));
     assert_eq!(router.resume("target_b", 0, 10).len(), 1);
+    Ok(())
 }
 
 #[test]
 fn router_target_index_supports_concurrent_submit_and_ack() -> Result<(), Box<dyn std::error::Error>>
 {
+    let source_identity = replay_source("alice_device")?;
     let router = std::sync::Arc::new(RouterCore::new());
     let worker_count = 16usize;
     let envelopes_per_worker = 32usize;
     let mut workers = Vec::with_capacity(worker_count);
     for worker_index in 0..worker_count {
         let router = std::sync::Arc::clone(&router);
+        let source_identity = source_identity.clone();
         workers.push(std::thread::spawn(move || {
             for envelope_index in 0..envelopes_per_worker {
                 let envelope_id = format!("env_index_{worker_index}_{envelope_index}");
                 let target_delivery_id = format!("target_index_{worker_index}_{envelope_index}");
-                let outcome = router.submit_envelope(envelope(
-                    &envelope_id,
-                    &target_delivery_id,
-                    DeliveryClass::OpaqueEvent,
-                ));
+                let outcome = router.submit_envelope(
+                    &source_identity,
+                    envelope(&envelope_id, &target_delivery_id, DeliveryClass::OpaqueEvent),
+                );
                 if !matches!(outcome, RouterSubmitOutcome::OfflineQueued(_)) {
                     return Err(format!("unexpected submit outcome: {outcome:?}"));
                 }
@@ -266,12 +267,22 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
     let first = router.mvp10_own_device_fanout(ItestMvp10OwnDeviceFanoutRequest {
         principal_id: "principal_fanout_collision_a".to_owned(),
         source_device_id: "source_a".to_owned(),
-        envelope: envelope("a:b", "unused_fanout_target_a", DeliveryClass::SelfDeviceControl),
+        envelope: signed_registered_envelope(
+            envelope("a:b", "unused_fanout_target_a", DeliveryClass::SelfDeviceControl),
+            "principal_fanout_collision_a",
+            "source_a",
+            701,
+        )?,
     })?;
     let second = router.mvp10_own_device_fanout(ItestMvp10OwnDeviceFanoutRequest {
         principal_id: "principal_fanout_collision_b".to_owned(),
         source_device_id: "source_b".to_owned(),
-        envelope: envelope("a", "unused_fanout_target_b", DeliveryClass::SelfDeviceControl),
+        envelope: signed_registered_envelope(
+            envelope("a", "unused_fanout_target_b", DeliveryClass::SelfDeviceControl),
+            "principal_fanout_collision_b",
+            "source_b",
+            703,
+        )?,
     })?;
 
     assert_eq!(first.delivered.len(), 1);
@@ -339,11 +350,14 @@ fn gateway_own_device_fanout_frame_round_trips_json() -> Result<(), Box<dyn std:
 
 #[test]
 fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     router.upsert_session(session("target_live", SessionLifecycle::Live, 1, 1))?;
 
-    let online =
-        router.submit_envelope(envelope("env_online", "target_live", DeliveryClass::OpaqueEvent));
+    let online = router.submit_envelope(
+        &source_identity,
+        envelope("env_online", "target_live", DeliveryClass::OpaqueEvent),
+    );
     assert!(matches!(online, RouterSubmitOutcome::Online(_)));
     if let RouterSubmitOutcome::Online(delivery) = online {
         assert_eq!(delivery.gateway_id, "gateway_a");
@@ -353,11 +367,10 @@ fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::err
     }
     assert_eq!(router.resume("target_live", 0, 10).len(), 1);
 
-    let offline = router.submit_envelope(envelope(
-        "env_offline",
-        "target_offline",
-        DeliveryClass::SelfDeviceControl,
-    ));
+    let offline = router.submit_envelope(
+        &source_identity,
+        envelope("env_offline", "target_offline", DeliveryClass::SelfDeviceControl),
+    );
     assert!(matches!(offline, RouterSubmitOutcome::OfflineQueued(_)));
     if let RouterSubmitOutcome::OfflineQueued(queued) = offline {
         assert_eq!(queued.entry.inbox_seq, 1);
@@ -496,6 +509,7 @@ fn home_node_migration_registration_guard_respects_effective_at()
 #[test]
 fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn std::error::Error>>
 {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     let request = registration_request(
         &router,
@@ -519,7 +533,7 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
     let mut migrated_envelope =
         envelope("env_home_node_migrated", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
     migrated_envelope.created_at = request.now + 2;
-    let rejected = router.submit_envelope_at(migrated_envelope, request.now + 2);
+    let rejected = router.submit_envelope_at(&source_identity, migrated_envelope, request.now + 2);
     let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = rejected else {
         return Err(format!("expected home-node migrated nack, got {rejected:?}").into());
     };
@@ -533,11 +547,14 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
     assert_eq!(delivery.nack.signed.signature, "");
     assert_eq!(router.resume(&request.target_delivery_id, 0, 10).len(), 0);
 
-    let unmigrated = router.submit_envelope(envelope(
-        "env_unmigrated_delivery",
-        "target_unmigrated_delivery",
-        DeliveryClass::OpaqueEvent,
-    ));
+    let unmigrated = router.submit_envelope(
+        &source_identity,
+        envelope(
+            "env_unmigrated_delivery",
+            "target_unmigrated_delivery",
+            DeliveryClass::OpaqueEvent,
+        ),
+    );
     assert!(matches!(unmigrated, RouterSubmitOutcome::OfflineQueued(_)));
     Ok(())
 }
@@ -545,6 +562,7 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
 #[test]
 fn home_node_migration_delivery_signs_nack_when_node_service_signer_is_configured()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     let signer = NodeServiceSigningKey::from_seed([0x73; 32]);
     router.set_node_service_signer(Some(signer.clone()));
@@ -573,7 +591,7 @@ fn home_node_migration_delivery_signs_nack_when_node_service_signer_is_configure
         DeliveryClass::OpaqueEvent,
     );
     migrated_envelope.created_at = request.now + 2;
-    let rejected = router.submit_envelope_at(migrated_envelope, request.now + 2);
+    let rejected = router.submit_envelope_at(&source_identity, migrated_envelope, request.now + 2);
     let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = rejected else {
         return Err(format!("expected signed home-node migrated nack, got {rejected:?}").into());
     };
@@ -660,6 +678,7 @@ fn home_node_route_update_proof_applies_and_rejects_invalid_inputs()
 #[test]
 fn home_node_migration_forwards_within_window_and_nacks_after_window()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     let request = registration_request(
         &router,
@@ -688,6 +707,7 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
         envelope("env_forward_window", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
     migrated_envelope.created_at = request.now + 3;
     let outcome = router.submit_envelope_with_home_node_forward_at(
+        &source_identity,
         migrated_envelope.clone(),
         request.now + 3,
         |plan| {
@@ -735,6 +755,7 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
         envelope("env_forward_expired", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
     expired_window.created_at = migration.effective_at + HOME_NODE_FORWARD_WINDOW_SECONDS + 1;
     let outcome = router.submit_envelope_with_home_node_forward_at(
+        &source_identity,
         expired_window,
         migration.effective_at + HOME_NODE_FORWARD_WINDOW_SECONDS + 1,
         |_plan| Err(NodeCoreError::ItestHttp("must not forward after window".to_owned())),
@@ -746,6 +767,7 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
 #[test]
 fn home_node_migration_new_home_accepts_forwarded_local_delivery()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     router.set_local_home_node_id(Some("node_new_local.example".to_owned()));
     let request = registration_request(
@@ -776,10 +798,12 @@ fn home_node_migration_new_home_accepts_forwarded_local_delivery()
         .ext
         .ext
         .insert(HOME_NODE_FORWARD_COUNT_EXT_KEY.to_owned(), serde_json::Value::from(1_u64));
-    let outcome =
-        router.submit_envelope_with_home_node_forward_at(forwarded, request.now + 3, |_plan| {
-            Err(NodeCoreError::ItestHttp("new home must not re-forward".to_owned()))
-        });
+    let outcome = router.submit_envelope_with_home_node_forward_at(
+        &source_identity,
+        forwarded,
+        request.now + 3,
+        |_plan| Err(NodeCoreError::ItestHttp("new home must not re-forward".to_owned())),
+    );
 
     let (target_delivery_id, envelope_id) = match outcome {
         RouterSubmitOutcome::Online(delivery) => {
@@ -811,6 +835,7 @@ fn home_node_migration_new_home_accepts_forwarded_local_delivery()
 #[test]
 fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     router.set_node_service_signer(Some(NodeServiceSigningKey::from_seed([0x95; 32])));
     let request = registration_request(
@@ -838,6 +863,7 @@ fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
         envelope("env_forward_failure", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
     failed_forward.created_at = request.now + 3;
     let outcome = router.submit_envelope_with_home_node_forward_at(
+        &source_identity,
         failed_forward,
         request.now + 3,
         |_plan| Err(NodeCoreError::ItestHttp("peer unavailable".to_owned())),
@@ -855,24 +881,30 @@ fn home_node_migration_forward_failure_or_loop_marker_falls_back_to_nack()
         .ext
         .ext
         .insert(HOME_NODE_FORWARD_COUNT_EXT_KEY.to_owned(), serde_json::Value::from(1_u64));
-    let outcome =
-        router.submit_envelope_with_home_node_forward_at(loop_guarded, request.now + 4, |_plan| {
-            Err(NodeCoreError::ItestHttp("must not forward twice".to_owned()))
-        });
+    let outcome = router.submit_envelope_with_home_node_forward_at(
+        &source_identity,
+        loop_guarded,
+        request.now + 4,
+        |_plan| Err(NodeCoreError::ItestHttp("must not forward twice".to_owned())),
+    );
     assert!(matches!(outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));
     Ok(())
 }
 
 #[test]
-fn router_replay_guard_rejects_duplicate_envelope_and_expired_ttl() {
+fn router_replay_guard_rejects_duplicate_envelope_and_expired_ttl()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     let accepted = router.submit_envelope_at(
+        &source_identity,
         envelope("env_replay", "target_replay", DeliveryClass::OpaqueEvent),
         1_760_000_001,
     );
     assert!(matches!(accepted, RouterSubmitOutcome::OfflineQueued(_)));
 
     let replay = router.submit_envelope_at(
+        &source_identity,
         envelope("env_replay", "target_replay", DeliveryClass::OpaqueEvent),
         1_760_000_002,
     );
@@ -880,40 +912,44 @@ fn router_replay_guard_rejects_duplicate_envelope_and_expired_ttl() {
 
     let mut expired = envelope("env_expired", "target_replay", DeliveryClass::OpaqueEvent);
     expired.ttl = 1;
-    let rejected = router.submit_envelope_at(expired, 1_760_000_010);
+    let rejected = router.submit_envelope_at(&source_identity, expired, 1_760_000_010);
     assert!(matches!(rejected, RouterSubmitOutcome::RejectedSecurity { .. }));
+    Ok(())
 }
 
 #[test]
 fn replay_guard_rejects_long_ttl_envelope_replay_until_expiry_then_prunes()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let mut replay_guard = NodeReplayGuardState::new();
     let mut first = envelope("env_ttl_window", "target_replay", DeliveryClass::OpaqueEvent);
     first.ttl = 3_600;
 
-    replay_guard.check_envelope(&first, first.created_at + 1)?;
-    let replay = replay_guard.check_envelope(&first, first.created_at + 901);
+    replay_guard.check_envelope(&source_identity, &first, first.created_at + 1)?;
+    let replay = replay_guard.check_envelope(&source_identity, &first, first.created_at + 901);
     assert!(matches!(replay, Err(NodeCoreError::ReplayGuard(_))));
     assert_eq!(replay_guard.len(), 1);
 
     let mut later = envelope("env_after_prune", "target_replay", DeliveryClass::OpaqueEvent);
     later.created_at = first.created_at + 3_601;
     later.ttl = 3_600;
-    replay_guard.check_envelope(&later, later.created_at)?;
+    replay_guard.check_envelope(&source_identity, &later, later.created_at)?;
     assert_eq!(replay_guard.len(), 1);
     Ok(())
 }
 
 #[test]
-fn replay_guard_rejects_envelope_ttl_above_maximum() {
+fn replay_guard_rejects_envelope_ttl_above_maximum() -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let mut replay_guard = NodeReplayGuardState::new();
     let mut envelope = envelope("env_ttl_max", "target_replay", DeliveryClass::OpaqueEvent);
     envelope.ttl = ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS_U32 + 1;
 
-    let rejected = replay_guard.check_envelope(&envelope, envelope.created_at);
+    let rejected = replay_guard.check_envelope(&source_identity, &envelope, envelope.created_at);
 
     assert!(matches!(rejected, Err(NodeCoreError::ReplayGuard(_))));
     assert_eq!(replay_guard.len(), 0);
+    Ok(())
 }
 
 #[test]

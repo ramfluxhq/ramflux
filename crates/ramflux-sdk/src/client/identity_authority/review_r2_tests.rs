@@ -174,8 +174,14 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
         pair.session_id
     );
     assert_ne!(
-        alice.client.pair_key("alice", &bob_ref)?,
-        alice.client.pair_key("alice", &mallory_ref)?
+        RamfluxClient::pair_key(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&bob_ref)?
+        )?,
+        RamfluxClient::pair_key(
+            &alice.client.local_device_identity("alice")?,
+            &alice.client.device_identity(&mallory_ref)?
+        )?
     );
     assert_eq!(
         alice

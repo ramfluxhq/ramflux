@@ -151,18 +151,7 @@ pub(crate) async fn handle_gateway_session_transport(
         return Ok(());
     };
 
-    let registered_auth_key: Option<ramflux_node_core::DeviceAuthKeyResponse> =
-        router_get_json_async(
-            &context.router,
-            &format!(
-                "/mvp1/device-auth-key/principal~{}",
-                ramflux_protocol::encode_base64url(serde_json::to_vec(&(
-                    &auth_frame.device_proof.principal_id,
-                    &open.device_id
-                ))?)
-            ),
-        )
-        .await?;
+    let registered_auth_key = registered_gateway_source(&context, &auth_frame, &open).await?;
     let Some(registered_auth_key) = registered_auth_key else {
         write_gateway_frame(
             &mut *send,
@@ -189,7 +178,7 @@ pub(crate) async fn handle_gateway_session_transport(
         }
         result
     };
-    if let Err(error) = auth_result {
+    if let Err(ref error) = auth_result {
         write_gateway_frame(
             &mut *send,
             &ramflux_node_core::GatewayServerFrame::Nack {
@@ -200,9 +189,15 @@ pub(crate) async fn handle_gateway_session_transport(
         return Ok(());
     }
 
-    let runtime =
-        establish_gateway_session(&mut *send, &context, &open, &auth_frame, registered_auth_key)
-            .await?;
+    let runtime = establish_gateway_session(
+        &mut *send,
+        &context,
+        &open,
+        &auth_frame,
+        registered_auth_key,
+        auth_result?,
+    )
+    .await?;
     let target_delivery_id = runtime.target_delivery_id.clone();
     let session_id = runtime.session_id.clone();
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
@@ -210,6 +205,30 @@ pub(crate) async fn handle_gateway_session_transport(
     let result = run_gateway_session_loop(send, recv, context.clone(), runtime).await;
     context.hub.unregister(&target_delivery_id, &session_id).await;
     result
+}
+
+async fn registered_gateway_source(
+    context: &GatewayQuicContext,
+    auth_frame: &ramflux_node_core::GatewayAuthFrame,
+    open: &ramflux_node_core::GatewayOpenFrame,
+) -> anyhow::Result<Option<ramflux_node_core::DeviceAuthKeyResponse>> {
+    Ok(router_get_json_async(
+        &context.router,
+        &format!(
+            "/mvp1/device-auth-key/{}",
+            ramflux_protocol::qualified_device_id(
+                auth_frame
+                    .device_proof
+                    .ext
+                    .ext
+                    .get("source_root_commitment")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("gateway source root missing"))?,
+                &open.device_id
+            )?
+        ),
+    )
+    .await?)
 }
 
 pub(crate) async fn read_gateway_auth_frame(
@@ -251,6 +270,7 @@ pub(crate) async fn establish_gateway_session(
     open: &ramflux_node_core::GatewayOpenFrame,
     auth_frame: &ramflux_node_core::GatewayAuthFrame,
     registered_auth_key: ramflux_node_core::DeviceAuthKeyResponse,
+    source_identity: ramflux_crypto::RootQualifiedDeviceRef,
 ) -> anyhow::Result<GatewaySessionRuntime> {
     let now = ramflux_node_core::now_unix_seconds();
     let resume_window_seconds = gateway_resume_window_seconds();
@@ -308,6 +328,7 @@ pub(crate) async fn establish_gateway_session(
     )
     .await?;
     Ok(GatewaySessionRuntime {
+        source_identity,
         session_id,
         resume_token,
         principal_id: registered_auth_key.principal_id,
@@ -687,7 +708,11 @@ fn validate_gateway_session_signed_request<T: serde::Serialize>(
     )?;
     {
         let mut gateway = gateway_state(&context.state)?;
-        gateway.replay_guard_state_mut().check_signed_request(signed_request, now)?;
+        gateway.replay_guard_state_mut().check_signed_request(
+            &runtime.source_identity,
+            signed_request,
+            now,
+        )?;
         context.store.save_state(&gateway)?;
     }
     Ok(())
@@ -751,9 +776,11 @@ pub(crate) async fn handle_gateway_submit(
     let submit_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
     let replay_rejection = {
         let mut gateway = gateway_state(&context.state)?;
-        let result = gateway
-            .replay_guard_state_mut()
-            .check_signed_request(&submit.signed_request, submit_now);
+        let result = gateway.replay_guard_state_mut().check_signed_request(
+            &runtime.source_identity,
+            &submit.signed_request,
+            submit_now,
+        );
         let rejection = result.err().map(|error| format!("submit replay rejected: {error}"));
         context.store.save_state(&gateway)?;
         rejection
@@ -838,9 +865,11 @@ pub(crate) async fn handle_gateway_own_device_fanout(
     let submit_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
     let replay_rejection = {
         let mut gateway = gateway_state(&context.state)?;
-        let result = gateway
-            .replay_guard_state_mut()
-            .check_signed_request(&fanout.signed_request, submit_now);
+        let result = gateway.replay_guard_state_mut().check_signed_request(
+            &runtime.source_identity,
+            &fanout.signed_request,
+            submit_now,
+        );
         let rejection = result.err().map(|error| format!("fanout replay rejected: {error}"));
         context.store.save_state(&gateway)?;
         rejection
@@ -1379,8 +1408,12 @@ mod tests {
     }
 
     #[test]
-    fn own_device_fanout_session_rejects_cross_principal_or_source_device() {
+    fn own_device_fanout_session_rejects_cross_principal_or_source_device() -> anyhow::Result<()> {
         let runtime = crate::GatewaySessionRuntime {
+            source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
+                &ramflux_crypto::create_identity_root("principal_a", [1; 32]),
+                &ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [2; 32]),
+            )?,
             session_id: "session_test".to_owned(),
             resume_token: "resume_test".to_owned(),
             principal_id: "principal_a".to_owned(),
@@ -1407,13 +1440,14 @@ mod tests {
             own_device_fanout_session_rejection(&runtime, &fanout),
             Some("own-device fanout principal does not match authenticated session")
         );
+        Ok(())
     }
 
     #[test]
     #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_session_binding_requires_owner_or_grantee_device() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
-        let runtime = test_runtime(&branch);
+        let runtime = test_runtime(&branch)?;
         let mut body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
         validate_relay_token_issue_session_binding(&runtime, &body)?;
@@ -1433,7 +1467,7 @@ mod tests {
     #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_gates_delete_after_ack_to_put_capability() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
-        let runtime = test_runtime(&branch);
+        let runtime = test_runtime(&branch)?;
 
         // Owner put tokens may carry the delete-on-ack policy.
         let mut put_body =
@@ -1463,7 +1497,7 @@ mod tests {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let wrong_branch =
             ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
-        let runtime = test_runtime(&branch);
+        let runtime = test_runtime(&branch)?;
         let context = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
@@ -1481,7 +1515,7 @@ mod tests {
     #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_accepts_authenticated_owner_put() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
-        let runtime = test_runtime(&branch);
+        let runtime = test_runtime(&branch)?;
         let context = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
@@ -1510,7 +1544,7 @@ mod tests {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let wrong_branch =
             ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
-        let runtime = test_runtime(&branch);
+        let runtime = test_runtime(&branch)?;
         let context = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
@@ -1541,7 +1575,7 @@ mod tests {
     #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_binding_failure_does_not_poison_replay() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
-        let runtime = test_runtime(&branch);
+        let runtime = test_runtime(&branch)?;
         let context = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
@@ -1568,7 +1602,7 @@ mod tests {
     #[cfg(feature = "itest-local-mint")]
     fn relay_token_issue_expired_does_not_poison_replay() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
-        let runtime = test_runtime(&branch);
+        let runtime = test_runtime(&branch)?;
         let context = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
@@ -1658,8 +1692,14 @@ mod tests {
     }
 
     #[cfg(feature = "itest-local-mint")]
-    fn test_runtime(branch: &ramflux_crypto::DeviceBranch) -> crate::GatewaySessionRuntime {
-        crate::GatewaySessionRuntime {
+    fn test_runtime(
+        branch: &ramflux_crypto::DeviceBranch,
+    ) -> anyhow::Result<crate::GatewaySessionRuntime> {
+        Ok(crate::GatewaySessionRuntime {
+            source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
+                &ramflux_crypto::create_identity_root(&branch.principal_id, [0x91; 32]),
+                branch,
+            )?,
             session_id: "session_test".to_owned(),
             resume_token: "resume_test".to_owned(),
             principal_id: branch.principal_id.clone(),
@@ -1668,7 +1708,7 @@ mod tests {
             branch_public_key: ramflux_protocol::encode_base64url(
                 branch.signing_key.verifying_key().to_bytes(),
             ),
-        }
+        })
     }
 
     #[cfg(feature = "itest-local-mint")]

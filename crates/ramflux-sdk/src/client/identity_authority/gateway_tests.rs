@@ -45,13 +45,7 @@ async fn mismatching_revocation_ack_fences_local_traffic_and_retries_the_identic
     let manifest = owner.manifest()?;
     observe(&owner.client, &manifest)?;
     let old = manifest.signed_device_set.ok_or("set")?;
-    let pair = ramflux_crypto::DmSession::initiator(
-        [1; 32],
-        dm_device_id_hash("alice"),
-        dm_device_id_hash("peer"),
-        [2; 32],
-    )?;
-    owner.client.persist_pair("alice", "peer", &[3; 32], &pair)?;
+    seed_owned_peer_pair(&owner)?;
     let certified = rcgen::generate_simple_self_signed(vec!["retry.test".into()])?;
     let ca = owner.path.join("ca.pem");
     std::fs::write(&ca, certified.cert.pem())?;
@@ -260,5 +254,20 @@ async fn own_device_import_rejects_a_revoked_siblings_replayed_manifest_before_h
         target.client.account_db()?.client_directory_ids("object", "", 100)?,
         Vec::<String>::new()
     );
+    Ok(())
+}
+
+fn seed_owned_peer_pair(owner: &Actor) -> TestResult {
+    let pair = ramflux_crypto::DmSession::initiator(
+        [1; 32],
+        dm_device_id_hash("alice"),
+        dm_device_id_hash("peer"),
+        [2; 32],
+    )?;
+    let peer = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+        owner.client.identity_root.as_ref().ok_or("root")?,
+        "peer",
+    )?;
+    owner.client.persist_pair("alice", peer.storage_key(), &[3; 32], &pair)?;
     Ok(())
 }

@@ -3,6 +3,78 @@
 
 use super::*;
 
+pub(super) fn replay_source(
+    device: &str,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, ramflux_crypto::CryptoError> {
+    let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+    let branch = ramflux_crypto::create_device_branch(
+        "alice",
+        device,
+        1,
+        ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+    );
+    ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)
+}
+pub(super) fn signed_registered_envelope(
+    mut envelope: Envelope,
+    principal: &str,
+    device: &str,
+    nonce: u64,
+) -> Result<Envelope, ramflux_crypto::CryptoError> {
+    let root = ramflux_crypto::create_identity_root(
+        principal,
+        ramflux_crypto::blake3_256("ramflux.test.registration_root.v1", principal.as_bytes()),
+    );
+    envelope.source_principal_id = principal.into();
+    envelope.source_device_id = device.into();
+    envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(ramflux_crypto::identity_root_commitment(
+            &root.signing_key.verifying_key()
+        )),
+    );
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_seed(&envelope, seed_from_nonce(0x41, nonce))?;
+    Ok(envelope)
+}
+pub(super) fn gateway_registered_key(
+    open: &GatewayOpenFrame,
+) -> Result<DeviceAuthKeyResponse, ramflux_crypto::CryptoError> {
+    let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([0x92; 32]);
+    let keys = ramflux_crypto::device_key_commitments(
+        &ramflux_crypto::fixture_public_key_base64url(),
+        &ramflux_protocol::encode_base64url(agreement.public),
+    )?;
+    let set = ramflux_crypto::sign_device_set(
+        &root,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            device_set_epoch: 1,
+            devices: vec![ramflux_protocol::SignedDeviceSetEntry {
+                device_id: open.device_id.clone(),
+                device_epoch: 1,
+                signing_key_commitment: keys.0,
+                agreement_key_commitment: keys.1,
+                status: ramflux_protocol::DeviceSetStatus::Active,
+                revoked_at: None,
+            }],
+        },
+    )?;
+    Ok(DeviceAuthKeyResponse {
+        root_public_key: Some(ramflux_protocol::encode_base64url(
+            root.signing_key.verifying_key().to_bytes(),
+        )),
+        signed_device_set: Some(set),
+        principal_id: "alice".into(),
+        device_id: open.device_id.clone(),
+        device_epoch: 1,
+        branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
+        target_delivery_id: open.target_delivery_id.clone(),
+        revoked: false,
+    })
+}
+
 pub(super) fn assert_incomplete_request_times_out(
     bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -687,6 +759,10 @@ pub(super) fn gateway_auth_frame_with_seed(
         nonce: open.stream_nonce.clone(),
         expires_at: now + 60,
     };
+    device_proof.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::Value::String(replay_source(&open.device_id)?.root_commitment().into()),
+    );
     device_proof.signed.signature =
         ramflux_crypto::sign_protocol_object_with_seed(&device_proof, seed)?;
     let device_proof_bytes = ramflux_protocol::canonical_json_bytes(&device_proof)?;

@@ -6,15 +6,15 @@ use super::*;
 #[test]
 fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
     let register =
         registration_request(&router, "principal_delete", "device_delete", 91, None, "ip_a")?;
     router.mvp1_register_identity(&register)?;
-    router.submit_envelope(envelope(
-        "env_before_delete",
-        "target_principal_delete",
-        DeliveryClass::OpaqueEvent,
-    ));
+    router.submit_envelope(
+        &source_identity,
+        envelope("env_before_delete", "target_principal_delete", DeliveryClass::OpaqueEvent),
+    );
     assert!(router.mvp7_metadata_summary("principal_delete").metadata_present);
 
     let deactivated = router.mvp7_apply_lifecycle_event(&lifecycle_request(
@@ -52,11 +52,10 @@ fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
     assert!(finalized.record.deletion_proof.is_some());
     assert!(!router.mvp7_metadata_summary("principal_delete").metadata_present);
     assert!(matches!(
-        router.submit_envelope(envelope(
-            "env_after_delete",
-            "target_principal_delete",
-            DeliveryClass::OpaqueEvent,
-        )),
+        router.submit_envelope(
+            &source_identity,
+            envelope("env_after_delete", "target_principal_delete", DeliveryClass::OpaqueEvent,)
+        ),
         RouterSubmitOutcome::RejectedDeleted { .. }
     ));
     Ok(())

@@ -529,14 +529,7 @@ fn gateway_auth_replay_guard_rejects_duplicate_signed_request()
 -> Result<(), Box<dyn std::error::Error>> {
     let open = gateway_open_frame("device_replay", "nonce_replay");
     let auth = gateway_auth_frame(&open, "request_replay", 1_760_000_000)?;
-    let registered = DeviceAuthKeyResponse {
-        principal_id: "alice".to_owned(),
-        device_id: open.device_id.clone(),
-        device_epoch: 1,
-        branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
-        target_delivery_id: open.target_delivery_id.clone(),
-        revoked: false,
-    };
+    let registered = gateway_registered_key(&open)?;
     let mut replay_guard = NodeReplayGuardState::new();
     validate_gateway_auth_with_replay(&open, &auth, 1_760_000_001, &mut replay_guard, &registered)?;
     let rejected = validate_gateway_auth_with_replay(
@@ -559,10 +552,16 @@ fn gateway_auth_replay_guard_rejects_long_validity_signed_request_replay()
     auth.signed_request.expires_at = auth.signed_request.created_at + 3_600;
     let mut replay_guard = NodeReplayGuardState::new();
 
-    replay_guard
-        .check_signed_request(&auth.signed_request, auth.signed_request.created_at + 901)?;
-    let rejected = replay_guard
-        .check_signed_request(&auth.signed_request, auth.signed_request.created_at + 902);
+    replay_guard.check_signed_request(
+        &replay_source(&auth.signed_request.source_device_id)?,
+        &auth.signed_request,
+        auth.signed_request.created_at + 901,
+    )?;
+    let rejected = replay_guard.check_signed_request(
+        &replay_source(&auth.signed_request.source_device_id)?,
+        &auth.signed_request,
+        auth.signed_request.created_at + 902,
+    );
 
     assert!(matches!(rejected, Err(NodeCoreError::ReplayGuard(_))));
     assert_eq!(replay_guard.len(), 1);
@@ -578,8 +577,11 @@ fn gateway_auth_replay_guard_rejects_signed_request_validity_above_maximum()
         auth.signed_request.created_at + ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS + 1;
     let mut replay_guard = NodeReplayGuardState::new();
 
-    let rejected =
-        replay_guard.check_signed_request(&auth.signed_request, auth.signed_request.created_at);
+    let rejected = replay_guard.check_signed_request(
+        &replay_source(&auth.signed_request.source_device_id)?,
+        &auth.signed_request,
+        auth.signed_request.created_at,
+    );
 
     assert!(matches!(rejected, Err(NodeCoreError::ReplayGuard(_))));
     assert_eq!(replay_guard.len(), 0);
@@ -592,6 +594,8 @@ fn gateway_auth_rejects_fixture_signature_when_registered_branch_key_differs()
     let open = gateway_open_frame("device_branch_bound", "nonce_branch_bound");
     let auth = gateway_auth_frame(&open, "request_branch_bound", 1_760_000_000)?;
     let registered = DeviceAuthKeyResponse {
+        root_public_key: None,
+        signed_device_set: None,
         principal_id: "alice".to_owned(),
         device_id: open.device_id.clone(),
         device_epoch: 1,

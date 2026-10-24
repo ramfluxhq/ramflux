@@ -17,7 +17,8 @@ pub(crate) fn submit_envelope(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&envelope);
+    let source = state.authenticated_envelope_source(&envelope)?;
+    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at
         .checked_add(i64::from(envelope.ttl))
@@ -26,12 +27,13 @@ pub(crate) fn submit_envelope(
     let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
     let outcome = match home_node_forward {
-        Some(client) => {
-            state.submit_envelope_with_home_node_forward_at(envelope, now_unix_seconds, |plan| {
-                client.forward(plan)
-            })
-        }
-        None => state.submit_envelope_at(envelope, now_unix_seconds),
+        Some(client) => state.submit_envelope_with_home_node_forward_at(
+            &source,
+            envelope,
+            now_unix_seconds,
+            |plan| client.forward(plan),
+        ),
+        None => state.submit_envelope_at(&source, envelope, now_unix_seconds),
     };
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
@@ -79,7 +81,8 @@ pub(crate) async fn submit_envelope_async(
         source_device_id = %envelope.source_device_id,
         "router decoded mvp0 envelope"
     );
-    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&envelope);
+    let source = state.authenticated_envelope_source(&envelope)?;
+    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
     let replay_expires_at = envelope
         .created_at
         .checked_add(i64::from(envelope.ttl))
@@ -88,12 +91,13 @@ pub(crate) async fn submit_envelope_async(
     let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
     let outcome = match home_node_forward {
-        Some(client) => {
-            state.submit_envelope_with_home_node_forward_at(envelope, now_unix_seconds, |plan| {
-                client.forward(plan)
-            })
-        }
-        None => state.submit_envelope_at(envelope, now_unix_seconds),
+        Some(client) => state.submit_envelope_with_home_node_forward_at(
+            &source,
+            envelope,
+            now_unix_seconds,
+            |plan| client.forward(plan),
+        ),
+        None => state.submit_envelope_at(&source, envelope, now_unix_seconds),
     };
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
@@ -205,7 +209,10 @@ pub(crate) fn own_device_fanout(
         .checked_add(i64::from(request.envelope.ttl))
         .ok_or_else(|| anyhow::anyhow!("fan-out envelope ttl overflows replay expiry"))?;
     store.record_fanout_increment(
-        &ramflux_node_core::envelope_replay_tuple_key(&request.envelope),
+        &ramflux_node_core::envelope_replay_tuple_key(
+            &state.authenticated_envelope_source(&request.envelope)?,
+            &request.envelope,
+        ),
         replay_expires_at,
         &entries,
     )?;

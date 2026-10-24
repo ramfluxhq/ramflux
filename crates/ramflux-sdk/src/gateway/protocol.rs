@@ -77,6 +77,7 @@ pub struct GatewaySessionConfig {
     pub device_epoch: u64,
     pub branch_proof_hash: String,
     pub device_branch: Option<std::sync::Arc<ramflux_crypto::DeviceBranch>>,
+    pub(crate) source_identity: Option<ramflux_crypto::RootQualifiedDeviceRef>,
     pub target_delivery_id: String,
     pub capability_scope: Vec<String>,
     pub auth_expires_at: i64,
@@ -171,6 +172,7 @@ impl GatewaySessionConfig {
             device_epoch: 1,
             branch_proof_hash: "sdk_branch_proof_hash".to_owned(),
             device_branch: None,
+            source_identity: None,
             target_delivery_id: parts.target_delivery_id,
             capability_scope: vec!["gateway.session".to_owned()],
             auth_expires_at: now.saturating_add(GATEWAY_SESSION_AUTH_TTL_SECONDS),
@@ -193,8 +195,24 @@ impl GatewaySessionConfig {
         self.auth_expires_at = self.now.saturating_add(GATEWAY_SESSION_AUTH_TTL_SECONDS);
     }
 
+    /// Bind gateway attribution to a device under the account's owned root.
+    /// # Errors
+    /// Rejects a root/branch mismatch or an invalid device name.
+    pub fn with_owned_device(
+        self,
+        root: &ramflux_crypto::IdentityRoot,
+        branch: ramflux_crypto::DeviceBranch,
+    ) -> Result<Self, crate::SdkError> {
+        let source_identity =
+            ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(root, &branch)?;
+        let mut config = self.with_device_branch(branch);
+        config.source_identity = Some(source_identity);
+        Ok(config)
+    }
+
     #[must_use]
     pub fn with_device_branch(mut self, branch: ramflux_crypto::DeviceBranch) -> Self {
+        self.source_identity = None;
         self.principal_id.clone_from(&branch.principal_id);
         self.device_id.clone_from(&branch.device_id);
         self.device_epoch = branch.device_epoch;

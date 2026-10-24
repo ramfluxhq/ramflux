@@ -170,6 +170,10 @@ pub struct DeviceManifestResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceAuthKeyResponse {
+    #[serde(default)]
+    pub root_public_key: Option<String>,
+    #[serde(default)]
+    pub signed_device_set: Option<ramflux_protocol::SignedDeviceSetRecord>,
     pub principal_id: String,
     pub device_id: String,
     pub device_epoch: u64,
@@ -772,6 +776,11 @@ impl IdentityRegistry {
             return None;
         }
         Some(DeviceAuthKeyResponse {
+            root_public_key: self
+                .root_public_keys_by_commitment
+                .get(&device.principal_commitment)
+                .cloned(),
+            signed_device_set: self.signed_device_sets.get(&device.principal_commitment).cloned(),
             principal_id: device.principal_id.clone(),
             device_id: device.device_id.clone(),
             device_epoch: device.device_epoch,

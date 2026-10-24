@@ -158,7 +158,10 @@ fn replay_watermarks_cannot_be_poisoned_by_another_principal_reusing_a_device_id
     let alice = Fixture::new("alice", 41)?;
     let bob = Fixture::new("bob", 61)?;
     let entry = fresh(&alice, &bob, "scoped-watermark")?;
-    let pair = bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?;
+    let pair = RamfluxClient::pair_key(
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
+    )?;
     // Legacy ownerless marks must not be inherited by the authenticated principal namespace.
     bob.client
         .account_db()?

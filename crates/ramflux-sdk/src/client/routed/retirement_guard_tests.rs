@@ -25,7 +25,10 @@ async fn pruned_tombstones_cannot_revive_a_held_bootstrap_or_clear_manual_recove
     assert!(bob.client.open_routed(&held, "bob").is_err());
     assert_eq!(super::session_record::active(&bob, "alice")?, current);
     bob.client.mark_pair_manual("bob", &alice.reference()?, now_unix_timestamp())?;
-    let pair = bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?;
+    let pair = RamfluxClient::pair_key(
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
+    )?;
     let marker = db.load_actor_state::<serde_json::Value>(&format!("{pair}/manual"))?;
     for key in db.actor_state_keys("dm-pair/retired/")? {
         db.remove_actor_state(&key)?;

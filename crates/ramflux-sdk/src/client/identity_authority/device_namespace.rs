@@ -76,6 +76,16 @@ impl RamfluxClient {
         let hint = super::super::routed::decode(&entry.envelope)
             .ok()
             .and_then(|packet| packet.source_principal_commitment);
+        let signed_hint = entry
+            .envelope
+            .ext
+            .ext
+            .get("source_root_commitment")
+            .and_then(serde_json::Value::as_str);
+        if hint.as_deref().zip(signed_hint).is_some_and(|(body, envelope)| body != envelope) {
+            return Err(invalid("sender root claims disagree"));
+        }
+        let hint = hint.or_else(|| signed_hint.map(str::to_owned));
         if let Some(root) = &hint {
             let bytes = ramflux_protocol::decode_base64url(root)
                 .map_err(|_| invalid("invalid sender root hint"))?;

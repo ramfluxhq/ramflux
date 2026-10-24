@@ -14,7 +14,13 @@ impl RamfluxClient {
     ) -> Result<Vec<String>, SdkError> {
         Ok(self
             .account_db()?
-            .load_actor_state::<Vec<String>>(&format!("{}/archive", self.pair_key(local, remote)?))?
+            .load_actor_state::<Vec<String>>(&format!(
+                "{}/archive",
+                RamfluxClient::pair_key(
+                    &self.local_device_identity(local)?,
+                    &self.device_identity(remote)?
+                )?
+            ))?
             .unwrap_or_default())
     }
     pub(super) fn archive_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
@@ -28,13 +34,24 @@ impl RamfluxClient {
                 self.retire_pair(local, remote, &evicted)?;
             }
         }
-        self.account_db()?
-            .persist_actor_state(&format!("{}/archive", self.pair_key(local, remote)?), &archive)?;
+        self.account_db()?.persist_actor_state(
+            &format!(
+                "{}/archive",
+                RamfluxClient::pair_key(
+                    &self.local_device_identity(local)?,
+                    &self.device_identity(remote)?
+                )?
+            ),
+            &archive,
+        )?;
         Ok(())
     }
     pub(super) fn promote_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let key = self.pair_key(local, remote)?;
+        let key = RamfluxClient::pair_key(
+            &self.local_device_identity(local)?,
+            &self.device_identity(remote)?,
+        )?;
         if let Some(old) = db.load_actor_state::<String>(&key)?
             && old != id
         {
@@ -61,7 +78,10 @@ impl RamfluxClient {
         let archived = self.archived_pairs(local, remote)?.contains(id);
         let fresh =
             !db.load_actor_state::<bool>(&format!("dm-pair/confirmed/{id}"))?.unwrap_or(false);
-        let key = self.pair_key(local, remote)?;
+        let key = RamfluxClient::pair_key(
+            &self.local_device_identity(local)?,
+            &self.device_identity(remote)?,
+        )?;
         let current = db.load_actor_state::<String>(&key)?;
         let current_confirmed = current
             .as_ref()
@@ -110,7 +130,10 @@ impl RamfluxClient {
             db.remove_actor_state(&format!("{key}/reset-pending"))?;
             db.remove_actor_state(&format!(
                 "dm-pair/reset-work/{}",
-                self.pair_key(local, remote)?
+                RamfluxClient::pair_key(
+                    &self.local_device_identity(local)?,
+                    &self.device_identity(remote)?
+                )?
             ))?;
         }
         Ok(())

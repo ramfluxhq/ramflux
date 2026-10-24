@@ -25,6 +25,51 @@ pub fn gateway_open_hash(open: &GatewayOpenFrame) -> String {
     )
 }
 
+impl DeviceAuthKeyResponse {
+    /// Recover identity only from a verified, active root-signed device entry.
+    /// The registry supplies its highest accepted record; callers must also verify possession
+    /// of the committed branch signing key before using this identity for request admission.
+    /// # Errors
+    /// Rejects legacy unsigned records, revoked entries, or inconsistent principal, epoch and key.
+    pub fn authenticated_device_identity(
+        &self,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        let reject =
+            || NodeCoreError::ItestHttp("device requires current root-signed authority".into());
+        let record = self.signed_device_set.as_ref().ok_or_else(reject)?;
+        let root = ramflux_crypto::verifying_key_from_base64url(
+            self.root_public_key.as_deref().ok_or_else(reject)?,
+        )
+        .map_err(|_| reject())?;
+        let identity = ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
+            &root,
+            record,
+            &self.device_id,
+        )
+        .map_err(|_| reject())?;
+        let entry = record
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == self.device_id)
+            .ok_or_else(reject)?;
+        let key = ramflux_crypto::verifying_key_from_base64url(&self.branch_public_key)
+            .map_err(|_| reject())?;
+        let commitment = ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::DEVICE_SIGNING_KEY_COMMITMENT,
+            &key.to_bytes(),
+        );
+        if self.revoked
+            || record.principal_id != self.principal_id
+            || entry.device_epoch != self.device_epoch
+            || entry.status != ramflux_protocol::DeviceSetStatus::Active
+            || entry.signing_key_commitment != commitment
+        {
+            return Err(reject());
+        }
+        Ok(identity)
+    }
+}
+
 /// # Errors
 /// Returns an error when auth does not bind to the open frame or signatures fail.
 pub fn validate_gateway_auth(
@@ -114,7 +159,14 @@ pub fn validate_gateway_auth_with_replay(
     now: i64,
     replay_guard: &mut NodeReplayGuardState,
     registered: &DeviceAuthKeyResponse,
-) -> Result<(), NodeCoreError> {
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
     validate_gateway_auth(open, auth, now, registered)?;
-    replay_guard.check_signed_request(&auth.signed_request, now)
+    let source = registered.authenticated_device_identity()?;
+    if auth.device_proof.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
+        != Some(source.root_commitment())
+    {
+        return Err(NodeCoreError::ItestHttp("gateway root identity mismatch".into()));
+    }
+    replay_guard.check_signed_request(&source, &auth.signed_request, now)?;
+    Ok(source)
 }

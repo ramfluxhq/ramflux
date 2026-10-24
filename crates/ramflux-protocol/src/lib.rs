@@ -105,3 +105,5 @@ pub use principal_directory::{
     IdentityDirectoryReason, IdentityRegistrationFailure, IdentityRegistrationFailureBody,
     PrincipalLookupResponse,
 };
+mod envelope_sender;
+pub use envelope_sender::envelope_sender_signed_bytes;

@@ -7,6 +7,29 @@ use crate::{GatewayInboxEntry, RamfluxClient, SdkError, prekey::SdkDeviceManifes
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::SignedDeviceSetRecord;
 impl RamfluxClient {
+    pub(crate) fn local_device_identity(
+        &self,
+        device: &str,
+    ) -> Result<RootQualifiedDeviceRef, SdkError> {
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if branch.device_id != device {
+            return Err(invalid("local device context mismatch"));
+        }
+        Ok(RootQualifiedDeviceRef::for_owned_device(
+            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            branch,
+        )?)
+    }
+    pub(crate) fn device_identity(
+        &self,
+        reference: &str,
+    ) -> Result<RootQualifiedDeviceRef, SdkError> {
+        if let Some((root, device)) = ramflux_protocol::parse_qualified_device_id(reference)? {
+            self.device_identity_for_root(&root, &device)
+        } else {
+            self.local_device_identity(reference)
+        }
+    }
     pub(crate) fn device_identity_for_root(
         &self,
         root: &str,
@@ -17,6 +40,11 @@ impl RamfluxClient {
             && ramflux_crypto::identity_root_commitment(&own.signing_key.verifying_key()) == root
         {
             return Ok(RootQualifiedDeviceRef::for_owned_device(own, branch)?);
+        }
+        if let Some(own) = &self.identity_root
+            && ramflux_crypto::identity_root_commitment(&own.signing_key.verifying_key()) == root
+        {
+            return Ok(RootQualifiedDeviceRef::for_owned_account_device(own, device)?);
         }
         let db = self.account_db()?;
         let record: SignedDeviceSetRecord = db

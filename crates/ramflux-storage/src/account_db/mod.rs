@@ -80,6 +80,7 @@ impl AccountDb {
         };
         db.enable_runtime()?;
         crate::schema_device_namespace::upgrade(&db.connection)?;
+        crate::schema_identity_keys::upgrade(&db.connection)?;
         Ok(db)
     }
 

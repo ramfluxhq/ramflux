@@ -71,9 +71,10 @@ async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair() -> Resul
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
-    bob.client.account_db()?.remove_actor_state(
-        &bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?,
-    )?;
+    bob.client.account_db()?.remove_actor_state(&RamfluxClient::pair_key(
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
+    )?)?;
     bob.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&bob, &alice, "after-state-loss")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
@@ -286,9 +287,10 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
         .ok_or_else(|| invalid("pair"))?
         .0
         .session_id;
-    alice.client.account_db()?.remove_actor_state(
-        &alice.client.pair_key("alice", &fixture_peer_reference(&alice.client, "bob")?)?,
-    )?;
+    alice.client.account_db()?.remove_actor_state(&RamfluxClient::pair_key(
+        &alice.client.local_device_identity("alice")?,
+        &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
+    )?)?;
     alice.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&alice, &bob, "alice-state-loss")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));

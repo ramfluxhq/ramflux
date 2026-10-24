@@ -37,6 +37,19 @@ impl RootQualifiedDeviceRef {
             &branch.device_id,
         )
     }
+    /// Name a device under an account whose private root the caller owns.
+    /// This permits root-scoped revocation cleanup even if the old device is no longer active.
+    /// # Errors
+    /// Rejects invalid live device names.
+    pub fn for_owned_account_device(
+        root: &IdentityRoot,
+        device: &str,
+    ) -> Result<Self, CryptoError> {
+        Self::authenticated(
+            crate::identity_root_commitment(&root.signing_key.verifying_key()),
+            device,
+        )
+    }
     /// Name an entry only after verifying its complete root-signed device set.
     /// Revoked entries remain nameable for cleanup and revocation bookkeeping, never authorization.
     /// # Errors

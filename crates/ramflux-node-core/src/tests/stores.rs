@@ -15,12 +15,19 @@ fn current_envelope(
 
 #[test]
 fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_redb_store_restores_router_snapshot")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     router.upsert_session(session("target_live", SessionLifecycle::Live, 1, 1))?;
-    router.submit_envelope(envelope("env_pending", "target_offline", DeliveryClass::OpaqueEvent));
-    router.submit_envelope(envelope("env_acked", "target_ack", DeliveryClass::OpaqueEvent));
+    router.submit_envelope(
+        &source_identity,
+        envelope("env_pending", "target_offline", DeliveryClass::OpaqueEvent),
+    );
+    router.submit_envelope(
+        &source_identity,
+        envelope("env_acked", "target_ack", DeliveryClass::OpaqueEvent),
+    );
     router.apply_ack(&ack("env_acked"))?;
     store.save_router(&router)?;
     drop(store);
@@ -30,7 +37,10 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_snapshot".to_owned()))?;
     assert!(matches!(
-        restored.submit_envelope(envelope("env_online", "target_live", DeliveryClass::OpaqueEvent)),
+        restored.submit_envelope(
+            &source_identity,
+            envelope("env_online", "target_live", DeliveryClass::OpaqueEvent)
+        ),
         RouterSubmitOutcome::Online(_)
     ));
     assert_eq!(restored.resume("target_offline", 0, 10).len(), 1);
@@ -44,6 +54,7 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
 #[test]
 fn router_redb_store_restores_home_node_migration_state() -> Result<(), Box<dyn std::error::Error>>
 {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_redb_store_restores_home_node_migration_state")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
@@ -85,7 +96,7 @@ fn router_redb_store_restores_home_node_migration_state() -> Result<(), Box<dyn 
         DeliveryClass::OpaqueEvent,
     );
     envelope.created_at = request.now + 2;
-    let rejected = restored.submit_envelope_at(envelope, request.now + 2);
+    let rejected = restored.submit_envelope_at(&source_identity, envelope, request.now + 2);
     let RouterSubmitOutcome::RejectedHomeNodeMigrated(delivery) = rejected else {
         return Err(format!("expected restored migrated nack, got {rejected:?}").into());
     };
@@ -133,15 +144,17 @@ fn router_redb_store_restores_home_node_route_state() -> Result<(), Box<dyn std:
 
 #[test]
 fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_redb_incremental_replay_survives_restart")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     store.save_router(&router)?;
     let submitted =
         current_envelope("env_replay_incremental", "target_replay", DeliveryClass::OpaqueEvent);
-    let replay_key = envelope_replay_tuple_key(&submitted);
+    let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
-    let accepted = router.submit_envelope_at(submitted.clone(), submitted.created_at + 1);
+    let accepted =
+        router.submit_envelope_at(&source_identity, submitted.clone(), submitted.created_at + 1);
     let entry = match accepted {
         RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
         other => return Err(format!("expected offline queue, got {other:?}").into()),
@@ -153,7 +166,8 @@ fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::
     let restored = reopened
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_incremental".to_owned()))?;
-    let replay = restored.submit_envelope_at(submitted.clone(), submitted.created_at + 2);
+    let replay =
+        restored.submit_envelope_at(&source_identity, submitted.clone(), submitted.created_at + 2);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
     Ok(())
 }
@@ -161,6 +175,7 @@ fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::
 #[test]
 fn router_wal_submission_restores_replay_and_inbox_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_wal_submission_restores_replay_and_inbox_atomically")?;
     let wal_root = path.with_extension("submission.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
@@ -171,9 +186,10 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
         "target_router_wal",
         DeliveryClass::OpaqueEvent,
     );
-    let replay_key = envelope_replay_tuple_key(&submitted);
+    let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
-    let accepted = router.submit_envelope_at(submitted.clone(), submitted.created_at + 1);
+    let accepted =
+        router.submit_envelope_at(&source_identity, submitted.clone(), submitted.created_at + 1);
     let entry = match accepted {
         RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
         other => return Err(format!("expected offline queue, got {other:?}").into()),
@@ -190,7 +206,7 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_wal_submission".to_owned()))?;
     assert_eq!(restored.resume("target_router_wal", 0, 10).len(), 1);
-    let replay = restored.submit_envelope_at(submitted, replay_expires_at - 1);
+    let replay = restored.submit_envelope_at(&source_identity, submitted, replay_expires_at - 1);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
     let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
@@ -199,6 +215,7 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
 #[test]
 fn router_wal_async_submission_restores_replay_and_inbox_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_wal_async_submission_restores_replay_and_inbox_atomically")?;
     let wal_root = path.with_extension("async_submission.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
@@ -209,9 +226,10 @@ fn router_wal_async_submission_restores_replay_and_inbox_atomically()
         "target_router_wal_async",
         DeliveryClass::OpaqueEvent,
     );
-    let replay_key = envelope_replay_tuple_key(&submitted);
+    let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
-    let accepted = router.submit_envelope_at(submitted.clone(), submitted.created_at + 1);
+    let accepted =
+        router.submit_envelope_at(&source_identity, submitted.clone(), submitted.created_at + 1);
     let entry = match accepted {
         RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
         other => return Err(format!("expected offline queue, got {other:?}").into()),
@@ -233,7 +251,7 @@ fn router_wal_async_submission_restores_replay_and_inbox_atomically()
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_wal_async_submission".to_owned()))?;
     assert_eq!(restored.resume("target_router_wal_async", 0, 10).len(), 1);
-    let replay = restored.submit_envelope_at(submitted, replay_expires_at - 1);
+    let replay = restored.submit_envelope_at(&source_identity, submitted, replay_expires_at - 1);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
     let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
@@ -242,6 +260,7 @@ fn router_wal_async_submission_restores_replay_and_inbox_atomically()
 #[test]
 fn router_wal_submission_respects_redb_ack_cursor_on_restore()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_wal_submission_respects_redb_ack_cursor_on_restore")?;
     let wal_root = path.with_extension("ack.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
@@ -252,9 +271,10 @@ fn router_wal_submission_respects_redb_ack_cursor_on_restore()
         "target_router_wal_ack",
         DeliveryClass::OpaqueEvent,
     );
-    let replay_key = envelope_replay_tuple_key(&submitted);
+    let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
-    let accepted = router.submit_envelope_at(submitted.clone(), submitted.created_at + 1);
+    let accepted =
+        router.submit_envelope_at(&source_identity, submitted.clone(), submitted.created_at + 1);
     let entry = match accepted {
         RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
         other => return Err(format!("expected offline queue, got {other:?}").into()),
@@ -273,7 +293,7 @@ fn router_wal_submission_respects_redb_ack_cursor_on_restore()
         restored.cursor_state("target_router_wal_ack").and_then(|cursor| cursor.last_envelope_id),
         Some("env_router_wal_acked".to_owned())
     );
-    let replay = restored.submit_envelope_at(submitted, replay_expires_at - 1);
+    let replay = restored.submit_envelope_at(&source_identity, submitted, replay_expires_at - 1);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
     let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
@@ -281,6 +301,7 @@ fn router_wal_submission_respects_redb_ack_cursor_on_restore()
 
 #[test]
 fn router_redb_expired_replay_tuple_is_purged_on_load() -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_redb_expired_replay_tuple_is_purged_on_load")?;
     let store = RouterRedbStore::open(&path)?;
     let mut expired =
@@ -288,7 +309,7 @@ fn router_redb_expired_replay_tuple_is_purged_on_load() -> Result<(), Box<dyn st
     let now = i64::try_from(now_unix_seconds())?;
     expired.ttl = 60;
     expired.created_at = now - 120;
-    let replay_key = envelope_replay_tuple_key(&expired);
+    let replay_key = envelope_replay_tuple_key(&source_identity, &expired);
     let replay_expires_at = expired.created_at + i64::from(expired.ttl);
     store.record_submission_increment(&replay_key, replay_expires_at, None)?;
     drop(store);
@@ -325,8 +346,12 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
         "ip_fanout_peer",
     )?)?;
     store.record_identity_registry(&router.mvp1_identities_snapshot())?;
-    let fanout_envelope =
-        current_envelope("env_fanout_replay", "target_unused", DeliveryClass::SelfDeviceControl);
+    let fanout_envelope = signed_registered_envelope(
+        current_envelope("env_fanout_replay", "target_unused", DeliveryClass::SelfDeviceControl),
+        "principal_fanout",
+        "device_source",
+        601,
+    )?;
     let request = ItestMvp10OwnDeviceFanoutRequest {
         principal_id: "principal_fanout".to_owned(),
         source_device_id: "device_source".to_owned(),
@@ -334,7 +359,10 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
     };
     let response = router.mvp10_own_device_fanout(request.clone())?;
     assert_eq!(response.delivered.len(), 1);
-    let replay_key = envelope_replay_tuple_key(&request.envelope);
+    let replay_key = envelope_replay_tuple_key(
+        &router.authenticated_envelope_source(&request.envelope)?,
+        &request.envelope,
+    );
     let replay_expires_at = request.envelope.created_at + i64::from(request.envelope.ttl);
     let entries = response
         .delivered
@@ -369,6 +397,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
 #[test]
 fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
 -> Result<(), Box<dyn std::error::Error>> {
+    let source_identity = replay_source("alice_device")?;
     let path =
         temp_store_path("router_redb_incremental_ack_survives_restart_without_duplicate_delivery")?;
     let store = RouterRedbStore::open(&path)?;
@@ -379,9 +408,10 @@ fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
         "target_ack_incremental",
         DeliveryClass::OpaqueEvent,
     );
-    let replay_key = envelope_replay_tuple_key(&submitted);
+    let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
-    let accepted = router.submit_envelope_at(submitted.clone(), submitted.created_at + 1);
+    let accepted =
+        router.submit_envelope_at(&source_identity, submitted.clone(), submitted.created_at + 1);
     let entry = match accepted {
         RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
         other => return Err(format!("expected offline queue, got {other:?}").into()),
@@ -406,6 +436,7 @@ fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
 #[test]
 fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn std::error::Error>>
 {
+    let source_identity = replay_source("alice_device")?;
     let path = temp_store_path("router_redb_per_key_state_round_trip_restores_router")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
@@ -425,21 +456,26 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
 
     let submitted =
         current_envelope("env_keyed_pending", "target_pending_keyed", DeliveryClass::OpaqueEvent);
-    let replay_key = envelope_replay_tuple_key(&submitted);
+    let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
-    let queued = match router.submit_envelope_at(submitted.clone(), submitted.created_at + 1) {
+    let queued = match router.submit_envelope_at(
+        &source_identity,
+        submitted.clone(),
+        submitted.created_at + 1,
+    ) {
         RouterSubmitOutcome::OfflineQueued(queued) => queued,
         other => return Err(format!("expected offline queue, got {other:?}").into()),
     };
     store.record_submission_increment(&replay_key, replay_expires_at, Some(&queued.entry))?;
 
     let acked = current_envelope("env_keyed_ack", "target_ack_keyed", DeliveryClass::OpaqueEvent);
-    let acked_key = envelope_replay_tuple_key(&acked);
+    let acked_key = envelope_replay_tuple_key(&source_identity, &acked);
     let acked_expires_at = acked.created_at + i64::from(acked.ttl);
-    let acked_entry = match router.submit_envelope_at(acked.clone(), acked.created_at + 1) {
-        RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
-        other => return Err(format!("expected ack queue, got {other:?}").into()),
-    };
+    let acked_entry =
+        match router.submit_envelope_at(&source_identity, acked.clone(), acked.created_at + 1) {
+            RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
+            other => return Err(format!("expected ack queue, got {other:?}").into()),
+        };
     store.record_submission_increment(&acked_key, acked_expires_at, Some(&acked_entry))?;
     let cursor = router.apply_ack(&ack("env_keyed_ack"))?;
     store.record_ack_increment(&cursor, "env_keyed_ack")?;
@@ -470,11 +506,14 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_keyed".to_owned()))?;
     assert!(matches!(
-        restored.submit_envelope(envelope(
-            "env_online_keyed_after_restart",
-            "target_online_keyed",
-            DeliveryClass::OpaqueEvent,
-        )),
+        restored.submit_envelope(
+            &source_identity,
+            envelope(
+                "env_online_keyed_after_restart",
+                "target_online_keyed",
+                DeliveryClass::OpaqueEvent,
+            )
+        ),
         RouterSubmitOutcome::Online(_)
     ));
     assert_eq!(restored.resume("target_pending_keyed", 0, 10).len(), 1);
@@ -483,11 +522,10 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
         Some("env_keyed_ack".to_owned())
     );
     assert!(matches!(
-        restored.submit_envelope(envelope(
-            "env_after_fed_deactivate",
-            "target_fed_keyed",
-            DeliveryClass::OpaqueEvent,
-        )),
+        restored.submit_envelope(
+            &source_identity,
+            envelope("env_after_fed_deactivate", "target_fed_keyed", DeliveryClass::OpaqueEvent,)
+        ),
         RouterSubmitOutcome::RejectedDeactivated { .. }
     ));
     assert_eq!(
@@ -498,6 +536,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
     assert!(restored.mvp7_abuse_report("report_keyed").is_some());
     assert!(matches!(
         restored.submit_envelope_at(
+            &source_identity,
             envelope("env_keyed_pending", "target_pending_keyed", DeliveryClass::OpaqueEvent),
             1_760_000_003,
         ),

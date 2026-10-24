@@ -20,8 +20,11 @@ struct Pair {
 }
 
 impl RamfluxClient {
-    pub(crate) fn pair_key(&self, local: &str, remote: &str) -> Result<String, SdkError> {
-        pair_key(&self.local_device_reference(local)?, &self.device_reference(remote)?)
+    pub(crate) fn pair_key(
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<String, SdkError> {
+        pair_key(local, remote)
     }
 
     pub(crate) fn persist_pair(
@@ -45,7 +48,10 @@ impl RamfluxClient {
             let record_key = format!("dm-pair/session/{}", session.session_id);
             let new = !db.actor_state_exists(&record_key)?;
             db.persist_actor_state(&record_key, &record)?;
-            let key = self.pair_key(local, remote)?;
+            let key = RamfluxClient::pair_key(
+                &self.local_device_identity(local)?,
+                &self.device_identity(remote)?,
+            )?;
             let current = db.load_actor_state::<String>(&key)?;
             let local_origin = db
                 .load_actor_state::<bool>(&format!("dm-pair/local/{}", session.session_id))?
@@ -82,7 +88,10 @@ impl RamfluxClient {
             .load_actor_state::<serde_json::Value>(&format!("dm-pair/retired/{id}"))?
         {
             let current =
-                self.account_db()?.load_actor_state::<String>(&self.pair_key(local, remote)?)?;
+                self.account_db()?.load_actor_state::<String>(&RamfluxClient::pair_key(
+                    &self.local_device_identity(local)?,
+                    &self.device_identity(remote)?,
+                )?)?;
             if let Some(current) = current
                 && retired["superseded_by"] == current
                 && self
@@ -96,8 +105,10 @@ impl RamfluxClient {
             }
             return Err(SdkError::PairRecoveryRequired);
         }
-        let current =
-            self.account_db()?.load_actor_state::<String>(&self.pair_key(local, remote)?)?;
+        let current = self.account_db()?.load_actor_state::<String>(&RamfluxClient::pair_key(
+            &self.local_device_identity(local)?,
+            &self.device_identity(remote)?,
+        )?)?;
         let mut order = current.into_iter().collect::<Vec<_>>();
         order.extend(self.archived_pairs(local, remote)?);
         if !order.iter().any(|candidate| candidate == id) {
@@ -122,8 +133,10 @@ impl RamfluxClient {
         local: &str,
         remote: &str,
     ) -> Result<Option<(ramflux_crypto::DmSession, [u8; 32])>, SdkError> {
-        let Some(id) =
-            self.account_db()?.load_actor_state::<String>(&self.pair_key(local, remote)?)?
+        let Some(id) = self.account_db()?.load_actor_state::<String>(&RamfluxClient::pair_key(
+            &self.local_device_identity(local)?,
+            &self.device_identity(remote)?,
+        )?)?
         else {
             return Ok(None);
         };
@@ -250,8 +263,12 @@ impl RamfluxClient {
         Ok((session, header.prekey_bundle_hash))
     }
 }
-pub(super) fn pair_key(local: &str, remote: &str) -> Result<String, SdkError> {
-    let bytes = ramflux_protocol::canonical_json_bytes(&(local, remote))?;
+pub(super) fn pair_key(
+    local: &ramflux_crypto::RootQualifiedDeviceRef,
+    remote: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> Result<String, SdkError> {
+    let bytes =
+        ramflux_protocol::canonical_json_bytes(&(local.storage_key(), remote.storage_key()))?;
     Ok(format!(
         "dm-pair/active/{}",
         ramflux_crypto::blake3_256_base64url("ramflux.sdk.root_bound_dm_pair.v1", &bytes)
