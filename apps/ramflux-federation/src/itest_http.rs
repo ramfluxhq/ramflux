@@ -542,6 +542,7 @@ pub(crate) fn handle_s8_forward_envelope(
         "federation forward route and peer CA resolved"
     );
     let mut signed_request = request.clone();
+    crate::flow::attach_forward_source_authority(&mut signed_request.envelope, router)?;
     signed_request.source_node_id.clone_from(&discovery.node_id);
     tracing::info!(
         source_node_id = %signed_request.source_node_id,

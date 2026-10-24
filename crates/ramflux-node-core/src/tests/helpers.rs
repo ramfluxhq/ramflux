@@ -75,6 +75,22 @@ pub(super) fn gateway_registered_key(
     })
 }
 
+pub(super) fn forwarded_source_envelope(
+    mut envelope: Envelope,
+) -> Result<Envelope, Box<dyn std::error::Error>> {
+    let open = gateway_open_frame(&envelope.source_device_id, "forward-context");
+    let authority = gateway_registered_key(&open)?;
+    let source = authority.authenticated_device_identity()?;
+    envelope.source_principal_id = authority.principal_id.clone();
+    envelope
+        .ext
+        .ext
+        .insert("source_root_commitment".into(), serde_json::json!(source.root_commitment()));
+    envelope.signed.signature = ramflux_crypto::sign_protocol_object(&envelope)?;
+    envelope.ext.ext.insert("source_device_authority".into(), serde_json::to_value(authority)?);
+    Ok(envelope)
+}
+
 pub(super) fn assert_incomplete_request_times_out(
     bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {

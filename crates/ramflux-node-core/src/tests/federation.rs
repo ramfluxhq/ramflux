@@ -103,21 +103,26 @@ fn federation_redb_store_dedups_inbound_forward_replay_persistently()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("federation_redb_store_dedups_inbound_forward_replay_persistently")?;
     let store = FederationRedbStore::open(&path)?;
-    let forward_a = federation_forward_request("env_inbound_a", "target_inbound_a");
-    let forward_b = federation_forward_request("env_inbound_b", "target_inbound_a");
-    let forward_a_other_target = federation_forward_request("env_inbound_a", "target_inbound_b");
+    let mut forward_a = federation_forward_request("env_inbound_a", "target_inbound_a");
+    let mut forward_b = federation_forward_request("env_inbound_b", "target_inbound_a");
+    let mut forward_a_other_target =
+        federation_forward_request("env_inbound_a", "target_inbound_b");
+    for request in [&mut forward_a, &mut forward_b, &mut forward_a_other_target] {
+        request.envelope = forwarded_source_envelope(request.envelope.clone())?;
+    }
+    let source = replay_source(&forward_a.envelope.source_device_id)?;
     let now = 1_760_000_010;
 
-    assert!(store.accept_inbound_forward_once(&forward_a, now)?);
-    assert!(!store.accept_inbound_forward_once(&forward_a, now + 1)?);
-    assert!(store.accept_inbound_forward_once(&forward_b, now + 2)?);
-    assert!(store.accept_inbound_forward_once(&forward_a_other_target, now + 3)?);
+    assert!(store.accept_inbound_forward_once(&source, &forward_a, now)?);
+    assert!(!store.accept_inbound_forward_once(&source, &forward_a, now + 1)?);
+    assert!(store.accept_inbound_forward_once(&source, &forward_b, now + 2)?);
+    assert!(store.accept_inbound_forward_once(&source, &forward_a_other_target, now + 3)?);
 
     drop(store);
     let reopened = FederationRedbStore::open(&path)?;
-    assert!(!reopened.accept_inbound_forward_once(&forward_a, now + 4)?);
-    assert!(!reopened.accept_inbound_forward_once(&forward_b, now + 5)?);
-    assert!(!reopened.accept_inbound_forward_once(&forward_a_other_target, now + 6)?);
+    assert!(!reopened.accept_inbound_forward_once(&source, &forward_a, now + 4)?);
+    assert!(!reopened.accept_inbound_forward_once(&source, &forward_b, now + 5)?);
+    assert!(!reopened.accept_inbound_forward_once(&source, &forward_a_other_target, now + 6)?);
     Ok(())
 }
 
@@ -486,4 +491,109 @@ fn federation_forward_request(
         required_capability: "opaque_delivery".to_owned(),
         envelope: envelope(envelope_id, target_delivery_id, DeliveryClass::OpaqueEvent),
     }
+}
+
+fn root_bound_forward(
+    root: &ramflux_crypto::IdentityRoot,
+    device: &str,
+    record: Option<ramflux_protocol::SignedDeviceSetRecord>,
+    id: &str,
+) -> Result<FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
+    let mut forward = federation_forward_request(id, "root-replay-target");
+    let open = gateway_open_frame(device, "root-forward");
+    let mut authority = gateway_registered_key(&open)?;
+    let devices = authority.signed_device_set.as_ref().ok_or("set")?.devices.clone();
+    authority.principal_id = root.principal_id.clone();
+    authority.root_public_key =
+        Some(ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()));
+    authority.signed_device_set = Some(match record {
+        Some(record) => record,
+        None => ramflux_crypto::sign_device_set(
+            root,
+            ramflux_crypto::DeviceSetSigningInput {
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                device_set_epoch: 1,
+                devices,
+            },
+        )?,
+    });
+    let source = authority.authenticated_device_identity()?;
+    forward.envelope.source_principal_id = root.principal_id.clone();
+    forward.envelope.source_device_id = device.into();
+    forward
+        .envelope
+        .ext
+        .ext
+        .insert("source_root_commitment".into(), serde_json::json!(source.root_commitment()));
+    forward.envelope.signed.signature = ramflux_crypto::sign_protocol_object(&forward.envelope)?;
+    forward
+        .envelope
+        .ext
+        .ext
+        .insert("source_device_authority".into(), serde_json::to_value(authority)?);
+    Ok(forward)
+}
+
+#[test]
+fn federated_replay_is_root_scoped_even_for_copied_device_and_branch_keys()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("forwarded-root-scope")?;
+    let store = FederationRedbStore::open(&path)?;
+    let bob_root = ramflux_crypto::create_identity_root("bob", [0xb1; 32]);
+    let mallory_root = ramflux_crypto::create_identity_root("mallory", [0xb2; 32]);
+    let bob = root_bound_forward(&bob_root, "bob", None, "next-bob-envelope")?;
+    let mallory = root_bound_forward(&mallory_root, "bob", None, "next-bob-envelope")?;
+    let (_, bob_source) = DeviceAuthKeyResponse::forwarded_envelope_source(&bob.envelope)?;
+    let (_, mallory_source) = DeviceAuthKeyResponse::forwarded_envelope_source(&mallory.envelope)?;
+    assert_ne!(bob_source, mallory_source);
+    assert!(store.accept_inbound_forward_once(&mallory_source, &mallory, 1_760_000_010)?);
+    assert!(store.accept_inbound_forward_once(&bob_source, &bob, 1_760_000_010)?);
+    assert!(!store.accept_inbound_forward_once(&bob_source, &bob, 1_760_000_011)?);
+    let target = RouterCore::new();
+    assert_eq!(target.authenticated_envelope_source(&bob.envelope)?, bob_source);
+    let mut forged = bob.envelope.clone();
+    forged.ext.ext.insert(
+        "source_device_authority".into(),
+        mallory.envelope.ext.ext.get("source_device_authority").ok_or("authority")?.clone(),
+    );
+    assert!(target.authenticated_envelope_source(&forged).is_err());
+    drop(store);
+    let reopened = FederationRedbStore::open(&path)?;
+    assert!(!reopened.accept_inbound_forward_once(&bob_source, &bob, 1_760_000_012)?);
+    assert!(!reopened.accept_inbound_forward_once(&mallory_source, &mallory, 1_760_000_012)?);
+    Ok(())
+}
+
+#[test]
+fn forwarded_old_authority_cannot_resurrect_a_revoked_device_after_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("forwarded-root-head")?;
+    let store = FederationRedbStore::open(&path)?;
+    let root = ramflux_crypto::create_identity_root("bob", [0xb1; 32]);
+    let old = root_bound_forward(&root, "bob", None, "old-bob-envelope")?;
+    let (authority, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&old.envelope)?;
+    let mut devices = authority.signed_device_set.ok_or("set")?.devices;
+    devices[0].status = ramflux_protocol::DeviceSetStatus::Revoked;
+    devices[0].revoked_at = Some(1_760_000_005);
+    let mut phone = devices[0].clone();
+    phone.device_id = "phone".into();
+    phone.status = ramflux_protocol::DeviceSetStatus::Active;
+    phone.revoked_at = None;
+    devices.push(phone);
+    let record = ramflux_crypto::sign_device_set(
+        &root,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            device_set_epoch: 2,
+            devices,
+        },
+    )?;
+    let latest = root_bound_forward(&root, "phone", Some(record), "phone-envelope")?;
+    let (_, phone_source) = DeviceAuthKeyResponse::forwarded_envelope_source(&latest.envelope)?;
+    assert!(store.accept_inbound_forward_once(&phone_source, &latest, 1_760_000_010)?);
+    assert!(store.accept_inbound_forward_once(&source, &old, 1_760_000_011).is_err());
+    drop(store);
+    let reopened = FederationRedbStore::open(&path)?;
+    assert!(reopened.accept_inbound_forward_once(&source, &old, 1_760_000_012).is_err());
+    Ok(())
 }

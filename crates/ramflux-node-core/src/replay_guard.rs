@@ -58,6 +58,15 @@ impl NodeReplayGuardState {
         {
             return Err(NodeCoreError::ReplayGuard("envelope source identity mismatch".into()));
         }
+        if envelope
+            .ext
+            .ext
+            .get("source_root_commitment")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|root| root != source.root_commitment())
+        {
+            return Err(NodeCoreError::ReplayGuard("envelope source root mismatch".into()));
+        }
         let ttl = i64::from(envelope.ttl);
         if ttl > ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS {
             return Err(NodeCoreError::ReplayGuard(format!(

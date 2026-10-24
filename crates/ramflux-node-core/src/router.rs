@@ -1160,24 +1160,22 @@ impl RouterCore {
             .ok_or_else(reject)?;
         let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
             .map_err(|_| reject())?;
-        let registered = lock_unpoisoned(&self.control)
-            .mvp1_identities
-            .device_auth_key(&lookup)
-            .ok_or_else(reject)?;
-        let source = registered.authenticated_device_identity()?;
-        if source.root_commitment() != root
-            || registered.principal_id != envelope.source_principal_id
+        let (registered, current) = {
+            let control = lock_unpoisoned(&self.control);
+            (
+                control.mvp1_identities.device_auth_key(&lookup),
+                control.mvp1_identities.signed_device_set(root).cloned(),
+            )
+        };
+        if let Some(registered) = registered {
+            return registered.verify_envelope_source(envelope);
+        }
+        let (authority, source) = DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
+        if let Some(current) = current.as_ref()
+            && authority.signed_device_set.as_ref() != Some(current)
         {
             return Err(reject());
         }
-        let bytes =
-            ramflux_protocol::envelope_sender_signed_bytes(envelope).map_err(|_| reject())?;
-        ramflux_crypto::verify_canonical_signature(
-            &bytes,
-            &envelope.signed.signature,
-            &registered.branch_public_key,
-        )
-        .map_err(|_| reject())?;
         Ok(source)
     }
 
