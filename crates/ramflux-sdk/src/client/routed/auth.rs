@@ -15,6 +15,16 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         let remote = &entry.envelope.source_device_id;
+        let hint =
+            decode(&entry.envelope).ok().and_then(|wrapper| wrapper.source_principal_commitment);
+        if let Some(hint) = &hint {
+            let bytes = ramflux_protocol::decode_base64url(hint)
+                .map_err(|_| invalid("invalid sender Root hint"))?;
+            if bytes.len() != 32 || ramflux_protocol::encode_base64url(&bytes) != *hint {
+                return Err(invalid("invalid sender Root hint"));
+            }
+        }
+
         let known = self.account_db()?.client_record("device", remote)?;
         if known.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none())
             || self.require_cached_root_authority(remote).is_err()
@@ -32,9 +42,6 @@ impl RamfluxClient {
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                     }));
-            let hint = decode(&entry.envelope)
-                .ok()
-                .and_then(|wrapper| wrapper.source_principal_commitment);
             let commitment = pinned.or(hint).ok_or_else(|| {
                 SdkError::InboundPending(
                     "sender Root context required; refresh the contact".to_owned(),
