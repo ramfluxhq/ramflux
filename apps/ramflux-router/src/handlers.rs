@@ -38,15 +38,6 @@ pub(crate) fn handle_itest_request(
         return Ok(());
     }
     match (request.method.as_str(), request.path.as_str()) {
-        ("POST", "/mvp1/identity/register") => {
-            let response = handle_mvp1_identity_register(
-                &request.body,
-                router.state(),
-                router.store(),
-                Some(request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip")),
-            )?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
-        }
         ("POST", "/mvp6/registration/policy") => {
             let response =
                 handle_mvp6_registration_policy(&request.body, router.state(), router.store())?;
@@ -707,7 +698,7 @@ fn handle_s1_session_get(
     state.session(target_delivery_id)
 }
 
-fn handle_mvp1_identity_register(
+pub(crate) fn handle_mvp1_identity_register(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,

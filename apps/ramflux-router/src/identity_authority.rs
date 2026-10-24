@@ -21,6 +21,15 @@ pub(crate) fn handle_itest_identity_authority(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/mvp1/identity/register") => {
+            let response = crate::handlers::handle_mvp1_identity_register(
+                &request.body,
+                router.state(),
+                router.store(),
+                Some(request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip")),
+            )?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
         ("POST", "/mvp2/device-set") => {
             let response = handle_signed_device_set(&request.body, router)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
