@@ -301,7 +301,7 @@ impl RamfluxClient {
         let group = self.group_state(id)?;
         let Some(role) = group.roles.get(source.device_id()).cloned() else { return Ok(None) };
         let Some(joined_epoch) =
-            self.account_db()?.group_member_joined_epoch(id, source.device_id())?
+            self.account_db()?.group_member_joined_epoch_metadata(id, source.device_id())?
         else {
             return Ok(None);
         };
@@ -309,7 +309,7 @@ impl RamfluxClient {
         for member in &group.members {
             if let Some(role) = group.roles.get(member).cloned()
                 && let Some(joined_epoch) =
-                    self.account_db()?.group_member_joined_epoch(id, member)?
+                    self.account_db()?.group_member_joined_epoch_metadata(id, member)?
             {
                 members.push(SdkOwnDeviceGroupMemberSnapshot {
                     member_id: member.clone(),
@@ -538,7 +538,7 @@ impl RamfluxClient {
                     || blocked.contains(&(group.group_id.clone(), String::new()))
                     || self
                         .account_db()?
-                        .group_member_role(&group.group_id, &group.sender_id)?
+                        .group_member_role_metadata(&group.group_id, &group.sender_id)?
                         .is_none())
             {
                 self.account_db()?.record_own_device_restore_skip(

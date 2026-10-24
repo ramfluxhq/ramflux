@@ -110,12 +110,12 @@ impl AccountDb {
             }
             join.actor_role.clone()
         } else {
-            self.group_member_role(&join.group_id, &join.actor_device_id)?
+            self.group_member_role_metadata(&join.group_id, &join.actor_device_id)?
                 .ok_or(StorageError::GroupPermissionDenied)?
         };
         if actor_role != join.actor_role
             || !can_invite_group_member(&actor_role, &join.joined_role)
-            || self.group_member_role(&join.group_id, &join.joined_identity)?.is_some()
+            || self.group_member_role_metadata(&join.group_id, &join.joined_identity)?.is_some()
         {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -138,8 +138,11 @@ impl AccountDb {
         {
             return Err(StorageError::GroupPermissionDenied);
         }
+        if !bootstrap && self.group_member_role(&join.group_id, actor)?.is_none() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
         self.authorize_group_join(join, bootstrap)?;
-        self.ensure_group_control_not_seen(&join.group_id, &join.event_id)?;
+        self.ensure_group_control_not_seen(&join.group_id, &join.event_id, actor)?;
         if !is_group_admin_role(&join.actor_role) {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -163,6 +166,7 @@ impl AccountDb {
             join.previous_epoch,
             join.new_group_epoch,
             applied_at,
+            actor,
         )?;
         self.connection.execute(
             "INSERT INTO group_projection
@@ -285,33 +289,67 @@ impl AccountDb {
     pub fn remove_group_member(
         &self,
         group_id: &str,
-        actor_id: &str,
-        target_member_id: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
+        target: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        let actor_role = self
-            .group_member_role(group_id, actor_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        let target_role = self
-            .group_member_role(group_id, target_member_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        if !can_remove_group_member(&actor_role, &target_role) {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        let state = self.group_state(group_id)?;
-        let new_epoch = state.group_epoch + 1;
-        self.connection.execute(
-            "UPDATE group_projection SET group_epoch = ?2 WHERE group_id = ?1",
-            params![group_id, new_epoch],
-        )?;
-        self.connection.execute(
-            "UPDATE group_member_projection
+        self.write_transaction(|| {
+            let target_member_id = target.device_id();
+            let actor_role = self
+                .group_member_role(group_id, actor)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            let target_role = self
+                .group_member_role(group_id, target)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            if !can_remove_group_member(&actor_role, &target_role) {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let state = self.group_state(group_id)?;
+            let new_epoch = state.group_epoch + 1;
+            self.connection.execute(
+                "UPDATE group_projection SET group_epoch = ?2 WHERE group_id = ?1",
+                params![group_id, new_epoch],
+            )?;
+            self.connection.execute(
+                "UPDATE group_member_projection
                 SET active = 0,
                     removed_epoch = ?3,
                     updated_at = ?4
               WHERE group_id = ?1 AND member_id = ?2",
-            params![group_id, target_member_id, new_epoch, self.now_unix()],
-        )?;
-        self.group_state(group_id)
+                params![group_id, target_member_id, new_epoch, self.now_unix()],
+            )?;
+            self.group_state(group_id)
+        })
+    }
+
+    /// Remove an unattributable historical membership slot before a root-bound re-add.
+    /// # Errors
+    /// Rejects an unbound actor, any root-bound target, or insufficient membership permissions.
+    pub fn legacy_remove_group_member(
+        &self,
+        group: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
+        raw: &str,
+    ) -> Result<GroupState, StorageError> {
+        self.write_transaction(|| {
+        let actor_role =
+            self.group_member_role(group, actor)?.ok_or(StorageError::GroupPermissionDenied)?;
+        if self.group_member_identity_metadata(group, raw)?.is_some() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        let target_role = self
+            .group_member_role_metadata(group, raw)?
+            .ok_or(StorageError::GroupPermissionDenied)?;
+        if !can_remove_group_member(&actor_role, &target_role) {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        let epoch = self.group_state(group)?.group_epoch + 1;
+        self.write_transaction(|| {
+            self.connection.execute("UPDATE group_projection SET group_epoch=?2 WHERE group_id=?1", params![group,epoch])?;
+            self.connection.execute("UPDATE group_member_projection SET active=0,removed_epoch=?3,updated_at=?4 WHERE group_id=?1 AND member_id=?2",params![group,raw,epoch,self.now_unix()])?;
+            self.group_state(group)
+        })
+
+        })
     }
 
     /// # Errors
@@ -325,7 +363,7 @@ impl AccountDb {
         self.write_transaction(|| {
             if self.group_member_requires_readd(group_id,member)? { return Err(StorageError::GroupPermissionDenied); }
             let stored = self.group_pin_key(group_id, member)?.unwrap_or_else(|| member.storage_key().to_owned());
-            if self.group_member_role(group_id,member.device_id())?.is_some()
+            if self.group_member_role_metadata(group_id,member.device_id())?.is_some()
                 && self.group_member_device_key(group_id,member)?.is_some_and(|old|old!=device_signing_public_key) {
                 return Err(StorageError::GroupPermissionDenied);
             }
@@ -361,61 +399,70 @@ impl AccountDb {
     pub fn apply_group_role_change(
         &self,
         change: &GroupRoleChangeWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        validate_group_role(&change.new_role)?;
-        self.ensure_group_control_not_seen(&change.group_id, &change.event_id)?;
-        let state = self.group_state(&change.group_id)?;
-        if state.group_epoch != change.previous_epoch {
-            return Err(StorageError::GroupControlEpochMismatch {
-                expected: state.group_epoch,
-                actual: change.previous_epoch,
-            });
-        }
-        if change.new_group_epoch != change.previous_epoch.saturating_add(1) {
-            return Err(StorageError::GroupControlEpochMismatch {
-                expected: change.previous_epoch.saturating_add(1),
-                actual: change.new_group_epoch,
-            });
-        }
-        let actor_role = self
-            .group_member_role(&change.group_id, &change.actor_device_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        let target_role = self
-            .group_member_role(&change.group_id, &change.target_member_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        if !can_change_group_member_role(&actor_role, &target_role, &change.new_role) {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        let applied_at = self.now_unix();
-        let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO group_control_event_seen
+        self.write_transaction(|| {
+            if change.actor_device_id != actor.device_id()
+                || self.group_member_role(&change.group_id, actor)?.is_none()
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            validate_group_role(&change.new_role)?;
+            self.ensure_group_control_not_seen(&change.group_id, &change.event_id, actor)?;
+            let state = self.group_state(&change.group_id)?;
+            if state.group_epoch != change.previous_epoch {
+                return Err(StorageError::GroupControlEpochMismatch {
+                    expected: state.group_epoch,
+                    actual: change.previous_epoch,
+                });
+            }
+            if change.new_group_epoch != change.previous_epoch.saturating_add(1) {
+                return Err(StorageError::GroupControlEpochMismatch {
+                    expected: change.previous_epoch.saturating_add(1),
+                    actual: change.new_group_epoch,
+                });
+            }
+            let actor_role = self
+                .group_member_role(&change.group_id, actor)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            let target_role = self
+                .group_member_role_metadata(&change.group_id, &change.target_member_id)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            if !can_change_group_member_role(&actor_role, &target_role, &change.new_role) {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let applied_at = self.now_unix();
+            let inserted = self.connection.execute(
+                "INSERT OR IGNORE INTO root_group_control_event_seen
                 (group_id, event_id, event_kind, actor_device_id, target_member_id,
-                 previous_epoch, new_group_epoch, applied_at)
-             VALUES (?1, ?2, 'role_changed', ?3, ?4, ?5, ?6, ?7)",
-            params![
-                change.group_id,
-                change.event_id,
-                change.actor_device_id,
-                change.target_member_id,
-                change.previous_epoch,
-                change.new_group_epoch,
-                applied_at
-            ],
-        )?;
-        if inserted == 0 {
-            return Err(StorageError::GroupControlReplay(change.event_id.clone()));
-        }
-        self.connection.execute(
-            "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
-            params![change.group_id, change.new_group_epoch, applied_at],
-        )?;
-        self.connection.execute(
-            "UPDATE group_member_projection
+                 previous_epoch, new_group_epoch, applied_at, actor_identity)
+             VALUES (?1, ?2, 'role_changed', ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    change.group_id,
+                    change.event_id,
+                    change.actor_device_id,
+                    change.target_member_id,
+                    change.previous_epoch,
+                    change.new_group_epoch,
+                    applied_at,
+                    actor.storage_key()
+                ],
+            )?;
+            if inserted == 0 {
+                return Err(StorageError::GroupControlReplay(change.event_id.clone()));
+            }
+            self.connection.execute(
+                "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
+                params![change.group_id, change.new_group_epoch, applied_at],
+            )?;
+            self.connection.execute(
+                "UPDATE group_member_projection
                 SET role = ?3, updated_at = ?4
               WHERE group_id = ?1 AND member_id = ?2 AND active = 1",
-            params![change.group_id, change.target_member_id, change.new_role, applied_at],
-        )?;
-        self.group_state(&change.group_id)
+                params![change.group_id, change.target_member_id, change.new_role, applied_at],
+            )?;
+            self.group_state(&change.group_id)
+        })
     }
 
     /// # Errors
@@ -423,17 +470,25 @@ impl AccountDb {
     pub fn apply_group_member_kick(
         &self,
         kick: &GroupMemberKickWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        self.apply_group_member_removal_control(
-            "member_kicked",
-            &kick.group_id,
-            &kick.event_id,
-            &kick.actor_device_id,
-            &kick.target_member_id,
-            kick.previous_epoch,
-            kick.new_group_epoch,
-            None,
-        )
+        self.write_transaction(|| {
+            if kick.actor_device_id != actor.device_id()
+                || self.group_member_role(&kick.group_id, actor)?.is_none()
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            self.apply_group_member_removal_control(
+                "member_kicked",
+                &kick.group_id,
+                &kick.event_id,
+                actor,
+                &kick.target_member_id,
+                kick.previous_epoch,
+                kick.new_group_epoch,
+                None,
+            )
+        })
     }
 
     /// # Errors
@@ -441,17 +496,25 @@ impl AccountDb {
     pub fn apply_group_member_ban(
         &self,
         ban: &GroupMemberBanWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        self.apply_group_member_removal_control(
-            "member_banned",
-            &ban.group_id,
-            &ban.event_id,
-            &ban.actor_device_id,
-            &ban.target_member_id,
-            ban.previous_epoch,
-            ban.new_group_epoch,
-            Some((&ban.ban_id, &ban.reason)),
-        )
+        self.write_transaction(|| {
+            if ban.actor_device_id != actor.device_id()
+                || self.group_member_role(&ban.group_id, actor)?.is_none()
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            self.apply_group_member_removal_control(
+                "member_banned",
+                &ban.group_id,
+                &ban.event_id,
+                actor,
+                &ban.target_member_id,
+                ban.previous_epoch,
+                ban.new_group_epoch,
+                Some((&ban.ban_id, &ban.reason)),
+            )
+        })
     }
 
     /// # Errors
@@ -459,66 +522,78 @@ impl AccountDb {
     pub fn apply_group_message_delete(
         &self,
         delete: &GroupMessageDeleteWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        self.ensure_group_control_not_seen(&delete.group_id, &delete.event_id)?;
-        let state = self.group_state(&delete.group_id)?;
-        if state.group_epoch != delete.group_epoch {
-            return Err(StorageError::GroupControlEpochMismatch {
-                expected: state.group_epoch,
-                actual: delete.group_epoch,
-            });
-        }
-        let actor_role = self
-            .group_member_role(&delete.group_id, &delete.actor_device_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        let author_id: String = self.connection.query_row(
-            "SELECT sender_id
+        self.write_transaction(|| {
+            if delete.actor_device_id != actor.device_id()
+                || self.group_member_role(&delete.group_id, actor)?.is_none()
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            self.ensure_group_control_not_seen(&delete.group_id, &delete.event_id, actor)?;
+            let state = self.group_state(&delete.group_id)?;
+            if state.group_epoch != delete.group_epoch {
+                return Err(StorageError::GroupControlEpochMismatch {
+                    expected: state.group_epoch,
+                    actual: delete.group_epoch,
+                });
+            }
+            let actor_role = self
+                .group_member_role(&delete.group_id, actor)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            let author_id: String = self.connection.query_row(
+                "SELECT sender_id
                FROM direct_message_projection
               WHERE conversation_id = ?1 AND message_id = ?2",
-            params![delete.group_id, delete.target_message_id],
-            |row| row.get(0),
-        )?;
-        let author_role = self
-            .group_member_role(&delete.group_id, &author_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        if !can_delete_group_message(&actor_role, &author_role, delete.actor_device_id == author_id)
-        {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        let applied_at = self.now_unix();
-        self.insert_group_control_seen(
-            &delete.group_id,
-            &delete.event_id,
-            "message_deleted",
-            &delete.actor_device_id,
-            &delete.target_message_id,
-            delete.group_epoch,
-            delete.group_epoch,
-            applied_at,
-        )?;
-        self.connection.execute(
-            "UPDATE direct_message_projection
+                params![delete.group_id, delete.target_message_id],
+                |row| row.get(0),
+            )?;
+            let author_role = self
+                .group_member_role_metadata(&delete.group_id, &author_id)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            if !can_delete_group_message(
+                &actor_role,
+                &author_role,
+                delete.actor_device_id == author_id,
+            ) {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let applied_at = self.now_unix();
+            self.insert_group_control_seen(
+                &delete.group_id,
+                &delete.event_id,
+                "message_deleted",
+                &delete.actor_device_id,
+                &delete.target_message_id,
+                delete.group_epoch,
+                delete.group_epoch,
+                applied_at,
+                actor,
+            )?;
+            self.connection.execute(
+                "UPDATE direct_message_projection
                 SET deleted = 1, encrypted_body = x''
               WHERE conversation_id = ?1 AND message_id = ?2 AND deleted = 0",
-            params![delete.group_id, delete.target_message_id],
-        )?;
-        self.connection.execute(
-            "INSERT OR REPLACE INTO group_message_tombstone_projection
+                params![delete.group_id, delete.target_message_id],
+            )?;
+            self.connection.execute(
+                "INSERT OR REPLACE INTO group_message_tombstone_projection
                 (group_id, message_id, tombstone_id, actor_device_id, delete_scope,
                  deleted_epoch, reason, deleted_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                delete.group_id,
-                delete.target_message_id,
-                delete.tombstone_id,
-                delete.actor_device_id,
-                delete.delete_scope,
-                delete.group_epoch,
-                delete.reason,
-                applied_at
-            ],
-        )?;
-        self.group_state(&delete.group_id)
+                params![
+                    delete.group_id,
+                    delete.target_message_id,
+                    delete.tombstone_id,
+                    delete.actor_device_id,
+                    delete.delete_scope,
+                    delete.group_epoch,
+                    delete.reason,
+                    applied_at
+                ],
+            )?;
+            self.group_state(&delete.group_id)
+        })
     }
 
     /// # Errors
@@ -526,68 +601,86 @@ impl AccountDb {
     pub fn apply_group_member_invite(
         &self,
         invite: &GroupInviteWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
-        validate_group_role(&invite.invited_role)?;
-        self.ensure_group_control_not_seen(&invite.group_id, &invite.event_id)?;
-        let state = self.group_state(&invite.group_id)?;
-        if state.group_epoch > invite.group_epoch
-            || (state.group_epoch < invite.group_epoch
-                && self.group_member_role(&invite.group_id, &invite.invitee_identity)?.is_some())
-        {
-            return Err(StorageError::GroupControlEpochMismatch {
-                expected: state.group_epoch,
-                actual: invite.group_epoch,
-            });
-        }
-        let actor_role = self
-            .group_member_role(&invite.group_id, &invite.actor_device_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        if !can_invite_group_member(&actor_role, &invite.invited_role) {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        if self.group_member_role(&invite.group_id, &invite.invitee_identity)?.is_some() {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        if self.group_member_banned(&invite.group_id, &invite.invitee_identity)? {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        let applied_at = self.now_unix();
-        if state.group_epoch < invite.group_epoch {
-            self.connection.execute(
+        self.write_transaction(|| {
+            ramflux_protocol::qualified_device_id(&invite.invitee_principal_commitment, &invite.invitee_identity)?;
+            let old: Option<(String,String)> = self.connection.query_row("SELECT expected_root,device_name FROM root_group_invite_identity WHERE group_id=?1 AND invite_id=?2",params![invite.group_id,invite.invite_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+            if old.is_some_and(|(root,name)| root != invite.invitee_principal_commitment || name != invite.invitee_identity) { return Err(StorageError::GroupPermissionDenied); }
+            if invite.actor_device_id != actor.device_id()
+                || self.group_member_role(&invite.group_id, actor)?.is_none()
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            validate_group_role(&invite.invited_role)?;
+            self.ensure_group_control_not_seen(&invite.group_id, &invite.event_id, actor)?;
+            let state = self.group_state(&invite.group_id)?;
+            if state.group_epoch > invite.group_epoch
+                || (state.group_epoch < invite.group_epoch
+                    && self
+                        .group_member_role_metadata(&invite.group_id, &invite.invitee_identity)?
+                        .is_some())
+            {
+                return Err(StorageError::GroupControlEpochMismatch {
+                    expected: state.group_epoch,
+                    actual: invite.group_epoch,
+                });
+            }
+            let actor_role = self
+                .group_member_role(&invite.group_id, actor)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            if !can_invite_group_member(&actor_role, &invite.invited_role) {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            if self
+                .group_member_role_metadata(&invite.group_id, &invite.invitee_identity)?
+                .is_some()
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            if self.group_member_banned(&invite.group_id, &invite.invitee_identity)? {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let applied_at = self.now_unix();
+            if state.group_epoch < invite.group_epoch {
+                self.connection.execute(
                 "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
                 params![invite.group_id, invite.group_epoch, applied_at],
             )?;
-        }
-        self.insert_group_control_seen(
-            &invite.group_id,
-            &invite.event_id,
-            "member_invited",
-            &invite.actor_device_id,
-            &invite.invitee_identity,
-            invite.group_epoch,
-            invite.group_epoch,
-            applied_at,
-        )?;
-        self.connection.execute(
-            "INSERT OR REPLACE INTO group_invite_projection
+            }
+            self.connection.execute("INSERT OR IGNORE INTO root_group_invite_identity(group_id,invite_id,expected_root,device_name) VALUES(?1,?2,?3,?4)",params![invite.group_id,invite.invite_id,invite.invitee_principal_commitment,invite.invitee_identity])?;
+            self.insert_group_control_seen(
+                &invite.group_id,
+                &invite.event_id,
+                "member_invited",
+                &invite.actor_device_id,
+                &invite.invitee_identity,
+                invite.group_epoch,
+                invite.group_epoch,
+                applied_at,
+                actor,
+            )?;
+            self.connection.execute(
+                "INSERT OR REPLACE INTO group_invite_projection
                 (group_id, invite_id, invitee_identity, invitee_signing_public_key,
                  invited_role, inviter_device_id, invite_epoch, expires_at, state,
                  reason, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?10)",
-            params![
-                invite.group_id,
-                invite.invite_id,
-                invite.invitee_identity,
-                invite.invitee_signing_public_key,
-                invite.invited_role,
-                invite.actor_device_id,
-                invite.group_epoch,
-                invite.expires_at,
-                invite.reason,
-                applied_at
-            ],
-        )?;
-        self.group_state(&invite.group_id)
+                params![
+                    invite.group_id,
+                    invite.invite_id,
+                    invite.invitee_identity,
+                    invite.invitee_signing_public_key,
+                    invite.invited_role,
+                    invite.actor_device_id,
+                    invite.group_epoch,
+                    invite.expires_at,
+                    invite.reason,
+                    applied_at
+                ],
+            )?;
+            self.group_state(&invite.group_id)
+        })
     }
 
     /// # Errors
@@ -603,51 +696,7 @@ impl AccountDb {
             return Err(StorageError::GroupPermissionDenied);
         }
         self.write_transaction(|| {
-            validate_group_role(&accept.accepted_role)?;
-            self.ensure_group_control_not_seen(&accept.group_id, &accept.event_id)?;
-            let invite = self.group_invite(&accept.group_id, &accept.invite_id)?;
-            if invite.state != "pending" {
-                return Err(StorageError::GroupInviteInvalidState {
-                    invite_id: accept.invite_id.clone(),
-                    expected: "pending".to_owned(),
-                    actual: invite.state,
-                });
-            }
-            if accept.now > invite.expires_at {
-                return Err(StorageError::GroupInviteExpired(accept.invite_id.clone()));
-            }
-            if accept.invitee_identity != invite.invitee_identity
-                || accept.actor_device_id != invite.invitee_identity
-            {
-                return Err(StorageError::GroupInviteAcceptorMismatch(accept.invite_id.clone()));
-            }
-            if accept.accepted_role != invite.invited_role {
-                return Err(StorageError::GroupPermissionDenied);
-            }
-            if self.group_member_role(&accept.group_id, &accept.invitee_identity)?.is_some() {
-                return Err(StorageError::GroupPermissionDenied);
-            }
-            if self.group_member_banned(&accept.group_id, &accept.invitee_identity)? {
-                return Err(StorageError::GroupPermissionDenied);
-            }
-            let state = self.group_state(&accept.group_id)?;
-            if state.group_epoch != accept.previous_epoch {
-                return Err(StorageError::GroupControlEpochMismatch {
-                    expected: state.group_epoch,
-                    actual: accept.previous_epoch,
-                });
-            }
-            if accept.new_group_epoch != accept.previous_epoch.saturating_add(1) {
-                return Err(StorageError::GroupControlEpochMismatch {
-                    expected: accept.previous_epoch.saturating_add(1),
-                    actual: accept.new_group_epoch,
-                });
-            }
-            let max_members = usize::try_from(state.max_members)
-                .map_err(|_err| StorageError::GroupMemberLimitExceeded)?;
-            if state.members.len() >= max_members {
-                return Err(StorageError::GroupMemberLimitExceeded);
-            }
+            let invite = self.authorize_group_accept(accept, actor)?;
             let applied_at = self.now_unix();
             self.insert_group_control_seen(
                 &accept.group_id,
@@ -658,6 +707,7 @@ impl AccountDb {
                 accept.previous_epoch,
                 accept.new_group_epoch,
                 applied_at,
+                actor,
             )?;
             self.connection.execute(
                 "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
@@ -728,6 +778,102 @@ impl AccountDb {
             .ok_or_else(|| StorageError::GroupInviteMissing(invite_id.to_owned()))
     }
 
+    fn authorize_group_accept(
+        &self,
+        accept: &GroupInviteAcceptWrite,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<GroupInviteRecord, StorageError> {
+        validate_group_role(&accept.accepted_role)?;
+        self.ensure_group_control_not_seen(&accept.group_id, &accept.event_id, actor)?;
+        self.require_group_invite_identity(&accept.group_id, &accept.invite_id, actor)?;
+        let invite = self.group_invite(&accept.group_id, &accept.invite_id)?;
+        if invite.state != "pending" {
+            return Err(StorageError::GroupInviteInvalidState {
+                invite_id: accept.invite_id.clone(),
+                expected: "pending".to_owned(),
+                actual: invite.state,
+            });
+        }
+        if accept.now > invite.expires_at {
+            return Err(StorageError::GroupInviteExpired(accept.invite_id.clone()));
+        }
+        if accept.invitee_identity != invite.invitee_identity
+            || accept.actor_device_id != invite.invitee_identity
+        {
+            return Err(StorageError::GroupInviteAcceptorMismatch(accept.invite_id.clone()));
+        }
+        if accept.accepted_role != invite.invited_role {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        if self.group_member_role_metadata(&accept.group_id, &accept.invitee_identity)?.is_some() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        if self.group_member_banned(&accept.group_id, &accept.invitee_identity)? {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        let state = self.group_state(&accept.group_id)?;
+        if state.group_epoch != accept.previous_epoch {
+            return Err(StorageError::GroupControlEpochMismatch {
+                expected: state.group_epoch,
+                actual: accept.previous_epoch,
+            });
+        }
+        if accept.new_group_epoch != accept.previous_epoch.saturating_add(1) {
+            return Err(StorageError::GroupControlEpochMismatch {
+                expected: accept.previous_epoch.saturating_add(1),
+                actual: accept.new_group_epoch,
+            });
+        }
+        let max_members = usize::try_from(state.max_members)
+            .map_err(|_err| StorageError::GroupMemberLimitExceeded)?;
+        if state.members.len() >= max_members {
+            return Err(StorageError::GroupMemberLimitExceeded);
+        }
+        Ok(invite)
+    }
+
+    fn require_group_invite_identity(
+        &self,
+        group: &str,
+        invite: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<(), StorageError> {
+        self.legacy_bind_group_invite_identity(group, invite, actor)?;
+        let expected: (String,String) = self.connection.query_row("SELECT expected_root,device_name FROM root_group_invite_identity WHERE group_id=?1 AND invite_id=?2",params![group,invite],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        if expected.0 != actor.root_commitment() || expected.1 != actor.device_id() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        Ok(())
+    }
+
+    fn legacy_bind_group_invite_identity(
+        &self,
+        group: &str,
+        invite: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<(), StorageError> {
+        let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM root_group_invite_identity WHERE group_id=?1 AND invite_id=?2)",params![group,invite],|row|row.get(0))?;
+        if exists {
+            return Ok(());
+        }
+        let key = format!(
+            "group/invite-record-root/{}",
+            ramflux_protocol::hash_base64url(
+                "ramflux.sdk.group.invite_record_root.v1",
+                &ramflux_protocol::canonical_json_bytes(&(group, invite))?
+            )
+        );
+        if self.load_actor_state::<String>(&key)?.as_deref() != Some(actor.root_commitment()) {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        let record = self.group_invite(group, invite)?;
+        if record.invitee_identity != actor.device_id() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        self.connection.execute("INSERT INTO root_group_invite_identity(group_id,invite_id,expected_root,device_name) VALUES(?1,?2,?3,?4)",params![group,invite,actor.root_commitment(),actor.device_id()])?;
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when the ban lookup fails.
     pub fn group_member_banned(
@@ -754,13 +900,14 @@ impl AccountDb {
         event_kind: &str,
         group_id: &str,
         event_id: &str,
-        actor_device_id: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
         target_member_id: &str,
         previous_epoch: u64,
         new_group_epoch: u64,
         ban: Option<(&str, &str)>,
     ) -> Result<GroupState, StorageError> {
-        self.ensure_group_control_not_seen(group_id, event_id)?;
+        let actor_device_id = actor.device_id();
+        self.ensure_group_control_not_seen(group_id, event_id, actor)?;
         let state = self.group_state(group_id)?;
         if state.group_epoch != previous_epoch {
             return Err(StorageError::GroupControlEpochMismatch {
@@ -775,10 +922,10 @@ impl AccountDb {
             });
         }
         let actor_role = self
-            .group_member_role(group_id, actor_device_id)?
+            .group_member_role_metadata(group_id, actor_device_id)?
             .ok_or(StorageError::GroupPermissionDenied)?;
         let target_role = self
-            .group_member_role(group_id, target_member_id)?
+            .group_member_role_metadata(group_id, target_member_id)?
             .ok_or(StorageError::GroupPermissionDenied)?;
         if !can_remove_group_member(&actor_role, &target_role) {
             return Err(StorageError::GroupPermissionDenied);
@@ -793,6 +940,7 @@ impl AccountDb {
             previous_epoch,
             new_group_epoch,
             applied_at,
+            actor,
         )?;
         self.connection.execute(
             "UPDATE group_projection SET group_epoch = ?2, updated_at = ?3 WHERE group_id = ?1",
@@ -829,10 +977,11 @@ impl AccountDb {
         &self,
         group_id: &str,
         event_id: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), StorageError> {
         let seen = self.connection.query_row(
-            "SELECT 1 FROM group_control_event_seen WHERE group_id = ?1 AND event_id = ?2",
-            params![group_id, event_id],
+            "SELECT 1 FROM root_group_control_event_seen WHERE group_id = ?1 AND event_id = ?2 AND actor_identity = ?3",
+            params![group_id, event_id, actor.storage_key()],
             |_row| Ok(()),
         );
         if matches!(seen, Ok(())) {
@@ -855,12 +1004,16 @@ impl AccountDb {
         previous_epoch: u64,
         new_group_epoch: u64,
         applied_at: i64,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), StorageError> {
+        if actor_device_id != actor.device_id() {
+            return Err(StorageError::GroupPermissionDenied);
+        }
         let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO group_control_event_seen
+            "INSERT OR IGNORE INTO root_group_control_event_seen
                 (group_id, event_id, event_kind, actor_device_id, target_member_id,
-                 previous_epoch, new_group_epoch, applied_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 previous_epoch, new_group_epoch, applied_at, actor_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 group_id,
                 event_id,
@@ -869,7 +1022,8 @@ impl AccountDb {
                 target_member_id,
                 previous_epoch,
                 new_group_epoch,
-                applied_at
+                applied_at,
+                actor.storage_key()
             ],
         )?;
         if inserted == 0 {
@@ -883,12 +1037,11 @@ impl AccountDb {
     pub fn ensure_group_member_can_send(
         &self,
         group_id: &str,
-        actor_id: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
         announcement_only: bool,
     ) -> Result<(), StorageError> {
-        let actor_role = self
-            .group_member_role(group_id, actor_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
+        let actor_role =
+            self.group_member_role(group_id, actor)?.ok_or(StorageError::GroupPermissionDenied)?;
         if announcement_only && !is_group_admin_role(&actor_role) {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -900,15 +1053,13 @@ impl AccountDb {
     pub fn ensure_group_member_can_mute(
         &self,
         group_id: &str,
-        actor_id: &str,
-        target_member_id: &str,
+        actor: &ramflux_crypto::RootQualifiedDeviceRef,
+        target: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), StorageError> {
-        let actor_role = self
-            .group_member_role(group_id, actor_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
-        let target_role = self
-            .group_member_role(group_id, target_member_id)?
-            .ok_or(StorageError::GroupPermissionDenied)?;
+        let actor_role =
+            self.group_member_role(group_id, actor)?.ok_or(StorageError::GroupPermissionDenied)?;
+        let target_role =
+            self.group_member_role(group_id, target)?.ok_or(StorageError::GroupPermissionDenied)?;
         if !can_mute_group_member(&actor_role, &target_role) {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -918,6 +1069,20 @@ impl AccountDb {
     /// # Errors
     /// Returns an error when storage lookup fails.
     pub fn group_member_role(
+        &self,
+        group: &str,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Option<String>, StorageError> {
+        if self.group_member_key_binding(group, member)?.is_none() {
+            return Ok(None);
+        }
+        self.group_member_role_metadata(group, member.device_id())
+    }
+
+    /// Read-model role text only; never use this as authenticated membership.
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn group_member_role_metadata(
         &self,
         group_id: &str,
         member_id: &str,
@@ -937,6 +1102,20 @@ impl AccountDb {
     /// # Errors
     /// Returns an error when storage lookup fails.
     pub fn group_member_joined_epoch(
+        &self,
+        group: &str,
+        member: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Option<u64>, StorageError> {
+        if self.group_member_key_binding(group, member)?.is_none() {
+            return Ok(None);
+        }
+        self.group_member_joined_epoch_metadata(group, member.device_id())
+    }
+
+    /// Read-model epoch metadata without granting a device membership.
+    /// # Errors
+    /// Returns SQL or malformed epoch errors.
+    pub fn group_member_joined_epoch_metadata(
         &self,
         group_id: &str,
         member_id: &str,

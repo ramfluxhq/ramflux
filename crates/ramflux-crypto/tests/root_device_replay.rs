@@ -26,31 +26,31 @@ fn copied_device_names_and_proof_ids_do_not_share_revocation_or_replay_state()
     let first = proof(&mallory, &mallory_branch, "next-proof")?;
     let genuine = proof(&alice, &alice_branch, "next-proof")?;
     let mut guard = DeviceRevocationReplayGuard::new();
-    guard.accept_branch_proof(
-        &attacker,
-        &mallory.signing_key.verifying_key(),
-        &first,
-        "node",
-        "send",
-        101,
-    )?;
-    guard.accept_branch_proof(
-        &honest,
-        &alice.signing_key.verifying_key(),
-        &genuine,
-        "node",
-        "send",
-        101,
-    )?;
+    guard.accept_branch_proof(BranchProofAdmission {
+        source: &attacker,
+        root_public_key: &mallory.signing_key.verifying_key(),
+        proof: &first,
+        audience: "node",
+        required_capability: "send",
+        now: 101,
+    })?;
+    guard.accept_branch_proof(BranchProofAdmission {
+        source: &honest,
+        root_public_key: &alice.signing_key.verifying_key(),
+        proof: &genuine,
+        audience: "node",
+        required_capability: "send",
+        now: 101,
+    })?;
     assert!(matches!(
-        guard.accept_branch_proof(
-            &honest,
-            &alice.signing_key.verifying_key(),
-            &genuine,
-            "node",
-            "send",
-            101
-        ),
+        guard.accept_branch_proof(BranchProofAdmission {
+            source: &honest,
+            root_public_key: &alice.signing_key.verifying_key(),
+            proof: &genuine,
+            audience: "node",
+            required_capability: "send",
+            now: 101
+        }),
         Err(CryptoError::BranchProofReplay)
     ));
     guard.revoke_device(&attacker);
@@ -59,34 +59,34 @@ fn copied_device_names_and_proof_ids_do_not_share_revocation_or_replay_state()
     forged.signature = ramflux_protocol::encode_base64url([0; 64]);
     assert!(
         guard
-            .accept_branch_proof(
-                &honest,
-                &alice.signing_key.verifying_key(),
-                &forged,
-                "node",
-                "send",
-                101
-            )
+            .accept_branch_proof(BranchProofAdmission {
+                source: &honest,
+                root_public_key: &alice.signing_key.verifying_key(),
+                proof: &forged,
+                audience: "node",
+                required_capability: "send",
+                now: 101
+            })
             .is_err()
     );
-    guard.accept_branch_proof(
-        &honest,
-        &alice.signing_key.verifying_key(),
-        &next,
-        "node",
-        "send",
-        101,
-    )?;
+    guard.accept_branch_proof(BranchProofAdmission {
+        source: &honest,
+        root_public_key: &alice.signing_key.verifying_key(),
+        proof: &next,
+        audience: "node",
+        required_capability: "send",
+        now: 101,
+    })?;
     assert!(
         guard
-            .accept_branch_proof(
-                &attacker,
-                &alice.signing_key.verifying_key(),
-                &next,
-                "node",
-                "send",
-                101
-            )
+            .accept_branch_proof(BranchProofAdmission {
+                source: &attacker,
+                root_public_key: &alice.signing_key.verifying_key(),
+                proof: &next,
+                audience: "node",
+                required_capability: "send",
+                now: 101
+            })
             .is_err()
     );
     Ok(())

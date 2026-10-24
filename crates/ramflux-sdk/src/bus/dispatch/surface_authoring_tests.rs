@@ -120,6 +120,9 @@ async fn group_roster_without_seed_refuses_surface_in_the_unreceived_conversatio
         "member",
         &owner.client.surface_local_root_commitment()?,
     )?;
+    agent.client.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&owner.client)?,
+    )?;
     let branch = owner.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     agent.client.apply_bootstrap_group_member_join_event(
         &join,

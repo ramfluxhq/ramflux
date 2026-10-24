@@ -105,7 +105,7 @@ impl RamfluxClient {
             }
             if self
                 .account_db()?
-                .group_member_joined_epoch(id, &local.device_id)?
+                .group_member_joined_epoch_metadata(id, &local.device_id)?
                 .is_some_and(|floor| epoch < floor)
             {
                 return Err(invalid("surface message below joined epoch"));

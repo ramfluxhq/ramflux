@@ -106,7 +106,7 @@ impl RamfluxClient {
             let epoch = checkpoint.group_epoch;
             let floor = if let Some(group) = checkpoint.conversation["group_id"].as_str() {
                 let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-                db.group_member_joined_epoch(group, &local.device_id)?
+                db.group_member_joined_epoch_metadata(group, &local.device_id)?
             } else {
                 None
             };

@@ -56,8 +56,9 @@ impl RamfluxClient {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if let Some(group) = conversation["group_id"].as_str() {
             let identity = self.owned_device_identity()?;
-            let floor =
-                self.account_db()?.group_member_joined_epoch(group, identity.device_id())?;
+            let floor = self
+                .account_db()?
+                .group_member_joined_epoch_metadata(group, identity.device_id())?;
             if self.account_db()?.group_member_key_binding(group, &identity)?.is_none()
                 || !self.group_state(group)?.roles.contains_key(identity.device_id())
                 || floor.is_none_or(|f| epoch.is_none_or(|e| e < f))

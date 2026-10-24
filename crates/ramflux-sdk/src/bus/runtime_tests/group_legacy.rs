@@ -105,39 +105,7 @@ fn legacy_group_fixture_with_pin(
     let receiver_manifest =
         crate::client::identity_authority::test_support::manifest(&receiver.client)?;
     sender.client.persist_root_verified_directory(&receiver_manifest)?;
-    sender.client.create_group("g", "device-alice")?;
-    sender.client.add_group_member(
-        "g",
-        receiver.client.owned_device_identity()?.storage_key(),
-        "member",
-    )?;
-    receiver.client.create_group("g", "device-bob")?;
-    if pin {
-        receiver.client.add_group_member(
-            "g",
-            sender.client.owned_device_identity()?.storage_key(),
-            "member",
-        )?;
-        receiver.client.import_group_sender_key_distribution(
-            &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
-        )?;
-    } else {
-        receiver.client.account_db()?.upsert_group_local_membership_snapshot(
-            "g",
-            2,
-            64,
-            "none",
-            "device-bob",
-            "owner",
-            1,
-        )?;
-        receiver.client.account_db()?.upsert_group_member_snapshot(
-            "g",
-            "device-alice",
-            "member",
-            2,
-        )?;
-    }
+    prepare_legacy_group_membership(&sender.client, &receiver.client, pin)?;
     receiver.client.account_db()?.persist_client_record(
         "conversation",
         "thread",
@@ -232,7 +200,10 @@ async fn repeated_group_receives_respect_backoff_and_a_new_pin_redrives_the_genu
     assert_eq!(db.due_inbox_retries(start + 10)?.len(), 1);
     assert!(receiver.client.direct_message_by_id("valid")?.is_none());
     assert!(!db.journal_after(0, 64)?.iter().any(|e| e.topic == "message.undeliverable"));
-    receiver.client.pin_joined_group_member("g", "device-alice")?;
+    receiver.client.pin_joined_group_member(
+        "g",
+        receiver.client.peer_device_identity("alice", "device-alice")?.storage_key(),
+    )?;
     receiver.client.import_group_sender_key_distribution(
         &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
     )?;
@@ -289,7 +260,10 @@ async fn forged_sources_and_forged_claims_of_the_real_device_cannot_spend_its_re
                 .iter()
                 .any(|e| e.topic == "message.undeliverable" && e.body["envelope_id"] == "valid")
         );
-        receiver.client.pin_joined_group_member("g", "device-alice")?;
+        receiver.client.pin_joined_group_member(
+            "g",
+            receiver.client.peer_device_identity("alice", "device-alice")?.storage_key(),
+        )?;
         receiver.client.import_group_sender_key_distribution(
             &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
         )?;
@@ -392,6 +366,10 @@ async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_t
     let address = listener.local_addr()?;
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
+    let expected_path = format!(
+        "/mvp1/device-manifest/{}",
+        sender.client.owned_device_identity()?.root_commitment()
+    );
     let server = tokio::spawn(async move {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
         while let Ok((socket, _)) = listener.accept().await {
@@ -400,7 +378,7 @@ async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_t
             let request: ramflux_transport::GatewayQuicRequest =
                 ramflux_transport::read_gateway_session_json(&mut receive).await?;
             assert_eq!(request.method, "GET");
-            assert_eq!(request.path, "/mvp1/prekey/device-alice");
+            assert_eq!(request.path, expected_path);
             observed.fetch_add(1, Ordering::SeqCst);
             ramflux_transport::write_gateway_session_json(
                 &mut send,
@@ -483,7 +461,10 @@ async fn fresh_legacy_delivery_can_complete_even_when_its_sources_retry_slots_ar
             LegacyGroupDelivery::Held
         ));
     }
-    receiver.client.pin_joined_group_member("g", "device-alice")?;
+    receiver.client.pin_joined_group_member(
+        "g",
+        receiver.client.peer_device_identity("alice", "device-alice")?.storage_key(),
+    )?;
     receiver.client.import_group_sender_key_distribution(
         &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
     )?;
@@ -527,7 +508,10 @@ async fn a_verified_pin_arrival_repairs_legacy_delivery_after_its_network_retry_
         );
     }
     receiver.client.account_db()?.park_legacy_inbox_retry(&key)?;
-    receiver.client.pin_joined_group_member("g", "device-alice")?;
+    receiver.client.pin_joined_group_member(
+        "g",
+        receiver.client.peer_device_identity("alice", "device-alice")?.storage_key(),
+    )?;
     receiver.client.import_group_sender_key_distribution(
         &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
     )?;
@@ -589,7 +573,10 @@ fn a_legacy_failure_without_a_retry_slot_cannot_reenter_as_a_fresh_delivery() ->
     assert!(!receiver.client.legacy_group_retry_ready(&good)?);
     assert!(!db.has_inbox_retry(&key)?);
     assert!(db.legacy_inbox_parked(&key)?);
-    receiver.client.pin_joined_group_member("g", "device-alice")?;
+    receiver.client.pin_joined_group_member(
+        "g",
+        receiver.client.peer_device_identity("alice", "device-alice")?.storage_key(),
+    )?;
     receiver.client.import_group_sender_key_distribution(
         &sender.client.export_group_sender_key_distribution("g", "device-alice")?,
     )?;
@@ -626,5 +613,34 @@ async fn held_legacy_group_messages_emit_one_metadata_only_unrouted_journal_even
     drop(sender);
     drop(receiver);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn prepare_legacy_group_membership(
+    sender: &RamfluxClient,
+    receiver: &RamfluxClient,
+    pin: bool,
+) -> Result<(), SdkError> {
+    sender.create_group("g", "device-alice")?;
+    sender.add_group_member("g", receiver.owned_device_identity()?.storage_key(), "member")?;
+    receiver.create_group("g", "device-bob")?;
+    if pin {
+        receiver.add_group_member("g", sender.owned_device_identity()?.storage_key(), "member")?;
+        receiver.import_group_sender_key_distribution(
+            &sender.export_group_sender_key_distribution("g", "device-alice")?,
+        )?;
+    } else {
+        receiver.account_db()?.upsert_group_local_membership_snapshot(
+            "g",
+            2,
+            64,
+            "none",
+            "device-bob",
+            "owner",
+            1,
+        )?;
+        receiver.account_db()?.upsert_group_member_snapshot("g", "device-alice", "member", 2)?;
+    }
+
     Ok(())
 }

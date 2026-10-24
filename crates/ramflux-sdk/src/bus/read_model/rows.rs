@@ -93,18 +93,7 @@ pub(crate) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<V
             }
             Ok(object)
         }
-        "group" => {
-            let mut group = serde_json::to_value(client.group_state(id)?)?;
-            group["id"] = json!(id);
-            group["safety_changes"] =
-                saved.get("safety_changes").cloned().unwrap_or_else(|| json!([]));
-            group["safety_change"] = saved.get("safety_change").cloned().unwrap_or(Value::Null);
-            group["member_routes"] = json!(super::super::group_delivery::directory(client, id)?);
-            group["conversation_id"] = saved.get("conversation_id").cloned().unwrap_or(Value::Null);
-            group["conversation_ids"] =
-                saved.get("conversation_ids").cloned().unwrap_or_else(|| json!([]));
-            Ok(group)
-        }
+        "group" => group_row(client, id, &saved),
         "server" => Ok(
             json!({"id":id,"reachable":saved.get("reachable").cloned().unwrap_or(Value::Null),"last_check":saved.get("last_check").cloned().unwrap_or(Value::Null),"health_source":saved.get("health_source").cloned().unwrap_or(json!("not_checked"))}),
         ),
@@ -167,4 +156,15 @@ fn conversation(
         value["participants"] = json!(participants);
     }
     Ok(value)
+}
+
+fn group_row(client: &RamfluxClient, id: &str, saved: &Value) -> Result<Value, SdkError> {
+    let mut group = serde_json::to_value(client.group_state(id)?)?;
+    group["id"] = json!(id);
+    group["safety_changes"] = saved.get("safety_changes").cloned().unwrap_or_else(|| json!([]));
+    group["safety_change"] = saved.get("safety_change").cloned().unwrap_or(Value::Null);
+    group["member_routes"] = json!(super::super::group_delivery::directory(client, id)?);
+    group["conversation_id"] = saved.get("conversation_id").cloned().unwrap_or(Value::Null);
+    group["conversation_ids"] = saved.get("conversation_ids").cloned().unwrap_or_else(|| json!([]));
+    Ok(group)
 }

@@ -119,16 +119,15 @@ impl RamfluxClient {
         if let Some(devices) = old["devices"].as_array() {
             for device in devices {
                 let Some(id) = device["device_id"].as_str() else { continue };
-                if let Some(record) = db.client_record("device", id)?
+                let identity =
+                    self.device_identity_for_root(&change.previous_root_commitment, id)?;
+                if let Some(record) = db.client_record("device", identity.storage_key())?
                     && record["principal_commitment"].as_str()
                         == Some(&change.previous_root_commitment)
                 {
-                    self.remove_device_pair(
-                        &self.device_identity_for_root(&change.previous_root_commitment, id)?,
-                        "provisional_root_replaced",
-                    )?;
-                    db.remove_actor_state(&format!("directory/device/{id}"))?;
-                    db.remove_device_directory_root(id, &change.previous_root_commitment)?;
+                    self.remove_device_pair(&identity, "provisional_root_replaced")?;
+                    db.remove_actor_state(&format!("directory/device/{}", identity.storage_key()))?;
+                    db.remove_device_directory_root(&identity)?;
                 }
             }
         }

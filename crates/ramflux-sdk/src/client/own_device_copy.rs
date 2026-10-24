@@ -25,6 +25,16 @@ pub(crate) struct OwnDeviceMessage {
     pub slots: Vec<OwnKeySlot>,
     pub signature: String,
 }
+impl OwnDeviceMessage {
+    fn recipient_slot(&self, device: &str) -> Result<&OwnKeySlot, SdkError> {
+        let mut slots = self.slots.iter().filter(|slot| slot.recipient_device_id == device);
+        let slot = slots.next().ok_or_else(|| invalid("own-device recipient slot ambiguity"))?;
+        if slots.next().is_some() {
+            return Err(invalid("own-device recipient slot ambiguity"));
+        }
+        Ok(slot)
+    }
+}
 /// Only the recipient selector and cryptographic bootstrap are needed outside AEAD.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -311,15 +321,8 @@ impl RamfluxClient {
             &packet.signing()?,
             &packet.signature,
         )?;
-        let slots = packet
-            .slots
-            .iter()
-            .filter(|s| s.recipient_device_id == local.device_id)
-            .collect::<Vec<_>>();
-        if slots.len() != 1 {
-            return Err(invalid("own-device recipient slot ambiguity"));
-        }
-        let slot = slots[0].object_slot(&packet.id, &manifest.principal_commitment);
+        let recipient = packet.recipient_slot(&local.device_id)?;
+        let slot = recipient.object_slot(&packet.id, &manifest.principal_commitment);
         if slot.ciphertext.sender_device_id_hash
             != dm_device_id_hash(&entry.envelope.source_device_id)
         {

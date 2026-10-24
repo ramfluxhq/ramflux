@@ -127,6 +127,8 @@ pub struct GroupInviteWrite {
     pub actor_device_id: String,
     pub invite_id: String,
     pub invitee_identity: String,
+    /// An offer's expected root claim; identity is authenticated only when its acceptor arrives.
+    pub invitee_principal_commitment: String,
     pub invitee_signing_public_key: String,
     pub invited_role: String,
     pub group_epoch: u64,

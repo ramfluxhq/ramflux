@@ -25,15 +25,34 @@ impl Terminals {
             c.unlock_account(principal, b"surface-test-secret")?;
             clients.push(c);
         }
+        let mut manifests =
+            std::collections::BTreeMap::<String, crate::prekey::SdkDeviceManifestResponse>::new();
+        for remote in &clients {
+            let next = crate::client::identity_authority::test_support::public_manifest(remote)?;
+            manifests
+                .entry(next.principal_id.clone())
+                .and_modify(|current| current.devices.extend(next.devices.clone()))
+                .or_insert(next);
+        }
+        for (principal, manifest) in &mut manifests {
+            let owner = clients
+                .iter()
+                .find(|client| {
+                    client
+                        .identity_root
+                        .as_ref()
+                        .is_some_and(|root| root.principal_id == *principal)
+                })
+                .ok_or(SdkError::IdentityRootMissing)?;
+            crate::client::identity_authority::test_support::sign_manifest(
+                owner.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+                manifest,
+                2,
+            )?;
+        }
         for local in &clients {
-            for remote in &clients {
-                let device = remote.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-                local.account_db()?.persist_client_record("device", &device.device_id, &json!({
-                    "principal_id":device.principal_id,
-                    "target_delivery_id":device.device_id,
-                    "principal_commitment":remote.surface_local_root_commitment()?,
-                    "signing_public_key":ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes())
-                }))?;
+            for manifest in manifests.values() {
+                local.persist_root_verified_directory(manifest)?;
             }
             local.account_db()?.persist_client_record(
                 "conversation",
@@ -55,16 +74,39 @@ pub(super) fn entry(
     id: &str,
 ) -> Result<crate::GatewayInboxEntry, SdkError> {
     let d = source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    Ok(serde_json::from_value(
-        json!({"inbox_seq":1,"target_delivery_id":"test-target","envelope":{
-            "schema":"ramflux.envelope.v1","version":1,"domain":"test",
-            "signing_key_id":"test","signature_alg":"ed25519","signature":"test",
-            "envelope_id":id,"source_principal_id":d.principal_id,"source_device_id":d.device_id,
-            "target_delivery_id":"test-target","delivery_class":"opaque_event","priority":"normal",
-            "ttl":600,"created_at":crate::prelude::now_unix_timestamp(),"encrypted_payload":"test","payload_hash":"test"
-        }}),
-    )?)
+    let endpoint = crate::GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse().map_err(|_| SdkError::LocalBus("test address".into()))?,
+        gateway_addr: "127.0.0.1:1"
+            .parse()
+            .map_err(|_| SdkError::LocalBus("test address".into()))?,
+        server_name: "test".into(),
+        ca_cert: PathBuf::new(),
+        principal_id: d.principal_id.clone(),
+        device_id: d.device_id.clone(),
+        target_delivery_id: "test-target".into(),
+        prekey_http_url: None,
+    };
+    let config = crate::GatewaySessionConfig::quic(endpoint).with_account_identity(source)?;
+    let message = crate::GatewayDirectMessage {
+        conversation_id: "thread".into(),
+        message_id: id.into(),
+        envelope_id: id.into(),
+        source_principal_id: d.principal_id.clone(),
+        sender_id: d.device_id.clone(),
+        recipient_device_id: None,
+        recipient_principal_commitment: None,
+        target_delivery_id: "test-target".into(),
+        encrypted_body: b"surface control".to_vec(),
+        created_at: crate::prelude::now_unix_timestamp(),
+        ttl: 600,
+    };
+    Ok(crate::GatewayInboxEntry {
+        inbox_seq: 1,
+        target_delivery_id: "test-target".into(),
+        envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,
+    })
 }
+
 fn own_forward(
     source: &RamfluxClient,
     target: &RamfluxClient,

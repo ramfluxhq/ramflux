@@ -361,3 +361,11 @@ indexes, inline device replay keys, identity-view impostors and reference
 deserialization shortcuts. Rust APIs provide the primary boundary; the source
 gate checks for accidental new bypasses. It does not prove arbitrary application
 code correct or replace signed-evidence and adversarial tests.
+
+Group mutation permissions and control-event replay use the same authenticated
+device reference. Invitation records bind an expected root and literal name as
+an offer claim; acceptance checks the authenticated actor against that claim.
+Unattributed legacy invitations need a fresh root-bound invitation unless their
+original persisted root witness can be recovered. A cached manifest is also saved
+under its verified root so replacing a provisional principal alias does not
+reassign historical device references to the alias's new owner.

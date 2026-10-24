@@ -561,14 +561,7 @@ fn handle_mesh_general_value(
             "401 Unauthorized",
             serde_json::to_vec(&unauthenticated_principal_lookup())?,
         )),
-        ("POST", "/mvp1/principal-lookup") => {
-            let request: ramflux_node_core::PrincipalLookupRequest = serde_json::from_slice(body)?;
-            let response = router.state().mvp1_authenticated_principal_lookup(
-                &request,
-                ramflux_node_core::now_unix_seconds(),
-            );
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
+        ("POST", "/mvp1/principal-lookup") => authenticated_principal_mesh_response(body, router),
         ("GET", path) if is_identity_manifest_path(path) => {
             let response = handle_mvp1_device_manifest_fetch(path, router.state());
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
@@ -926,6 +919,17 @@ fn handle_mvp1_inbox_fetch(
         "router mvp1 inbox fetch outcome"
     );
     Ok(response)
+}
+
+fn authenticated_principal_mesh_response(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<MeshResponse> {
+    let request: ramflux_node_core::PrincipalLookupRequest = serde_json::from_slice(body)?;
+    let response = router
+        .state()
+        .mvp1_authenticated_principal_lookup(&request, ramflux_node_core::now_unix_seconds());
+    Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
 }
 
 #[cfg(test)]

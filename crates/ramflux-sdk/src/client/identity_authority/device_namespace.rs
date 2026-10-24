@@ -104,7 +104,17 @@ impl RamfluxClient {
             .map(|root| {
                 ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())
             });
-        let expected = own.or(pinned);
+        let expected = if let Some(root) = own.or(pinned) {
+            Some(root)
+        } else {
+            let roots = self
+                .account_db()?
+                .pinned_group_root_metadata(owner, &entry.envelope.source_device_id)?;
+            if roots.len() > 1 {
+                return Err(invalid("ambiguous group sender root context"));
+            }
+            roots.into_iter().next()
+        };
         if hint.as_ref().zip(expected.as_ref()).is_some_and(|(hint, expected)| hint != expected) {
             return Err(invalid("sender root differs from pinned relationship"));
         }
@@ -135,9 +145,18 @@ impl RamfluxClient {
         if pinned && self.friend_link_peer_is_accepted(principal)? {
             return Ok(true);
         }
-        Ok(self.account_db()?.has_group_device_relationship(
-            principal,
-            &self.device_identity_for_root(root, device)?,
-        )?)
+        // Selecting a manifest to fetch is not device authentication. A saved root-bound
+        // relationship/offer constrains the claim; the complete record and envelope signature
+        // must still verify before a RootQualifiedDeviceRef can authorize any operation.
+        Ok(self
+            .account_db()?
+            .pinned_group_root_metadata(principal, device)?
+            .iter()
+            .any(|expected| expected == root)
+            || self.account_db()?.pending_group_invite_root_metadata(
+                device,
+                root,
+                crate::prelude::now_unix_timestamp(),
+            )?)
     }
 }

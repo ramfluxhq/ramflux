@@ -1119,9 +1119,10 @@ pub(crate) async fn dispatch_group_receive_request(
     let mut engine = account.take_live_engine().await?;
     let receive_result = async {
         let mut entries = Vec::<GatewayInboxEntry>::new();
+        let mut seen = BTreeSet::new();
         for bytes in account.client.account_db()?.unrouted_entries()? {
             let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
-            if !entries.iter().any(|e| e.envelope.envelope_id == entry.envelope.envelope_id) {
+            if seen.insert(account.client.inbox_admission_key(&entry)?) {
                 entries.push(entry);
             }
         }
@@ -1291,13 +1292,17 @@ fn group_receive_compat(
     let mut seen = BTreeSet::new();
     let entries = page.0.iter().chain(&account.pending_deliveries).cloned().collect::<Vec<_>>();
     for entry in entries {
-        let id = &entry.envelope.envelope_id;
-        if !seen.insert(id.clone()) {
+        if crate::client::routed::decode(&entry.envelope).is_err() {
+            continue;
+        }
+        let source_key = account.client.inbox_admission_key(&entry)?;
+        if !seen.insert(source_key.clone()) {
             continue;
         }
         let Some(route) = account.client.committed_routing(&entry)? else {
             continue;
         };
+        let id = &route.message_id;
         if route.group_id.as_deref() != Some(body.group_id.as_str()) {
             continue;
         }
@@ -1325,7 +1330,12 @@ fn group_receive_compat(
                 page.2.push(serde_json::to_value(distribution)?);
             }
         }
-        if !page.0.iter().any(|value| value.envelope.envelope_id == *id) {
+        let page_keys = page
+            .0
+            .iter()
+            .map(|value| account.client.inbox_admission_key(value))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if !page_keys.contains(&source_key) {
             page.0.push(entry);
         }
     }

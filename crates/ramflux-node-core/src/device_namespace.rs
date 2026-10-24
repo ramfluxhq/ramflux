@@ -111,6 +111,57 @@ impl IdentityRegistry {
         self.legacy_device_record(identity)?;
         self.prekey_bundles.get(identity.device_id())
     }
+    pub(crate) fn legacy_device_manifest(
+        &self,
+        commitment: &str,
+    ) -> Option<crate::DeviceManifestResponse> {
+        let public = self.root_public_keys_by_commitment.get(commitment)?;
+        let key = ramflux_crypto::verifying_key_from_base64url(public).ok()?;
+        if ramflux_crypto::identity_root_commitment(&key) != commitment {
+            return None;
+        }
+        let mut devices = Vec::new();
+        for device in self.devices.values().filter(|row| {
+            row.principal_commitment == commitment && row.branch_proof.key_binding.is_none()
+        }) {
+            if self.legacy_record_is_revoked(device)
+                || ramflux_crypto::verify_branch_proof(
+                    &key,
+                    &device.branch_proof,
+                    crate::IDENTITY_BIND_AUDIENCE,
+                    crate::IDENTITY_BIND_CAPABILITY,
+                    device.branch_proof.issued_at,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            let Some(bundle) = self.prekey_bundles.get(&device.device_id) else { continue };
+            devices.push(crate::DeviceManifestEntry {
+                principal_id: device.principal_id.clone(),
+                principal_commitment: commitment.into(),
+                device_id: device.device_id.clone(),
+                device_epoch: device.device_epoch,
+                branch_public_key: device.branch_public_key.clone(),
+                target_delivery_id: device.target_delivery_id.clone(),
+                branch_proof: device.branch_proof.clone(),
+                prekey_bundle: bundle.clone(),
+                branch_authorized_event_id: format!(
+                    "device.branch_authorized:{}:{}",
+                    device.device_id, device.device_epoch
+                ),
+            });
+        }
+        devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        let principal = devices.first()?.principal_id.clone();
+        Some(crate::DeviceManifestResponse {
+            principal_id: principal,
+            principal_commitment: commitment.into(),
+            root_public_key: public.clone(),
+            signed_device_set: None,
+            devices,
+        })
+    }
     pub(crate) fn record_is_revoked(&self, device: &IdentityDeviceRecord) -> bool {
         self.storage_key_for_record(device).is_none_or(|key| self.revoked_devices.contains(&key))
             || self.legacy_record_is_revoked(device)

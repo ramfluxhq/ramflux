@@ -18,30 +18,7 @@ pub(crate) async fn dispatch_quic_json_request(
         "gateway QUIC request received"
     );
     let body = match (request.method.as_str(), request.path.as_str()) {
-        ("POST", "/mvp0/envelope") => {
-            let total_started = Instant::now();
-            let decode_started = Instant::now();
-            let envelope: ramflux_protocol::Envelope = serde_json::from_value(request.body)?;
-            ramflux_node_core::record_gateway_submit_decode_us(elapsed_us(decode_started));
-            ramflux_node_core::record_gateway_submit_received();
-            let router_started = Instant::now();
-            let response: ramflux_node_core::EnvelopeSubmitResponse =
-                router_post_json_async(router, "/mvp0/envelope", &envelope).await?;
-            ramflux_node_core::record_gateway_submit_router_us(elapsed_us(router_started));
-            tracing::info!(
-                envelope_id = %envelope.envelope_id,
-                target_delivery_id = %envelope.target_delivery_id,
-                outcome = %response.outcome,
-                "gateway QUIC forwarded envelope to router"
-            );
-            let response_started = Instant::now();
-            let body = serde_json::to_value(response)?;
-            ramflux_node_core::record_gateway_submit_response_encode_us(elapsed_us(
-                response_started,
-            ));
-            ramflux_node_core::record_gateway_submit_total_us(elapsed_us(total_started));
-            body
-        }
+        ("POST", "/mvp0/envelope") => forward_quic_envelope(router, request.body).await?,
         ("POST", "/mvp0/ack") => {
             let ack: ramflux_protocol::Ack = serde_json::from_value(request.body)?;
             let response: ramflux_node_core::InboxCursorResponse =
@@ -126,4 +103,30 @@ fn lookup_error(error: &dyn std::fmt::Display) -> ramflux_transport::GatewayQuic
         status: 400,
         body: serde_json::json!({"error":error.to_string()}),
     }
+}
+
+async fn forward_quic_envelope(
+    router: &RouterMeshClient,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let total_started = Instant::now();
+    let decode_started = Instant::now();
+    let envelope: ramflux_protocol::Envelope = serde_json::from_value(body)?;
+    ramflux_node_core::record_gateway_submit_decode_us(elapsed_us(decode_started));
+    ramflux_node_core::record_gateway_submit_received();
+    let router_started = Instant::now();
+    let response: ramflux_node_core::EnvelopeSubmitResponse =
+        router_post_json_async(router, "/mvp0/envelope", &envelope).await?;
+    ramflux_node_core::record_gateway_submit_router_us(elapsed_us(router_started));
+    tracing::info!(
+        envelope_id = %envelope.envelope_id,
+        target_delivery_id = %envelope.target_delivery_id,
+        outcome = %response.outcome,
+        "gateway QUIC forwarded envelope to router"
+    );
+    let response_started = Instant::now();
+    let body = serde_json::to_value(response)?;
+    ramflux_node_core::record_gateway_submit_response_encode_us(elapsed_us(response_started));
+    ramflux_node_core::record_gateway_submit_total_us(elapsed_us(total_started));
+    Ok(body)
 }
