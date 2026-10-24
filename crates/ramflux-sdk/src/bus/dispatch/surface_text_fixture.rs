@@ -75,7 +75,7 @@ impl GatewaySessionFrameSource for RecordingGateway {
         })
     }
 }
-pub(super) fn manifest(
+pub(crate) fn manifest(
     client: &RamfluxClient,
 ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
     let root = client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;

@@ -33,7 +33,7 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
         &json!({"kind":"group","group_id":"group"}),
     )?;
     let peer = &peers[0];
-    let manifest = super::fixture::manifest(&peer.client)?;
+    let manifest = fixture::manifest(&peer.client)?;
     source.client.persist_identity_directory(&manifest)?;
     source.client.pin_joined_group_member("group", "device-peer-0")?;
     let event = TaskEvent::new(
