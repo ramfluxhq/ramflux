@@ -67,7 +67,10 @@ impl Origin {
                 let n = stream.read(&mut buf).await?;
                 observed.fetch_add(1, Ordering::SeqCst);
                 let request = String::from_utf8_lossy(&buf[..n]);
-                assert!(request.starts_with("GET /.well-known/ramflux/client ") || request.starts_with(&proxy_request));
+                assert!(
+                    request.starts_with("GET /.well-known/ramflux/client ")
+                        || request.starts_with(&proxy_request)
+                );
                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
                 stream.write_all(&body).await?;
                 stream.shutdown().await?;
