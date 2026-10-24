@@ -22,7 +22,10 @@ impl Wire {
             GatewaySessionEngine::with_test_transport(
                 local.config()?,
                 Box::new(Self {
-                    bundle: remote.client.load_x3dh_private_state(&remote.id)?.bundle,
+                    bundle: remote
+                        .client
+                        .load_x3dh_private_state(&remote.client.local_device_identity(&remote.id)?)?
+                        .bundle,
                     responses: VecDeque::new(),
                     sent: sent.clone(),
                 }),
@@ -157,7 +160,10 @@ fn group_bootstrap(
     let body = sender.client.encrypt_group_message(group, &sender.id, b"delayed group packet")?;
     let mut message = outgoing(sender, receiver, id);
     message.conversation_id = format!("thread-{group}");
-    let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
+    let bundle = receiver
+        .client
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
+        .bundle;
     let (mut session, header, bundle) = sender.client.new_send_pair(
         &sender.client.local_device_identity(&sender.id)?,
         &message,

@@ -53,7 +53,10 @@ pub(super) fn pool() -> Result<ramflux_transport::RelayQuicPool, SdkError> {
 }
 pub(super) fn legacy(sender: &Fixture, receiver: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
     let mut msg = message("legacy-unbound", "thread");
-    let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
+    let bundle = receiver
+        .client
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
+        .bundle;
     let (mut session, header) =
         sender.client.create_send_dm_session_from_bundle(&msg, &receiver.id, bundle, &sender.id)?;
     let ciphertext = session.encrypt(b"old message", dm_associated_data("thread"))?;
@@ -470,7 +473,8 @@ fn a_lower_peer_session_id_cannot_displace_a_locally_initiated_session() -> Resu
     outbound.recipient_device_id = Some("alice".to_owned());
     outbound.target_delivery_id = "alice".to_owned();
     let local_id = install_high_local_pair(&bob, &alice, &outbound)?;
-    let bundle = bob.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle =
+        bob.client.load_x3dh_private_state(&bob.client.local_device_identity("bob")?)?.bundle;
     let hash = prekey_bundle_hash(&bundle)?;
     let mut inbound = None;
     for attempt in 0..256 {
@@ -541,7 +545,8 @@ async fn an_object_share_and_later_messages_keep_one_device_pair_ratchet() -> Re
     trust(&bob, &alice)?;
     trust(&alice, &bob)?;
     alice.client.put_encrypted_object("shared", b"object bytes")?;
-    let bundle = bob.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle =
+        bob.client.load_x3dh_private_state(&bob.client.local_device_identity("bob")?)?.bundle;
     let response = crate::prekey::SdkPrekeyResponse {
         device_id: "bob".to_owned(),
         bundle: Some(bundle),
@@ -745,7 +750,10 @@ fn a_substituted_recipient_prekey_cannot_bootstrap_a_known_device() -> Result<()
     let bob = Fixture::new("bob", 153)?;
     let impostor = Fixture::new("bob", 173)?;
     trust(&alice, &bob)?;
-    let bundle = impostor.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle = impostor
+        .client
+        .load_x3dh_private_state(&impostor.client.local_device_identity("bob")?)?
+        .bundle;
     let reply = serde_json::to_vec(&crate::prekey::SdkPrekeyResponse {
         device_id: "bob".to_owned(),
         bundle: Some(bundle),
@@ -787,7 +795,10 @@ fn install_high_local_pair(
     recipient: &Fixture,
     message: &GatewayDirectMessage,
 ) -> Result<String, SdkError> {
-    let bundle = recipient.client.load_x3dh_private_state(&recipient.id)?.bundle;
+    let bundle = recipient
+        .client
+        .load_x3dh_private_state(&recipient.client.local_device_identity(&recipient.id)?)?
+        .bundle;
     let hash = prekey_bundle_hash(&bundle)?;
     let aad = associated_data(&message.envelope_id, &sender.id, &recipient.id, &hash)?;
     let mut selected: Option<ramflux_crypto::DmSession> = None;
@@ -1056,7 +1067,8 @@ fn live_pair_bootstrap_rejects_a_signed_prekey_from_an_older_device_epoch() -> R
     let current = Fixture::owned_epoch("bob", "bob", 61, 62, 2)?;
     let sender = Fixture::new("alice", 41)?;
     trust(&sender, &current)?;
-    let bundle = old.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle =
+        old.client.load_x3dh_private_state(&old.client.local_device_identity("bob")?)?.bundle;
     ramflux_crypto::verify_prekey_bundle(
         &current
             .client

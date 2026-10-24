@@ -90,7 +90,10 @@ fn expired_sibling_proof_does_not_block_newer_signed_revocation_or_authorize_a_n
         peer.client
             .verify_root_bound_prekey(
                 &ramflux_protocol::qualified_device_id(&manifest.principal_commitment, "two")?,
-                &sibling.client.load_x3dh_private_state("two")?.bundle
+                &sibling
+                    .client
+                    .load_x3dh_private_state(&sibling.client.local_device_identity("two")?)?
+                    .bundle
             )
             .is_err()
     );

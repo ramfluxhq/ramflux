@@ -84,7 +84,10 @@ fn enroll(
     node.register_identity(&request)?;
     node.publish_prekey(ramflux_node_core::PrekeyPublishRequest {
         device_id: actor.id.clone(),
-        bundle: actor.client.load_x3dh_private_state(&actor.id)?.bundle,
+        bundle: actor
+            .client
+            .load_x3dh_private_state(&actor.client.local_device_identity(&actor.id)?)?
+            .bundle,
     })?;
     actor.client.accept_owned_record(&set)?;
     Ok(serde_json::from_value(serde_json::to_value(

@@ -152,7 +152,10 @@ fn seal_as(
             .signing_key
             .verifying_key(),
     ));
-    let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
+    let bundle = receiver
+        .client
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
+        .bundle;
     let hash = prekey_bundle_hash(&bundle)?;
     let existing = sender.client.send_pair_session_from_url(
         &sender.client.local_device_identity(&sender.id)?,
@@ -405,7 +408,7 @@ fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(
     let b = Fixture::new("bob", 131)?;
     review::trust(&b, &a)?;
     let mut message = message("legacy-envelope", "legacy-conversation");
-    let bundle = b.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle = b.client.load_x3dh_private_state(&b.client.local_device_identity("bob")?)?.bundle;
     let (mut sending, header) =
         a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
     let ciphertext = sending.encrypt(b"legacy body", dm_associated_data("legacy-conversation"))?;

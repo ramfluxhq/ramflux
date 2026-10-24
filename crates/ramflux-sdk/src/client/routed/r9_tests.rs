@@ -29,12 +29,8 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
         &original.principal_commitment,
         &original.devices[0].branch_public_key,
     )?;
-    let mut impostor = Fixture::new("alice", 71)?;
     let principal = if cross_principal { "mallory" } else { "alice" };
-    impostor
-        .client
-        .create_identity_root(principal, if cross_principal { [71; 32] } else { [41; 32] });
-    impostor.client.create_device_branch(principal, "alice", 1, [72; 32]);
+    let impostor = Fixture::owned("alice", principal, if cross_principal { 71 } else { 41 }, 72)?;
     let advertised = manifest(&impostor)?;
     if cross_principal {
         // Reproduce a poisoned directory left by the reviewed version before the new guard.
@@ -181,8 +177,12 @@ fn old_bootstrap(
     trust(sender, receiver)?;
     trust(receiver, sender)?;
     let msg = outgoing(sender, receiver, id);
-    let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
-    let own = sender.client.load_x3dh_private_state(&sender.id)?;
+    let bundle = receiver
+        .client
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
+        .bundle;
+    let own =
+        sender.client.load_x3dh_private_state(&sender.client.local_device_identity(&sender.id)?)?;
     let identity = ramflux_crypto::X25519KeyPair::from_seed(own.identity_seed);
     let ephemeral = ramflux_crypto::X25519KeyPair::random()?;
     let hash = prekey_bundle_hash(&bundle)?;

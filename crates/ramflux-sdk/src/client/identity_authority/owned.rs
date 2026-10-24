@@ -42,16 +42,9 @@ impl RamfluxClient {
     ) -> Result<BranchProofDocument, SdkError> {
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let agreement = if self
-            .projection_checkpoint(&x3dh_private_checkpoint_name(&branch.device_id))?
-            .is_some()
+        let agreement = if let Some(stored) =
+            self.optional_owned_private_prekey(&self.owned_device_identity()?)?
         {
-            let stored = self.load_x3dh_private_state(&branch.device_id)?;
-            if stored.bundle.device_identity_ed25519_public
-                != ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
-            {
-                return Err(invalid("stored prekeys belong to another device signing key"));
-            }
             stored.bundle.identity_key
         } else {
             X25519KeyPair::from_seed(x3dh_private_seed(

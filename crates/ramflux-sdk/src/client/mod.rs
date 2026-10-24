@@ -30,6 +30,7 @@ mod own_device_group_pins;
 mod own_device_group_restore;
 pub mod own_device_sync;
 mod own_device_sync_receipts;
+mod private_prekeys;
 pub mod recovery;
 pub(crate) mod routed;
 pub mod storage;

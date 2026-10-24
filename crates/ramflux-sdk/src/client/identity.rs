@@ -185,16 +185,16 @@ impl RamfluxClient {
             None,
             None,
         )?;
+        let device = self.local_device_identity(device_id)?;
         let state = SdkX3dhPrivateState {
+            principal_commitment: Some(device.root_commitment().to_owned()),
             device_id: device_id.to_owned(),
             identity_seed,
             signed_prekey_id,
             signed_prekey_seed,
             bundle: bundle.clone(),
         };
-        let event_id = format!("x3dh.prekey.private:{device_id}");
-        self.append_event(&event_id, "x3dh.prekey.private", &serde_json::to_vec(&state)?)?;
-        self.set_projection_checkpoint(&x3dh_private_checkpoint_name(device_id), &event_id)?;
+        self.persist_owned_private_prekey(&device, &state)?;
         Ok(bundle)
     }
 

@@ -112,7 +112,8 @@ fn legacy_group_distribution_sender_is_bound_to_the_authenticated_device() -> Re
     let mut message = message("forged-distribution", &conversation);
     message.source_principal_id = "mallory".into();
     message.sender_id = "mallory".into();
-    let bundle = bob.client.load_x3dh_private_state("bob")?.bundle;
+    let bundle =
+        bob.client.load_x3dh_private_state(&bob.client.local_device_identity("bob")?)?.bundle;
     let (mut session, x3dh) =
         mallory.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "mallory")?;
     let encrypted = serde_json::to_vec(&SdkDmEncryptedEnvelope {
