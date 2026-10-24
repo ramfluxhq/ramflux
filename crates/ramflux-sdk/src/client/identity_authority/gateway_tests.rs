@@ -34,7 +34,10 @@ async fn r8_malicious_server_bundle_substitution_fails_before_key_admission_or_s
     assert!(peer.client.account_db()?.client_record("device", "alice")?.is_none());
     // The genuine signed set is independently admitted; substituted ready keys are not.
     assert!(peer.client.observed_device_set(&expected)?.is_some());
-    assert_eq!(peer.client.account_db()?.pair_peer_devices("bob")?, Vec::<String>::new());
+    assert_eq!(
+        peer.client.account_db()?.pair_peer_devices(&peer.client.local_device_identity("bob")?)?,
+        Vec::<String>::new()
+    );
     Ok(())
 }
 
@@ -115,7 +118,13 @@ async fn mismatching_revocation_ack_fences_local_traffic_and_retries_the_identic
             .load_actor_state::<bool>(&owner.client.device_revocation_key("alice")?)?,
         Some(true)
     );
-    assert_eq!(owner.client.account_db()?.pair_peer_devices("alice")?, Vec::<String>::new());
+    assert_eq!(
+        owner
+            .client
+            .account_db()?
+            .pair_peer_devices(&owner.client.local_device_identity("alice")?)?,
+        Vec::<String>::new()
+    );
     let pending = owner
         .client
         .account_db()?
@@ -268,6 +277,11 @@ fn seed_owned_peer_pair(owner: &Actor) -> TestResult {
         owner.client.identity_root.as_ref().ok_or("root")?,
         "peer",
     )?;
-    owner.client.persist_pair("alice", peer.storage_key(), &[3; 32], &pair)?;
+    owner.client.persist_pair(
+        &owner.client.local_device_identity("alice")?,
+        &owner.client.device_identity(peer.storage_key())?,
+        &[3; 32],
+        &pair,
+    )?;
     Ok(())
 }

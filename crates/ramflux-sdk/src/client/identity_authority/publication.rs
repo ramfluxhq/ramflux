@@ -126,12 +126,15 @@ impl RamfluxClient {
             db.persist_actor_state("identity/owned_pending_set", record)?;
             for entry in record.devices.iter().filter(|e| e.status == DeviceSetStatus::Revoked) {
                 if &entry.device_id == local {
-                    for peer in db.pair_peer_devices(local)? {
-                        self.remove_device_pair(&peer, "root_signed_revocation_pending")?;
+                    for peer in db.pair_peer_devices(&self.owned_device_identity()?)? {
+                        self.remove_device_pair(
+                            &self.device_identity(&peer)?,
+                            "root_signed_revocation_pending",
+                        )?;
                     }
                 } else {
                     self.remove_device_pair(
-                        &ramflux_protocol::qualified_device_id(
+                        &self.device_identity_for_root(
                             &record.principal_commitment,
                             &entry.device_id,
                         )?,

@@ -176,3 +176,28 @@ async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_r
     assert_eq!(messages.len(), 1);
     Ok(())
 }
+
+#[test]
+fn legacy_reset_work_requires_the_root_bound_pair_key_and_preserves_attempts()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 11)?;
+    let bob = Fixture::new("bob", 31)?;
+    trust(&alice, &bob)?;
+    alice.client.establish_friend_link("friend", "alice", "bob")?;
+    let local = alice.client.owned_device_identity()?;
+    let remote = alice.client.device_identity(&bob.reference()?)?;
+    let key = RamfluxClient::reset_work_key(&local, &remote)?;
+    let value = serde_json::json!({"local":"alice","remote":remote.storage_key(),"attempts":5,"next_at":120,"first_at":10});
+    let db = alice.client.account_db()?;
+    db.persist_actor_state(&key, &value)?;
+    db.persist_actor_state("dm-pair/reset-work/unproven", &value)?;
+    let restored = alice.client.legacy_upgrade_reset_work(&local)?;
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].local, local.storage_key());
+    assert_eq!(restored[0].attempts, 5);
+    assert_eq!(restored[0].first_at, Some(10));
+    assert_eq!(restored[0].next_at, 120);
+    assert!(!db.actor_state_exists("dm-pair/reset-work/unproven")?);
+    assert_eq!(db.actor_state_keys("legacy/reset-work/")?.len(), 1);
+    Ok(())
+}

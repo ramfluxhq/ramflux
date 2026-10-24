@@ -154,7 +154,11 @@ fn seal_as(
     ));
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
     let hash = prekey_bundle_hash(&bundle)?;
-    let existing = sender.client.send_pair_session_from_url(&sender.id, &message, None);
+    let existing = sender.client.send_pair_session_from_url(
+        &sender.client.local_device_identity(&sender.id)?,
+        &message,
+        None,
+    );
     let (mut session, header, hash) = if let Ok(value) = existing {
         value
     } else {
@@ -218,8 +222,8 @@ fn device_pair_session_spans_conversations_and_rejects_replay_and_tampering() ->
     let opened = b.client.open_routed(&first, "bob")?;
     let session_id = opened.session.session_id.clone();
     b.client.persist_pair(
-        "bob",
-        &fixture_peer_reference(&b.client, "alice")?,
+        &b.client.local_device_identity("bob")?,
+        &b.client.device_identity(&fixture_peer_reference(&b.client, "alice")?)?,
         &opened.bundle_hash,
         &opened.session,
     )?;
@@ -247,8 +251,8 @@ fn device_pair_session_supports_reply_direction() -> Result<(), SdkError> {
     let first = seal(&a, &b, message("first", "c"), b"hello")?;
     let opened = b.client.open_routed(&first, "bob")?;
     b.client.persist_pair(
-        "bob",
-        &fixture_peer_reference(&b.client, "alice")?,
+        &b.client.local_device_identity("bob")?,
+        &b.client.device_identity(&fixture_peer_reference(&b.client, "alice")?)?,
         &opened.bundle_hash,
         &opened.session,
     )?;

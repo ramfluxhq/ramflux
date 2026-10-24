@@ -17,7 +17,7 @@ impl RamfluxClient {
         engine: &mut GatewaySessionEngine,
         entry: &GatewayInboxEntry,
     ) -> Result<super::Opened, SdkError> {
-        self.require_pair_device_active(&engine.config.device_id)?;
+        self.require_pair_device_active(&self.local_device_identity(&engine.config.device_id)?)?;
         match self.open_routed(entry, &engine.config.device_id) {
             Ok(opened) => Ok(opened),
             Err(error) => {
@@ -33,12 +33,14 @@ impl RamfluxClient {
         }
     }
 
-    pub(super) fn retire_pair(&self, local: &str, remote: &str, id: &str) -> Result<(), SdkError> {
+    pub(super) fn retire_pair(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+        id: &str,
+    ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let pair = RamfluxClient::pair_key(
-            &self.local_device_identity(local)?,
-            &self.device_identity(remote)?,
-        )?;
+        let pair = RamfluxClient::pair_key(local, remote)?;
         let successor = db.load_actor_state::<String>(&pair)?;
         db.persist_actor_state(&format!("dm-pair/retired/{id}"), &serde_json::json!({"pair":pair,"superseded_by":successor,"retired_at":now_unix_timestamp()}))?;
         db.persist_actor_state("secrets/retired", &true)?;
@@ -50,17 +52,14 @@ impl RamfluxClient {
     }
     pub(crate) fn pair_recovery_pending(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<bool, SdkError> {
         Ok(self
             .account_db()?
             .load_actor_state::<bool>(&format!(
                 "{}/reset-pending",
-                RamfluxClient::pair_key(
-                    &self.local_device_identity(local)?,
-                    &self.device_identity(remote)?
-                )?
+                RamfluxClient::pair_key(local, remote)?
             ))?
             .unwrap_or(false))
     }
@@ -72,15 +71,14 @@ impl RamfluxClient {
         // The triggering packet must have a valid signature from the pinned device. A stranger
         // cannot induce key churn, prekey requests or outgoing traffic.
         self.authenticated_envelope_sender(entry)?;
-        let local = engine.config.device_id.clone();
-        let remote = self.inbound_device_reference(entry)?;
-        let remote = remote.as_str();
-        if !self.pair_recovery_allowed(&local, remote)? {
+        let local = self.local_device_identity(&engine.config.device_id)?;
+        let remote = self.authenticated_device_identity(entry)?;
+        if !self.pair_recovery_allowed(&local, &remote)? {
             return Ok(());
         }
         let at = now_unix_timestamp();
-        if self.begin_pair_recovery(&local, remote, at)? {
-            self.send_pair_reset(engine, remote).await?;
+        if self.begin_pair_recovery(&local, &remote, at)? {
+            self.send_pair_reset(engine, &remote).await?;
         }
         Ok(())
     }

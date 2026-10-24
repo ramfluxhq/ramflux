@@ -110,7 +110,12 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
     )?;
     let reference =
         ramflux_protocol::qualified_device_id(&added.principal_commitment, "alice-two")?;
-    peer.client.persist_pair("bob", &reference, &[3; 32], &pair)?;
+    peer.client.persist_pair(
+        &peer.client.local_device_identity("bob")?,
+        &peer.client.device_identity(&reference)?,
+        &[3; 32],
+        &pair,
+    )?;
     let mut entries = added.signed_device_set.as_ref().ok_or("set")?.devices.clone();
     let entry = entries.iter_mut().find(|e| e.device_id == "alice-two").ok_or("device")?;
     entry.status = DeviceSetStatus::Revoked;
@@ -131,7 +136,14 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
         node.device_manifest(&initial.principal_commitment).ok_or("manifest")?,
     )?)?;
     observe(&peer.client, &revoked)?;
-    assert!(!peer.client.account_db()?.pair_peer_devices("bob")?.iter().any(|d| d == &reference));
+    assert!(
+        !peer
+            .client
+            .account_db()?
+            .pair_peer_devices(&peer.client.local_device_identity("bob")?)?
+            .iter()
+            .any(|d| d == &reference)
+    );
     assert!(peer.client.require_cached_root_authority(&reference).is_err());
     peer.reopen()?;
     assert_eq!(peer.client.observed_device_set(&initial.principal_commitment)?, Some(record));
@@ -217,11 +229,23 @@ fn newer_root_authorized_rotation_retires_pairs_rotates_group_pin_and_preserves_
         dm_device_id_hash("alice"),
         [2; 32],
     )?;
-    peer.client.persist_pair("bob", &reference, &[3; 32], &pair)?;
+    peer.client.persist_pair(
+        &peer.client.local_device_identity("bob")?,
+        &peer.client.device_identity(&reference)?,
+        &[3; 32],
+        &pair,
+    )?;
     let mut rotated = replacement.manifest()?;
     sign_set(&replacement, &mut rotated, 2)?;
     observe(&peer.client, &rotated)?;
-    assert!(!peer.client.account_db()?.pair_peer_devices("bob")?.iter().any(|d| d == &reference));
+    assert!(
+        !peer
+            .client
+            .account_db()?
+            .pair_peer_devices(&peer.client.local_device_identity("bob")?)?
+            .iter()
+            .any(|d| d == &reference)
+    );
     assert_eq!(
         db.group_member_device_key("group", &reference)?,
         Some(rotated.devices[0].branch_public_key.clone())

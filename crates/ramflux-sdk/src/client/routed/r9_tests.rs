@@ -126,10 +126,12 @@ async fn a_clock_behind_restore_recovers_through_an_authenticated_rate_limited_r
         SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| invalid("time"))?.as_millis(),
     )
     .map_err(|_| invalid("time"))?;
-    alice
-        .client
-        .account_db()?
-        .persist_actor_state("dm-pair/bootstrap-sequence/alice", &(now + 300_000))?;
+    alice.client.account_db()?.persist_actor_state(
+        &super::super::bootstrap_sequence::bootstrap_sequence_key(
+            &alice.client.owned_device_identity()?,
+        ),
+        &(now + 300_000),
+    )?;
     let entry = fresh(&alice, &bob, "old-future-clock")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
     bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await?;

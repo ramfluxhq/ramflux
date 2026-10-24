@@ -31,7 +31,12 @@ impl RamfluxClient {
             self.account_db()?
                 .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
         }
-        self.persist_pair(local, &Self::qualified_recipient(message)?, &bundle, &session)?;
+        self.persist_pair(
+            &self.local_device_identity(local)?,
+            &self.device_identity(&Self::qualified_recipient(message)?)?,
+            &bundle,
+            &session,
+        )?;
         self.finish_pair_retirement()?;
         Ok(SdkObjectKeySlot {
             schema: "ramflux.sdk.object_key_slot.dm.v2".to_owned(),
@@ -46,7 +51,10 @@ impl RamfluxClient {
             ciphertext,
         })
     }
-    fn slot_remote(&self, slot: &SdkObjectKeySlot) -> Result<String, SdkError> {
+    fn slot_remote(
+        &self,
+        slot: &SdkObjectKeySlot,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
         let mut candidates = std::collections::BTreeSet::new();
         if let Some(record) = self.account_db()?.load_actor_state::<serde_json::Value>(&format!(
             "dm-pair/session/{}",
@@ -55,7 +63,7 @@ impl RamfluxClient {
         {
             let remote = self.device_reference(remote)?;
             if self.require_cached_root_authority(&remote).is_ok() {
-                candidates.insert(remote);
+                candidates.insert(self.device_identity(&remote)?);
             }
         }
         if candidates.is_empty() || slot.source_principal_commitment.is_some() {
@@ -75,7 +83,7 @@ impl RamfluxClient {
                             self.device_root(id).is_ok_and(|root| root == *expected)
                         })
                     {
-                        candidates.insert(self.device_reference(id)?);
+                        candidates.insert(self.device_identity(id)?);
                     }
                 }
                 after = ids.last().cloned().ok_or_else(|| invalid("empty device page"))?;
@@ -106,8 +114,12 @@ impl RamfluxClient {
             x3dh: slot.x3dh.clone(),
             ciphertext: slot.ciphertext.clone(),
         };
-        let (mut session, bundle) =
-            self.recv_pair_session(local, &remote, "object-slot", &envelope)?;
+        let (mut session, bundle) = self.recv_pair_session(
+            &self.local_device_identity(local)?,
+            &remote,
+            "object-slot",
+            &envelope,
+        )?;
         if let Some(current) = current.as_ref() {
             if current.session_id != session.session_id {
                 return Err(invalid("attachment slot differs from message pair session"));
@@ -117,12 +129,7 @@ impl RamfluxClient {
         let active = &mut session;
         let key = zeroize::Zeroizing::new(active.decrypt(
             &slot.ciphertext,
-            &slot_aad(
-                &slot.object_id,
-                &crate::client::identity_authority::device_namespace::wire_device_id(&remote)?,
-                local,
-                &bundle,
-            )?,
+            &slot_aad(&slot.object_id, remote.device_id(), local, &bundle)?,
         )?);
         let object_key: [u8; 32] =
             key.as_slice().try_into().map_err(|_| invalid("invalid pair object key length"))?;
@@ -190,17 +197,21 @@ impl RamfluxClient {
             x3dh: slot.x3dh.clone(),
             ciphertext: slot.ciphertext.clone(),
         };
-        let (_, bundle) =
-            self.recv_pair_session(&slot.recipient_device_id, &remote, "object-slot", &envelope)?;
+        let (_, bundle) = self.recv_pair_session(
+            &self.local_device_identity(&slot.recipient_device_id)?,
+            &remote,
+            "object-slot",
+            &envelope,
+        )?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.commit_bootstrap_sequence(
-                &slot.recipient_device_id,
+                &self.local_device_identity(&slot.recipient_device_id)?,
                 &remote,
                 slot.x3dh.as_ref(),
                 &slot.ciphertext.session_id,
             )?;
             self.persist_pair(
-                &slot.recipient_device_id,
+                &self.local_device_identity(&slot.recipient_device_id)?,
                 &remote,
                 &bundle,
                 deferred.session.as_ref().ok_or_else(|| invalid("slot session missing"))?,

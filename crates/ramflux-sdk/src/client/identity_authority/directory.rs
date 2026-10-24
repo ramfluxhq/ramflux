@@ -131,11 +131,17 @@ impl RamfluxClient {
                             ) == record.principal_commitment
                         })
                     {
-                        for peer in db.pair_peer_devices(&local.device_id)? {
-                            self.remove_device_pair(&peer, "root_authorized_local_key_rotation")?;
+                        for peer in db.pair_peer_devices(&self.owned_device_identity()?)? {
+                            self.remove_device_pair(
+                                &self.device_identity(&peer)?,
+                                "root_authorized_local_key_rotation",
+                            )?;
                         }
                     } else {
-                        self.remove_device_pair(&reference, "root_authorized_key_rotation")?;
+                        self.remove_device_pair(
+                            &self.device_identity(&reference)?,
+                            "root_authorized_key_rotation",
+                        )?;
                     }
                 }
             }

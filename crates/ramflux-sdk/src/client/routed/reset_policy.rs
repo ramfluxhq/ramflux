@@ -16,14 +16,11 @@ pub(super) struct ResetWork {
     pub first_at: Option<i64>,
 }
 impl RamfluxClient {
-    pub(super) fn reset_work_key(&self, local: &str, remote: &str) -> Result<String, SdkError> {
-        Ok(format!(
-            "dm-pair/reset-work/{}",
-            RamfluxClient::pair_key(
-                &self.local_device_identity(local)?,
-                &self.device_identity(remote)?
-            )?
-        ))
+    pub(super) fn reset_work_key(
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<String, SdkError> {
+        Ok(format!("dm-pair/reset-work/{}", RamfluxClient::pair_key(local, remote)?))
     }
     pub(super) fn normalize_reset_work(&self, work: &mut ResetWork) -> Result<i64, SdkError> {
         if let Some(first) = work.first_at {
@@ -34,33 +31,33 @@ impl RamfluxClient {
         let first = self
             .account_db()?
             .legacy_pair_reset_first_at(&RamfluxClient::pair_key(
-                &self.local_device_identity(&work.local)?,
+                &self.device_identity(&work.local)?,
                 &self.device_identity(&work.remote)?,
             )?)?
             .unwrap_or(0);
         work.first_at = Some(first);
-        self.account_db()?
-            .persist_actor_state(&self.reset_work_key(&work.local, &work.remote)?, work)?;
+        self.account_db()?.persist_actor_state(
+            &Self::reset_work_key(
+                &self.device_identity(&work.local)?,
+                &self.device_identity(&work.remote)?,
+            )?,
+            work,
+        )?;
         Ok(first)
     }
 
     pub(crate) fn begin_pair_recovery(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
         at: i64,
     ) -> Result<bool, SdkError> {
-        let remote = self.device_reference(remote)?;
-        let remote = remote.as_str();
         let db = self.account_db()?;
-        let pair = RamfluxClient::pair_key(
-            &self.local_device_identity(local)?,
-            &self.device_identity(remote)?,
-        )?;
+        let pair = RamfluxClient::pair_key(local, remote)?;
         if db.actor_state_exists(&format!("{pair}/manual"))? {
             return Ok(false);
         }
-        let key = self.reset_work_key(local, remote)?;
+        let key = Self::reset_work_key(local, remote)?;
         let mut existing = db.load_actor_state::<ResetWork>(&key)?;
         if let Some(work) = &mut existing
             && at >= self.normalize_reset_work(work)?.saturating_add(MAX_RESET_LIFETIME)
@@ -82,7 +79,7 @@ impl RamfluxClient {
                 work.next_at = work.next_at.max(next);
                 db.persist_actor_state(&key, &work)?;
             }
-            db.append_journal(&format!("pair-reset-refused:{pair}:{next}"),"session.reset",&json!({"device_id":remote,"state":"rate_limited","reason":if minute.is_some(){"minimum_interval"}else{"daily_budget"},"retry_at":next}),at,None)?;
+            db.append_journal(&format!("pair-reset-refused:{pair}:{next}"),"session.reset",&json!({"device_id":remote.storage_key(),"state":"rate_limited","reason":if minute.is_some(){"minimum_interval"}else{"daily_budget"},"retry_at":next}),at,None)?;
             return Ok(false);
         }
         if existing.as_ref().is_some_and(|work| at < work.next_at) {
@@ -105,8 +102,8 @@ impl RamfluxClient {
             db.persist_actor_state(
                 &key,
                 &ResetWork {
-                    local: local.to_owned(),
-                    remote: remote.to_owned(),
+                    local: local.storage_key().to_owned(),
+                    remote: remote.storage_key().to_owned(),
                     attempts: count,
                     next_at: at.saturating_add(delay),
                     first_at: Some(first),
@@ -119,7 +116,7 @@ impl RamfluxClient {
             db.append_journal(
                 &format!("pair-reset-attempt:{pair}:{at}"),
                 "session.reset",
-                &json!({"device_id":remote,"reason":"receive_state_unrecoverable","attempt":count}),
+                &json!({"device_id":remote.storage_key(),"reason":"receive_state_unrecoverable","attempt":count}),
                 at,
                 None,
             )?;

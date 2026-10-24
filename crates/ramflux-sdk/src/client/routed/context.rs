@@ -91,6 +91,8 @@ impl RamfluxClient {
             return Ok(false);
         }
         let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
-        Ok(self.active_pair(local, remote)?.is_some())
+        Ok(self
+            .active_pair(&self.local_device_identity(local)?, &self.device_identity(remote)?)?
+            .is_some())
     }
 }

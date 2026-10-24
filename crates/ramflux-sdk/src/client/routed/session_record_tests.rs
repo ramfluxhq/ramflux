@@ -94,7 +94,10 @@ impl ramflux_transport::GatewaySessionFrameSource for Wire {
 }
 pub(super) fn active(f: &Fixture, remote: &str) -> Result<String, SdkError> {
     Ok(f.client
-        .active_pair(&f.id, &fixture_peer_reference(&f.client, remote)?)?
+        .active_pair(
+            &f.client.local_device_identity(&f.id)?,
+            &f.client.device_identity(&fixture_peer_reference(&f.client, remote)?)?,
+        )?
         .ok_or_else(|| invalid("current pair"))?
         .0
         .session_id)
@@ -118,12 +121,20 @@ pub(super) fn gap(
 ) -> Result<GatewayInboxEntry, SdkError> {
     let (mut session, bundle) = sender
         .client
-        .active_pair(&sender.id, &receiver.reference()?)?
+        .active_pair(
+            &sender.client.local_device_identity(&sender.id)?,
+            &sender.client.device_identity(&receiver.reference()?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?;
     for _ in 0..1001 {
         session.encrypt(b"lost", b"discarded")?;
     }
-    sender.client.persist_pair(&sender.id, &receiver.reference()?, &bundle, &session)?;
+    sender.client.persist_pair(
+        &sender.client.local_device_identity(&sender.id)?,
+        &sender.client.device_identity(&receiver.reference()?)?,
+        &bundle,
+        &session,
+    )?;
     seal(sender, receiver, outgoing(sender, receiver, id), b"past gap")
 }
 pub(super) fn last(sent: &Sent) -> Result<GatewayInboxEntry, SdkError> {
@@ -147,8 +158,11 @@ fn group_bootstrap(
     let mut message = outgoing(sender, receiver, id);
     message.conversation_id = format!("thread-{group}");
     let bundle = receiver.client.load_x3dh_private_state(&receiver.id)?.bundle;
-    let (mut session, header, bundle) =
-        sender.client.new_send_pair(&sender.id, &message, bundle)?;
+    let (mut session, header, bundle) = sender.client.new_send_pair(
+        &sender.client.local_device_identity(&sender.id)?,
+        &message,
+        bundle,
+    )?;
     let wrapper = sender.client.seal_routed_with_route(
         &message,
         &body,
@@ -347,14 +361,17 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
     let first = last(&sent)?;
     let (mut session, bundle) = bob
         .client
-        .active_pair("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        .active_pair(
+            &bob.client.local_device_identity("bob")?,
+            &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
+        )?
         .ok_or_else(|| invalid("pair"))?;
     for _ in 0..1001 {
         session.encrypt(b"unacknowledged", b"discarded")?;
     }
     bob.client.persist_pair(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         &bundle,
         &session,
     )?;

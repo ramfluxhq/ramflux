@@ -7,17 +7,17 @@ pub(super) type SendPair = (ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, 
 impl RamfluxClient {
     pub(super) fn sendable_pair(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Option<SendPair>, SdkError> {
         if self
             .account_db()?
-            .load_actor_state::<bool>(&self.device_revocation_key(remote)?)?
+            .load_actor_state::<bool>(&self.device_revocation_key(remote.storage_key())?)?
             .unwrap_or(false)
         {
             return Err(SdkError::InboundRejected("recipient device is revoked".into()));
         }
-        if self.require_cached_root_authority(remote).is_err() {
+        if self.require_cached_root_authority(remote.storage_key()).is_err() {
             return Ok(None);
         }
         let Some((session, bundle)) = self.active_pair(local, remote)? else { return Ok(None) };
@@ -35,15 +35,15 @@ impl RamfluxClient {
     }
     pub(super) fn abandon_unconfirmed_candidate(
         &self,
-        local: &str,
-        remote: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
         floor: u64,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| {
             let pair = RamfluxClient::pair_key(
-                &self.local_device_identity(local)?,
-                &self.device_identity(remote)?,
+                local,
+                remote,
             )?;
             let Some(id) = db.load_actor_state::<String>(&pair)? else { return Ok(false) };
             if !db.load_actor_state::<bool>(&format!("dm-pair/local/{id}"))?.unwrap_or(false)
@@ -67,7 +67,7 @@ impl RamfluxClient {
             db.append_journal(
                 &format!("pair-candidate-upgrade:{id}"),
                 "session.reset",
-                &serde_json::json!({"device_id":remote,"reason":"unconfirmed_bootstrap_replaced"}),
+                &serde_json::json!({"device_id":remote.storage_key(),"reason":"unconfirmed_bootstrap_replaced"}),
                 super::now_unix_timestamp(),
                 None,
             )?;

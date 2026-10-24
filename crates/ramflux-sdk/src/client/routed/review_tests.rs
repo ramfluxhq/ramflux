@@ -244,8 +244,8 @@ fn a_v2_device_pair_rejects_a_bound_legacy_downgrade() -> Result<(), SdkError> {
     let entry = seal(&alice, &bob, message("v2", "thread"), b"v2")?;
     let opened = bob.client.open_routed(&entry, "bob")?;
     bob.client.persist_pair(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         &opened.bundle_hash,
         &opened.session,
     )?;
@@ -507,12 +507,16 @@ fn a_lower_peer_session_id_cannot_displace_a_locally_initiated_session() -> Resu
     let entry = inbound.ok_or_else(|| invalid("could not construct a lower peer session id"))?;
     let opened = bob.client.open_routed(&entry, "bob")?;
     bob.client.persist_pair(
-        "bob",
-        &fixture_peer_reference(&bob.client, "alice")?,
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
         &opened.bundle_hash,
         &opened.session,
     )?;
-    let (active, _, _) = bob.client.send_pair_session_from_url("bob", &outbound, None)?;
+    let (active, _, _) = bob.client.send_pair_session_from_url(
+        &bob.client.local_device_identity("bob")?,
+        &outbound,
+        None,
+    )?;
     assert_eq!(active.session_id, local_id);
     Ok(())
 }
@@ -579,8 +583,8 @@ async fn an_object_share_and_later_messages_keep_one_device_pair_ratchet() -> Re
     let opened =
         alice.client.open_routed(&reply, "alice").map_err(|e| invalid(&format!("reply: {e}")))?;
     alice.client.persist_pair(
-        "alice",
-        &fixture_peer_reference(&alice.client, "bob")?,
+        &alice.client.local_device_identity("alice")?,
+        &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
         &opened.bundle_hash,
         &opened.session,
     )?;
@@ -769,7 +773,7 @@ fn a_substituted_recipient_prekey_cannot_bootstrap_a_known_device() -> Result<()
         socket.write_all(&reply)
     });
     let result = alice.client.send_pair_session_from_url(
-        "alice",
+        &alice.client.local_device_identity("alice")?,
         &super::r5::outgoing(&alice, &bob, "substitution"),
         Some(&url),
     );
@@ -804,7 +808,12 @@ fn install_high_local_pair(
         .client
         .account_db()?
         .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
-    sender.client.persist_pair(&sender.id, &recipient.reference()?, &hash, &session)?;
+    sender.client.persist_pair(
+        &sender.client.local_device_identity(&sender.id)?,
+        &sender.client.device_identity(&recipient.reference()?)?,
+        &hash,
+        &session,
+    )?;
     Ok(session.session_id.clone())
 }
 
@@ -1062,7 +1071,7 @@ fn live_pair_bootstrap_rejects_a_signed_prekey_from_an_older_device_epoch() -> R
         sender
             .client
             .new_send_pair(
-                "alice",
+                &sender.client.local_device_identity("alice")?,
                 &super::r5::outgoing(&sender, &current, "old-device-epoch"),
                 bundle
             )

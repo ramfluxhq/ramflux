@@ -36,7 +36,7 @@ impl RamfluxClient {
         }
         if let Ok(mut event) = serde_json::from_slice::<A2iControlEvent>(body) {
             if event.source_device_id != entry.envelope.source_device_id
-                || event.target_device_id != opened.local_device
+                || event.target_device_id != opened.local_device.device_id()
             {
                 return Err(invalid("control event device binding mismatch"));
             }
@@ -77,7 +77,7 @@ impl RamfluxClient {
                         floor,
                     )?;
                 }
-                self.account_db()?.append_journal(&format!("pair-reset:{}", self.authenticated_committed_key(entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device,"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
+                self.account_db()?.append_journal(&format!("pair-reset:{}", self.authenticated_committed_key(entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device.storage_key(),"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
             } else {
                 self.project_contact_control(entry, &event)?;
             }
