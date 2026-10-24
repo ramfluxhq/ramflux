@@ -96,7 +96,13 @@ a changed task or opening revision cannot reuse it. Pending requests and
 decisions are stored in the encrypted account database before acknowledgement.
 Private tool arguments are never published to other group members or journals.
 Courier attempts are bounded (two per sync tick, eight attempts, capped
-exponential backoff), with expiry and bounded encrypted storage. Tool execution
+exponential backoff), with expiry and bounded encrypted storage. Request and
+decision queues have separate budgets; a peer cannot consume the requester's
+decision-return headroom. Incoming requests allow 64 rows / 384 KiB overall and
+16 rows / 96 KiB per assignee, keeping the new list projection below a bus frame.
+Other courier queues allow 64 rows / 2 MiB each. Decided request rows are retired;
+the signed decision retains the ID mapping and restart evidence. Decisions are sent before new requests, and request admission failure
+does not stop the decision courier. Expiry cleanup pages all six namespaces. Tool execution
 still uses the existing argument-bound single-use MCP gate.
 
 Choice/input refers to an accepted surface action at the current surface

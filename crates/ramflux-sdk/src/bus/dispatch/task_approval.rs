@@ -45,13 +45,20 @@ pub(super) fn decide(
 }
 pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     apply_decisions(account)?;
-    queue_requests(account)?;
+    if let Err(error) = queue_requests(account) {
+        tracing::warn!(%error,"task approval request admission deferred; decision courier continues");
+    }
     let now = now_unix_timestamp();
-    let rows = account.client.account_db()?.task_record_page::<Job>(
-        "task/approval_out/",
-        "task/approval_out/",
-        129,
+    let mut rows = account.client.account_db()?.task_record_page::<Job>(
+        "task/approval_decision_out/",
+        "task/approval_decision_out/",
+        65,
     )?;
+    rows.extend(account.client.account_db()?.task_record_page::<Job>(
+        "task/approval_out/",
+        "task/approval_out/",
+        65,
+    )?);
     let mut sent = 0;
     for (storage, mut job) in rows
         .into_iter()
@@ -243,13 +250,22 @@ fn apply_decisions(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
 fn cleanup(account: &LocalBusAccountState) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
     let now = now_unix_timestamp();
-    for (key, row) in db.task_record_page::<Value>("task/approval_", "task/approval_", 513)? {
-        let packet = row.get("packet").unwrap_or(&row);
-        let expires = packet["payload"]["request"]["approval"]["expires_at"]
-            .as_i64()
-            .or_else(|| row["expires_at"].as_i64());
-        if expires.is_some_and(|t| t <= now) {
-            db.delete_task_state(&key)?;
+    let mut cursor = "task/approval_".to_owned();
+    for _ in 0..6 {
+        let rows = db.task_record_page::<Value>("task/approval_", &cursor, 101)?;
+        let done = rows.len() < 101;
+        for (key, row) in rows {
+            cursor.clone_from(&key);
+            let packet = row.get("packet").unwrap_or(&row);
+            let expires = packet["payload"]["request"]["approval"]["expires_at"]
+                .as_i64()
+                .or_else(|| row["expires_at"].as_i64());
+            if expires.is_some_and(|t| t <= now) {
+                db.delete_task_state(&key)?;
+            }
+        }
+        if done {
+            break;
         }
     }
     Ok(())

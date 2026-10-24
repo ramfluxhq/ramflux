@@ -114,9 +114,12 @@ impl RamfluxClient {
     }
     pub(crate) fn queue_task_approval(&self, packet: &Packet) -> Result<(), SdkError> {
         let id = packet.id()?;
-        let phase =
-            if matches!(packet.payload, Payload::Request { .. }) { "request" } else { "decision" };
-        let key = key("approval_out", &format!("{phase}:{id}"));
+        let namespace = if matches!(packet.payload, Payload::Request { .. }) {
+            "approval_out"
+        } else {
+            "approval_decision_out"
+        };
+        let key = key(namespace, &id);
         if self.account_db()?.actor_state_exists(&key)? {
             return Ok(());
         }
@@ -131,12 +134,15 @@ impl RamfluxClient {
         value: &impl Serialize,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let (count, bytes) = db.task_state_usage("task/approval_")?;
+        let (namespace, _) =
+            key.rsplit_once('/').ok_or_else(|| invalid("approval storage namespace missing"))?;
+        let (count, bytes) = db.task_state_usage(&(namespace.to_owned() + "/"))?;
         let existing = db.actor_state_exists(key)?;
-        if (!existing && count >= 96)
+        let byte_limit = if namespace == "task/approval_in" { 384 * 1024 } else { 2 * 1024 * 1024 };
+        if (!existing && count >= 64)
             || bytes
                 .saturating_add(u64::try_from(serde_json::to_vec(value)?.len()).unwrap_or(u64::MAX))
-                > 8 * 1024 * 1024
+                > byte_limit
         {
             return Err(SdkError::InboundPending("task approval inbox capacity reached".into()));
         }
@@ -228,20 +234,36 @@ impl RamfluxClient {
             if matches!(packet.payload, Payload::Request { .. }) { "in" } else { "decision_in" };
         let id = packet.id()?;
         let storage = key(&format!("approval_{phase}"), &id);
+        self.persist_task_approval(packet, &id, phase, &storage)
+    }
+    fn persist_task_approval(
+        &self,
+        packet: &Packet,
+        id: &str,
+        phase: &str,
+        storage: &str,
+    ) -> Result<(), SdkError> {
+        let b = &packet.request().binding;
         let db = self.account_db()?;
         db.write_transaction(|| {
-            if let Some(old)=db.load_actor_state::<Packet>(&storage)? {
+            if let Some(old)=db.load_actor_state::<Packet>(storage)? {
                 // The first human decision wins across all requester devices.
                 if serde_json::to_vec(&old.payload)?!=serde_json::to_vec(&packet.payload)? {
                     return Err(crate::task_refusal::refused(crate::TaskRefusalCode::DecisionConsumed,"task approval already decided"));
                 }
                 return Ok(());
             }
+            if phase=="in" && db.actor_state_exists(&key("approval_decision_in",id))? {return Ok(());}
             let existing=db.task_record_page::<Packet>("task/approval_in/","task/approval_in/",129)?;
             if phase=="in" && existing.iter().filter(|(_,p)|p.principal==packet.principal).count()>=16 {
                 return Err(SdkError::InboundPending("task approval sender inbox capacity reached".into()));
             }
-            self.bounded_task_approval_store(&storage,packet)?;
+            if phase=="in" {
+                let used=existing.iter().filter(|(_,p)|p.principal==packet.principal).try_fold(0usize,|bytes,(_,p)|Ok::<_,SdkError>(bytes.saturating_add(serde_json::to_vec(p)?.len())))?;
+                if used.saturating_add(serde_json::to_vec(packet)?.len())>96*1024 {return Err(SdkError::InboundPending("task approval sender byte capacity reached".into()));}
+            }
+            self.bounded_task_approval_store(storage,packet)?;
+            if phase=="decision_in" {db.delete_task_state(&key("approval_in",id))?;}
             db.append_journal(&format!("task-approval:{phase}:{id}"),match &packet.payload {Payload::Request {..}=>"mcp.approval.request",Payload::Decision {approved:true,..}=>"mcp.approval.granted",Payload::Decision {approved:false,..}=>"mcp.approval.denied"},&json!({"approval_id":format!("task_approval_{id}"),"task_id":b.task_id,"conversation_id":b.conversation_id}),crate::time::now_unix_timestamp(),None)?;
             Ok(())
         })
@@ -295,6 +317,9 @@ impl RamfluxClient {
         let packet = self
             .account_db()?
             .load_actor_state::<Packet>(&key("approval_in", scoped))?
+            .or(self
+                .account_db()?
+                .load_actor_state::<Packet>(&key("approval_decision_in", scoped))?)
             .ok_or_else(|| invalid("task approval not found"))?;
         let b = &packet.request().binding;
         if b.conversation_id != conversation || b.task_id != task || b.step_id != step {
@@ -302,10 +327,6 @@ impl RamfluxClient {
                 crate::TaskRefusalCode::DecisionMismatch,
                 "approval belongs to another task intervention",
             ));
-        }
-        let target = NeedsMe::Approval { grant_id: packet.request().grant_body.grant_id.clone() };
-        if self.task_approval_binding(conversation, task, step, &target)? != *b {
-            return Err(invalid("task approval intervention changed"));
         }
         Ok(packet.request().approval.approval_id.clone())
     }
@@ -315,6 +336,7 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let packet = db
             .load_actor_state::<Packet>(&key("approval_in", id))?
+            .or(db.load_actor_state::<Packet>(&key("approval_decision_in", id))?)
             .ok_or_else(|| invalid("task approval not found"))?;
         let request = packet.request().clone();
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;

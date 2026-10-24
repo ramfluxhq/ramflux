@@ -62,8 +62,8 @@ fn a_requesters_second_device_reads_the_remote_approval_and_returns_a_task_bound
     assert_eq!(decision["decision_id"], "approval");
     assert_eq!(sibling.task_remote_approvals()?, Vec::<Value>::new());
     let jobs = sibling.account_db()?.task_record_page::<approval::Job>(
-        "task/approval_out/",
-        "task/approval_out/",
+        "task/approval_decision_out/",
+        "task/approval_decision_out/",
         10,
     )?;
     let reply = &jobs[0].1.packet;
@@ -130,5 +130,31 @@ fn an_assignee_cannot_show_different_arguments_from_the_human_signed_tool_capabi
     let changed = f.agent.sign_task_approval(packet.payload)?;
     assert!(f.human.accept_task_approval(&changed).is_err());
     assert_eq!(f.human.task_remote_approvals()?, Vec::<Value>::new());
+    Ok(())
+}
+
+#[test]
+fn peer_request_capacity_cannot_consume_the_requesters_decision_return_headroom() -> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let packet = request(&f)?;
+    f.human.accept_task_approval(&packet)?;
+    let db = f.human.account_db()?;
+    // Seed the local encrypted queue indexes at their boundary. The decision uses
+    // the actual validated request and the normal attended decision implementation.
+    for i in 0..63 {
+        db.persist_actor_state(&key("approval_in", &format!("full-{i}")), &packet)?;
+    }
+    for i in 0..32 {
+        db.persist_actor_state(
+            &key("approval_out", &format!("full-{i}")),
+            &approval::Job { packet: packet.clone(), attempts: 0, next_at: 0 },
+        )?;
+    }
+    let id = format!("task_approval_{}", packet.id()?);
+    let result = f.human.decide_task_approval(&id, true)?;
+    assert_eq!(result["status"], "approved");
+    assert_eq!(db.task_state_usage("task/approval_decision_out/")?.0, 1);
+    assert_eq!(db.task_state_usage("task/approval_decision_in/")?.0, 1);
     Ok(())
 }
