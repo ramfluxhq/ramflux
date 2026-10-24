@@ -112,7 +112,8 @@ fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Res
                 .client_record(directory, id)?
                 .unwrap_or_else(|| json!({"surface_id":id,"removed":true}));
             events.push((
-                "surface.changed".to_owned(),
+                if directory == "surface" { "surface.changed" } else { "surface.rejected" }
+                    .to_owned(),
                 crate::client::surface::surface_metadata(&view),
                 None,
             ));

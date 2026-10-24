@@ -2,15 +2,31 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-owned surfaces in authenticated conversation messages, independent of pair sessions.
+mod authored;
 mod backfill;
 pub(crate) mod carrier;
+mod control;
+mod control_context;
+mod decision;
+mod group;
+mod logical;
+mod own_history;
+pub(crate) use control::{ControlKind, SurfaceControl};
+pub(crate) use logical::SurfaceLogicalJob;
+mod delivery;
 mod fallback;
+mod origin;
+mod pending;
+mod persist;
 mod projection;
 mod read;
+mod scope;
+mod snapshot;
 pub(crate) use carrier::{Carrier, Payload, PayloadKind, command_id, invalid};
 pub(crate) use read::surface_metadata;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub(crate) use snapshot::SnapshotProof;
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredSurface {
     pub surface_id: String,
@@ -29,6 +45,10 @@ pub(crate) struct Outcome {
     pub accepted: bool,
     pub fallback_text: String,
     pub renderer_error: Option<Value>,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default)]
+    pub queued: bool,
 }
 impl Outcome {
     fn accepted(
@@ -40,14 +60,26 @@ impl Outcome {
             accepted: true,
             fallback_text: fallback::render(author, &content.fallback_text),
             renderer_error: None,
+            retryable: false,
+            queued: false,
         })
     }
 
+    fn protocol_rejected(error: &ramflux_protocol::SurfaceReject) -> Self {
+        let retryable = matches!(error, ramflux_protocol::SurfaceReject::NotCreated)
+            || matches!(error,ramflux_protocol::SurfaceReject::Version { expected, actual } if actual>expected);
+        let mut outcome =
+            Self::rejected(serde_json::json!({"code":"renderer_error","reject":error}));
+        outcome.retryable = retryable;
+        outcome
+    }
     pub(crate) fn rejected(error: Value) -> Self {
         Self {
             accepted: false,
             fallback_text: "[Surface rejected]".into(),
             renderer_error: Some(error),
+            retryable: false,
+            queued: false,
         }
     }
 }
@@ -68,4 +100,14 @@ mod tests;
 pub(crate) struct SurfaceSender<'a> {
     pub principal: &'a str,
     pub device: &'a str,
+    pub envelope_id: &'a str,
+    pub expires_at: Option<i64>,
+    pub group_epoch: Option<u64>,
+}
+
+pub(super) fn receipt_key(carrier: &Carrier) -> Result<String, crate::SdkError> {
+    scoped_key(
+        "receipt_v2",
+        &[&carrier.surface_reference()?, &carrier.sender_principal_id, &carrier.message_id],
+    )
 }

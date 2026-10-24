@@ -34,6 +34,7 @@ pub(super) async fn publish(
     request: &LocalBusFrame,
     sender: &mpsc::Sender<EventBatch>,
 ) -> Result<(), SdkError> {
+    client.expire_surface_pending()?;
     let db = client.account_db()?;
     loop {
         let entries = db.pending_outbox(256)?;
