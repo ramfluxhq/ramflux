@@ -18,13 +18,21 @@ impl RamfluxClient {
         // Preserve the existing bounded pinned-owner safety observation, even for ownership
         // conflicts, but only after the new record and its exact keys authenticate.
         db.write_transaction(|| self.record_pinned_group_key_changes(manifest))?;
+        if let Err(error) =
+            self.check_observed_set(record).and_then(|()| self.check_directory_ownership(manifest))
+        {
+            self.record_authority_rejection(record)?;
+            return Err(error);
+        }
+        let previous = self.observed_device_set(&record.principal_commitment)?;
+        let authority_changed = previous.as_ref().is_some_and(|r| r.devices != record.devices);
         db.write_transaction(|| {
             self.check_observed_set(record)?;
             self.check_directory_ownership(manifest)?;
             db.persist_actor_state(&record_key(&record.principal_commitment), record)?;
             if db.client_record("identity",&record.principal_id)?.is_none() {db.persist_client_record("identity",&record.principal_id,&json!({"principal_id":record.principal_id,"contact_identity_commitment":record.principal_commitment}))?;}
             self.apply_record_retirements(record)?;
-            self.write_directory_metadata(manifest)?;
+            self.write_directory_metadata(manifest,authority_changed)?;
             db.persist_actor_state(
                 &format!("identity/manifest/{}", manifest.principal_id),
                 manifest,
@@ -32,6 +40,20 @@ impl RamfluxClient {
             Ok::<_, SdkError>(())
         })?;
         self.finish_pair_retirement()
+    }
+    fn record_authority_rejection(&self, record: &SignedDeviceSetRecord) -> Result<(), SdkError> {
+        let known = self.observed_device_set(&record.principal_commitment)?.is_some()
+            || self.account_db()?.client_record("identity", &record.principal_id)?.is_some();
+        if !known {
+            return Ok(());
+        } // Existing bounded group-owner observations cover unknown claimants.
+        let key = ramflux_protocol::hash_base64url(
+            "ramflux.sdk.authority_rejection.v1",
+            record.principal_id.as_bytes(),
+        );
+        self.account_db()?.persist_actor_state(&format!("identity/rejected_set/{key}"), record)?;
+        self.account_db()?.append_journal(&format!("identity-authority-rejected:{key}"),"safety.changed",&json!({"principal_id":record.principal_id,"principal_commitment":record.principal_commitment,"device_set_epoch":record.device_set_epoch,"reason":"root_authority_rollback_equivocation_or_owner_conflict"}),crate::prelude::now_unix_timestamp(),None)?;
+        Ok(())
     }
     pub(crate) fn check_observed_set(&self, next: &SignedDeviceSetRecord) -> Result<(), SdkError> {
         if let Some(old) = self
@@ -57,14 +79,13 @@ impl RamfluxClient {
         for entry in
             &manifest.signed_device_set.as_ref().ok_or_else(|| invalid("set absent"))?.devices
         {
-            if let Some(old) = db.client_record("device", &entry.device_id)? {
-                if old["principal_commitment"]
+            if let Some(old) = db.client_record("device", &entry.device_id)?
+                && (old["principal_commitment"]
                     .as_str()
                     .is_some_and(|c| c != manifest.principal_commitment)
-                    || old["principal_id"].as_str().is_some_and(|p| p != manifest.principal_id)
-                {
-                    return Err(invalid("device owner changed"));
-                }
+                    || old["principal_id"].as_str().is_some_and(|p| p != manifest.principal_id))
+            {
+                return Err(invalid("device owner changed"));
             }
         }
         Ok(())
@@ -102,7 +123,15 @@ impl RamfluxClient {
                         ) != entry.agreement_key_commitment
                     });
                 if changed {
-                    self.remove_device_pair(&entry.device_id, "root_authorized_key_rotation")?;
+                    if let Some(local) = &self.device_branch
+                        && local.device_id == entry.device_id
+                    {
+                        for peer in db.pair_peer_devices(&local.device_id)? {
+                            self.remove_device_pair(&peer, "root_authorized_local_key_rotation")?;
+                        }
+                    } else {
+                        self.remove_device_pair(&entry.device_id, "root_authorized_key_rotation")?;
+                    }
                 }
             }
         }
@@ -111,6 +140,7 @@ impl RamfluxClient {
     fn write_directory_metadata(
         &self,
         manifest: &SdkDeviceManifestResponse,
+        authority_changed: bool,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let record = manifest.signed_device_set.as_ref().ok_or_else(|| invalid("set absent"))?;
@@ -118,9 +148,10 @@ impl RamfluxClient {
         let material = crate::client::contact::contact_safety_material_from_manifest(manifest)?;
         let hash =
             ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&material.devices));
-        let changed = old["device_set_hash"].as_str().is_some_and(|old| old != hash);
+        let changed =
+            authority_changed || old["device_set_hash"].as_str().is_some_and(|old| old != hash);
         let devices=manifest.devices.iter().map(|d|json!({"id":d.device_id,"device_id":d.device_id,"target_delivery_id":d.target_delivery_id,"signing_public_key":d.branch_public_key,"device_epoch":d.device_epoch})).collect::<Vec<_>>();
-        db.persist_client_record("identity",&manifest.principal_id,&json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":record.principal_kind,"kind_verified":true,"device_set_epoch":record.device_set_epoch,"is_self":self.device_branch.as_ref().is_some_and(|b|b.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":hash,"safety_number":if changed {Value::Null} else {old["safety_number"].clone()}}))?;
+        db.persist_client_record("identity",&manifest.principal_id,&json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":record.principal_kind,"kind_asserted":true,"kind_verified":false,"device_set_epoch":record.device_set_epoch,"is_self":self.device_branch.as_ref().is_some_and(|b|b.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":hash,"safety_number":if changed {Value::Null} else {old["safety_number"].clone()}}))?;
         db.persist_client_record(
             "commitment",
             &manifest.principal_commitment,
@@ -172,12 +203,14 @@ impl RamfluxClient {
                 )?;
             }
             db.rotate_root_authorized_group_device_key(
-                &group,
-                &device.device_id,
-                &manifest.principal_id,
-                &manifest.principal_commitment,
-                &pin,
-                &device.branch_public_key,
+                ramflux_storage::RootAuthorizedGroupKeyRotation {
+                    group_id: &group,
+                    device_id: &device.device_id,
+                    principal_id: &manifest.principal_id,
+                    principal_commitment: &manifest.principal_commitment,
+                    previous_key: &pin,
+                    next_key: &device.branch_public_key,
+                },
             )?;
         }
         Ok(())

@@ -88,13 +88,16 @@ impl AccountDb {
     /// Rejects ownership/key races and returns SQL failures. This grants no authority to a directory.
     pub fn rotate_root_authorized_group_device_key(
         &self,
-        group: &str,
-        device: &str,
-        principal: &str,
-        commitment: &str,
-        old: &str,
-        new: &str,
+        rotation: crate::RootAuthorizedGroupKeyRotation<'_>,
     ) -> Result<(), StorageError> {
+        let crate::RootAuthorizedGroupKeyRotation {
+            group_id: group,
+            device_id: device,
+            principal_id: principal,
+            principal_commitment: commitment,
+            previous_key: old,
+            next_key: new,
+        } = rotation;
         let changed=self.connection.execute("UPDATE group_member_device_key SET device_signing_public_key=?6 WHERE group_id=?1 AND member_id=?2 AND member_principal_id=?3 AND principal_commitment=?4 AND device_signing_public_key=?5",params![group,device,principal,commitment,old,new])?;
         if changed != 1 {
             return Err(StorageError::GroupPermissionDenied);

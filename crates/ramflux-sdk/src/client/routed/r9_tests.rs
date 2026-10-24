@@ -44,7 +44,7 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
             serde_json::to_value(&advertised)?,
             &advertised.principal_commitment,
         )?;
-        bob.client.persist_identity_directory(&advertised)?;
+        assert!(bob.client.persist_identity_directory(&advertised).is_err());
     }
     trust(&impostor, &bob)?;
     impostor.client.create_group("pinned", "alice")?;

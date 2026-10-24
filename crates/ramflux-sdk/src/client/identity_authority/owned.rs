@@ -42,25 +42,24 @@ impl RamfluxClient {
     ) -> Result<BranchProofDocument, SdkError> {
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let agreement = self
-            .load_x3dh_private_state(&branch.device_id)
-            .ok()
-            .filter(|s| {
-                s.bundle.device_identity_ed25519_public
-                    == ramflux_protocol::encode_base64url(
-                        branch.signing_key.verifying_key().to_bytes(),
-                    )
-            })
-            .map_or_else(
-                || {
-                    X25519KeyPair::from_seed(x3dh_private_seed(
-                        "ramflux.sdk.x3dh.identity.v1",
-                        &branch.signing_key.to_bytes(),
-                    ))
-                    .public
-                },
-                |s| s.bundle.identity_key,
-            );
+        let agreement = if self
+            .projection_checkpoint(&x3dh_private_checkpoint_name(&branch.device_id))?
+            .is_some()
+        {
+            let stored = self.load_x3dh_private_state(&branch.device_id)?;
+            if stored.bundle.device_identity_ed25519_public
+                != ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
+            {
+                return Err(invalid("stored prekeys belong to another device signing key"));
+            }
+            stored.bundle.identity_key
+        } else {
+            X25519KeyPair::from_seed(x3dh_private_seed(
+                "ramflux.sdk.x3dh.identity.v1",
+                &branch.signing_key.to_bytes(),
+            ))
+            .public
+        };
         let mut proof = ramflux_crypto::authorize_device_branch_v2(
             root,
             branch,
@@ -128,6 +127,70 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
+    fn legacy_migration_entries(
+        &self,
+        remote: &SdkDeviceManifestResponse,
+        local: &str,
+    ) -> Result<Vec<SignedDeviceSetEntry>, SdkError> {
+        let approvals = self
+            .account_db()?
+            .load_actor_state::<Vec<BranchProofDocument>>("identity/legacy_authorizations")?
+            .unwrap_or_default();
+        let mut devices = remote
+            .devices
+            .iter()
+            .map(|d| d.device_id.clone())
+            .chain(approvals.iter().map(|p| p.device_id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        let path = local_bus_account_manifest_path(
+            self.account_index()?.root(),
+            &self.account_db()?.local_account_id,
+        );
+        if path.exists() {
+            devices.extend(
+                read_local_bus_account_manifest(&path)?.devices.into_iter().map(|d| d.device_id),
+            );
+        }
+        devices.remove(local);
+        let mut entries = Vec::new();
+        for device in devices {
+            let proof = approvals
+                .iter()
+                .find(|p| p.device_id == device)
+                .or_else(|| {
+                    remote
+                        .devices
+                        .iter()
+                        .find(|d| d.device_id == device)
+                        .and_then(|d| d.branch_proof.key_binding.as_ref().map(|_| &d.branch_proof))
+                })
+                .ok_or_else(|| {
+                    invalid(&format!("migration requires a root-bound authorization for {device}"))
+                })?;
+            self.verify_owned_authorization(proof)?;
+            entries.push(entry_from_proof(proof)?);
+        }
+        Ok(entries)
+    }
+    pub(crate) fn validate_owned_registration_set(
+        &self,
+        record: &SignedDeviceSetRecord,
+        proof: &BranchProofDocument,
+    ) -> Result<(), SdkError> {
+        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        ramflux_crypto::verify_signed_device_set(&root.signing_key.verifying_key(), record)?;
+        self.check_observed_set(record)?;
+        let entry = entry_from_proof(proof)?;
+        if record.principal_id != root.principal_id
+            || record.principal_kind != self.local_principal_kind()?
+            || !record.devices.contains(&entry)
+        {
+            return Err(invalid(
+                "staged registration authority is stale or belongs to another device",
+            ));
+        }
+        Ok(())
+    }
     pub(crate) fn prepare_owned_authority(
         &self,
         remote: Option<&SdkDeviceManifestResponse>,
@@ -158,7 +221,7 @@ impl RamfluxClient {
                     &root.signing_key.verifying_key(),
                     record,
                 )?;
-                self.check_observed_set(record)?;
+                self.accept_owned_record(record)?;
                 previous = Some(record.clone());
             }
         }
@@ -181,37 +244,13 @@ impl RamfluxClient {
         {
             return Err(invalid("local device is revoked"));
         }
-        if let Some(remote) = remote.filter(|m| m.signed_device_set.is_none()) {
-            let approvals = self
-                .account_db()?
-                .load_actor_state::<Vec<BranchProofDocument>>("identity/legacy_authorizations")?
-                .unwrap_or_default();
-            for device in &remote.devices {
-                if device.device_id == local.device_id {
-                    continue;
-                }
-                let proof = approvals
-                    .iter()
-                    .find(|p| p.device_id == device.device_id)
-                    .or_else(|| {
-                        device.branch_proof.key_binding.as_ref().map(|_| &device.branch_proof)
-                    })
-                    .ok_or_else(|| {
-                        invalid(&format!(
-                            "migration requires a root-bound authorization for {}",
-                            device.device_id
-                        ))
-                    })?;
-                self.verify_owned_authorization(proof)?;
-                entries.push(entry_from_proof(proof)?);
-            }
+        if let Some(remote) = remote.filter(|m| m.signed_device_set.is_none() && previous.is_none())
+        {
+            entries.extend(self.legacy_migration_entries(remote, &local.device_id)?);
         }
         entries.retain(|e| e.device_id != local.device_id);
         entries.push(local);
         entries.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-        if let Some(old) = previous.as_ref().filter(|r| r.devices == entries) {
-            return Ok(old.clone());
-        }
         let pending = self
             .account_db()?
             .load_actor_state::<SignedDeviceSetRecord>("identity/owned_pending_set")?;
@@ -225,6 +264,9 @@ impl RamfluxClient {
             if let Some(previous) = &previous {
                 ramflux_crypto::validate_device_set_transition(&pending, previous)?;
             }
+        }
+        if let Some(old) = previous.as_ref().filter(|r| r.devices == entries) {
+            return Ok(old.clone());
         }
         let epoch = previous
             .as_ref()
@@ -258,10 +300,20 @@ impl RamfluxClient {
             self.account_db()?
                 .persist_actor_state(&record_key(&record.principal_commitment), record)?;
             self.apply_record_retirements(record)?;
-            self.account_db()?.remove_actor_state("identity/owned_pending_set")?;
+            if let Some(pending) = self
+                .account_db()?
+                .load_actor_state::<SignedDeviceSetRecord>("identity/owned_pending_set")?
+            {
+                if record.device_set_epoch < pending.device_set_epoch {
+                    ramflux_crypto::validate_device_set_transition(record, &pending)?;
+                } else {
+                    ramflux_crypto::validate_device_set_transition(&pending, record)?;
+                    self.account_db()?.remove_actor_state("identity/owned_pending_set")?;
+                }
+            }
             Ok::<_, SdkError>(())
         })?;
-        Ok(())
+        self.finish_pair_retirement()
     }
     pub(crate) async fn prepare_owned_authority_via_gateway(
         &self,

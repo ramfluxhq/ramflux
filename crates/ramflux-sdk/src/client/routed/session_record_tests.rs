@@ -363,7 +363,9 @@ async fn reset_requests_use_the_verified_identity_directory_delivery_alias() -> 
     let mut alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
-    bob.client.account_db()?.persist_client_record("identity","alice",&serde_json::json!({"devices":[{"device_id":"alice","target_delivery_id":"alice-delivery"}]}))?;
+    let mut manifest = crate::client::identity_authority::test_support::manifest(&alice.client)?;
+    manifest.devices[0].target_delivery_id = "alice-delivery".into();
+    bob.client.persist_identity_directory(&manifest)?;
     let packet = gap(&alice, &bob, "alias-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await.is_err());

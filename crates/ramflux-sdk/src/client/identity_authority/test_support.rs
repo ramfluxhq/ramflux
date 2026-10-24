@@ -9,11 +9,16 @@ pub(crate) fn sign_manifest(
     manifest: &mut SdkDeviceManifestResponse,
     epoch: u64,
 ) -> Result<(), SdkError> {
+    let kind = manifest
+        .devices
+        .first()
+        .and_then(|d| d.branch_proof.key_binding.as_ref())
+        .map_or(PrincipalKind::Human, |b| b.principal_kind);
     let mut entries = Vec::new();
     for device in &mut manifest.devices {
         device.branch_proof.key_binding = Some(DeviceKeyBinding {
             version: 2,
-            principal_kind: PrincipalKind::Human,
+            principal_kind: kind,
             branch_signing_public_key: device.branch_public_key.clone(),
             agreement_identity_public_key: ramflux_protocol::encode_base64url(
                 device.prekey_bundle.identity_key,
@@ -39,7 +44,7 @@ pub(crate) fn sign_manifest(
     manifest.signed_device_set = Some(ramflux_crypto::sign_device_set(
         root,
         ramflux_crypto::DeviceSetSigningInput {
-            principal_kind: PrincipalKind::Human,
+            principal_kind: kind,
             device_set_epoch: epoch,
             devices: entries,
         },

@@ -28,9 +28,11 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
         let manifest = read_local_bus_account_manifest(&path)?;
         if let Some(mut value) = db.client_record("identity", &config.principal_id)? {
             value["display_name"] = json!(manifest.label);
-            let verified = account.client.verified_principal_kind(&config.principal_id)?;
-            value["kind_verified"] = json!(verified.is_some());
-            value["kind"] = if let Some(kind) = verified {
+            let asserted = account.client.root_asserted_principal_kind(&config.principal_id)?;
+            value["kind_asserted"] = json!(asserted.is_some());
+            value["kind_verified"] =
+                json!(account.client.verified_principal_kind(&config.principal_id)?.is_some());
+            value["kind"] = if let Some(kind) = asserted {
                 json!(kind)
             } else {
                 json!(manifest.kind.unwrap_or_else(|| {

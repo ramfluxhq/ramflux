@@ -282,6 +282,7 @@ impl RamfluxClient {
                 "identity/registration_set",
             )?
             .map_or_else(|| self.prepare_owned_authority(None), Ok)?;
+        self.validate_owned_registration_set(&record, &proof)?;
         Ok(SdkIdentityRegisterRequest {
             device_set: Some(record),
             root_public_key: ramflux_protocol::encode_base64url(

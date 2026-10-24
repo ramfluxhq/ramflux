@@ -51,6 +51,6 @@ pub(super) async fn dispatch_identity_authority(
         .signed_device_set
         .ok_or_else(|| SdkError::InboundRejected("signed device set absent".into()))?;
     Ok(local_bus_ok(
-        json!({"principal_id":record.principal_id,"device_set_epoch":record.device_set_epoch,"principal_kind":record.principal_kind,"kind_verified":true,"devices":record.devices}),
+        json!({"principal_id":record.principal_id,"device_set_epoch":record.device_set_epoch,"principal_kind":record.principal_kind,"kind_asserted":true,"kind_verified":account.client.verified_principal_kind(&record.principal_id)?.is_some(),"devices":record.devices}),
     ))
 }

@@ -284,3 +284,14 @@ pub struct GroupMemberKeyBinding {
     pub principal_id: Option<String>,
     pub principal_commitment: Option<String>,
 }
+
+/// Compare-and-swap parameters for a caller-verified root-authorized group key rotation.
+#[derive(Clone, Copy, Debug)]
+pub struct RootAuthorizedGroupKeyRotation<'a> {
+    pub group_id: &'a str,
+    pub device_id: &'a str,
+    pub principal_id: &'a str,
+    pub principal_commitment: &'a str,
+    pub previous_key: &'a str,
+    pub next_key: &'a str,
+}

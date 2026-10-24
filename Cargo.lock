@@ -2602,6 +2602,7 @@ dependencies = [
  "hmac",
  "mime",
  "ramflux-crypto",
+ "ramflux-node-core",
  "ramflux-protocol",
  "ramflux-storage",
  "ramflux-sync",

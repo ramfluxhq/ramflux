@@ -25,13 +25,13 @@ impl RamfluxClient {
         let old =
             remote.ok_or_else(|| invalid("migrate legacy identity before signed revocation"))?;
         ramflux_crypto::verify_signed_device_set(&root.signing_key.verifying_key(), &old)?;
-        self.check_observed_set(&old)?;
+        self.accept_owned_record(&old)?;
         let mut entries = old.devices.clone();
         let entry = entries
             .iter_mut()
             .find(|e| e.device_id == device)
             .ok_or_else(|| invalid("device not in own signed set"))?;
-        let next = if entry.status == DeviceSetStatus::Revoked {
+        let mut next = if entry.status == DeviceSetStatus::Revoked {
             old.clone()
         } else {
             entry.status = DeviceSetStatus::Revoked;
@@ -49,6 +49,21 @@ impl RamfluxClient {
             )?
         };
         ramflux_crypto::validate_device_set_transition(&old, &next)?;
+        if let Some(pending) = self
+            .account_db()?
+            .load_actor_state::<SignedDeviceSetRecord>("identity/owned_pending_set")?
+        {
+            if !pending
+                .devices
+                .iter()
+                .any(|e| e.device_id == device && e.status == DeviceSetStatus::Revoked)
+            {
+                return Err(invalid("unacknowledged root publication requires reconciliation"));
+            }
+            ramflux_crypto::validate_device_set_transition(&old, &pending)?;
+            next = pending;
+        }
+        self.retain_owned_revocation_proposal(&next)?;
         let ack: SignedDeviceSetRecord = sdk_gateway_post_json(
             gateway,
             "/mvp2/device-set",
@@ -65,6 +80,33 @@ impl RamfluxClient {
         }
         self.accept_owned_record(&ack)?;
         Ok(ack)
+    }
+    fn retain_owned_revocation_proposal(
+        &self,
+        record: &SignedDeviceSetRecord,
+    ) -> Result<(), SdkError> {
+        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        ramflux_crypto::verify_signed_device_set(&root.signing_key.verifying_key(), record)?;
+        if record.principal_id != root.principal_id {
+            return Err(invalid("own revocation principal mismatch"));
+        }
+        let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            db.persist_actor_state("identity/owned_pending_set", record)?;
+            for entry in record.devices.iter().filter(|e| e.status == DeviceSetStatus::Revoked) {
+                if &entry.device_id == local {
+                    for peer in db.pair_peer_devices(local)? {
+                        self.remove_device_pair(&peer, "root_signed_revocation_pending")?;
+                    }
+                } else {
+                    self.remove_device_pair(&entry.device_id, "root_signed_revocation_pending")?;
+                }
+                db.persist_actor_state(&format!("device/revoked/{}", entry.device_id), &true)?;
+            }
+            Ok::<_, SdkError>(())
+        })?;
+        self.finish_pair_retirement()
     }
     /// Read the highest accepted signed record for an observed identity, including tombstones.
     /// # Errors

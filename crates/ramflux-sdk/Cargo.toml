@@ -68,6 +68,7 @@ tracing = "0.1"
 zeroize = { version = "1.8", features = ["serde"] }
 
 [dev-dependencies]
+ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
 
 [build-dependencies]

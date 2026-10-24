@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn revoke_endpoint(
     root: &std::path::Path,
     expected_root: String,
+    old: ramflux_protocol::SignedDeviceSetRecord,
 ) -> Result<(GatewayQuicEndpointConfig, tokio::task::JoinHandle<Result<(), SdkError>>), SdkError> {
     let certified = rcgen::generate_simple_self_signed(vec!["revoke.test".to_owned()])
         .map_err(|error| invalid(&error.to_string()))?;
@@ -28,34 +29,43 @@ async fn revoke_endpoint(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await?;
-        let mut stream =
-            tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls)).accept(socket).await?;
-        let length = stream.read_u32().await?;
-        if length > 65536 {
-            return Err(invalid("unexpected revoke request size"));
+        for index in 0..2 {
+            let (socket, _) = listener.accept().await?;
+            let mut stream = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls.clone()))
+                .accept(socket)
+                .await?;
+            let length = stream.read_u32().await?;
+            if length > 65536 {
+                return Err(invalid("unexpected revoke request size"));
+            }
+            let mut bytes = vec![0; usize::try_from(length).map_err(|_| invalid("length"))?];
+            stream.read_exact(&mut bytes).await?;
+            let request: ramflux_transport::GatewayQuicRequest = serde_json::from_slice(&bytes)?;
+            let body = if index == 0 {
+                assert_eq!(request.method, "GET");
+                assert_eq!(request.path, format!("/mvp2/device-set/{}", old.principal_commitment));
+                serde_json::to_value(&old)?
+            } else {
+                assert_eq!(request.method, "POST");
+                assert_eq!(request.path, "/mvp2/device-set");
+                assert_eq!(request.body["root_public_key"], expected_root);
+                let next: ramflux_protocol::SignedDeviceSetRecord =
+                    serde_json::from_value(request.body["record"].clone())?;
+                ramflux_crypto::verify_signed_device_set(
+                    &ramflux_crypto::verifying_key_from_base64url(&expected_root)?,
+                    &next,
+                )?;
+                ramflux_crypto::validate_device_set_transition(&old, &next)?;
+                serde_json::to_value(next)?
+            };
+            let response =
+                serde_json::to_vec(&ramflux_transport::GatewayQuicResponse { status: 200, body })?;
+            stream
+                .write_u32(u32::try_from(response.len()).map_err(|_| invalid("response"))?)
+                .await?;
+            stream.write_all(&response).await?;
+            stream.flush().await?;
         }
-        let mut bytes = vec![0; usize::try_from(length).map_err(|_| invalid("length"))?];
-        stream.read_exact(&mut bytes).await?;
-        let request: ramflux_transport::GatewayQuicRequest = serde_json::from_slice(&bytes)?;
-        assert_eq!(request.method, "POST");
-        assert_eq!(request.path, "/mvp1/device/revoke");
-        assert_eq!(request.body["root_public_key"], expected_root);
-        let signature =
-            request.body["signature"].as_str().ok_or_else(|| invalid("revoke signature"))?;
-        let body = json!({"device_id":request.body["device_id"],"principal_commitment":request.body["principal_commitment"],"revoked_at":request.body["revoked_at"]});
-        ramflux_crypto::verify_canonical_signature(
-            &ramflux_protocol::canonical_json_bytes(&body)?,
-            signature,
-            &expected_root,
-        )?;
-        let response = serde_json::to_vec(&ramflux_transport::GatewayQuicResponse {
-            status: 200,
-            body: json!({"device_id":request.body["device_id"],"revoked":true}),
-        })?;
-        stream.write_u32(u32::try_from(response.len()).map_err(|_| invalid("response"))?).await?;
-        stream.write_all(&response).await?;
-        stream.flush().await?;
         Ok(())
     });
     Ok((
@@ -73,13 +83,15 @@ async fn revoke_endpoint(
     ))
 }
 async fn revoked_fixture(target: &str) -> Result<(Fixture, Fixture), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
+    let mut alice = Fixture::owned("alice", "bob", 61, 42)?;
     let mut bob = Fixture::new("bob", 61)?;
     settle(&mut alice, &mut bob).await?;
     assert!(bob.client.begin_pair_recovery("bob", "alice", now_unix_timestamp())?);
     let public = ramflux_crypto::public_key_base64url_from_seed([61; 32]);
     let commitment = crate::prekey::identity_root_public_key_commitment(&public)?;
-    let (gateway, server) = revoke_endpoint(&bob.root, public).await?;
+    let old =
+        bob.client.observed_device_set(&commitment)?.ok_or_else(|| invalid("own signed set"))?;
+    let (gateway, server) = revoke_endpoint(&bob.root, public, old).await?;
     let body = LocalBusAccountCreateRequest {
         label: None,
         kind: None,
@@ -142,7 +154,7 @@ async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_r
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?.len(),
         0
     );
-    super::review::trust(&bob, &alice)?;
+    assert!(super::review::trust(&bob, &alice).is_err());
     assert!(matches!(bob.client.trusted_device("alice"), Err(SdkError::InboundRejected(_))));
     Ok(())
 }

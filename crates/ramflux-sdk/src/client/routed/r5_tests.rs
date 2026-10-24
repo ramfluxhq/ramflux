@@ -6,7 +6,11 @@ use super::review::{pool, trust};
 use super::*;
 pub(super) fn outgoing(sender: &Fixture, receiver: &Fixture, id: &str) -> GatewayDirectMessage {
     let mut msg = message(id, "recovery-thread");
-    msg.source_principal_id.clone_from(&sender.id);
+    msg.source_principal_id = sender
+        .client
+        .device_branch
+        .as_ref()
+        .map_or_else(|| sender.id.clone(), |b| b.principal_id.clone());
     msg.sender_id.clone_from(&sender.id);
     msg.recipient_device_id = Some(receiver.id.clone());
     msg.target_delivery_id.clone_from(&receiver.id);

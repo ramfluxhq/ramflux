@@ -973,6 +973,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                 "already_submitted": true,
             })));
         }
+        let qualified=account.client.root_qualified_device_lookup(recipient_device_id)?;
         let prekey = if let Some(federation) = route.federation.as_ref() {
             let prekey_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
                 SdkError::LocalBus(
@@ -980,9 +981,9 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                         .to_owned(),
                 )
             })?;
-            sdk_fetch_prekey_bundle(prekey_url, recipient_device_id)?
+            sdk_fetch_prekey_bundle(prekey_url, &qualified)?
         } else {
-            engine.fetch_prekey_bundle(recipient_device_id).await?
+            engine.fetch_prekey_bundle(&qualified).await?
         };
         let target_delivery_id =
             route.target_delivery_id.clone().or(prekey.target_delivery_id).ok_or_else(|| {
