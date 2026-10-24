@@ -14,7 +14,9 @@ pub(crate) async fn dispatch_a2i_bus_request(
     match request.method.as_str() {
         "a2i.append" => {
             let body: LocalBusA2iAppendRequest = serde_json::from_value(request.body.clone())?;
-            let event = A2iControlEvent {
+            let mut event = A2iControlEvent {
+                source_principal_id: None,
+                source_principal_commitment: None,
                 event_id: body.event_id,
                 event_type: body.event_type,
                 source_device_id: body.source_device_id,
@@ -25,6 +27,7 @@ pub(crate) async fn dispatch_a2i_bus_request(
                 created_at: body.created_at,
                 acknowledged: false,
             };
+            account.client.bind_owned_a2i_event(&mut event)?;
             let mut engine = account.take_live_engine().await?;
             let entry = account
                 .client
@@ -44,7 +47,7 @@ pub(crate) async fn dispatch_a2i_bus_request(
             let received = received?;
             for event in received {
                 let key = crate::client::routed::control::a2i_key(
-                    &event.source_device_id,
+                    &account.client.a2i_event_identity(&event)?,
                     &event.event_id,
                 )?;
                 account.pending_a2i.entry(key).or_insert(event);
@@ -58,7 +61,7 @@ pub(crate) async fn dispatch_a2i_bus_request(
                     let mut row = serde_json::to_value(event)?;
                     row["acknowledge_id"] =
                         serde_json::json!(crate::client::routed::control::a2i_key(
-                            &event.source_device_id,
+                            &account.client.a2i_event_identity(event)?,
                             &event.event_id
                         )?);
                     Ok(row)
@@ -87,7 +90,10 @@ pub(crate) async fn dispatch_a2i_bus_request(
             let mut acknowledged = event.clone();
             acknowledged.acknowledged = true;
             account.client.account_db()?.persist_actor_state(
-                &crate::client::routed::control::a2i_key(&event.source_device_id, &event.event_id)?,
+                &crate::client::routed::control::a2i_key(
+                    &account.client.a2i_event_identity(&event)?,
+                    &event.event_id,
+                )?,
                 &acknowledged,
             )?;
             *event = acknowledged;
@@ -203,14 +209,14 @@ fn a2ui_action_result_event_body(action: &A2uiAction, accepted: bool) -> serde_j
 }
 
 fn restore_a2i_cache(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+    account.pending_a2i.clear();
     for event in account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")? {
-        let key =
-            crate::client::routed::control::a2i_key(&event.source_device_id, &event.event_id)?;
-        account.pending_a2i.retain(|old_key, old| {
-            old_key == &key
-                || old.event_id != event.event_id
-                || old.source_device_id != event.source_device_id
-        });
+        // Unattributed legacy records remain read-only and cannot satisfy a qualified lookup.
+        if event.source_principal_commitment.is_none() || event.source_principal_id.is_none() {
+            continue;
+        }
+        let source = account.client.a2i_event_identity(&event)?;
+        let key = crate::client::routed::control::a2i_key(&source, &event.event_id)?;
         account.pending_a2i.insert(key, event);
     }
     Ok(())

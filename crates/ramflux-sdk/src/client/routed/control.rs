@@ -40,10 +40,11 @@ impl RamfluxClient {
             {
                 return Err(invalid("control event device binding mismatch"));
             }
-            if let Some(old) = self.account_db()?.load_actor_state::<A2iControlEvent>(&a2i_key(
-                &event.source_device_id,
-                &event.event_id,
-            )?)? {
+            let source = self.bind_received_a2i_event(&mut event, entry)?;
+            if let Some(old) = self
+                .account_db()?
+                .load_actor_state::<A2iControlEvent>(&a2i_key(&source, &event.event_id)?)?
+            {
                 event.acknowledged = old.acknowledged;
                 if event != old {
                     return Err(invalid(
@@ -52,11 +53,12 @@ impl RamfluxClient {
                 }
             }
             self.account_db()?.persist_actor_state(
-                &super::committed_key(entry)?.replace("routed/committed/", "routed/control/"),
+                &self
+                    .authenticated_committed_key(entry)?
+                    .replace("routed/committed/", "routed/control/"),
                 &event,
             )?;
-            self.account_db()?
-                .persist_actor_state(&a2i_key(&event.source_device_id, &event.event_id)?, &event)?;
+            self.account_db()?.persist_actor_state(&a2i_key(&source, &event.event_id)?, &event)?;
         } else {
             let event: Value = serde_json::from_slice(body)?;
             if matches!(
@@ -75,7 +77,7 @@ impl RamfluxClient {
                         floor,
                     )?;
                 }
-                self.account_db()?.append_journal(&format!("pair-reset:{}", super::committed_key(entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device,"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
+                self.account_db()?.append_journal(&format!("pair-reset:{}", self.authenticated_committed_key(entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device,"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
             } else {
                 self.project_contact_control(entry, &event)?;
             }
@@ -210,12 +212,19 @@ impl RamfluxClient {
     }
 }
 
-pub(crate) fn a2i_key(source: &str, event: &str) -> Result<String, SdkError> {
+pub(crate) fn a2i_key(
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    event: &str,
+) -> Result<String, SdkError> {
     Ok(format!(
         "a2i/scoped/{}",
         ramflux_crypto::blake3_256_base64url(
-            "ramflux.a2i.sender.v2",
-            &ramflux_protocol::canonical_json_bytes(&(source, event))?
+            "ramflux.a2i.sender.v3",
+            &ramflux_protocol::canonical_json_bytes(&(
+                source.root_commitment(),
+                source.device_id(),
+                event
+            ))?
         )
     ))
 }

@@ -71,6 +71,15 @@ impl RootQualifiedDeviceRef {
     }
 }
 
+impl ramflux_protocol::RootQualifiedDeviceIdentity for RootQualifiedDeviceRef {
+    fn root_commitment(&self) -> &str {
+        self.root_commitment()
+    }
+    fn device_id(&self) -> &str {
+        self.device_id()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

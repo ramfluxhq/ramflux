@@ -3,6 +3,16 @@
 
 //! Root-qualified device addresses use the existing gateway lookup encoding.
 use crate::ProtocolError;
+/// Read-only identity view for protocol guards without a dependency on the crypto crate.
+/// Production callers use `ramflux_crypto::RootQualifiedDeviceRef`, whose constructors
+/// authenticate root ownership or a signed device-set entry. A string is not an identity.
+/// The workspace identity guard permits no other production implementation.
+pub trait RootQualifiedDeviceIdentity {
+    #[must_use]
+    fn root_commitment(&self) -> &str;
+    #[must_use]
+    fn device_id(&self) -> &str;
+}
 /// Reject address-shaped names at live device enrollment and group-control ingress.
 /// The address codec itself still preserves historical literal names without recursive decoding.
 /// # Errors

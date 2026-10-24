@@ -364,6 +364,8 @@ async fn mixed_a2i_batch_commits_and_acks_control_without_losing_direct_messages
     bob.client.establish_friend_link("friend", "bob", "alice")?;
     let first = seal(&alice, &bob, message("dm-before-control", "thread"), b"direct message")?;
     let event = A2iControlEvent {
+        source_principal_id: None,
+        source_principal_commitment: None,
         event_id: "control-event".to_owned(),
         event_type: "a2i.control".to_owned(),
         source_device_id: "alice".to_owned(),
@@ -653,7 +655,7 @@ async fn transient_sender_lookup_retries_with_backoff_while_later_messages_progr
     assert_eq!(db.due_inbox_retries(now)?.len(), 0);
     assert_eq!(db.due_inbox_retries(now + 3)?.len(), 1);
     assert!(!db.journal_after(0, 100)?.iter().any(|event| event.topic == "message.undeliverable"));
-    let key = super::super::committed_key(&pending)?;
+    let key = account.client.inbox_admission_key(&pending)?;
     db.defer_inbox_entry(&key, &serde_json::to_vec(&pending)?, now + 3)?;
     let (engine, _) = Inbox::engine(account.gateway_config.clone(), vec![pending])?;
     account.engine = Some(engine);

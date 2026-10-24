@@ -65,6 +65,10 @@ pub struct A2iControlEvent {
     pub event_id: String,
     pub event_type: String,
     pub source_device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_principal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_principal_commitment: Option<String>,
     pub target_device_id: String,
     pub control_domain: String,
     pub action: String,

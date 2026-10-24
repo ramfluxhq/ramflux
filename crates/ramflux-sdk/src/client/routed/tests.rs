@@ -579,7 +579,7 @@ async fn compatibility_receive_acks_after_commit_and_returns_cached_plaintext()
         b.config()?,
         Box::new(ReceivingGateway {
             queued: VecDeque::new(),
-            receipt_key: super::committed_key(&entry)?,
+            receipt_key: b.client.authenticated_committed_key(&entry)?,
             entry: Some(entry),
             last: None,
             reader: b.client.account_db()?.open_reader()?,
@@ -680,3 +680,6 @@ mod discovery;
 
 #[path = "participant_tests.rs"]
 mod participants;
+
+#[path = "root_identity_keys_tests.rs"]
+mod root_identity_keys;

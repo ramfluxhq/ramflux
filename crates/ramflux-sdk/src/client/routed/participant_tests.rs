@@ -52,7 +52,10 @@ async fn assert_copied_device_cannot_change_thread(victim_principal: &str) -> Re
         .ok_or_else(|| invalid("attack accepted"))?;
     assert!(error.to_string().contains("not a direct conversation participant"), "{error}");
     assert!(
-        !alice.client.account_db()?.actor_state_exists(&super::super::committed_key(&attack)?)?
+        !alice
+            .client
+            .account_db()?
+            .actor_state_exists(&alice.client.authenticated_committed_key(&attack)?)?
     );
     let ack = seal_as(
         &mallory,
@@ -68,7 +71,12 @@ async fn assert_copied_device_cannot_change_thread(victim_principal: &str) -> Re
         .err()
         .ok_or_else(|| invalid("receipt accepted"))?;
     assert!(error.to_string().contains("not a conversation participant"), "{error}");
-    assert!(!alice.client.account_db()?.actor_state_exists(&super::super::committed_key(&ack)?)?);
+    assert!(
+        !alice
+            .client
+            .account_db()?
+            .actor_state_exists(&alice.client.authenticated_committed_key(&ack)?)?
+    );
     assert_eq!(alice.client.direct_messages("alice-bob")?.len(), before);
     assert_eq!(alice.client.account_db()?.delivery_receipt("alice-bob", "bob")?, None);
     assert_eq!(

@@ -294,7 +294,7 @@ impl RamfluxClient {
                 }
                 continue;
             }
-            let legacy_key = crate::client::routed::committed_key(&entry)?;
+            let legacy_key = self.inbox_admission_key(&entry)?;
             let legacy_id = entry.envelope.envelope_id.clone();
             if let Some(delivery) = self
                 .receive_legacy_entry(

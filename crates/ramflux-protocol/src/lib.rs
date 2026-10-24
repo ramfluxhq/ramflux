@@ -9,7 +9,10 @@ pub use client_discovery::*;
 pub mod a2ui_state;
 mod core_types;
 mod device_address;
-pub use device_address::{parse_qualified_device_id, qualified_device_id, validate_device_name};
+pub use device_address::{
+    RootQualifiedDeviceIdentity, parse_qualified_device_id, qualified_device_id,
+    validate_device_name,
+};
 pub mod domain;
 mod encoding;
 mod error;
