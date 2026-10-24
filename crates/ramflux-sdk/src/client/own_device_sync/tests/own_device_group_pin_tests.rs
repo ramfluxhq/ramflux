@@ -69,7 +69,8 @@ fn own_device_history_restores_member_pins_before_sender_keys_without_conflating
 }
 
 #[test]
-fn conflicting_own_device_member_pins_roll_back_membership_and_history() -> Result<(), SdkError> {
+fn conflicting_own_device_member_pins_skip_unsafe_history_and_preserve_local_membership()
+-> Result<(), SdkError> {
     let (source, source_root) =
         client_with_account("group-pin-conflict-source", "principal_sync", "source_device_sync")?;
     let (mut target, target_root) =
@@ -111,13 +112,19 @@ fn conflicting_own_device_member_pins_roll_back_membership_and_history() -> Resu
             .to_bytes(),
     );
     db.persist_group_member_device_key("sync_group", "source_device_sync", &existing_key)?;
-    assert!(
-        target
-            .import_own_device_history_bundle(
-                &envelope("source_device_sync", "target_device_sync"),
-                &history
-            )
-            .is_err()
+    source.send_direct_message("dm", "safe-direct", "source_device_sync", b"safe")?;
+    let mut history = history;
+    history.groups[0].group_epoch = 5;
+    history.messages.extend(source.direct_messages("dm")?);
+    let imported = target.import_own_device_history_bundle(
+        &envelope("source_device_sync", "target_device_sync"),
+        &history,
+    )?;
+    assert_eq!(imported.imported_messages, 1);
+    assert!(target.direct_message_by_id("safe-direct")?.is_some());
+    assert_ne!(
+        db.list_actor_states::<serde_json::Value>("own-device/restore-skip/")?,
+        Vec::<serde_json::Value>::new()
     );
     assert_eq!(target.group_state("sync_group")?.group_epoch, 5);
     assert_eq!(db.group_member_device_key("sync_group", "source_device_sync")?, Some(existing_key));

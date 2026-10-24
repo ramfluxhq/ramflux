@@ -15,6 +15,7 @@ type GatewaySessionFrameFuture<'a, T> =
 
 struct Gateway {
     last: Option<GatewayClientFrame>,
+    pending_cursor: Option<GatewayCursor>,
     blocked: Option<oneshot::Sender<()>>,
     cancelled: Arc<AtomicBool>,
     submits: Arc<AtomicUsize>,
@@ -49,12 +50,27 @@ impl GatewaySessionFrameSource for Gateway {
                 let _ = blocked.send(());
                 return std::future::pending().await;
             }
+            if let Some(cursor) = self.pending_cursor.take() {
+                return serde_json::to_vec(&GatewayServerFrame::Cursor { cursor: Some(cursor) })
+                    .map_err(|error| TransportError::Quic(error.to_string()));
+            }
             let response = match self.last.take() {
                 Some(GatewayClientFrame::Heartbeat { now }) => {
                     GatewayServerFrame::Heartbeat { now }
                 }
                 Some(GatewayClientFrame::Resume { .. }) => {
                     GatewayServerFrame::Resume { entries: Vec::new() }
+                }
+                Some(GatewayClientFrame::Ack { ack }) => {
+                    let cursor = GatewayCursor {
+                        target_delivery_id: "target".into(),
+                        inbox_seq: 1,
+                        last_envelope_id: Some(ack.envelope_id.clone()),
+                        acked_envelope_ids: vec![ack.envelope_id],
+                        nacked_envelope_ids: BTreeMap::new(),
+                    };
+                    self.pending_cursor = Some(cursor.clone());
+                    GatewayServerFrame::Ack { cursor }
                 }
                 Some(GatewayClientFrame::Submit { submit }) => GatewayServerFrame::Deliver {
                     entry: GatewayInboxEntry {
@@ -148,7 +164,7 @@ fn account_with_counter(
         .with_device_branch(client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?);
     let engine = GatewaySessionEngine::with_test_transport(
         config,
-        Box::new(Gateway { last: None, blocked, cancelled, submits }),
+        Box::new(Gateway { last: None, pending_cursor: None, blocked, cancelled, submits }),
     );
     Ok(LocalBusAccountState::new(client, engine, format!("commitment-{id}")))
 }
@@ -892,3 +908,5 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
 mod metadata;
 mod restore;
 mod stream;
+
+mod group_legacy;

@@ -409,37 +409,37 @@ impl RamfluxClient {
         if bundle.target_device_id != local_device_id {
             return Err(SdkError::LocalBus("own-device sync bundle target mismatch".to_owned()));
         }
-        let mut floor_by_group = BTreeMap::new();
-        for group in &bundle.groups {
-            self.account_db()?.upsert_group_local_membership_snapshot(
-                &group.group_id,
-                group.group_epoch,
-                group.max_members,
-                &group.new_member_history,
-                &local_device_id,
-                &group.local_role,
-                group.local_joined_epoch,
-            )?;
-            for member in &group.members {
-                self.account_db()?.upsert_group_member_snapshot(
-                    &group.group_id,
-                    &member.member_id,
-                    &member.role,
-                    member.joined_epoch,
-                )?;
-            }
-            for route in &group.routes {
-                self.persist_group_member_route(&group.group_id, route)?;
-            }
-            floor_by_group.insert(group.group_id.clone(), group.local_joined_epoch);
-        }
-        // The authenticated own-device snapshot carries the source's existing pins. Establish
-        // them before any sender-key seed is imported; a distribution never establishes a pin.
-        self.restore_own_device_group_member_pins(bundle)?;
+        let floor_by_group = self.restore_own_groups(bundle)?;
+        let blocked = self.restore_own_device_group_member_pins(bundle, &floor_by_group)?;
         let mut imported_messages = 0_usize;
         // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
         let imported_dm_sessions = 0_usize;
         for message in &bundle.messages {
+            if serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
+                .is_ok_and(|group| floor_by_group.contains_key(&group.group_id))
+                && !Self::message_allowed_by_group_floor(message, &floor_by_group)
+            {
+                return Err(SdkError::LocalBus(
+                    "own-device sync message below joined epoch".into(),
+                ));
+            }
+            if let Ok(group) =
+                serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
+                && (!floor_by_group.contains_key(&group.group_id)
+                    || blocked.contains(&(group.group_id.clone(), group.sender_id.clone()))
+                    || blocked.contains(&(group.group_id.clone(), String::new()))
+                    || self
+                        .account_db()?
+                        .group_member_role(&group.group_id, &group.sender_id)?
+                        .is_none())
+            {
+                self.account_db()?.record_own_device_restore_skip(
+                    &bundle.snapshot_id,
+                    &message.message_id,
+                    "group_message_unavailable",
+                )?;
+                continue;
+            }
             if !Self::message_allowed_by_group_floor(message, &floor_by_group) {
                 return Err(SdkError::LocalBus(
                     "own-device sync message below joined epoch".to_owned(),
@@ -464,18 +464,15 @@ impl RamfluxClient {
         }
         let mut imported_sender_keys = 0_usize;
         for distribution_base64 in &bundle.sender_key_distributions_base64 {
-            let distribution =
-                ramflux_protocol::decode_base64url(distribution_base64).map_err(|error| {
-                    SdkError::LocalBus(format!("invalid own-device sender key: {error}"))
-                })?;
-            self.import_group_sender_key_distribution(&distribution)?;
-            imported_sender_keys = imported_sender_keys.saturating_add(1);
+            if self.restore_own_sender_key(bundle, distribution_base64, &blocked)? {
+                imported_sender_keys = imported_sender_keys.saturating_add(1);
+            }
         }
         Ok(SdkOwnDeviceSyncImportResponse {
             snapshot_id: bundle.snapshot_id.clone(),
             imported_messages,
             imported_dm_sessions,
-            imported_groups: bundle.groups.len(),
+            imported_groups: floor_by_group.len(),
             imported_sender_keys,
         })
     }
@@ -881,4 +878,6 @@ mod tests {
     }
     #[path = "own_device_group_pin_tests.rs"]
     mod group_pin_tests;
+    #[path = "stale_group_snapshot_tests.rs"]
+    mod stale_group_snapshot_tests;
 }

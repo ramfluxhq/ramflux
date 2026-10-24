@@ -1031,24 +1031,24 @@ pub(crate) async fn dispatch_group_receive_request(
             )? {
                 continue;
             }
-            account.client.ensure_inbound_device(&engine.config, &entry).await?;
             if group_entry_is_sender_key_message(&entry)? {
                 message_entries.push(entry);
                 continue;
             }
             let message_id = entry.envelope.envelope_id.clone();
-            match account
-                .client
-                .append_group_gateway_delivery_for_recipient_with_gateway(
-                    &engine.config,
-                    &body.conversation_id,
-                    &body.group_id,
-                    &message_id,
-                    &entry,
-                    engine.config.device_id.as_str(),
-                )
-                .await?
-            {
+            let Some(delivery) =
+                legacy_receive::apply(&account.client, &engine.config, &body, &entry).await?
+            else {
+                if !account
+                    .client
+                    .account_db()?
+                    .has_inbox_retry(&crate::client::routed::committed_key(&entry)?)?
+                {
+                    gateway_entries.push(entry);
+                }
+                continue;
+            };
+            match delivery {
                 GroupGatewayDeliveryResult::SenderKeyDistribution(distribution) => {
                     account.client.persist_gateway_receive_cursor(
                         engine.target_delivery_id(),
@@ -1079,18 +1079,19 @@ pub(crate) async fn dispatch_group_receive_request(
         }
         for entry in message_entries {
             let message_id = entry.envelope.envelope_id.clone();
-            if let GroupGatewayDeliveryResult::Message(plaintext) = account
-                .client
-                .append_group_gateway_delivery_for_recipient_with_gateway(
-                    &engine.config,
-                    &body.conversation_id,
-                    &body.group_id,
-                    &message_id,
-                    &entry,
-                    engine.config.device_id.as_str(),
-                )
-                .await?
-            {
+            let Some(delivery) =
+                legacy_receive::apply(&account.client, &engine.config, &body, &entry).await?
+            else {
+                if !account
+                    .client
+                    .account_db()?
+                    .has_inbox_retry(&crate::client::routed::committed_key(&entry)?)?
+                {
+                    gateway_entries.push(entry);
+                }
+                continue;
+            };
+            if let GroupGatewayDeliveryResult::Message(plaintext) = delivery {
                 account
                     .client
                     .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
@@ -1373,3 +1374,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[path = "group_receive_legacy.rs"]
+mod legacy_receive;
