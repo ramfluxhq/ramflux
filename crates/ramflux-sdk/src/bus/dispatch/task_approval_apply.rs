@@ -8,6 +8,12 @@ use crate::prelude::*;
 use serde_json::{Value, json};
 
 pub(super) fn apply_decisions(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+    apply_using(account, apply_one)
+}
+pub(super) fn apply_using(
+    account: &mut LocalBusAccountState,
+    mut apply: impl FnMut(&mut LocalBusAccountState, &Packet) -> Result<bool, SdkError>,
+) -> Result<(), SdkError> {
     let rows = account.client.account_db()?.task_record_page::<Value>(
         "task/approval_decision_in/",
         "task/approval_decision_in/",
@@ -24,15 +30,15 @@ pub(super) fn apply_decisions(account: &mut LocalBusAccountState) -> Result<(), 
     for (storage, row) in rows {
         let result = match serde_json::from_value::<Packet>(row) {
             Ok(packet) if packet.request().binding.executor_device_id == local => {
-                apply_one(account, &packet)
+                apply(account, &packet)
             }
             Ok(_) => continue,
             Err(error) => Err(SdkError::Json(error)),
         };
         match result {
             Ok(applied) => accepted += usize::from(applied),
-            Err(error @ (SdkError::Storage(_) | SdkError::Io(_))) => {
-                tracing::warn!(%error,"task approval storage failure deferred for retry");
+            Err(error) if !validation_failure(&error) => {
+                tracing::warn!(%error,"task approval deferred for retry");
             }
             Err(error) => {
                 tracing::warn!(%error,"task approval row rejected; other decisions continue");
@@ -57,7 +63,10 @@ fn reject_row(account: &LocalBusAccountState, storage: &str) -> Result<(), SdkEr
         Ok(())
     })
 }
-fn apply_one(account: &mut LocalBusAccountState, packet: &Packet) -> Result<bool, SdkError> {
+pub(super) fn apply_one(
+    account: &mut LocalBusAccountState,
+    packet: &Packet,
+) -> Result<bool, SdkError> {
     let id = packet.id()?;
     if account.client.task_approval_receipt(&id)?.is_some() {
         return Ok(false);
@@ -108,7 +117,7 @@ fn apply_one(account: &mut LocalBusAccountState, packet: &Packet) -> Result<bool
         Ok::<_, SdkError>(())
     })();
     if let Err(error) = validation {
-        if matches!(error, SdkError::Storage(_) | SdkError::Io(_)) {
+        if !validation_failure(&error) {
             return Err(error);
         }
         tracing::warn!(%error,"task approval rejected by MCP validation");
@@ -170,4 +179,29 @@ fn accept_grant(account: &mut LocalBusAccountState, packet: &Packet) -> Result<(
         Some(packet.deadline()),
     )?;
     Ok(())
+}
+
+fn validation_failure(error: &SdkError) -> bool {
+    use crate::TaskRefusalCode as R;
+    crate::client::inbox_failure::deterministic(error).is_some()
+        || matches!(
+            error,
+            SdkError::SignatureVerificationFailed(_)
+                | SdkError::GrantInvalidated
+                | SdkError::CapabilityDenied(_)
+                | SdkError::TaskRefused {
+                    reason: R::InvalidRequest
+                        | R::InvalidEvent
+                        | R::NotRequester
+                        | R::NotAssignee
+                        | R::NotMember
+                        | R::NotEligibleAcceptor
+                        | R::HumanRequired
+                        | R::Terminal
+                        | R::NoLocalRole
+                        | R::DecisionConsumed
+                        | R::DecisionMismatch,
+                    ..
+                }
+        )
 }

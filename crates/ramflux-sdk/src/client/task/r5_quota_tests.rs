@@ -141,3 +141,40 @@ fn r5_pruning_announces_a_typed_removal_and_drops_the_task_row() -> TestResult {
         && e.body["task_id"] == "task"));
     Ok(())
 }
+
+#[test]
+fn r6_a_malformed_lifecycle_row_does_not_block_compaction_of_valid_terminal_history() -> TestResult
+{
+    let f = Fixture::new()?;
+    assert!(project(&f.human, &sign(&f.human, "thread", "old", start("old", "thread"))?)?.accepted);
+    assert!(
+        project(
+            &f.human,
+            &sign(
+                &f.human,
+                "thread",
+                "done",
+                TaskEventBody::Cancel(TaskCancel { task_id: "old".into(), base_revision: 1 })
+            )?
+        )?
+        .accepted
+    );
+    let storage = scoped("lifecycle", "thread", "old")?;
+    let mut row: super::super::lifecycle::Lifecycle =
+        f.human.account_db()?.load_actor_state(&storage)?.ok_or("lifecycle")?;
+    row.usage =
+        std::collections::BTreeMap::from([("human".into(), retained_usage(32 * 1024 * 1024))]);
+    f.human.account_db()?.persist_actor_state(&storage, &row)?;
+    f.human.account_db()?.persist_actor_state(
+        &scoped("lifecycle", "thread", "malformed")?,
+        &json!({"updated_at":i64::MAX,"usage":{}}),
+    )?;
+    let c = sign(&f.human, "thread", "new", start("new", "thread"))?;
+    f.human.admit_global_task_history(
+        &c,
+        &std::collections::BTreeMap::from([("human".into(), retained_usage(1))]),
+        false,
+    )?;
+    assert_eq!(f.human.task_get(Some("thread"), "old")?["compacted"], true);
+    Ok(())
+}
