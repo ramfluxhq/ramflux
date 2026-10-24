@@ -1000,7 +1000,9 @@ mod tests {
             ))?;
             assert_eq!(response.status, 400);
             assert!(
-                response.body["error"].as_str().is_some_and(|s| s.contains("device not found"))
+                response.body["error"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("qualified device required"))
             );
         }
         drop(handle);
