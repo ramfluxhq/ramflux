@@ -9,9 +9,18 @@ pub(crate) async fn handle_surface(
 ) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
     let (account, method, body) = match command.action {
-        SurfaceAction::Get { account, surface_id, action_id } => {
-            (account, "surface.get", json!({"surface_id":surface_id,"action_id":action_id}))
-        }
+        SurfaceAction::Get {
+            account,
+            surface_id,
+            surface_ref,
+            conversation,
+            author,
+            action_id,
+        } => (
+            account,
+            "surface.get",
+            json!({"surface_id":surface_id,"surface_ref":surface_ref,"conversation_id":conversation,"author_principal_id":author,"action_id":action_id}),
+        ),
         SurfaceAction::List { account, conversation, limit, cursor } => (
             account,
             "surface.list",
@@ -28,10 +37,14 @@ pub(crate) async fn handle_surface(
             if wire.len() > 700_000 {
                 return Err(RfError::Message("surface payload exceeds bus frame budget".into()));
             }
+            let message = match send.message {
+                Some(id) => id,
+                None => ramflux_sdk::new_surface_message_id()?,
+            };
             (
                 send.account,
                 method,
-                json!({"conversation_id":send.conversation,"message_id":send.message,"wire_base64":ramflux_protocol::encode_base64url(wire)}),
+                json!({"conversation_id":send.conversation,"message_id":message,"wire_base64":ramflux_protocol::encode_base64url(wire),"author_principal_id":send.author}),
             )
         }
     };

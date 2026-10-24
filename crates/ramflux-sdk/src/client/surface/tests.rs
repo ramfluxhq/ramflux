@@ -94,6 +94,7 @@ fn carrier(
         author_principal_id: "author".into(),
         wire_base64: ramflux_protocol::encode_base64url(wire),
         signature: String::new(),
+        snapshot: None,
     })
 }
 fn project(
@@ -108,6 +109,9 @@ fn project(
             crate::client::surface::SurfaceSender {
                 principal: &carrier.sender_principal_id,
                 device: &carrier.sender_device_id,
+                envelope_id: projection,
+                expires_at: None,
+                group_epoch: None,
             },
             &carrier.bytes()?,
             false,
@@ -204,7 +208,7 @@ fn only_author_updates_and_rejections_do_not_partially_change_snapshot() -> Test
     assert_eq!(after["snapshot"], before["snapshot"]);
     assert_eq!(after["version"], 1);
     assert_eq!(after["surface_hash"], before["surface_hash"]);
-    assert_eq!(after["renderer_error"]["code"], "non_author_update");
+    assert_eq!(after["renderer_error"], before["renderer_error"]);
     assert!(!project(&f.author, &signed, "forged-remote")?.accepted);
     Ok(())
 }
@@ -224,11 +228,9 @@ fn author_consumes_a_decision_once_across_message_and_payload_replays() -> TestR
     f.author.unlock_account("author", b"surface-test-secret")?;
     let repeat =
         action(&f.human, "different-message", 1, view["surface_hash"].as_str().ok_or("hash")?)?;
-    assert!(!project(&f.author, &repeat, "repeat")?.accepted);
-    assert_eq!(
-        f.author.surface_get("s", 0, None)?["renderer_error"]["code"],
-        "action_already_used"
-    );
+    let rejected = project(&f.author, &repeat, "repeat")?;
+    assert!(!rejected.accepted);
+    assert_eq!(rejected.renderer_error.ok_or("renderer error")?["code"], "action_already_used");
     Ok(())
 }
 #[test]
@@ -276,10 +278,15 @@ fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestR
     let signed = carrier(&f.author, PayloadKind::Event, "raw", wire)?;
     assert!(project(&f.human, &signed, "raw")?.accepted);
     let before = f.human.surface_get("s", 0, None)?;
-    let history: Vec<Value> =
-        f.human.account_db()?.surface_history_page(&(key("history", "s") + "/"), "", 100)?;
+    let history: Vec<Value> = f.human.account_db()?.surface_history_page(
+        &(key("history", &signed.surface_reference()?) + "/"),
+        "",
+        100,
+    )?;
     assert_eq!(
-        ramflux_protocol::decode_base64url(history[0]["wire_base64"].as_str().ok_or("wire")?)?,
+        ramflux_protocol::decode_base64url(
+            history[0]["carrier"]["wire_base64"].as_str().ok_or("wire")?
+        )?,
         wire
     );
     f.human = RamfluxClient::new();
@@ -346,7 +353,13 @@ fn replay_still_requires_authenticated_transport_bindings() -> TestResult {
             .project_surface_message(
                 conversation,
                 "spoofed",
-                crate::client::surface::SurfaceSender { principal: "author", device },
+                crate::client::surface::SurfaceSender {
+                    principal: "author",
+                    device,
+                    envelope_id: "spoofed",
+                    expires_at: None,
+                    group_epoch: None,
+                },
                 &signed.bytes()?,
                 false,
             )?
@@ -366,7 +379,7 @@ fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> TestResu
     );
     assert!(signed.payload().is_err());
     assert!(!project(&f.human, &signed, "invalid")?.accepted);
-    assert_eq!(f.human.surface_get("s", 0, None)?["version"], 0);
+    assert!(f.human.surface_get("s", 0, None)?.is_null());
     assert!(f.human.surface_state("s")?.is_none());
     Ok(())
 }
@@ -418,7 +431,7 @@ fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> TestResul
     let expected = super::fallback::render("author", raw);
     assert_eq!(project(&f.human, &signed, "hostile")?.fallback_text, expected);
     // Simulate a receipt committed before display rendering was centralized.
-    let receipt_key = super::scoped_key("receipt", &["author", "hostile"])?;
+    let receipt_key = super::receipt_key(&signed)?;
     let mut receipt: super::Receipt =
         f.human.account_db()?.load_actor_state(&receipt_key)?.ok_or("receipt")?;
     receipt.result.fallback_text = raw.into();
@@ -439,3 +452,13 @@ fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> TestResul
     assert_eq!(f.human.surface_message_fallback("hostile")?.ok_or("reference")?.1, expected);
     Ok(())
 }
+
+#[path = "tests/reordering.rs"]
+mod reordering;
+#[path = "tests/retention.rs"]
+mod retention;
+#[path = "tests/security.rs"]
+mod security;
+
+#[path = "tests/devices.rs"]
+mod devices;

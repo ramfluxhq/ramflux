@@ -820,9 +820,10 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         SdkError::Crypto(_) | SdkError::SignatureVerificationFailed(_) => {
             RamfluxErrorCode::CryptoFailed
         }
-        SdkError::Storage(_) | SdkError::AccountIndexNotOpen | SdkError::AccountDbNotUnlocked => {
-            RamfluxErrorCode::StorageFailed
-        }
+        SdkError::SurfaceCheckpointMismatch
+        | SdkError::Storage(_)
+        | SdkError::AccountIndexNotOpen
+        | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::IdentityRootMissing => RamfluxErrorCode::AuthFailed,
         SdkError::Transport(_)
         | SdkError::GatewaySessionRejected(_)

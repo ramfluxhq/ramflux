@@ -171,12 +171,22 @@ impl RamfluxClient {
         for group in &groups {
             floor_by_group.insert(group.group_id.clone(), group.local_joined_epoch);
         }
-        let messages = self
-            .account_db()?
-            .all_direct_messages()?
-            .into_iter()
-            .filter(|message| Self::message_allowed_by_group_floor(message, &floor_by_group))
-            .collect::<Vec<_>>();
+        let mut messages = Vec::new();
+        let mut surface_message_epochs = BTreeMap::new();
+        for message in self.account_db()?.all_direct_messages()? {
+            let surface_epoch = self.surface_message_group_epoch(&message.message_id)?;
+            if !Self::message_allowed_by_group_floor(&message, &floor_by_group)
+                || surface_epoch.as_ref().is_some_and(|(group, epoch)| {
+                    floor_by_group.get(group).is_none_or(|floor| epoch < floor)
+                })
+            {
+                continue;
+            }
+            if let Some(epoch) = surface_epoch {
+                surface_message_epochs.insert(message.message_id.clone(), epoch);
+            }
+            messages.push(message);
+        }
         let mut contents = BTreeMap::new();
         for message in &messages {
             if let Some(body) = self.account_db()?.message_content(&message.message_id)? {
@@ -194,6 +204,8 @@ impl RamfluxClient {
             target_device_id: target_device_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             messages,
+            surface_controls: self.own_surface_history_controls()?,
+            surface_message_epochs,
             contents,
             dm_sessions,
             group_member_pins: self.own_device_group_member_pins(&groups)?,
@@ -202,7 +214,7 @@ impl RamfluxClient {
         })
     }
 
-    fn own_device_group_snapshots(
+    pub(crate) fn own_device_group_snapshots(
         &self,
         source_device_id: &str,
     ) -> Result<Vec<SdkOwnDeviceGroupSnapshot>, SdkError> {
@@ -345,6 +357,7 @@ impl RamfluxClient {
             &envelope.principal_commitment,
         )
         .await?;
+        self.persist_identity_directory(&manifest)?;
         let source = manifest
             .devices
             .iter()
@@ -450,6 +463,12 @@ impl RamfluxClient {
                 )?;
                 continue;
             }
+            if bundle.surface_message_epochs.get(&message.message_id).is_some_and(
+                |(group, epoch)| floor_by_group.get(group).is_none_or(|floor| epoch < floor),
+            ) {
+                return Err(SdkError::LocalBus("own-device sync surface message below joined epoch".into()));
+
+            }
             self.account_db()?.import_direct_message_projection(DirectMessageWrite {
                 conversation_id: &message.conversation_id,
                 message_id: &message.message_id,
@@ -473,6 +492,7 @@ impl RamfluxClient {
                 imported_sender_keys = imported_sender_keys.saturating_add(1);
             }
         }
+        self.import_own_surface_history(envelope, &bundle.surface_controls)?;
         Ok(SdkOwnDeviceSyncImportResponse {
             snapshot_id: bundle.snapshot_id.clone(),
             imported_messages,
@@ -709,6 +729,8 @@ mod tests {
         groups: Vec<SdkOwnDeviceGroupSnapshot>,
     ) -> SdkOwnDeviceHistoryBundle {
         SdkOwnDeviceHistoryBundle {
+            surface_controls: Vec::new(),
+            surface_message_epochs: BTreeMap::new(),
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,
             principal_commitment: "principal_sync".to_owned(),

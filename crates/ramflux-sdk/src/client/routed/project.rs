@@ -56,6 +56,11 @@ impl RamfluxClient {
             crate::client::surface::SurfaceSender {
                 principal: &entry.envelope.source_principal_id,
                 device: &entry.envelope.source_device_id,
+                envelope_id: &entry.envelope.envelope_id,
+                expires_at: Some(
+                    entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
+                ),
+                group_epoch: None,
             },
             body,
             false,
@@ -131,6 +136,7 @@ impl RamfluxClient {
         }
         let mut inner = entry.clone();
         inner.envelope.encrypted_payload = ramflux_protocol::encode_base64url(body);
+        self.record_surface_origin(&route.message_id, entry, Some(group.group_key_epoch))?;
         let plaintext = self.append_or_pending_group_message(
             &route.conversation_id,
             &route.message_id,
@@ -148,6 +154,11 @@ impl RamfluxClient {
                 crate::client::surface::SurfaceSender {
                     principal: &entry.envelope.source_principal_id,
                     device: &entry.envelope.source_device_id,
+                    envelope_id: &entry.envelope.envelope_id,
+                    expires_at: Some(
+                        entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
+                    ),
+                    group_epoch: Some(group.group_key_epoch),
                 },
                 &plaintext,
                 false,
