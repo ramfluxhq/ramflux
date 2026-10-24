@@ -28,6 +28,7 @@ pub mod state;
 mod subscription;
 mod supervisor;
 pub(crate) mod sync_driver;
+mod sync_status;
 
 pub use client::*;
 pub use daemon::*;

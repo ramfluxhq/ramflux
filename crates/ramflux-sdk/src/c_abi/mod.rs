@@ -858,6 +858,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::ContactHomeNodeUnsupported
         | SdkError::ContactInput(_)
         | SdkError::LocalBus(_)
+        | SdkError::LocalBusRefused { .. }
         | SdkError::InboundRejected(_)
         | SdkError::InboundPending(_)
         | SdkError::PairRecoveryRequired => RamfluxErrorCode::InvalidArgument,

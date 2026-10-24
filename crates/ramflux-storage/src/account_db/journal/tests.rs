@@ -588,3 +588,45 @@ fn parking_a_legacy_hold_keeps_only_ciphertext_and_marker_even_after_an_old_reje
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn status_transitions_never_spend_the_message_retention_budget() -> Result<(), StorageError> {
+    let (root, db) = database()?;
+    for n in 1..=3 {
+        db.append_journal(
+            &format!("m:{n}"),
+            "message.received",
+            &serde_json::json!({"message_id":n}),
+            1,
+            None,
+        )?;
+    }
+    for n in 0..300 {
+        db.append_journal(
+            &format!("sync:{n}"),
+            "sync.status",
+            &serde_json::json!({"state":if n%2==0 {"idle"}else{"error"}}),
+            2,
+            None,
+        )?;
+    }
+    db.retain_journal(2, 2, 100)?;
+    let mut events = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = db.journal_after(cursor, 128)?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map_or(cursor, |e| e.seq);
+        events.extend(page);
+    }
+    let messages = events.iter().filter(|e| e.topic == "message.received").collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2, "status transitions must not evict retained messages");
+    assert_eq!(messages[0].body["message_id"], 2);
+    assert_eq!(messages[1].body["message_id"], 3);
+    assert!(events.iter().filter(|e| e.topic == "sync.status").count() <= 128);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

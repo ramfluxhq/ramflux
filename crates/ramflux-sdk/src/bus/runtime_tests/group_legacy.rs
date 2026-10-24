@@ -42,6 +42,20 @@ async fn a_rejected_legacy_group_entry_does_not_block_read_or_receive_of_valid_m
             .collect::<Vec<_>>(),
         serde_json::to_string(&receiver.client.account_db()?.journal_after(0, 128)?)?
     );
+    let readers = super::super::readers::AccountReaders::start(receiver.client.account_db()?)?;
+    let page = readers
+        .request(LocalBusFrame::request(
+            "message-read",
+            Some("bob".into()),
+            "message",
+            "message.read",
+            serde_json::json!({"conversation_id":"thread"}),
+        ))
+        .await?;
+    readers.stop().await;
+    assert_eq!(page["messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(page["messages"][0]["message_id"], "valid");
+    assert_eq!(page["messages"][0]["body_utf8"], "valid after rejected");
     assert_eq!(receiver.client.account_db()?.unrouted_entries()?, Vec::<Vec<u8>>::new());
     let journal = serde_json::to_string(&receiver.client.account_db()?.journal_after(0, 128)?)?;
     assert!(journal.contains("schema_invalid"));

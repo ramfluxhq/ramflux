@@ -84,6 +84,10 @@ impl AccountRuntime {
             super::control_state::trim(account);
             super::read_model::initialize(account)?;
             let db = account.client.account_db()?;
+            let path = local_bus_account_manifest_path(&self.state.config.data_root, &self.id);
+            let node_id =
+                if path.exists() { read_local_bus_account_manifest(&path)?.node_id } else { None };
+            db.persist_actor_state("sync/node-id", &node_id)?;
             let tick = db.journal_bounds()?.head_seq;
             db.append_journal(
                 &format!("account:unlocked:{tick}"),
@@ -174,18 +178,7 @@ impl AccountRuntime {
             }
             Err(_) => ("error", false),
         };
-        let db = account.client.account_db()?;
-        let at = now_unix_timestamp();
-        let tick = db.load_actor_state::<u64>("sync/tick")?.unwrap_or_default() + 1;
-        db.persist_actor_state("sync/tick", &tick)?;
-        db.append_journal(
-            &format!("sync:{tick}"),
-            "sync.status",
-            &serde_json::json!({"state":state,"last_run":at,"unrouted":db.unrouted_count()?}),
-            at,
-            None,
-        )?;
-        db.append_journal(&format!("node-health:{tick}"),"node.health",&serde_json::json!({"state":if state=="error" {"unavailable"} else {"connected"},"transport":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),"last_run":at}),at,None)?;
+        super::sync_status::record(account, state, now_unix_timestamp())?;
         let request = LocalBusFrame::request(
             "sync",
             Some(self.id.clone()),

@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("{code}: {message}")]
+    LocalBusRefused { code: String, message: String, body: Box<serde_json::Value> },
     #[error("{message}")]
     TaskRefused { reason: crate::TaskRefusalCode, message: String },
     #[error("task delivery payload is too large: {bytes} bytes (limit {limit})")]

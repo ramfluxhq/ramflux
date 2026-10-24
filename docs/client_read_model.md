@@ -315,3 +315,5 @@ retirement transactions. Filesystem snapshots, backups and previously exported b
 this local operation; active readers can delay checkpoint progress. Live and persisted ratchet
 message-key Debug output is redacted, and legacy routing compares typed device hashes without
 copying a full secret snapshot to JSON.
+
+See [Account event stream](event_stream.md) for resume bounds, status transition semantics, and retention.

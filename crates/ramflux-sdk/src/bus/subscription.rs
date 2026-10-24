@@ -19,8 +19,7 @@ pub(super) fn read(db: &AccountDb, request: &LocalBusFrame) -> Result<serde_json
         .get("since_seq")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(bounds.head_seq);
-    let resync =
-        cursor < bounds.floor_seq || cursor < bounds.pruned_through || cursor > bounds.head_seq;
+    let resync = cursor < bounds.pruned_through || cursor > bounds.head_seq;
     let events = if resync { Vec::new() } else { db.journal_after(cursor, 128)? };
     Ok(
         serde_json::json!({"bounds":bounds,"cursor":cursor,"resync_required":resync,"events":events}),
@@ -120,4 +119,60 @@ pub(super) fn lagged(outbound: &mpsc::Sender<LocalBusFrame>, request: &LocalBusF
 }
 fn closed() -> SdkError {
     SdkError::LocalBus("subscription closed".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_fresh_journal_and_the_last_pruned_cursor_resume_without_missing_events()
+    -> Result<(), SdkError> {
+        let root = std::env::temp_dir().join(format!(
+            "ramflux-stream-cursor-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
+        ));
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("a", "a")?;
+        client.unlock_account("a", b"secret")?;
+        let db = client.account_db()?;
+        let mut query = LocalBusFrame::request(
+            "read",
+            Some("a".into()),
+            "stream",
+            "stream.read",
+            serde_json::json!({"since_seq":0}),
+        );
+        assert_eq!(read(db, &query)?["resync_required"], false);
+        for n in 1..=4 {
+            db.append_journal(
+                &format!("e:{n}"),
+                "message.received",
+                &serde_json::json!({"id":n}),
+                1,
+                None,
+            )?;
+        }
+        let page = read(db, &query)?;
+        assert_eq!(page["resync_required"], false, "nothing was pruned");
+        assert_eq!(page["events"].as_array().map(Vec::len), Some(4));
+        db.retain_journal(1, 2, 100)?;
+        query.body = serde_json::json!({"since_seq":2});
+        let page = read(db, &query)?;
+        assert_eq!(page["resync_required"], false, "cursor equals last discarded event");
+        assert_eq!(page["events"][0]["seq"], 3);
+        query.body = serde_json::json!({"since_seq":1});
+        assert_eq!(read(db, &query)?["resync_required"], true);
+        query.body = serde_json::json!({"since_seq":5});
+        assert_eq!(read(db, &query)?["resync_required"], true);
+        db.retain_journal(1, 0, 100)?;
+        query.body = serde_json::json!({"since_seq":4});
+        assert_eq!(read(db, &query)?["resync_required"], false);
+        query.body = serde_json::json!({"since_seq":3});
+        assert_eq!(read(db, &query)?["resync_required"], true);
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

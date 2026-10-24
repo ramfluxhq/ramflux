@@ -186,11 +186,17 @@ impl LocalBusClient {
     ) -> Result<serde_json::Value, SdkError> {
         let response = self.request_owned_response(protected).await?;
         if response.kind == LocalBusFrameKind::Error {
-            let message = response.error.map_or_else(
-                || "unknown local bus error".to_owned(),
-                |error| format!("{}: {}", error.code, error.message),
-            );
-            Err(SdkError::LocalBus(message))
+            match response.error {
+                Some(error) if error.code == "resync_required" => Err(SdkError::LocalBusRefused {
+                    code: error.code,
+                    message: error.message,
+                    body: Box::new(response.body),
+                }),
+                error => Err(SdkError::LocalBus(error.map_or_else(
+                    || "unknown local bus error".to_owned(),
+                    |error| format!("{}: {}", error.code, error.message),
+                ))),
+            }
         } else {
             Ok(response.body)
         }
@@ -410,3 +416,7 @@ mod stream_tests {
 #[cfg(test)]
 #[path = "contact_error_client_tests.rs"]
 mod contact_error_tests;
+
+#[cfg(test)]
+#[path = "client_stream_error_tests.rs"]
+mod stream_error_tests;
