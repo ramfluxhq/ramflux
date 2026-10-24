@@ -52,17 +52,8 @@ pub(crate) fn set_failure_policy(
     bytes: &[u8],
     at: i64,
 ) -> Result<bool, SdkError> {
-    let principal = client.authenticated_envelope_sender(entry).ok();
-    let authenticated = principal.is_some();
-    let verified_source = principal
-        .as_ref()
-        .map(|principal| {
-            ramflux_protocol::canonical_json_bytes(&(principal, &entry.envelope.source_device_id))
-                .map(|bytes| {
-                    ramflux_protocol::hash_base64url("ramflux.inbox.verified_source.v1", &bytes)
-                })
-        })
-        .transpose()?;
+    let verified_source=client.authenticated_device_identity(entry).ok();
+    let authenticated=verified_source.is_some();
     let opened = if authenticated { client.open_routed(entry, local).ok() } else { None };
     let legacy_group = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .ok()
@@ -76,7 +67,7 @@ pub(crate) fn set_failure_policy(
             .group_state(group)
             .is_ok_and(|state| state.members.contains(&entry.envelope.source_device_id))
     } else {
-        client.pair_recovery_pending(local, &entry.envelope.source_device_id)?
+        verified_source.as_ref().map(|source|client.pair_recovery_pending(local,source.storage_key())).transpose()?.unwrap_or(false)
             || client.friend_link_peer_is_accepted(&entry.envelope.source_principal_id)?
             || client
                 .device_branch
@@ -98,7 +89,7 @@ pub(crate) fn set_failure_policy(
         key,
         bytes,
         ramflux_storage::InboxFailurePolicy {
-            verified_source: verified_source.as_deref(),
+            verified_source: verified_source.as_ref(),
             trusted: authenticated && related,
             dependency: (class, subject),
             at,

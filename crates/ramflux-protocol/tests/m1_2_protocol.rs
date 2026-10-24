@@ -16,6 +16,16 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+struct ReplaySource<'a>(&'a str);
+impl ramflux_protocol::RootQualifiedDeviceIdentity for ReplaySource<'_> {
+    fn root_commitment(&self) -> &'static str {
+        "protocol-test-root"
+    }
+    fn device_id(&self) -> &str {
+        self.0
+    }
+}
+
 const FIXTURE_SIGNING_KEY_BYTES: [u8; 32] = [
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
     0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x01,
@@ -82,16 +92,28 @@ fn signed_request_replay_guard_enforces_m1_1_window() -> Result<(), Box<dyn std:
     let request: SignedRequest = serde_json::from_value(fixture)?;
     let mut guard = ReplayGuard::new();
 
-    guard.check_signed_request(&request, request.created_at + 1)?;
+    guard.check_signed_request(
+        &ReplaySource(&request.source_device_id),
+        &request,
+        request.created_at + 1,
+    )?;
     assert!(matches!(
-        guard.check_signed_request(&request, request.created_at + 2),
+        guard.check_signed_request(
+            &ReplaySource(&request.source_device_id),
+            &request,
+            request.created_at + 2
+        ),
         Err(ProtocolError::Replay(_))
     ));
 
     let replay_fixture = read_json(&root.join(fixture_replay_path(signed_request_fixture)))?;
     let replay_request: SignedRequest = serde_json::from_value(replay_fixture)?;
     assert!(matches!(
-        ReplayGuard::new().check_signed_request(&replay_request, replay_request.created_at + 901),
+        ReplayGuard::new().check_signed_request(
+            &ReplaySource(&replay_request.source_device_id),
+            &replay_request,
+            replay_request.created_at + 901
+        ),
         Err(ProtocolError::SignedRequestExpired)
     ));
 
@@ -99,9 +121,17 @@ fn signed_request_replay_guard_enforces_m1_1_window() -> Result<(), Box<dyn std:
     long_validity.request_id = "fixture-request-long-validity".to_owned();
     long_validity.expires_at = long_validity.created_at + 3_600;
     let mut long_guard = ReplayGuard::new();
-    long_guard.check_signed_request(&long_validity, long_validity.created_at + 901)?;
+    long_guard.check_signed_request(
+        &ReplaySource(&long_validity.source_device_id),
+        &long_validity,
+        long_validity.created_at + 901,
+    )?;
     assert!(matches!(
-        long_guard.check_signed_request(&long_validity, long_validity.created_at + 902),
+        long_guard.check_signed_request(
+            &ReplaySource(&long_validity.source_device_id),
+            &long_validity,
+            long_validity.created_at + 902
+        ),
         Err(ProtocolError::Replay(_))
     ));
 
@@ -109,7 +139,11 @@ fn signed_request_replay_guard_enforces_m1_1_window() -> Result<(), Box<dyn std:
     too_long.request_id = "fixture-request-too-long".to_owned();
     too_long.expires_at = too_long.created_at + ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS + 1;
     assert!(matches!(
-        ReplayGuard::new().check_signed_request(&too_long, too_long.created_at),
+        ReplayGuard::new().check_signed_request(
+            &ReplaySource(&too_long.source_device_id),
+            &too_long,
+            too_long.created_at
+        ),
         Err(ProtocolError::SignedRequestExpiryTooLong)
     ));
     Ok(())

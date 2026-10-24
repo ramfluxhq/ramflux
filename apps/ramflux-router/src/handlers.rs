@@ -931,18 +931,17 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
-
     use super::*;
 
     #[test]
     fn mesh_quic_request_submit_uses_async_router_path() -> anyhow::Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        let path = temp_path("mesh_quic_request_submit_uses_async_router_path")?;
-        let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
-        let router = Arc::new(ramflux_node_core::RouterCore::new());
-        let handle = crate::router_runtime::RouterHandle::tokio(router, store, None);
-        let envelope = current_envelope("env_router_async_ingress", "target_router_async_ingress");
+        let (state, store, path) = crate::router_runtime::tests::test_router("mesh_async_submit")?;
+        let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
+        let envelope = crate::router_runtime::tests::current_envelope(
+            "env_router_async_ingress",
+            "target_router_async_ingress",
+        )?;
         let request = ramflux_transport::GatewayQuicRequest {
             method: "POST".to_owned(),
             path: "/mvp0/envelope".to_owned(),
@@ -1026,32 +1025,6 @@ mod tests {
         let _removed = std::fs::remove_file(&path);
         let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
         Ok(())
-    }
-
-    fn current_envelope(envelope_id: &str, target_delivery_id: &str) -> Envelope {
-        Envelope {
-            schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-            version: 1,
-            domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
-            ext: Ext::default(),
-            signed: SignedFields {
-                signing_key_id: "router_async_ingress_test".to_owned(),
-                signature_alg: SignatureAlg::Ed25519,
-                signature: "signature".to_owned(),
-            },
-            envelope_id: envelope_id.to_owned(),
-            source_principal_id: "principal_router_async_ingress".to_owned(),
-            source_device_id: "device_router_async_ingress".to_owned(),
-            target_delivery_id: target_delivery_id.to_owned(),
-            routing_set_id: None,
-            delivery_class: DeliveryClass::OpaqueEvent,
-            priority: Priority::Normal,
-            ttl: 300,
-            created_at: i64::try_from(ramflux_node_core::now_unix_seconds())
-                .unwrap_or(i64::MAX - 300),
-            encrypted_payload: "ciphertext".to_owned(),
-            payload_hash: "payload_hash".to_owned(),
-        }
     }
 
     fn temp_path(test_name: &str) -> anyhow::Result<PathBuf> {

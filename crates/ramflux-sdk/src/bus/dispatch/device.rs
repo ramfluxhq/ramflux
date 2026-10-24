@@ -101,7 +101,10 @@ async fn dispatch_device_activate(
     endpoint.principal_id.clone_from(&manifest.principal_id);
     endpoint.device_id.clone_from(&body.device_id);
     endpoint.target_delivery_id.clone_from(&body.target_delivery_id);
-    let mut gateway = GatewaySessionConfig::auto(endpoint.clone()).with_device_branch(branch);
+    let mut gateway = GatewaySessionConfig::auto(endpoint.clone()).with_owned_device(
+        account.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        branch,
+    )?;
     if let Some(addr) = manifest.node_tcp_addr {
         gateway = gateway.with_tcp_gateway_addr(addr);
     }

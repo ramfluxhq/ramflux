@@ -46,7 +46,10 @@ impl RamfluxClient {
             self.device_branch.as_ref().is_some_and(|device| device.principal_id == principal);
         Ok(own
             || self.friend_link_peer_is_accepted(principal)?
-            || db.actor_state_exists(&self.pair_key(local, remote)?)?
+            || db.actor_state_exists(&RamfluxClient::pair_key(
+                &self.local_device_identity(local)?,
+                &self.device_identity(remote)?,
+            )?)?
             || self.pair_recovery_pending(local, remote)?)
     }
     pub(crate) fn apply_verified_device_revocation(
@@ -113,7 +116,10 @@ impl RamfluxClient {
             for id in db.pair_session_ids(&local, remote)? {
                 self.retire_pair(&local, remote, &id)?;
             }
-            let pair = self.pair_key(&local, remote)?;
+            let pair = RamfluxClient::pair_key(
+                &self.local_device_identity(&local)?,
+                &self.device_identity(remote)?,
+            )?;
             db.remove_actor_state(&pair)?;
             db.remove_actor_state(&format!("{pair}/archive"))?;
             db.remove_actor_state(&format!("{pair}/reset-pending"))?;
@@ -143,8 +149,8 @@ impl RamfluxClient {
         let db = self.account_db()?;
         db.write_transaction(||->Result<(),SdkError>{
             self.remove_device_pair(remote,"retry_lifetime_exhausted")?;
-            db.persist_actor_state(&format!("{}/manual",self.pair_key(local,remote)?),&json!({"local_device_id":local,"device_id":remote,"state":"needs_manual_recovery","at":at}))?;
-            db.append_journal(&format!("pair-manual:{}:{at}",self.pair_key(local,remote)?),"session.reset",&json!({"device_id":remote,"state":"needs_manual_recovery","reason":"retry_lifetime_exhausted"}),at,None)?;
+            db.persist_actor_state(&format!("{}/manual",RamfluxClient::pair_key(&self.local_device_identity(local)?, &self.device_identity(remote)?)?),&json!({"local_device_id":local,"device_id":remote,"state":"needs_manual_recovery","at":at}))?;
+            db.append_journal(&format!("pair-manual:{}:{at}",RamfluxClient::pair_key(&self.local_device_identity(local)?, &self.device_identity(remote)?)?),"session.reset",&json!({"device_id":remote,"state":"needs_manual_recovery","reason":"retry_lifetime_exhausted"}),at,None)?;
             Ok(())
         })?;
         self.finish_pair_retirement()

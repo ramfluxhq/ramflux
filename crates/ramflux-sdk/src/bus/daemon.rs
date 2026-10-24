@@ -154,9 +154,10 @@ async fn restore_local_bus_account_impl(
             .await?,
         );
     }
-    let mut gateway = GatewaySessionConfig::auto(manifest.gateway.clone()).with_device_branch(
+    let mut gateway = GatewaySessionConfig::auto(manifest.gateway.clone()).with_owned_device(
+        client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
-    );
+    )?;
     if let Some(addr) = manifest.node_tcp_addr {
         gateway = gateway.with_tcp_gateway_addr(addr);
     }

@@ -17,7 +17,13 @@ pub(super) struct ResetWork {
 }
 impl RamfluxClient {
     pub(super) fn reset_work_key(&self, local: &str, remote: &str) -> Result<String, SdkError> {
-        Ok(format!("dm-pair/reset-work/{}", self.pair_key(local, remote)?))
+        Ok(format!(
+            "dm-pair/reset-work/{}",
+            RamfluxClient::pair_key(
+                &self.local_device_identity(local)?,
+                &self.device_identity(remote)?
+            )?
+        ))
     }
     pub(super) fn normalize_reset_work(&self, work: &mut ResetWork) -> Result<i64, SdkError> {
         if let Some(first) = work.first_at {
@@ -27,7 +33,10 @@ impl RamfluxClient {
         // If retention removed the original attempt, fail closed to manual recovery.
         let first = self
             .account_db()?
-            .legacy_pair_reset_first_at(&self.pair_key(&work.local, &work.remote)?)?
+            .legacy_pair_reset_first_at(&RamfluxClient::pair_key(
+                &self.local_device_identity(&work.local)?,
+                &self.device_identity(&work.remote)?,
+            )?)?
             .unwrap_or(0);
         work.first_at = Some(first);
         self.account_db()?
@@ -44,7 +53,10 @@ impl RamfluxClient {
         let remote = self.device_reference(remote)?;
         let remote = remote.as_str();
         let db = self.account_db()?;
-        let pair = self.pair_key(local, remote)?;
+        let pair = RamfluxClient::pair_key(
+            &self.local_device_identity(local)?,
+            &self.device_identity(remote)?,
+        )?;
         if db.actor_state_exists(&format!("{pair}/manual"))? {
             return Ok(false);
         }

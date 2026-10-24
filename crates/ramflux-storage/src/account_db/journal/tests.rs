@@ -15,6 +15,12 @@ fn database() -> Result<(std::path::PathBuf, AccountDb), StorageError> {
     let db = AccountDb::open(&index, "a", &AccountDbKey::derive("a", b"secret"))?;
     Ok((root, db))
 }
+fn retry_source(name: &str) -> Result<ramflux_crypto::RootQualifiedDeviceRef, StorageError> {
+    Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+        &ramflux_crypto::create_identity_root("retry-test", [0xa1; 32]),
+        name,
+    )?)
+}
 #[test]
 fn sequences_survive_reopen_and_retention_never_reuses_them() -> Result<(), StorageError> {
     let (root, db) = database()?;
@@ -140,7 +146,10 @@ fn dead_letters_refuse_over_capacity_expire_and_keep_ciphertext_out_of_journal()
         db.set_inbox_failure_policy(
             &format!("bad-{n:02}"),
             b"PRIVATE_CIPHERTEXT",
-            true,
+            InboxFailureSource::Authenticated {
+                device: &retry_source(&format!("bad-{n:02}"))?,
+                related: true,
+            },
             ("none", ""),
             100 + n,
         )?;
@@ -177,7 +186,10 @@ fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backo
         db.set_inbox_failure_policy(
             &format!("retry-{n:02}"),
             b"PRIVATE_RETRY",
-            true,
+            InboxFailureSource::Authenticated {
+                device: &retry_source(&format!("retry-{n:02}"))?,
+                related: true,
+            },
             ("none", ""),
             100,
         )?;
@@ -205,7 +217,13 @@ fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backo
 #[test]
 fn terminal_dead_letters_are_not_reinserted_after_membership_changes() -> Result<(), StorageError> {
     let (root, db) = database()?;
-    db.set_inbox_failure_policy("refused", b"packet", true, ("group", "g"), 100)?;
+    db.set_inbox_failure_policy(
+        "refused",
+        b"packet",
+        InboxFailureSource::Authenticated { device: &retry_source("refused")?, related: true },
+        ("group", "g"),
+        100,
+    )?;
     db.dead_letter_inbox(
         "refused",
         b"packet",
@@ -258,9 +276,21 @@ fn a_junk_source_cannot_evict_another_sources_pending_ciphertext() -> Result<(),
 fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
 -> Result<(), StorageError> {
     let (root, db) = database()?;
-    db.set_inbox_failure_policy("pending", b"packet", true, ("group", "g"), 100)?;
+    db.set_inbox_failure_policy(
+        "pending",
+        b"packet",
+        InboxFailureSource::Authenticated { device: &retry_source("pending")?, related: true },
+        ("group", "g"),
+        100,
+    )?;
     db.defer_inbox_entry("pending", b"packet", 100)?;
-    db.set_inbox_failure_policy("auth", b"bad", true, ("group", "g"), 100)?;
+    db.set_inbox_failure_policy(
+        "auth",
+        b"bad",
+        InboxFailureSource::Authenticated { device: &retry_source("auth")?, related: true },
+        ("group", "g"),
+        100,
+    )?;
     db.dead_letter_inbox(
         "auth",
         b"bad",
@@ -346,7 +376,13 @@ fn redrive_wakes_only_later_matching_changes_and_retains_rate_limited_triggers()
 -> Result<(), StorageError> {
     let (root, db) = database()?;
     db.create_group("affected", "bob")?;
-    db.set_inbox_failure_policy("pending", b"packet", true, ("group", "affected"), 100)?;
+    db.set_inbox_failure_policy(
+        "pending",
+        b"packet",
+        InboxFailureSource::Authenticated { device: &retry_source("pending")?, related: true },
+        ("group", "affected"),
+        100,
+    )?;
     db.defer_inbox_entry("pending", b"packet", 100)?;
     assert_eq!(db.redrive_inbox_changes(101)?, 0);
     db.create_group("unrelated", "bob")?;
@@ -681,6 +717,101 @@ fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
     assert_eq!(selected.principal_commitment.as_deref(), Some("bob-root"));
     assert_eq!(db.group_member_device_key("legacy", "shared")?.as_deref(), Some("same-key"));
 
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn retry_quota_owner_requires_authenticated_root_context() -> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let bob = retry_source("bob")?;
+    let mallory = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+        &ramflux_crypto::create_identity_root("mallory", [0xa2; 32]),
+        "bob",
+    )?;
+    let packet = br#"{"envelope":{"source_device_id":"bob"}}"#;
+    for n in 0..8 {
+        for (prefix, device) in [("bob", &bob), ("mallory", &mallory)] {
+            assert!(db.set_inbox_failure_policy(
+                &format!("{prefix}-{n}"),
+                packet,
+                InboxFailureSource::Authenticated { device, related: true },
+                ("none", ""),
+                100
+            )?);
+        }
+    }
+    assert!(!db.set_inbox_failure_policy(
+        "bob-over",
+        packet,
+        InboxFailureSource::Authenticated { device: &bob, related: true },
+        ("none", ""),
+        100
+    )?);
+    assert!(!db.set_inbox_failure_policy(
+        "mallory-over",
+        packet,
+        InboxFailureSource::Authenticated { device: &mallory, related: true },
+        ("none", ""),
+        100
+    )?);
+    assert!(db.set_inbox_failure_policy(
+        "unverified-bob",
+        packet,
+        InboxFailureSource::Unverified,
+        ("none", ""),
+        100
+    )?);
+    let sources: i64 = db.connection.query_row(
+        "SELECT count(DISTINCT source) FROM runtime_inbox_policy",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(sources, 3);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn legacy_retry_attribution_is_isolated_then_verified_without_renewing_lifetime()
+-> Result<(), StorageError> {
+    let (root, db) = database()?;
+    db.set_inbox_failure_policy(
+        "old",
+        b"packet",
+        InboxFailureSource::Unverified,
+        ("none", ""),
+        100,
+    )?;
+    db.defer_inbox_entry("old", b"packet", 100)?;
+    db.connection.execute("UPDATE runtime_inbox_policy SET source='bob',trusted=1", [])?;
+    db.connection.execute("DELETE FROM root_identity_key_upgrade", [])?;
+    drop(db);
+    let index = AccountIndex::open(&root)?;
+    let db = AccountDb::open(&index, "a", &AccountDbKey::derive("a", b"secret"))?;
+    let before: (String, i64, u32) = db.connection.query_row(
+        "SELECT source,expires_at,attempts FROM runtime_inbox_policy WHERE envelope_key='old'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert!(before.0.starts_with("legacy/inbox/"));
+    let bob = retry_source("bob")?;
+    assert!(db.set_inbox_failure_policy(
+        "old",
+        b"packet",
+        InboxFailureSource::Authenticated { device: &bob, related: true },
+        ("none", ""),
+        110
+    )?);
+    let after: (String, i64, u32) = db.connection.query_row(
+        "SELECT source,expires_at,attempts FROM runtime_inbox_policy WHERE envelope_key='old'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(after.0, bob.storage_key());
+    assert_eq!((after.1, after.2), (before.1, before.2));
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

@@ -993,7 +993,11 @@ pub(crate) mod tests {
             dm_device_id_hash("remote_device"),
             [2; 32],
         )?;
-        source.persist_pair("source_device_sync", "remote_device", &[3; 32], &session)?;
+        let remote = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            source.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            "remote_device",
+        )?;
+        source.persist_pair("source_device_sync", remote.storage_key(), &[3; 32], &session)?;
         source.send_direct_message(
             "history-thread",
             "history-message",

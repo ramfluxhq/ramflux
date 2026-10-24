@@ -13,6 +13,13 @@ pub use inbox_policy::InboxFailurePolicy;
 mod quarantine;
 mod retention;
 
+/// A retry bucket has an authenticated root-qualified owner or only an opaque quarantine key.
+#[derive(Clone, Copy)]
+pub enum InboxFailureSource<'a> {
+    Unverified,
+    Authenticated { device: &'a ramflux_crypto::RootQualifiedDeviceRef, related: bool },
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JournalEvent {
     pub seq: u64,

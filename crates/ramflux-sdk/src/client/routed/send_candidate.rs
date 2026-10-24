@@ -41,7 +41,10 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| {
-            let pair = self.pair_key(local, remote)?;
+            let pair = RamfluxClient::pair_key(
+                &self.local_device_identity(local)?,
+                &self.device_identity(remote)?,
+            )?;
             let Some(id) = db.load_actor_state::<String>(&pair)? else { return Ok(false) };
             if !db.load_actor_state::<bool>(&format!("dm-pair/local/{id}"))?.unwrap_or(false)
                 || db.load_actor_state::<bool>(&format!("dm-pair/confirmed/{id}"))?.unwrap_or(false)

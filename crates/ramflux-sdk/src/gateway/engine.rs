@@ -765,12 +765,11 @@ mod a2_signed_request_freshness_tests {
             target_delivery_id: "target_test".to_owned(),
             prekey_http_url: None,
         })
-        .with_device_branch(ramflux_crypto::create_device_branch(
-            "principal_test",
-            "device_test",
-            1,
-            [7_u8; 32],
-        ));
+        .with_owned_device(
+            &ramflux_crypto::create_identity_root("principal_test", [0x91; 32]),
+            ramflux_crypto::create_device_branch("principal_test", "device_test", 1, [7_u8; 32]),
+        )
+        .expect("owned test device");
         // Freeze the window in the deep past (as if connected long ago and never refreshed).
         config.now = 1_000;
         config.auth_expires_at = 1_300; // 1_000 + 300s, long expired vs wall clock.
@@ -841,11 +840,18 @@ mod a2_signed_request_freshness_tests {
             "nonce must be unique per counter even at the same refreshed now"
         );
         assert_ne!(
-            r0.replay_tuple_key(),
-            r1.replay_tuple_key(),
+            r0.replay_tuple_key(config.source_identity.as_ref().expect("owned identity"))
+                .expect("replay key"),
+            r1.replay_tuple_key(config.source_identity.as_ref().expect("owned identity"))
+                .expect("replay key"),
             "replay_tuple must be unique so the guard never coalesces two distinct requests"
         );
         // A true replay of the SAME request yields the SAME tuple → the guard still fail-closes on it.
-        assert_eq!(r0.replay_tuple_key(), r0.replay_tuple_key());
+        assert_eq!(
+            r0.replay_tuple_key(config.source_identity.as_ref().expect("owned identity"))
+                .expect("replay key"),
+            r0.replay_tuple_key(config.source_identity.as_ref().expect("owned identity"))
+                .expect("replay key")
+        );
     }
 }

@@ -172,7 +172,7 @@ impl RouterHandle {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn tokio_handle_matches_submit_and_replay_oracle() -> anyhow::Result<()> {
-        let envelope = current_envelope("env_runtime_submit", "target_runtime_submit");
+        let envelope = current_envelope("env_runtime_submit", "target_runtime_submit")?;
         let (oracle_state, oracle_store, _oracle_path) = test_router("submit_oracle")?;
         let oracle = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn tokio_handle_async_submit_matches_replay_oracle() -> anyhow::Result<()> {
-        let envelope = current_envelope("env_runtime_async_submit", "target_runtime_async_submit");
+        let envelope = current_envelope("env_runtime_async_submit", "target_runtime_async_submit")?;
         let (handle, _handle_path) = test_handle("async_submit_handle")?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let via_handle =
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn tokio_handle_matches_bound_ack_and_nack_oracle() -> anyhow::Result<()> {
-        let envelope = current_envelope("env_runtime_ack", "target_runtime_ack");
+        let envelope = current_envelope("env_runtime_ack", "target_runtime_ack")?;
 
         let (oracle_state, oracle_store, _oracle_path) = test_router("ack_oracle")?;
         let _submitted = crate::router_engine::submit_envelope(
@@ -266,17 +266,16 @@ mod tests {
 
     #[test]
     fn tokio_handle_matches_fanout_oracle() -> anyhow::Result<()> {
-        let request = fanout_request("env_runtime_fanout");
+        let request = fanout_request("env_runtime_fanout")?;
 
         let (oracle_state, oracle_store, _oracle_path) = test_router("fanout_oracle")?;
-        register_test_device(oracle_state.as_ref(), "alice", "alice_phone", "target_phone", 1, 1)?;
+        register_test_device(oracle_state.as_ref(), "alice", "alice_phone", "target_phone", 1)?;
         register_test_device(
             oracle_state.as_ref(),
             "alice",
             "alice_laptop",
             "target_laptop",
             2,
-            1,
         )?;
         let oracle = crate::router_engine::own_device_fanout(
             oracle_state.as_ref(),
@@ -285,8 +284,8 @@ mod tests {
         )?;
 
         let (handle, _handle_path) = test_handle("fanout_handle")?;
-        register_test_device(handle.state(), "alice", "alice_phone", "target_phone", 1, 1)?;
-        register_test_device(handle.state(), "alice", "alice_laptop", "target_laptop", 2, 1)?;
+        register_test_device(handle.state(), "alice", "alice_phone", "target_phone", 1)?;
+        register_test_device(handle.state(), "alice", "alice_laptop", "target_laptop", 2)?;
         let via_handle = handle.own_device_fanout(&request)?;
 
         assert_eq!(via_handle, oracle);
@@ -365,7 +364,7 @@ mod tests {
         Ok((RouterHandle::tokio(state, store, None), path))
     }
 
-    fn test_router(
+    pub(crate) fn test_router(
         name: &str,
     ) -> anyhow::Result<(
         Arc<ramflux_node_core::RouterCore>,
@@ -375,22 +374,43 @@ mod tests {
         let path = temp_store_path(name)?;
         let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
         let state = Arc::new(ramflux_node_core::RouterCore::new());
+        register_test_device(&state, "alice", "alice_phone", "target_alice", 1)?;
+        store.record_identity_registry(&state.mvp1_identities_snapshot())?;
         Ok((state, store, path))
     }
 
-    fn current_envelope(envelope_id: &str, target_delivery_id: &str) -> ramflux_protocol::Envelope {
+    pub(crate) fn current_envelope(
+        envelope_id: &str,
+        target_delivery_id: &str,
+    ) -> anyhow::Result<ramflux_protocol::Envelope> {
         let mut envelope = envelope(envelope_id, target_delivery_id, DeliveryClass::OpaqueEvent);
         envelope.created_at =
             i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
-        envelope
+        let root = ramflux_crypto::create_identity_root(
+            "alice",
+            ramflux_crypto::blake3_256("ramflux.test.registration_root.v1", b"alice"),
+        );
+        envelope.ext.ext.insert(
+            "source_root_commitment".into(),
+            serde_json::json!(ramflux_crypto::identity_root_commitment(
+                &root.signing_key.verifying_key()
+            )),
+        );
+        envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
+            &envelope,
+            ramflux_crypto::blake3_256("ramflux.test.runtime.device.v1", b"alice/alice_phone"),
+        )?;
+        Ok(envelope)
     }
 
-    fn fanout_request(envelope_id: &str) -> ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest {
-        ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest {
+    fn fanout_request(
+        envelope_id: &str,
+    ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest> {
+        Ok(ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest {
             principal_id: "alice".to_owned(),
             source_device_id: "alice_phone".to_owned(),
-            envelope: current_envelope(envelope_id, "target_unused"),
-        }
+            envelope: current_envelope(envelope_id, "target_unused")?,
+        })
     }
 
     fn forward_plan() -> ramflux_node_core::HomeNodeMigrationForwardPlan {
@@ -428,7 +448,7 @@ mod tests {
             signed: signed_fields(),
             envelope_id: envelope_id.to_owned(),
             source_principal_id: "alice".to_owned(),
-            source_device_id: "alice_device".to_owned(),
+            source_device_id: "alice_phone".to_owned(),
             target_delivery_id: target_delivery_id.to_owned(),
             routing_set_id: None,
             delivery_class,
@@ -487,13 +507,21 @@ mod tests {
         device_id: &str,
         target_delivery_id: &str,
         nonce: u64,
-        root_nonce: u64,
     ) -> anyhow::Result<()> {
-        let root_seed = seed_from_nonce(0x31, root_nonce);
-        let device_seed = seed_from_nonce(0x41, nonce);
+        let root_seed = ramflux_crypto::blake3_256(
+            "ramflux.test.registration_root.v1",
+            principal_id.as_bytes(),
+        );
+        let device_seed = ramflux_crypto::blake3_256(
+            "ramflux.test.runtime.device.v1",
+            format!("{principal_id}/{device_id}").as_bytes(),
+        );
         let root = ramflux_crypto::create_identity_root(principal_id, root_seed);
         let device = ramflux_crypto::create_device_branch(principal_id, device_id, 1, device_seed);
-        let agreement = ramflux_crypto::X25519KeyPair::from_seed(seed_from_nonce(0x51, nonce));
+        let agreement = ramflux_crypto::X25519KeyPair::from_seed(ramflux_crypto::blake3_256(
+            "ramflux.test.runtime.agreement.v1",
+            format!("{principal_id}/{device_id}").as_bytes(),
+        ));
         let proof = ramflux_crypto::authorize_device_branch_v2(
             &root,
             &device,
@@ -514,6 +542,7 @@ mod tests {
             &ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes()),
             &ramflux_protocol::encode_base64url(agreement.public),
         )?;
+        entries.retain(|entry| entry.device_id != device_id);
         entries.push(ramflux_protocol::SignedDeviceSetEntry {
             device_id: device_id.into(),
             device_epoch: 1,
@@ -554,12 +583,6 @@ mod tests {
         };
         state.mvp1_register_identity(&request)?;
         Ok(())
-    }
-
-    fn seed_from_nonce(prefix: u8, nonce: u64) -> [u8; 32] {
-        let mut seed = [prefix; 32];
-        seed[24..].copy_from_slice(&nonce.to_be_bytes());
-        seed
     }
 
     fn temp_store_path(test_name: &str) -> anyhow::Result<PathBuf> {

@@ -7,7 +7,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub struct InboxFailurePolicy<'a> {
     /// An independently verified source scope; absent for unauthenticated claims.
-    pub verified_source: Option<&'a str>,
+    pub verified_source: Option<&'a ramflux_crypto::RootQualifiedDeviceRef>,
     /// True only for an authenticated source with an existing local relationship.
     pub trusted: bool,
     /// Dependency class and subject used for selective redrive.
@@ -23,22 +23,15 @@ impl AccountDb {
         &self,
         key: &str,
         entry: &[u8],
-        trusted: bool,
+        identity: InboxFailureSource<'_>,
         dependency: (&str, &str),
         at: i64,
     ) -> Result<bool, StorageError> {
-        let value: serde_json::Value = serde_json::from_slice(entry).unwrap_or_default();
-        let source = value["envelope"]["source_device_id"].as_str().unwrap_or(key);
-        self.set_verified_inbox_failure_policy(
-            key,
-            entry,
-            InboxFailurePolicy {
-                verified_source: trusted.then_some(source),
-                trusted,
-                dependency,
-                at,
-            },
-        )
+        let (verified_source,trusted)=match identity {
+            InboxFailureSource::Authenticated {device,related} => (Some(device),related),
+            InboxFailureSource::Unverified => (None,false),
+        };
+        self.set_verified_inbox_failure_policy(key,entry,InboxFailurePolicy {verified_source,trusted,dependency,at})
     }
     /// Sets failure policy with a verified identity scope independent of claimed device IDs.
     /// # Errors
@@ -53,7 +46,7 @@ impl AccountDb {
             policy;
         let trusted = trusted && verified_source.is_some();
         let source = verified_source
-            .map_or_else(|| format!("unverified:{key}"), |source| format!("verified:{source}"));
+            .map_or_else(|| format!("unverified/{}",ramflux_protocol::encode_base64url(key)), |source| source.storage_key().to_owned());
         let value: serde_json::Value = serde_json::from_slice(entry).unwrap_or_default();
         self.write_transaction(|| {
             self.release_expired_legacy_inbox(at)?;
@@ -123,7 +116,7 @@ impl AccountDb {
         entry: &[u8],
         at: i64,
     ) -> Result<bool, StorageError> {
-        self.set_inbox_failure_policy(key, entry, false, ("none", ""), at)
+        self.set_inbox_failure_policy(key, entry, InboxFailureSource::Unverified, ("none", ""), at)
     }
     pub(super) fn cleanup_inbox_policy(&self) -> Result<(), StorageError> {
         self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_retry UNION SELECT envelope_key FROM runtime_inbox_dead_letter)",[])?;

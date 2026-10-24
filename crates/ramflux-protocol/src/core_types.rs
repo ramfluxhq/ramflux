@@ -101,9 +101,33 @@ pub struct SignedRequest {
 }
 
 impl SignedRequest {
-    #[must_use]
-    pub fn replay_tuple_key(&self) -> String {
-        format!("{}:{}:{}", self.source_device_id, self.nonce, self.request_id)
+    /// Build a replay key only in an authenticated root-qualified identity context.
+    /// # Errors
+    /// Rejects a source name that differs from the authenticated device or invalid canonical data.
+    pub fn replay_tuple_key(
+        &self,
+        source: &impl crate::RootQualifiedDeviceIdentity,
+    ) -> Result<String, crate::ProtocolError> {
+        if self.source_device_id != source.device_id()
+            && self.source_device_id
+                != crate::qualified_device_id(source.root_commitment(), source.device_id())?
+        {
+            return Err(crate::ProtocolError::InvalidIdentityRecord(
+                "signed request source identity mismatch",
+            ));
+        }
+        Ok(format!(
+            "request/v2/{}",
+            crate::hash_base64url(
+                "ramflux.signed_request.replay.v2",
+                &crate::canonical_json_bytes(&(
+                    source.root_commitment(),
+                    source.device_id(),
+                    &self.nonce,
+                    &self.request_id
+                ))?
+            )
+        ))
     }
 }
 

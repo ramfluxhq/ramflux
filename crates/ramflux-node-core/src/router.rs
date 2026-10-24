@@ -635,10 +635,11 @@ impl RouterCore {
     /// Returns an error when the envelope replay tuple has already been accepted.
     pub fn accept_envelope_replay(
         &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedEnvelope, NodeCoreError> {
-        self.check_envelope_replay_once(&envelope, now_unix_seconds)?;
+        self.check_envelope_replay_once(source, &envelope, now_unix_seconds)?;
         Ok(ReplayAcceptedEnvelope { envelope })
     }
 
@@ -659,7 +660,8 @@ impl RouterCore {
         request: ItestMvp10OwnDeviceFanoutRequest,
     ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
         let targets = self.mvp10_own_device_targets(&request)?;
-        self.check_envelope_replay_once(&request.envelope, request.envelope.created_at)?;
+        let source = self.authenticated_envelope_source(&request.envelope)?;
+        self.check_envelope_replay_once(&source, &request.envelope, request.envelope.created_at)?;
         let deliveries = targets
             .into_iter()
             .map(|(device_id, target_delivery_id)| {
@@ -771,17 +773,22 @@ impl RouterCore {
         self.target_shard(target_delivery_id).registry.close_session(target_delivery_id)
     }
 
-    pub fn submit_envelope(&self, envelope: ramflux_protocol::Envelope) -> RouterSubmitOutcome {
+    pub fn submit_envelope(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: ramflux_protocol::Envelope,
+    ) -> RouterSubmitOutcome {
         let now = envelope.created_at;
-        self.submit_envelope_at(envelope, now)
+        self.submit_envelope_at(source, envelope, now)
     }
 
     pub fn submit_envelope_at(
         &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
-        if let Err(error) = self.check_envelope_replay_once(&envelope, now_unix_seconds) {
+        if let Err(error) = self.check_envelope_replay_once(source, &envelope, now_unix_seconds) {
             return RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
                 reason: error.to_string(),
@@ -792,6 +799,7 @@ impl RouterCore {
 
     pub fn submit_envelope_with_home_node_forward_at<F>(
         &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
         forward: F,
@@ -801,7 +809,7 @@ impl RouterCore {
             &HomeNodeMigrationForwardPlan,
         ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError>,
     {
-        if let Err(error) = self.check_envelope_replay_once(&envelope, now_unix_seconds) {
+        if let Err(error) = self.check_envelope_replay_once(source, &envelope, now_unix_seconds) {
             return RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
                 reason: error.to_string(),
@@ -1136,17 +1144,55 @@ impl RouterCore {
         }
     }
 
+    /// Authenticate the root-selected branch before using any claimed sender in a key.
+    /// # Errors
+    /// Rejects missing root claims, absent/revoked signed-set entries and forged signatures.
+    pub fn authenticated_envelope_source(
+        &self,
+        envelope: &ramflux_protocol::Envelope,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
+        let root = envelope
+            .ext
+            .ext
+            .get("source_root_commitment")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(reject)?;
+        let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
+            .map_err(|_| reject())?;
+        let registered = lock_unpoisoned(&self.control)
+            .mvp1_identities
+            .device_auth_key(&lookup)
+            .ok_or_else(reject)?;
+        let source = registered.authenticated_device_identity()?;
+        if source.root_commitment() != root
+            || registered.principal_id != envelope.source_principal_id
+        {
+            return Err(reject());
+        }
+        let bytes =
+            ramflux_protocol::envelope_sender_signed_bytes(envelope).map_err(|_| reject())?;
+        ramflux_crypto::verify_canonical_signature(
+            &bytes,
+            &envelope.signed.signature,
+            &registered.branch_public_key,
+        )
+        .map_err(|_| reject())?;
+        Ok(source)
+    }
+
     fn check_envelope_replay_once(
         &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: &ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<(), NodeCoreError> {
         crate::record_router_replay_guard_check();
         let replay_check_started = Instant::now();
-        let replay_key = envelope_replay_tuple_key(envelope);
+        let replay_key = envelope_replay_tuple_key(source, envelope);
         let replay_check =
             lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
-                .check_envelope(envelope, now_unix_seconds);
+                .check_envelope(source, envelope, now_unix_seconds);
         crate::record_router_replay_guard_check_us(elapsed_us(replay_check_started));
         replay_check
     }

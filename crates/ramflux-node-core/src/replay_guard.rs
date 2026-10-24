@@ -6,9 +6,12 @@ use std::collections::BTreeMap;
 
 use crate::NodeCoreError;
 
+#[path = "replay_guard/legacy_replay.rs"]
+mod legacy_replay;
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NodeReplayGuardState {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "legacy_replay::deserialize_entries")]
     accepted_by_key: BTreeMap<String, i64>,
 }
 
@@ -20,18 +23,21 @@ impl NodeReplayGuardState {
 
     /// # Errors
     /// Returns an error when the request is expired, valid for too long, or
-    /// duplicates an already accepted `(source_device_id, nonce, request_id)` tuple.
+    /// duplicates an already accepted root-qualified device, nonce and request-id tuple.
     pub fn check_signed_request(
         &mut self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         request: &ramflux_protocol::SignedRequest,
         now_unix_seconds: i64,
     ) -> Result<(), NodeCoreError> {
         let mut guard = ramflux_protocol::ReplayGuard::new();
         guard
-            .check_signed_request(request, now_unix_seconds)
+            .check_signed_request(source, request, now_unix_seconds)
             .map_err(|source| NodeCoreError::ReplayGuard(source.to_string()))?;
         self.prune(now_unix_seconds);
-        let key = request.replay_tuple_key();
+        let key = request
+            .replay_tuple_key(source)
+            .map_err(|source| NodeCoreError::ReplayGuard(source.to_string()))?;
         if self.accepted_by_key.insert(key.clone(), request.expires_at).is_some() {
             return Err(NodeCoreError::ReplayGuard(format!("replay: {key}")));
         }
@@ -40,12 +46,18 @@ impl NodeReplayGuardState {
 
     /// # Errors
     /// Returns an error when the envelope TTL has expired or the same
-    /// `(source_device_id, envelope_id, envelope_id)` replay tuple has already been accepted.
+    /// root-qualified device and envelope-id replay tuple has already been accepted.
     pub fn check_envelope(
         &mut self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: &ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<(), NodeCoreError> {
+        if envelope.source_device_id != source.device_id()
+            && envelope.source_device_id != source.storage_key()
+        {
+            return Err(NodeCoreError::ReplayGuard("envelope source identity mismatch".into()));
+        }
         let ttl = i64::from(envelope.ttl);
         if ttl > ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS {
             return Err(NodeCoreError::ReplayGuard(format!(
@@ -66,7 +78,7 @@ impl NodeReplayGuardState {
             )));
         }
         self.prune(now_unix_seconds);
-        let key = envelope_replay_tuple_key(envelope);
+        let key = envelope_replay_tuple_key(source, envelope);
         if self.accepted_by_key.insert(key.clone(), expires_at).is_some() {
             return Err(NodeCoreError::ReplayGuard(format!("replay: {key}")));
         }
@@ -88,7 +100,7 @@ impl NodeReplayGuardState {
     }
 
     pub(crate) fn restore_accepted(&mut self, key: String, expires_at: i64) {
-        self.accepted_by_key.insert(key, expires_at);
+        self.accepted_by_key.insert(legacy_replay::isolate_unknown_key(key), expires_at);
     }
 
     fn prune(&mut self, now_unix_seconds: i64) {
@@ -97,6 +109,13 @@ impl NodeReplayGuardState {
 }
 
 #[must_use]
-pub fn envelope_replay_tuple_key(envelope: &ramflux_protocol::Envelope) -> String {
-    format!("{}:{}:{}", envelope.source_device_id, envelope.envelope_id, envelope.envelope_id)
+pub fn envelope_replay_tuple_key(
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &ramflux_protocol::Envelope,
+) -> String {
+    format!(
+        "envelope/v2/{}/{}",
+        source.storage_key(),
+        ramflux_protocol::encode_base64url(&envelope.envelope_id)
+    )
 }

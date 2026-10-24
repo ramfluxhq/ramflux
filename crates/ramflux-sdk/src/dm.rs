@@ -462,6 +462,17 @@ pub(crate) fn gateway_direct_message_envelope(
         encrypted_payload,
         payload_hash,
     };
+    if let Some(source) = &config.source_identity {
+        if source.device_id() != envelope.source_device_id {
+            return Err(SdkError::GatewaySessionRejected(
+                "envelope source identity mismatch".into(),
+            ));
+        }
+        envelope.ext.ext.insert(
+            "source_root_commitment".into(),
+            serde_json::Value::String(source.root_commitment().into()),
+        );
+    }
     if let Some(franking) = franking {
         envelope.ext.ext.insert("franking".to_owned(), serde_json::to_value(franking)?);
     }

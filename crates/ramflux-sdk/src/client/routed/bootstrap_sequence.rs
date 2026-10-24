@@ -80,7 +80,10 @@ impl RamfluxClient {
         let commitment = record["principal_commitment"]
             .as_str()
             .ok_or_else(|| invalid("bootstrap commitment missing"))?;
-        let pair = self.pair_key(local, remote)?;
+        let pair = RamfluxClient::pair_key(
+            &self.local_device_identity(local)?,
+            &self.device_identity(remote)?,
+        )?;
         let hash = ramflux_protocol::hash_base64url(
             "ramflux.sdk.bootstrap.owner.v2",
             &ramflux_protocol::canonical_json_bytes(&(principal, commitment, remote))?,

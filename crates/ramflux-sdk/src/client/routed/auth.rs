@@ -138,17 +138,8 @@ fn verify_sender_record(entry: &GatewayInboxEntry, record: &Value) -> Result<Str
         .get("signing_public_key")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("sender signing key missing"))?;
-    let mut sender_envelope = envelope.clone();
-    if let Some(receipt) =
-        sender_envelope.ext.ext.get_mut("franking").and_then(Value::as_object_mut)
-    {
-        // The gateway appends exactly these receipt fields after sender signing.
-        for field in ["franking_tag", "node_id", "accepted_at"] {
-            receipt.remove(field);
-        }
-    }
     ramflux_crypto::verify_canonical_signature(
-        &ramflux_protocol::signed_bytes(&sender_envelope)?,
+        &ramflux_protocol::envelope_sender_signed_bytes(envelope)?,
         &envelope.signed.signature,
         key,
     )?;

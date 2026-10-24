@@ -177,9 +177,10 @@ pub(crate) async fn local_bus_account_create(
         "device.branch.created",
         &serde_json::to_vec(&device_state)?,
     )?;
-    let mut gateway = GatewaySessionConfig::auto(body.gateway.clone()).with_device_branch(
+    let mut gateway = GatewaySessionConfig::auto(body.gateway.clone()).with_owned_device(
+        client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
-    );
+    )?;
     if let Some(addr) = node_tcp_addr {
         gateway = gateway.with_tcp_gateway_addr(addr);
     }

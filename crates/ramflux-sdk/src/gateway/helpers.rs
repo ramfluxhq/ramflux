@@ -82,6 +82,16 @@ pub(crate) fn gateway_auth_frame(
         nonce: open.stream_nonce.clone(),
         expires_at: config.auth_expires_at,
     };
+    let source = config.source_identity.as_ref().ok_or_else(|| {
+        SdkError::GatewaySessionRejected("root-authenticated gateway identity missing".into())
+    })?;
+    if source.device_id() != device_branch.device_id {
+        return Err(SdkError::GatewaySessionRejected("gateway source identity mismatch".into()));
+    }
+    device_proof.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::Value::String(source.root_commitment().into()),
+    );
     device_proof.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
         device_branch.as_ref(),
         &device_proof,
@@ -170,12 +180,10 @@ mod tests {
             target_delivery_id: "target_test".to_owned(),
             prekey_http_url: None,
         })
-        .with_device_branch(ramflux_crypto::create_device_branch(
-            "principal_test",
-            "device_test",
-            1,
-            [7_u8; 32],
-        ));
+        .with_owned_device(
+            &ramflux_crypto::create_identity_root("principal_test", [0x91; 32]),
+            ramflux_crypto::create_device_branch("principal_test", "device_test", 1, [7_u8; 32]),
+        )?;
         config.previous_session_id = Some("session_previous".to_owned());
         config.resume_token = Some("resume_previous".to_owned());
 
@@ -187,12 +195,20 @@ mod tests {
         assert_ne!(first_open.stream_nonce, second_open.stream_nonce);
         assert_ne!(first_auth.signed_request.request_id, second_auth.signed_request.request_id);
         assert_ne!(
-            first_auth.signed_request.replay_tuple_key(),
-            second_auth.signed_request.replay_tuple_key()
+            first_auth.signed_request.replay_tuple_key(
+                config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?
+            )?,
+            second_auth.signed_request.replay_tuple_key(
+                config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?
+            )?
         );
         assert_eq!(
-            first_auth.signed_request.replay_tuple_key(),
-            first_auth.signed_request.replay_tuple_key()
+            first_auth.signed_request.replay_tuple_key(
+                config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?
+            )?,
+            first_auth.signed_request.replay_tuple_key(
+                config.source_identity.as_ref().ok_or(SdkError::IdentityRootMissing)?
+            )?
         );
         Ok(())
     }

@@ -104,7 +104,10 @@ pub(super) fn archive(f: &Fixture, remote: &str) -> Result<Vec<String>, SdkError
         .account_db()?
         .load_actor_state::<Vec<String>>(&format!(
             "{}/archive",
-            f.client.pair_key(&f.id, &fixture_peer_reference(&f.client, remote)?)?
+            RamfluxClient::pair_key(
+                &f.client.local_device_identity(&f.id)?,
+                &f.client.device_identity(&fixture_peer_reference(&f.client, remote)?)?
+            )?
         ))?
         .unwrap_or_default())
 }
@@ -260,7 +263,10 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
     let lost = last(&sent)?;
     let key = format!(
         "dm-pair/reset-work/{}",
-        bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        RamfluxClient::pair_key(
+            &bob.client.local_device_identity("bob")?,
+            &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+        )?
     );
     let mut work = bob
         .client
@@ -271,7 +277,10 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
     bob.client.account_db()?.persist_actor_state(
         &format!(
             "{}/reset-at",
-            bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            RamfluxClient::pair_key(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
         ),
         &(now_unix_timestamp() - 60),
     )?;
@@ -351,7 +360,10 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
     )?;
     let key = format!(
         "dm-pair/reset-work/{}",
-        bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+        RamfluxClient::pair_key(
+            &bob.client.local_device_identity("bob")?,
+            &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+        )?
     );
     let mut work = bob
         .client
@@ -362,7 +374,10 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
     bob.client.account_db()?.persist_actor_state(
         &format!(
             "{}/reset-at",
-            bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)?
+            RamfluxClient::pair_key(
+                &bob.client.local_device_identity("bob")?,
+                &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?
+            )?
         ),
         &(now_unix_timestamp() - 60),
     )?;

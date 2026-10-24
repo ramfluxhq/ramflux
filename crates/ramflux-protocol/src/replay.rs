@@ -27,6 +27,7 @@ impl ReplayGuard {
     /// Returns an error when the request is expired, valid for too long, or duplicated.
     pub fn check_signed_request(
         &mut self,
+        source: &impl crate::RootQualifiedDeviceIdentity,
         request: &SignedRequest,
         now_unix_seconds: i64,
     ) -> Result<(), ProtocolError> {
@@ -42,7 +43,7 @@ impl ReplayGuard {
         }
 
         self.prune(now_unix_seconds);
-        let key = request.replay_tuple_key();
+        let key = request.replay_tuple_key(source)?;
         if self.accepted.insert(key.clone(), request.expires_at).is_some() {
             return Err(ProtocolError::Replay(key));
         }

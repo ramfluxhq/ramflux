@@ -7,7 +7,10 @@ use super::review::pool;
 use super::session_record::{Wire, active, archive, gap, last};
 use super::*;
 fn pair(bob: &Fixture) -> Result<String, SdkError> {
-    bob.client.pair_key("bob", &fixture_peer_reference(&bob.client, "alice")?)
+    RamfluxClient::pair_key(
+        &bob.client.local_device_identity("bob")?,
+        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
+    )
 }
 fn work(bob: &Fixture) -> Result<String, SdkError> {
     Ok(format!("dm-pair/reset-work/{}", pair(bob)?))
