@@ -169,3 +169,36 @@ impl super::AccountDb {
         rows.into_iter().map(|(id, bytes)| Ok((id, serde_json::from_slice(&bytes)?))).collect()
     }
 }
+
+impl AccountDb {
+    /// Exportable state only, prioritizing this account's authorship over peer state.
+    /// The opaque signed cursor preserves that priority across bounded pages.
+    /// # Errors
+    /// Returns database/JSON errors. Placeholder directory rows are never read.
+    pub fn surface_export_records<T: serde::de::DeserializeOwned>(
+        &self,
+        owner: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<(i64, T)>, StorageError> {
+        let mut query = self.connection.prepare("SELECT export_order,state_json FROM (SELECT CASE WHEN json_extract(CAST(state_json AS TEXT),'$.author_principal_id')=?1 THEN rowid ELSE rowid-9223372036854775807 END AS export_order,state_json FROM runtime_actor_state WHERE substr(state_kind,1,14)='surface/state/') WHERE export_order<?2 ORDER BY export_order DESC LIMIT ?3")?;
+        let rows = query
+            .query_map(params![owner, before.unwrap_or(i64::MAX), limit.min(65)], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(order, bytes)| Ok((order, serde_json::from_slice(&bytes)?)))
+            .collect()
+    }
+    /// Removes a transient directory entry that never acquired a validated checkpoint.
+    /// # Errors
+    /// Returns database failures.
+    pub fn delete_surface_placeholder(&self, reference: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM runtime_actor_state WHERE state_kind=?1",
+            params![format!("directory/surface/{reference}")],
+        )?;
+        Ok(())
+    }
+}

@@ -955,7 +955,7 @@ async fn send_group_sender_key_distribution_message(
     Ok(serde_json::to_value(entry)?)
 }
 
-async fn resolve_group_route_principal_commitment(
+pub(super) async fn resolve_group_route_principal_commitment(
     client: &RamfluxClient,
     gateway: &GatewaySessionConfig,
     route: &LocalBusGroupMemberRoute,

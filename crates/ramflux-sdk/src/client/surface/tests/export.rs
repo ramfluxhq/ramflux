@@ -22,13 +22,25 @@ fn peer_without_snapshot_proof_exports_and_restores_its_validated_checkpoint() -
     let mut damaged = serde_json::to_value(&exported.checkpoints[0])?;
     damaged["version"] = json!(99);
     let damaged = serde_json::from_value(damaged)?;
-    assert!(replica.import_owned_surface_checkpoints(&[damaged]).is_err());
-    assert_eq!(replica.surface_get("s", 0, None)?, actual);
+    replica.import_owned_surface_checkpoints(&[damaged])?;
+    let conflict = replica.surface_get("s", 0, None)?;
+    assert_eq!(conflict["snapshot"], actual["snapshot"]);
+    assert_eq!(conflict["surface_hash"], actual["surface_hash"]);
+    assert_eq!(conflict["out_of_sync"], true);
     Ok(())
 }
 #[test]
 fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> TestResult {
     let f = Fixture::new()?;
+    let mut own_content = snapshot();
+    own_content.surface_id = "own".into();
+    let mut own =
+        carrier(&f.human, PayloadKind::Event, "own", &event(1, C::CreateSurface(snapshot()))?)?;
+    own.wire_base64 = ramflux_protocol::encode_base64url(event(1, C::CreateSurface(own_content))?);
+    own.surface_id = "own".into();
+    own.author_principal_id = "human".into();
+    own = f.human.sign_surface_carrier(own)?;
+    assert!(project(&f.human, &own, "own")?.accepted);
     for i in 0..65 {
         let mut content = snapshot();
         content.surface_id = format!("s{i}");
@@ -47,10 +59,19 @@ fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> Test
     let exported = f.human.own_surface_history_export(None)?;
     assert!(exported.metadata.truncated);
     assert_eq!(exported.checkpoints.len(), 64);
-    assert_eq!(serde_json::to_value(&exported.checkpoints[0])?["record"]["surface_id"], "s1");
+    assert!(
+        exported
+            .checkpoints
+            .iter()
+            .any(|c| serde_json::to_value(c).is_ok_and(|v| v["record"]["surface_id"] == "own"))
+    );
+    assert_eq!(serde_json::to_value(&exported.checkpoints[0])?["record"]["surface_id"], "s2");
+    let all = f.human.own_surface_history_pages()?;
+    assert_eq!(all.len(), 2);
+    assert_eq!(all.iter().map(|p| p.checkpoints.len()).sum::<usize>(), 66);
     let older = f.human.own_surface_history_export(exported.metadata.next_before)?;
     assert!(!older.metadata.truncated);
-    assert_eq!(older.checkpoints.len(), 1);
+    assert_eq!(older.checkpoints.len(), 2);
     assert_eq!(serde_json::to_value(&older.checkpoints[0])?["record"]["surface_id"], "s0");
     let recorded: Value =
         f.human.account_db()?.load_actor_state("surface/export_metadata")?.ok_or("metadata")?;
@@ -147,5 +168,86 @@ fn cache_human_manifest(f: &Fixture) -> TestResult {
         &principal_commitment,
     )?;
     f.author.account_db()?.persist_actor_state("identity/manifest/human", &manifest)?;
+    Ok(())
+}
+
+#[test]
+fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
+    let f = Fixture::new()?;
+    create(&f)?;
+    let before = serde_json::to_value(f.human.own_surface_history_export(None)?)?;
+    for i in 0..64 {
+        let mut held = carrier(
+            &f.author,
+            PayloadKind::Event,
+            &format!("held-{i}"),
+            &event(1, C::CreateSurface(snapshot()))?,
+        )?;
+        held.wire_base64 = ramflux_protocol::encode_base64url(event(
+            3,
+            C::StreamAppend(StreamAppendCommand {
+                surface_id: format!("unknown-{i}"),
+                component_id: "stream".into(),
+                text_delta: "future".into(),
+                final_: false,
+            }),
+        )?);
+        held.surface_id = format!("unknown-{i}");
+        held = f.author.sign_surface_carrier(held)?;
+        assert!(project(&f.human, &held, &held.message_id)?.queued);
+    }
+    assert_eq!(serde_json::to_value(f.human.own_surface_history_export(None)?)?, before);
+    let db = f.human.account_db()?;
+    for (key, mut pending) in
+        db.surface_record_page::<Value>("surface/pending/", "surface/pending/", 65)?
+    {
+        pending["expires_at"] = json!(0);
+        db.persist_actor_state(&key, &pending)?;
+    }
+    f.human.expire_surface_pending()?;
+    assert_eq!(db.surface_recent_records::<Value>("directory/surface/", None, 129)?.len(), 1);
+    assert_eq!(serde_json::to_value(f.human.own_surface_history_export(None)?)?, before);
+    Ok(())
+}
+#[test]
+fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent() -> TestResult {
+    let f = Fixture::new()?;
+    create(&f)?;
+    let original = f.human.own_surface_history_export(None)?.checkpoints.remove(0);
+    let mut content = snapshot();
+    content.surface_id = "honest".into();
+    let mut honest =
+        carrier(&f.author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
+    honest.wire_base64 = ramflux_protocol::encode_base64url(event(1, C::CreateSurface(content))?);
+    honest.surface_id = "honest".into();
+    honest = f.author.sign_surface_carrier(honest)?;
+    assert!(project(&f.human, &honest, "honest")?.accepted);
+    let exported = f.human.own_surface_history_export(None)?;
+    let mut replica = client(&f.root.join("conflict-replica"), "human", 35)?;
+    replica.create_device_branch("human", "human-two", 1, [37; 32]);
+    replica.import_owned_surface_checkpoints(std::slice::from_ref(&original))?;
+    let mut corrupt = serde_json::to_value(&original)?;
+    corrupt["surface_hash"] = json!("divergent-content");
+    let corrupt = serde_json::from_value(corrupt)?;
+    let mut items = vec![corrupt];
+    items.extend(
+        exported.checkpoints.into_iter().filter(|v| {
+            serde_json::to_value(v).is_ok_and(|v| v["record"]["surface_id"] == "honest")
+        }),
+    );
+    for _ in 0..2 {
+        replica.import_owned_surface_checkpoints(&items)?;
+    }
+    assert_eq!(replica.surface_get("honest", 0, None)?["version"], 1);
+    let preserved = replica.surface_get("s", 0, None)?;
+    assert_eq!(preserved["version"], 1);
+    assert_eq!(preserved["out_of_sync"], true);
+    assert_eq!(
+        replica
+            .account_db()?
+            .surface_history_page::<Value>("surface/import_skip/", "surface/import_skip/", 65)?
+            .len(),
+        1
+    );
     Ok(())
 }

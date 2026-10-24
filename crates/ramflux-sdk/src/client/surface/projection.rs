@@ -114,7 +114,9 @@ impl RamfluxClient {
             &carrier.surface_id,
         )?;
         let state = saved.map_or_else(SurfaceState::default, |(_, state)| state);
-        if self.surface_is_out_of_sync(&carrier.surface_reference()?)? && carrier.snapshot.is_some()
+        if carrier.snapshot.is_some()
+            && (self.surface_is_out_of_sync(&carrier.surface_reference()?)?
+                || event.version() > state.version().saturating_add(1))
         {
             return match self.restore_surface_proof(carrier, &state, event.version()) {
                 Ok(Some(next)) => Ok(Ok(next)),
@@ -153,8 +155,12 @@ impl RamfluxClient {
         let db = self.account_db()?;
         match payload {
             Payload::Event(event) => {
-                let recovering = self.surface_is_out_of_sync(&carrier.surface_reference()?)?
-                    && carrier.snapshot.is_some();
+                let previous_version = self
+                    .surface_state_ref(&carrier.surface_reference()?)?
+                    .map_or(0, |(_, s)| s.version());
+                let recovering = carrier.snapshot.is_some()
+                    && (self.surface_is_out_of_sync(&carrier.surface_reference()?)?
+                        || event.version() > previous_version.saturating_add(1));
                 let state = self
                     .next_surface_event(carrier, &event)?
                     .map_err(|_| invalid("surface changed during writer transaction"))?;
