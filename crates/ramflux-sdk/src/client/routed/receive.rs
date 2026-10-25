@@ -17,7 +17,7 @@ pub(crate) struct Delivery {
 
 struct PreparedGroupControls {
     legacy: Option<(ramflux_protocol::GroupEvent, String)>,
-    shared: Option<ramflux_crypto::VerifiedGroupState>,
+    shared: Option<crate::client::shared_group::PreparedSharedGroup>,
 }
 
 struct Commit<'a> {
@@ -26,7 +26,7 @@ struct Commit<'a> {
     body: &'a [u8],
     metadata: Option<&'a MessageMetadata>,
     membership: Option<&'a (ramflux_protocol::GroupEvent, String)>,
-    shared_group: Option<&'a ramflux_crypto::VerifiedGroupState>,
+    shared_group: Option<&'a crate::client::shared_group::PreparedSharedGroup>,
     local_target: &'a str,
     slots: &'a [crate::SdkObjectKeySlot],
     references: Vec<(
@@ -410,7 +410,7 @@ impl RamfluxClient {
         } = context;
         self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
             if let Some(shared) = shared_group {
-                self.accept_shared_group_state(shared, local_target)?;
+                self.apply_prepared_shared_group(shared, local_target)?;
             }
             if let Some((event, key)) = membership {
                 self.apply_bootstrap_group_member_join_event(

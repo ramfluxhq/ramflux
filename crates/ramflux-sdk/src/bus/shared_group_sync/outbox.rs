@@ -118,9 +118,8 @@ pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<
         intent.next_at = now.saturating_add((1_i64 << intent.attempt).min(60));
         account.client.account_db()?.persist_actor_state(&id, &intent)?;
         let state = ramflux_crypto::verify_group_state_snapshot(intent.snapshot.clone())?;
-        let bytes = crate::client::shared_group::packet_bytes(&state)?;
         let mut engine = account.take_live_engine().await?;
-        let outcome = deliver(&account.client, &mut engine, &mut intent, &bytes).await;
+        let outcome = deliver(&account.client, &mut engine, &mut intent, &state).await;
         account.put_engine(engine);
         if let Ok(count) = outcome {
             delivered += count;
@@ -133,7 +132,7 @@ async fn deliver(
     client: &RamfluxClient,
     engine: &mut GatewaySessionEngine,
     intent: &mut Intent,
-    bytes: &[u8],
+    state: &VerifiedGroupState,
 ) -> Result<usize, SdkError> {
     let mut recipients = Vec::new();
     if intent.active.is_some() {
@@ -162,6 +161,10 @@ async fn deliver(
         {
             continue;
         }
+        let bytes = client.shared_group_packet(
+            state,
+            state.view().effective_role(&root, &device.device_id).is_some(),
+        )?;
         let state = &intent.snapshot;
         let envelope = format!(
             "group_state_{}",
@@ -202,7 +205,7 @@ async fn deliver(
             .seal_routed_as(
                 engine,
                 &message,
-                bytes,
+                &bytes,
                 crate::client::routed::Route::group_control(&state.group_id),
             )
             .await?;

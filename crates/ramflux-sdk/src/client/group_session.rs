@@ -186,6 +186,24 @@ impl RamfluxClient {
         distribution_bytes: &[u8],
         retry_pending: bool,
     ) -> Result<(SdkGroupSenderKeyDistribution, Vec<SdkGroupPendingPlaintext>), SdkError> {
+        self.import_group_key_with_source(distribution_bytes, retry_pending, None)
+    }
+
+    pub(crate) fn import_group_key_for_identity(
+        &self,
+        distribution_bytes: &[u8],
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        retry_pending: bool,
+    ) -> Result<(SdkGroupSenderKeyDistribution, Vec<SdkGroupPendingPlaintext>), SdkError> {
+        self.import_group_key_with_source(distribution_bytes, retry_pending, Some(source))
+    }
+
+    fn import_group_key_with_source(
+        &self,
+        distribution_bytes: &[u8],
+        retry_pending: bool,
+        identity: Option<&ramflux_crypto::RootQualifiedDeviceRef>,
+    ) -> Result<(SdkGroupSenderKeyDistribution, Vec<SdkGroupPendingPlaintext>), SdkError> {
         let distribution: SdkGroupSenderKeyDistribution =
             serde_json::from_slice(distribution_bytes)?;
         if !matches!(
@@ -209,25 +227,26 @@ impl RamfluxClient {
                     "distribution requires a pinned sender signing key".into(),
                 )
             })?;
-        if self
-            .account_db()?
-            .group_member_device_key(
-                &distribution.group_id,
-                &self.device_identity(
-                    &self
-                        .group_device_reference(&distribution.group_id, &distribution.sender_id)?,
-                )?,
+        let source = if let Some(identity) = identity {
+            if identity.device_id() != distribution.sender_id {
+                return Err(SdkError::InboundRejected("group distribution device mismatch".into()));
+            }
+            identity.clone()
+        } else {
+            self.device_identity(
+                &self.group_device_reference(&distribution.group_id, &distribution.sender_id)?,
             )?
-            .as_ref()
+        };
+        if identity.is_some() {
+            self.require_cached_root_authority(&source)?;
+        }
+        if self.account_db()?.group_member_device_key(&distribution.group_id, &source)?.as_ref()
             != Some(public_key)
         {
             return Err(SdkError::InboundRejected(
                 "safety: distribution signing key differs from member pin".into(),
             ));
         }
-        let source = self.device_identity(
-            &self.group_device_reference(&distribution.group_id, &distribution.sender_id)?,
-        )?;
         let state = SdkGroupSenderKeyState {
             chain_version: distribution.version,
             principal_commitment: Some(source.root_commitment().to_owned()),

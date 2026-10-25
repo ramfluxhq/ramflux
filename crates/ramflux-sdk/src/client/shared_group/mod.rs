@@ -5,69 +5,17 @@
 use crate::prelude::*;
 use ramflux_crypto::{
     VerifiedGroupState, advance_group_state, certify_group_state_actor, sign_group_state_operation,
-    sign_group_state_snapshot, verify_group_state_snapshot,
+    sign_group_state_snapshot,
 };
-use ramflux_protocol::group_state::{
-    GroupMemberIdentity, GroupStateActor, GroupStateChange, GroupStateSnapshot,
-};
-use serde::{Deserialize, Serialize};
+use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupStateChange};
 use serde_json::{Value, json};
 
-pub(crate) const PACKET_SCHEMA: &str = "ramflux.sdk.group_state.v1";
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SharedGroupPacket {
-    pub(crate) schema: String,
-    pub(crate) snapshot_base64: String,
-}
+mod bootstrap;
+pub(crate) use bootstrap::{PACKET_SCHEMA, PreparedSharedGroup, decode_packet, packet_bytes};
 fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(reason.into())
 }
-pub(crate) fn packet_bytes(state: &VerifiedGroupState) -> Result<Vec<u8>, SdkError> {
-    Ok(serde_json::to_vec(&SharedGroupPacket {
-        schema: PACKET_SCHEMA.into(),
-        snapshot_base64: ramflux_protocol::encode_base64url(
-            ramflux_protocol::canonical_json_bytes(state.snapshot())?,
-        ),
-    })?)
-}
-pub(crate) fn decode_packet(bytes: &[u8]) -> Result<Option<VerifiedGroupState>, SdkError> {
-    let Ok(header) = serde_json::from_slice::<Value>(bytes) else {
-        return Ok(None);
-    };
-    if header["schema"] != PACKET_SCHEMA {
-        return Ok(None);
-    }
-    if bytes.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES * 2 {
-        return Err(invalid("group state packet exceeds its byte budget"));
-    }
-    let packet: SharedGroupPacket = ramflux_protocol::parse_i_json(bytes)?;
-    let bytes = ramflux_protocol::decode_base64url(&packet.snapshot_base64)
-        .map_err(|_| invalid("invalid group state encoding"))?;
-    Ok(Some(verify_group_state_snapshot(GroupStateSnapshot::from_wire_bytes(&bytes)?)?))
-}
 impl RamfluxClient {
-    pub(crate) async fn prepare_shared_group_receive(
-        &self,
-        engine: &GatewaySessionEngine,
-        opened: &crate::client::routed::Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-    ) -> Result<Option<VerifiedGroupState>, SdkError> {
-        if opened.routing.kind != crate::client::routed::Kind::GroupControl {
-            return Ok(None);
-        }
-        let state = decode_packet(body)?;
-        if let Some(shared) = &state {
-            if opened.routing.group_id.as_deref() != Some(shared.view().group_id.as_str())
-                || opened.routing.conversation_id != shared.view().conversation_id
-            {
-                return Err(invalid("group state routing mismatch"));
-            }
-            self.verify_shared_group_source(&engine.config, shared, entry).await?;
-        }
-        Ok(state)
-    }
     pub(crate) fn owned_group_actor(&self, target: &str) -> Result<GroupStateActor, SdkError> {
         Ok(certify_group_state_actor(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,

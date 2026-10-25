@@ -161,7 +161,11 @@ impl RamfluxClient {
                 return Err(invalid("distribution sender differs from authenticated device"));
             }
             self.require_routed_group_member(&distribution.group_id, entry)?;
-            self.import_group_sender_key_distribution_inner(&bytes, true)?;
+            self.import_group_key_for_identity(
+                &bytes,
+                &self.authenticated_device_identity(entry)?,
+                true,
+            )?;
             self.account_db()?.store_message_content(
                 &route.conversation_id,
                 &route.message_id,

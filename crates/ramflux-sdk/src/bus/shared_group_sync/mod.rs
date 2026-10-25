@@ -109,11 +109,23 @@ async fn verified_member(
     account: &LocalBusAccountState,
     body: &Value,
 ) -> Result<GroupMemberIdentity, SdkError> {
-    let root = required(body, "member_principal_commitment")?;
-    let device = required(body, "member_id")?;
-    let manifest =
-        crate::client::contact::fetch_verified_device_manifest(&account.gateway_config, root)
-            .await?;
+    let selected = required(body, "member_id")?;
+    let address = ramflux_protocol::parse_qualified_device_id(selected)?;
+    let device = address.as_ref().map_or(selected, |(_, device)| device.as_str());
+    let explicit = body["member_principal_commitment"].as_str();
+    if address.as_ref().is_some_and(|(root, _)| explicit.is_some_and(|given| given != root)) {
+        return Err(SdkError::Storage(StorageError::GroupPermissionDenied));
+    }
+    let gateway = account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
+    let root = account
+        .client
+        .resolve_target_principal_commitment(
+            gateway,
+            explicit.or_else(|| address.as_ref().map(|(root, _)| root.as_str())),
+            device,
+        )
+        .await?;
+    let manifest = crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
     let member =
         manifest.devices.iter().find(|m| m.device_id == device).ok_or_else(|| {
             SdkError::LocalBus("member is absent from its verified manifest".into())
@@ -127,7 +139,7 @@ async fn verified_member(
     }
     let identity = GroupMemberIdentity {
         principal_id: manifest.principal_id.clone(),
-        root_commitment: root.into(),
+        root_commitment: root,
         device_id: device.into(),
         signing_public_key: member.branch_public_key.clone(),
         target_delivery_id: member.target_delivery_id.clone(),
