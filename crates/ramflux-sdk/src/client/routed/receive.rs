@@ -397,6 +397,45 @@ impl RamfluxClient {
             Ok(Delivery { routing: opened.routing, plaintext: None })
         })
     }
+    fn commit_routed_pair_context(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
+            || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
+        {
+            self.commit_bootstrap_sequence(
+                &opened.local_device,
+                &opened.remote_device,
+                decode(&entry.envelope)?.x3dh.as_ref(),
+                &opened.session.session_id,
+            )?;
+            self.persist_pair(
+                &opened.local_device,
+                &opened.remote_device,
+                &opened.bundle_hash,
+                &opened.session,
+            )?;
+            let reset = opened.routing.kind == Kind::Control
+                && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
+                    matches!(
+                        value["type"].as_str(),
+                        Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
+                    )
+                });
+            self.confirm_pair(
+                &opened.local_device,
+                &opened.remote_device,
+                &opened.session,
+                reset,
+                decode(&entry.envelope)?.x3dh.is_some(),
+            )?;
+        }
+        Ok(())
+    }
+
     fn commit_routed_projection(&self, context: Commit<'_>) -> Result<Option<Vec<u8>>, SdkError> {
         let Commit {
             opened,
@@ -450,36 +489,7 @@ impl RamfluxClient {
             }
             self.project_routed(opened, entry, body, metadata)?
             };
-            if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
-                || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
-            {
-                self.commit_bootstrap_sequence(
-                    &opened.local_device,
-                    &opened.remote_device,
-                    decode(&entry.envelope)?.x3dh.as_ref(),
-                    &opened.session.session_id,
-                )?;
-                self.persist_pair(
-                    &opened.local_device,
-                    &opened.remote_device,
-                    &opened.bundle_hash,
-                    &opened.session,
-                )?;
-                let reset = opened.routing.kind == Kind::Control
-                    && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
-                        matches!(
-                            value["type"].as_str(),
-                            Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
-                        )
-                    });
-                self.confirm_pair(
-                    &opened.local_device,
-                    &opened.remote_device,
-                    &opened.session,
-                    reset,
-                    decode(&entry.envelope)?.x3dh.is_some(),
-                )?;
-            }
+            self.commit_routed_pair_context(opened, entry, body)?;
             for slot in slots {
                 self.persist_pair_slot_receipt(slot)?;
             }
