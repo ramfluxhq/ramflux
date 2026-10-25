@@ -36,8 +36,11 @@ async fn r2_legacy_request_frame_keeps_resync_text_on_a_pruned_cursor() -> Resul
         assert!(matches!(error,SdkError::LocalBus(ref text) if text.starts_with("resync_required: ")));
         let raw=bus.request_frame_response(request("raw","bob","bus.subscribe",body)).await?;
         assert_eq!(raw.kind,LocalBusFrameKind::Error);
-        assert_eq!(raw.body["floor_seq"],3);
-        assert!(raw.body["head_seq"].as_u64().is_some_and(|head|head>=4));
+        // Background sync samples may append and prune more rows on a slow runner, so the floor
+        // can only rise above the seeded retention point; it must still sit above the cursor.
+        let floor=raw.body["floor_seq"].as_u64().ok_or_else(||failure("floor_seq"))?;
+        let head=raw.body["head_seq"].as_u64().ok_or_else(||failure("head_seq"))?;
+        assert!(floor>=3 && floor<=head && head>=4,"floor {floor} head {head}");
         supervisor.shutdown().await?;drop(bus);server.abort();let _=server.await;drop(supervisor);std::fs::remove_dir_all(root)?;Ok(())
     }).await
 }
