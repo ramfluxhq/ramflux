@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub mod backup;
 pub mod bot;
 mod contact_request_retention;
 mod contact_requests;

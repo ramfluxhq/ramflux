@@ -56,7 +56,7 @@ impl Connection {
         })
     }
 
-    fn call<T: Send + 'static>(
+    pub(crate) fn call<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut rusqlite::Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
