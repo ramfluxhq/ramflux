@@ -144,7 +144,15 @@ impl AccountRuntime {
                     let mut shutdown = self.shutdown.clone();
                     let active = tokio::select! {
                         _ = shutdown.changed() => break,
-                        result = self.sync() => result?,
+                        result = self.sync() => match result {
+                            Ok(active) => active,
+                            Err(error) => {
+                                tracing::warn!(account_id = %self.id, %error,
+                                    error_code = local_bus_error_code(&error),
+                                    "background synchronization deferred; account remains open");
+                                false
+                            }
+                        },
                     };
                     schedule.completed(active);
                     next = tokio::time::Instant::now() + schedule.interval;
@@ -262,7 +270,10 @@ impl AccountRuntime {
             return Ok(true);
         }
         if cancelled {
-            self.publish(&command.request).await?;
+            if let Err(error) = self.publish(&command.request).await {
+                tracing::warn!(account_id = %self.id, %error,
+                    "cancelled request publication deferred; account remains open");
+            }
             return Ok(false);
         }
         let result = match self.initialize_readers() {

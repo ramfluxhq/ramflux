@@ -1044,3 +1044,5 @@ mod contact_state;
 mod group_legacy;
 
 mod status_snapshot;
+
+mod group_actor;
