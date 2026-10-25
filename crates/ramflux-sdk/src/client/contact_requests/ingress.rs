@@ -56,10 +56,11 @@ impl RamfluxClient {
             "principal_id":manifest.principal_id,"signing_public_key":sender.branch_public_key}),
         )?;
         let now = now_unix_timestamp();
-        // Capacity retries must not spend a sender's quota repeatedly while the global window is full.
-        if !db.contact_request_budget_available("bootstrap-attempts", 120, now)? {
+        // Global and account pressure defer before any charge, so redriving a held request never
+        // spends the requester's own quota.
+        if !self.contact_admission_capacity(Some(&root), now)? {
             return Err(SdkError::ContactRequestCapacity(
-                "contact authentication budget exhausted".into(),
+                "contact admission capacity exhausted".into(),
             ));
         }
         if !db.charge_contact_request(&format!("bootstrap:{root}"), 32, 3600, now)? {
@@ -79,6 +80,25 @@ impl RamfluxClient {
         self.cache_verified_device_manifest(gateway, own.root_commitment(), "contact-request-self")
             .await?;
         Ok(manifest)
+    }
+    /// Read-only global and account-wide admission capacity. `root` adds the requester's own
+    /// bucket and floor rows to the table-capacity estimate once it is authenticated.
+    pub(crate) fn contact_admission_capacity(
+        &self,
+        root: Option<&str>,
+        now: i64,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        if !db.contact_request_budget_available("bootstrap-attempts", 120, now)?
+            || !db.contact_request_budget_available("inbound-account", 64, now)?
+        {
+            return Ok(false);
+        }
+        let mut buckets = vec!["bootstrap-attempts".to_owned(), "inbound-account".to_owned()];
+        if let Some(root) = root {
+            buckets.extend([format!("bootstrap:{root}"), format!("inbound:{root}")]);
+        }
+        Ok(db.contact_request_inbound_capacity(&buckets, root, now)?)
     }
     pub(crate) fn contact_route_gate(
         &self,

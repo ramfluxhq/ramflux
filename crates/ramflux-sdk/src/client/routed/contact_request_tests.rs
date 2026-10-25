@@ -543,3 +543,6 @@ mod r2;
 
 #[path = "contact_request_r3_tests.rs"]
 mod r3;
+
+#[path = "contact_request_r4_tests.rs"]
+mod r4;

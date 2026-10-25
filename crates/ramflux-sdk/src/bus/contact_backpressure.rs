@@ -57,22 +57,29 @@ impl Backpressure {
         let Some(root) = requester(entry) else {
             return Ok(false);
         };
-        if self.duplicate(entry) || (!self.roots.contains_key(&root) && self.roots.len() >= 1024) {
+        if self.duplicate(entry) {
             return Ok(false);
         }
-        self.roots.insert(
-            root,
-            Deferred {
-                sequence: entry.inbox_seq,
-                expires_at: entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
-            },
-        );
+        // Every ContactRequestCapacity is global or account pressure. Past 1024 roots the entry
+        // stays unacknowledged under the floor without a dedup slot instead of being dropped.
+        if self.roots.contains_key(&root) || self.roots.len() < 1024 {
+            self.roots
+                .entry(root)
+                .or_insert(Deferred { sequence: entry.inbox_seq, expires_at: expiry(entry, now) });
+        }
+        self.hold(entry, now);
+        // Persist before the normal cursor advances. The gateway retains the original ciphertext.
+        self.save(client)?;
+        // Existing generic retry rows must not stay due every tick. The durable floor owns redrive.
+        client.account_db()?.remove_inbox_retry(&client.inbox_admission_key(entry)?)?;
+        Ok(true)
+    }
+    fn hold(&mut self, entry: &GatewayInboxEntry, now: i64) {
         if self.floor.is_none() {
             self.next_at = now.saturating_add(60);
         }
         self.floor = earliest(self.floor, Some(entry.inbox_seq));
-        let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
-        self.expires_at = self.expires_at.max(expires.min(now.saturating_add(604_860)));
+        self.expires_at = self.expires_at.max(expiry(entry, now));
         if let Some(scan) = &mut self.scan {
             if entry.inbox_seq <= scan.until {
                 scan.pending = earliest(scan.pending, Some(entry.inbox_seq));
@@ -80,10 +87,23 @@ impl Backpressure {
                 scan.future = earliest(scan.future, Some(entry.inbox_seq));
             }
         }
-        // Persist before the normal cursor advances. The gateway retains the original ciphertext.
+    }
+    /// A rescan under global or account pressure keeps a contact envelope held before any
+    /// manifest fetch. It never creates a slot, because the requester is not authenticated here.
+    pub fn saturated(
+        &mut self,
+        client: &RamfluxClient,
+        entry: &GatewayInboxEntry,
+        now: i64,
+    ) -> Result<bool, SdkError> {
+        if requester(entry).is_none()
+            || self.duplicate(entry)
+            || client.contact_admission_capacity(None, now)?
+        {
+            return Ok(false);
+        }
+        self.hold(entry, now);
         self.save(client)?;
-        // Existing generic retry rows must not stay due every tick. The durable floor owns redrive.
-        client.account_db()?.remove_inbox_retry(&client.inbox_admission_key(entry)?)?;
         Ok(true)
     }
     pub fn duplicate(&self, entry: &GatewayInboxEntry) -> bool {
@@ -145,6 +165,14 @@ impl Backpressure {
     }
 }
 
+/// Sender-supplied lifetime, capped like the state expiry so a slot cannot outlive the gateway copy.
+fn expiry(entry: &GatewayInboxEntry, now: i64) -> i64 {
+    entry
+        .envelope
+        .created_at
+        .saturating_add(i64::from(entry.envelope.ttl))
+        .min(now.saturating_add(604_860))
+}
 fn requester(entry: &GatewayInboxEntry) -> Option<String> {
     let packet = crate::client::routed::decode(&entry.envelope).ok()?;
     (packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)

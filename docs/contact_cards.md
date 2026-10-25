@@ -261,11 +261,20 @@ receipt or local consent. Sender-specific quota exhaustion and extra pending req
 are terminally rejected and acknowledged; exhausted known sender buckets are checked
 before a manifest fetch. Only global/account capacity pressure retains a ciphertext
 for paced retry. At most one deferred envelope per requester root is retained, with
-1024 deferred roots per account; extras and overflow are rejected and acknowledged.
+1024 deferred roots per account; extra envelopes from a held root are rejected and
+acknowledged. Past 1024 roots, a capacity-deferred envelope stays unacknowledged under
+the replay floor without a deduplication slot.
 Deferred entries leave the generic retry queue and use the durable replay floor.
-Replaying a global-budget refusal does not consume the sender's bootstrap quota.
+Global and account capacity (bootstrap attempts, account request rate, pending slots,
+rate-bucket and authority-floor tables) is checked before any sender bucket is
+charged, so replaying a held request never consumes the sender's bootstrap quota.
+While that capacity is exhausted, rescans keep contact envelopes held without a
+manifest fetch. A deferred slot expires no later than the retained state.
 
-Decline/block fences apply to both request envelopes and authenticated pair controls.
+Decline/block fences apply to both request envelopes and authenticated pair controls
+from roots that are not accepted contacts. `contact.unblock` clears the root fence; a
+local `contact.add` or accept clears this side's decline fence, and a local outbound
+request admits the peer's response. An accepted contact link is never fenced.
 A compact declined fence retains its original decision timestamp through the wire
 replay lifetime after cooldown; older signed requests cannot reopen consent. Outbound
 retained status also enforces cooldown after a closed row is pruned.

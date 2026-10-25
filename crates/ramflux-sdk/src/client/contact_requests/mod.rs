@@ -102,11 +102,19 @@ impl RamfluxClient {
             return Ok(());
         };
         let db = self.account_db()?;
+        // An accepted contact link is never fenced; block and decline fences gate strangers only.
+        if self.friend_link_peer_is_accepted(&root)? {
+            return Ok(());
+        }
         if db.contact_request_fence(&root, now_unix_timestamp())?.is_some() {
             return Err(invalid("contact request is declined or blocked"));
         }
+        // A local outbound request to this root restores consent for its response.
+        let consented = db
+            .contact_request(&root, "outbound")?
+            .is_some_and(|row| matches!(row.state.as_str(), "pending" | "accepted"));
         if let Some(request) = db.contact_request(&root, "inbound")?
-            && !self.friend_link_peer_is_accepted(&root)?
+            && !(consented && request.state != "blocked")
             && (request.state != "pending" || request.expires_at <= now_unix_timestamp())
         {
             return Err(invalid("contact request is declined, blocked or expired"));
@@ -286,6 +294,10 @@ impl RamfluxClient {
             }
             let own = self.owned_device_identity()?;
             if state == "accepted" {
+                db.clear_contact_request_fence(
+                    &request.contact_identity_commitment,
+                    Some("declined"),
+                )?;
                 if !self.friend_link_peer_is_accepted(&request.contact_identity_commitment)? {
                     self.establish_friend_link(
                         &request.link_id,

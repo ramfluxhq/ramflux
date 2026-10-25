@@ -467,9 +467,16 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when no account DB is unlocked or the friend link cannot be updated.
     pub fn unblock_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
-        let link = self.account_db()?.unblock_friend_link(link_id, now_unix_timestamp())?;
-        self.append_contact_control_event("friend.unblocked", &link)?;
-        Ok(link)
+        let db = self.account_db()?;
+        db.write_transaction(|| -> Result<_, SdkError> {
+            let link = db.unblock_friend_link(link_id, now_unix_timestamp())?;
+            // Explicit unblock restores consent, so neither side of the link stays fenced.
+            for root in [&link.requester_id, &link.target_id] {
+                db.clear_contact_request_fence(root, None)?;
+            }
+            self.append_contact_control_event("friend.unblocked", &link)?;
+            Ok(link)
+        })
     }
 
     /// Records an inbound friend request as a pending friend link awaiting the

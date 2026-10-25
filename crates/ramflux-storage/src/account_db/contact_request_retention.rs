@@ -147,6 +147,21 @@ impl AccountDb {
         self.connection.execute("INSERT INTO contact_request_fence VALUES(?1,?2,?3) ON CONFLICT(root) DO UPDATE SET state=excluded.state,until=excluded.until WHERE contact_request_fence.state<>'blocked' OR excluded.state='blocked'",params![root,state,until])?;
         Ok(())
     }
+    /// Remove a local consent fence after the local user explicitly restores consent.
+    /// `None` clears any state; `Some(state)` clears only that state, so a block survives a re-add.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn clear_contact_request_fence(
+        &self,
+        root: &str,
+        state: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM contact_request_fence WHERE root=?1 AND (?2 IS NULL OR state=?2)",
+            params![root, state],
+        )?;
+        Ok(())
+    }
     /// Read the retained decision, including its replay barrier after cooldown.
     /// # Errors
     /// Returns SQL failures.

@@ -219,6 +219,8 @@ impl RamfluxClient {
         {
             return Err(crate::ContactReason::LookupRateLimited.into());
         }
+        // A local re-add restores this side's consent; an explicit block still needs unblock.
+        db.clear_contact_request_fence(&peer.principal_commitment, Some("declined"))?;
         let own = self.owned_device_identity()?;
         let previous = old
             .as_ref()

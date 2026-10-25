@@ -186,6 +186,9 @@ async fn receive_page(
             advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
             continue;
         }
+        if replay && backpressure.saturated(&account.client, &entry, now)? {
+            continue;
+        }
         let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
         let outcome = if backpressure.duplicate(&entry) {
             Err(SdkError::InboundRejected(

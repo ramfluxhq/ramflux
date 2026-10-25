@@ -157,6 +157,44 @@ impl AccountDb {
     ) -> Result<bool, StorageError> {
         Ok(!self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contact_request_rate WHERE bucket=?1 AND window_end>?2 AND count>=?3)",params![bucket,now,limit],|row|row.get::<_,bool>(0))?)
     }
+    /// Read-only account capacity for one more pending inbound request, the rate buckets it would
+    /// create and its authority floor. Admission checks this before charging any requester bucket.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn contact_request_inbound_capacity(
+        &self,
+        buckets: &[String],
+        root: Option<&str>,
+        now: i64,
+    ) -> Result<bool, StorageError> {
+        let pending:u64=self.connection.query_row("SELECT count(*) FROM contact_request_projection WHERE direction='inbound' AND state='pending'",[],|row|row.get(0))?;
+        if pending >= MAX_PENDING {
+            return Ok(false);
+        }
+        let mut rows: u64 = self.connection.query_row(
+            "SELECT count(*) FROM contact_request_rate WHERE window_end>?1",
+            params![now],
+            |row| row.get(0),
+        )?;
+        for bucket in buckets {
+            if !self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contact_request_rate WHERE bucket=?1 AND window_end>?2)",params![bucket,now],|row|row.get::<_,bool>(0))? {
+                rows = rows.saturating_add(1);
+            }
+        }
+        if rows > 1024 {
+            return Ok(false);
+        }
+        let floor: u64 = self.connection.query_row(
+            "SELECT count(*) FROM contact_request_authority_floor WHERE until>?1",
+            params![now],
+            |row| row.get(0),
+        )?;
+        let retained = match root {
+            Some(root) => self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contact_request_authority_floor WHERE root=?1 AND until>?2)",params![root,now],|row|row.get::<_,bool>(0))?,
+            None => false,
+        };
+        Ok(retained || floor < 4096)
+    }
     /// Refresh expiry for a single selected request, independently of periodic maintenance.
     /// # Errors
     /// Returns SQL failures.
