@@ -52,6 +52,11 @@ fn s13_dispatch_sends_wake_to_tls_h2_provider() -> Result<(), Box<dyn std::error
     assert!(send_provider_push(&pushes[0])?);
     let received = stub.recv()?;
     assert_eq!(received.path, "/webpush");
+    let topic = received.headers.get("topic").ok_or("WebPush topic missing")?;
+    assert_eq!(topic.len(), 32);
+    assert!(topic.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte)));
+    assert_ne!(Some(topic), test_wake().collapse_key.as_ref());
+    assert!(pushes[0].collapse_key_hash.starts_with(topic));
     assert_eq!(
         received.headers.get("ramflux-delivery-class").map(String::as_str),
         Some("user_content_notification")

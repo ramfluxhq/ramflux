@@ -2719,8 +2719,9 @@ fn build_webpush_request(
         ("authorization".to_owned(), format!("vapid t={vapid_token}, k={vapid_public_key}")),
         ("content-encoding".to_owned(), "aes128gcm".to_owned()),
     ]);
-    if let Some(collapse_key) = prepared.payload.collapse_key.as_ref() {
-        headers.push(("topic".to_owned(), collapse_key.clone()));
+    if prepared.payload.collapse_key.is_some() {
+        // RFC 8030 topics allow at most 32 URL-safe characters; keep 192 bits of the hash.
+        headers.push(("topic".to_owned(), prepared.collapse_key_hash.chars().take(32).collect()));
     }
     let plaintext = serde_json::to_vec(&serde_json::json!({
         "wake_id": prepared.payload.wake_id,
