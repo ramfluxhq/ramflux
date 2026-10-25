@@ -23,6 +23,7 @@ impl BackupDatabase {
     /// Returns authentication, schema or I/O errors.
     pub fn open(path: &Path, key: &AccountDbKey) -> Result<Self, StorageError> {
         let db = rusqlite::Connection::open(path)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(&format!("PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",key.sqlcipher_hex()))?;
         let fingerprint: String = db.query_row(
             "SELECT key_fingerprint FROM account_key_check WHERE singleton_id=1",
@@ -49,6 +50,7 @@ impl BackupDatabase {
         )?;
         require_space(parent, estimate.saturating_add(20 * 1024 * 1024))?;
         let mut target = rusqlite::Connection::open(path)?;
+        target.busy_timeout(std::time::Duration::from_secs(5))?;
         target.execute_batch(&format!(
             "PRAGMA key=\"x'{}'\"; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048;",
             key.sqlcipher_hex()

@@ -130,7 +130,8 @@ fn missing_peer_manifest_leaves_cursor_retryable_until_authority_arrives() -> Te
     Ok(())
 }
 #[test]
-fn history_exports_a_bounded_prefix_instead_of_failing_heavy_accounts() -> TestResult {
+fn heavy_account_history_pages_preserve_every_contact_and_manifest_within_admission_budgets()
+-> TestResult {
     let root = path()?;
     let own = client(&root.join("own"), "bob", 1)?;
     let peer = client(&root.join("peer"), "alice", 3)?;
@@ -145,7 +146,7 @@ fn history_exports_a_bounded_prefix_instead_of_failing_heavy_accounts() -> TestR
     }
     let contacts = own.own_history_contacts()?;
     assert_ne!(contacts.len(), 0);
-    assert!(contacts.len() <= 512);
+    assert_eq!(contacts.len(), 513);
     let mut pins = Vec::new();
     for n in 0..513 {
         // Public manifest payload remains valid; distinct cache keys exercise root-list admission.
@@ -162,8 +163,27 @@ fn history_exports_a_bounded_prefix_instead_of_failing_heavy_accounts() -> TestR
     }
     let manifests = own.own_history_device_manifests(&pins)?;
     assert_ne!(manifests.len(), 0);
-    assert!(manifests.len() <= 512);
-    RamfluxClient::check_own_history_authority_budget(&manifests, &contacts)?;
+    assert_eq!(manifests.len(), 513);
+    assert!(RamfluxClient::check_own_history_authority_budget(&manifests, &contacts).is_err());
+    let history = serde_json::from_value::<crate::own_device_sync::SdkOwnDeviceHistoryBundle>(
+        serde_json::json!({
+            "schema":"ramflux.sdk.own_device_history_bundle.v1","version":1,
+            "principal_commitment":own.owned_device_identity()?.root_commitment(),"source_device_id":"source","target_device_id":"target","snapshot_id":"budget-pages",
+            "messages":[],"dm_sessions":[],"groups":[],"sender_key_distributions_base64":[],
+            "group_member_pins":pins,"device_manifests":manifests,"accepted_contacts":contacts
+        }),
+    )?;
+    let pages = crate::client::own_device_history_pages::pages(history)?;
+    assert_eq!(pages.iter().map(|p| p.accepted_contacts.len()).sum::<usize>(), 513);
+    assert_eq!(pages.iter().map(|p| p.device_manifests.len()).sum::<usize>(), 513);
+    for page in pages {
+        assert!(page.accepted_contacts.len() <= 512);
+        assert!(page.device_manifests.len() <= 512);
+        RamfluxClient::check_own_history_authority_budget(
+            &page.device_manifests,
+            &page.accepted_contacts,
+        )?;
+    }
     drop((own, peer));
     std::fs::remove_dir_all(root)?;
     Ok(())

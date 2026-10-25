@@ -43,9 +43,17 @@ pub(crate) async fn dispatch_account_bus_request(
                 &state.config.data_root,
                 account_id,
             ))?;
+            let reestablishing = account
+                .client
+                .account_db()
+                .ok()
+                .map(|db| db.load_actor_state::<bool>("backup/reestablishing"))
+                .transpose()?
+                .flatten()
+                .unwrap_or(false);
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
-                "secure_sessions":if account.client.account_db()?.load_actor_state::<bool>("backup/reestablishing")?.unwrap_or(false){"reestablishing"}else{"ready"},
+                "secure_sessions":if reestablishing{"reestablishing"}else{"ready"},
                 "node_id": manifest.node_id,
                 "client_mode":manifest.client_mode,
                 "local_device_authorized":manifest.devices.iter().any(|device|device.device_id==account.gateway_config.device_id),

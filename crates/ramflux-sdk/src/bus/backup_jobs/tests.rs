@@ -244,12 +244,13 @@ async fn round_trip(scale: Scale) -> TestResult {
                 (&json!("preparing"), &json!("verifying"), &json!("installing"))
             );
             finished(&target, id, BackupJobState::Done).await?;
+            // A standalone SDK reopen owns a writer; stop the daemon's writer/readers first.
+            target.shutdown().await?;
             let restored = check_restored(&restored_root, scale)?;
             if scale.file_bytes.is_none() {
                 merge_existing_source(&source, &source_root, &archive, secret).await?;
             }
             source.shutdown().await?;
-            target.shutdown().await?;
             drop(restored);
             drop(source);
             drop(target);
@@ -480,6 +481,7 @@ async fn merge_existing_source(
     let done = finished(source, id, BackupJobState::Done).await?;
     assert_eq!(done.kept_newer.as_ref().map(|c| c.messages), Some(6));
     assert_eq!(done.kept_newer.as_ref().map(|c| c.attachments), Some(1));
+    source.shutdown().await?;
     let mut client = RamfluxClient::new();
     client.open_account_index(root)?;
     client.unlock_account("alice", b"account-test-secret")?;
