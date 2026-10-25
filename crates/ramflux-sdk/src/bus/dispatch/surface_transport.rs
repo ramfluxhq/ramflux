@@ -248,3 +248,11 @@ mod history_import_tests;
 #[cfg(test)]
 #[path = "surface_group_membership_tests.rs"]
 mod membership_tests;
+
+#[cfg(test)]
+#[path = "shared_group_transport_tests.rs"]
+mod shared_group_transport_tests;
+
+#[cfg(test)]
+#[path = "shared_group_federation_tests.rs"]
+mod shared_group_federation_tests;

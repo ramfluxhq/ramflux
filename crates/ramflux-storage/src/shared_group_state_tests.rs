@@ -178,3 +178,53 @@ fn a_conflicting_thread_rolls_back_the_proof_roster_and_all_pins() -> Result<(),
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn shared_legacy_snapshot_mutators_cannot_change_the_signed_projection() -> Result<(), StorageError>
+{
+    let (owner_root, owner, actor) = person("owner", "owner", 10)?;
+    let state = create(&owner_root, &owner, &actor)?;
+    let (root, db) = test_db("shared-legacy-snapshot")?;
+    db.commit_shared_group_state(&state, &actor)?;
+    assert!(db.create_group("group", "forged").is_err());
+    assert!(db.add_group_member("group", "forged", "owner").is_err());
+    assert!(
+        db.upsert_group_local_membership_snapshot(
+            "group",
+            99,
+            1000,
+            "no_history",
+            "forged",
+            "owner",
+            1
+        )
+        .is_err()
+    );
+    assert!(db.upsert_group_member_snapshot("group", "forged", "owner", 1).is_err());
+    assert_eq!(db.group_state("group")?.members.len(), 1);
+    assert_eq!(
+        db.shared_group_state("group")?.ok_or(StorageError::GroupPermissionDenied)?.view(),
+        state.view()
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn shared_legacy_retirement_cannot_retire_a_signed_member() -> Result<(), StorageError> {
+    let (owner_root, owner, actor) = person("owner", "owner", 10)?;
+    let state = create(&owner_root, &owner, &actor)?;
+    let (root, db) = test_db("shared-legacy-retirement")?;
+    db.commit_shared_group_state(&state, &actor)?;
+    let key =
+        state.member_storage_key(&actor.identity)?.ok_or(StorageError::GroupPermissionDenied)?;
+    assert!(db.retire_group_snapshot_member("group", &key, 1).is_err());
+    assert_eq!(db.group_state("group")?.members.len(), 1);
+    assert_eq!(
+        db.group_member_role("group", &owned_device("owner", "owner", 10)?)?.as_deref(),
+        Some("owner")
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

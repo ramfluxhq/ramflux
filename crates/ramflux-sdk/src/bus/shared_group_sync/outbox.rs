@@ -7,10 +7,14 @@ use ramflux_crypto::VerifiedGroupState;
 use ramflux_protocol::group_state::GroupStateSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+mod delivery;
 
 const PREFIX: &str = "group-state/send/";
 const MAX_GROUPS: usize = 32;
 const MAX_DEVICES: usize = 1024;
+const ROOTS_PER_DRAIN: usize = 4;
+const DEVICES_PER_DRAIN: usize = 4;
+const DRIVER_PROGRESS: &str = "group-state/driver-progress";
 const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Clone, Deserialize, Serialize)]
 struct Intent {
@@ -24,6 +28,20 @@ struct Intent {
     attempt: u8,
     next_at: i64,
     expires_at: i64,
+    #[serde(default)]
+    round_active: bool,
+    #[serde(default)]
+    round_failed: bool,
+    #[serde(default)]
+    round_devices: usize,
+    #[serde(default)]
+    cursor: Option<RecipientCursor>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+struct RecipientCursor {
+    root: String,
+    after_device: Option<String>,
+    complete: bool,
 }
 // A removed recipient receives its removal boundary, never subsequent roster or name changes.
 #[derive(Clone, Deserialize, Serialize)]
@@ -34,6 +52,8 @@ struct TerminalSnapshot {
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct StagedEnvelope {
+    #[serde(default)]
+    federation: Option<LocalBusFederationRoute>,
     root: String,
     device: String,
     envelope: ramflux_protocol::Envelope,
@@ -70,7 +90,7 @@ fn eligibility(state: &VerifiedGroupState) -> BTreeMap<String, BTreeSet<String>>
 fn freeze_removals(intent: &mut Intent, previous: &VerifiedGroupState, state: &VerifiedGroupState) {
     for root in eligibility(previous).keys() {
         if !eligibility(state).contains_key(root) {
-            intent.terminal.retain(|entry| entry.root != *root);
+            intent.terminal.retain(|entry| entry.root != *root || entry.device.is_some());
             intent.terminal.push(TerminalSnapshot {
                 root: root.clone(),
                 device: None,
@@ -106,8 +126,9 @@ fn recipient_snapshot<'a>(
     intent
         .terminal
         .iter()
-        .find(|entry| {
-            entry.root == root && entry.device.as_deref().is_none_or(|excluded| excluded == device)
+        .find(|entry| entry.root == root && entry.device.as_deref() == Some(device))
+        .or_else(|| {
+            intent.terminal.iter().find(|entry| entry.root == root && entry.device.is_none())
         })
         .map(|entry| &entry.snapshot)
 }
@@ -134,6 +155,8 @@ pub(crate) fn enqueue(
             old.snapshot = state.snapshot().clone();
             old.eligible = eligible;
             old.delivered.clear();
+            old.cursor = None;
+            old.round_devices = 0;
             old
         } else {
             Intent {
@@ -146,6 +169,10 @@ pub(crate) fn enqueue(
                 attempt: 0,
                 next_at: now,
                 expires_at: now.saturating_add(3600),
+                round_active: false,
+                round_failed: false,
+                round_devices: 0,
+                cursor: None,
             }
         };
     if let Some(previous) = previous {
@@ -167,186 +194,137 @@ pub(crate) fn enqueue(
 }
 pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let pending = account.client.account_db()?.list_actor_states::<Intent>(PREFIX)?;
+    let after = account
+        .client
+        .account_db()?
+        .load_actor_state::<String>(DRIVER_PROGRESS)?
+        .unwrap_or_default();
+    let mut pending = pending;
+    pending.sort_by_key(|intent| key(&intent.snapshot.group_id));
+    let selected = pending
+        .iter()
+        .find(|intent| key(&intent.snapshot.group_id) > after)
+        .or_else(|| pending.first())
+        .cloned();
+    let Some(intent) = selected else {
+        return Ok(0);
+    };
+    drive_one(account, intent).await
+}
+async fn drive_one(
+    account: &mut LocalBusAccountState,
+    mut intent: Intent,
+) -> Result<usize, SdkError> {
     let mut delivered = 0;
-    for mut intent in pending.into_iter().take(MAX_GROUPS) {
-        let now = now_unix_timestamp();
-        let id = key(&intent.snapshot.group_id);
-        if now < intent.next_at {
-            continue;
-        }
-        if now >= intent.expires_at || intent.attempt >= 8 {
-            account.client.account_db()?.append_journal(&id,"group.state.delivery_failed",
+    let now = now_unix_timestamp();
+    let id = key(&intent.snapshot.group_id);
+    account.client.account_db()?.persist_actor_state(DRIVER_PROGRESS, &id)?;
+    if now < intent.next_at {
+        return Ok(0);
+    }
+    if now >= intent.expires_at || (!intent.round_active && intent.attempt >= 8) {
+        account.client.account_db()?.append_journal(&id,"group.state.delivery_failed",
                 &serde_json::json!({"group_id":intent.snapshot.group_id,"epoch":intent.snapshot.epoch,"reason":"retry_budget_exhausted"}),now,None)?;
-            account.client.account_db()?.remove_actor_state(&id)?;
-            continue;
-        }
+        account.client.account_db()?.remove_actor_state(&id)?;
+        return Ok(0);
+    }
+    if !intent.round_active {
         intent.attempt += 1;
-        intent.next_at = now.saturating_add((1_i64 << intent.attempt).min(60));
-        account.client.account_db()?.persist_actor_state(&id, &intent)?;
-        let state = ramflux_crypto::verify_group_state_snapshot(intent.snapshot.clone())?;
-        let latest = account.client.account_db()?.shared_group_state(&intent.snapshot.group_id)?;
-        let state =
-            latest.filter(|latest| latest.view().epoch > state.view().epoch).unwrap_or(state);
-        let state = ramflux_crypto::resign_group_state_snapshot(
-            account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &account.client.owned_group_actor(&account.target_delivery_id)?,
-            &state,
-        )?;
-        if intent.snapshot.state_hash != state.snapshot().state_hash {
-            intent.delivered.clear();
+        intent.round_active = true;
+        intent.round_failed = false;
+        intent.round_devices = 0;
+        intent.cursor = None;
+    }
+    account.client.account_db()?.persist_actor_state(&id, &intent)?;
+    let state = match prepare_intent(&account.client, &mut intent, &account.target_delivery_id) {
+        Ok(Some(state)) => state,
+        Ok(None) => return Ok(0),
+        Err(error) => {
+            defer_round(&account.client, &mut intent)?;
+            tracing::warn!(%error, group_id = %intent.snapshot.group_id,
+                    "group state preparation deferred; other groups remain eligible");
+            return Ok(0);
         }
-        intent.snapshot = state.snapshot().clone();
-        // The router rejects repeated envelope ids. A cancelled or lost-ACK submit is retried
-        // with a fresh sealed carrier; the authenticated state and key are idempotent.
-        // At most eight attempts can advance the pair, even across coalesced mutations.
-        intent.active = None;
-        persist_intent(&account.client, &intent)?;
-        merge_eligible(&mut intent.eligible, eligibility(&state));
-        let mut engine = account.take_live_engine().await?;
-        let outcome = deliver(&account.client, &mut engine, &mut intent, &state).await;
-        account.put_engine(engine);
-        match outcome {
-            Ok((count, complete)) => {
-                delivered += count;
-                if complete {
+    };
+    let mut engine = account.take_live_engine().await?;
+    let outcome = delivery::deliver(&account.client, &mut engine, &mut intent, &state).await;
+    account.put_engine(engine);
+    match outcome {
+        Ok((count, progress)) => {
+            delivered += count;
+            match progress {
+                DeliveryProgress::Complete => {
                     account.client.account_db()?.remove_actor_state(&id)?;
                 }
+                DeliveryProgress::Continue => {
+                    persist_intent(&account.client, &intent)?;
+                }
+                DeliveryProgress::Retry => {
+                    defer_round(&account.client, &mut intent)?;
+                }
             }
-            Err(error) => tracing::debug!(%error, group_id = %intent.snapshot.group_id,
-                "group state batch remains pending"),
+        }
+        Err(error) => {
+            defer_round(&account.client, &mut intent)?;
+            tracing::debug!(%error, group_id = %intent.snapshot.group_id,
+                    "group state batch remains pending");
         }
     }
     Ok(delivered)
 }
-async fn deliver(
+fn prepare_intent(
     client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
     intent: &mut Intent,
-    state: &VerifiedGroupState,
-) -> Result<(usize, bool), SdkError> {
-    let mut complete = true;
-    let mut recipients = Vec::new();
-    for (root, excluded) in &intent.eligible {
-        let manifest = match crate::client::contact::fetch_verified_device_manifest(
-            &engine.config,
-            root,
-        )
-        .await
-        {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                complete = false;
-                tracing::debug!(%error, %root, "group member manifest refresh deferred");
-                continue;
-            }
-        };
-        if let Err(error) = client.persist_identity_directory(&manifest) {
-            complete = false;
-            tracing::debug!(%error, %root, "group member manifest application deferred");
-            continue;
-        }
-        recipients.extend(
-            manifest
-                .devices
-                .into_iter()
-                .filter(|device| !excluded.contains(&device.device_id))
-                .map(|device| (root.clone(), device)),
-        );
-        if recipients.len() > MAX_DEVICES {
-            return Err(SdkError::LocalBus("group state device fanout budget exceeded".into()));
-        }
-    }
-    let mut delivered = 0;
-    for (root, device) in recipients {
-        if (device.device_id == engine.config.device_id
-            && device.principal_id == engine.config.principal_id)
-            || intent.delivered.contains(&(root.clone(), device.device_id.clone()))
-        {
-            continue;
-        }
-        let Some(snapshot) = recipient_snapshot(intent, state, &root, &device.device_id) else {
-            // A state learned from a peer cannot expose later metadata to an old removed root.
-            continue;
-        };
-        let selected = ramflux_crypto::verify_group_state_snapshot(snapshot.clone())?;
-        let outcome = deliver_one(client, engine, intent, &selected, &root, device).await;
-        match outcome {
-            Ok(()) => delivered += 1,
-            Err(error) => {
-                complete = false;
-                tracing::debug!(%error, %root, "group state recipient remains pending");
-            }
-        }
-    }
-    Ok((delivered, complete))
-}
-async fn deliver_one(
-    client: &RamfluxClient,
-    engine: &mut GatewaySessionEngine,
-    intent: &mut Intent,
-    selected: &VerifiedGroupState,
-    root: &str,
-    device: crate::prekey::SdkDeviceManifestEntry,
-) -> Result<(), SdkError> {
-    let bytes = zeroize::Zeroizing::new(client.shared_group_packet(
-        selected,
-        selected.view().effective_role(root, &device.device_id).is_some(),
-    )?);
-    let state = selected.snapshot();
-    let envelope = format!(
-        "group_state_{}",
-        ramflux_crypto::blake3_256_base64url(
-            "ramflux.group_state.delivery.v1",
-            &ramflux_protocol::canonical_json_bytes(&(
-                &state.state_hash,
-                &root,
-                &device.device_id
-            ))?
-        )
-    );
-    let mut message = GatewayDirectMessage {
-        conversation_id: state
-            .operations
-            .first()
-            .and_then(|op| match &op.change {
-                ramflux_protocol::group_state::GroupStateChange::Create {
-                    conversation_id, ..
-                } => Some(conversation_id.clone()),
-                _ => None,
-            })
-            .or_else(|| state.checkpoint.as_ref().map(|c| c.state.conversation_id.clone()))
-            .ok_or_else(|| SdkError::LocalBus("group state conversation is absent".into()))?,
-        message_id: envelope.clone(),
-        envelope_id: format!("group_state_{}", crate::new_surface_message_id()?),
-        source_principal_id: engine.config.principal_id.clone(),
-        sender_id: engine.config.device_id.clone(),
-        recipient_device_id: Some(device.device_id.clone()),
-        recipient_principal_commitment: Some(root.into()),
-        target_delivery_id: device.target_delivery_id,
-        encrypted_body: Vec::new(),
-        created_at: now_unix_timestamp(),
-        ttl: 3600,
+    target: &str,
+) -> Result<Option<VerifiedGroupState>, SdkError> {
+    let state = ramflux_crypto::verify_group_state_snapshot(intent.snapshot.clone())?;
+    let latest = client.account_db()?.shared_group_state(&intent.snapshot.group_id)?;
+    let Some(latest) = latest else {
+        client.account_db()?.remove_actor_state(&key(&intent.snapshot.group_id))?;
+        return Ok(None);
     };
-    let sealed = client
-        .seal_routed_as(
-            engine,
-            &message,
-            &bytes,
-            crate::client::routed::Route::group_control(&state.group_id),
-        )
-        .await?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    intent.active = Some(StagedEnvelope {
-        root: root.into(),
-        device: device.device_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?,
+    if !latest.extends(&state) {
+        return Err(StorageError::GroupPermissionDenied.into());
+    }
+    let state = latest;
+    let own = client.owned_device_identity()?;
+    let revoked = client.observed_device_set(own.root_commitment())?.is_some_and(|set| {
+        !set.devices.iter().any(|device| {
+            device.device_id == own.device_id()
+                && device.status == ramflux_protocol::DeviceSetStatus::Active
+        })
     });
-    // Persist each sealed attempt before submit; application-level state replay is harmless.
+    if revoked || state.view().effective_role(own.root_commitment(), own.device_id()).is_none() {
+        client.account_db()?.remove_actor_state(&key(&intent.snapshot.group_id))?;
+        return Ok(None);
+    }
+    let state = ramflux_crypto::resign_group_state_snapshot(
+        client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &client.owned_group_actor(target)?,
+        &state,
+    )?;
+    if intent.snapshot.state_hash != state.snapshot().state_hash {
+        intent.delivered.clear();
+        intent.cursor = None;
+        intent.round_devices = 0;
+    }
+    intent.snapshot = state.snapshot().clone();
+    // A retry uses a fresh carrier ID; the state and sender-key import remain idempotent.
+    intent.active = None;
+    merge_eligible(&mut intent.eligible, eligibility(&state));
     persist_intent(client, intent)?;
-    submit_staged(client, engine, intent).await?;
-    Ok(())
+    Ok(Some(state))
 }
-
+enum DeliveryProgress {
+    Complete,
+    Continue,
+    Retry,
+}
+fn defer_round(client: &RamfluxClient, intent: &mut Intent) -> Result<(), SdkError> {
+    intent.round_active = false;
+    intent.next_at = now_unix_timestamp().saturating_add((1_i64 << intent.attempt).min(60));
+    persist_intent(client, intent)
+}
 fn persist_intent(client: &RamfluxClient, intent: &Intent) -> Result<(), SdkError> {
     let db = client.account_db()?;
     let mut pending = db.list_actor_states::<Intent>(PREFIX)?;
@@ -364,7 +342,17 @@ async fn submit_staged(
     intent: &mut Intent,
 ) -> Result<(), SdkError> {
     if let Some(staged) = &intent.active {
-        engine.submit_envelope(staged.envelope.clone()).await?;
+        if let Some(federation) = &staged.federation {
+            let response =
+                RamfluxClient::forward_federated_envelope(federation, staged.envelope.clone())?;
+            if !response.accepted {
+                return Err(SdkError::InboundPending(
+                    "group state federation submission refused".into(),
+                ));
+            }
+        } else {
+            engine.submit_envelope(staged.envelope.clone()).await?;
+        }
         intent.delivered.insert((staged.root.clone(), staged.device.clone()));
         intent.active = None;
         persist_intent(client, intent)?;

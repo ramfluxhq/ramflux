@@ -11,6 +11,8 @@ use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupS
 use serde_json::{Value, json};
 
 mod bootstrap;
+mod federation;
+mod routes;
 pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 #[cfg(test)]
 use bootstrap::{decode_packet, packet_bytes};

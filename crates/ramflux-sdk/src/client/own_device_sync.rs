@@ -667,10 +667,8 @@ impl RamfluxClient {
                 && (!floor_by_group.contains_key(&group.group_id)
                     || blocked.contains(&(group.group_id.clone(), group.sender_id.clone()))
                     || blocked.contains(&(group.group_id.clone(), String::new()))
-                    || self
-                        .account_db()?
-                        .group_member_role_metadata(&group.group_id, &group.sender_id)?
-                        .is_none())
+                    || !self
+                        .own_history_group_member_name_present(&group.group_id, &group.sender_id)?)
             {
                 self.account_db()?.record_own_device_restore_skip(
                     &bundle.snapshot_id,
@@ -1263,6 +1261,8 @@ pub(crate) mod tests {
     }
     #[path = "own_device_group_pin_tests.rs"]
     mod group_pin_tests;
+    #[path = "shared_group_history_tests.rs"]
+    mod shared_group_history_tests;
     #[path = "stale_group_snapshot_tests.rs"]
     mod stale_group_snapshot_tests;
     #[test]

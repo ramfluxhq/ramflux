@@ -11,6 +11,13 @@ struct FederatedSendOptions {
 }
 
 impl RamfluxClient {
+    pub(crate) fn forward_federated_envelope(
+        federation: &LocalBusFederationRoute,
+        envelope: ramflux_protocol::Envelope,
+    ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
+        post_federated_envelope_forward(federation, envelope)
+    }
+
     pub fn send_plaintext_federated_direct_message(
         &self,
         engine: &GatewaySessionEngine,

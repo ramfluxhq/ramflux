@@ -5,6 +5,39 @@
 use crate::own_device_sync::{SdkOwnDeviceGroupSnapshot, SdkOwnDeviceHistoryBundle};
 use crate::prelude::*;
 impl RamfluxClient {
+    // History read-model eligibility only. This does not select a root or grant key authority.
+    pub(super) fn own_history_group_member_name_present(
+        &self,
+        group: &str,
+        name: &str,
+    ) -> Result<bool, SdkError> {
+        let Some(state) = self.account_db()?.shared_group_state(group)? else {
+            return Ok(self.account_db()?.group_member_role_metadata(group, name)?.is_some());
+        };
+        if state.view().members.iter().any(|member| member.identity.device_id == name) {
+            return Ok(true);
+        }
+        let roots = state
+            .view()
+            .members
+            .iter()
+            .map(|member| member.identity.root_commitment.as_str())
+            .collect::<BTreeSet<_>>();
+        for root in roots {
+            if state.view().effective_role(root, name).is_some()
+                && self.observed_device_set(root)?.is_some_and(|record| {
+                    record.devices.iter().any(|device| {
+                        device.device_id == name
+                            && device.status == ramflux_protocol::DeviceSetStatus::Active
+                    })
+                })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn restore_own_groups(
         &self,
         bundle: &SdkOwnDeviceHistoryBundle,

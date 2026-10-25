@@ -1090,6 +1090,9 @@ impl RamfluxClient {
         &self,
         group_id: &str,
     ) -> Result<Vec<LocalBusGroupMemberRoute>, SdkError> {
+        if let Some(state) = self.account_db()?.shared_group_state(group_id)? {
+            return self.shared_group_member_routes(&state);
+        }
         let group = self.group_state(group_id)?;
         let mut routes = Vec::new();
         for member_id in group.members {

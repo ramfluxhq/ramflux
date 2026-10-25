@@ -96,7 +96,24 @@ pub(crate) async fn dispatch_group_bus_request(
         }
         "group.list" => {
             let account = local_bus_account(state, account_id)?;
-            let groups = account.client.groups()?;
+            let groups = account
+                .client
+                .groups()?
+                .into_iter()
+                .map(|group| {
+                    let name = account
+                        .client
+                        .account_db()?
+                        .shared_group_state(&group.group_id)?
+                        .map(|state| (state.view().name.clone(), state.view().name_epoch));
+                    let mut metadata = serde_json::to_value(group)?;
+                    if let Some((name, epoch)) = name {
+                        metadata["name"] = serde_json::json!(name);
+                        metadata["name_epoch"] = serde_json::json!(epoch);
+                    }
+                    Ok(metadata)
+                })
+                .collect::<Result<Vec<_>, SdkError>>()?;
             Ok(local_bus_ok(serde_json::json!({ "groups": groups })))
         }
         "group.send" => {

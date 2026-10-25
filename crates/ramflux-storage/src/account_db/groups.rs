@@ -278,6 +278,7 @@ impl AccountDb {
         role: &str,
         joined_epoch: u64,
     ) -> Result<(), StorageError> {
+        self.ensure_legacy_group_writable(group_id)?;
         validate_group_role(role)?;
         let joined_epoch_i64 = i64::try_from(joined_epoch)
             .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;

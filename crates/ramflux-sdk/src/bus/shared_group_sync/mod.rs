@@ -58,6 +58,22 @@ pub(super) async fn dispatch(
             method,
         )?
     };
+    let route = if let Some(GroupStateChange::Add { member, .. }) = &change {
+        let federation: Option<LocalBusFederationRoute> = body
+            .get("federation")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?;
+        federation.map(|federation| LocalBusGroupMemberRoute {
+            member_id: member.device_id.clone(),
+            member_principal_commitment: Some(member.root_commitment.clone()),
+            device_signing_public_key: Some(member.signing_public_key.clone()),
+            target_delivery_id: Some(member.target_delivery_id.clone()),
+            federation: Some(federation),
+        })
+    } else {
+        None
+    };
     account.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
         if let Some(change) = change {
             account.client.shared_group_change(group, &target, change)?
@@ -66,6 +82,17 @@ pub(super) async fn dispatch(
             let name = body["name"].as_str().or_else(|| body["title"].as_str()).map(str::to_owned);
             account.client.shared_group_create(group, conversation, name, &target)?
         };
+        if let Some(route) = &route {
+            account.client.persist_group_member_route(group, route)?;
+            account.client.persist_shared_group_federation_route(
+                group,
+                route
+                    .member_principal_commitment
+                    .as_deref()
+                    .ok_or(StorageError::GroupPermissionDenied)?,
+                route.federation.as_ref().ok_or(StorageError::GroupPermissionDenied)?,
+            )?;
+        }
         Ok(())
     })?;
     // The actor's sync tick drains durable delivery. Mutations return after their atomic commit,
@@ -146,15 +173,22 @@ async fn verified_member(
     };
     let device = address.as_ref().map_or(selected, |(_, device)| device.as_str());
     let gateway = account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
-    let root = account
-        .client
-        .resolve_target_principal_commitment(
-            gateway,
-            explicit.or_else(|| address.as_ref().map(|(root, _)| root.as_str())),
-            device,
-        )
-        .await?;
-    let manifest = crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
+    let expected = explicit.or_else(|| address.as_ref().map(|(root, _)| root.as_str()));
+    let manifest = if let Some(federation) = body.get("federation").filter(|value| !value.is_null())
+    {
+        let federation: LocalBusFederationRoute = serde_json::from_value(federation.clone())?;
+        let url = federation.recipient_prekey_url.ok_or_else(|| {
+            SdkError::LocalBus("federated group member requires recipient_prekey_url".into())
+        })?;
+        let root =
+            account.client.resolve_federated_target_principal_commitment(&url, expected, device)?;
+        crate::client::contact::fetch_verified_device_manifest_from_url(&url, &root)?
+    } else {
+        let root =
+            account.client.resolve_target_principal_commitment(gateway, expected, device).await?;
+        crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?
+    };
+    let root = manifest.principal_commitment.clone();
     let member =
         manifest.devices.iter().find(|m| m.device_id == device).ok_or_else(|| {
             SdkError::LocalBus("member is absent from its verified manifest".into())

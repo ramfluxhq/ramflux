@@ -67,9 +67,16 @@ pub(super) async fn peer_fixture(
     root: &Path,
     source: &mut LocalBusAccountState,
 ) -> Result<PeerFixture, Box<dyn std::error::Error>> {
+    peer_fixture_devices(root, source, &["device-peer-one", "device-peer-two"]).await
+}
+pub(super) async fn peer_fixture_devices(
+    root: &Path,
+    source: &mut LocalBusAccountState,
+    devices: &[&str],
+) -> Result<PeerFixture, Box<dyn std::error::Error>> {
     let mut peers = Vec::new();
     let mut peer_manifest = None;
-    for (index, device) in ["device-peer-one", "device-peer-two"].iter().enumerate() {
+    for (index, device) in devices.iter().enumerate() {
         let mut peer = runtime_tests::account(
             &root.join(device),
             "peer",
