@@ -50,18 +50,7 @@ impl BackupJobs {
         let root = data_root.join("backup_jobs");
         std::fs::create_dir_all(&root)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&root)?;
-        // Keys do not survive daemon restart. Orphaned staging can only be discarded.
-        for entry in std::fs::read_dir(&root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_name().to_string_lossy().starts_with("job_") {
-                if entry.file_type()?.is_symlink() {
-                    std::fs::remove_file(path)?;
-                } else if entry.file_type()?.is_dir() {
-                    std::fs::remove_dir_all(path)?;
-                }
-            }
-        }
+        super::recovery::recover(&root, data_root, &index)?;
         Ok(Self {
             state: Arc::new(Mutex::new(State {
                 registry: BackupJobRegistry::default(),

@@ -4,6 +4,7 @@
 //! Daemon-owned background backup jobs with account-ordered snapshot capture.
 mod format;
 mod install;
+mod recovery;
 mod routing;
 mod stream;
 pub(super) use service::refused as refusal;

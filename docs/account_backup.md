@@ -58,8 +58,10 @@ Install quiesces only the affected account and prepares a complete new encrypted
 generation. All files and directories are synchronized before one FULL/WAL account
 index transaction selects the generation, its wrapped database key and recovery
 manifest. An error before that commit keeps the previous generation selected.
-An interrupted pre-commit install leaves only an unselected encrypted generation;
-it cannot expose partial live state. Other accounts and daemon requests continue.
+An interrupted pre-commit install cannot expose partial live state. On restart,
+secret-free ownership markers remove abandoned output prefixes and unselected
+prepared generations. The committed generation pointer always wins, including a
+crash immediately after commit; unmarked older data is preserved. Other accounts and daemon requests continue.
 Normal contact/conversation/message invalidations are queued through the durable
 outbox, followed by `account.restored`; clients reload after completion.
 

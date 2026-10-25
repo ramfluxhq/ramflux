@@ -98,6 +98,7 @@ impl BackupJobs {
         std::fs::create_dir(&generation)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&generation)?;
         let mut guard = PrivateDirectory { path: generation.clone(), transferred: false };
+        super::recovery::mark_install(&generation)?;
         let target = generation.join("account.db");
         let installed_key = AccountDbKey::generate()?;
         let (restored, kept_newer) = if let Some(record) = previous.as_ref() {
@@ -153,6 +154,7 @@ impl BackupJobs {
             wrapped_key: &wrapped,
         })?;
         guard.transferred = true;
+        super::recovery::selected(&generation);
         drop(staging);
         Ok((id, restored, kept_newer))
     }

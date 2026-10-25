@@ -36,16 +36,18 @@ fn incremental_merge_preserves_attachment_bytes_keys_and_hashes_and_refuses_miss
         &ciphertext,
     );
     let plaintext = ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::OBJECT, &clear);
+    let encoded_nonce = ramflux_protocol::encode_base64url(&nonce[..12]);
+    let descriptor = serde_json::json!({"object_id":id,"nonce":encoded_nonce,"manifest_hash":manifest,"plaintext_hash":plaintext,"ciphertext":"ramflux:column:1","tombstoned":false,"backup_excluded":false});
     source.upsert_object(&ObjectWrite {
         object_id: id,
         manifest_hash: &manifest,
-        nonce: "nonce",
+        nonce: &encoded_nonce,
         ciphertext: &ciphertext,
         plaintext_hash: &plaintext,
         tombstoned: false,
         backup_excluded: false,
         content_key: Some(&key),
-        object: &serde_json::json!({"ciphertext":"ramflux:column:1"}),
+        object: &descriptor,
         updated_at: 1,
     })?;
     source.persist_actor_state(

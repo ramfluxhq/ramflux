@@ -136,6 +136,8 @@ impl BackupJobs {
             .validate(&metadata.manifest.local_account_id)
             .map_err(|_| failure(BackupFailureCode::RootConflict))?;
         let temporary = parent.join(format!(".ramflux-backup-{}.partial", job.job_id));
+        super::recovery::remember_partial_output(&directory, &temporary)
+            .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let mut guard = PartialFile { path: temporary.clone(), published: false };
         let file = std::fs::OpenOptions::new()
             .write(true)
