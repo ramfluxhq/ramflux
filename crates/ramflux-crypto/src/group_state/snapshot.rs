@@ -300,10 +300,14 @@ pub(super) fn advance_as(
     // exclusion of a device from an active member root uses signed account revocation.
     snapshot.state.excluded.retain(|entry| entry.expires_at > now);
     if let GroupStateChange::TransferOwnership { creator } = &change {
-        if requester.identity.root_commitment != previous.creator().identity.root_commitment
-            || snapshot.transfers.len() >= MAX_GROUP_CREATOR_TRANSFERS
-        {
-            return Err(invalid("ownership transfer not authorized or transfer cap exceeded"));
+        if requester.identity.root_commitment != previous.creator().identity.root_commitment {
+            return Err(invalid("ownership transfer not authorized"));
+        }
+        if snapshot.transfers.len() >= MAX_GROUP_CREATOR_TRANSFERS {
+            return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
+                GroupStateLimit::Transfers,
+            )
+            .into());
         }
         verify_group_state_actor(creator)?;
         let selected = snapshot

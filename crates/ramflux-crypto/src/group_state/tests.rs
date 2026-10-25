@@ -310,3 +310,27 @@ fn group_only_exclusions_expire_after_the_boundary_window() -> Result<(), Crypto
     );
     Ok(())
 }
+
+#[test]
+fn ownership_transfer_budget_has_a_typed_capacity_refusal() -> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let mut current = create(&owner)?;
+    for _ in 0..MAX_GROUP_CREATOR_TRANSFERS {
+        current = step(
+            &current,
+            &owner,
+            GroupStateChange::TransferOwnership { creator: owner.actor.clone() },
+        )?;
+    }
+    assert!(matches!(
+        step(
+            &current,
+            &owner,
+            GroupStateChange::TransferOwnership { creator: owner.actor.clone() }
+        ),
+        Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
+            GroupStateLimit::Transfers
+        )))
+    ));
+    Ok(())
+}
