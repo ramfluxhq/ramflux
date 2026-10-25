@@ -74,7 +74,7 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
         )?,
         "all historical plaintext"
     );
-    assert_eq!(merged.db.query_row("SELECT CAST(state_json AS TEXT) FROM runtime_actor_state WHERE state_kind='backup/inactive-pair/new'",[],|r|r.get::<_,String>(0))?,"true");
+    assert!(merged.db.query_row("SELECT CAST(state_json AS TEXT) FROM runtime_actor_state WHERE state_kind='backup/inactive-pair/new'",[],|r|r.get::<_,String>(0))?.parse::<u64>()?>0);
     assert_eq!(merged.db.query_row("SELECT json_extract(CAST(state_json AS TEXT),'$.revision') FROM runtime_actor_state WHERE state_kind='surface/state/old'",[],|r|r.get::<_,u64>(0))?,9);
     assert_eq!(merged.db.query_row("SELECT CAST(event_body AS TEXT) FROM backup_archived_local_event WHERE event_id='source-only-counter'",[],|r|r.get::<_,String>(0))?,"preserved despite actor-counter collision");
     assert!(!merged.db.query_row("SELECT active FROM group_member_projection WHERE group_id='membership' AND member_id='peer'",[],|r|r.get::<_,bool>(0))?);
@@ -163,6 +163,65 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     drop(local);
     drop(source_index);
     drop(local_index);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn r2_merge_never_imports_restore_flags_or_marks_existing_local_sessions_inactive() -> TestResult {
+    let root = std::env::temp_dir().join(format!(
+        "rf-backup-flags-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    let si = AccountIndex::open(root.join("source"))?;
+    let li = AccountIndex::open(root.join("local"))?;
+    si.create_account("a", "root")?;
+    li.create_account("a", "root")?;
+    let source = AccountDb::open(&si, "a", &AccountDbKey::generate()?)?;
+    let local = AccountDb::open(&li, "a", &AccountDbKey::generate()?)?;
+    for name in [
+        "backup/reestablishing",
+        "backup/fresh-outbound",
+        "backup/previous-device-epoch",
+        "backup/inactive-pair/live",
+    ] {
+        source.persist_actor_state(name, &true)?;
+    }
+    source.persist_actor_state("dm-pair/session/live", &serde_json::json!({"secret":"old"}))?;
+    local.persist_actor_state("dm-pair/session/live", &serde_json::json!({"secret":"live"}))?;
+    local.persist_actor_state("dm-pair/active/pair", &"live")?;
+    source.persist_actor_state(
+        "dm-pair/session/retired",
+        &serde_json::json!({"secret":"retired key"}),
+    )?;
+    local.persist_actor_state("dm-pair/retired/retired", &serde_json::json!({"retired_at":1}))?;
+    let path = root.join("incoming.db");
+    let saved = source.write_backup_snapshot(&path)?;
+    let target = root.join("target.db");
+    let snapshot = local.write_backup_snapshot(&target)?;
+    let mut merged = BackupDatabase::open(&target, &snapshot.key)?;
+    merged.merge_backup(&path, &saved.key, || Ok(()))?;
+    let flags: u64 = merged.db.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'backup/%'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(flags, 0, "merge must not copy source restore state or poison live sessions");
+    assert_eq!(
+        merged.db.query_row(
+            "SELECT count(*) FROM runtime_actor_state WHERE state_kind='dm-pair/session/retired'",
+            [],
+            |r| r.get::<_, u64>(0)
+        )?,
+        0
+    );
+    assert_eq!(merged.db.query_row("SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='dm-pair/session/retired'",[],|r|r.get::<_,u64>(0))?,0);
+    drop(merged);
+    drop(source);
+    drop(local);
+    drop(si);
+    drop(li);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

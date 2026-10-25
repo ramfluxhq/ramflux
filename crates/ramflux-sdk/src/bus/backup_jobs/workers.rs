@@ -76,10 +76,11 @@ impl BackupJobs {
             verified: checks.verified,
             mismatched: checks.mismatched,
             missing: checks.missing,
+            unavailable_at_source: checks.unavailable_at_source,
         };
         self.change(|registry| registry.attachment_checks(&job.job_id, checks.clone()))
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;
-        if checks.missing > 0 || checks.mismatched > 0 {
+        if checks.missing != checks.unavailable_at_source || checks.mismatched > 0 {
             return Err(failure(BackupFailureCode::AttachmentMismatch));
         }
         Ok(checks)
@@ -90,12 +91,13 @@ impl BackupJobs {
         job: &BackupJob,
         secret: Zeroizing<String>,
         captured: CapturedAccount,
+        allow_missing_attachments: bool,
     ) -> Result<(), BackupFailure> {
         let cancel =
             self.cancellation(&job.job_id).map_err(|_| failure(BackupFailureCode::Interrupted))?;
         let directory =
             self.directory(&job.job_id).map_err(|_| failure(BackupFailureCode::NotWritable))?;
-        let _private = PrivateDirectory { path: directory.clone(), transferred: false };
+        let mut private = PrivateDirectory { path: directory.clone(), transferred: false };
         let estimate = captured.reader.backup_estimated_bytes().map_err(storage_error)?;
         check_space(&self.root, estimate.saturating_mul(2).saturating_add(20 * 1024 * 1024))?;
         let destination = std::path::Path::new(&job.path)
@@ -118,7 +120,19 @@ impl BackupJobs {
         self.change(|registry| registry.writing(&job.job_id, snapshot.counts.clone(), now()))
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         let db = BackupDatabase::open(&database, &snapshot.key).map_err(storage_error)?;
+        db.clear_missing_manifest().map_err(storage_error)?;
+        if db.missing_attachment_count().map_err(storage_error)? > 0 {
+            if !allow_missing_attachments {
+                let failure = self
+                    .unavailable_failure(job, directory.clone(), &snapshot.key, &db)
+                    .map_err(|_| failure(BackupFailureCode::Interrupted))?;
+                private.transferred = true;
+                return Err(failure);
+            }
+            db.allow_missing_attachments().map_err(storage_error)?;
+        }
         self.verify_files(job, &db, &cancel, &snapshot.counts)?;
+        let missing_count = db.approved_missing_count().map_err(storage_error)?;
         drop(db);
         let output = PathBuf::from(&job.path);
         let parent = output
@@ -164,6 +178,7 @@ impl BackupJobs {
             .map(|(key, value)| (key.clone(), value.as_u64().unwrap_or(0)))
             .collect::<std::collections::BTreeMap<_, _>>();
         totals.insert("database_bytes".into(), size);
+        totals.insert("missing_attachments".into(), missing_count);
         let context = BackupContext {
             account_id: metadata.manifest.local_account_id.clone(),
             created_at: now(),
@@ -204,7 +219,7 @@ impl BackupJobs {
         {
             return Err(failure(BackupFailureCode::Interrupted));
         }
-        std::fs::hard_link(temporary, output)
+        super::publication::publish(temporary, output)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         if std::fs::File::open(parent).and_then(|directory| directory.sync_all()).is_err() {
             let _ = std::fs::remove_file(output);
@@ -237,11 +252,7 @@ impl BackupJobs {
             .map_err(|error| stream_error(error, true))?;
         drop(secret);
         let context = decoder.context().clone();
-        let counts: BackupCounts = serde_json::from_value(
-            serde_json::to_value(&context.totals)
-                .map_err(|_| failure(BackupFailureCode::Tampered))?,
-        )
-        .map_err(|_| failure(BackupFailureCode::UnsupportedVersion))?;
+        let counts = archive_counts(&context)?;
         self.change(|registry| registry.authenticated_totals(&job.job_id, counts.clone()))
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         check_space(
@@ -297,6 +308,11 @@ impl BackupJobs {
         if db.counts().map_err(storage_error)? != counts {
             return Err(failure(BackupFailureCode::Tampered));
         }
+        if db.approved_missing_count().map_err(storage_error)?
+            != context.totals.get("missing_attachments").copied().unwrap_or(0)
+        {
+            return Err(failure(BackupFailureCode::Tampered));
+        }
         let checks = self.verify_files(job, &db, &cancel, &counts)?;
         drop(db);
         let merge = self.check_existing_identity(&metadata, &path, &key)?;
@@ -345,18 +361,6 @@ impl BackupJobs {
                 if local.root_seed != metadata.manifest.root_seed {
                     return Err(failure(BackupFailureCode::RootConflict));
                 }
-                for device in &local.devices {
-                    if metadata
-                        .manifest
-                        .devices
-                        .iter()
-                        .find(|old| old.device_id == device.device_id)
-                        .is_some_and(|old| old.device_epoch < device.device_epoch)
-                    {
-                        return Err(failure(BackupFailureCode::IdentityRollback));
-                    }
-                }
-
                 let path = self.data_root.join(record.db_relative_path);
                 let local_key = super::install::existing_key(
                     &self.index,
@@ -384,4 +388,12 @@ fn fresh_staging_keys() -> Result<(Zeroizing<[u8; 32]>, AccountDbKey), BackupFai
         b"ramflux.backup.staging.database.v1",
     ));
     Ok((master, key))
+}
+
+fn archive_counts(context: &BackupContext) -> Result<BackupCounts, BackupFailure> {
+    let counts: BackupCounts = serde_json::from_value(
+        serde_json::to_value(&context.totals).map_err(|_| failure(BackupFailureCode::Tampered))?,
+    )
+    .map_err(|_| failure(BackupFailureCode::UnsupportedVersion))?;
+    Ok(counts)
 }

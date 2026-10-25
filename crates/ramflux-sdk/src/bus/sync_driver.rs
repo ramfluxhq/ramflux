@@ -32,6 +32,8 @@ impl Schedule {
 }
 
 pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    account.client.account_db()?.expire_backup_pairs(now_unix_timestamp())?;
+    account.client.finish_pair_retirement()?;
     super::dispatch::call::expire_due(account)?;
     let mut engine = account.take_live_engine().await?;
     let result = receive(account, &mut engine).await;

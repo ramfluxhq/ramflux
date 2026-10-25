@@ -18,6 +18,8 @@ use std::path::PathBuf;
 pub mod backup;
 pub(crate) mod backup_database;
 pub(crate) mod backup_merge;
+mod backup_missing;
+mod backup_retirement;
 pub mod bot;
 mod contact_request_retention;
 mod contact_requests;

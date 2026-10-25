@@ -40,9 +40,7 @@ impl RamfluxClient {
         id: &str,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        if db.actor_state_exists(&format!("backup/inactive-pair/{id}"))? {
-            return Ok(());
-        }
+        db.erase_backup_pair(id)?;
         let pair = RamfluxClient::pair_key(local, remote)?;
         let successor = db.load_actor_state::<String>(&pair)?;
         db.persist_actor_state(&format!("dm-pair/retired/{id}"), &serde_json::json!({"pair":pair,"superseded_by":successor,"retired_at":now_unix_timestamp()}))?;

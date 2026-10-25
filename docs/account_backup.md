@@ -7,8 +7,7 @@ attachment ciphertext, content keys, transfer metadata and inbound ratchets.
 There are no message, contact, group or attachment count limits. SQLite snapshot
 copy and archive I/O use bounded page/chunk buffers; attachment verification reads
 BLOBs incrementally. Each attachment must pass its AEAD tag, ciphertext manifest
-hash and plaintext hash. A missing deferred attachment makes a full backup fail;
-fetch it first and retry. Missing or corrupt files are never silently skipped.
+hash and plaintext hash. Create first attempts to fetch missing deferred attachments. Unavailable files fail by default with `attachments_unavailable`; an explicit retry with `allow_missing_attachments:true` records the missing selectors and expected hashes in the authenticated omission manifest. Corrupt stored files always fail. Missing or corrupt files are never silently skipped.
 
 ## Daemon workflow
 
@@ -16,7 +15,7 @@ An attended human frontend starts a job; agents cannot start backup/restore jobs
 
 | Method | Body | Immediate answer |
 |---|---|---|
-| `account.backup.create` | account scope, `output_path`, secret `passphrase` | `{job}` preparing |
+| `account.backup.create` | account scope, `output_path`, secret `passphrase`, optional `allow_missing_attachments:false` | `{job}` preparing |
 | `account.restore.verify` | `input_path`, secret `passphrase` | `{job}` verifying |
 | `account.restore.install` | `job_id` | `{job}` installing |
 | `account.backup.cancel` | `job_id` | `{job}` cancelled after worker cleanup |
@@ -37,12 +36,12 @@ The whole secret-free row includes `job_id`, `kind`, `state`, `seq`, `path`,
 `kept_newer` are per-category objects: contacts, conversations, messages, groups,
 surfaces, tasks, attachments, attachment_bytes. Totals describe the exact snapshot,
 not the currently advancing live account. Restore totals are trusted only after
-header authentication. Attachment checks distinguish verified, mismatched, missing.
+header authentication. Attachment checks distinguish verified, mismatched, missing and explicitly `unavailable_at_source` (included in missing). Progress updates are coalesced at 250 ms or one percent; phase and terminal updates are immediate.
 
 States are Preparing → Writing → Done for backup and Verifying → Verified →
 Installing → Done for restore. Cancel is available until Installing. Verified
 staging expires after 30 minutes. Cancel, expiry, failure and daemon restart discard
-staging; the passphrase and staging key are never persisted. Restart clears the
+staging; the passphrase and staging key are never persisted. Unavailable-file failure diagnostics retain only their encrypted snapshot under a RAM-only key for at most 30 minutes. Restart clears the
 in-memory job history; poll again to discover the current daemon's jobs.
 
 ## Verification and atomic installation
@@ -61,32 +60,30 @@ manifest. An error before that commit keeps the previous generation selected.
 An interrupted pre-commit install cannot expose partial live state. On restart,
 secret-free ownership markers remove abandoned output prefixes and unselected
 prepared generations. The committed generation pointer always wins, including a
-crash immediately after commit; unmarked older data is preserved. Other accounts and daemon requests continue.
+crash immediately after commit. A durable post-commit marker reclaims exactly the previously selected database/generation; unrelated unmarked data is preserved. Failed cleanup logs a warning, never blocks daemon startup, and is retried periodically without deleting active job staging. Other accounts and daemon requests continue.
 Normal contact/conversation/message invalidations are queued through the durable
 outbox, followed by `account.restored`; clients reload after completion.
 
 Output is written to a private partial file and published exclusively after final
-AEAD and fsync completion. Existing output files are never overwritten. Space is
+AEAD and fsync completion. Hard-link publication falls back to an exclusive no-replace rename for removable or network filesystems. Existing output files are never overwritten. Space is
 estimated before writing and checked between bounded copy/write batches. Partial
 output and encrypted staging are removed on cancellation or failure.
 
 Typed failures: `wrong_passphrase`, `tampered`, `truncated`, `unsupported_version`,
 `insufficient_space` (needed_bytes, available_bytes), `unreadable`, `not_writable`,
-`staging_expired`, `interrupted`, `attachment_mismatch`, `identity_rollback`,
+`staging_expired`, `interrupted`, `attachment_mismatch`, `attachments_unavailable`, `identity_rollback`,
 `root_conflict`. A wrong passphrase fails immediately after header authentication,
-before staging or account installation. Any missing/mismatched attachment refuses
-verification and installation. Root replacement and epoch rollback are refused.
+before staging or account installation. Any unapproved missing or mismatched attachment refuses verification and installation. Root replacement is always refused; merge accepts older epochs and keeps the live manifest. Fresh-install identity adoption still uses checked epoch advancement.
 
 ## Merge and outbound activation
 
 For an existing account, merge occurs in a private copy of the live generation.
 Rows with version/epoch/time ordering use the newer value. Ties keep the live
-value, except a tied contact restriction wins over an acceptance. Message deletions
-are monotonic and never revive plaintext. Restrictions and tombstones use their
+value, except a tied contact restriction wins over an acceptance. Message and attachment deletions are monotonic and never revive plaintext or a deleted file. Restrictions and tombstones use their
 stored version/time; read/delivery receipts use their own timestamps. Immutable
 contact roots and group member pins cannot change. Unordered conflicts keep the
 live value; nonconflicting history is added. The live recovery manifest and live
-outbound crypto always win. Imported outbound state is archived, never resumed.
+outbound crypto always win. Imported outbound state is archived, never resumed. Archive `backup/*` controls never enter the live merge.
 The report distinguishes restored and retained values per category.
 
 On an empty data root, restore preserves all history, attachment keys and inbound
@@ -94,22 +91,41 @@ or archived sessions needed for late messages. Saved outbound DM sessions are
 inactive; saved outbound group chains stay archived. Before the first send, the
 device performs fresh root-authorized activation at an increased device epoch,
 starts fresh outbound DM sessions, and rotates each group's sender seed/chain ID
-before distributing it to members. Rotated distributions use
+before distributing it to members. All newly created distributions use
 `ramflux.sdk.group_sender_key.distribution.v3`, which binds the fresh seed into the
 chain ID; participating receivers need v3 support. Existing v1/v2 receive chains
 remain readable. The UI must show **re-establishing secure
 sessions** while `account.status` / `sync.status.get` has
 `secure_sessions:reestablishing`; `account.secure_sessions.changed` announces ready.
 If activation is refused, history remains readable and sending fails closed.
-Merge preserves the existing live outbound sessions and does not require rotation.
+Merge preserves existing live outbound sessions. A group without a live sending checkpoint gets a fresh seed-bound chain; a known chain ID with different secret material is refused loudly. Inactive receive-only DM chains remain subject to the ordinary eight-chain retirement limit and a 24-hour late-delivery deadline. Retirement erases private archived copies as well as live session records.
 
 Transient network work is intentionally not resumed: queued gateway sends,
 own-device sends and runtime command idempotency/outbox receipts are not replayed
 from the imported snapshot. Their historical records remain available. CA bytes
 are included; network endpoint reachability and external helper processes are
 re-established separately. The account database is the backup boundary: temporary
-upload spool files outside that database are not historical attachments. Incomplete
-referenced attachments cause a strict missing-file failure rather than omission.
+upload spool files outside that database are not historical attachments. Incomplete referenced attachments require the explicit omission workflow described below.
+
+## Explicit unavailable-file workflow
+
+`attachments_unavailable` reports `unavailable_count`, a first page of up to 64
+`unavailable_attachments` selectors, and `unavailable_next_cursor`. Request all
+remaining pages with `account.backup.jobs {job_id, missing_after}`; its answer is
+`{job, unavailable_attachments, unavailable_count, unavailable_next_cursor}`.
+Continue until the cursor is null. Encrypted diagnostics expire after 30 minutes,
+or when their recent job is evicted; after daemon restart retry create. No grant,
+content key or attachment reference enters the error details. An explicit retry
+with `allow_missing_attachments:true` still tries fetching first. It records every
+remaining valid selector and its expected hashes in the encrypted archive's
+`backup_missing_attachment` manifest, whose count is also in the authenticated
+header (`missing_attachments`). Restore validates that approval against the exact
+references; unrelated approvals cannot excuse a missing or corrupt file. Verify
+and install report the explicit unavailable count separately. No item-count limit
+or silent prefix is introduced by diagnostic paging or the omission manifest.
+
+The local bus checks the same-user peer UID; daemon attendance is self-asserted.
+Account-scoped headless restrictions do not authenticate another same-user process.
 
 ## Compatibility and own-device history
 

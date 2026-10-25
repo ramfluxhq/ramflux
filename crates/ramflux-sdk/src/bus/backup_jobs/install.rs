@@ -120,7 +120,7 @@ impl BackupJobs {
         db.check_integrity()?;
         db.enqueue_restore_events(&id, &job.job_id)?;
         let files = db.verify_attachments(|_, _| Ok(()))?;
-        if files.missing != 0 || files.mismatched != 0 {
+        if files.missing != files.unavailable_at_source || files.mismatched != 0 {
             return Err(refused("attachment_mismatch"));
         }
         drop(db);
@@ -128,23 +128,12 @@ impl BackupJobs {
         std::fs::write(&ca, &metadata.ca_pem)?;
         std::fs::File::open(&ca)?.sync_all()?;
         metadata.manifest.gateway.ca_cert = ca;
-        let vault = FileVaultSecretSource::new(&self.data_root);
-        let secret = Zeroizing::new(vault.vault_secret(&id)?);
-        let kek = Zeroizing::new(crate::client::account::account_db_key_encryption_key(
-            &secret,
-            metadata.manifest.account_secret.as_bytes(),
-        ));
-        let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, installed_key.bytes())?;
-        let wrapped = WrappedAccountDbKey {
-            key_wrapping_provider: "platform-local-vault".into(),
-            key_wrapping_ref: format!("platform-local-vault:{id}"),
-            nonce,
-            wrapped_key,
-        };
+        let wrapped = wrap_installed_key(&self.data_root, &metadata, &installed_key)?;
         let manifest = Zeroizing::new(serde_json::to_vec(&metadata.manifest)?);
         std::fs::File::open(&target)?.sync_all()?;
         std::fs::File::open(&generation)?.sync_all()?;
         std::fs::File::open(&parent)?.sync_all()?;
+        super::reclamation::remember(&generation, previous.as_ref())?;
         self.index.install_backup_generation(&BackupIndexInstall {
             account_id: &id,
             principal_commitment: &metadata.manifest.principal_commitment,
@@ -155,6 +144,9 @@ impl BackupJobs {
         })?;
         guard.transferred = true;
         super::recovery::selected(&generation);
+        if super::reclamation::complete(&generation, &self.data_root, &self.index, &id).is_err() {
+            tracing::warn!("replaced backup generation cleanup deferred until retry");
+        }
         drop(staging);
         Ok((id, restored, kept_newer))
     }
@@ -207,4 +199,25 @@ fn relative(root: &Path, path: &Path) -> Result<String, SdkError> {
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| refused("unreadable"))
+}
+
+fn wrap_installed_key(
+    root: &Path,
+    metadata: &format::Metadata,
+    key: &AccountDbKey,
+) -> Result<WrappedAccountDbKey, SdkError> {
+    let id = &metadata.manifest.local_account_id;
+    let vault = FileVaultSecretSource::new(root);
+    let secret = Zeroizing::new(vault.vault_secret(id)?);
+    let kek = Zeroizing::new(crate::client::account::account_db_key_encryption_key(
+        &secret,
+        metadata.manifest.account_secret.as_bytes(),
+    ));
+    let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
+    Ok(WrappedAccountDbKey {
+        key_wrapping_provider: "platform-local-vault".into(),
+        key_wrapping_ref: format!("platform-local-vault:{id}"),
+        nonce,
+        wrapped_key,
+    })
 }

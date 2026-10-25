@@ -23,6 +23,7 @@ pub(super) struct State {
     pub events: VecDeque<(u64, BackupJob)>,
     pub head: u64,
     pub cancelling: std::collections::BTreeSet<String>,
+    progress: std::collections::BTreeMap<String, (BackupCategory, u64, std::time::Instant)>,
 }
 #[derive(Clone)]
 pub(crate) struct BackupJobs {
@@ -31,6 +32,8 @@ pub(crate) struct BackupJobs {
     pub(super) data_root: PathBuf,
     pub(super) index: ramflux_storage::AccountIndex,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    next_cleanup: Arc<Mutex<std::time::Instant>>,
+    pub(super) diagnostics: super::attachments::Diagnostics,
 }
 pub(super) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_secs())
@@ -50,18 +53,23 @@ impl BackupJobs {
         let root = data_root.join("backup_jobs");
         std::fs::create_dir_all(&root)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&root)?;
-        super::recovery::recover(&root, data_root, &index)?;
+        if super::recovery::recover(&root, data_root, &index).is_err() {
+            tracing::warn!("backup cleanup deferred; daemon startup continues");
+        }
         Ok(Self {
             state: Arc::new(Mutex::new(State {
                 registry: BackupJobRegistry::default(),
                 events: VecDeque::new(),
                 head: 0,
                 cancelling: std::collections::BTreeSet::default(),
+                progress: std::collections::BTreeMap::default(),
             })),
             root,
             data_root: data_root.to_owned(),
             index,
             tasks: Arc::default(),
+            next_cleanup: Arc::new(Mutex::new(std::time::Instant::now())),
+            diagnostics: Arc::default(),
         })
     }
     pub(super) fn change(
@@ -131,17 +139,18 @@ impl BackupJobs {
         path: String,
         secret: zeroize::Zeroizing<String>,
         actor: crate::bus::actor::AccountActor,
+        allow_missing_attachments: bool,
     ) -> Result<BackupJob, SdkError> {
         let row = self.start(BackupJobKind::Backup, path)?;
         let job = row.clone();
         let service = self.clone();
         self.task(tokio::task::spawn_local(async move {
             let id = job.job_id.clone();
-            match actor.capture_backup().await {
+            match service.fetch_before_capture(&actor, &job).await {
                 Ok(captured) => {
                     let worker = service.clone();
                     match tokio::task::spawn_blocking(move || {
-                        worker.write_archive(&job, secret, captured)
+                        worker.write_archive(&job, secret, captured, allow_missing_attachments)
                     })
                     .await
                     {
@@ -152,7 +161,19 @@ impl BackupJobs {
                         }
                     }
                 }
-                Err(_) => service.fail(&id, BackupFailure::new(BackupFailureCode::Unreadable)),
+                Err(_) => service.fail(
+                    &id,
+                    BackupFailure::new(
+                        if service
+                            .cancellation(&id)
+                            .is_ok_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+                        {
+                            BackupFailureCode::Interrupted
+                        } else {
+                            BackupFailureCode::Unreadable
+                        },
+                    ),
+                ),
             }
         }))?;
         Ok(row)
@@ -231,6 +252,49 @@ impl BackupJobs {
         Ok(row)
     }
     pub(crate) fn expire(&self) {
+        if let Ok(mut diagnostics) = self.diagnostics.lock() {
+            let retained = self
+                .state
+                .lock()
+                .map(|s| {
+                    s.registry
+                        .jobs()
+                        .into_iter()
+                        .map(|r| r.job_id)
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            diagnostics.retain(|id, stage| retained.contains(id) && !stage.expired(now()));
+        }
+        if let Ok(mut next) = self.next_cleanup.try_lock()
+            && std::time::Instant::now() >= *next
+        {
+            *next = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut protected = self.state.lock().map(|s| {
+                s.registry
+                    .jobs()
+                    .into_iter()
+                    .filter(|r| !r.state.terminal())
+                    .map(|r| format!("job_{}", r.job_id))
+                    .collect::<std::collections::BTreeSet<_>>()
+            });
+            if let Ok(diagnostics) = self.diagnostics.lock()
+                && let Ok(protected) = &mut protected
+            {
+                protected.extend(diagnostics.keys().map(|id| format!("job_{id}")));
+            }
+            if let Ok(protected) = protected
+                && super::recovery::recover_excluding(
+                    &self.root,
+                    &self.data_root,
+                    &self.index,
+                    &protected,
+                )
+                .is_err()
+            {
+                tracing::warn!("backup cleanup remains deferred; retry scheduled");
+            }
+        }
         let expired = {
             let Ok(mut state) = self.state.lock() else { return };
             let expired = state.registry.expire(now());
@@ -254,18 +318,44 @@ impl BackupJobs {
         bytes: u64,
         totals: Option<u64>,
     ) {
-        let _ = self.change(|registry| {
-            registry.progress(
-                id,
-                BackupProgress {
-                    category,
-                    items_done: items,
-                    items_total: None,
-                    bytes_done: bytes,
-                    bytes_total: totals,
-                },
-            )
-        });
+        let Ok(mut state) = self.state.lock() else { return };
+        if !state.cancelling.is_empty() {
+            return;
+        }
+        let at = std::time::Instant::now();
+        if let Some((previous_category, previous_bytes, previous_at)) = state.progress.get(id) {
+            let percent = totals.filter(|total| *total > 0).is_some_and(|total| {
+                (u128::from(bytes.saturating_sub(*previous_bytes)) * 100 >= u128::from(total))
+                    || (bytes >= total && *previous_bytes < total)
+            });
+            if *previous_category == category
+                && bytes >= *previous_bytes
+                && !percent
+                && at.duration_since(*previous_at) < std::time::Duration::from_millis(250)
+            {
+                return;
+            }
+        }
+        let Ok(row) = state.registry.progress(
+            id,
+            BackupProgress {
+                category,
+                items_done: items,
+                items_total: None,
+                bytes_done: bytes,
+                bytes_total: totals,
+            },
+        ) else {
+            return;
+        };
+        state.progress.retain(|key, _| key == id);
+        state.progress.insert(id.into(), (category, bytes, at));
+        state.head += 1;
+        let seq = state.head;
+        state.events.push_back((seq, row));
+        while state.events.len() > 1024 {
+            state.events.pop_front();
+        }
     }
     pub(crate) async fn stop(&self) {
         if let Ok(state) = self.state.lock() {
@@ -282,5 +372,45 @@ impl BackupJobs {
         id: &str,
     ) -> Result<Arc<std::sync::atomic::AtomicBool>, SdkError> {
         self.state.lock().map_err(|_| refused("interrupted"))?.registry.cancellation(id)
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn r2_fast_chunk_progress_cannot_overflow_the_replay_ring()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::bus::runtime_tests::root("backup-progress");
+        let jobs = BackupJobs::new(&root, ramflux_storage::AccountIndex::open(&root)?)?;
+        let row = jobs.start(BackupJobKind::Backup, "archive".into())?;
+        let total = 1024 * 1024 * 1024;
+        for bytes in (0..=total).step_by(64 * 1024) {
+            jobs.progress(&row.job_id, BackupCategory::Attachments, 0, bytes, Some(total));
+        }
+        let state = jobs.state.lock().map_err(|_| "lock")?;
+        assert!(state.head <= 105, "one GiB must coalesce chunk events into percentage updates");
+        assert_eq!(state.registry.job(&row.job_id)?.progress.bytes_done, total);
+        drop(state);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn r2_cleanup_failure_does_not_block_startup_and_a_later_retry_removes_the_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::bus::runtime_tests::root("backup-cleanup-retry");
+        let index = ramflux_storage::AccountIndex::open(&root)?;
+        let stage = root.join("backup_jobs/job_retry");
+        std::fs::create_dir_all(&stage)?;
+        let partial = root.join(".ramflux-backup-retry.partial");
+        std::fs::create_dir(&partial)?;
+        super::super::recovery::remember_partial_output(&stage, &partial)?;
+        let jobs = BackupJobs::new(&root, index)?;
+        assert!(stage.exists(), "failed cleanup retains its durable retry marker");
+        std::fs::remove_dir(&partial)?;
+        jobs.expire();
+        assert!(!stage.exists(), "the periodic cleanup must retry without a daemon restart");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

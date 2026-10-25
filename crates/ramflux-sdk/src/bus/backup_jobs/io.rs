@@ -20,6 +20,7 @@ pub(super) fn check_space(path: &Path, needed: u64) -> Result<(), BackupFailure>
             code: BackupFailureCode::InsufficientSpace,
             needed_bytes: Some(needed),
             available_bytes: Some(available),
+            ..BackupFailure::new(BackupFailureCode::InsufficientSpace)
         });
     }
     Ok(())

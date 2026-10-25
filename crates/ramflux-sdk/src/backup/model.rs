@@ -101,6 +101,8 @@ pub struct BackupAttachmentChecks {
     pub verified: u64,
     pub mismatched: u64,
     pub missing: u64,
+    #[serde(default)]
+    pub unavailable_at_source: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -116,6 +118,7 @@ pub enum BackupFailureCode {
     StagingExpired,
     Interrupted,
     AttachmentMismatch,
+    AttachmentsUnavailable,
     IdentityRollback,
     RootConflict,
 }
@@ -127,11 +130,24 @@ pub struct BackupFailure {
     pub needed_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub available_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_attachments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_next_cursor: Option<String>,
 }
 impl BackupFailure {
     #[must_use]
     pub const fn new(code: BackupFailureCode) -> Self {
-        Self { code, needed_bytes: None, available_bytes: None }
+        Self {
+            code,
+            needed_bytes: None,
+            available_bytes: None,
+            unavailable_attachments: Vec::new(),
+            unavailable_count: None,
+            unavailable_next_cursor: None,
+        }
     }
 }
 

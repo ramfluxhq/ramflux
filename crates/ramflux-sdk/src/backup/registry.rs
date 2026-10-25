@@ -52,7 +52,7 @@ impl VerifiedBackupStaging {
     pub fn key(&self) -> &[u8; 32] {
         &self.key
     }
-    fn expired(&self, now: u64) -> bool {
+    pub(crate) fn expired(&self, now: u64) -> bool {
         now >= self.expires_at || std::time::Instant::now() >= self.deadline
     }
     #[must_use]
@@ -231,11 +231,9 @@ impl BackupJobRegistry {
     ) -> Result<BackupJob, crate::SdkError> {
         let entry = self.entry(id)?;
         if entry.row.state != BackupJobState::Installing
-            || entry
-                .row
-                .attachments
-                .as_ref()
-                .is_none_or(|checks| checks.missing != 0 || checks.mismatched != 0)
+            || entry.row.attachments.as_ref().is_none_or(|checks| {
+                checks.missing != checks.unavailable_at_source || checks.mismatched != 0
+            })
         {
             return Err(refused("invalid_job_phase"));
         }
@@ -303,7 +301,10 @@ impl BackupJobRegistry {
         now: u64,
     ) -> Result<BackupJob, crate::SdkError> {
         let VerifiedBackup { preview, counts, archive_bytes, checks, staging } = verified;
-        if checks.mismatched != 0 || checks.missing != 0 || checks.verified != counts.attachments {
+        if checks.mismatched != 0
+            || checks.missing != checks.unavailable_at_source
+            || checks.verified != counts.attachments
+        {
             return Err(refused("attachment_mismatch"));
         }
         if staging.expired(now) {

@@ -684,3 +684,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/key_backup_restore.rs"]
+pub(crate) mod key_backup_restore;

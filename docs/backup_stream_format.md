@@ -70,3 +70,5 @@ and seals identity metadata with AES-256-GCM under a separate derived key. Datab
 integrity, actual counts and every attachment's existing ChaCha20-Poly1305 tag and
 hashes must agree before the job can become Verified. A complete stream alone does
 not authorize installation or outbound chain resumption.
+
+The authenticated `totals.missing_attachments` field counts explicitly approved source omissions (absent means zero for older archives). Their selectors and expected manifest/plaintext hashes are stored in the encrypted database table `backup_missing_attachment`, authenticated by the stream. A count alone never authorizes an omission: verification matches each row to its still-missing reference. All present payloads must still pass AEAD and both hash checks.

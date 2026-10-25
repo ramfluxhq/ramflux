@@ -103,24 +103,10 @@ impl RamfluxClient {
         let root_seed = ramflux_crypto::random_32()?;
         let local_hash = group_sender_device_hash(group_id, sender_id, "local");
         let remote_hash = group_sender_device_hash(group_id, sender_id, "remote");
-        let transcript_hash = if self
-            .account_db()?
-            .load_actor_state::<bool>("backup/fresh-outbound")?
-            .unwrap_or(false)
-        {
-            fresh_group_transcript(group_id, sender_id, group_key_epoch, &root_seed)?
-        } else {
-            group_sender_transcript_hash(group_id, sender_id, group_key_epoch)
-        };
-        let chain_version = if self
-            .account_db()?
-            .load_actor_state::<bool>("backup/fresh-outbound")?
-            .unwrap_or(false)
-        {
-            3
-        } else {
-            2
-        };
+        // Every new chain binds its fresh seed, including a group first learned through merge.
+        let transcript_hash =
+            fresh_group_transcript(group_id, sender_id, group_key_epoch, &root_seed)?;
+        let chain_version = 3;
         let state = SdkGroupSenderKeyState {
             chain_version,
             principal_commitment: Some(sender.root_commitment().to_owned()),
@@ -269,28 +255,7 @@ impl RamfluxClient {
             )?
             .snapshot(),
         };
-        let base = group_sender_key_checkpoint_name(
-            &state.group_id,
-            &source,
-            state.group_key_epoch,
-            "recv",
-        )?;
-        let known = self
-            .projection_checkpoint(&format!(
-                "{base}/chain/{}",
-                state.session_snapshot.session_id()
-            ))?
-            .is_some()
-            || self
-                .load_group_sender_key_state(
-                    &state.group_id,
-                    &source,
-                    state.group_key_epoch,
-                    "recv",
-                )
-                .is_ok_and(|old| {
-                    old.session_snapshot.session_id() == state.session_snapshot.session_id()
-                });
+        let known = self.knows_identical_group_chain(&state, &source)?;
         if !known {
             self.persist_group_sender_key_state(&state, &source, "recv", "import")?;
         }
@@ -300,6 +265,45 @@ impl RamfluxClient {
             Vec::new()
         };
         Ok((distribution, pending))
+    }
+
+    fn knows_identical_group_chain(
+        &self,
+        state: &SdkGroupSenderKeyState,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<bool, SdkError> {
+        let base = group_sender_key_checkpoint_name(
+            &state.group_id,
+            source,
+            state.group_key_epoch,
+            "recv",
+        )?;
+        let checkpoint = self.projection_checkpoint(&format!(
+            "{base}/chain/{}",
+            state.session_snapshot.session_id()
+        ))?;
+        let old = if let Some(checkpoint) = checkpoint {
+            self.event_body(&checkpoint)?
+                .map(|bytes| serde_json::from_slice::<SdkGroupSenderKeyState>(&bytes))
+                .transpose()?
+        } else {
+            self.load_group_sender_key_state(&state.group_id, source, state.group_key_epoch, "recv")
+                .ok()
+                .filter(|old| {
+                    old.session_snapshot.session_id() == state.session_snapshot.session_id()
+                })
+        };
+        let known = if let Some(old) = old {
+            if old.session_snapshot.root_key_bytes() != state.session_snapshot.root_key_bytes() {
+                return Err(SdkError::InboundRejected(
+                    "group sender chain id reused with different key material".into(),
+                ));
+            }
+            true
+        } else {
+            false
+        };
+        Ok(known)
     }
 
     fn assert_group_sender_key_epoch_allowed(

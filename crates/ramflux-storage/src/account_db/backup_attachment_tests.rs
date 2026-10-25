@@ -73,11 +73,74 @@ fn incremental_merge_preserves_attachment_bytes_keys_and_hashes_and_refuses_miss
     assert_eq!(merged.verify_attachments(|_, _| Ok(()))?.missing, 1);
     merged.put_state("attachment/reference/invalid", &serde_json::json!({"reference":{}}))?;
     assert_eq!(merged.verify_attachments(|_, _| Ok(()))?.missing, 2);
+    merged.allow_missing_attachments()?;
+    assert_eq!(merged.approved_missing_count()?, 1, "malformed references are never approved");
+    merged.put_state(
+        "attachment/reference/missing",
+        &serde_json::json!({"reference":{"manifest_hash":"changed","plaintext_hash":"changed"}}),
+    )?;
+    assert_eq!(
+        merged.approved_missing_count()?,
+        0,
+        "an unchanged count cannot excuse a changed reference"
+    );
+    assert_eq!(merged.verify_attachments(|_, _| Ok(()))?.mismatched, 0);
+
     drop(merged);
     drop(source);
     drop(local);
     drop(source_index);
     drop(local_index);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn r2_attachment_merge_cannot_resurrect_a_local_deletion_with_a_later_upsert()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!(
+        "rf-backup-deleted-object-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    let si = AccountIndex::open(root.join("source"))?;
+    let li = AccountIndex::open(root.join("local"))?;
+    si.create_account("a", "root")?;
+    li.create_account("a", "root")?;
+    let source = AccountDb::open(&si, "a", &AccountDbKey::generate()?)?;
+    let local = AccountDb::open(&li, "a", &AccountDbKey::generate()?)?;
+    let object = serde_json::json!({"object_id":"deleted"});
+    for (db, at) in [(&source, 100), (&local, 1)] {
+        db.upsert_object(&ObjectWrite {
+            object_id: "deleted",
+            manifest_hash: "hash",
+            nonce: "nonce",
+            ciphertext: b"ciphertext",
+            plaintext_hash: "plain",
+            tombstoned: false,
+            backup_excluded: false,
+            content_key: Some(&[1; 32]),
+            object: &object,
+            updated_at: at,
+        })?;
+    }
+    local.set_object_tombstoned("deleted")?;
+    let path = root.join("incoming.db");
+    let saved = source.write_backup_snapshot(&path)?;
+    let target = root.join("target.db");
+    let snapshot = local.write_backup_snapshot(&target)?;
+    let mut merged = BackupDatabase::open(&target, &snapshot.key)?;
+    merged.merge_backup(&path, &saved.key, || Ok(()))?;
+    assert!(merged.db.query_row(
+        "SELECT tombstoned FROM object_index WHERE object_id='deleted'",
+        [],
+        |r| r.get::<_, bool>(0)
+    )?);
+    drop(merged);
+    drop(source);
+    drop(local);
+    drop(si);
+    drop(li);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

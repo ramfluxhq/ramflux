@@ -14,25 +14,10 @@ impl Supervisor {
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
-        if let Some(id) = request.account_id.as_deref() {
-            let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-                &self.config.data_root,
-                id,
-            ))?;
-            if manifest.kind.as_deref().unwrap_or("human") != "human"
-                || manifest.client_mode == LocalBusClientMode::HeadlessAi
-            {
-                return Err(SdkError::CapabilityDenied(
-                    "backup jobs require a human account".into(),
-                ));
-            }
-        }
+        self.backup_human_scope(request.account_id.as_deref())?;
         if request.method == "account.backup.jobs" {
-            return Ok(ActorResponse {
-                body: self.backup_jobs.jobs()?,
-                events: Vec::new(),
-                nodes: None,
-            });
+            let body = self.backup_jobs_listing(&request).await?;
+            return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
         }
         let attended = connection.attended_account_id.is_some()
             || self.daemon_attended.borrow().contains(&connection.connection_id);
@@ -53,7 +38,15 @@ impl Supervisor {
                     .ok_or_else(|| refused("not_writable"))?
                     .to_owned();
                 let secret = take_secret(&mut request)?;
-                self.backup_jobs.create(path, secret, actor)?
+                let allow = request
+                    .body
+                    .get("allow_missing_attachments")
+                    .map(|value| {
+                        value.as_bool().ok_or_else(|| refused("invalid_attachment_policy"))
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                self.backup_jobs.create(path, secret, actor, allow)?
             }
             "account.restore.verify" => {
                 let path = request
@@ -107,6 +100,41 @@ impl Supervisor {
             _ => return Err(refused("unsupported_version")),
         };
         Ok(ActorResponse { body: serde_json::json!({"job":row}), events: Vec::new(), nodes: None })
+    }
+    fn backup_human_scope(&self, id: Option<&str>) -> Result<(), SdkError> {
+        if let Some(id) = id {
+            let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
+                &self.config.data_root,
+                id,
+            ))?;
+            if manifest.kind.as_deref().unwrap_or("human") != "human"
+                || manifest.client_mode == LocalBusClientMode::HeadlessAi
+            {
+                return Err(SdkError::CapabilityDenied(
+                    "backup jobs require a human account".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    async fn backup_jobs_listing(
+        &self,
+        request: &LocalBusFrame,
+    ) -> Result<serde_json::Value, SdkError> {
+        if let Some(id) = request.body.get("job_id").and_then(serde_json::Value::as_str) {
+            self.backup_jobs
+                .missing_page(
+                    id,
+                    request
+                        .body
+                        .get("missing_after")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(""),
+                )
+                .await
+        } else {
+            self.backup_jobs.jobs()
+        }
     }
     async fn restart_backup_actor(
         &self,

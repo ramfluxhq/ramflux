@@ -2,8 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Daemon-owned background backup jobs with account-ordered snapshot capture.
+mod attachments;
 mod format;
 mod install;
+mod publication;
+mod reclamation;
 mod recovery;
 mod routing;
 mod stream;

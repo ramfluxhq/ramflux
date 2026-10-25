@@ -12,6 +12,7 @@ pub struct BackupAttachmentVerification {
     pub verified: u64,
     pub mismatched: u64,
     pub missing: u64,
+    pub unavailable_at_source: u64,
 }
 
 pub struct BackupDatabase {
@@ -33,7 +34,9 @@ impl BackupDatabase {
         if fingerprint != key.fingerprint() {
             return Err(StorageError::AccountKeyMismatch);
         }
-        Ok(Self { db })
+        let opened = Self { db };
+        opened.ensure_missing_manifest()?;
+        Ok(opened)
     }
     /// Copies a quiesced generation to a fresh encrypted private generation.
     /// # Errors
@@ -172,6 +175,7 @@ impl BackupDatabase {
         }
         // References with no matching local payload make a full archive incomplete.
         checks.missing+=self.db.query_row("SELECT count(*) FROM runtime_actor_state r WHERE r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE CAST(o.manifest_hash AS TEXT)=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))",[],|row|row.get::<_,u64>(0))?;
+        checks.unavailable_at_source = self.approved_missing_count()?;
         Ok(checks)
     }
 }

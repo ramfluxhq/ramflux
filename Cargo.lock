@@ -2641,6 +2641,7 @@ dependencies = [
  "ramflux-transport",
  "rcgen",
  "reqwest",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "serde",

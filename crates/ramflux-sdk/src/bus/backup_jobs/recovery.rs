@@ -35,10 +35,21 @@ pub(super) fn selected(generation: &Path) {
     }
 }
 pub(super) fn recover(root: &Path, data_root: &Path, index: &AccountIndex) -> Result<(), SdkError> {
+    recover_excluding(root, data_root, index, &std::collections::BTreeSet::new())
+}
+pub(super) fn recover_excluding(
+    root: &Path,
+    data_root: &Path,
+    index: &AccountIndex,
+    protected: &std::collections::BTreeSet<String>,
+) -> Result<(), SdkError> {
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        if protected.contains(name.as_ref()) {
+            continue;
+        }
         let Some(id) = name.strip_prefix("job_") else { continue };
         let path = entry.path();
         if entry.file_type()?.is_symlink() {
@@ -93,6 +104,9 @@ fn recover_generations(data_root: &Path, index: &AccountIndex) -> Result<(), Sdk
                 continue;
             }
             let path = generation.path();
+            if selected.as_deref().and_then(Path::parent) == Some(path.as_path()) {
+                super::reclamation::complete(&path, data_root, index, id)?;
+            }
             let marker = path.join(INSTALL_MARKER);
             if !std::fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file()) {
                 continue;
@@ -166,6 +180,62 @@ mod tests {
         assert_eq!(std::fs::read(complete)?, b"complete archive");
         drop(index);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod reclamation_tests {
+    use super::*;
+    #[test]
+    fn r2_restart_reclaims_only_a_committed_replacement_after_a_crash()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for committed in [false, true] {
+            let root = crate::bus::runtime_tests::root(if committed {
+                "reclaim-committed"
+            } else {
+                "reclaim-uncommitted"
+            });
+            let index = AccountIndex::open(&root)?;
+            let row = index.create_account("alice", "root")?;
+            let old = root.join(&row.db_relative_path);
+            std::fs::create_dir_all(old.parent().ok_or("parent")?)?;
+            std::fs::write(&old, b"old encrypted database")?;
+            let generation = root.join("accounts/alice/generation_new");
+            std::fs::create_dir_all(&generation)?;
+            std::fs::write(generation.join("account.db"), b"new encrypted database")?;
+            mark_install(&generation)?;
+            std::fs::write(
+                generation.join(".backup-replaced.json"),
+                serde_json::to_vec(&row.db_relative_path)?,
+            )?;
+            let jobs = root.join("backup_jobs");
+            std::fs::create_dir(&jobs)?;
+            if committed {
+                index.install_backup_generation(&ramflux_storage::BackupIndexInstall {
+                    account_id: "alice",
+                    principal_commitment: "root",
+                    db_relative_path: "accounts/alice/generation_new/account.db",
+                    object_relative_path: "accounts/alice/generation_new",
+                    manifest_json: b"{}",
+                    wrapped_key: &ramflux_storage::WrappedAccountDbKey {
+                        key_wrapping_provider: "test".into(),
+                        key_wrapping_ref: "test".into(),
+                        nonce: [1; 12],
+                        wrapped_key: vec![2; 48],
+                    },
+                })?;
+            }
+            recover(&jobs, &root, &index)?;
+            assert_eq!(
+                old.exists(),
+                !committed,
+                "only a durable replacement authorizes old-data deletion"
+            );
+            assert_eq!(generation.exists(), committed);
+            drop(index);
+            std::fs::remove_dir_all(root)?;
+        }
         Ok(())
     }
 }

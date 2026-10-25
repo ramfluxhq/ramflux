@@ -134,3 +134,98 @@ fn a_restored_group_sender_rotates_its_chain_and_the_live_peer_keeps_late_old_me
     assert!(bob.client.decrypt_group_envelope(&first, "duplicate").is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn r2_key_only_recovery_then_full_merge_creates_a_unique_group_chain_accepted_by_live_peer()
+-> Result<(), SdkError> {
+    let original = Fixture::new("alice", 41)?;
+    let bob = Fixture::new("bob", 61)?;
+    trust(&original, &bob)?;
+    trust(&bob, &original)?;
+    for client in [&original.client, &bob.client] {
+        fixture_group(client, "group", &original)?;
+        fixture_member(client, "group", &bob)?;
+    }
+    let old = original.client.export_group_sender_key_distribution("group", "alice")?;
+    bob.client.import_group_sender_key_distribution(&old)?;
+    let old_message: SdkGroupEncryptedEnvelope = serde_json::from_slice(
+        &original.client.encrypt_group_message("group", "alice", b"before")?,
+    )?;
+    assert_eq!(bob.client.decrypt_group_envelope(&old_message, "before")?, b"before");
+    let saved_path = original.root.join("full.db");
+    let saved = original.client.account_db()?.write_backup_snapshot(&saved_path)?;
+    // Same recovered root/device seeds, no group or sending checkpoint (legacy key import).
+    let recovered_root = original.root.join("key-recovered");
+    let client =
+        crate::bus::dispatch::account::key_backup_restore::recover_alice(&recovered_root).await?;
+    let recovered = Fixture { root: recovered_root, client, id: "alice".into() };
+    let vault = FileVaultSecretSource::new(&recovered.root).vault_secret(&recovered.id)?;
+    let kek = crate::client::account::account_db_key_encryption_key(&vault, b"routed-test");
+    let key = ramflux_storage::unwrap_with_vault_secret(
+        &kek,
+        &recovered
+            .client
+            .account_index()?
+            .load_wrapped_db_key(&recovered.id)?
+            .ok_or(SdkError::AccountDbNotUnlocked)?,
+    )?;
+    BackupDatabase::open(&recovered.client.account_db()?.path, &key)?.merge_backup(
+        &saved_path,
+        &saved.key,
+        || Ok(()),
+    )?;
+    let new = recovered.client.export_group_sender_key_distribution("group", "alice")?;
+    bob.client.import_group_sender_key_distribution(&new)?;
+    let message: SdkGroupEncryptedEnvelope = serde_json::from_slice(
+        &recovered.client.encrypt_group_message("group", "alice", b"after merge")?,
+    )?;
+    assert_ne!(message.ciphertext.session_id, old_message.ciphertext.session_id);
+    assert_eq!(bob.client.decrypt_group_envelope(&message, "after")?, b"after merge");
+    Ok(())
+}
+
+#[tokio::test]
+async fn r2_inactive_restored_sessions_retire_and_destroy_their_private_state()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::new("alice", 41)?;
+    let mut bob = Fixture::new("bob", 61)?;
+    settle(&mut alice, &mut bob).await?;
+    let local = alice.client.local_device_identity("alice")?;
+    let remote = bob.client.local_device_identity("bob")?;
+    let id =
+        alice.client.active_pair(&local, &remote)?.ok_or_else(|| invalid("pair"))?.0.session_id;
+    archived(&alice)?;
+    alice.client.retire_pair(&local, &remote, &id)?;
+    assert!(!alice.client.account_db()?.actor_state_exists(&format!("dm-pair/session/{id}"))?);
+    assert!(!alice.client.account_db()?.actor_state_exists(&format!("backup/inactive-pair/{id}"))?);
+    assert!(alice.client.account_db()?.actor_state_exists(&format!("dm-pair/retired/{id}"))?);
+    Ok(())
+}
+
+#[test]
+fn r2_a_known_legacy_group_chain_id_with_different_secret_is_rejected_loudly()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 41)?;
+    let bob = Fixture::new("bob", 61)?;
+    trust(&alice, &bob)?;
+    trust(&bob, &alice)?;
+    for client in [&alice.client, &bob.client] {
+        fixture_group(client, "group", &alice)?;
+        fixture_member(client, "group", &bob)?;
+    }
+    let mut distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(
+        &alice.client.export_group_sender_key_distribution("group", "alice")?,
+    )?;
+    distribution.schema = "ramflux.sdk.group_sender_key.distribution.v2".into();
+    distribution.version = 2;
+    let original = serde_json::to_vec(&distribution)?;
+    bob.client.import_group_sender_key_distribution(&original)?;
+    distribution.sender_key_seed[0] ^= 1;
+    assert!(
+        bob.client
+            .import_group_sender_key_distribution(&serde_json::to_vec(&distribution)?)
+            .is_err()
+    );
+    bob.client.import_group_sender_key_distribution(&original)?;
+    Ok(())
+}
