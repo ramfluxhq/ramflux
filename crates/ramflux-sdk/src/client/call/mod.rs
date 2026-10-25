@@ -107,6 +107,29 @@ impl RamfluxClient {
         } else {
             return Err(invalid("local endpoint binding"));
         };
+        if local.principal_id == c.sender.principal_id {
+            return Err(invalid("self calls are unsupported"));
+        }
+        if let Some(thread) = self.account_db()?.client_record("conversation", conversation)? {
+            let expected = std::collections::BTreeSet::from([
+                local.principal_id.as_str(),
+                c.sender.principal_id.as_str(),
+            ]);
+            let participants =
+                thread["participants"].as_array().filter(|ids| ids.len() == 2).map(|ids| {
+                    ids.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<std::collections::BTreeSet<_>>()
+                });
+            if thread["kind"] != "direct"
+                || !thread["group_id"].is_null()
+                || thread["removed"] == true
+                || thread["deleted"] == true
+                || participants != Some(expected)
+            {
+                return Err(invalid("direct conversation participant binding"));
+            }
+        }
         if peer != &c.sender {
             return Err(invalid("control source is not peer"));
         }
@@ -130,26 +153,38 @@ impl RamfluxClient {
             next.apply(c, now)?;
             Ok(next)
         } else {
-            if self.voice_calls.values().filter(|c| c.row.state != "ended").count() >= 2
+            if self.voice_calls.len() >= 8
                 || self.account_db()?.actor_state_exists(&format!("voice/public/{}", c.call_id))?
             {
                 return Err(invalid("call capacity or retired id"));
             }
-            LiveCall::incoming(c, self.call_local_endpoint()?, now)
+            let mut incoming = LiveCall::incoming(c, self.call_local_endpoint()?, now)?;
+            if self.voice_calls.values().any(|call| call.row.state != "ended") {
+                incoming.busy(now)?;
+            }
+            Ok(incoming)
         }
     }
     pub(crate) fn project_call_control(
         &self,
         entry: &GatewayInboxEntry,
         conversation: &str,
+        group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
         let Some(c) = decode(body)? else {
             return Ok(false);
         };
         self.voice_transition.borrow_mut().take();
+        if group.is_some() {
+            return Err(invalid("group calls are unsupported"));
+        }
         self.verify_call(&c, entry, conversation)?;
         let next = self.plan_call(&c, crate::time::now_unix_timestamp())?;
+        let db = self.account_db()?;
+        if db.client_record("conversation", conversation)?.is_none() {
+            db.persist_client_record("conversation", conversation, &json!({"kind":"direct","group_id":null,"participants":[c.caller.principal_id,c.callee.principal_id]}))?;
+        }
         self.persist_call_row(&next.row)?;
         self.voice_transition.replace(Some((transition_key(body), next)));
         Ok(true)

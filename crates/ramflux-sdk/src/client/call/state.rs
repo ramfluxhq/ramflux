@@ -24,6 +24,7 @@ pub(crate) struct LiveCall {
     pub pending: Vec<CallControl>,
     offer_keys: BTreeMap<CallEndpoint, Zeroizing<[u8; 32]>>,
     next_seq: u64,
+    ring_deadline: i64,
     seen: BTreeMap<CallEndpoint, u64>,
 }
 
@@ -47,6 +48,9 @@ impl LiveCall {
         invited: Vec<CallEndpoint>,
         now: i64,
     ) -> Result<Self, SdkError> {
+        if invited.len() > 96 {
+            return Err(invalid("too many callee devices"));
+        }
         let callee = invited.first().cloned().ok_or_else(|| invalid("no callable peer device"))?;
         let key = Zeroizing::new(ramflux_crypto::random_32()?);
         let mut call = Self::new(id, conversation, (local.clone(), callee), local, key, now);
@@ -73,7 +77,8 @@ impl LiveCall {
         if control.sender != control.caller
             || control.callee != local
             || control.seq == 0
-            || now.saturating_sub(control.created_at) > 45
+            || control.created_at > now.saturating_add(60)
+            || now.saturating_sub(control.created_at) >= 45
         {
             return Err(invalid("invalid or expired invite"));
         }
@@ -86,6 +91,7 @@ impl LiveCall {
             key,
             control.created_at,
         );
+        call.ring_deadline = now.min(control.created_at).saturating_add(45);
         call.receive_key = Some(decode_key(base_key)?);
         call.seen.insert(control.sender.clone(), control.seq);
         let ringing = call.control(CallAction::Ringing, now)?;
@@ -134,6 +140,7 @@ impl LiveCall {
             pending: Vec::new(),
             offer_keys: BTreeMap::new(),
             next_seq: 1,
+            ring_deadline: now.saturating_add(45),
             seen: BTreeMap::new(),
         }
     }
@@ -192,10 +199,15 @@ impl LiveCall {
         match &c.body {
             CallAction::Ringing if self.row.state == "outgoing_ringing" => {}
             CallAction::Answer { base_key } if self.local == self.caller => {
-                if self.row.state != "outgoing_ringing" || self.expired(now) {
-                    let mut other = self.control(CallAction::AnsweredElsewhere, now)?;
-                    other.callee = c.callee.clone();
-                    self.pending.push(other);
+                if self.expired(now) {
+                    self.expire(now)?;
+                    return Ok(false);
+                }
+                if self.row.state != "outgoing_ringing" {
+                    if c.callee == self.callee {
+                        return Err(invalid("answer cannot replace an active key"));
+                    }
+                    // The first answer already queued an authenticated terminal notice for siblings.
                     return Ok(false);
                 }
                 self.receive_key = Some(decode_key(base_key)?);
@@ -270,6 +282,10 @@ impl LiveCall {
         if self.row.state == "ended" {
             return Ok(());
         }
+        if reject && (self.local != self.callee || self.row.state != "incoming_ringing") {
+            return Err(invalid("only a ringing callee can reject a call"));
+        }
+        self.pending.clear();
         let action = if reject { CallAction::Reject } else { CallAction::Hangup };
         if self.local == self.caller && self.row.state == "outgoing_ringing" {
             for target in self.invited.clone() {
@@ -294,6 +310,15 @@ impl LiveCall {
             now,
         )
     }
+    pub fn busy(&mut self, now: i64) -> Result<(), SdkError> {
+        if self.local != self.callee || self.row.state != "incoming_ringing" {
+            return Err(invalid("busy outside incoming call"));
+        }
+        self.pending.clear();
+        let control = self.control(CallAction::Busy, now)?;
+        self.pending.push(control);
+        self.finish("busy", now)
+    }
     pub fn expire(&mut self, now: i64) -> Result<bool, SdkError> {
         if !self.expired(now) {
             return Ok(false);
@@ -306,7 +331,7 @@ impl LiveCall {
     fn expired(&self, now: i64) -> bool {
         matches!(self.row.state.as_str(), "outgoing_ringing" | "incoming_ringing" | "connecting")
             && self.row.answered_at.is_none()
-            && now.saturating_sub(self.row.created_at) >= 45
+            && now >= self.ring_deadline
     }
     fn set_state(&mut self, state: &str, now: i64) -> Result<(), SdkError> {
         self.row.seq =
@@ -321,6 +346,7 @@ impl LiveCall {
         self.set_state("ended", now)?;
         self.row.end_reason = Some(reason.into());
         self.row.ended_at = Some(now);
+        self.offer_keys.clear();
         self.send_key = Zeroizing::new([0; 32]);
         self.receive_key = None;
         self.allocation = None;

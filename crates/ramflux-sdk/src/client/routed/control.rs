@@ -11,7 +11,12 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, SdkError> {
-        if self.project_call_control(entry, &opened.routing.conversation_id, body)? {
+        if self.project_call_control(
+            entry,
+            &opened.routing.conversation_id,
+            opened.routing.group_id.as_deref(),
+            body,
+        )? {
             return Ok(None);
         }
         if self.receive_surface_resync_request(entry, &opened.routing.conversation_id, body)? {

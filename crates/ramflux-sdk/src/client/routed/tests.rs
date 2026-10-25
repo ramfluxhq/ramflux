@@ -710,3 +710,5 @@ mod root_ack;
 
 #[path = "recipient_context_tests.rs"]
 mod recipient_context;
+#[path = "call_tests.rs"]
+mod calls;
