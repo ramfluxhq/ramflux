@@ -217,3 +217,6 @@ mod receipt_identity_tests;
 
 #[cfg(test)]
 mod backup_merge_tests;
+
+#[cfg(test)]
+mod backup_attachment_tests;

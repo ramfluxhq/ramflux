@@ -17,6 +17,12 @@ pub struct BackupMergeReport {
 fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
+struct RowSelection<'a> {
+    table: &'a str,
+    join: &'a str,
+    newer: &'a str,
+    filter: &'a str,
+}
 impl BackupDatabase {
     /// Checks immutable relationship roots and member keys before preview or installation.
     /// # Errors
@@ -62,6 +68,7 @@ impl BackupDatabase {
             };
             self.db.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
             self.preserve_imported_archives(key)?;
+            self.prepare_conversation_counts()?;
             let mut report = BackupMergeReport::default();
             for table in tables {
                 progress()?;
@@ -125,6 +132,12 @@ impl BackupDatabase {
                 if table == "runtime_actor_state" {
                     self.count_actor_states(filter, &join, &newer, &mut report)?;
                 }
+                self.record_conversation_changes(&RowSelection {
+                    table: &table,
+                    join: &join,
+                    newer: &newer,
+                    filter,
+                })?;
                 let replacements=self.db.execute(&format!("DELETE FROM main.{t} AS l WHERE EXISTS(SELECT 1 FROM incoming.{t} r WHERE {join} AND {filter} AND ({newer}))",t=quoted(&table)),[])?;
                 let inserted=self.db.execute(&format!("INSERT OR IGNORE INTO main.{t}({names}) SELECT {names} FROM incoming.{t} r WHERE {filter}",t=quoted(&table)),[])?;
                 add_count(&mut report.restored, &table, inserted as u64);
@@ -132,14 +145,63 @@ impl BackupDatabase {
                 let _ = replacements;
             }
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),'true' FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));")?;
-            self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); COMMIT;")?;
+            self.finish_conversation_counts(&mut report)?;
+            self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; COMMIT;")?;
             Ok(report)
         })();
         if result.is_err() {
             let _ = self.db.execute_batch("ROLLBACK");
         }
-        self.db.execute_batch("DETACH DATABASE incoming")?;
+        self.db.execute_batch("DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
         result
+    }
+    fn prepare_conversation_counts(&self) -> Result<(), StorageError> {
+        // These scratch indexes live in the encrypted private generation, not SQLite temp files.
+        self.db.execute_batch("CREATE TABLE backup_local_conversation(conversation_id TEXT PRIMARY KEY);CREATE TABLE backup_source_conversation(conversation_id TEXT PRIMARY KEY);CREATE TABLE backup_changed_conversation(conversation_id TEXT PRIMARY KEY);")?;
+        for (database, target) in
+            [("main", "backup_local_conversation"), ("incoming", "backup_source_conversation")]
+        {
+            for table in
+                ["conversation_projection", "conversation_list_state", "direct_message_projection"]
+            {
+                self.db.execute(&format!("INSERT OR IGNORE INTO main.{target} SELECT conversation_id FROM {database}.{table}"),[])?;
+            }
+            self.db.execute(&format!("INSERT OR IGNORE INTO main.{target} SELECT substr(state_kind,length('directory/conversation/')+1) FROM {database}.runtime_actor_state WHERE state_kind LIKE 'directory/conversation/%'"),[])?;
+        }
+        Ok(())
+    }
+    fn record_conversation_changes(
+        &self,
+        selection: &RowSelection<'_>,
+    ) -> Result<(), StorageError> {
+        let RowSelection { table, join, newer, filter } = selection;
+        let (id, scope) = match *table {
+            "runtime_actor_state" => (
+                "substr(r.state_kind,length('directory/conversation/')+1)",
+                "r.state_kind LIKE 'directory/conversation/%'",
+            ),
+            "conversation_projection"
+            | "conversation_list_state"
+            | "direct_message_projection"
+            | "conversation_read_state"
+            | "conversation_delivery_state"
+            | "conversation_unread_marker" => ("r.conversation_id", "1"),
+            _ => return Ok(()),
+        };
+        self.db.execute(&format!("INSERT OR IGNORE INTO main.backup_changed_conversation SELECT {id} FROM incoming.{table} r WHERE ({filter}) AND ({scope}) AND NOT EXISTS(SELECT 1 FROM main.{table} l WHERE {join} AND NOT ({newer}))"),[])?;
+        Ok(())
+    }
+    fn finish_conversation_counts(
+        &self,
+        report: &mut BackupMergeReport,
+    ) -> Result<(), StorageError> {
+        let total: u64 =
+            self.db.query_row("SELECT count(*) FROM main.backup_source_conversation", [], |r| {
+                r.get(0)
+            })?;
+        report.restored.conversations=self.db.query_row("SELECT count(*) FROM main.backup_source_conversation s WHERE EXISTS(SELECT 1 FROM main.backup_changed_conversation c WHERE c.conversation_id=s.conversation_id) OR NOT EXISTS(SELECT 1 FROM main.backup_local_conversation l WHERE l.conversation_id=s.conversation_id)",[],|r|r.get(0))?;
+        report.kept_newer.conversations = total - report.restored.conversations;
+        Ok(())
     }
     fn count_actor_states(
         &self,

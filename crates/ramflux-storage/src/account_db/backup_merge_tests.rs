@@ -122,6 +122,10 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
             db.store_message_content("thread", id, b"historical plaintext")?;
         }
     }
+    source.persist_actor_state(
+        "directory/conversation/empty-group-thread",
+        &serde_json::json!({"id":"empty-group-thread","kind":"group"}),
+    )?;
     source.delete_direct_message("thread", "source-deleted", "me", "source-tombstone")?;
     local.delete_direct_message("thread", "local-deleted", "me", "local-tombstone")?;
     source.connection.execute_batch(
@@ -135,7 +139,11 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     let path = root.join("merged.db");
     let target = local.write_backup_snapshot(&path)?;
     let mut merged = BackupDatabase::open(&path, &target.key)?;
-    merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
+    let report = merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
+    assert_eq!(snapshot.counts.conversations, 2);
+    assert_eq!(report.restored.conversations, 2);
+    assert_eq!(report.kept_newer.conversations, 0);
+    assert_eq!(merged.counts()?.conversations, 2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND deleted=1",[],|r|r.get::<_,u64>(0))?,2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM runtime_message_content WHERE message_id IN ('source-deleted','local-deleted')",[],|r|r.get::<_,u64>(0))?,0);
     assert_eq!(

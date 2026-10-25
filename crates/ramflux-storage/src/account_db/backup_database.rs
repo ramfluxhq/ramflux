@@ -169,7 +169,7 @@ impl BackupDatabase {
             progress(checks.verified + checks.mismatched + checks.missing, bytes)?;
         }
         // References with no matching local payload make a full archive incomplete.
-        checks.missing+=self.db.query_row("SELECT count(DISTINCT coalesce(json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash'),r.state_kind)) FROM runtime_actor_state r WHERE r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE CAST(o.manifest_hash AS TEXT)=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))",[],|row|row.get::<_,u64>(0))?;
+        checks.missing+=self.db.query_row("SELECT count(*) FROM runtime_actor_state r WHERE r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE CAST(o.manifest_hash AS TEXT)=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))",[],|row|row.get::<_,u64>(0))?;
         Ok(checks)
     }
 }

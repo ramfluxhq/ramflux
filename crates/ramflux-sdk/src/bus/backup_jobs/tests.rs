@@ -245,6 +245,9 @@ async fn round_trip(scale: Scale) -> TestResult {
             );
             finished(&target, id, BackupJobState::Done).await?;
             let restored = check_restored(&restored_root, scale)?;
+            if scale.file_bytes.is_none() {
+                merge_existing_source(&source, &source_root, &archive, secret).await?;
+            }
             source.shutdown().await?;
             target.shutdown().await?;
             drop(restored);
@@ -455,4 +458,33 @@ async fn archive_while_reading(
         .await?;
     let original = std::fs::read(archive)?;
     Ok(original)
+}
+
+async fn merge_existing_source(
+    source: &Supervisor,
+    root: &Path,
+    archive: &Path,
+    secret: &str,
+) -> TestResult {
+    let verify = call(
+        source,
+        "account.restore.verify",
+        None,
+        json!({"input_path":archive,"passphrase":secret}),
+    )
+    .await?;
+    let id = verify["job"]["job_id"].as_str().ok_or("job id")?;
+    let preview = finished(source, id, BackupJobState::Verified).await?;
+    assert!(preview.archive.as_ref().is_some_and(|a| a.merge));
+    call(source, "account.restore.install", None, json!({"job_id":id})).await?;
+    let done = finished(source, id, BackupJobState::Done).await?;
+    assert_eq!(done.kept_newer.as_ref().map(|c| c.messages), Some(6));
+    assert_eq!(done.kept_newer.as_ref().map(|c| c.attachments), Some(1));
+    let mut client = RamfluxClient::new();
+    client.open_account_index(root)?;
+    client.unlock_account("alice", b"account-test-secret")?;
+    assert_eq!(client.direct_messages("thread")?.len(), 6);
+    assert_eq!(client.decrypt_object("file")?, b"complete attachment bytes");
+    assert_eq!(client.account_db()?.load_actor_state::<bool>("backup/reestablishing")?, None);
+    Ok(())
 }
