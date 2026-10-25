@@ -51,7 +51,11 @@ impl RamfluxClient {
         role: &str,
         root: Option<&str>,
     ) -> Result<GroupState, SdkError> {
-        let explicit = ramflux_protocol::parse_qualified_device_id(member_id)?;
+        let explicit = if root.is_none() {
+            ramflux_protocol::parse_qualified_device_id(member_id)?
+        } else {
+            None
+        };
         let raw = explicit.as_ref().map_or(member_id, |(_, raw)| raw.as_str());
         ramflux_protocol::validate_device_name(raw)?;
         let reference = if let Some(root) = root {
@@ -61,6 +65,35 @@ impl RamfluxClient {
         } else {
             self.group_device_reference(group_id, raw)?
         };
+        if self.account_db()?.shared_group_state(group_id)?.is_some() {
+            let identity = self.device_identity(&reference)?;
+            let record = self.trusted_device(&identity)?;
+            let member = ramflux_protocol::group_state::GroupMemberIdentity {
+                principal_id: record["principal_id"]
+                    .as_str()
+                    .ok_or(StorageError::GroupPermissionDenied)?
+                    .into(),
+                root_commitment: identity.root_commitment().into(),
+                device_id: identity.device_id().into(),
+                signing_public_key: record["signing_public_key"]
+                    .as_str()
+                    .ok_or(StorageError::GroupPermissionDenied)?
+                    .into(),
+                target_delivery_id: record["target_delivery_id"]
+                    .as_str()
+                    .ok_or(StorageError::GroupPermissionDenied)?
+                    .into(),
+            };
+            self.shared_group_change(
+                group_id,
+                &self.shared_group_local_target(group_id)?,
+                ramflux_protocol::group_state::GroupStateChange::Add {
+                    member,
+                    role: role.parse()?,
+                },
+            )?;
+            return self.group_state(group_id);
+        }
         self.account_db()?.write_transaction(|| {
             let state = self.account_db()?.add_group_member(group_id, raw, role)?;
             self.pin_joined_group_member(group_id, &reference)?;
@@ -77,6 +110,40 @@ impl RamfluxClient {
         target_member_id: &str,
     ) -> Result<GroupState, SdkError> {
         let actor = self.local_device_identity(actor_id)?;
+        if let Some(state) = self.account_db()?.shared_group_state(group_id)? {
+            let address =
+                if state.view().members.iter().any(|m| m.identity.device_id == target_member_id) {
+                    None
+                } else {
+                    ramflux_protocol::parse_qualified_device_id(target_member_id)?
+                };
+            let selected = state
+                .view()
+                .members
+                .iter()
+                .filter(|m| {
+                    address.as_ref().map_or(
+                        m.identity.device_id == target_member_id,
+                        |(root, device)| {
+                            m.identity.root_commitment == *root && m.identity.device_id == *device
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            if selected.len() != 1 {
+                return Err(StorageError::GroupPermissionDenied.into());
+            }
+            let target = &selected[0].identity;
+            self.shared_group_change(
+                group_id,
+                &self.shared_group_local_target(group_id)?,
+                ramflux_protocol::group_state::GroupStateChange::Remove {
+                    root_commitment: target.root_commitment.clone(),
+                    device_id: target.device_id.clone(),
+                },
+            )?;
+            return self.group_state(group_id);
+        }
         if let Some(target) = self.group_route_identity(group_id, target_member_id)? {
             Ok(self.account_db()?.remove_group_member(group_id, &actor, &target)?)
         } else {

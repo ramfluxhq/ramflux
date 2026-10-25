@@ -657,7 +657,7 @@ pub(crate) async fn dispatch_group_send_request(
     {
         None
     } else {
-        Some(super::super::group_delivery::resolve(account, &body)?)
+        Some(super::super::group_delivery::resolve_current(account, &body).await?)
     };
     let group_state = account.client.group_state(&body.group_id)?;
     if !group_state.members.contains(&body.sender_id) {
@@ -880,9 +880,6 @@ pub(crate) async fn dispatch_group_send_request(
         let routes = fanout_routes.unwrap_or_default();
         let mut sender_key_distribution = Vec::new();
         for route in routes.iter().cloned() {
-            if route.member_id == body.sender_id {
-                continue;
-            }
             if let Some(distribution) =
                 dispatch_group_sender_key_distribution(account, &body.group_id, route, None).await?
             {
@@ -892,9 +889,6 @@ pub(crate) async fn dispatch_group_send_request(
         let mut local = Vec::new();
         let mut federated = Vec::new();
         for route in routes {
-            if route.member_id == body.sender_id {
-                continue;
-            }
             let target_delivery_id = route.target_delivery_id.clone().ok_or_else(|| {
                 SdkError::LocalBus(format!("group route lost for member {}", route.member_id))
             })?;
@@ -979,7 +973,8 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
     let result = async {
         let sender_id = engine.config.device_id.clone();
         let recipient_device_id = route.member_id.as_str();
-        if sender_id == recipient_device_id {
+        if sender_id == recipient_device_id
+            && route.member_principal_commitment.as_deref() == Some(&account.principal_commitment) {
             return Ok(None);
         }
         let member_principal_commitment = resolve_group_route_principal_commitment(

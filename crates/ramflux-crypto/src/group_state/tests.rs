@@ -24,14 +24,16 @@ fn create(owner: &Person) -> Result<VerifiedGroupState, CryptoError> {
         &owner.root,
         &owner.branch,
         &owner.actor,
-        "group",
-        1,
-        None,
-        GroupStateChange::Create {
-            conversation_id: "group-thread".into(),
-            max_members: 1000,
-            new_member_history: "no_history".into(),
-            name: Some("Checklist".into()),
+        crate::group_state::GroupStateOperationInput {
+            group_id: "group",
+            epoch: 1,
+            previous_hash: None,
+            change: GroupStateChange::Create {
+                conversation_id: "group-thread".into(),
+                max_members: 1000,
+                new_member_history: "no_history".into(),
+                name: Some("Checklist".into()),
+            },
         },
     )?;
     sign_group_state_snapshot(&owner.branch, &owner.actor, vec![operation])
@@ -46,10 +48,12 @@ fn step(
         &author.root,
         &author.branch,
         &author.actor,
-        "group",
-        state.view().epoch + 1,
-        Some(state.view().head_hash.clone()),
-        change,
+        crate::group_state::GroupStateOperationInput {
+            group_id: "group",
+            epoch: state.view().epoch + 1,
+            previous_hash: Some(state.view().head_hash.clone()),
+            change,
+        },
     )?);
     sign_group_state_snapshot(&author.branch, &author.actor, operations)
 }
@@ -339,10 +343,12 @@ fn a_device_certificate_cannot_forge_new_controls_or_owner_checkpoints() -> Resu
         &owner.root,
         &owner.branch,
         &owner.actor,
-        "group",
-        3,
-        Some(joined.view().head_hash.clone()),
-        GroupStateChange::SetName { name: "approved".into() },
+        crate::group_state::GroupStateOperationInput {
+            group_id: "group",
+            epoch: 3,
+            previous_hash: Some(joined.view().head_hash.clone()),
+            change: GroupStateChange::SetName { name: "approved".into() },
+        },
     )?;
     forged.change = GroupStateChange::SetName { name: "forged with only a branch key".into() };
     forged.signature = crate::sign_with_device_branch(&owner.branch, &operation_body(&forged))?;
@@ -363,5 +369,29 @@ fn a_device_certificate_cannot_forge_new_controls_or_owner_checkpoints() -> Resu
         verify_group_state_snapshot(snapshot).is_err(),
         "checkpoint authority requires the immutable owner root key"
     );
+    Ok(())
+}
+
+#[test]
+fn group_state_root_authorized_branch_rotation_keeps_membership_and_checkpoint_authority()
+-> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 41, 42)?;
+    let initial = create(&owner)?;
+    let replacement = person("owner", "phone", 41, 43)?;
+    let changed = advance_group_state(
+        &replacement.root,
+        &replacement.branch,
+        &replacement.actor,
+        &initial,
+        GroupStateChange::SetName { name: "After rotation".into() },
+    )?;
+    assert_eq!(changed.view().name.as_deref(), Some("After rotation"));
+    assert_eq!(
+        changed.member_storage_key(&replacement.actor.identity)?,
+        initial.member_storage_key(&owner.actor.identity)?
+    );
+    let checkpoint =
+        compact_group_state(&replacement.root, &replacement.branch, &replacement.actor, &changed)?;
+    assert_eq!(verify_group_state_snapshot(checkpoint.snapshot().clone())?.view(), changed.view());
     Ok(())
 }

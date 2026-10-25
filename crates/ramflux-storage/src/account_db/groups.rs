@@ -17,6 +17,7 @@ impl AccountDb {
         group_id: &str,
         creator_id: &str,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(group_id)?;
         let now = self.now_unix();
         self.connection.execute(
             "INSERT OR REPLACE INTO group_projection
@@ -41,6 +42,7 @@ impl AccountDb {
         member_id: &str,
         role: &str,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(group_id)?;
         self.write_transaction(|| {
             validate_group_role(role)?;
             let state = self.group_state(group_id)?;
@@ -80,6 +82,7 @@ impl AccountDb {
         join: &GroupMemberJoinWrite,
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(&join.group_id)?;
         self.write_transaction(|| self.apply_group_member_join_inner(join, actor, false))
     }
     /// Applies authenticated first-seen onboarding only to a group absent from local state.
@@ -90,6 +93,7 @@ impl AccountDb {
         join: &GroupMemberJoinWrite,
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(&join.group_id)?;
         self.write_transaction(|| self.apply_group_member_join_inner(join, actor, true))
     }
     fn authorize_group_join(
@@ -237,6 +241,7 @@ impl AccountDb {
         local_role: &str,
         joined_epoch: u64,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(group_id)?;
         validate_group_role(local_role)?;
         let now = self.now_unix();
         let group_epoch_i64 = i64::try_from(group_epoch)
@@ -293,6 +298,8 @@ impl AccountDb {
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
         target: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(group_id)?;
+        self.ensure_legacy_group_writable(group_id)?;
         self.write_transaction(|| {
             let target_member_id = target.device_id();
             let actor_role = self
@@ -332,6 +339,7 @@ impl AccountDb {
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
         raw: &str,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(group)?;
         self.write_transaction(|| {
         let actor_role =
             self.group_member_role(group, actor)?.ok_or(StorageError::GroupPermissionDenied)?;
@@ -414,6 +422,7 @@ impl AccountDb {
         change: &GroupRoleChangeWrite,
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(&change.group_id)?;
         self.write_transaction(|| {
             if change.actor_device_id != actor.device_id()
                 || self.group_member_role(&change.group_id, actor)?.is_none()
@@ -485,6 +494,7 @@ impl AccountDb {
         kick: &GroupMemberKickWrite,
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(&kick.group_id)?;
         self.write_transaction(|| {
             if kick.actor_device_id != actor.device_id()
                 || self.group_member_role(&kick.group_id, actor)?.is_none()
@@ -511,6 +521,7 @@ impl AccountDb {
         ban: &GroupMemberBanWrite,
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(&ban.group_id)?;
         self.write_transaction(|| {
             if ban.actor_device_id != actor.device_id()
                 || self.group_member_role(&ban.group_id, actor)?.is_none()
@@ -617,6 +628,7 @@ impl AccountDb {
         invite: &GroupInviteWrite,
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(&invite.group_id)?;
         self.write_transaction(|| {
             ramflux_protocol::qualified_device_id(&invite.invitee_principal_commitment, &invite.invitee_identity)?;
             let old: Option<(String,String)> = self.connection.query_row("SELECT expected_root,device_name FROM root_group_invite_identity WHERE group_id=?1 AND invite_id=?2",params![invite.group_id,invite.invite_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
@@ -704,6 +716,7 @@ impl AccountDb {
         accept: &GroupInviteAcceptWrite,
         actor: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<GroupState, StorageError> {
+        self.ensure_legacy_group_writable(&accept.group_id)?;
         if accept.actor_device_id != actor.device_id()
             || accept.invitee_identity != actor.device_id()
         {

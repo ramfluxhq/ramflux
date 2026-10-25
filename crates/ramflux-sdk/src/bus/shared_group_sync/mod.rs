@@ -3,9 +3,12 @@
 
 //! Shared group mutations and bounded state distribution on the existing account actor.
 mod outbox;
+mod recovery;
 use crate::prelude::*;
+pub(crate) use outbox::enqueue;
 pub(super) use outbox::flush;
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateChange};
+pub(super) use recovery::stage;
 use serde_json::{Value, json};
 
 fn required<'a>(body: &'a Value, key: &str) -> Result<&'a str, SdkError> {
@@ -34,6 +37,9 @@ pub(super) async fn dispatch(
     if method != "group.create" && previous.is_none() {
         return Ok(None);
     }
+    if body["actor_id"].as_str().is_some_and(|actor| actor != account.gateway_config.device_id) {
+        return Err(StorageError::GroupPermissionDenied.into());
+    }
     let target = account.gateway_config.target_delivery_id.clone();
     let change = if method == "group.create" {
         if required(body, "creator_id")? != account.gateway_config.device_id {
@@ -46,64 +52,85 @@ pub(super) async fn dispatch(
     } else if method == "group.name.set" {
         Some(GroupStateChange::SetName { name: required(body, "name")?.into() })
     } else {
-        if body
-            .get("actor_id")
-            .and_then(Value::as_str)
-            .is_some_and(|actor| actor != account.gateway_config.device_id)
-        {
-            return Err(SdkError::Storage(StorageError::GroupPermissionDenied));
-        }
-        let member = required(body, "member_id")?;
-        let previous = previous.as_ref().ok_or(StorageError::GroupPermissionDenied)?;
-        let matches = previous
-            .view()
-            .members
-            .iter()
-            .filter(|m| {
-                m.identity.device_id == member
-                    && body
-                        .get("member_principal_commitment")
-                        .and_then(Value::as_str)
-                        .is_none_or(|root| root == m.identity.root_commitment)
-            })
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
-            return Err(SdkError::LocalBus(
-                "member requires an unambiguous root-qualified identity".into(),
-            ));
-        }
-        let identity = &matches[0].identity;
-        Some(if method == "group.role.set" {
-            GroupStateChange::SetRole {
-                root_commitment: identity.root_commitment.clone(),
-                device_id: member.into(),
-                role: required(body, "role")?.parse()?,
-            }
-        } else {
-            GroupStateChange::Remove {
-                root_commitment: identity.root_commitment.clone(),
-                device_id: member.into(),
-            }
-        })
+        selected_change(
+            previous.as_ref().ok_or(StorageError::GroupPermissionDenied)?,
+            body,
+            method,
+        )?
     };
     account.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-        let state = if let Some(change) = change {
+        if let Some(change) = change {
             account.client.shared_group_change(group, &target, change)?
         } else {
             let conversation = body["conversation_id"].as_str().unwrap_or(group);
             let name = body["name"].as_str().or_else(|| body["title"].as_str()).map(str::to_owned);
             account.client.shared_group_create(group, conversation, name, &target)?
         };
-        outbox::enqueue(&account.client, &state, previous.as_ref())?;
         Ok(())
     })?;
-    if let Err(error) = flush(account).await {
-        tracing::debug!(%error,"group state delivery remains pending");
-    }
+    // The actor's sync tick drains durable delivery. Mutations return after their atomic commit,
+    // so one offline member cannot keep a local group command waiting on network retries.
     let mut result =
         account.client.shared_group_metadata(group)?.ok_or(StorageError::GroupPermissionDenied)?;
     result["accepted"] = json!(true);
     Ok(Some(result))
+}
+fn selected_change(
+    previous: &ramflux_crypto::VerifiedGroupState,
+    body: &Value,
+    method: &str,
+) -> Result<Option<GroupStateChange>, SdkError> {
+    Ok({
+        let selected = required(body, "member_id")?;
+        let explicit = body["member_principal_commitment"].as_str();
+        let address = if explicit.is_none()
+            && !previous.view().members.iter().any(|m| m.identity.device_id == selected)
+        {
+            ramflux_protocol::parse_qualified_device_id(selected)?
+        } else {
+            None
+        };
+        let member = address.as_ref().map_or(selected, |(_, device)| device.as_str());
+        let selected_root = explicit.or_else(|| address.as_ref().map(|(root, _)| root.as_str()));
+        let matches = previous
+            .view()
+            .members
+            .iter()
+            .filter(|m| {
+                m.identity.device_id == member
+                    && selected_root.is_none_or(|root| root == m.identity.root_commitment)
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty()
+            && method != "group.role.set"
+            && let Some(root) = selected_root
+            && previous.view().effective_role(root, member).is_some()
+        {
+            Some(GroupStateChange::Remove {
+                root_commitment: root.into(),
+                device_id: member.into(),
+            })
+        } else {
+            if matches.len() != 1 {
+                return Err(SdkError::LocalBus(
+                    "member requires an unambiguous root-qualified identity".into(),
+                ));
+            }
+            let identity = &matches[0].identity;
+            Some(if method == "group.role.set" {
+                GroupStateChange::SetRole {
+                    root_commitment: identity.root_commitment.clone(),
+                    device_id: member.into(),
+                    role: required(body, "role")?.parse()?,
+                }
+            } else {
+                GroupStateChange::Remove {
+                    root_commitment: identity.root_commitment.clone(),
+                    device_id: member.into(),
+                }
+            })
+        }
+    })
 }
 async fn verified_member(
     account: &LocalBusAccountState,

@@ -11,10 +11,10 @@ impl RamfluxClient {
         group: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        let state =
-            self.group_state(group).map_err(|error| SdkError::InboundPending(error.to_string()))?;
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if !state.members.contains(&local.device_id) {
+        if !self
+            .local_is_group_member(group)
+            .map_err(|error| SdkError::InboundPending(error.to_string()))?
+        {
             return Err(SdkError::InboundPending(
                 "local group membership not yet available".to_owned(),
             ));

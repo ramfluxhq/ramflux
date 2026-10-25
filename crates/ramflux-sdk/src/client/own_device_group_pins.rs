@@ -13,6 +13,9 @@ impl RamfluxClient {
     ) -> Result<Vec<SdkOwnDeviceGroupMemberPin>, SdkError> {
         let mut pins = Vec::new();
         for group in groups {
+            if group.shared_state.is_some() {
+                continue;
+            }
             for member in &group.members {
                 if let Some(binding) = self
                     .account_db()?
@@ -40,7 +43,13 @@ impl RamfluxClient {
         let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
         let mut blocked = BTreeSet::new();
         let mut unique = BTreeMap::new();
-        for pin in bundle.group_member_pins.iter().filter(|pin| pin.device_id != *local) {
+        for pin in bundle.group_member_pins.iter().filter(|pin| {
+            pin.device_id != *local
+                && !bundle
+                    .groups
+                    .iter()
+                    .any(|g| g.group_id == pin.group_id && g.shared_state.is_some())
+        }) {
             let id = (pin.group_id.clone(), pin.device_id.clone());
             let encoded = serde_json::to_vec(pin)?;
             if unique.insert(id.clone(), encoded.clone()).is_some_and(|old| old != encoded) {
@@ -48,7 +57,13 @@ impl RamfluxClient {
             }
         }
         let mut seen = BTreeSet::new();
-        for pin in bundle.group_member_pins.iter().filter(|pin| pin.device_id != *local) {
+        for pin in bundle.group_member_pins.iter().filter(|pin| {
+            pin.device_id != *local
+                && !bundle
+                    .groups
+                    .iter()
+                    .any(|g| g.group_id == pin.group_id && g.shared_state.is_some())
+        }) {
             let id = (pin.group_id.clone(), pin.device_id.clone());
             if !seen.insert(id.clone()) {
                 continue;

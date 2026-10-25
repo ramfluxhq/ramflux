@@ -144,22 +144,27 @@ fn root_matches(root: &IdentityRoot, actor: &GroupStateActor) -> Result<(), Cryp
 pub(super) fn root_operation_body(operation: &GroupStateOperation) -> Value {
     json!({"domain":"ramflux.group_state.root_operation.v1","operation":operation_body(operation)})
 }
+/// Header and exact transition authenticated by both the account root and its local branch.
+pub struct GroupStateOperationInput<'a> {
+    pub group_id: &'a str,
+    pub epoch: u64,
+    pub previous_hash: Option<String>,
+    pub change: GroupStateChange,
+}
 /// # Errors
 /// Rejects an invalid actor or canonical serialization. History authority is checked by snapshot verification.
 pub fn sign_group_state_operation(
     root: &IdentityRoot,
     branch: &DeviceBranch,
     actor: &GroupStateActor,
-    group: &str,
-    epoch: u64,
-    previous_hash: Option<String>,
-    change: GroupStateChange,
+    input: GroupStateOperationInput<'_>,
 ) -> Result<GroupStateOperation, CryptoError> {
+    let GroupStateOperationInput { group_id, epoch, previous_hash, change } = input;
     branch_matches(branch, actor)?;
     root_matches(root, actor)?;
     let mut operation = GroupStateOperation {
         schema: GROUP_STATE_OPERATION_DOMAIN.into(),
-        group_id: group.into(),
+        group_id: group_id.into(),
         epoch,
         previous_hash,
         actor: actor.clone(),
@@ -188,13 +193,8 @@ fn check_issuer(
 ) -> Result<(), CryptoError> {
     let identity = &issuer.identity;
     let role = view.effective_role(&identity.root_commitment, &identity.device_id);
-    if view.members.iter().any(|member| {
-        member.identity.root_commitment == identity.root_commitment
-            && member.identity.device_id == identity.device_id
-            && member.identity.signing_public_key != identity.signing_public_key
-    }) {
-        return Err(invalid("issuer key differs from the group pin"));
-    }
+    // Transport admission verifies the issuer's current root-signed device set. Group history
+    // retains the original declaration and must not pin a retired branch key forever.
     let completed_writer = operations.last().is_some_and(|last| {
         last.actor.identity.root_commitment == identity.root_commitment
             && last.actor.identity.device_id == identity.device_id

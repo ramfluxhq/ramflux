@@ -18,6 +18,27 @@ fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(reason.into())
 }
 impl RamfluxClient {
+    pub(crate) fn local_is_group_member(&self, group: &str) -> Result<bool, SdkError> {
+        if let Some(state) = self.account_db()?.shared_group_state(group)? {
+            let local = self.owned_device_identity()?;
+            return Ok(state
+                .view()
+                .effective_role(local.root_commitment(), local.device_id())
+                .is_some());
+        }
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        Ok(self.group_state(group)?.members.contains(&branch.device_id))
+    }
+
+    pub(super) fn shared_group_local_target(&self, group: &str) -> Result<String, SdkError> {
+        let local: GroupMemberIdentity = serde_json::from_value(
+            self.account_db()?
+                .client_record("group-local", group)?
+                .ok_or(StorageError::GroupPermissionDenied)?,
+        )?;
+        Ok(local.target_delivery_id)
+    }
+
     pub(crate) fn owned_group_actor(&self, target: &str) -> Result<GroupStateActor, SdkError> {
         Ok(certify_group_state_actor(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -41,18 +62,23 @@ impl RamfluxClient {
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             branch,
             &actor,
-            group,
-            1,
-            None,
-            GroupStateChange::Create {
-                conversation_id: conversation.into(),
-                max_members: 1000,
-                new_member_history: "no_history".into(),
-                name,
+            ramflux_crypto::GroupStateOperationInput {
+                group_id: group,
+                epoch: 1,
+                previous_hash: None,
+                change: GroupStateChange::Create {
+                    conversation_id: conversation.into(),
+                    max_members: 1000,
+                    new_member_history: "no_history".into(),
+                    name,
+                },
             },
         )?;
         let verified = sign_group_state_snapshot(branch, &actor, vec![operation])?;
-        self.account_db()?.commit_shared_group_state(&verified, &actor)?;
+        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            self.account_db()?.commit_shared_group_state(&verified, &actor)?;
+            crate::bus::enqueue_shared_group(self, &verified, None)
+        })?;
         Ok(verified)
     }
     pub(crate) fn shared_group_change(
@@ -73,7 +99,10 @@ impl RamfluxClient {
             &previous,
             change,
         )?;
-        self.account_db()?.commit_shared_group_state(&state, &actor)?;
+        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            self.account_db()?.commit_shared_group_state(&state, &actor)?;
+            crate::bus::enqueue_shared_group(self, &state, Some(&previous))
+        })?;
         Ok(state)
     }
     pub(crate) fn accept_shared_group_state(
@@ -129,6 +158,26 @@ impl RamfluxClient {
         for member in &state.members {
             members.insert(member.identity.device_id.clone());
             roles.insert(member.identity.device_id.clone(), member.role.as_str().into());
+        }
+        // Signed device-set membership expands each account's implicit sibling devices.
+        let roots = state
+            .members
+            .iter()
+            .map(|member| member.identity.root_commitment.as_str())
+            .collect::<BTreeSet<_>>();
+        for root in roots {
+            if let Some(set) = self.observed_device_set(root)? {
+                for device in set
+                    .devices
+                    .iter()
+                    .filter(|d| d.status == ramflux_protocol::DeviceSetStatus::Active)
+                {
+                    if let Some(role) = state.effective_role(root, &device.device_id) {
+                        members.insert(device.device_id.clone());
+                        roles.insert(device.device_id.clone(), role.as_str().into());
+                    }
+                }
+            }
         }
         if let Some(local) = self.account_db()?.client_record("group-local", group)? {
             let local: GroupMemberIdentity = serde_json::from_value(local)?;

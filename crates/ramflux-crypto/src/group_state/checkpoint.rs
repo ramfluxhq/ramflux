@@ -112,7 +112,7 @@ impl VerifiedGroupState {
     /// Root-qualified storage identifier, admitted only by this verified group's membership.
     /// This is a storage codec, not an authentication credential.
     /// # Errors
-    /// Rejects malformed identities, principal aliases and a key conflicting with an explicit pin.
+    /// Rejects malformed identities and principal aliases. Device-key authentication is separate.
     pub fn member_storage_key(
         &self,
         identity: &ramflux_protocol::group_state::GroupMemberIdentity,
@@ -120,9 +120,7 @@ impl VerifiedGroupState {
         identity_valid(identity)?;
         if self.view.members.iter().any(|member| {
             member.identity.root_commitment == identity.root_commitment
-                && (member.identity.principal_id != identity.principal_id
-                    || (member.identity.device_id == identity.device_id
-                        && member.identity.signing_public_key != identity.signing_public_key))
+                && member.identity.principal_id != identity.principal_id
         }) {
             return Err(invalid("identity conflicts with verified group membership"));
         }
@@ -215,10 +213,12 @@ pub fn advance_group_state(
         root,
         branch,
         actor,
-        &base.view.group_id,
-        base.view.epoch.checked_add(1).ok_or_else(|| invalid("group epoch overflow"))?,
-        Some(base.view.head_hash.clone()),
-        change,
+        crate::group_state::GroupStateOperationInput {
+            group_id: &base.view.group_id,
+            epoch: base.view.epoch.checked_add(1).ok_or_else(|| invalid("group epoch overflow"))?,
+            previous_hash: Some(base.view.head_hash.clone()),
+            change,
+        },
     )?;
     let mut operations = base.snapshot.operations;
     operations.push(operation);

@@ -26,6 +26,7 @@ mod readers;
 mod requests;
 mod secrets;
 mod shared_group_sync;
+pub(crate) use shared_group_sync::enqueue as enqueue_shared_group;
 mod socket;
 pub mod state;
 mod subscription;

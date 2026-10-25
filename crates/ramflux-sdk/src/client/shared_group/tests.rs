@@ -225,3 +225,86 @@ fn one_bootstrap_packet_supplies_the_first_key_and_replays_do_not_reset_the_rece
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn shared_group_implicit_sibling_can_send_and_own_history_keeps_signed_names()
+-> Result<(), SdkError> {
+    let root = temp_root("implicit-sibling")?;
+    let owner = person(&root.join("owner"), "owner", "phone", 61, 62)?;
+    let peer = person(&root.join("peer"), "peer", "phone", 71, 72)?;
+    let sibling = person(&root.join("sibling"), "owner", "laptop", 61, 82)?;
+    let mut own = crate::client::identity_authority::test_support::public_manifest(&owner)?;
+    own.devices.extend(
+        crate::client::identity_authority::test_support::public_manifest(&sibling)?.devices,
+    );
+    crate::client::identity_authority::test_support::sign_manifest(
+        owner.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut own,
+        2,
+    )?;
+    let remote = crate::client::identity_authority::test_support::public_manifest(&peer)?;
+    for client in [&owner, &peer, &sibling] {
+        client.persist_identity_directory(&own)?;
+        client.persist_identity_directory(&remote)?;
+    }
+    owner.shared_group_create("group", "thread", Some("Signed title".into()), "target-phone")?;
+    let state = owner.shared_group_change(
+        "group",
+        "target-phone",
+        GroupStateChange::Add {
+            member: peer.owned_group_actor("target-phone")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    peer.accept_shared_group_state(&state, "target-phone")?;
+    let sibling_id = peer.device_identity_for_root(&own.principal_commitment, "laptop")?;
+    assert!(peer.account_db()?.group_member_key_binding("group", &sibling_id)?.is_none());
+    peer.require_group_sender_pin("group", "owner", &sibling_id)?;
+    assert!(peer.account_db()?.group_member_key_binding("group", &sibling_id)?.is_some());
+    // The own-device wrapper's role/name claims cannot replace the enclosed signed state.
+    let mut bundle = owner.own_device_history_bundle(
+        &own.principal_commitment,
+        "phone",
+        "laptop",
+        "snapshot",
+    )?;
+    bundle.groups[0].local_role = "bot".into();
+    bundle.groups[0].group_epoch += 1;
+    assert!(sibling.restore_own_groups(&bundle)?.is_empty(), "mismatched wrapper isolated");
+    bundle.groups[0].group_epoch -= 1;
+    let floors = sibling.restore_own_groups(&bundle)?;
+    assert_eq!(floors.get("group"), Some(&1));
+    assert_eq!(
+        sibling.group_state("group")?.roles.get("laptop").map(String::as_str),
+        Some("owner")
+    );
+    assert_eq!(sibling.group_state("group")?.group_epoch, 2, "no explicit sibling join");
+    assert_eq!(
+        sibling
+            .account_db()?
+            .client_record("conversation", "thread")?
+            .ok_or(StorageError::GroupPermissionDenied)?["title"],
+        "Signed title"
+    );
+    let distribution = sibling.export_group_sender_key_distribution("group", "laptop")?;
+    peer.import_group_key_for_identity(&distribution, &sibling_id, false)?;
+    let encrypted = sibling.encrypt_group_message("group", "laptop", b"implicit first message")?;
+    let envelope: SdkGroupEncryptedEnvelope = serde_json::from_slice(&encrypted)?;
+    assert_eq!(
+        peer.decrypt_group_envelope_for_identity(&envelope, "first-sibling", &sibling_id)?,
+        b"implicit first message"
+    );
+    // Both roots use the same literal device name, but independent key/counter namespaces.
+    let owner_id = peer.device_identity_for_root(&own.principal_commitment, "phone")?;
+    let distribution = owner.export_group_sender_key_distribution("group", "phone")?;
+    peer.import_group_key_for_identity(&distribution, &owner_id, false)?;
+    let encrypted = owner.encrypt_group_message("group", "phone", b"same-name root-qualified")?;
+    let envelope: SdkGroupEncryptedEnvelope = serde_json::from_slice(&encrypted)?;
+    assert_eq!(
+        peer.decrypt_group_envelope_for_identity(&envelope, "first-owner", &owner_id)?,
+        b"same-name root-qualified"
+    );
+    drop((owner, peer, sibling));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

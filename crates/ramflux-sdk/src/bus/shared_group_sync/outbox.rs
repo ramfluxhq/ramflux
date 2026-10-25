@@ -16,12 +16,21 @@ const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 struct Intent {
     snapshot: GroupStateSnapshot,
     eligible: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    terminal: Vec<TerminalSnapshot>,
     created_at: i64,
     active: Option<StagedEnvelope>,
     delivered: BTreeSet<(String, String)>,
     attempt: u8,
     next_at: i64,
     expires_at: i64,
+}
+// A removed recipient receives its removal boundary, never subsequent roster or name changes.
+#[derive(Clone, Deserialize, Serialize)]
+struct TerminalSnapshot {
+    root: String,
+    device: Option<String>,
+    snapshot: GroupStateSnapshot,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct StagedEnvelope {
@@ -58,10 +67,55 @@ fn eligibility(state: &VerifiedGroupState) -> BTreeMap<String, BTreeSet<String>>
         .collect()
 }
 
+fn freeze_removals(intent: &mut Intent, previous: &VerifiedGroupState, state: &VerifiedGroupState) {
+    for root in eligibility(previous).keys() {
+        if !eligibility(state).contains_key(root) {
+            intent.terminal.retain(|entry| entry.root != *root);
+            intent.terminal.push(TerminalSnapshot {
+                root: root.clone(),
+                device: None,
+                snapshot: state.snapshot().clone(),
+            });
+        }
+    }
+    for excluded in &state.view().excluded {
+        if previous.view().effective_role(&excluded.root_commitment, &excluded.device_id).is_some()
+            && eligibility(state).contains_key(&excluded.root_commitment)
+        {
+            intent.terminal.retain(|entry| {
+                entry.root != excluded.root_commitment
+                    || entry.device.as_deref() != Some(&excluded.device_id)
+            });
+            intent.terminal.push(TerminalSnapshot {
+                root: excluded.root_commitment.clone(),
+                device: Some(excluded.device_id.clone()),
+                snapshot: state.snapshot().clone(),
+            });
+        }
+    }
+}
+fn recipient_snapshot<'a>(
+    intent: &'a Intent,
+    state: &'a VerifiedGroupState,
+    root: &str,
+    device: &str,
+) -> Option<&'a GroupStateSnapshot> {
+    if state.view().effective_role(root, device).is_some() {
+        return Some(state.snapshot());
+    }
+    intent
+        .terminal
+        .iter()
+        .find(|entry| {
+            entry.root == root && entry.device.as_deref().is_none_or(|excluded| excluded == device)
+        })
+        .map(|entry| &entry.snapshot)
+}
+
 fn key(group: &str) -> String {
     format!("{PREFIX}{}", ramflux_protocol::encode_base64url(group))
 }
-pub(super) fn enqueue(
+pub(crate) fn enqueue(
     client: &RamfluxClient,
     state: &VerifiedGroupState,
     previous: Option<&VerifiedGroupState>,
@@ -85,6 +139,7 @@ pub(super) fn enqueue(
             Intent {
                 snapshot: state.snapshot().clone(),
                 eligible,
+                terminal: Vec::new(),
                 created_at: now,
                 active: None,
                 delivered: BTreeSet::new(),
@@ -93,6 +148,9 @@ pub(super) fn enqueue(
                 expires_at: now.saturating_add(3600),
             }
         };
+    if let Some(previous) = previous {
+        freeze_removals(&mut intent, previous, state);
+    }
     // A new mutation must not bypass an existing outage's backoff or extend its retry window.
     intent.snapshot = state.snapshot().clone();
     let mut all = db.list_actor_states::<Intent>(PREFIX)?;
@@ -147,9 +205,15 @@ pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<
         let mut engine = account.take_live_engine().await?;
         let outcome = deliver(&account.client, &mut engine, &mut intent, &state).await;
         account.put_engine(engine);
-        if let Ok(count) = outcome {
-            delivered += count;
-            account.client.account_db()?.remove_actor_state(&id)?;
+        match outcome {
+            Ok((count, complete)) => {
+                delivered += count;
+                if complete {
+                    account.client.account_db()?.remove_actor_state(&id)?;
+                }
+            }
+            Err(error) => tracing::debug!(%error, group_id = %intent.snapshot.group_id,
+                "group state batch remains pending"),
         }
     }
     Ok(delivered)
@@ -159,12 +223,28 @@ async fn deliver(
     engine: &mut GatewaySessionEngine,
     intent: &mut Intent,
     state: &VerifiedGroupState,
-) -> Result<usize, SdkError> {
+) -> Result<(usize, bool), SdkError> {
+    let mut complete = true;
     let mut recipients = Vec::new();
     for (root, excluded) in &intent.eligible {
-        let manifest =
-            crate::client::contact::fetch_verified_device_manifest(&engine.config, root).await?;
-        client.persist_identity_directory(&manifest)?;
+        let manifest = match crate::client::contact::fetch_verified_device_manifest(
+            &engine.config,
+            root,
+        )
+        .await
+        {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                complete = false;
+                tracing::debug!(%error, %root, "group member manifest refresh deferred");
+                continue;
+            }
+        };
+        if let Err(error) = client.persist_identity_directory(&manifest) {
+            complete = false;
+            tracing::debug!(%error, %root, "group member manifest application deferred");
+            continue;
+        }
         recipients.extend(
             manifest
                 .devices
@@ -184,66 +264,87 @@ async fn deliver(
         {
             continue;
         }
-        let bytes = zeroize::Zeroizing::new(client.shared_group_packet(
-            state,
-            state.view().effective_role(&root, &device.device_id).is_some(),
-        )?);
-        let state = &intent.snapshot;
-        let envelope = format!(
-            "group_state_{}",
-            ramflux_crypto::blake3_256_base64url(
-                "ramflux.group_state.delivery.v1",
-                &ramflux_protocol::canonical_json_bytes(&(
-                    &state.state_hash,
-                    &root,
-                    &device.device_id
-                ))?
-            )
-        );
-        let mut message = GatewayDirectMessage {
-            conversation_id: state
-                .operations
-                .first()
-                .and_then(|op| match &op.change {
-                    ramflux_protocol::group_state::GroupStateChange::Create {
-                        conversation_id,
-                        ..
-                    } => Some(conversation_id.clone()),
-                    _ => None,
-                })
-                .or_else(|| state.checkpoint.as_ref().map(|c| c.state.conversation_id.clone()))
-                .ok_or_else(|| SdkError::LocalBus("group state conversation is absent".into()))?,
-            message_id: envelope.clone(),
-            envelope_id: format!("group_state_{}", crate::new_surface_message_id()?),
-            source_principal_id: engine.config.principal_id.clone(),
-            sender_id: engine.config.device_id.clone(),
-            recipient_device_id: Some(device.device_id.clone()),
-            recipient_principal_commitment: Some(root.clone()),
-            target_delivery_id: device.target_delivery_id,
-            encrypted_body: Vec::new(),
-            created_at: now_unix_timestamp(),
-            ttl: 3600,
+        let Some(snapshot) = recipient_snapshot(intent, state, &root, &device.device_id) else {
+            // A state learned from a peer cannot expose later metadata to an old removed root.
+            continue;
         };
-        let sealed = client
-            .seal_routed_as(
-                engine,
-                &message,
-                &bytes,
-                crate::client::routed::Route::group_control(&state.group_id),
-            )
-            .await?;
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
-        intent.active = Some(StagedEnvelope {
-            root: root.clone(),
-            device: device.device_id.clone(),
-            envelope: crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?,
-        });
-        // Persist each sealed attempt before submit; application-level state replay is harmless.
-        persist_intent(client, intent)?;
-        submit_staged(client, engine, intent).await?;
-        delivered += 1;
+        let selected = ramflux_crypto::verify_group_state_snapshot(snapshot.clone())?;
+        let outcome = deliver_one(client, engine, intent, &selected, &root, device).await;
+        match outcome {
+            Ok(()) => delivered += 1,
+            Err(error) => {
+                complete = false;
+                tracing::debug!(%error, %root, "group state recipient remains pending");
+            }
+        }
     }
-    Ok(delivered)
+    Ok((delivered, complete))
+}
+async fn deliver_one(
+    client: &RamfluxClient,
+    engine: &mut GatewaySessionEngine,
+    intent: &mut Intent,
+    selected: &VerifiedGroupState,
+    root: &str,
+    device: crate::prekey::SdkDeviceManifestEntry,
+) -> Result<(), SdkError> {
+    let bytes = zeroize::Zeroizing::new(client.shared_group_packet(
+        selected,
+        selected.view().effective_role(root, &device.device_id).is_some(),
+    )?);
+    let state = selected.snapshot();
+    let envelope = format!(
+        "group_state_{}",
+        ramflux_crypto::blake3_256_base64url(
+            "ramflux.group_state.delivery.v1",
+            &ramflux_protocol::canonical_json_bytes(&(
+                &state.state_hash,
+                &root,
+                &device.device_id
+            ))?
+        )
+    );
+    let mut message = GatewayDirectMessage {
+        conversation_id: state
+            .operations
+            .first()
+            .and_then(|op| match &op.change {
+                ramflux_protocol::group_state::GroupStateChange::Create {
+                    conversation_id, ..
+                } => Some(conversation_id.clone()),
+                _ => None,
+            })
+            .or_else(|| state.checkpoint.as_ref().map(|c| c.state.conversation_id.clone()))
+            .ok_or_else(|| SdkError::LocalBus("group state conversation is absent".into()))?,
+        message_id: envelope.clone(),
+        envelope_id: format!("group_state_{}", crate::new_surface_message_id()?),
+        source_principal_id: engine.config.principal_id.clone(),
+        sender_id: engine.config.device_id.clone(),
+        recipient_device_id: Some(device.device_id.clone()),
+        recipient_principal_commitment: Some(root.into()),
+        target_delivery_id: device.target_delivery_id,
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 3600,
+    };
+    let sealed = client
+        .seal_routed_as(
+            engine,
+            &message,
+            &bytes,
+            crate::client::routed::Route::group_control(&state.group_id),
+        )
+        .await?;
+    message.encrypted_body = serde_json::to_vec(&sealed)?;
+    intent.active = Some(StagedEnvelope {
+        root: root.into(),
+        device: device.device_id.clone(),
+        envelope: crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?,
+    });
+    // Persist each sealed attempt before submit; application-level state replay is harmless.
+    persist_intent(client, intent)?;
+    submit_staged(client, engine, intent).await?;
+    Ok(())
 }
 
 fn persist_intent(client: &RamfluxClient, intent: &Intent) -> Result<(), SdkError> {
@@ -270,3 +371,6 @@ async fn submit_staged(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

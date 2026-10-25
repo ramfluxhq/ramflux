@@ -89,8 +89,7 @@ impl RamfluxClient {
                 "group payload sender differs from authenticated source device".into(),
             ));
         }
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if !self.group_state(group)?.members.contains(&local.device_id) {
+        if !self.local_is_group_member(group)? {
             return Err(SdkError::InboundRejected(
                 "local device is not a current group member".into(),
             ));
@@ -117,15 +116,50 @@ impl RamfluxClient {
                 "group sender root differs from pinned relationship".into(),
             ));
         }
+        let record = self.trusted_device(device)?;
+        if let Some(state) = db.shared_group_state(group)? {
+            if state.view().effective_role(device.root_commitment(), device.device_id()).is_none() {
+                return Err(StorageError::GroupPermissionDenied.into());
+            }
+            let key = record["signing_public_key"]
+                .as_str()
+                .ok_or_else(|| SdkError::InboundPending("group member key unavailable".into()))?;
+            if let Some(binding) = db.group_member_key_binding(group, device)? {
+                if binding.signing_public_key != key {
+                    db.rotate_root_authorized_group_device_key(
+                        ramflux_storage::RootAuthorizedGroupKeyRotation {
+                            group_id: group,
+                            device_id: device,
+                            principal_id: principal,
+                            principal_commitment: device.root_commitment(),
+                            previous_key: &binding.signing_public_key,
+                            next_key: key,
+                        },
+                    )?;
+                }
+            } else {
+                db.materialize_shared_group_member(
+                    group,
+                    device,
+                    &ramflux_protocol::group_state::GroupMemberIdentity {
+                        principal_id: principal.into(),
+                        root_commitment: device.root_commitment().into(),
+                        device_id: device.device_id().into(),
+                        signing_public_key: key.into(),
+                        target_delivery_id: record["target_delivery_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .into(),
+                    },
+                )?;
+            }
+        }
         let binding = db
             .group_member_key_binding(group, device)?
             .ok_or_else(|| SdkError::InboundPending("group member key not pinned".into()))?;
         let pin = binding.signing_public_key;
         let bound_principal = binding.principal_id;
         let bound_commitment = binding.principal_commitment;
-        let record = db
-            .client_record("device", device.storage_key())?
-            .ok_or_else(|| SdkError::InboundPending("group member identity unavailable".into()))?;
         let commitment = record["principal_commitment"].as_str().ok_or_else(|| {
             SdkError::InboundPending("group member commitment unavailable".into())
         })?;
@@ -158,6 +192,28 @@ impl RamfluxClient {
             && binding.principal_id.as_deref() == Some(local.principal_id.as_str())
             && binding.principal_commitment.as_deref() == Some(commitment.as_str())
         {
+            return Ok(());
+        }
+        if db.shared_group_state(group)?.is_some() {
+            let binding = db
+                .group_member_key_binding(group, &identity)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            if binding.principal_id.as_deref() != Some(&local.principal_id)
+                || binding.principal_commitment.as_deref() != Some(&commitment)
+            {
+                return Err(StorageError::GroupPermissionDenied.into());
+            }
+            // The owned root authenticates this local branch; no directory claim selects it.
+            db.rotate_root_authorized_group_device_key(
+                ramflux_storage::RootAuthorizedGroupKeyRotation {
+                    group_id: group,
+                    device_id: &identity,
+                    principal_id: &local.principal_id,
+                    principal_commitment: &commitment,
+                    previous_key: &binding.signing_public_key,
+                    next_key: &public,
+                },
+            )?;
             return Ok(());
         }
         db.persist_group_member_device_key(group, &identity, &public)?;

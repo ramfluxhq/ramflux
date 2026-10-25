@@ -13,6 +13,13 @@ fn state_key(group: &str) -> String {
     format!("group-state/{}", ramflux_protocol::encode_base64url(group))
 }
 impl AccountDb {
+    pub(super) fn ensure_legacy_group_writable(&self, group: &str) -> Result<(), StorageError> {
+        if self.is_shared_group(group)? {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        Ok(())
+    }
+
     /// Load and reverify the persisted authority proof, never a deserialized role claim.
     /// # Errors
     /// Returns storage, serialization or proof verification errors.
@@ -75,7 +82,7 @@ impl AccountDb {
             Ok(changed)
         })
     }
-    fn project_shared_group_member(
+    pub(super) fn project_shared_group_member(
         &self,
         verified: &VerifiedGroupState,
         identity: &GroupMemberIdentity,

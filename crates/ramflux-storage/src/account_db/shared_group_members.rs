@@ -8,6 +8,53 @@ use ramflux_crypto::RootQualifiedDeviceRef;
 use rusqlite::{OptionalExtension, params};
 
 impl AccountDb {
+    /// Project an implicit sibling only after the caller authenticates its current device set.
+    /// A group declaration alone cannot supply a device identity.
+    /// # Errors
+    /// Rejects absent membership, excluded devices and inconsistent verified device metadata.
+    pub fn materialize_shared_group_member(
+        &self,
+        group: &str,
+        device: &RootQualifiedDeviceRef,
+        member: &ramflux_protocol::group_state::GroupMemberIdentity,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            if device.root_commitment() != member.root_commitment
+                || device.device_id() != member.device_id
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let record = self
+                .client_record("device", device.storage_key())?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            if record["principal_id"] != member.principal_id
+                || record["principal_commitment"] != member.root_commitment
+                || record["signing_public_key"] != member.signing_public_key
+            {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let state =
+                self.shared_group_state(group)?.ok_or(StorageError::GroupPermissionDenied)?;
+            let joined = state
+                .view()
+                .members
+                .iter()
+                .filter(|m| m.identity.root_commitment == member.root_commitment)
+                .map(|m| m.joined_epoch)
+                .min()
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            let joined = state
+                .view()
+                .members
+                .iter()
+                .find(|m| {
+                    m.identity.root_commitment == member.root_commitment
+                        && m.identity.device_id == member.device_id
+                })
+                .map_or(joined, |m| m.joined_epoch);
+            self.project_shared_group_member(&state, member, joined)
+        })
+    }
     pub(super) fn is_shared_group(&self, group: &str) -> Result<bool, StorageError> {
         self.actor_state_exists(&format!(
             "group-state/{}",

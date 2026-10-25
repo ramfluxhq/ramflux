@@ -32,13 +32,8 @@ fn actor_role(
     }) {
         return Err(invalid("actor principal mismatch"));
     }
-    if state.members.iter().any(|member| {
-        member.identity.root_commitment == actor.identity.root_commitment
-            && member.identity.device_id == actor.identity.device_id
-            && member.identity.signing_public_key != actor.identity.signing_public_key
-    }) {
-        return Err(invalid("actor key differs from the group pin"));
-    }
+    // Exact operations also carry the account root's signature. A root-authorized branch
+    // rotation preserves this root/device membership; stale certificates alone cannot write.
     state
         .effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
         .ok_or_else(|| invalid("actor is not a member"))

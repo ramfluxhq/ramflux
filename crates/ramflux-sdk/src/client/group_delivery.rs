@@ -286,7 +286,11 @@ impl RamfluxClient {
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
                 return Ok(Vec::new());
             }
-            match self.decrypt_group_envelope(envelope, message_id) {
+            match self.decrypt_group_envelope_for_identity(
+                envelope,
+                message_id,
+                &self.authenticated_device_identity(entry)?,
+            ) {
                 Ok(plaintext) => self.account_db()?.write_transaction(|| {
                     self.send_direct_message(
                         conversation_id,

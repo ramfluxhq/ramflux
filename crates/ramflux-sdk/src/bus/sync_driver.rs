@@ -61,9 +61,20 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
-    if let Err(error) = super::shared_group_sync::flush(account).await {
-        tracing::warn!(%error, "group state delivery deferred");
-    }
+    let group_staged = match super::shared_group_sync::stage(account) {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, "group state recovery staging deferred");
+            0
+        }
+    };
+    let group_sent = match Box::pin(super::shared_group_sync::flush(account)).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, "group state delivery deferred");
+            0
+        }
+    };
     let approvals = match super::dispatch::task_approval::drive(account).await {
         Ok(n) => n,
         Err(error) => {
@@ -93,7 +104,15 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
-    Ok(received + tasks_applied + task_sent + approvals + receipts + voice + contacts)
+    Ok(received
+        + tasks_applied
+        + task_sent
+        + approvals
+        + receipts
+        + voice
+        + contacts
+        + group_staged
+        + group_sent)
 }
 
 /// Projection is best-effort; the durable message remains available when its claim cannot be written.

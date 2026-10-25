@@ -477,19 +477,30 @@ impl RamfluxClient {
         envelope: &SdkGroupEncryptedEnvelope,
         message_id: &str,
     ) -> Result<Vec<u8>, SdkError> {
+        let source = self.device_identity(
+            &self.group_device_reference(&envelope.group_id, &envelope.sender_id)?,
+        )?;
+        self.decrypt_group_envelope_for_identity(envelope, message_id, &source)
+    }
+
+    pub(crate) fn decrypt_group_envelope_for_identity(
+        &self,
+        envelope: &SdkGroupEncryptedEnvelope,
+        message_id: &str,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Vec<u8>, SdkError> {
+        if source.device_id() != envelope.sender_id {
+            return Err(SdkError::InboundRejected("group sender identity mismatch".into()));
+        }
         if envelope.schema != "ramflux.sdk.group_sender_key.message.v1" {
             return Err(SdkError::LocalBus(format!(
                 "unsupported group message schema: {}",
                 envelope.schema
             )));
         }
-        let sender = self.device_identity(
-            &self.group_device_reference(&envelope.group_id, &envelope.sender_id)?,
-        )?;
         let base = group_sender_key_checkpoint_name(
             &envelope.group_id,
-            &sender,
-            envelope.group_key_epoch,
+            source,            envelope.group_key_epoch,
             "recv",
         )?;
         let mut state = if let Some(event) =
@@ -503,7 +514,7 @@ impl RamfluxClient {
         } else {
             self.load_group_sender_key_state(
                 &envelope.group_id,
-                &sender,
+                source,
                 envelope.group_key_epoch,
                 "recv",
             )?
@@ -516,13 +527,7 @@ impl RamfluxClient {
         let mut session = ramflux_crypto::DmSession::from_snapshot(state.session_snapshot.clone())?;
         let plaintext = session.decrypt(&envelope.ciphertext, &associated_data)?;
         state.session_snapshot = session.snapshot();
-        if !self.record_group_sender_key_counter(
-            envelope,
-            &self.device_identity(
-                &self.group_device_reference(&envelope.group_id, &envelope.sender_id)?,
-            )?,
-            message_id,
-        )? {
+        if !self.record_group_sender_key_counter(envelope, source, message_id)? {
             return Err(SdkError::LocalBus(format!(
                 "replayed group sender-key counter for {}/{}/epoch {}/counter {}",
                 envelope.group_id,
@@ -533,9 +538,7 @@ impl RamfluxClient {
         }
         self.persist_group_sender_key_state(
             &state,
-            &self.device_identity(
-                &self.group_device_reference(&envelope.group_id, &envelope.sender_id)?,
-            )?,
+            source,
             "recv",
             &format!("recv:{}", envelope.ciphertext.counter),
         )?;

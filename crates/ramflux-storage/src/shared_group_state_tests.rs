@@ -41,14 +41,16 @@ fn create(
         root,
         branch,
         actor,
-        "group",
-        1,
-        None,
-        GroupStateChange::Create {
-            conversation_id: "thread".into(),
-            max_members: 1000,
-            new_member_history: "no_history".into(),
-            name: Some("Checklist".into()),
+        ramflux_crypto::GroupStateOperationInput {
+            group_id: "group",
+            epoch: 1,
+            previous_hash: None,
+            change: GroupStateChange::Create {
+                conversation_id: "thread".into(),
+                max_members: 1000,
+                new_member_history: "no_history".into(),
+                name: Some("Checklist".into()),
+            },
         },
     )?;
     Ok(sign_group_state_snapshot(branch, actor, vec![operation])?)

@@ -23,7 +23,7 @@ pub(super) async fn plan(
     let body: LocalBusGroupSendRequest = serde_json::from_value(
         json!({"group_id":group,"conversation_id":conversation,"message_id":message,"sender_id":local.device_id,"encrypted_body_base64":""}),
     )?;
-    let routes = super::super::group_delivery::resolve(account, &body)?;
+    let routes = super::super::group_delivery::resolve_current(account, &body).await?;
     let mut targets = Vec::new();
     for route in routes {
         let commitment = route

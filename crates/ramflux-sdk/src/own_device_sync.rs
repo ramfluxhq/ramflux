@@ -87,6 +87,8 @@ pub(crate) struct SdkOwnDeviceDmSessionSnapshot {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkOwnDeviceGroupSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shared_state: Option<ramflux_protocol::group_state::GroupStateSnapshot>,
     pub(crate) group_id: String,
     pub(crate) group_epoch: u64,
     pub(crate) max_members: u32,
