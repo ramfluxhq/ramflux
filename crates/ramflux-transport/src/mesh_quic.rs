@@ -707,7 +707,7 @@ where
     if (200..300).contains(&response.status) {
         Ok(serde_json::from_value(response.body)?)
     } else {
-        Err(TransportError::Http(format!("HTTP {}: {}", response.status, response.body)))
+        Err(TransportError::HttpStatus { status: response.status, body: response.body.to_string() })
     }
 }
 
@@ -738,7 +738,7 @@ where
     if (200..300).contains(&response.status) {
         Ok(serde_json::from_value(response.body)?)
     } else {
-        Err(TransportError::Http(format!("HTTP {}: {}", response.status, response.body)))
+        Err(TransportError::HttpStatus { status: response.status, body: response.body.to_string() })
     }
 }
 
@@ -769,7 +769,7 @@ where
     if (200..300).contains(&response.status) {
         Ok(serde_json::from_value(response.body)?)
     } else {
-        Err(TransportError::Http(format!("HTTP {}: {}", response.status, response.body)))
+        Err(TransportError::HttpStatus { status: response.status, body: response.body.to_string() })
     }
 }
 
@@ -801,7 +801,7 @@ where
     if (200..300).contains(&response.status) {
         Ok(serde_json::from_value(response.body)?)
     } else {
-        Err(TransportError::Http(format!("HTTP {}: {}", response.status, response.body)))
+        Err(TransportError::HttpStatus { status: response.status, body: response.body.to_string() })
     }
 }
 
@@ -1639,7 +1639,7 @@ mod tests {
         };
 
         match error {
-            TransportError::Http(message) => assert!(message.contains("HTTP 404")),
+            TransportError::HttpStatus { status, .. } => assert_eq!(status, 404),
             TransportError::Quic(message) => {
                 return Err(format!(
                     "business HTTP response must not become QUIC fallback error: {message}"

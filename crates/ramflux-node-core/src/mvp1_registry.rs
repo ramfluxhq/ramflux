@@ -436,7 +436,7 @@ impl IdentityRegistry {
             .iter()
             .filter(|r| r.source.as_deref() == Some(source_bucket))
             .count()
-            >= crate::registration_receipts::REGISTRATION_SOURCE_LIMIT
+            >= crate::registration_receipts::registration_source_limit()?
         {
             return Err(NodeCoreError::Capacity { resource: "registration_proofs_per_source" });
         }

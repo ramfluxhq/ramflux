@@ -16,14 +16,17 @@ impl RamfluxClient {
             .iter()
             .filter_map(|pin| pin.principal_commitment.as_deref())
             .collect::<BTreeSet<_>>();
-        if roots.len() > 512 {
-            return Err(SdkError::InboundPending("own history authority capacity exceeded".into()));
-        }
         let mut manifests = Vec::new();
+        let mut bytes = 0;
         for root in roots {
             if let Some(manifest) =
                 self.account_db()?.load_actor_state(&format!("identity/manifest-root/{root}"))?
             {
+                let encoded = serde_json::to_vec(&manifest)?;
+                if manifests.len() >= 512 || bytes + encoded.len() > 3 * 1024 * 1024 {
+                    break;
+                }
+                bytes += encoded.len();
                 manifests.push(manifest);
             }
         }
@@ -73,12 +76,19 @@ impl RamfluxClient {
             }
             self.persist_identity_directory(manifest)?;
         }
-        for packet in &bundle.accepted_contacts {
-            let bytes = ramflux_protocol::decode_base64url(packet).map_err(|_| {
-                SdkError::InboundRejected("invalid own contact history encoding".into())
-            })?;
-            if !self.receive_own_contact(&bytes)? {
-                return Err(SdkError::InboundRejected("unsupported own contact history".into()));
+        for restrictions in [true, false] {
+            for packet in &bundle.accepted_contacts {
+                let bytes = ramflux_protocol::decode_base64url(packet).map_err(|_| {
+                    SdkError::InboundRejected("invalid own contact history encoding".into())
+                })?;
+                if super::own_contact::is_tombstone_packet(&bytes) != restrictions {
+                    continue;
+                }
+                if !self.receive_own_contact(&bytes)? {
+                    return Err(SdkError::InboundRejected(
+                        "unsupported own contact history".into(),
+                    ));
+                }
             }
         }
         Ok(())

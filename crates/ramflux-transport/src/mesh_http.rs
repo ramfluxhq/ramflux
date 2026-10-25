@@ -528,7 +528,12 @@ fn read_mesh_http_response_from_reader<R: BufRead>(
     if status_code.starts_with('2') {
         Ok(body)
     } else {
-        Err(TransportError::Http(format!("HTTP {status_code}: {}", String::from_utf8_lossy(&body))))
+        Err(TransportError::HttpStatus {
+            status: status_code
+                .parse()
+                .map_err(|_| TransportError::Http("invalid HTTP status code".into()))?,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
     }
 }
 

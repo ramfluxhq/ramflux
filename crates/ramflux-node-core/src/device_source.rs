@@ -58,8 +58,15 @@ impl DeviceAuthKeyResponse {
         &self,
         envelope: &ramflux_protocol::Envelope,
     ) -> Result<RootQualifiedDeviceRef, NodeCoreError> {
-        let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
-        let source = self.authenticated_device_identity()?;
+        let reject = || NodeCoreError::SourceAuthorityRefused {
+            reason_code: crate::EnvelopeAuthorityReason::AuthorityMismatch,
+        };
+        if self.revoked {
+            return Err(NodeCoreError::SourceAuthorityRefused {
+                reason_code: crate::EnvelopeAuthorityReason::Revoked,
+            });
+        }
+        let source = self.authenticated_device_identity().map_err(|_| reject())?;
         if envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
             != Some(source.root_commitment())
             || envelope.source_device_id != source.device_id()

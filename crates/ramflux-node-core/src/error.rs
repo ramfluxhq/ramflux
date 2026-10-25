@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("source authority refused: {reason_code:?}")]
+    SourceAuthorityRefused { reason_code: crate::EnvelopeAuthorityReason },
     #[error("capacity: {resource}")]
     Capacity { resource: &'static str },
     #[error("principal_id_taken")]

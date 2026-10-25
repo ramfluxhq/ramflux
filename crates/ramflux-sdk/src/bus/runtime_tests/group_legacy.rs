@@ -42,7 +42,10 @@ async fn a_rejected_legacy_group_entry_does_not_block_read_or_receive_of_valid_m
             .collect::<Vec<_>>(),
         serde_json::to_string(&receiver.client.account_db()?.journal_after(0, 128)?)?
     );
-    let readers = super::super::readers::AccountReaders::start(receiver.client.account_db()?)?;
+    let readers = super::super::readers::AccountReaders::start(
+        receiver.client.account_db()?,
+        Some(receiver.client.owned_device_identity()?),
+    )?;
     let page = readers
         .request(LocalBusFrame::request(
             "message-read",

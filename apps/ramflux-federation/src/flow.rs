@@ -262,51 +262,46 @@ pub(crate) fn retry_outbound_spool_once(
     router: &RouterMeshClient,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let now = now_unix_seconds()?;
+    retry_outbound_spool_with(store, now, outbound_spool_retry_batch(), |entry| {
+        let peer = resolve_forward_peer(&entry.forward, state)?;
+        let forward = refresh_spooled_forward(&entry.forward, state, |envelope| {
+            attach_forward_source_authority(envelope, router)
+        })?;
+        send_signed_forward_to_peer(router, &peer, &forward)
+            .map(|response| response.delivery.outcome)
+    })
+}
+
+fn retry_outbound_spool_with(
+    store: &ramflux_node_core::FederationRedbStore,
+    now: u64,
+    batch: usize,
+    mut send: impl FnMut(
+        &ramflux_node_core::FederationOutboundSpoolEntry,
+    ) -> Result<String, ramflux_node_core::NodeCoreError>,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
     let expired = store.expire_outbound_spool(now)?;
     if expired > 0 {
         tracing::info!(expired, "expired federation outbound spool entries");
     }
-    let pending = store.list_pending_outbound(outbound_spool_retry_batch())?;
     let mut blocked_peers = BTreeSet::new();
-    for entry in pending {
+    for entry in store.list_pending_outbound(batch)? {
         if blocked_peers.contains(&entry.peer_node_id) {
             continue;
         }
-        let peer = match resolve_forward_peer(&entry.forward, state) {
-            Ok(peer) => peer,
-            Err(error) => {
-                tracing::warn!(
-                    peer_node_id = %entry.peer_node_id,
-                    seq = entry.seq,
-                    error = %error,
-                    "federation outbound spool route unavailable"
-                );
-                store.record_outbound_attempt(&entry.peer_node_id, entry.seq)?;
-                blocked_peers.insert(entry.peer_node_id);
-                continue;
-            }
-        };
-        let refreshed = refresh_spooled_forward(&entry.forward, state, |envelope| {
-            attach_forward_source_authority(envelope, router)
-        });
-        match refreshed.and_then(|forward| send_signed_forward_to_peer(router, &peer, &forward)) {
-            Ok(response) => {
+        match send(&entry) {
+            Ok(outcome) => {
                 store.mark_outbound_delivered(&entry.peer_node_id, entry.seq)?;
-                tracing::info!(
-                    peer_node_id = %entry.peer_node_id,
-                    seq = entry.seq,
-                    outcome = %response.delivery.outcome,
-                    "delivered federation outbound spool entry"
-                );
+                tracing::info!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %outcome, "delivered federation outbound spool entry");
+            }
+            Err(ramflux_node_core::NodeCoreError::SourceAuthorityRefused { reason_code }) => {
+                store.dead_letter_outbound(&entry.peer_node_id, entry.seq, reason_code, now)?;
+                let dead_letters = store.outbound_dead_letter_count()?;
+                tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, ?reason_code, dead_letters, "dead-lettered federation outbound spool entry");
             }
             Err(error) => {
                 store.record_outbound_attempt(&entry.peer_node_id, entry.seq)?;
-                tracing::warn!(
-                    peer_node_id = %entry.peer_node_id,
-                    seq = entry.seq,
-                    error = %error,
-                    "federation outbound spool retry failed"
-                );
+                tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %error, "federation outbound spool retry deferred");
                 blocked_peers.insert(entry.peer_node_id);
             }
         }
@@ -567,12 +562,8 @@ pub(crate) fn ensure_receive_target_node(
 mod tests {
     use super::*;
 
-    #[test]
-    fn spool_retry_refreshes_authority_before_resigning_and_refuses_revoked_sources()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = ramflux_node_core::FederationTrustState::new();
-        state.set_node_signing_seed([9; 32]);
-        let state = crate::SharedFederationTrustState::new(state);
+    fn retained_forward()
+    -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
         let request: ramflux_node_core::FederatedEnvelopeForwardRequest = serde_json::from_value(
             serde_json::json!({
                 "admin_token":"", "source_node_id":"node-a.example", "target_node_id":"node-b.example",
@@ -588,6 +579,72 @@ mod tests {
                 }
             }),
         )?;
+        Ok(request)
+    }
+    #[test]
+    fn revoked_spool_head_is_dead_lettered_durably_and_other_sender_to_same_peer_delivers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "rf-spool-r9-{}",
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ));
+        let store = ramflux_node_core::FederationRedbStore::open(&path)?;
+        let first = retained_forward()?;
+        let mut second = first.clone();
+        second.envelope.envelope_id = "later-bob".into();
+        second.envelope.source_principal_id = "bob".into();
+        second.envelope.source_device_id = "bob-device".into();
+        store.spool_outbound_forward(&first.target_node_id, &first, 100, 1000)?;
+        store.spool_outbound_forward(&first.target_node_id, &second, 100, 1000)?;
+        let mut attempted = Vec::new();
+        retry_outbound_spool_with(&store, 101, 64, |entry| {
+            attempted.push(entry.forward.envelope.envelope_id.clone());
+            Err(ramflux_node_core::NodeCoreError::ItestHttp("peer unreachable".into()))
+        })?;
+        assert_eq!(attempted, vec!["retained"]);
+        assert_eq!(store.list_pending_outbound(64)?.len(), 2);
+        attempted.clear();
+        // The peer returns after the first sender was revoked. Only its entry is terminal.
+        retry_outbound_spool_with(&store, 102, 64, |entry| {
+            attempted.push(entry.forward.envelope.envelope_id.clone());
+            if entry.forward.envelope.source_principal_id == "alice" {
+                Err(ramflux_node_core::NodeCoreError::SourceAuthorityRefused {
+                    reason_code: ramflux_node_core::EnvelopeAuthorityReason::Revoked,
+                })
+            } else {
+                Ok("delivered".into())
+            }
+        })?;
+        assert_eq!(attempted, vec!["retained", "later-bob"]);
+        assert_eq!(store.list_pending_outbound(64)?.len(), 0);
+        assert_eq!(store.outbound_dead_letter_count()?, 1);
+        store.dead_letter_outbound(
+            &first.target_node_id,
+            1,
+            ramflux_node_core::EnvelopeAuthorityReason::Revoked,
+            103,
+        )?;
+        assert_eq!(store.outbound_dead_letter_count()?, 1);
+        drop(store);
+        let store = ramflux_node_core::FederationRedbStore::open(&path)?;
+        let dead = store.outbound_dead_letters(64)?;
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].envelope_id, "retained");
+        assert_eq!(dead[0].reason_code, ramflux_node_core::EnvelopeAuthorityReason::Revoked);
+        assert_eq!(store.outbound_dead_letter_count()?, 1);
+        assert_eq!(store.list_pending_outbound(64)?.len(), 0);
+        drop(store);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn spool_retry_refreshes_authority_before_resigning_and_refuses_revoked_sources()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ramflux_node_core::FederationTrustState::new();
+        state.set_node_signing_seed([9; 32]);
+        let state = crate::SharedFederationTrustState::new(state);
+        let request = retained_forward()?;
         let refreshed = refresh_spooled_forward(&request, &state, |envelope| {
             envelope
                 .ext

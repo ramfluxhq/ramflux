@@ -27,9 +27,9 @@ impl EpochFence {
     }
     pub(crate) fn check(self, next: Self) -> Result<(), NodeCoreError> {
         if next.epoch < self.epoch || (next.epoch == self.epoch && next.hash != self.hash) {
-            return Err(NodeCoreError::ItestHttp(
-                "foreign device set epoch fence rejected stale or conflicting authority".into(),
-            ));
+            return Err(NodeCoreError::SourceAuthorityRefused {
+                reason_code: crate::EnvelopeAuthorityReason::StaleEpoch,
+            });
         }
         Ok(())
     }

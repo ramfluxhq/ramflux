@@ -21,11 +21,17 @@ pub(super) fn initialize_coordinates(db: &AccountDb) -> Result<(), SdkError> {
     })
 }
 
+#[cfg(test)]
 pub(super) fn record(account: &LocalBusAccountState, state: &str, at: i64) -> Result<(), SdkError> {
     record_with_reason(account, state, at, None)
 }
 
-pub(super) fn record_with_reason(account: &LocalBusAccountState, state: &str, at: i64, reason: Option<&str>) -> Result<(), SdkError> {
+pub(super) fn record_with_reason(
+    account: &LocalBusAccountState,
+    state: &str,
+    at: i64,
+    reason: Option<&str>,
+) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
     db.write_transaction(|| {
         let tick = db

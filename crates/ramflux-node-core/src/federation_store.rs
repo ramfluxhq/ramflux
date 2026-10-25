@@ -20,6 +20,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod dead_letters;
+pub use dead_letters::FederationOutboundDeadLetter;
+
 pub struct FederationRedbStore {
     db: redb::Database,
     foreign_authority_writes: std::sync::atomic::AtomicU64,
@@ -75,7 +78,9 @@ impl FederationRedbStore {
             crate::foreign_device_store::Namespace::Federation,
             None,
         )?;
-        Ok(Self { db, foreign_authority_writes: std::sync::atomic::AtomicU64::new(0) })
+        let store = Self { db, foreign_authority_writes: std::sync::atomic::AtomicU64::new(0) };
+        store.initialize_dead_letters()?;
+        Ok(store)
     }
 
     /// # Errors

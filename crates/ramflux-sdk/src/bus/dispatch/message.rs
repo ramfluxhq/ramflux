@@ -705,15 +705,12 @@ pub(crate) async fn dispatch_message_receive_request(
             Ok(Some(delivery)) => plaintext.push(delivery),
             Ok(None) => {}
             Err(error) => {
-                let key = account.client.inbox_admission_key(entry)?;
-                if super::super::sync_driver::quarantine_failure(
+                if quarantine_projection_failure(
                     &account.client,
                     &account.gateway_config.device_id,
                     entry,
-                    &key,
                     &error,
-                    now_unix_timestamp(),
-                )? {
+                ) {
                     rejected.insert((entry.target_delivery_id.clone(), entry.inbox_seq));
                 }
             }
@@ -742,6 +739,31 @@ pub(crate) async fn dispatch_message_receive_request(
         response_body: serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext}),
         event,
     })
+}
+
+fn quarantine_projection_failure(
+    client: &RamfluxClient,
+    device: &str,
+    entry: &GatewayInboxEntry,
+    error: &SdkError,
+) -> bool {
+    let result = client.inbox_admission_key(entry).and_then(|key| {
+        super::super::sync_driver::quarantine_failure(
+            client,
+            device,
+            entry,
+            &key,
+            error,
+            now_unix_timestamp(),
+        )
+    });
+    match result {
+        Ok(quarantined) => quarantined,
+        Err(error) => {
+            tracing::warn!(%error,"inbox quarantine deferred; continuing receive page");
+            false
+        }
+    }
 }
 
 fn project_received_entry(
@@ -912,6 +934,30 @@ mod root_tests {
         );
         drop(account);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod projection_failure_tests {
+    #[test]
+    fn unavailable_quarantine_storage_is_best_effort() -> Result<(), Box<dyn std::error::Error>> {
+        let client = crate::RamfluxClient::new();
+        let entry: crate::GatewayInboxEntry = serde_json::from_value(serde_json::json!({
+            "inbox_seq":1,"target_delivery_id":"target","envelope":{
+                "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{},
+                "signing_key_id":"device","signature_alg":"ed25519","signature":"invalid",
+                "envelope_id":"malformed","source_principal_id":"peer","source_device_id":"device",
+                "target_delivery_id":"target","routing_set_id":null,"delivery_class":"opaque_event",
+                "priority":"normal","ttl":600,"created_at":1_760_000_000,"encrypted_payload":"opaque","payload_hash":"hash"
+            }
+        }))?;
+        assert!(!super::quarantine_projection_failure(
+            &client,
+            "local",
+            &entry,
+            &crate::SdkError::InboundRejected("bad entry".into())
+        ));
         Ok(())
     }
 }

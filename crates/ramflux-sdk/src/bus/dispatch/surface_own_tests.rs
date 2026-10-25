@@ -760,6 +760,7 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
     // The live session has selected TCP-TLS; the original Auto endpoint is unavailable.
     source.gateway_config.transport_kind = GatewaySessionTransportKind::Auto;
     source.gateway_config.gateway_addr = "127.0.0.1:9".parse()?;
+    assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
     assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 1);
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);

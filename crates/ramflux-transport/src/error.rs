@@ -23,6 +23,8 @@ pub enum TransportError {
     Tls(String),
     #[error("HTTP error: {0}")]
     Http(String),
+    #[error("HTTP {status}: {body}")]
+    HttpStatus { status: u16, body: String },
     #[error("HTTP client error: {0}")]
     HttpClient(#[source] reqwest::Error),
     #[error("QUIC error: {0}")]

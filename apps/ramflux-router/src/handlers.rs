@@ -196,8 +196,12 @@ fn handle_itest_mvp0_request(
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/mvp1/envelope-authority") => {
-            let response = refresh_forward_authority(&request.body, router)?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+            let response = forward_authority_response(&request.body, router)?;
+            ramflux_node_core::write_itest_text_response(
+                stream,
+                response.status,
+                std::str::from_utf8(&response.body)?,
+            )?;
         }
         ("POST", "/mvp0/envelope") => {
             let response = handle_mvp0_envelope(&request.body, router)?;
@@ -335,8 +339,7 @@ pub(crate) fn handle_mesh_request_value(
         if peer_service_id != "ramflux-federation" {
             anyhow::bail!("source authority refresh requires federation peer");
         }
-        let response = refresh_forward_authority(&body, router)?;
-        return Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?));
+        return forward_authority_response(&body, router);
     }
     if let Some(response) = handle_mesh_retention_value(&method, &path, &body, peer_service_id)? {
         return Ok(response);
@@ -1008,6 +1011,34 @@ fn authenticated_principal_mesh_response(
     Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
 }
 
+fn forward_authority_response(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<MeshResponse> {
+    match refresh_forward_authority(body, router) {
+        Ok(envelope) => Ok(MeshResponse::json("200 OK", serde_json::to_vec(&envelope)?)),
+        Err(error) => {
+            let reason = match error.downcast_ref::<ramflux_node_core::NodeCoreError>() {
+                Some(ramflux_node_core::NodeCoreError::SourceAuthorityRefused { reason_code }) => {
+                    *reason_code
+                }
+                Some(
+                    ramflux_node_core::NodeCoreError::Unauthorized(_)
+                    | ramflux_node_core::NodeCoreError::ItestHttp(_)
+                    | ramflux_node_core::NodeCoreError::ItestJson(_),
+                ) => ramflux_node_core::EnvelopeAuthorityReason::AuthorityMismatch,
+                _ => return Err(error),
+            };
+            Ok(MeshResponse::json(
+                "409 Conflict",
+                serde_json::to_vec(&ramflux_node_core::EnvelopeAuthorityRefusal {
+                    reason_code: reason,
+                })?,
+            ))
+        }
+    }
+}
+
 fn refresh_forward_authority(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
@@ -1062,6 +1093,20 @@ mod tests {
         let (authority, _) =
             ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&refreshed)?;
         assert!(authority.signed_device_set.is_some());
+        let mut invalid = request.clone();
+        invalid.body["signature"] = serde_json::json!(ramflux_protocol::encode_base64url([0; 64]));
+        let refused = runtime.block_on(handle_mesh_quic_request_value(
+            &invalid,
+            &handle,
+            "ramflux-federation",
+        ))?;
+        assert_eq!(refused.status, 409);
+        let refusal: ramflux_node_core::EnvelopeAuthorityRefusal =
+            serde_json::from_value(refused.body)?;
+        assert_eq!(
+            refusal.reason_code,
+            ramflux_node_core::EnvelopeAuthorityReason::AuthorityMismatch
+        );
         drop(handle);
         std::fs::remove_file(path)?;
         Ok(())

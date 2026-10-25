@@ -417,3 +417,20 @@ The group-pin schema upgrade archives and deletes pins for inactive membership
 or a different membership root. Re-adding a literal name under another root
 requires its newly authenticated pin; an inactive or archived pin cannot supply
 the new membership's root.
+
+
+## Registration receipt capacity behind shared NAT
+
+Replay receipts remain live until the signed registration proof expires (at most
+30 days). Admission permits 128 live receipts per root, 256 per server-derived
+source bucket by default, and 4096 globally. A source bucket represents the
+observed network source, so a large CGNAT population shares its source limit.
+A full live bucket refuses new registrations until receipts expire; it never
+evicts live replay fences. Existing sessions are unaffected.
+
+Operators serving large shared NATs may set
+`RAMFLUX_REGISTRATION_SOURCE_RECEIPT_LIMIT` on the router to an integer from
+1 through 4096. Invalid or zero settings fail admission closed. Raising this
+limit leaves the per-root and global limits intact but lets a single source
+consume more of the global receipt budget. Apply it consistently to router
+instances; observe capacity refusals before increasing it.

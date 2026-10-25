@@ -80,14 +80,30 @@ where
                 tracing::warn!(%error, path, "federation router QUIC mesh failed; falling back to blocking mesh");
             }
             Err(error) => {
-                return Err(ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()));
+                return Err(router_response_error(path, &error));
             }
         }
     }
     router
         .client
         .post_json(&router.endpoint, path, &router.tls, &router.server_name, value)
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))
+        .map_err(|source| router_response_error(path, &source))
+}
+
+fn router_response_error(
+    path: &str,
+    error: &ramflux_transport::TransportError,
+) -> ramflux_node_core::NodeCoreError {
+    if path == "/mvp1/envelope-authority"
+        && let ramflux_transport::TransportError::HttpStatus { status: 409, body } = error
+        && let Ok(refusal) =
+            serde_json::from_str::<ramflux_node_core::EnvelopeAuthorityRefusal>(body)
+    {
+        return ramflux_node_core::NodeCoreError::SourceAuthorityRefused {
+            reason_code: refusal.reason_code,
+        };
+    }
+    ramflux_node_core::NodeCoreError::ItestHttp(error.to_string())
 }
 
 pub(crate) fn router_get_json<R>(
@@ -469,5 +485,36 @@ mod router_quic_tests {
 
     fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
         message.into().into()
+    }
+}
+
+#[cfg(test)]
+mod authority_response_tests {
+    use super::*;
+    #[test]
+    fn only_typed_authority_refusals_are_terminal() -> Result<(), Box<dyn std::error::Error>> {
+        use ramflux_node_core::{
+            EnvelopeAuthorityReason as Reason, EnvelopeAuthorityRefusal, NodeCoreError,
+        };
+        for reason in [Reason::Revoked, Reason::AuthorityMismatch, Reason::StaleEpoch] {
+            let body = serde_json::to_string(&EnvelopeAuthorityRefusal { reason_code: reason })?;
+            assert!(
+                matches!(router_response_error("/mvp1/envelope-authority",&ramflux_transport::TransportError::HttpStatus{status:409,body}),NodeCoreError::SourceAuthorityRefused{reason_code} if reason_code==reason)
+            );
+        }
+        for (path, status, body) in [
+            ("/mvp1/envelope-authority", 503, "unavailable"),
+            ("/mvp1/envelope-authority", 409, "not typed JSON"),
+            ("/other", 409, "{\"reason_code\":\"revoked\"}"),
+        ] {
+            assert!(!matches!(
+                router_response_error(
+                    path,
+                    &ramflux_transport::TransportError::HttpStatus { status, body: body.into() }
+                ),
+                NodeCoreError::SourceAuthorityRefused { .. }
+            ));
+        }
+        Ok(())
     }
 }

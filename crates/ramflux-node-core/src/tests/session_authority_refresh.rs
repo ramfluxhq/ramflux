@@ -56,6 +56,12 @@ fn old_session_refreshes_set_before_cross_node_delivery_and_revocation_refuses_i
         &store,
     )?;
     message.ext.ext.insert("source_device_authority".into(), stale);
+    assert!(matches!(
+        router.authenticated_envelope_source(&message),
+        Err(crate::NodeCoreError::SourceAuthorityRefused {
+            reason_code: crate::EnvelopeAuthorityReason::Revoked
+        })
+    ));
     assert!(router.refresh_registered_envelope_authority(&mut message).is_err());
     assert!(router.authenticated_envelope_source(&message).is_err());
     Ok(())

@@ -5,6 +5,7 @@
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
+mod tombstone;
 const PREFIX: &[u8] = b"ramflux.own_contact.v1\n";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -14,9 +15,13 @@ struct Contact {
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Backfill {
+    #[serde(default)]
+    schema_version: u32,
     epoch: u64,
     cursor: String,
     complete: bool,
+    #[serde(default)]
+    restrictions_done: bool,
 }
 impl RamfluxClient {
     pub(crate) fn stage_own_contact(
@@ -37,10 +42,14 @@ impl RamfluxClient {
         let link = self.account_db()?.friend_link(link)?;
         let mut body = PREFIX.to_vec();
         body.extend(serde_json::to_vec(&Contact { manifest: manifest.clone(), link })?);
+        self.stage_own_contact_body(&body)
+    }
+    fn stage_own_contact_body(&self, body: &[u8]) -> Result<(), SdkError> {
+        let own = self.owned_device_identity()?;
         let set = self.observed_device_set(own.root_commitment())?;
         let id = ramflux_protocol::hash_base64url(
             "ramflux.sdk.own_contact.copy.v2",
-            &ramflux_protocol::canonical_json_bytes(&(&body, set))?,
+            &ramflux_protocol::canonical_json_bytes(&(body, set))?,
         );
         crate::bus::own_device_copy::stage(
             self,
@@ -49,7 +58,7 @@ impl RamfluxClient {
                 created_at: crate::prelude::now_unix_timestamp(),
                 conversation: "own-contact",
                 group: None,
-                body: &body,
+                body,
             },
             None,
         )
@@ -57,44 +66,55 @@ impl RamfluxClient {
     pub(super) fn own_history_contacts(&self) -> Result<Vec<String>, SdkError> {
         let own = self.owned_device_identity()?;
         let db = self.account_db()?;
-        let mut after = String::new();
         let mut result = Vec::new();
-        loop {
-            let page = db.friend_link_page(&after, 64)?;
-            for link in &page {
-                after.clone_from(&link.link_id);
-                if link.state != "accepted" || link.blocked || link.capability_revoked_at.is_some()
-                {
-                    continue;
-                }
-                let peer = if link.requester_id == own.root_commitment() {
-                    &link.target_id
-                } else if link.target_id == own.root_commitment() {
-                    &link.requester_id
-                } else {
-                    continue;
-                };
-                if let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(
-                    &format!("identity/manifest-root/{peer}"),
-                )? {
-                    let mut body = PREFIX.to_vec();
-                    body.extend(serde_json::to_vec(&Contact { manifest, link: link.clone() })?);
-                    result.push(ramflux_protocol::encode_base64url(body));
-                    if result.len() > 512 {
-                        return Err(SdkError::InboundPending(
-                            "own contact history capacity exceeded".into(),
-                        ));
+        let mut bytes = 0;
+        // Restrictions precede acceptances both in history and in the ordered own-device queue.
+        for restrictions in [true, false] {
+            let mut after = String::new();
+            loop {
+                let page = db.friend_link_page(&after, 64)?;
+                for link in &page {
+                    after.clone_from(&link.link_id);
+                    let Some(peer) = contact_peer(link, own.root_commitment()) else {
+                        continue;
+                    };
+                    if tombstone::is_restricted(link) != restrictions {
+                        continue;
                     }
+                    let body = if restrictions {
+                        tombstone::encode(link)?
+                    } else if link.state == "accepted" {
+                        let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(
+                            &format!("identity/manifest-root/{peer}"),
+                        )?
+                        else {
+                            continue;
+                        };
+                        let mut body = PREFIX.to_vec();
+                        body.extend(serde_json::to_vec(&Contact { manifest, link: link.clone() })?);
+                        body
+                    } else {
+                        continue;
+                    };
+                    let encoded = ramflux_protocol::encode_base64url(body);
+                    if result.len() >= 512 || bytes + encoded.len() > 3 * 1024 * 1024 {
+                        return Ok(result);
+                    }
+                    bytes += encoded.len();
+                    result.push(encoded);
                 }
-            }
-            if page.len() < 64 {
-                return Ok(result);
+                if page.len() < 64 {
+                    break;
+                }
             }
         }
+        Ok(result)
     }
     pub(crate) fn stage_contact_backfill_batch(&self) -> Result<usize, SdkError> {
         let own = self.owned_device_identity()?;
-        let Some(set) = self.observed_device_set(own.root_commitment())? else { return Ok(0) };
+        let Some(set) = self.observed_device_set(own.root_commitment())? else {
+            return Ok(0);
+        };
         if set
             .devices
             .iter()
@@ -107,8 +127,9 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let mut progress =
             db.load_actor_state::<Backfill>("own-contact/backfill")?.unwrap_or_default();
-        if progress.epoch != set.device_set_epoch {
-            progress = Backfill { epoch: set.device_set_epoch, ..Backfill::default() };
+        if progress.epoch != set.device_set_epoch || progress.schema_version != 1 {
+            progress =
+                Backfill { schema_version: 1, epoch: set.device_set_epoch, ..Backfill::default() };
         }
         if progress.complete {
             return Ok(0);
@@ -116,19 +137,22 @@ impl RamfluxClient {
         let links = db.friend_link_page(&progress.cursor, 4)?;
         let mut count = 0;
         for link in &links {
-            if link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none() {
-                let peer = if link.requester_id == own.root_commitment() {
-                    &link.target_id
-                } else if link.target_id == own.root_commitment() {
-                    &link.requester_id
-                } else {
-                    progress.cursor.clone_from(&link.link_id);
-                    db.persist_actor_state("own-contact/backfill", &progress)?;
-                    continue;
-                };
-                if let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(
-                    &format!("identity/manifest-root/{peer}"),
-                )? {
+            if let Some(peer) = contact_peer(link, own.root_commitment()) {
+                if !progress.restrictions_done && tombstone::is_restricted(link) {
+                    self.stage_own_contact_body(&tombstone::encode(link)?)?;
+                    count += 1;
+                } else if progress.restrictions_done
+                    && link.state == "accepted"
+                    && !tombstone::is_restricted(link)
+                {
+                    let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(
+                        &format!("identity/manifest-root/{peer}"),
+                    )?
+                    else {
+                        // Leave the cursor immediately before this link; refresh its manifest next tick.
+                        db.persist_actor_state("own-contact/backfill", &progress)?;
+                        return Ok(count);
+                    };
                     self.stage_own_contact(&manifest, &link.link_id)?;
                     count += 1;
                 }
@@ -137,13 +161,40 @@ impl RamfluxClient {
             db.persist_actor_state("own-contact/backfill", &progress)?;
         }
         if links.len() < 4 {
-            progress.complete = true;
+            if progress.restrictions_done {
+                progress.complete = true;
+            } else {
+                progress.restrictions_done = true;
+                progress.cursor.clear();
+            }
             db.persist_actor_state("own-contact/backfill", &progress)?;
         }
         Ok(count)
     }
+    pub(crate) fn pending_contact_backfill_root(&self) -> Result<Option<String>, SdkError> {
+        let db = self.account_db()?;
+        let progress = db.load_actor_state::<Backfill>("own-contact/backfill")?.unwrap_or_default();
+        if !progress.restrictions_done || progress.complete {
+            return Ok(None);
+        }
+        let own = self.owned_device_identity()?;
+        let links = db.friend_link_page(&progress.cursor, 4)?;
+        for link in links {
+            if link.state == "accepted"
+                && !tombstone::is_restricted(&link)
+                && let Some(peer) = contact_peer(&link, own.root_commitment())
+                && !db.actor_state_exists(&format!("identity/manifest-root/{peer}"))?
+            {
+                return Ok(Some(peer.into()));
+            }
+        }
+        Ok(None)
+    }
     /// The caller must first verify the packet's active sibling signature and owned root.
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
+        if self.receive_own_contact_tombstone(body)? {
+            return Ok(true);
+        }
         let Some(raw) = body.strip_prefix(PREFIX) else {
             return Ok(false);
         };
@@ -186,11 +237,25 @@ impl RamfluxClient {
     }
 }
 
+pub(super) fn is_tombstone_packet(body: &[u8]) -> bool {
+    tombstone::is_packet(body)
+}
+
+fn contact_peer<'a>(link: &'a ramflux_storage::FriendLinkRecord, own: &str) -> Option<&'a str> {
+    if link.requester_id == own {
+        Some(&link.target_id)
+    } else if link.target_id == own {
+        Some(&link.requester_id)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
-    fn client(
+    pub(super) fn client(
         path: &std::path::Path,
         principal: &str,
         root_seed: u8,
@@ -304,6 +369,7 @@ mod tests {
             2,
         )?;
         own.persist_identity_directory(&set)?;
+        assert_eq!(own.stage_contact_backfill_batch()?, 0); // Restriction pass precedes acceptances.
         assert_eq!(own.stage_contact_backfill_batch()?, 1);
         assert_eq!(own.stage_contact_backfill_batch()?, 0);
         assert_eq!(own.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
@@ -312,3 +378,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "own_contact/review_r9_tests.rs"]
+mod review_r9_tests;

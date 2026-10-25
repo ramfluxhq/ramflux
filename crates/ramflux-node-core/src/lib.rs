@@ -3,7 +3,9 @@
 
 //! Shared node-service runtime helpers.
 
+mod authority_refusal;
 mod config;
+pub use authority_refusal::*;
 mod error;
 mod federation_crypto;
 mod federation_delivery;
@@ -55,7 +57,9 @@ pub(crate) use federation_crypto::{
     verify_federation_key_rotation, verify_node_invitation,
 };
 pub use federation_state::{BadNodeAdvisory, FederationTrustState};
-pub use federation_store::{FederationOutboundSpoolEntry, FederationRedbStore};
+pub use federation_store::{
+    FederationOutboundDeadLetter, FederationOutboundSpoolEntry, FederationRedbStore,
+};
 pub use federation_types::*;
 pub use franking::*;
 pub use gateway_auth::{
