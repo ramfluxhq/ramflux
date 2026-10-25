@@ -48,6 +48,13 @@ fn removed_and_blocked_contacts_arrive_before_acceptances_and_cannot_be_resurrec
             own.block_friend_link(id)?;
         }
     }
+    for n in 0..16 {
+        own.establish_friend_link(
+            &format!("early-accepted-{n:02}"),
+            &own_root,
+            &manifest.principal_commitment,
+        )?;
+    }
     activate(&own, &sibling)?;
     // A completed r8 acceptance-only cursor must restart to propagate restrictions after upgrade.
     own.account_db()?.persist_actor_state(
@@ -55,7 +62,7 @@ fn removed_and_blocked_contacts_arrive_before_acceptances_and_cannot_be_resurrec
         &serde_json::json!({"epoch":2,"cursor":"zzz","complete":true}),
     )?;
     assert_eq!(own.stage_contact_backfill_batch()?, 2);
-    assert_eq!(own.stage_contact_backfill_batch()?, 1);
+    assert_eq!(own.stage_contact_backfill_batch()?, 4);
     let work = own.account_db()?.list_actor_states::<serde_json::Value>("own-device/send/")?;
     let mut staged = work
         .iter()
@@ -67,7 +74,7 @@ fn removed_and_blocked_contacts_arrive_before_acceptances_and_cannot_be_resurrec
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     staged.sort_by_key(|(seq, _)| *seq);
-    assert_eq!(staged.len(), 3);
+    assert_eq!(staged.len(), 6);
     assert!(is_tombstone_packet(&staged[0].1));
     assert!(is_tombstone_packet(&staged[1].1));
     assert!(!is_tombstone_packet(&staged[2].1));

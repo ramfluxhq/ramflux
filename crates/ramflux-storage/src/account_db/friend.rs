@@ -206,6 +206,25 @@ impl AccountDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
     }
 
+    /// Pages restrictions or accepted links directly, avoiding a full acceptance scan before tombstones.
+    /// # Errors
+    /// Returns storage errors while reading at most 64 matching rows.
+    pub fn friend_link_backfill_page(
+        &self,
+        after: &str,
+        limit: u32,
+        restrictions: bool,
+    ) -> Result<Vec<FriendLinkRecord>, StorageError> {
+        let mut statement=self.connection.prepare(
+            "SELECT link_id, requester_id, target_id, state, remove_scope, blocked, capability_revoked_at
+             FROM friend_link_projection WHERE link_id > ?1
+             AND ((state = 'removed' OR blocked != 0 OR capability_revoked_at IS NOT NULL) = ?3)
+             AND (?3 OR state = 'accepted') ORDER BY link_id LIMIT ?2")?;
+        let rows = statement
+            .query_map(params![after, limit.min(64), restrictions], friend_link_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn reject_inbox_message(

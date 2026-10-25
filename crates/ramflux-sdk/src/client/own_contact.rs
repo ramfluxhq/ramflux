@@ -72,7 +72,7 @@ impl RamfluxClient {
         for restrictions in [true, false] {
             let mut after = String::new();
             loop {
-                let page = db.friend_link_page(&after, 64)?;
+                let page = db.friend_link_backfill_page(&after, 64, restrictions)?;
                 for link in &page {
                     after.clone_from(&link.link_id);
                     let Some(peer) = contact_peer(link, own.root_commitment()) else {
@@ -134,7 +134,8 @@ impl RamfluxClient {
         if progress.complete {
             return Ok(0);
         }
-        let links = db.friend_link_page(&progress.cursor, 4)?;
+        let links =
+            db.friend_link_backfill_page(&progress.cursor, 4, !progress.restrictions_done)?;
         let mut count = 0;
         for link in &links {
             if let Some(peer) = contact_peer(link, own.root_commitment()) {
@@ -178,7 +179,8 @@ impl RamfluxClient {
             return Ok(None);
         }
         let own = self.owned_device_identity()?;
-        let links = db.friend_link_page(&progress.cursor, 4)?;
+        let links =
+            db.friend_link_backfill_page(&progress.cursor, 4, !progress.restrictions_done)?;
         for link in links {
             if link.state == "accepted"
                 && !tombstone::is_restricted(&link)
