@@ -179,13 +179,14 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
     let public = ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
     let commitment = crate::prekey::identity_root_public_key_commitment(&public)?;
     let branch = ramflux_crypto::create_device_branch("alice", "alice-new", 1, [43; 32]);
+    let now = now_unix_timestamp();
     let proof = ramflux_crypto::authorize_device_branch(
         &root,
         &branch,
         "ramflux-node",
         vec!["device.delivery.bind".to_owned()],
-        1_700_000_000,
-        4_000_000_000,
+        now,
+        now + 3600,
     )?;
     let identity = ramflux_crypto::X25519KeyPair::from_seed([44; 32]);
     let prekey = ramflux_crypto::X25519KeyPair::from_seed([45; 32]);

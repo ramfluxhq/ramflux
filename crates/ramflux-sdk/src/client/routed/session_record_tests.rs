@@ -147,6 +147,17 @@ pub(super) fn last(sent: &Sent) -> Result<GatewayInboxEntry, SdkError> {
         .cloned()
         .ok_or_else(|| invalid("no control submitted"))
 }
+fn last_pair_control(sent: &Sent) -> Result<GatewayInboxEntry, SdkError> {
+    // The sync pass also flushes receipt work; replay the reset, not the later receipt.
+    sent.lock()
+        .map_err(|_| invalid("mutex"))?
+        .iter()
+        .rev()
+        .find(|entry| entry.envelope.envelope_id.starts_with("pair-control-"))
+        .cloned()
+        .ok_or_else(|| invalid("no pair control submitted"))
+}
+
 fn group_bootstrap(
     sender: &Fixture,
     receiver: &Fixture,
@@ -313,7 +324,7 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
     );
     crate::bus::sync_driver::run(&mut account).await?;
     bob.client = std::mem::take(&mut account.client);
-    let retry = last(&resent)?;
+    let retry = last_pair_control(&resent)?;
     assert_ne!(retry.envelope.envelope_id, lost.envelope.envelope_id);
     assert_eq!(
         decode(&retry.envelope)?.ciphertext.session_id,
@@ -413,7 +424,7 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it()
     );
     crate::bus::sync_driver::run(&mut account).await?;
     bob.client = std::mem::take(&mut account.client);
-    let retry = last(&retries)?;
+    let retry = last_pair_control(&retries)?;
     assert_ne!(
         decode(&retry.envelope)?.ciphertext.session_id,
         decode(&first.envelope)?.ciphertext.session_id
