@@ -19,6 +19,7 @@ pub(super) struct AccountReaders {
 
 impl AccountReaders {
     pub(super) fn start(db: &AccountDb) -> Result<Self, SdkError> {
+        super::sync_status::initialize_coordinates(db)?;
         let mut senders = Vec::new();
         for _ in 0..2 {
             let reader = db.open_reader()?;
@@ -100,7 +101,7 @@ pub(super) fn read(
     if request.method == "sync.status.get" {
         return super::sync_status::read(client.account_db()?);
     }
-    if request.method == "stream.read" {
+    if matches!(request.method.as_str(), "stream.read" | "bus.subscribe") {
         return super::subscription::read(client.account_db()?, request);
     }
     if matches!(request.method.as_str(), "task.get" | "task.list") {

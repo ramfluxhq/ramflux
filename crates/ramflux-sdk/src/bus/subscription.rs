@@ -21,9 +21,12 @@ pub(super) fn read(db: &AccountDb, request: &LocalBusFrame) -> Result<serde_json
         .unwrap_or(bounds.head_seq);
     let resync = cursor < bounds.pruned_through || cursor > bounds.head_seq;
     let events = if resync { Vec::new() } else { db.journal_after(cursor, 128)? };
-    Ok(
-        serde_json::json!({"bounds":bounds,"cursor":cursor,"resync_required":resync,"events":events,"status":super::sync_status::read(db)?}),
-    )
+    let mut page = serde_json::json!({"bounds":bounds,"cursor":cursor,"resync_required":resync,"events":events});
+    // The subscribe acknowledgement needs one coherent snapshot; live pages only read the journal.
+    if request.method == "bus.subscribe" {
+        page["status"] = super::sync_status::read(db)?;
+    }
+    Ok(page)
 }
 
 pub(super) async fn start(
@@ -38,7 +41,6 @@ pub(super) async fn start(
         return Err(SdkError::LocalBus("invalid subscription topics".to_owned()));
     }
     let mut query = request.clone();
-    "stream.read".clone_into(&mut query.method);
     query.body = serde_json::json!({"since_seq":body.since_seq});
     let first = readers.request(query.clone()).await?;
     let bounds: JournalBounds = serde_json::from_value(first["bounds"].clone())?;
@@ -59,6 +61,7 @@ pub(super) async fn start(
     acknowledgement["head_seq"] = serde_json::json!(bounds.head_seq);
     acknowledgement["floor_seq"] = serde_json::json!(bounds.floor_seq);
     outbound.send(local_bus_response(&request, acknowledgement)).await.map_err(|_| closed())?;
+    "stream.read".clone_into(&mut query.method);
     Ok(Some(tokio::task::spawn_local(async move {
         let _ = tail(readers, query, request, outbound, body.topics, cursor).await;
     })))
