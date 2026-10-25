@@ -534,3 +534,22 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
     assert_eq!(receiver.direct_messages("request-thread")?.len(), 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn contact02_r2_requester_cache_cannot_supply_the_pin_for_legacy_name_consent()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 23)?;
+    let mut b = Fixture::new("bob", 33)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    account(&state, "bob")?.account_db()?.establish_friend_link("legacy-name", "bob", "alice")?;
+    pending(&mut state, &directory).await?;
+    message(&mut state, "requires-root-consent").await?;
+    let entry = frames(&directory)?.into_iter().next().ok_or_else(|| invalid("message"))?;
+    assert!(deliver(&mut state, "bob", &entry).await?.plaintext.is_none());
+    let receiver = account(&state, "bob")?;
+    assert_eq!(receiver.direct_messages("request-thread")?.len(), 0);
+    assert!(receiver.pending_contact_root(&root(&state, "alice")?)?);
+    assert_eq!(receiver.account_db()?.contact_message_count(&root(&state, "alice")?)?, 1);
+    Ok(())
+}

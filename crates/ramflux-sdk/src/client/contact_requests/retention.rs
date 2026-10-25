@@ -15,6 +15,9 @@ pub(crate) fn authority_digest(
     ))
 }
 impl RamfluxClient {
+    pub(super) fn contact_request_owns_identity_cache(&self, root: &str) -> Result<bool, SdkError> {
+        Ok(self.account_db()?.actor_state_exists(&format!("{CACHE_PREFIX}{root}"))?)
+    }
     pub(crate) fn remember_contact_request_cache(
         &self,
         manifest: &crate::prekey::SdkDeviceManifestResponse,

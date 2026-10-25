@@ -71,6 +71,7 @@ impl RamfluxClient {
         let db = self.account_db()?;
         // Migrate existing consent only through its saved root pin, never a packet's name.
         if !self.friend_link_peer_is_accepted(root)?
+            && !self.contact_request_owns_identity_cache(root)?
             && db
                 .client_record("identity", principal)?
                 .is_some_and(|row| row["contact_identity_commitment"] == root)

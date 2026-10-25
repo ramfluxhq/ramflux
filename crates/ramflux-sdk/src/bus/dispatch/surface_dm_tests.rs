@@ -126,14 +126,7 @@ pub(super) async fn peer_fixture(
         )?;
         source.client.persist_root_verified_directory(manifest)?;
         for peer in &peers {
-            peer.client.persist_root_verified_directory(manifest)?;
-            peer.client
-                .persist_root_verified_directory(&super::fixture::manifest(&source.client)?)?;
-            peer.client.establish_friend_link(
-                "surface-receiver-consent",
-                source.client.owned_device_identity()?.root_commitment(),
-                peer.client.owned_device_identity()?.root_commitment(),
-            )?;
+            configure_receiver(&peer.client, &source.client, manifest)?;
         }
     }
     let peer_manifest = peer_manifest.ok_or("peer manifest")?;
@@ -167,6 +160,20 @@ pub(super) async fn peer_fixture(
     })
     .with_account_identity(&source.client)?;
     Ok(PeerFixture { peers, config, address, directory })
+}
+fn configure_receiver(
+    peer: &RamfluxClient,
+    source: &RamfluxClient,
+    manifest: &crate::prekey::SdkDeviceManifestResponse,
+) -> Result<(), SdkError> {
+    peer.persist_root_verified_directory(manifest)?;
+    peer.persist_root_verified_directory(&super::fixture::manifest(source)?)?;
+    peer.establish_friend_link(
+        "surface-receiver-consent",
+        source.owned_device_identity()?.root_commitment(),
+        peer.owned_device_identity()?.root_commitment(),
+    )?;
+    Ok(())
 }
 pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
     let request = crate::SurfaceSendRequest::event(
