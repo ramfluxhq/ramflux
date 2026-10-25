@@ -205,6 +205,11 @@ pub(super) fn derive(
             return Err(invalid("invalid group operation header or epoch"));
         }
         verify_group_state_actor(&operation.actor)?;
+        crate::verify_canonical_signature(
+            &ramflux_protocol::canonical_json_bytes(&super::root_operation_body(operation))?,
+            &operation.root_signature,
+            &operation.actor.root_public_key,
+        )?;
         crate::verify_device_branch_signature(
             &operation.actor.identity.signing_public_key,
             &super::operation_body(operation),

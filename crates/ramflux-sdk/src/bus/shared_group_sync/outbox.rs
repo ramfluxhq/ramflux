@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Coalesced group-state delivery intents with stable ids, backoff and finite budgets.
+//! Coalesced group-state delivery with bounded retries and idempotent state application.
 use crate::prelude::*;
 use ramflux_crypto::VerifiedGroupState;
 use ramflux_protocol::group_state::GroupStateSnapshot;
@@ -73,20 +73,28 @@ pub(super) fn enqueue(
     if let Some(old) = previous {
         merge_eligible(&mut eligible, eligibility(old));
     }
-    if let Some(old) = pending {
-        merge_eligible(&mut eligible, old.eligible);
-    }
     let now = now_unix_timestamp();
-    let intent = Intent {
-        snapshot: state.snapshot().clone(),
-        eligible,
-        created_at: now,
-        active: None,
-        delivered: BTreeSet::new(),
-        attempt: 0,
-        next_at: now,
-        expires_at: now.saturating_add(3600),
-    };
+    let mut intent =
+        if let Some(mut old) = pending.filter(|old| old.expires_at > now && old.attempt < 8) {
+            merge_eligible(&mut eligible, old.eligible);
+            old.snapshot = state.snapshot().clone();
+            old.eligible = eligible;
+            old.delivered.clear();
+            old
+        } else {
+            Intent {
+                snapshot: state.snapshot().clone(),
+                eligible,
+                created_at: now,
+                active: None,
+                delivered: BTreeSet::new(),
+                attempt: 0,
+                next_at: now,
+                expires_at: now.saturating_add(3600),
+            }
+        };
+    // A new mutation must not bypass an existing outage's backoff or extend its retry window.
+    intent.snapshot = state.snapshot().clone();
     let mut all = db.list_actor_states::<Intent>(PREFIX)?;
     all.retain(|row| row.snapshot.group_id != state.view().group_id);
     if all.len() >= MAX_GROUPS {
@@ -118,6 +126,24 @@ pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<
         intent.next_at = now.saturating_add((1_i64 << intent.attempt).min(60));
         account.client.account_db()?.persist_actor_state(&id, &intent)?;
         let state = ramflux_crypto::verify_group_state_snapshot(intent.snapshot.clone())?;
+        let latest = account.client.account_db()?.shared_group_state(&intent.snapshot.group_id)?;
+        let state =
+            latest.filter(|latest| latest.view().epoch > state.view().epoch).unwrap_or(state);
+        let state = ramflux_crypto::resign_group_state_snapshot(
+            account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &account.client.owned_group_actor(&account.target_delivery_id)?,
+            &state,
+        )?;
+        if intent.snapshot.state_hash != state.snapshot().state_hash {
+            intent.delivered.clear();
+        }
+        intent.snapshot = state.snapshot().clone();
+        // The router rejects repeated envelope ids. A cancelled or lost-ACK submit is retried
+        // with a fresh sealed carrier; the authenticated state and key are idempotent.
+        // At most eight attempts can advance the pair, even across coalesced mutations.
+        intent.active = None;
+        persist_intent(&account.client, &intent)?;
+        merge_eligible(&mut intent.eligible, eligibility(&state));
         let mut engine = account.take_live_engine().await?;
         let outcome = deliver(&account.client, &mut engine, &mut intent, &state).await;
         account.put_engine(engine);
@@ -135,9 +161,6 @@ async fn deliver(
     state: &VerifiedGroupState,
 ) -> Result<usize, SdkError> {
     let mut recipients = Vec::new();
-    if intent.active.is_some() {
-        submit_staged(client, engine, intent).await?;
-    }
     for (root, excluded) in &intent.eligible {
         let manifest =
             crate::client::contact::fetch_verified_device_manifest(&engine.config, root).await?;
@@ -161,10 +184,10 @@ async fn deliver(
         {
             continue;
         }
-        let bytes = client.shared_group_packet(
+        let bytes = zeroize::Zeroizing::new(client.shared_group_packet(
             state,
             state.view().effective_role(&root, &device.device_id).is_some(),
-        )?;
+        )?);
         let state = &intent.snapshot;
         let envelope = format!(
             "group_state_{}",
@@ -191,14 +214,14 @@ async fn deliver(
                 .or_else(|| state.checkpoint.as_ref().map(|c| c.state.conversation_id.clone()))
                 .ok_or_else(|| SdkError::LocalBus("group state conversation is absent".into()))?,
             message_id: envelope.clone(),
-            envelope_id: envelope,
+            envelope_id: format!("group_state_{}", crate::new_surface_message_id()?),
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: engine.config.device_id.clone(),
             recipient_device_id: Some(device.device_id.clone()),
             recipient_principal_commitment: Some(root.clone()),
             target_delivery_id: device.target_delivery_id,
             encrypted_body: Vec::new(),
-            created_at: intent.created_at,
+            created_at: now_unix_timestamp(),
             ttl: 3600,
         };
         let sealed = client
@@ -215,7 +238,7 @@ async fn deliver(
             device: device.device_id.clone(),
             envelope: crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?,
         });
-        // Persist the exact ciphertext before submit; a lost ACK cannot advance the ratchet again.
+        // Persist each sealed attempt before submit; application-level state replay is harmless.
         persist_intent(client, intent)?;
         submit_staged(client, engine, intent).await?;
         delivered += 1;

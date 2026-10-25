@@ -133,9 +133,7 @@ impl RamfluxClient {
     ) -> Result<Option<Vec<u8>>, SdkError> {
         let route = &opened.routing;
 
-        if serde_json::from_slice::<serde_json::Value>(body)
-            .is_ok_and(|header| header["schema"] == crate::client::shared_group::PACKET_SCHEMA)
-        {
+        if crate::client::shared_group::is_shared_group_packet(body) {
             // The signed full state was verified before and atomically applied by the commit path.
             return Ok(None);
         }

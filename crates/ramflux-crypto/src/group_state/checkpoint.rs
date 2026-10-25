@@ -4,8 +4,8 @@
 //! Creator-root checkpoints bound replay work without giving members snapshot authority.
 use super::{
     CryptoError, DeviceBranch, GroupStateActor, GroupStateChange, VerifiedGroupState,
-    branch_matches, group_state_head_hash, identity_valid, invalid, sign_snapshot_parts,
-    verify_group_state_actor,
+    branch_matches, group_state_head_hash, identity_valid, invalid, root_matches,
+    sign_snapshot_parts, verify_group_state_actor,
 };
 use ramflux_protocol::group_state::{
     GROUP_STATE_CHECKPOINT_DOMAIN, GroupStateCheckpoint, MAX_GROUP_STATE_EXCLUSIONS,
@@ -31,10 +31,10 @@ pub(super) fn verify_checkpoint(
     {
         return Err(invalid("checkpoint requires the creator root"));
     }
-    crate::verify_device_branch_signature(
-        &checkpoint.owner.identity.signing_public_key,
-        &body(checkpoint),
+    crate::verify_canonical_signature(
+        &canonical_json_bytes(&body(checkpoint))?,
         &checkpoint.signature,
+        &checkpoint.owner.root_public_key,
     )?;
     let state = &checkpoint.state;
     if state.group_id != genesis.group_id
@@ -164,11 +164,13 @@ impl VerifiedGroupState {
 /// # Errors
 /// Rejects non-owner roots, removed devices, invalid certificates or snapshot byte overflow.
 pub fn compact_group_state(
+    root: &crate::IdentityRoot,
     branch: &DeviceBranch,
     actor: &GroupStateActor,
     previous: &VerifiedGroupState,
 ) -> Result<VerifiedGroupState, CryptoError> {
     branch_matches(branch, actor)?;
+    root_matches(root, actor)?;
     if actor.identity.root_commitment != previous.genesis().actor.identity.root_commitment
         || previous.view.effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
             != Some(SharedGroupRole::Owner)
@@ -182,7 +184,10 @@ pub fn compact_group_state(
         owner: actor.clone(),
         signature: String::new(),
     };
-    checkpoint.signature = crate::sign_with_device_branch(branch, &body(&checkpoint))?;
+    checkpoint.signature = crate::sign_canonical_bytes_with_seed(
+        &canonical_json_bytes(&body(&checkpoint))?,
+        root.signing_key.to_bytes(),
+    );
     verify_checkpoint(&checkpoint)?;
     sign_snapshot_parts(branch, actor, Vec::new(), Some(checkpoint))
 }
@@ -191,6 +196,7 @@ pub fn compact_group_state(
 /// # Errors
 /// Rejects unauthorized transitions, invalid writers, epoch overflow and exhausted snapshot budgets.
 pub fn advance_group_state(
+    root: &crate::IdentityRoot,
     branch: &DeviceBranch,
     actor: &GroupStateActor,
     previous: &VerifiedGroupState,
@@ -200,9 +206,13 @@ pub fn advance_group_state(
         && previous.genesis().actor.identity.root_commitment == actor.identity.root_commitment
         && previous.view.effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
             == Some(SharedGroupRole::Owner);
-    let base =
-        if compact { compact_group_state(branch, actor, previous)? } else { previous.clone() };
+    let base = if compact {
+        compact_group_state(root, branch, actor, previous)?
+    } else {
+        previous.clone()
+    };
     let operation = super::sign_group_state_operation(
+        root,
         branch,
         actor,
         &base.view.group_id,

@@ -50,9 +50,7 @@ pub(super) fn identity_valid(identity: &GroupMemberIdentity) -> Result<(), Crypt
             return Err(invalid("invalid member identity"));
         }
     }
-    if identity.device_id.starts_with("root~") || identity.device_id.starts_with("legacy~") {
-        return Err(invalid("reserved device name"));
-    }
+    ramflux_protocol::validate_device_name(&identity.device_id)?;
     let root = ramflux_protocol::decode_base64url(&identity.root_commitment)?;
     if root.len() != 32 || encode_base64url(&root) != identity.root_commitment {
         return Err(invalid("invalid member root"));
@@ -135,9 +133,21 @@ fn branch_matches(branch: &DeviceBranch, actor: &GroupStateActor) -> Result<(), 
     }
     Ok(())
 }
+fn root_matches(root: &IdentityRoot, actor: &GroupStateActor) -> Result<(), CryptoError> {
+    if root.principal_id != actor.identity.principal_id
+        || encode_base64url(root.signing_key.verifying_key().to_bytes()) != actor.root_public_key
+    {
+        return Err(invalid("group writer root mismatch"));
+    }
+    Ok(())
+}
+pub(super) fn root_operation_body(operation: &GroupStateOperation) -> Value {
+    json!({"domain":"ramflux.group_state.root_operation.v1","operation":operation_body(operation)})
+}
 /// # Errors
 /// Rejects an invalid actor or canonical serialization. History authority is checked by snapshot verification.
 pub fn sign_group_state_operation(
+    root: &IdentityRoot,
     branch: &DeviceBranch,
     actor: &GroupStateActor,
     group: &str,
@@ -146,6 +156,7 @@ pub fn sign_group_state_operation(
     change: GroupStateChange,
 ) -> Result<GroupStateOperation, CryptoError> {
     branch_matches(branch, actor)?;
+    root_matches(root, actor)?;
     let mut operation = GroupStateOperation {
         schema: GROUP_STATE_OPERATION_DOMAIN.into(),
         group_id: group.into(),
@@ -153,8 +164,12 @@ pub fn sign_group_state_operation(
         previous_hash,
         actor: actor.clone(),
         change,
+        root_signature: String::new(),
         signature: String::new(),
     };
+    operation.root_signature = encode_base64url(
+        root.signing_key.sign(&canonical_json_bytes(&root_operation_body(&operation))?).to_bytes(),
+    );
     operation.signature = crate::sign_with_device_branch(branch, &operation_body(&operation))?;
     Ok(operation)
 }
@@ -233,6 +248,22 @@ fn sign_snapshot_parts(
     }
     Ok(VerifiedGroupState { snapshot, view, heads })
 }
+/// Re-sign an already verified snapshot for delivery without rewriting its history or checkpoint.
+/// # Errors
+/// Rejects an actor outside the verified membership or a mismatched private branch.
+pub fn resign_group_state_snapshot(
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    state: &VerifiedGroupState,
+) -> Result<VerifiedGroupState, CryptoError> {
+    branch_matches(branch, actor)?;
+    check_issuer(state.view(), &state.snapshot().operations, actor)?;
+    let mut snapshot = state.snapshot().clone();
+    snapshot.issuer = actor.clone();
+    snapshot.signature = crate::sign_with_device_branch(branch, &snapshot_body(&snapshot))?;
+    verify_group_state_snapshot(snapshot)
+}
+
 /// Verify the entire root-authorized role history before a snapshot can mutate local state.
 /// # Errors
 /// Rejects invalid signatures, roles, epochs, hashes, identities, names or budgets.

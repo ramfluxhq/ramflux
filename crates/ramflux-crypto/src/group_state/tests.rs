@@ -4,6 +4,7 @@
 //! Native signed-state authority, sibling convergence and bounded recovery regressions.
 use super::*;
 struct Person {
+    root: IdentityRoot,
     branch: DeviceBranch,
     actor: GroupStateActor,
 }
@@ -16,10 +17,11 @@ fn person(
     let root = crate::create_identity_root(principal, [root_seed; 32]);
     let branch = crate::create_device_branch(principal, device, 1, [branch_seed; 32]);
     let actor = certify_group_state_actor(&root, &branch, &format!("target-{device}"))?;
-    Ok(Person { branch, actor })
+    Ok(Person { root, branch, actor })
 }
 fn create(owner: &Person) -> Result<VerifiedGroupState, CryptoError> {
     let operation = sign_group_state_operation(
+        &owner.root,
         &owner.branch,
         &owner.actor,
         "group",
@@ -41,6 +43,7 @@ fn step(
 ) -> Result<VerifiedGroupState, CryptoError> {
     let mut operations = state.snapshot().operations.clone();
     operations.push(sign_group_state_operation(
+        &author.root,
         &author.branch,
         &author.actor,
         "group",
@@ -253,6 +256,7 @@ fn creator_checkpoints_bound_replay_without_resetting_epochs_or_names() -> Resul
     let mut current = initial.clone();
     for index in 0..70 {
         current = advance_group_state(
+            &owner.root,
             &owner.branch,
             &owner.actor,
             &current,
@@ -267,11 +271,12 @@ fn creator_checkpoints_bound_replay_without_resetting_epochs_or_names() -> Resul
         &canonical_json_bytes(current.snapshot())?,
     )?)?;
     assert_eq!(restored.view(), current.view());
-    let compact = compact_group_state(&owner.branch, &owner.actor, &current)?;
+    let compact = compact_group_state(&owner.root, &owner.branch, &owner.actor, &current)?;
     assert_eq!(compact.snapshot().operations, Vec::<GroupStateOperation>::new());
     assert!(compact.extends(&current));
     assert_eq!(compact.view(), current.view());
     let advanced = advance_group_state(
+        &owner.root,
         &owner.branch,
         &owner.actor,
         &compact,
@@ -292,14 +297,16 @@ fn admin_cannot_rewrite_or_compact_an_authenticated_roster() -> Result<(), Crypt
     let peer = person("peer", "peer", 21, 22)?;
     let initial = create(&owner)?;
     let joined = advance_group_state(
+        &owner.root,
         &owner.branch,
         &owner.actor,
         &initial,
         GroupStateChange::Add { member: peer.actor.identity.clone(), role: SharedGroupRole::Admin },
     )?;
-    assert!(compact_group_state(&peer.branch, &peer.actor, &joined).is_err());
-    let compact = compact_group_state(&owner.branch, &owner.actor, &joined)?;
+    assert!(compact_group_state(&peer.root, &peer.branch, &peer.actor, &joined).is_err());
+    let compact = compact_group_state(&owner.root, &owner.branch, &owner.actor, &joined)?;
     let renamed = advance_group_state(
+        &peer.root,
         &peer.branch,
         &peer.actor,
         &compact,
@@ -312,5 +319,49 @@ fn admin_cannot_rewrite_or_compact_an_authenticated_roster() -> Result<(), Crypt
     checkpoint.signature =
         crate::sign_with_device_branch(&peer.branch, &super::checkpoint::body(checkpoint))?;
     assert!(verify_group_state_snapshot(forged).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_device_certificate_cannot_forge_new_controls_or_owner_checkpoints() -> Result<(), CryptoError>
+{
+    let owner = person("owner", "owner", 71, 72)?;
+    let peer = person("peer", "peer", 81, 82)?;
+    let joined = step(
+        &create(&owner)?,
+        &owner,
+        GroupStateChange::Add {
+            member: peer.actor.identity.clone(),
+            role: SharedGroupRole::Member,
+        },
+    )?;
+    let mut forged = sign_group_state_operation(
+        &owner.root,
+        &owner.branch,
+        &owner.actor,
+        "group",
+        3,
+        Some(joined.view().head_hash.clone()),
+        GroupStateChange::SetName { name: "approved".into() },
+    )?;
+    forged.change = GroupStateChange::SetName { name: "forged with only a branch key".into() };
+    forged.signature = crate::sign_with_device_branch(&owner.branch, &operation_body(&forged))?;
+    let mut operations = joined.snapshot().operations.clone();
+    operations.push(forged);
+    assert!(
+        sign_group_state_snapshot(&peer.branch, &peer.actor, operations).is_err(),
+        "an active peer cannot launder a control made with a retained device certificate"
+    );
+    let compact = compact_group_state(&owner.root, &owner.branch, &owner.actor, &joined)?;
+    let mut snapshot = compact.snapshot().clone();
+    let checkpoint = snapshot.checkpoint.as_mut().ok_or_else(|| invalid("checkpoint"))?;
+    checkpoint.state.name = Some("forged checkpoint".into());
+    checkpoint.signature =
+        crate::sign_with_device_branch(&owner.branch, &super::checkpoint::body(checkpoint))?;
+    snapshot.signature = crate::sign_with_device_branch(&owner.branch, &snapshot_body(&snapshot))?;
+    assert!(
+        verify_group_state_snapshot(snapshot).is_err(),
+        "checkpoint authority requires the immutable owner root key"
+    );
     Ok(())
 }

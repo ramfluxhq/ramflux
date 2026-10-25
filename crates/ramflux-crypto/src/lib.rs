@@ -14,8 +14,8 @@ mod group_sender;
 mod group_state;
 pub use group_state::{
     VerifiedGroupState, advance_group_state, certify_group_state_actor, compact_group_state,
-    group_state_head_hash, sign_group_state_operation, sign_group_state_snapshot,
-    verify_group_state_actor, verify_group_state_snapshot,
+    group_state_head_hash, resign_group_state_snapshot, sign_group_state_operation,
+    sign_group_state_snapshot, verify_group_state_actor, verify_group_state_snapshot,
 };
 mod home_node_migration;
 mod identity;

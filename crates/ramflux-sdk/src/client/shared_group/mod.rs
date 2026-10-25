@@ -11,7 +11,9 @@ use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupS
 use serde_json::{Value, json};
 
 mod bootstrap;
-pub(crate) use bootstrap::{PACKET_SCHEMA, PreparedSharedGroup, decode_packet, packet_bytes};
+pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
+#[cfg(test)]
+use bootstrap::{decode_packet, packet_bytes};
 fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(reason.into())
 }
@@ -36,6 +38,7 @@ impl RamfluxClient {
         let actor = self.owned_group_actor(target)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let operation = sign_group_state_operation(
+            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             branch,
             &actor,
             group,
@@ -64,6 +67,7 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("group requires an authenticated state snapshot"))?;
         let actor = self.owned_group_actor(target)?;
         let state = advance_group_state(
+            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             &actor,
             &previous,

@@ -96,6 +96,7 @@ pub struct GroupStateOperation {
     pub previous_hash: Option<String>,
     pub actor: GroupStateActor,
     pub change: GroupStateChange,
+    pub root_signature: String,
     pub signature: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

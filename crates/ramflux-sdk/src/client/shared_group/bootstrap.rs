@@ -34,14 +34,20 @@ fn packet(state: &VerifiedGroupState) -> Result<SharedGroupPacket, SdkError> {
 pub(crate) fn packet_bytes(state: &VerifiedGroupState) -> Result<Vec<u8>, SdkError> {
     Ok(serde_json::to_vec(&packet(state)?)?)
 }
+#[derive(Deserialize)]
+struct PacketHeader<'a> {
+    #[serde(borrow)]
+    schema: Option<&'a str>,
+}
+pub(crate) fn is_packet(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<PacketHeader<'_>>(bytes)
+        .is_ok_and(|header| header.schema == Some(PACKET_SCHEMA))
+}
 pub(crate) fn decode_packet(bytes: &[u8]) -> Result<Option<VerifiedGroupState>, SdkError> {
     if bytes.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES * 2 {
         return Err(invalid("group state packet exceeds its byte budget"));
     }
-    let Ok(header) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return Ok(None);
-    };
-    if header["schema"] != PACKET_SCHEMA {
+    if !is_packet(bytes) {
         return Ok(None);
     }
     let packet: SharedGroupPacket = ramflux_protocol::parse_i_json(bytes)?;
@@ -163,19 +169,29 @@ impl RamfluxClient {
                     distribution.group_key_epoch,
                     "recv",
                 )?;
-                if self.projection_checkpoint(&checkpoint)?.is_some() {
-                    let existing = self.load_group_sender_key_state(
-                        &distribution.group_id,
-                        &source,
-                        distribution.group_key_epoch,
-                        "recv",
-                    )?;
-                    if existing.session_snapshot.root_key_bytes() != distribution.sender_key_seed {
-                        return Err(invalid("group bootstrap key changed within the same epoch"));
-                    }
-                } else {
+                let marker = format!(
+                    "group/bootstrap-key/{}",
+                    ramflux_protocol::hash_base64url(
+                        "ramflux.group.bootstrap.key-id.v1",
+                        checkpoint.as_bytes()
+                    )
+                );
+                let fingerprint = ramflux_protocol::hash_base64url(
+                    "ramflux.group.bootstrap.key-seed.v1",
+                    &distribution.sender_key_seed,
+                );
+                if self
+                    .account_db()?
+                    .load_actor_state::<String>(&marker)?
+                    .is_some_and(|old| old != fingerprint)
+                {
+                    return Err(invalid("group bootstrap key changed within the same epoch"));
+                }
+                // Repeated snapshots must never reset an already advanced receiver ratchet.
+                if self.projection_checkpoint(&checkpoint)?.is_none() {
                     self.import_group_key_for_identity(bytes, &source, false)?;
                 }
+                self.account_db()?.persist_actor_state(&marker, &fingerprint)?;
             }
             Ok(changed)
         })

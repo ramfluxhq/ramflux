@@ -138,3 +138,90 @@ fn readonly_group_metadata_does_not_need_private_root_material() -> Result<(), S
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn one_bootstrap_packet_supplies_the_first_key_and_replays_do_not_reset_the_receiver()
+-> Result<(), SdkError> {
+    let root = temp_root("bootstrap")?;
+    let owner = person(&root.join("owner"), "owner", "owner", 41, 42)?;
+    let peer = person(&root.join("peer"), "peer", "peer", 51, 52)?;
+    let own = crate::client::identity_authority::test_support::public_manifest(&owner)?;
+    let remote = crate::client::identity_authority::test_support::public_manifest(&peer)?;
+    for client in [&owner, &peer] {
+        client.persist_identity_directory(&own)?;
+        client.persist_identity_directory(&remote)?;
+    }
+    owner.shared_group_create("group", "thread", Some("Checklist".into()), "target-owner")?;
+    let peer_actor = peer.owned_group_actor("target-peer")?;
+    let state = owner.shared_group_change(
+        "group",
+        "target-owner",
+        GroupStateChange::Add {
+            member: peer_actor.identity.clone(),
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    let bytes = owner.shared_group_packet(&state, true)?;
+    let decoded = decode_packet(&bytes)?.ok_or(SdkError::IdentityRootMissing)?;
+    let prepared = peer.prepare_shared_group_payload(decoded, &bytes)?;
+    assert!(peer.apply_prepared_shared_group(&prepared, "target-peer")?);
+    let encrypted =
+        owner.encrypt_group_message("group", "owner", b"first without a separate distribution")?;
+    peer.send_direct_message("thread", "first", "owner", &encrypted)?;
+    assert_eq!(
+        peer.decrypt_group_message("thread", "first")?,
+        b"first without a separate distribution"
+    );
+    let source = peer.device_identity_for_root(&own.principal_commitment, "owner")?;
+    let before = serde_json::to_value(peer.load_group_sender_key_state(
+        "group",
+        &source,
+        state.view().epoch,
+        "recv",
+    )?)?;
+    assert!(!peer.apply_prepared_shared_group(&prepared, "target-peer")?);
+    assert_eq!(
+        serde_json::to_value(peer.load_group_sender_key_state(
+            "group",
+            &source,
+            state.view().epoch,
+            "recv"
+        )?)?,
+        before
+    );
+    let next = owner.encrypt_group_message("group", "owner", b"second after bootstrap replay")?;
+    peer.send_direct_message("thread", "second", "owner", &next)?;
+    assert_eq!(peer.decrypt_group_message("thread", "second")?, b"second after bootstrap replay");
+    let mut poisoned: Value = serde_json::from_slice(&bytes)?;
+    let payload = ramflux_protocol::decode_base64url(
+        poisoned["distribution_base64"].as_str().ok_or(SdkError::IdentityRootMissing)?,
+    )
+    .map_err(|_| invalid("distribution encoding"))?;
+    let mut distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&payload)?;
+    distribution.sender_key_seed = [99; 32];
+    poisoned["distribution_base64"] =
+        json!(ramflux_protocol::encode_base64url(serde_json::to_vec(&distribution)?));
+    let poisoned = serde_json::to_vec(&poisoned)?;
+    let changed = peer.prepare_shared_group_payload(state.clone(), &poisoned)?;
+    assert!(peer.apply_prepared_shared_group(&changed, "target-peer").is_err());
+    let removed = owner.shared_group_change(
+        "group",
+        "target-owner",
+        GroupStateChange::Remove {
+            root_commitment: peer_actor.identity.root_commitment,
+            device_id: "peer".into(),
+        },
+    )?;
+    let bytes = owner.shared_group_packet(&removed, false)?;
+    assert!(
+        serde_json::from_slice::<Value>(&bytes)?.get("distribution_base64").is_none(),
+        "removed recipients never receive the new epoch key"
+    );
+    let prepared = peer.prepare_shared_group_payload(removed, &bytes)?;
+    assert!(peer.apply_prepared_shared_group(&prepared, "target-peer")?);
+    assert!(peer.load_group_sender_key_state("group", &source, 3, "recv").is_err());
+    assert!(peer.encrypt_group_message("group", "peer", b"not a member").is_err());
+    drop((owner, peer));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

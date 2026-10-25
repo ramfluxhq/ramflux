@@ -15,11 +15,11 @@ fn person(
     principal: &str,
     device: &str,
     seed: u8,
-) -> Result<(DeviceBranch, GroupStateActor), StorageError> {
+) -> Result<(ramflux_crypto::IdentityRoot, DeviceBranch, GroupStateActor), StorageError> {
     let root = create_identity_root(principal, [seed; 32]);
     let branch = create_device_branch(principal, device, 1, [seed + 1; 32]);
     let actor = certify_group_state_actor(&root, &branch, &format!("target-{device}"))?;
-    Ok((branch, actor))
+    Ok((root, branch, actor))
 }
 fn owned_device(
     principal: &str,
@@ -33,10 +33,12 @@ fn owned_device(
 }
 
 fn create(
+    root: &ramflux_crypto::IdentityRoot,
     branch: &DeviceBranch,
     actor: &GroupStateActor,
 ) -> Result<VerifiedGroupState, StorageError> {
     let operation = sign_group_state_operation(
+        root,
         branch,
         actor,
         "group",
@@ -53,17 +55,19 @@ fn create(
 }
 #[test]
 fn full_state_projects_all_three_members_and_the_same_epoch_and_name() -> Result<(), StorageError> {
-    let (owner, a) = person("owner", "phone", 10)?;
-    let (_, b) = person("peer", "phone", 20)?;
-    let (_, sibling) = person("owner", "laptop", 10)?;
-    let state = create(&owner, &a)?;
+    let (owner_root, owner, a) = person("owner", "phone", 10)?;
+    let (_, _, b) = person("peer", "phone", 20)?;
+    let (_, _, sibling) = person("owner", "laptop", 10)?;
+    let state = create(&owner_root, &owner, &a)?;
     let second = advance_group_state(
+        &owner_root,
         &owner,
         &a,
         &state,
         GroupStateChange::Add { member: b.identity.clone(), role: SharedGroupRole::Member },
     )?;
     let third = advance_group_state(
+        &owner_root,
         &owner,
         &a,
         &second,
@@ -119,14 +123,15 @@ fn full_state_projects_all_three_members_and_the_same_epoch_and_name() -> Result
 #[test]
 fn sibling_inherits_membership_and_a_later_removal_cannot_be_reversed_by_replay()
 -> Result<(), StorageError> {
-    let (owner, a) = person("owner", "owner", 10)?;
-    let (_, sibling) = person("owner", "laptop", 10)?;
-    let state = create(&owner, &a)?;
+    let (owner_root, owner, a) = person("owner", "owner", 10)?;
+    let (_, _, sibling) = person("owner", "laptop", 10)?;
+    let state = create(&owner_root, &owner, &a)?;
     let (root, db) = test_db("group-sibling-removal")?;
     db.commit_shared_group_state(&state, &sibling)?;
     let id = owned_device("owner", "laptop", 10)?;
     assert_eq!(db.group_member_role("group", &id)?.as_deref(), Some("owner"));
     let joined = advance_group_state(
+        &owner_root,
         &owner,
         &a,
         &state,
@@ -135,6 +140,7 @@ fn sibling_inherits_membership_and_a_later_removal_cannot_be_reversed_by_replay(
     db.commit_shared_group_state(&joined, &sibling)?;
     assert_eq!(db.group_member_joined_epoch("group", &id)?, Some(2));
     let removed = advance_group_state(
+        &owner_root,
         &owner,
         &a,
         &joined,
@@ -153,8 +159,8 @@ fn sibling_inherits_membership_and_a_later_removal_cannot_be_reversed_by_replay(
 }
 #[test]
 fn a_conflicting_thread_rolls_back_the_proof_roster_and_all_pins() -> Result<(), StorageError> {
-    let (owner, a) = person("owner", "owner", 10)?;
-    let state = create(&owner, &a)?;
+    let (owner_root, owner, a) = person("owner", "owner", 10)?;
+    let state = create(&owner_root, &owner, &a)?;
     let (root, db) = test_db("group-conflicting-thread")?;
     db.persist_client_record("conversation", "thread", &json!({"kind":"direct","title":"Keep"}))?;
     assert!(db.commit_shared_group_state(&state, &a).is_err());

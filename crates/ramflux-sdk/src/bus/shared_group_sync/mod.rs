@@ -110,12 +110,14 @@ async fn verified_member(
     body: &Value,
 ) -> Result<GroupMemberIdentity, SdkError> {
     let selected = required(body, "member_id")?;
-    let address = ramflux_protocol::parse_qualified_device_id(selected)?;
-    let device = address.as_ref().map_or(selected, |(_, device)| device.as_str());
     let explicit = body["member_principal_commitment"].as_str();
-    if address.as_ref().is_some_and(|(root, _)| explicit.is_some_and(|given| given != root)) {
-        return Err(SdkError::Storage(StorageError::GroupPermissionDenied));
-    }
+    // An explicit root makes member_id a literal device name, including address-shaped names.
+    let address = if explicit.is_none() {
+        ramflux_protocol::parse_qualified_device_id(selected)?
+    } else {
+        None
+    };
+    let device = address.as_ref().map_or(selected, |(_, device)| device.as_str());
     let gateway = account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
     let root = account
         .client
