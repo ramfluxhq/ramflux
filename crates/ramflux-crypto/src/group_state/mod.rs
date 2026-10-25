@@ -114,6 +114,18 @@ impl VerifiedGroupState {
                 Unrelated
             });
         }
+        // The handover snapshot is still signed by the former creator. Once
+        // its transfer is known, that key cannot replace the accepted handover
+        // content (or a successor head), even by reusing the same certificate.
+        if self
+            .snapshot
+            .transfers
+            .last()
+            .is_some_and(|transfer| transfer.epoch == self.view().epoch)
+            && self.snapshot.state_hash != previous.snapshot.state_hash
+        {
+            return Ok(Unrelated);
+        }
         if self.view().epoch < previous.view().epoch {
             return Ok(Ancestor);
         }

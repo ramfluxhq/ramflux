@@ -11,7 +11,9 @@ Receivers accept a higher creator-certified epoch, including an arbitrary gap.
 There is no operation history, delegated checkpoint or cross-root state writer.
 A verified ownership-transfer chain dominates an old-owner fork even when that
 fork has a larger epoch. Once a transfer at epoch E is known, old-owner snapshots
-at E or later are rejected; the transfer also wins a same-epoch edit. This can
+at E or later are rejected; the transfer also wins a same-epoch edit. Reusing
+its certificate does not let the former creator replace known handover content;
+a successor signed by the new creator can advance either observed handover. This can
 replace a higher numeric epoch with a lower one on the certified successor line.
 Conflicting snapshots within the same transfer chain can only be creator-device
 writes; the lowest content hash wins, and the losing creator device reapplies its own pending

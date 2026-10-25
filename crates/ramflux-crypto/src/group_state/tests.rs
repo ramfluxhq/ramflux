@@ -361,3 +361,33 @@ fn r5_transfer_dominates_same_epoch_edit_and_old_owner_higher_fork() -> Result<(
     assert!(step(&bob_head, &alice, GroupStateChange::SetName { name: "undo".into() }).is_err());
     Ok(())
 }
+
+#[test]
+fn r5_known_handover_rejects_replacement_content_signed_by_the_former_creator()
+-> Result<(), CryptoError> {
+    let alice = person("alice", "phone", 11, 12)?;
+    let bob = person("bob", "phone", 21, 22)?;
+    let base = add(&create(&alice)?, &alice, &bob, SharedGroupRole::Member)?;
+    let transfer = |now| {
+        snapshot::advance_as(
+            &alice.root,
+            &alice.branch,
+            &alice.actor,
+            &base,
+            snapshot::Apply {
+                requester: &alice.actor,
+                change: GroupStateChange::TransferOwnership { creator: bob.actor.clone() },
+                now,
+            },
+        )
+    };
+    let known = transfer(1000)?;
+    let replacement = transfer(1001)?;
+    assert_eq!(known.snapshot().transfers, replacement.snapshot().transfers);
+    assert_ne!(known.snapshot().state_hash, replacement.snapshot().state_hash);
+    assert_eq!(replacement.relation_to(&known)?, GroupStateRelation::Unrelated);
+    let successor = step(&known, &bob, GroupStateChange::SetName { name: "final".into() })?;
+    assert_eq!(replacement.relation_to(&successor)?, GroupStateRelation::Unrelated);
+    assert_eq!(known.relation_to(&known)?, GroupStateRelation::Same);
+    Ok(())
+}
