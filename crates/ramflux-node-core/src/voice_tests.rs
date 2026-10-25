@@ -103,8 +103,8 @@ fn an_expired_voice_credential_cannot_disrupt_another_live_allocation()
     let expired = state.allocate("node", &scope(1), "relay:9000", 100)?;
     let live = state.allocate("node", &scope(2), "relay:9000", 110)?;
     let source = "8.8.8.8:1234".parse()?;
-    let stale = encode_voice_datagram(&expired.caller_token, &[])?;
-    assert!(state.route(&stale, source, 160, false).is_err());
+    let expired_packet = encode_voice_datagram(&expired.caller_token, &[])?;
+    assert!(state.route(&expired_packet, source, 160, false).is_err());
     let opposite = encode_voice_datagram(&expired.callee_token, &[])?;
     assert!(state.route(&opposite, source, 160, false).is_err());
     let valid = encode_voice_datagram(&live.caller_token, &[])?;
