@@ -16,9 +16,14 @@ pub(crate) fn project(
     if let Some(conversation) = field(keys, "conversation_id") {
         if let Some(message) = field(keys, "message_id") {
             if entry.table_name == "direct_message_projection" {
-                let row = db.client_message_metadata(message)?.unwrap_or_else(
+                let mut row = db.client_message_metadata(message)?.unwrap_or_else(
                     || json!({"id":message,"conversation_id":conversation,"removed":true}),
                 );
+                let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
+                for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"]
+                {
+                    row[field] = origin[field].clone();
+                }
                 let route = client.routed_message_metadata(message)?;
                 let topic = if entry.change_kind == "insert" && route.is_some() {
                     if route.as_ref().is_some_and(|route| {

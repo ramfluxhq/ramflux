@@ -79,6 +79,8 @@ impl Supervisor {
         if let Some(active) = active {
             supervisor.index.set_active_account(&active)?;
         }
+        // Test-injected unlocked accounts need the same outbox service as restored accounts.
+        supervisor.start_event_router();
         Ok(supervisor)
     }
 

@@ -46,7 +46,10 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let sender = &entry.envelope.source_device_id;
         let device = db.client_record("device", sender)?.unwrap_or_else(|| json!({}));
-        let root = device["principal_commitment"].as_str().map(str::to_owned);
+        let root = device["principal_commitment"]
+            .as_str()
+            .map(str::to_owned)
+            .or(db.device_directory_entry(sender)?.map(|entry| entry.principal_commitment));
         let own_root = self.surface_local_root_commitment()?;
         if entry.envelope.source_principal_id == local.principal_id
             || sender == &local.device_id

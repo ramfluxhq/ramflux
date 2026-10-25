@@ -352,10 +352,10 @@ async fn dispatch_message_receipt_delivered(
         &body.conversation_id,
         &body.message_id,
         &body.receiver_device_id,
-    )? && status["state"] == "sent"
+    )? && matches!(status["state"].as_str(), Some("pending" | "sent" | "failed"))
     {
         return Ok(local_bus_ok(
-            serde_json::json!({"conversation_id":body.conversation_id,"receiver_device_id":body.receiver_device_id,"delivered_through_message_id":body.message_id,"delivered_at":status["delivered_at"],"ttl_seconds":300,"scope":"network_e2ee","already_sent":true}),
+            serde_json::json!({"conversation_id":body.conversation_id,"receiver_device_id":body.receiver_device_id,"delivered_through_message_id":body.message_id,"delivered_at":status["delivered_at"],"ttl_seconds":300,"scope":"network_e2ee","already_sent":status["state"]=="sent","delivery_receipt_state":status["state"]}),
         ));
     }
     let delivered_at = body.delivered_at.unwrap_or_else(now_unix_timestamp);

@@ -266,53 +266,55 @@ impl RamfluxClient {
         encrypted_body: &[u8],
         envelope: &SdkGroupEncryptedEnvelope,
     ) -> Result<Vec<u8>, SdkError> {
-        self.require_group_payload_sender(&envelope.group_id, &envelope.sender_id, entry)?;
-        if self
-            .direct_messages(conversation_id)?
-            .iter()
-            .any(|message| message.message_id == message_id)
-        {
-            self.account_db()?.remove_group_pending_undecrypted(message_id)?;
-            return Ok(Vec::new());
-        }
-        if self.group_sender_key_counter_seen(envelope)? {
-            self.account_db()?.remove_group_pending_undecrypted(message_id)?;
-            return Ok(Vec::new());
-        }
-        match self.decrypt_group_envelope(envelope, message_id) {
-            Ok(plaintext) => self.account_db()?.write_transaction(|| {
-                self.send_direct_message(
-                    conversation_id,
-                    message_id,
-                    &envelope.sender_id,
-                    encrypted_body,
-                )?;
-                self.account_db()?.store_message_content(
-                    conversation_id,
-                    message_id,
-                    &plaintext,
-                )?;
+        self.account_db()?.write_transaction(|| {
+            self.require_group_payload_sender(&envelope.group_id, &envelope.sender_id, entry)?;
+            if self
+                .direct_messages(conversation_id)?
+                .iter()
+                .any(|message| message.message_id == message_id)
+            {
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
-                self.stage_delivery_receipt(conversation_id, message_id, entry)?;
-                Ok(plaintext)
-            }),
-            Err(error) if is_missing_group_sender_key_error(&error) => {
-                self.account_db()?.upsert_group_pending_undecrypted(
-                    &GroupPendingUndecryptedRecord {
-                        group_id: envelope.group_id.clone(),
-                        conversation_id: conversation_id.to_owned(),
-                        group_key_epoch: envelope.group_key_epoch,
-                        message_id: message_id.to_owned(),
-                        sender_id: envelope.sender_id.clone(),
-                        inbox_seq: entry.inbox_seq,
-                        envelope_json: serde_json::to_vec(entry)?,
-                        created_at: now_unix_timestamp(),
-                    },
-                )?;
-                Ok(Vec::new())
+                return Ok(Vec::new());
             }
-            Err(error) => Err(error),
-        }
+            if self.group_sender_key_counter_seen(envelope)? {
+                self.account_db()?.remove_group_pending_undecrypted(message_id)?;
+                return Ok(Vec::new());
+            }
+            match self.decrypt_group_envelope(envelope, message_id) {
+                Ok(plaintext) => self.account_db()?.write_transaction(|| {
+                    self.send_direct_message(
+                        conversation_id,
+                        message_id,
+                        &envelope.sender_id,
+                        encrypted_body,
+                    )?;
+                    self.account_db()?.store_message_content(
+                        conversation_id,
+                        message_id,
+                        &plaintext,
+                    )?;
+                    self.account_db()?.remove_group_pending_undecrypted(message_id)?;
+                    self.stage_delivery_receipt(conversation_id, message_id, entry)?;
+                    Ok(plaintext)
+                }),
+                Err(error) if is_missing_group_sender_key_error(&error) => {
+                    self.account_db()?.upsert_group_pending_undecrypted(
+                        &GroupPendingUndecryptedRecord {
+                            group_id: envelope.group_id.clone(),
+                            conversation_id: conversation_id.to_owned(),
+                            group_key_epoch: envelope.group_key_epoch,
+                            message_id: message_id.to_owned(),
+                            sender_id: envelope.sender_id.clone(),
+                            inbox_seq: entry.inbox_seq,
+                            envelope_json: serde_json::to_vec(entry)?,
+                            created_at: now_unix_timestamp(),
+                        },
+                    )?;
+                    Ok(Vec::new())
+                }
+                Err(error) => Err(error),
+            }
+        })
     }
 
     pub(crate) fn apply_group_control_plaintext(

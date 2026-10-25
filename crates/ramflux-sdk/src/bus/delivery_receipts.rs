@@ -46,6 +46,9 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
                 finish(&account.client, &key, &work, "sent")?;
                 sent += 1;
             }
+            Ok(Err(SdkError::InboundRejected(_))) => {
+                finish(&account.client, &key, &work, "failed")?;
+            }
             Ok(Err(error)) => tracing::warn!(%error,"delivery receipt deferred"),
             Err(_) => tracing::warn!("delivery receipt deadline exceeded"),
         }
@@ -58,15 +61,19 @@ async fn send(
     key: &str,
     work: &mut Work,
 ) -> Result<(), SdkError> {
+    let device = account.client.trusted_device(&work.sender)?;
+    let current_root = device["principal_commitment"].as_str().map(str::to_owned).or(account
+        .client
+        .account_db()?
+        .device_directory_entry(&work.sender)?
+        .map(|entry| entry.principal_commitment));
+    if work.root.as_deref().is_some_and(|root| current_root.as_deref() != Some(root)) {
+        return Err(SdkError::InboundRejected("receipt sender root changed".into()));
+    }
+    if work.receiver != engine.config.device_id {
+        return Err(SdkError::InboundRejected("receipt receiving device changed".into()));
+    }
     if work.packet.is_none() {
-        let device = account.client.trusted_device(&work.sender)?;
-        if work
-            .root
-            .as_deref()
-            .is_some_and(|root| device["principal_commitment"].as_str() != Some(root))
-        {
-            return Err(SdkError::InboundRejected("receipt sender root changed".into()));
-        }
         let target = device["target_delivery_id"]
             .as_str()
             .ok_or_else(|| SdkError::InboundPending("receipt sender route missing".into()))?;
@@ -131,3 +138,7 @@ fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result
         Ok(())
     })
 }
+
+#[cfg(test)]
+#[path = "receipt_tests/mod.rs"]
+mod tests;

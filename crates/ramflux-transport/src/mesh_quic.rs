@@ -182,6 +182,7 @@ struct MeshQuicCircuitBreakerKey {
 #[derive(Clone, Debug)]
 struct MeshQuicCircuitProbe {
     key: MeshQuicCircuitBreakerKey,
+    previous: Option<MeshQuicCircuitBreakerState>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -213,14 +214,17 @@ impl MeshQuicCircuitBreakers {
                     "mesh QUIC circuit breaker open for {server_name}@{peer_addr}; skipping connect for {remaining_ms}ms"
                 )))
             }
-            Some(MeshQuicCircuitBreakerState::Open { .. }) => {
+            Some(MeshQuicCircuitBreakerState::Open { retry_after }) => {
                 states.insert(key.clone(), MeshQuicCircuitBreakerState::HalfOpen);
-                Ok(MeshQuicCircuitProbe { key })
+                Ok(MeshQuicCircuitProbe {
+                    key,
+                    previous: Some(MeshQuicCircuitBreakerState::Open { retry_after }),
+                })
             }
             Some(MeshQuicCircuitBreakerState::HalfOpen) => Err(TransportError::Quic(format!(
                 "mesh QUIC circuit breaker half-open probe already in flight for {server_name}@{peer_addr}; skipping connect"
             ))),
-            None => Ok(MeshQuicCircuitProbe { key }),
+            None => Ok(MeshQuicCircuitProbe { key, previous: None }),
         }
     }
 
@@ -237,6 +241,26 @@ impl MeshQuicCircuitBreakers {
             }
             Err(error) => {
                 tracing::warn!(%error, "mesh QUIC circuit breaker lock poisoned while recording failure");
+            }
+        }
+    }
+
+    fn record_connect_error(
+        &self,
+        probe: &MeshQuicCircuitProbe,
+        error: &TransportError,
+        now: Instant,
+        cooldown: Duration,
+    ) {
+        if !error.is_tls_failure() {
+            self.record_connect_failure(probe, now, cooldown);
+        } else if let Some(previous) = probe.previous {
+            // Restore an acquired half-open probe; a trust error is neither a transport success
+            // nor an outage. Do not erase a concurrent attempt's newer availability failure.
+            if let Ok(mut states) = self.states.lock()
+                && matches!(states.get(&probe.key), Some(MeshQuicCircuitBreakerState::HalfOpen))
+            {
+                states.insert(probe.key.clone(), previous);
             }
         }
     }
@@ -1203,12 +1227,7 @@ async fn mesh_quic_connect(
             connection
         }
         Err(error) => {
-            if error.is_tls_failure() {
-                // A trust failure must not become a cached, retryable outage for the next caller.
-                breakers.record_connect_success(&probe);
-            } else {
-                breakers.record_connect_failure(&probe, Instant::now(), breaker_cooldown);
-            }
+            breakers.record_connect_error(&probe, &error, Instant::now(), breaker_cooldown);
             return Err(error);
         }
     };
@@ -1356,6 +1375,34 @@ mod tests {
         resolve_endpoint, write_quic_json_message,
     };
     use crate::TransportError;
+
+    #[test]
+    fn a_trust_failure_never_erases_another_connect_failure_or_strands_a_half_open_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let breakers = MeshQuicCircuitBreakers::default();
+        let address = "127.0.0.1:5443".parse()?;
+        let now = Instant::now();
+        let first = breakers.before_connect(address, "peer", now)?;
+        let concurrent = breakers.before_connect(address, "peer", now)?;
+        breakers.record_connect_failure(&first, now, Duration::from_secs(1));
+        breakers.record_connect_error(
+            &concurrent,
+            &TransportError::Tls("certificate".into()),
+            now,
+            Duration::from_secs(1),
+        );
+        assert!(breakers.before_connect(address, "peer", now).is_err());
+        let later = now + Duration::from_secs(2);
+        let probe = breakers.before_connect(address, "peer", later)?;
+        breakers.record_connect_error(
+            &probe,
+            &TransportError::Tls("certificate".into()),
+            later,
+            Duration::from_secs(1),
+        );
+        assert!(breakers.before_connect(address, "peer", later).is_ok());
+        Ok(())
+    }
 
     type CapturedQuicRequest = (Option<String>, GatewayQuicRequest);
 

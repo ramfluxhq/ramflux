@@ -61,8 +61,13 @@ impl TransportError {
 pub(crate) fn tls_source(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(error) = current {
-        if error.is::<rustls::Error>() {
-            return true;
+        if let Some(error) = error.downcast_ref::<rustls::Error>() {
+            return match error {
+                rustls::Error::AlertReceived(alert) => {
+                    crate::quic_errors::trust_alert(0x100 + u64::from(u8::from(*alert)))
+                }
+                _ => true,
+            };
         }
         // Some I/O wrappers expose their custom payload separately from Error::source.
         if let Some(inner) =
