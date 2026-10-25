@@ -15,11 +15,52 @@ const MAX_DEVICES: usize = 1024;
 const ROOTS_PER_DRAIN: usize = 4;
 const DEVICES_PER_DRAIN: usize = 4;
 const DRIVER_PROGRESS: &str = "group-state/driver-progress";
-const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
+const BOUNDARY_SECONDS: i64 = 7 * 86400;
+#[derive(Clone, Deserialize, Serialize)]
+struct StatePointer {
+    group_id: String,
+    epoch: u64,
+    state_hash: String,
+}
+impl StatePointer {
+    fn from_state(state: &VerifiedGroupState) -> Self {
+        Self {
+            group_id: state.view().group_id.clone(),
+            epoch: state.view().epoch,
+            state_hash: state.snapshot().state_hash.clone(),
+        }
+    }
+}
+#[derive(Deserialize, Serialize)]
+struct Delivered {
+    state_hash: String,
+    devices: BTreeSet<(String, String)>,
+}
+fn delivered_key(group: &str) -> String {
+    format!("group-state/delivered/{}", ramflux_protocol::encode_base64url(group))
+}
+fn boundary_key(group: &str) -> String {
+    format!("group-state/boundaries/{}", ramflux_protocol::encode_base64url(group))
+}
+fn proof_key(hash: &str) -> String {
+    format!("group-state/boundary-proof/{hash}")
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DeliveryOrigin {
+    #[default]
+    Local,
+    Recovery,
+}
 #[derive(Clone, Deserialize, Serialize)]
 struct Intent {
-    snapshot: GroupStateSnapshot,
+    snapshot: StatePointer,
     eligible: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    origin: DeliveryOrigin,
+    #[serde(default)]
+    priority: bool,
     #[serde(default)]
     terminal: Vec<TerminalSnapshot>,
     created_at: i64,
@@ -48,7 +89,8 @@ struct RecipientCursor {
 struct TerminalSnapshot {
     root: String,
     device: Option<String>,
-    snapshot: GroupStateSnapshot,
+    snapshot: StatePointer,
+    expires_at: i64,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct StagedEnvelope {
@@ -87,14 +129,20 @@ fn eligibility(state: &VerifiedGroupState) -> BTreeMap<String, BTreeSet<String>>
         .collect()
 }
 
-fn freeze_removals(intent: &mut Intent, previous: &VerifiedGroupState, state: &VerifiedGroupState) {
+fn freeze_removals(
+    client: &RamfluxClient,
+    intent: &mut Intent,
+    previous: &VerifiedGroupState,
+    state: &VerifiedGroupState,
+) -> Result<(), SdkError> {
     for root in eligibility(previous).keys() {
         if !eligibility(state).contains_key(root) {
             intent.terminal.retain(|entry| entry.root != *root || entry.device.is_some());
             intent.terminal.push(TerminalSnapshot {
                 root: root.clone(),
                 device: None,
-                snapshot: state.snapshot().clone(),
+                snapshot: StatePointer::from_state(state),
+                expires_at: now_unix_timestamp().saturating_add(BOUNDARY_SECONDS),
             });
         }
     }
@@ -109,28 +157,60 @@ fn freeze_removals(intent: &mut Intent, previous: &VerifiedGroupState, state: &V
             intent.terminal.push(TerminalSnapshot {
                 root: excluded.root_commitment.clone(),
                 device: Some(excluded.device_id.clone()),
-                snapshot: state.snapshot().clone(),
+                snapshot: StatePointer::from_state(state),
+                expires_at: now_unix_timestamp().saturating_add(BOUNDARY_SECONDS),
             });
         }
     }
+    if !intent.terminal.is_empty() {
+        // Store each immutable proof once, regardless of removed recipient count.
+        if intent
+            .terminal
+            .iter()
+            .any(|entry| entry.snapshot.state_hash == state.snapshot().state_hash)
+        {
+            client
+                .account_db()?
+                .persist_actor_state(&proof_key(&state.snapshot().state_hash), state.snapshot())?;
+        }
+        client
+            .account_db()?
+            .persist_actor_state(&boundary_key(&state.view().group_id), &intent.terminal)?;
+    }
+    Ok(())
 }
-fn recipient_snapshot<'a>(
-    intent: &'a Intent,
-    state: &'a VerifiedGroupState,
+fn recipient_snapshot(
+    client: &RamfluxClient,
+    intent: &Intent,
+    state: &VerifiedGroupState,
     root: &str,
     device: &str,
-) -> Option<&'a GroupStateSnapshot> {
+) -> Result<Option<GroupStateSnapshot>, SdkError> {
     if state.view().effective_role(root, device).is_some() {
-        return Some(state.snapshot());
+        return Ok(Some(state.snapshot().clone()));
     }
-    intent
+    let boundary = intent
         .terminal
         .iter()
+        .filter(|entry| entry.expires_at > now_unix_timestamp())
         .find(|entry| entry.root == root && entry.device.as_deref() == Some(device))
         .or_else(|| {
-            intent.terminal.iter().find(|entry| entry.root == root && entry.device.is_none())
+            intent.terminal.iter().find(|entry| {
+                entry.root == root
+                    && entry.device.is_none()
+                    && entry.expires_at > now_unix_timestamp()
+            })
+        });
+    boundary
+        .map(|entry| {
+            client
+                .account_db()?
+                .load_actor_state(&proof_key(&entry.snapshot.state_hash))?
+                .ok_or_else(|| {
+                    SdkError::InboundPending("removal boundary proof unavailable".into())
+                })
         })
-        .map(|entry| &entry.snapshot)
+        .transpose()
 }
 
 fn key(group: &str) -> String {
@@ -140,6 +220,26 @@ pub(crate) fn enqueue(
     client: &RamfluxClient,
     state: &VerifiedGroupState,
     previous: Option<&VerifiedGroupState>,
+) -> Result<(), SdkError> {
+    enqueue_kind(client, state, previous, false)
+}
+pub(super) fn enqueue_recovery(
+    client: &RamfluxClient,
+    state: &VerifiedGroupState,
+) -> Result<bool, SdkError> {
+    if client.account_db()?.shared_group_recovery_count()? >= MAX_GROUPS as u64
+        && !client.account_db()?.actor_state_exists(&key(&state.view().group_id))?
+    {
+        return Ok(false);
+    }
+    enqueue_kind(client, state, None, true)?;
+    Ok(true)
+}
+fn enqueue_kind(
+    client: &RamfluxClient,
+    state: &VerifiedGroupState,
+    previous: Option<&VerifiedGroupState>,
+    recovery: bool,
 ) -> Result<(), SdkError> {
     let db = client.account_db()?;
     let id = key(&state.view().group_id);
@@ -151,20 +251,31 @@ pub(crate) fn enqueue(
     let now = now_unix_timestamp();
     let mut intent = if let Some(mut old) = pending.filter(|old| old.expires_at > now) {
         merge_eligible(&mut eligible, old.eligible);
-        old.snapshot = state.snapshot().clone();
+        let changed = old.snapshot.state_hash != state.snapshot().state_hash;
+        old.snapshot = StatePointer::from_state(state);
         old.eligible = eligible;
-        old.delivered.clear();
+        if changed {
+            old.delivered.clear();
+        }
+        // Restart recipient discovery for new devices while preserving same-head acknowledgements.
         old.cursor = None;
         old.round_devices = 0;
         old
     } else {
         Intent {
-            snapshot: state.snapshot().clone(),
+            snapshot: StatePointer::from_state(state),
             eligible,
-            terminal: Vec::new(),
+            origin: if recovery { DeliveryOrigin::Recovery } else { DeliveryOrigin::Local },
+            priority: false,
+            terminal: db
+                .load_actor_state::<Vec<TerminalSnapshot>>(&boundary_key(&state.view().group_id))?
+                .unwrap_or_default(),
             created_at: now,
             active: None,
-            delivered: BTreeSet::new(),
+            delivered: db
+                .load_actor_state::<Delivered>(&delivered_key(&state.view().group_id))?
+                .filter(|receipt| receipt.state_hash == state.snapshot().state_hash)
+                .map_or_else(BTreeSet::new, |receipt| receipt.devices),
             attempt: 0,
             next_at: now,
             expires_at: now.saturating_add(3600),
@@ -174,37 +285,30 @@ pub(crate) fn enqueue(
             cursor: None,
         }
     };
+    intent.terminal.retain(|boundary| boundary.expires_at > now);
     if let Some(previous) = previous {
-        freeze_removals(&mut intent, previous, state);
+        freeze_removals(client, &mut intent, previous, state)?;
+        intent.priority |= previous.view().members.len() > state.view().members.len()
+            || previous.view().excluded != state.view().excluded;
     }
-    // A new mutation must not bypass an existing outage's backoff or extend its retry window.
-    intent.snapshot = state.snapshot().clone();
-    let mut all = db.list_actor_states::<Intent>(PREFIX)?;
-    all.retain(|row| row.snapshot.group_id != state.view().group_id);
-    if all.len() >= MAX_GROUPS {
-        return Err(SdkError::LocalBus("group state queue is full".into()));
+    if !recovery {
+        intent.origin = DeliveryOrigin::Local;
     }
-    all.push(intent.clone());
-    if serde_json::to_vec(&all)?.len() > MAX_PENDING_BYTES {
-        return Err(SdkError::LocalBus("group state queue byte budget exceeded".into()));
+    intent.terminal.retain(|boundary| boundary.expires_at > now);
+    for boundary in &intent.terminal {
+        let excluded = intent.eligible.entry(boundary.root.clone()).or_default();
+        if let Some(device) = &boundary.device {
+            excluded.remove(device);
+        }
     }
+    intent.snapshot = StatePointer::from_state(state);
     db.persist_actor_state(&id, &intent)?;
     Ok(())
 }
 pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    let pending = account.client.account_db()?.list_actor_states::<Intent>(PREFIX)?;
-    let after = account
-        .client
-        .account_db()?
-        .load_actor_state::<String>(DRIVER_PROGRESS)?
-        .unwrap_or_default();
-    let mut pending = pending;
-    pending.sort_by_key(|intent| key(&intent.snapshot.group_id));
-    let selected = pending
-        .iter()
-        .find(|intent| key(&intent.snapshot.group_id) > after)
-        .or_else(|| pending.first())
-        .cloned();
+    let db = account.client.account_db()?;
+    let after = db.load_actor_state::<String>(DRIVER_PROGRESS)?.unwrap_or_default();
+    let selected = db.next_shared_group_intent::<Intent>(&after, now_unix_timestamp())?;
     let Some(intent) = selected else {
         return Ok(0);
     };
@@ -224,7 +328,16 @@ async fn drive_one(
     if now >= intent.expires_at || (!intent.round_active && intent.attempt >= 8) {
         account.client.account_db()?.append_journal(&id,"group.state.delivery_failed",
                 &serde_json::json!({"group_id":intent.snapshot.group_id,"epoch":intent.snapshot.epoch,"reason":"retry_budget_exhausted"}),now,None)?;
-        account.client.account_db()?.remove_actor_state(&id)?;
+        if intent.terminal.iter().any(|boundary| boundary.expires_at > now) {
+            intent.attempt = 0;
+            intent.round_active = false;
+            intent.next_at = now.saturating_add(300);
+            intent.expires_at =
+                intent.terminal.iter().map(|boundary| boundary.expires_at).max().unwrap_or(now);
+            persist_intent(&account.client, &intent)?;
+        } else {
+            account.client.account_db()?.remove_actor_state(&id)?;
+        }
         return Ok(0);
     }
     if !intent.round_active {
@@ -276,15 +389,11 @@ fn prepare_intent(
     intent: &mut Intent,
     target: &str,
 ) -> Result<Option<VerifiedGroupState>, SdkError> {
-    let state = ramflux_crypto::verify_group_state_snapshot(intent.snapshot.clone())?;
     let latest = client.account_db()?.shared_group_state(&intent.snapshot.group_id)?;
     let Some(latest) = latest else {
         client.account_db()?.remove_actor_state(&key(&intent.snapshot.group_id))?;
         return Ok(None);
     };
-    if !latest.extends(&state) {
-        return Err(StorageError::GroupPermissionDenied.into());
-    }
     let state = latest;
     let own = client.owned_device_identity()?;
     let revoked = client.observed_device_set(own.root_commitment())?.is_some_and(|set| {
@@ -307,7 +416,7 @@ fn prepare_intent(
         intent.cursor = None;
         intent.round_devices = 0;
     }
-    intent.snapshot = state.snapshot().clone();
+    intent.snapshot = StatePointer::from_state(&state);
     // A retry uses a fresh carrier ID; the state and sender-key import remain idempotent.
     intent.active = None;
     merge_eligible(&mut intent.eligible, eligibility(&state));
@@ -326,12 +435,6 @@ fn defer_round(client: &RamfluxClient, intent: &mut Intent) -> Result<(), SdkErr
 }
 fn persist_intent(client: &RamfluxClient, intent: &Intent) -> Result<(), SdkError> {
     let db = client.account_db()?;
-    let mut pending = db.list_actor_states::<Intent>(PREFIX)?;
-    pending.retain(|row| row.snapshot.group_id != intent.snapshot.group_id);
-    pending.push(intent.clone());
-    if serde_json::to_vec(&pending)?.len() > MAX_PENDING_BYTES {
-        return Err(SdkError::LocalBus("group state queue byte budget exceeded".into()));
-    }
     db.persist_actor_state(&key(&intent.snapshot.group_id), intent)?;
     Ok(())
 }
@@ -353,6 +456,13 @@ async fn submit_staged(
             engine.submit_envelope(staged.envelope.clone()).await?;
         }
         intent.delivered.insert((staged.root.clone(), staged.device.clone()));
+        client.account_db()?.persist_actor_state(
+            &delivered_key(&intent.snapshot.group_id),
+            &Delivered {
+                state_hash: intent.snapshot.state_hash.clone(),
+                devices: intent.delivered.clone(),
+            },
+        )?;
         intent.active = None;
         persist_intent(client, intent)?;
     }

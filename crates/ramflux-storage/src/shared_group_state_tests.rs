@@ -47,7 +47,7 @@ fn create(
             previous_hash: None,
             change: GroupStateChange::Create {
                 conversation_id: "thread".into(),
-                max_members: 1000,
+                max_members: 200,
                 new_member_history: "no_history".into(),
                 name: Some("Checklist".into()),
             },

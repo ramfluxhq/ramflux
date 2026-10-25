@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Creator-root checkpoints bound replay work without giving members snapshot authority.
+//! Delegated root-signed checkpoints preserve creator-certified privilege authority.
 use super::{
     CryptoError, DeviceBranch, GroupStateActor, GroupStateChange, VerifiedGroupState,
     branch_matches, group_state_head_hash, identity_valid, invalid, root_matches,
@@ -18,6 +18,9 @@ use std::collections::BTreeSet;
 pub(super) fn body(checkpoint: &GroupStateCheckpoint) -> Value {
     let mut value = json!({"domain":GROUP_STATE_CHECKPOINT_DOMAIN,"schema":checkpoint.schema,
         "genesis":checkpoint.genesis,"state":checkpoint.state,"owner":checkpoint.owner});
+    if let Some(authority) = &checkpoint.authority {
+        value["authority"] = json!(authority);
+    }
     if !checkpoint.lineage.is_empty() {
         value["lineage"] = json!(checkpoint.lineage);
     }
@@ -29,12 +32,10 @@ pub(super) fn verify_checkpoint(
     let (genesis, _) = super::transition::derive(std::slice::from_ref(&checkpoint.genesis), None)?;
     let creator = &checkpoint.genesis.actor.identity;
     verify_group_state_actor(&checkpoint.owner)?;
-    if checkpoint.schema != GROUP_STATE_CHECKPOINT_DOMAIN
-        || checkpoint.owner.identity.root_commitment != creator.root_commitment
-        || checkpoint.owner.identity.principal_id != creator.principal_id
-    {
+    if checkpoint.schema != GROUP_STATE_CHECKPOINT_DOMAIN {
         return Err(invalid("checkpoint requires the creator root"));
     }
+    super::authority::verify(checkpoint)?;
     crate::verify_canonical_signature(
         &canonical_json_bytes(&body(checkpoint))?,
         &checkpoint.signature,
@@ -102,10 +103,12 @@ pub(super) fn verify_checkpoint(
         }
     }
     if owners != 1
-        || state.effective_role(
-            &checkpoint.owner.identity.root_commitment,
-            &checkpoint.owner.identity.device_id,
-        ) != Some(SharedGroupRole::Owner)
+        || state
+            .effective_role(
+                &checkpoint.owner.identity.root_commitment,
+                &checkpoint.owner.identity.device_id,
+            )
+            .is_none_or(|role| !matches!(role, SharedGroupRole::Owner | SharedGroupRole::Admin))
         || (state.epoch == 1 && state != &genesis)
     {
         return Err(invalid("invalid checkpoint creator authority"));
@@ -161,9 +164,9 @@ impl VerifiedGroupState {
     }
 }
 
-/// Compact already verified history using the immutable creator root's certified branch.
+/// Compact verified history under creator authority or an unchanged creator-certified delegation.
 /// # Errors
-/// Rejects non-owner roots, removed devices, invalid certificates or snapshot byte overflow.
+/// Rejects unauthorized writers, altered delegated privileges, invalid certificates or byte overflow.
 pub fn compact_group_state(
     root: &crate::IdentityRoot,
     branch: &DeviceBranch,
@@ -172,18 +175,21 @@ pub fn compact_group_state(
 ) -> Result<VerifiedGroupState, CryptoError> {
     branch_matches(branch, actor)?;
     root_matches(root, actor)?;
-    if actor.identity.root_commitment != previous.genesis().actor.identity.root_commitment
-        || previous.view.effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
-            != Some(SharedGroupRole::Owner)
+    if previous
+        .view
+        .effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
+        .is_none_or(|role| !matches!(role, SharedGroupRole::Owner | SharedGroupRole::Admin))
     {
-        return Err(invalid("only the creator root can compact group state"));
+        return Err(invalid("checkpoint writer requires owner or delegated admin authority"));
     }
+    let authority = super::authority::for_checkpoint(root, actor, previous)?;
     let mut checkpoint = GroupStateCheckpoint {
         schema: GROUP_STATE_CHECKPOINT_DOMAIN.into(),
         genesis: previous.genesis().clone(),
         state: previous.view.clone(),
         owner: actor.clone(),
         lineage: super::lineage::retained(previous),
+        authority: Some(authority),
         signature: String::new(),
     };
     checkpoint.signature = crate::sign_canonical_bytes_with_seed(
@@ -194,7 +200,7 @@ pub fn compact_group_state(
     sign_snapshot_parts(branch, actor, Vec::new(), Some(checkpoint))
 }
 
-/// Append one authorized operation, compacting creator-owned history before replay reaches its cap.
+/// Append an authorized operation, compacting delegated history before its replay or byte cap.
 /// # Errors
 /// Rejects unauthorized transitions, invalid writers, epoch overflow and exhausted snapshot budgets.
 pub fn advance_group_state(
@@ -204,10 +210,7 @@ pub fn advance_group_state(
     previous: &VerifiedGroupState,
     change: GroupStateChange,
 ) -> Result<VerifiedGroupState, CryptoError> {
-    let compact = previous.snapshot.operations.len() >= 32
-        && previous.genesis().actor.identity.root_commitment == actor.identity.root_commitment
-        && previous.view.effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
-            == Some(SharedGroupRole::Owner);
+    let compact = previous.snapshot.operations.len() >= 32;
     let base = if compact {
         compact_group_state(root, branch, actor, previous)?
     } else {
@@ -224,7 +227,30 @@ pub fn advance_group_state(
             change,
         },
     )?;
-    let mut operations = base.snapshot.operations;
-    operations.push(operation);
-    sign_snapshot_parts(branch, actor, operations, base.snapshot.checkpoint)
+    let mut operations = base.snapshot.operations.clone();
+    operations.push(operation.clone());
+    let advanced =
+        match sign_snapshot_parts(branch, actor, operations, base.snapshot.checkpoint.clone()) {
+            Ok(state) => state,
+            Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
+                ramflux_protocol::group_state::GroupStateLimit::Bytes,
+            ))) if !base.snapshot.operations.is_empty() => {
+                let compacted = compact_group_state(root, branch, actor, &base)?;
+                let mut operations = compacted.snapshot.operations;
+                operations.push(operation);
+                sign_snapshot_parts(branch, actor, operations, compacted.snapshot.checkpoint)?
+            }
+            Err(error) => return Err(error),
+        };
+    // A creator mutation that changes checkpoint authority publishes the new certificate
+    // immediately, so admins can keep compacting after the creator disconnects.
+    if actor.identity.root_commitment == advanced.genesis().actor.identity.root_commitment
+        && (super::authority::protected(previous.view())
+            != super::authority::protected(advanced.view())
+            || advanced.snapshot.checkpoint.is_none())
+    {
+        compact_group_state(root, branch, actor, &advanced)
+    } else {
+        Ok(advanced)
+    }
 }

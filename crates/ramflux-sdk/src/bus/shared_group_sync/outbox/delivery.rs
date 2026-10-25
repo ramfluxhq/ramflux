@@ -34,10 +34,6 @@ pub(super) async fn deliver(
             continue;
         };
         if !intent.cursor.as_ref().is_some_and(|cursor| cursor.root == root && !cursor.complete) {
-            intent.round_devices += manifest.devices.len();
-            if intent.round_devices > MAX_DEVICES {
-                return Err(SdkError::LocalBus("group state device fanout budget exceeded".into()));
-            }
             intent.cursor =
                 Some(RecipientCursor { root: root.clone(), after_device: None, complete: false });
             persist_intent(client, intent)?;
@@ -65,10 +61,17 @@ pub(super) async fn deliver(
             {
                 continue;
             }
+            if intent.round_devices >= MAX_DEVICES {
+                intent.round_devices = 0;
+                persist_intent(client, intent)?;
+                return Ok((delivered, DeliveryProgress::Continue));
+            }
             if attempts >= DEVICES_PER_DRAIN {
                 return Ok((delivered, DeliveryProgress::Continue));
             }
-            let Some(snapshot) = recipient_snapshot(intent, state, &root, &device.device_id) else {
+            let Some(snapshot) =
+                recipient_snapshot(client, intent, state, &root, &device.device_id)?
+            else {
                 continue;
             };
             let selected = if snapshot.state_hash == state.snapshot().state_hash {
@@ -81,6 +84,7 @@ pub(super) async fn deliver(
                 )?
             };
             attempts += 1;
+            intent.round_devices += 1;
             let name = device.device_id.clone();
             match tokio::time::timeout(
                 Duration::from_secs(3),
@@ -180,7 +184,12 @@ async fn deliver_one(
         target_delivery_id: device.target_delivery_id,
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: 3600,
+        ttl: if selected.view().effective_role(root, &device.device_id).is_some() {
+            3600
+        } else {
+            u32::try_from(super::BOUNDARY_SECONDS)
+                .map_err(|_| SdkError::LocalBus("removal boundary TTL overflow".into()))?
+        },
     };
     let federation = client.shared_group_federation_route(&state.group_id, root)?;
     let route = crate::client::routed::Route::group_control(&state.group_id);

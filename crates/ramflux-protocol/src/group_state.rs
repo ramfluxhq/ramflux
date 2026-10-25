@@ -8,11 +8,21 @@ pub const GROUP_STATE_SNAPSHOT_DOMAIN: &str = "ramflux.group_state.snapshot.v1";
 pub const GROUP_STATE_CHECKPOINT_DOMAIN: &str = "ramflux.group_state.checkpoint.v1";
 pub const GROUP_STATE_ACTOR_DOMAIN: &str = "ramflux.group_state.actor.v1";
 pub const MAX_GROUP_STATE_STEPS: usize = 512;
-pub const MAX_GROUP_STATE_BYTES: usize = 524_288;
-pub const MAX_GROUP_STATE_MEMBERS: usize = 1000;
+// Reserve 64 KiB of the 1 MiB gateway frame; the sealed path expands state by at most 10x.
+pub const MAX_GROUP_STATE_BYTES: usize = (1024 * 1024 - 64 * 1024) / 10;
+pub const MAX_GROUP_STATE_MEMBERS: usize = 200;
 pub const MAX_GROUP_STATE_EXCLUSIONS: usize = 2048;
 pub const MAX_GROUP_NAME_BYTES: usize = 256;
 pub const MAX_GROUP_STATE_LINEAGE: usize = 64;
+
+/// A deterministic group capacity refusal, distinct from an authentication failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum GroupStateLimit {
+    #[error("member limit exceeded")]
+    Members,
+    #[error("snapshot byte budget exceeded")]
+    Bytes,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,7 +129,7 @@ impl GroupStateSnapshot {
     /// Cryptographic history verification is mandatory after decoding.
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
         if bytes.len() > MAX_GROUP_STATE_BYTES {
-            return Err(crate::ProtocolError::InvalidGroupState("snapshot byte budget exceeded"));
+            return Err(crate::ProtocolError::GroupStateLimit(GroupStateLimit::Bytes));
         }
         crate::parse_i_json(bytes)
     }
@@ -187,7 +197,19 @@ pub struct GroupStateHead {
     pub head_hash: String,
 }
 
-/// The immutable creator root can compact verified history without granting that power to an admin.
+/// Creator-root delegation binds the privileged roster independently of delegated checkpoints.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupCheckpointAuthority {
+    pub genesis_hash: String,
+    pub epoch: u64,
+    pub head_hash: String,
+    pub members: Vec<SharedGroupMember>,
+    pub excluded: Vec<GroupDeviceExclusion>,
+    pub signature: String,
+}
+
+/// A root-signed checkpoint; delegated writers must preserve the creator-certified privileged roster.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupStateCheckpoint {
@@ -197,5 +219,7 @@ pub struct GroupStateCheckpoint {
     pub owner: GroupStateActor,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lineage: Vec<GroupStateHead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<GroupCheckpointAuthority>,
     pub signature: String,
 }

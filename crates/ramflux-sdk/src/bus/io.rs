@@ -127,6 +127,10 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     match error {
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
+        SdkError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(_))
+        | SdkError::Crypto(CryptoError::Protocol(
+            ramflux_protocol::ProtocolError::GroupStateLimit(_),
+        )) => "GroupStateCapacity",
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::SurfaceDeliveryTooLarge { .. } => "too_large",
         SdkError::SurfaceRefused { reason, .. } => reason.as_str(),

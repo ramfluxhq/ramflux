@@ -147,15 +147,15 @@ impl RamfluxClient {
         local_target: &str,
     ) -> Result<bool, SdkError> {
         let state = &prepared.state;
-        if self
-            .account_db()?
-            .group_snapshot_epoch(&state.view().group_id)?
-            .is_some_and(|epoch| epoch > state.view().epoch)
-        {
-            return Ok(false);
-        }
         self.account_db()?.write_transaction(|| {
             let changed = self.accept_shared_group_state(state, local_target)?;
+            if self
+                .account_db()?
+                .shared_group_state(&state.view().group_id)?
+                .is_none_or(|current| current.snapshot().state_hash != state.snapshot().state_hash)
+            {
+                return Ok(changed);
+            }
             let local = self.owned_device_identity()?;
             if let Some(bytes) = &prepared.distribution
                 && state.view().effective_role(local.root_commitment(), local.device_id()).is_some()
@@ -165,6 +165,11 @@ impl RamfluxClient {
                 let issuer = &state.snapshot().issuer.identity;
                 let source =
                     self.device_identity_for_root(&issuer.root_commitment, &issuer.device_id)?;
+                self.account_db()?.materialize_shared_group_member(
+                    &state.view().group_id,
+                    &source,
+                    issuer,
+                )?;
                 let checkpoint = crate::group::group_key_checkpoint(
                     &distribution.group_id,
                     &source,

@@ -30,7 +30,7 @@ fn create(owner: &Person) -> Result<VerifiedGroupState, CryptoError> {
             previous_hash: None,
             change: GroupStateChange::Create {
                 conversation_id: "group-thread".into(),
-                max_members: 1000,
+                max_members: 200,
                 new_member_history: "no_history".into(),
                 name: Some("Checklist".into()),
             },
@@ -296,7 +296,7 @@ fn creator_checkpoints_bound_replay_without_resetting_epochs_or_names() -> Resul
 }
 
 #[test]
-fn admin_cannot_rewrite_or_compact_an_authenticated_roster() -> Result<(), CryptoError> {
+fn delegated_admin_can_compact_but_cannot_rewrite_privileges() -> Result<(), CryptoError> {
     let owner = person("owner", "owner", 11, 12)?;
     let peer = person("peer", "peer", 21, 22)?;
     let initial = create(&owner)?;
@@ -307,7 +307,37 @@ fn admin_cannot_rewrite_or_compact_an_authenticated_roster() -> Result<(), Crypt
         &initial,
         GroupStateChange::Add { member: peer.actor.identity.clone(), role: SharedGroupRole::Admin },
     )?;
-    assert!(compact_group_state(&peer.root, &peer.branch, &peer.actor, &joined).is_err());
+    let delegated = compact_group_state(&peer.root, &peer.branch, &peer.actor, &joined)?;
+    assert_eq!(delegated.view(), joined.view());
+    let mut offline = delegated;
+    for index in 0..80 {
+        offline = advance_group_state(
+            &peer.root,
+            &peer.branch,
+            &peer.actor,
+            &offline,
+            GroupStateChange::SetName { name: format!("offline-admin-{index}") },
+        )?;
+    }
+    assert_eq!(offline.view().epoch, joined.view().epoch + 80);
+    assert!(offline.snapshot().operations.len() <= 32);
+    assert_eq!(verify_group_state_snapshot(offline.snapshot().clone())?.view(), offline.view());
+    let mut forged_privilege = offline.snapshot().clone();
+    let checkpoint = forged_privilege.checkpoint.as_mut().ok_or_else(|| invalid("checkpoint"))?;
+    checkpoint
+        .state
+        .members
+        .iter_mut()
+        .find(|member| member.identity == peer.actor.identity)
+        .ok_or_else(|| invalid("admin missing"))?
+        .role = SharedGroupRole::Owner;
+    checkpoint.signature = crate::sign_canonical_bytes_with_seed(
+        &canonical_json_bytes(&super::checkpoint::body(checkpoint))?,
+        peer.root.signing_key.to_bytes(),
+    );
+    forged_privilege.signature =
+        crate::sign_with_device_branch(&peer.branch, &snapshot_body(&forged_privilege))?;
+    assert!(verify_group_state_snapshot(forged_privilege).is_err());
     let compact = compact_group_state(&owner.root, &owner.branch, &owner.actor, &joined)?;
     let renamed = advance_group_state(
         &peer.root,

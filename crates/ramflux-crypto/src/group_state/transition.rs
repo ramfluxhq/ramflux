@@ -90,7 +90,10 @@ fn add(
     if state.members.len()
         >= usize::try_from(state.max_members).map_err(|_| invalid("member limit"))?
     {
-        return Err(invalid("group member limit exceeded"));
+        return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
+            ramflux_protocol::group_state::GroupStateLimit::Members,
+        )
+        .into());
     }
     if state.members.iter().any(|m| {
         m.identity.root_commitment == identity.root_commitment

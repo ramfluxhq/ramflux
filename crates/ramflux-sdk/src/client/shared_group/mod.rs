@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 mod bootstrap;
 mod federation;
+mod reconciliation;
 mod routes;
 pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 #[cfg(test)]
@@ -70,7 +71,7 @@ impl RamfluxClient {
                 previous_hash: None,
                 change: GroupStateChange::Create {
                     conversation_id: conversation.into(),
-                    max_members: 1000,
+                    max_members: 200,
                     new_member_history: "no_history".into(),
                     name,
                 },
@@ -99,10 +100,11 @@ impl RamfluxClient {
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             &actor,
             &previous,
-            change,
+            change.clone(),
         )?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&state, &actor)?;
+            self.record_group_write(&state, change)?;
             crate::bus::enqueue_shared_group(self, &state, Some(&previous))
         })?;
         Ok(state)
@@ -112,12 +114,21 @@ impl RamfluxClient {
         verified: &VerifiedGroupState,
         local_target: &str,
     ) -> Result<bool, SdkError> {
-        let actor = self.owned_group_actor(local_target)?;
-        let previous = self.account_db()?.shared_group_state(&verified.view().group_id)?;
-        if verified.member_storage_key(&actor.identity)?.is_none() && previous.is_none() {
-            return Err(invalid("first group snapshot does not grant local membership"));
-        }
-        Ok(self.account_db()?.commit_shared_group_state(verified, &actor)?)
+        self.account_db()?.write_transaction(|| {
+            let actor = self.owned_group_actor(local_target)?;
+            let previous = self.account_db()?.shared_group_state(&verified.view().group_id)?;
+            if verified.member_storage_key(&actor.identity)?.is_none() && previous.is_none() {
+                return Err(invalid("first group snapshot does not grant local membership"));
+            }
+            let Some(reconciled) = self.reconcile_group_state(verified, local_target)? else {
+                return Ok(false);
+            };
+            let changed = self.account_db()?.commit_shared_group_state(&reconciled, &actor)?;
+            if reconciled.snapshot().state_hash != verified.snapshot().state_hash {
+                crate::bus::enqueue_shared_group(self, &reconciled, previous.as_ref())?;
+            }
+            Ok(changed)
+        })
     }
     pub(crate) async fn verify_shared_group_source(
         &self,
@@ -126,7 +137,10 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         let issuer = &state.snapshot().issuer;
-        if issuer.identity.principal_id != entry.envelope.source_principal_id
+        let source = self.authenticated_device_identity(entry)?;
+        if issuer.identity.root_commitment != source.root_commitment()
+            || issuer.identity.device_id != source.device_id()
+            || issuer.identity.principal_id != entry.envelope.source_principal_id
             || issuer.identity.device_id != entry.envelope.source_device_id
         {
             return Err(invalid("group state issuer differs from authenticated transport"));

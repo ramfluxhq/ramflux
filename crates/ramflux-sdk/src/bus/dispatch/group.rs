@@ -1007,12 +1007,8 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             serde_json::from_slice(&distribution)?;
         let sender = account.client.owned_device_identity()?;
         let recipient = account.client.device_identity_for_root(&member_principal_commitment, recipient_device_id)?;
-        let distribution_key = format!("{}/{}",crate::group::distribution_envelope_key(group_id, &sender, &recipient, decoded_distribution.group_key_epoch)?,ramflux_protocol::hash_base64url("ramflux.group.distribution.content.v3",&distribution));
-        let envelope_id = if let Some(id) = account.client.account_db()?.load_actor_state::<String>(&distribution_key)? { id } else {
-            let id = format!("envelope_{}",ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
-            account.client.account_db()?.persist_actor_state(&distribution_key,&id)?;
-            id
-        };
+        let envelope_id = group_distribution_envelope_id(
+            &account.client, group_id, &sender, &recipient, &decoded_distribution)?;
         if account.client.direct_message_by_id(&envelope_id)?.is_some() {
             return Ok(Some(serde_json::json!({
                 "message_id": envelope_id,
@@ -1070,13 +1066,15 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             created_at: now_unix_timestamp(),
             ttl: 3_600,
         };
-        let payload_bytes = serde_json::to_vec(&payload)?;
+        let payload_bytes = group_distribution_payload(
+            &account.client, &engine.config, group_id, &payload)?;
         let value = send_group_sender_key_distribution_message(
             &account.client,
             &mut engine,
             &route,
             message,
             &payload_bytes,
+            group_id,
         )
         .await?;
         Ok(Some(value))
@@ -1086,18 +1084,63 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
     result
 }
 
+fn group_distribution_envelope_id(
+    client: &RamfluxClient,
+    group: &str,
+    sender: &ramflux_crypto::RootQualifiedDeviceRef,
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    distribution: &SdkGroupSenderKeyDistribution,
+) -> Result<String, SdkError> {
+    let mut key = crate::group::distribution_envelope_key(
+        group,
+        sender,
+        recipient,
+        distribution.group_key_epoch,
+    )?;
+    if let Some(head) = &distribution.group_state_hash {
+        key.push('/');
+        key.push_str(head);
+    }
+    key.push('/');
+    key.push_str(&ramflux_protocol::hash_base64url(
+        "ramflux.group.distribution.content.v3", &serde_json::to_vec(distribution)?,
+    ));
+    if let Some(id) = client.account_db()?.load_actor_state::<String>(&key)? {
+        return Ok(id);
+    }
+    let id =
+        format!("envelope_{}", ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
+    client.account_db()?.persist_actor_state(&key, &id)?;
+    Ok(id)
+}
+
+fn group_distribution_payload(
+    client: &RamfluxClient,
+    config: &GatewaySessionConfig,
+    group_id: &str,
+    legacy: &SdkGroupSenderKeyDistributionEnvelope,
+) -> Result<Vec<u8>, SdkError> {
+    if let Some(state) = client.account_db()?.shared_group_state(group_id)? {
+        let state = ramflux_crypto::resign_group_state_snapshot(
+            client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &client.owned_group_actor(&config.target_delivery_id)?,
+            &state,
+        )?;
+        client.shared_group_packet(&state, true)
+    } else {
+        Ok(serde_json::to_vec(legacy)?)
+    }
+}
+
 async fn send_group_sender_key_distribution_message(
     client: &RamfluxClient,
     engine: &mut GatewaySessionEngine,
     route: &LocalBusGroupMemberRoute,
     message: GatewayDirectMessage,
     payload: &[u8],
+    group_id: &str,
 ) -> Result<serde_json::Value, SdkError> {
-    let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(payload)?;
-    let bytes = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
-        .map_err(|_| SdkError::InboundRejected("invalid local distribution".to_owned()))?;
-    let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&bytes)?;
-    let kind = crate::client::routed::Route::group_control(&distribution.group_id);
+    let kind = crate::client::routed::Route::group_control(group_id);
     if let Some(federation) = route.federation.as_ref() {
         let response = client.send_plaintext_federated_direct_message_without_franking(
             engine, message, payload, federation, kind,

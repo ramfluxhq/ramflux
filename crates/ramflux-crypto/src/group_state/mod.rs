@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-authenticated group writers, signed history and monotonic snapshot proofs.
+mod authority;
 mod checkpoint;
 mod lineage;
 pub use lineage::GroupStateRelation;
@@ -239,7 +240,10 @@ fn sign_snapshot_parts(
     };
     snapshot.signature = crate::sign_with_device_branch(branch, &snapshot_body(&snapshot))?;
     if canonical_json_bytes(&snapshot)?.len() > MAX_GROUP_STATE_BYTES {
-        return Err(invalid("snapshot byte budget exceeded"));
+        return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
+            ramflux_protocol::group_state::GroupStateLimit::Bytes,
+        )
+        .into());
     }
     Ok(VerifiedGroupState { snapshot, view, heads })
 }
@@ -265,10 +269,14 @@ pub fn resign_group_state_snapshot(
 pub fn verify_group_state_snapshot(
     snapshot: GroupStateSnapshot,
 ) -> Result<VerifiedGroupState, CryptoError> {
-    if snapshot.schema != GROUP_STATE_SNAPSHOT_DOMAIN
-        || canonical_json_bytes(&snapshot)?.len() > MAX_GROUP_STATE_BYTES
-    {
-        return Err(invalid("invalid snapshot header or budget"));
+    if canonical_json_bytes(&snapshot)?.len() > MAX_GROUP_STATE_BYTES {
+        return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
+            ramflux_protocol::group_state::GroupStateLimit::Bytes,
+        )
+        .into());
+    }
+    if snapshot.schema != GROUP_STATE_SNAPSHOT_DOMAIN {
+        return Err(invalid("invalid snapshot header"));
     }
     verify_group_state_actor(&snapshot.issuer)?;
     let (view, mut heads) = transition::derive(&snapshot.operations, snapshot.checkpoint.as_ref())?;

@@ -319,3 +319,6 @@ fn shared_group_implicit_sibling_can_send_and_own_history_keeps_signed_names()
 
 #[path = "head_scope_tests.rs"]
 mod head_scope_tests;
+
+#[path = "fork_tests.rs"]
+mod fork_tests;

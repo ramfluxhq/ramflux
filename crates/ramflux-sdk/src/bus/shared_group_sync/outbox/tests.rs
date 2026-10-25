@@ -64,7 +64,7 @@ fn shared_group_queue_freezes_removed_recipients_without_resetting_outage_backof
     assert_eq!(db.list_actor_states::<Intent>(PREFIX)?.len(), 1);
     for device in ["phone", "unknown-sibling"] {
         let snapshot =
-            recipient_snapshot(&intent, &renamed, &peer.identity.root_commitment, device)
+            recipient_snapshot(&client, &intent, &renamed, &peer.identity.root_commitment, device)?
                 .ok_or(StorageError::GroupPermissionDenied)?;
         assert_eq!(snapshot.epoch, removed.view().epoch);
         assert_eq!(
@@ -74,7 +74,7 @@ fn shared_group_queue_freezes_removed_recipients_without_resetting_outage_backof
     }
     let owned = client.owned_device_identity()?;
     assert_eq!(
-        recipient_snapshot(&intent, &renamed, owned.root_commitment(), "owner")
+        recipient_snapshot(&client, &intent, &renamed, owned.root_commitment(), "owner")?
             .ok_or(StorageError::GroupPermissionDenied)?
             .epoch,
         renamed.view().epoch
@@ -87,7 +87,7 @@ fn shared_group_queue_freezes_removed_recipients_without_resetting_outage_backof
     enqueue(&client, &rejoined, Some(&renamed))?;
     let intent: Intent = db.load_actor_state(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(
-        recipient_snapshot(&intent, &rejoined, &peer.identity.root_commitment, "phone")
+        recipient_snapshot(&client, &intent, &rejoined, &peer.identity.root_commitment, "phone")?
             .ok_or(StorageError::GroupPermissionDenied)?
             .epoch,
         rejoined.view().epoch
@@ -160,13 +160,14 @@ async fn shared_group_bad_snapshot_does_not_prevent_another_group_getting_its_tu
     account.client.shared_group_create("z-good", "good-thread", None, "target")?;
     let bad = key("a-bad");
     let good = key("z-good");
-    let mut intent = account
+    let proof_key = format!("group-state/{}", ramflux_protocol::encode_base64url("a-bad"));
+    let mut proof: GroupStateSnapshot = account
         .client
         .account_db()?
-        .load_actor_state::<Intent>(&bad)?
+        .load_actor_state(&proof_key)?
         .ok_or(StorageError::GroupPermissionDenied)?;
-    intent.snapshot.signature = "invalid".into();
-    account.client.account_db()?.persist_actor_state(&bad, &intent)?;
+    proof.signature = "invalid".into();
+    account.client.account_db()?.persist_actor_state(&proof_key, &proof)?;
     assert_eq!(flush(&mut account).await?, 0);
     let bad = account
         .client
@@ -174,7 +175,6 @@ async fn shared_group_bad_snapshot_does_not_prevent_another_group_getting_its_tu
         .load_actor_state::<Intent>(&bad)?
         .ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(bad.attempt, 1);
-    assert!(!bad.round_active);
     assert_eq!(flush(&mut account).await?, 0);
     let good = account
         .client
@@ -234,18 +234,29 @@ fn shared_group_device_removal_keeps_its_boundary_when_the_root_is_removed_later
         .account_db()?
         .load_actor_state::<Intent>(&key("group"))?
         .ok_or(StorageError::GroupPermissionDenied)?;
-    let tablet =
-        recipient_snapshot(&intent, &root_removed, &peer.identity.root_commitment, "tablet")
-            .ok_or(StorageError::GroupPermissionDenied)?;
+    let tablet = recipient_snapshot(
+        client,
+        &intent,
+        &root_removed,
+        &peer.identity.root_commitment,
+        "tablet",
+    )?
+    .ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(tablet.epoch, device_removed.view().epoch);
     assert_eq!(
         ramflux_crypto::verify_group_state_snapshot(tablet.clone())?.view().name.as_deref(),
         Some("Original name")
     );
     assert_eq!(
-        recipient_snapshot(&intent, &root_removed, &peer.identity.root_commitment, "phone")
-            .ok_or(StorageError::GroupPermissionDenied)?
-            .epoch,
+        recipient_snapshot(
+            client,
+            &intent,
+            &root_removed,
+            &peer.identity.root_commitment,
+            "phone"
+        )?
+        .ok_or(StorageError::GroupPermissionDenied)?
+        .epoch,
         root_removed.view().epoch
     );
     drop(account);
@@ -286,6 +297,110 @@ fn shared_group_coalescing_during_round_eight_keeps_the_existing_retry_window()
     assert_eq!(coalesced.expires_at, deadline);
     assert_eq!(coalesced.next_at, next);
     assert_eq!(coalesced.snapshot.epoch, 2);
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn shared_group_same_head_coalescing_preserves_device_delivery_progress() -> Result<(), SdkError> {
+    let root = crate::bus::runtime_tests::root("group-preserve-delivered");
+    let account = crate::bus::runtime_tests::account(
+        &root,
+        "owner",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    let state = account.client.shared_group_create("group", "thread", None, "target")?;
+    let db = account.client.account_db()?;
+    let id = key("group");
+    let mut intent: Intent =
+        db.load_actor_state(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
+    let recipient = ("root".into(), "phone".into());
+    intent.delivered.insert(recipient.clone());
+    db.persist_actor_state(&id, &intent)?;
+    enqueue(&account.client, &state, None)?;
+    let same: Intent = db.load_actor_state(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
+    assert!(same.delivered.contains(&recipient));
+    let wire = serde_json::to_value(same)?;
+    assert!(wire["snapshot"].get("operations").is_none());
+    assert!(wire["snapshot"].get("checkpoint").is_none());
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_group_remove_commits_above_recovery_capacity_and_is_selected_first()
+-> Result<(), SdkError> {
+    let root = crate::bus::runtime_tests::root("group-local-priority");
+    let mut account = crate::bus::runtime_tests::account(
+        &root,
+        "owner",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    for index in 0..40 {
+        account.client.shared_group_create(
+            &format!("group-{index:02}"),
+            &format!("thread-{index}"),
+            None,
+            "target",
+        )?;
+    }
+    let peer = ramflux_crypto::certify_group_state_actor(
+        &ramflux_crypto::create_identity_root("peer", [41; 32]),
+        &ramflux_crypto::create_device_branch("peer", "phone", 1, [42; 32]),
+        "phone-target",
+    )?;
+    account.client.shared_group_change(
+        "group-39",
+        "target",
+        GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
+    )?;
+    let removed = account.client.shared_group_change(
+        "group-39",
+        "target",
+        GroupStateChange::Remove {
+            root_commitment: peer.identity.root_commitment,
+            device_id: "phone".into(),
+        },
+    )?;
+    assert_eq!(
+        account
+            .client
+            .account_db()?
+            .shared_group_state("group-39")?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .view(),
+        removed.view()
+    );
+    assert_eq!(account.client.account_db()?.list_actor_states::<Intent>(PREFIX)?.len(), 40);
+    // No gateway is needed: the progress pointer proves selection before the transport fails.
+    let _ = flush(&mut account).await;
+    assert_eq!(
+        account.client.account_db()?.load_actor_state::<String>(DRIVER_PROGRESS)?.as_deref(),
+        Some(key("group-39").as_str())
+    );
+    let mut intent: Intent = account
+        .client
+        .account_db()?
+        .load_actor_state(&key("group-39"))?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    intent.attempt = 8;
+    intent.round_active = false;
+    intent.next_at = 0;
+    let deadline = intent.terminal[0].expires_at;
+    account.client.account_db()?.persist_actor_state(&key("group-39"), &intent)?;
+    assert_eq!(flush(&mut account).await?, 0);
+    let retained: Intent = account
+        .client
+        .account_db()?
+        .load_actor_state(&key("group-39"))?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(retained.terminal[0].expires_at, deadline);
+    assert!(retained.expires_at > now_unix_timestamp() + 6 * 86400);
+    assert!(account.client.account_db()?.actor_state_exists(&boundary_key("group-39"))?);
     drop(account);
     std::fs::remove_dir_all(root)?;
     Ok(())

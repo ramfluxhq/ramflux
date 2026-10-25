@@ -4,7 +4,9 @@
 //! Atomic projections of opaque verified group state and root-qualified member pins.
 use super::AccountDb;
 use crate::StorageError;
-use ramflux_crypto::{VerifiedGroupState, verify_group_state_actor, verify_group_state_snapshot};
+use ramflux_crypto::{
+    GroupStateRelation, VerifiedGroupState, verify_group_state_actor, verify_group_state_snapshot,
+};
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupStateSnapshot};
 use rusqlite::params;
 use serde_json::json;
@@ -45,13 +47,18 @@ impl AccountDb {
         self.write_transaction(|| {
             let state = verified.view();
             let previous = self.shared_group_state(&state.group_id)?;
-            let changed = previous.as_ref().is_none_or(|old| state.epoch > old.view().epoch);
+            let changed = previous.as_ref().is_none_or(|old| state != old.view());
             if let Some(previous) = previous {
-                if state.epoch < previous.view().epoch { return Ok(false); }
-                if !verified.extends(&previous) { return Err(StorageError::GroupPermissionDenied); }
-                if state.epoch == previous.view().epoch {
-                    // A newer proof checkpoint may replace the same logical state, never its content.
-                    if state != previous.view() { return Err(StorageError::GroupPermissionDenied); }
+                if verified.snapshot().checkpoint.as_ref().is_some_and(|checkpoint|
+                    checkpoint.owner.identity.root_commitment != checkpoint.genesis.actor.identity.root_commitment
+                    && checkpoint.authority.as_ref().map_or(0, |authority| authority.epoch)
+                        < previous.snapshot().checkpoint.as_ref().and_then(|old| old.authority.as_ref()).map_or(0, |authority| authority.epoch)) {
+                    return Err(StorageError::GroupPermissionDenied);
+                }
+                match verified.relation_to(&previous)? {
+                    GroupStateRelation::Ancestor | GroupStateRelation::ExistingPreferred => return Ok(false),
+                    GroupStateRelation::Same | GroupStateRelation::Extension | GroupStateRelation::IncomingPreferred => {}
+                    GroupStateRelation::Unrelated => return Err(StorageError::GroupPermissionDenied),
                 }
             } else if self.group_snapshot_epoch(&state.group_id)?.is_some() {
                 // An unsolicited full-state proof cannot take over a legacy group with the same id.
