@@ -5,10 +5,7 @@
 //!
 //! Mailbox rows store the server-assigned retention deadline next to the entry. Index keys
 //! start with the zero-padded deadline, so a sweep is a prefix range scan up to `now`.
-use super::{
-    InboxEntry, NodeCoreError, ROUTER_INBOX_ENTRY_TABLE, ROUTER_REPLAY_TUPLE_TABLE,
-    inbox_retain_until,
-};
+use super::{InboxEntry, NodeCoreError, ROUTER_INBOX_ENTRY_TABLE, ROUTER_REPLAY_TUPLE_TABLE};
 use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -50,9 +47,18 @@ pub(super) fn decode_entry(bytes: &[u8]) -> Result<(InboxEntry, i64), NodeCoreEr
     let stored: StoredInboxEntry = serde_json::from_slice(bytes)
         .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
     let deadline = stored.retain_until.unwrap_or_else(|| {
-        inbox_retain_until(&stored.entry.envelope, stored.entry.envelope.created_at)
+        crate::inbox_legacy_retain_until(
+            &stored.entry.envelope,
+            i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX),
+        )
     });
     Ok((stored.entry, deadline))
+}
+
+fn has_stored_deadline(bytes: &[u8]) -> Result<bool, NodeCoreError> {
+    let stored: StoredInboxEntry = serde_json::from_slice(bytes)
+        .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
+    Ok(stored.retain_until.is_some())
 }
 
 pub(super) fn index_inbox_row(
@@ -98,18 +104,33 @@ pub(super) fn index_replay_row(
     Ok(())
 }
 
-/// One-time backfill for databases written before the indexes existed.
+/// Index format 2 stores a fixed deadline in every mailbox row.
+const FORMAT_VERSION: u8 = 2;
+
+/// One-time migration for databases written before the indexes or stored deadlines existed.
+/// Rows without a deadline get `min(created_at, now) + 7 d` (capped by the envelope expiry)
+/// written into the row, so a far-future row from an older build still expires.
 pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
     let mut format = txn.open_table(FORMAT).map_err(db_error)?;
-    if format.get("version").map_err(db_error)?.is_some() {
+    let version = format.get("version").map_err(db_error)?.map(|value| value.value());
+    if version.is_some_and(|version| version >= FORMAT_VERSION) {
         return Ok(());
     }
+    let migrated_at = i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX);
+    let mut rewrites = Vec::new();
     let mut inbox_index = Vec::new();
     for row in
         txn.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(db_error)?.iter().map_err(db_error)?
     {
         let (key, value) = row.map_err(db_error)?;
-        let (_entry, deadline) = decode_entry(value.value())?;
+        let deadline = if has_stored_deadline(value.value())? {
+            decode_entry(value.value())?.1
+        } else {
+            let (entry, _) = decode_entry(value.value())?;
+            let deadline = crate::inbox_legacy_retain_until(&entry.envelope, migrated_at);
+            rewrites.push((key.value().to_owned(), encode_entry(&entry, deadline)?));
+            deadline
+        };
         inbox_index.push(index_key(deadline, key.value()));
     }
     let mut replay_index = Vec::new();
@@ -121,6 +142,12 @@ pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError>
             .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
         replay_index.push(index_key(expires_at, key.value()));
     }
+    let mut rows = txn.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(db_error)?;
+    for (key, bytes) in rewrites {
+        rows.insert(key.as_str(), bytes.as_slice()).map_err(db_error)?;
+    }
+    drop(rows);
+    clear(txn)?;
     let mut table = txn.open_table(INBOX_EXPIRY).map_err(db_error)?;
     for key in inbox_index {
         table.insert(key.as_str(), [].as_slice()).map_err(db_error)?;
@@ -129,7 +156,7 @@ pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError>
     for key in replay_index {
         table.insert(key.as_str(), [].as_slice()).map_err(db_error)?;
     }
-    format.insert("version", 1).map_err(db_error)?;
+    format.insert("version", FORMAT_VERSION).map_err(db_error)?;
     Ok(())
 }
 

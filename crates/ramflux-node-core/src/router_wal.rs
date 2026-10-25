@@ -123,14 +123,15 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
     fn try_from(payload: StoredRouterWalPayload) -> Result<Self, Self::Error> {
         match payload {
             StoredRouterWalPayload::Submission { replay_key, replay_expires_at, entry } => {
+                let entry = entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?;
+                // Records from before acceptance times were logged: accepted no later than now.
+                let accepted_at =
+                    entry.as_ref().map(|entry| entry.envelope.created_at.min(router_wal_now()));
                 Ok(Self::Submission {
                     replay_key,
                     replay_expires_at,
-                    entry: entry
-                        .map(|entry| InboxEntry::try_from(*entry))
-                        .transpose()?
-                        .map(Box::new),
-                    accepted_at: None,
+                    entry: entry.map(Box::new),
+                    accepted_at,
                 })
             }
             StoredRouterWalPayload::SubmissionAccepted {

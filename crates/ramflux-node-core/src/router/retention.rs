@@ -3,6 +3,7 @@
 
 //! Delivery expiry and bounded cursor indexes share the mailbox shard's lock.
 use super::{RouterCore, envelope_target_index_shard_index, lock_unpoisoned};
+
 impl RouterCore {
     /// Cursors changed by expiry, dead-lettering or recovery since the last call.
     ///
@@ -13,6 +14,17 @@ impl RouterCore {
             .iter()
             .flat_map(|shard| lock_unpoisoned(shard).inbox.take_checkpoint_due())
             .collect()
+    }
+
+    /// Keeps cursors dirty after a failed checkpoint save, so the next sweep retries them.
+    pub fn requeue_retention_checkpoints(&self, cursors: &[crate::CursorAckState]) {
+        for cursor in cursors {
+            lock_unpoisoned(
+                &self.target_shards[super::target_shard_index(&cursor.target_delivery_id)],
+            )
+            .inbox
+            .requeue_checkpoints([cursor.target_delivery_id.clone()]);
+        }
     }
 
     /// Remove expired ciphertext and replay receipts from live service state.

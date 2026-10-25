@@ -12,7 +12,12 @@ pub(crate) fn sweep(
     let now = i64::try_from(request.effective_now())?;
     if !request.dry_run {
         let changed = router.state().sweep_delivery_retention(now);
-        router.store().retain_cursor_checkpoints(&router.state().take_retention_checkpoints())?;
+        let due = router.state().take_retention_checkpoints();
+        if let Err(error) = router.store().retain_cursor_checkpoints(&due) {
+            // Never drop a watermark: the next sweep retries these cursors.
+            router.state().requeue_retention_checkpoints(&due);
+            return Err(error.into());
+        }
         if changed > 0 {
             router.state().persist_identity_registry(router.store())?;
         }

@@ -84,6 +84,18 @@ pub fn inbox_retain_until(envelope: &ramflux_protocol::Envelope, accepted_at: i6
         .min(accepted_at.saturating_add(cap))
 }
 
+/// Deadline for a delivery stored before acceptance times were recorded: it is treated as
+/// accepted at the earlier of its creation and `migrated_at`, so a far-future `created_at`
+/// written by an older build still expires seven days after the upgrade.
+#[must_use]
+pub fn inbox_legacy_retain_until(envelope: &ramflux_protocol::Envelope, migrated_at: i64) -> i64 {
+    inbox_retain_until(envelope, envelope.created_at.min(migrated_at))
+}
+
+fn server_now() -> i64 {
+    i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX)
+}
+
 impl CursorAckState {
     fn bound_receipts(&mut self) {
         if self.recent_ack_ids.is_empty() {
@@ -214,7 +226,7 @@ impl OpaqueDeviceInbox {
             .get(&entry.target_delivery_id)
             .and_then(|deadlines| deadlines.get(&entry.inbox_seq))
             .copied()
-            .unwrap_or_else(|| inbox_retain_until(&entry.envelope, entry.envelope.created_at))
+            .unwrap_or_else(|| inbox_legacy_retain_until(&entry.envelope, server_now()))
     }
 
     fn set_deadline(&mut self, target: &str, seq: u64, deadline: i64) {
@@ -231,6 +243,28 @@ impl OpaqueDeviceInbox {
     fn ensure_expiry_index(&mut self) {
         if self.expiry.ready {
             return;
+        }
+        // Fix deadlines missing from older snapshots once, so they stop moving with the clock.
+        let migrated_at = server_now();
+        let missing: Vec<(String, u64, i64)> = self
+            .pending
+            .values()
+            .flatten()
+            .filter(|entry| {
+                self.retain_until
+                    .get(&entry.target_delivery_id)
+                    .is_none_or(|deadlines| !deadlines.contains_key(&entry.inbox_seq))
+            })
+            .map(|entry| {
+                (
+                    entry.target_delivery_id.clone(),
+                    entry.inbox_seq,
+                    inbox_legacy_retain_until(&entry.envelope, migrated_at),
+                )
+            })
+            .collect();
+        for (target, seq, deadline) in missing {
+            self.retain_until.entry(target).or_default().insert(seq, deadline);
         }
         let mut due = BTreeSet::new();
         for entries in self.pending.values() {
@@ -586,6 +620,15 @@ impl OpaqueDeviceInbox {
             .collect()
     }
 
+    /// Marks cursors whose checkpoint could not be saved as due again.
+    pub(crate) fn requeue_checkpoints(&mut self, targets: impl IntoIterator<Item = String>) {
+        for target in targets {
+            if self.cursors.contains_key(&target) {
+                self.checkpoint_due.insert(target);
+            }
+        }
+    }
+
     /// Never reuse a sequence that a recovered log already issued, even if it expired.
     pub(crate) fn observe_issued_seq(&mut self, target: &str, seq: u64) {
         let next_seq = self.next_seq.entry(target.to_owned()).or_insert(1);
@@ -638,7 +681,7 @@ impl OpaqueDeviceInbox {
         let target = entry.target_delivery_id.clone();
         let seq = entry.inbox_seq;
         let deadline = retain_until
-            .unwrap_or_else(|| inbox_retain_until(&entry.envelope, entry.envelope.created_at));
+            .unwrap_or_else(|| inbox_legacy_retain_until(&entry.envelope, server_now()));
         let entries = self.pending.entry(target.clone()).or_default();
         if !entries.iter().any(|existing| existing.inbox_seq == seq) {
             entries.push(entry);
