@@ -244,7 +244,10 @@ fn load_registration_policy<'de, D>(deserializer: D) -> Result<RegistrationPolic
 where
     D: serde::Deserializer<'de>,
 {
-    let mut policy = RegistrationPolicy::deserialize(deserializer)?;
+    Ok(normalize_registration_policy(RegistrationPolicy::deserialize(deserializer)?))
+}
+
+fn normalize_registration_policy(mut policy: RegistrationPolicy) -> RegistrationPolicy {
     let defaults = RegistrationPolicy::default();
     if matches!(policy.per_source_ip_registration_limit, 0 | u32::MAX) {
         policy.per_source_ip_registration_limit = defaults.per_source_ip_registration_limit;
@@ -252,7 +255,7 @@ where
     if policy.registration_window_seconds == 0 {
         policy.registration_window_seconds = defaults.registration_window_seconds;
     }
-    Ok(policy)
+    policy
 }
 
 impl IdentityRegistry {
@@ -369,7 +372,7 @@ impl IdentityRegistry {
     }
 
     pub fn set_registration_policy(&mut self, policy: RegistrationPolicy) {
-        self.registration_policy = policy;
+        self.registration_policy = normalize_registration_policy(policy);
     }
 
     #[must_use]

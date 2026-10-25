@@ -382,3 +382,34 @@ fn reopening_legacy_registration_policies_restores_finite_admission_and_keeps_op
     }
     Ok(())
 }
+
+#[test]
+fn registration_policy_setters_and_snapshot_loads_share_finite_normalization()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (limit, window) in [(0, 0), (u32::MAX, 0), (7, 13), (1, u64::MAX)] {
+        let policy = RegistrationPolicy {
+            per_source_ip_registration_limit: limit,
+            registration_window_seconds: window,
+            challenge_policy: RegistrationChallengePolicy::Pow,
+            pow_difficulty_bits: 9,
+        };
+        let mut registry = IdentityRegistry::new();
+        registry.set_registration_policy(policy.clone());
+        let mut snapshot = serde_json::to_value(IdentityRegistry::new())?;
+        snapshot["registration_policy"] = serde_json::to_value(policy)?;
+        let loaded: IdentityRegistry = serde_json::from_value(snapshot)?;
+        assert_eq!(registry.registration_policy(), loaded.registration_policy());
+        let expected_limit = if matches!(limit, 0 | u32::MAX) { 120 } else { limit };
+        let expected_window = if window == 0 { 60 } else { window };
+        assert_eq!(registry.registration_policy().per_source_ip_registration_limit, expected_limit);
+        assert_eq!(registry.registration_policy().registration_window_seconds, expected_window);
+        assert_eq!(registry.registration_policy().pow_difficulty_bits, 9);
+        assert_eq!(
+            registry.registration_policy().challenge_policy,
+            RegistrationChallengePolicy::Pow
+        );
+        let restarted: IdentityRegistry = serde_json::from_slice(&serde_json::to_vec(&registry)?)?;
+        assert_eq!(registry.registration_policy(), restarted.registration_policy());
+    }
+    Ok(())
+}
