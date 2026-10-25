@@ -495,6 +495,27 @@ fn gateway_session_id_for_open(
     Some(metadata.session_id)
 }
 
+/// Marks the authenticated session live with server time. Retention metadata is recreated if
+/// it is missing, so an authenticated session never ends because its record was pruned.
+fn refresh_session_activity(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+) -> anyhow::Result<()> {
+    let mut state = gateway_state(&context.state)?;
+    let now = ramflux_node_core::now_unix_seconds();
+    if state.mark_live(&runtime.session_id, now).is_err() {
+        state.open_session(ramflux_node_core::GatewaySession {
+            session_id: runtime.session_id.clone(),
+            target_delivery_id: runtime.target_delivery_id.clone(),
+            device_id: runtime.device_id.clone(),
+            opened_at: now,
+            last_heartbeat_at: now,
+            lifecycle: ramflux_node_core::GatewaySessionLifecycle::Live,
+        });
+    }
+    Ok(())
+}
+
 /// Configured resume window; session retention uses the same value.
 pub(crate) fn gateway_resume_window_seconds() -> u64 {
     resume_window_from(std::env::var("RAMFLUX_GATEWAY_RESUME_WINDOW_SECONDS").ok().as_deref())
@@ -520,21 +541,8 @@ pub(crate) async fn run_gateway_session_loop(
     context: GatewayQuicContext,
     runtime: GatewaySessionRuntime,
 ) -> anyhow::Result<()> {
-    {
-        // This helper enters after authentication; mirror the session opened by that phase.
-        let mut state = gateway_state(&context.state)?;
-        if state.session(&runtime.session_id).is_none() {
-            let now = ramflux_node_core::now_unix_seconds();
-            state.open_session(ramflux_node_core::GatewaySession {
-                session_id: runtime.session_id.clone(),
-                target_delivery_id: runtime.target_delivery_id.clone(),
-                device_id: runtime.device_id.clone(),
-                opened_at: now,
-                last_heartbeat_at: now,
-                lifecycle: ramflux_node_core::GatewaySessionLifecycle::Live,
-            });
-        }
-    }
+    // This helper enters after authentication; mirror the session opened by that phase.
+    refresh_session_activity(&context, &runtime)?;
     run_gateway_session_loop_until_closed(send, recv, context, runtime, None).await
 }
 
@@ -586,8 +594,7 @@ async fn run_gateway_session_loop_until_closed(
                 continue;
             }
         };
-        gateway_state(&context.state)?
-            .mark_live(&runtime.session_id, ramflux_node_core::now_unix_seconds())?;
+        refresh_session_activity(&context, &runtime)?;
         let request_kind = super::session_response::request_kind(&frame);
         let result = async {
             match frame {
