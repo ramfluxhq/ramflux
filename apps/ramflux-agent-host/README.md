@@ -141,8 +141,8 @@ that gated slice on a container host; unit tests do not claim realnet acceptance
 fallback and host-restart equivalence.
 
 Malformed read-model fields are permanent typed refusals, never transport retries.
-Only connection failures and explicit Unavailable/Busy/DeadlineExceeded refusals
-reconnect the host. Per-poll validation failures are recorded without abandoning the
+Connection failures, explicit Unavailable/Busy/DeadlineExceeded refusals and gateway
+authentication races with a valid local identity reconnect the host. Per-poll validation failures are recorded without abandoning the
 event stream; an unchanged poll refusal does not rewrite the checkpoint. Authentication
 loss on an identity method stops the host. An `Unauthenticated` refusal on another
 method rechecks `account.status`, `device.list` and the self identity directory. A

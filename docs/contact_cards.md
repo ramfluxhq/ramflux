@@ -55,9 +55,9 @@ The existing explicit federation route API remains separate.
 
 User input errors return `ValidationFailed` and `reason_code`: `unknown_principal`,
 `invalid_card`, `card_signature_invalid`, `card_expired`, `self_contact`,
-`already_contact`, `home_insecure_transport`, `home_profile_missing`, or
-`home_profile_stale` and `node_fingerprint_mismatch`. An unsupported card home node uses `invalid_card` with an explanatory
-message. Transient directory/transport failures return `Unavailable`, preserving the
+`already_contact`, `home_insecure_transport`, `home_profile_missing`,
+`home_profile_stale`, or `node_fingerprint_mismatch`. An unsupported card home node
+uses `invalid_card` with an explanatory message. Transient directory/transport failures return `Unavailable`, preserving the
 source error for socket diagnostics. Failed resolution creates no accepted contact.
 
 ## Name ownership and authenticated lookup
