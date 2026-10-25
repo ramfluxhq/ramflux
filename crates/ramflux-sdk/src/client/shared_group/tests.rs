@@ -257,6 +257,11 @@ fn shared_group_implicit_sibling_can_send_and_own_history_keeps_signed_names()
         },
     )?;
     peer.accept_shared_group_state(&state, "target-phone")?;
+    let routes = owner.group_member_routes("group")?;
+    assert_eq!(routes.len(), 3, "both same-name roots and the implicit sibling need routes");
+    let roots = routes.iter().filter(|route| route.member_id == "phone")
+        .filter_map(|route| route.member_principal_commitment.as_deref()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(roots.len(),2);
     let sibling_id = peer.device_identity_for_root(&own.principal_commitment, "laptop")?;
     assert!(peer.account_db()?.group_member_key_binding("group", &sibling_id)?.is_none());
     peer.require_group_sender_pin("group", "owner", &sibling_id)?;
