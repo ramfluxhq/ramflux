@@ -224,7 +224,7 @@ fn choose_fork_name(
             base,
             GroupStateChange::SetName { name: name.clone() },
         )?;
-        let preferred = candidate.relation_to(&removed)?
+        let preferred = candidate.relation_to(removed)?
             == ramflux_crypto::GroupStateRelation::ExistingPreferred;
         if preferred == removal_wins {
             selected = Some(name);
