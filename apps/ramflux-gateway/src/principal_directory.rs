@@ -34,9 +34,7 @@ pub(crate) async fn fetch(
     let response: PrincipalLookupResponse<ramflux_node_core::DeviceManifestResponse> =
         router_post_json_async(&context.router, "/mvp1/principal-lookup", &request).await?;
     let frame = ramflux_node_core::GatewayServerFrame::PrincipalManifest { response };
-    let mut send = send.lock().await;
-    ramflux_transport::write_gateway_session_json(&mut **send, &frame).await?;
-    Ok(())
+    crate::session::write_gateway_handle(send, &frame).await
 }
 pub(crate) fn registration_forwarding_failure(
     error: &dyn std::fmt::Display,

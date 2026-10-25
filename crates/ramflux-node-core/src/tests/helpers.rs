@@ -806,11 +806,13 @@ pub(super) fn gateway_auth_frame_with_seed(
 }
 
 pub(super) fn temp_store_path(test_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let path = std::env::temp_dir().join(format!(
-        "ramflux-node-core-{test_name}-{}-{}.redb",
+        "ramflux-node-core-{test_name}-{}-{}-{}.redb",
         std::process::id(),
-        elapsed.as_nanos()
+        elapsed.as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     Ok(path)
 }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
+use crate::EnvelopeAuthorityReason::StaleEpoch;
 
 #[test]
 fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error::Error>> {
@@ -737,11 +738,11 @@ fn foreign_epoch_fences_survive_capacity_and_restart_and_gateway_cannot_assert_a
             Some(&router_store),
             crate::RouterEnvelopeOrigin::Federation
         ),
-        Err(NodeCoreError::ItestHttp(_))
+        Err(NodeCoreError::SourceAuthorityRefused { reason_code: StaleEpoch })
     ));
     assert!(matches!(
         federation_store.accept_inbound_forward_once(&refused_source, &refused_old, 1_760_000_014),
-        Err(NodeCoreError::ItestHttp(_))
+        Err(NodeCoreError::SourceAuthorityRefused { reason_code: StaleEpoch })
     ));
     assert!(
         router
@@ -838,11 +839,11 @@ fn refuse_new_root_with_permanent_fence(
             Some(router_store),
             crate::RouterEnvelopeOrigin::Federation
         ),
-        Err(NodeCoreError::ItestHttp(_))
+        Err(NodeCoreError::SourceAuthorityRefused { reason_code: StaleEpoch })
     ));
     assert!(matches!(
         federation_store.accept_inbound_forward_once(&refused_source, &refused_old, 1_760_000_012),
-        Err(NodeCoreError::ItestHttp(_))
+        Err(NodeCoreError::SourceAuthorityRefused { reason_code: StaleEpoch })
     ));
     Ok((refused_old, refused_source))
 }

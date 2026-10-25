@@ -176,15 +176,9 @@ pub(crate) async fn handle_gateway_session_transport(
         return Ok(());
     };
 
-    let registered_auth_key = registered_gateway_source(&context, &auth_frame, &open).await?;
-    let Some(registered_auth_key) = registered_auth_key else {
-        write_gateway_frame(
-            &mut *send,
-            &ramflux_node_core::GatewayServerFrame::Nack {
-                reason: format!("auth rejected: unregistered device {}", open.device_id),
-            },
-        )
-        .await?;
+    let Some(registered_auth_key) =
+        lookup_gateway_auth_source(&mut *send, &context, &auth_frame, &open).await?
+    else {
         return Ok(());
     };
 
@@ -230,6 +224,40 @@ pub(crate) async fn handle_gateway_session_transport(
     let result = run_gateway_session_loop(send, recv, context.clone(), runtime).await;
     context.hub.unregister(&target_delivery_id, &session_id).await;
     result
+}
+
+async fn lookup_gateway_auth_source(
+    send: &mut (impl ramflux_transport::GatewaySessionFrameSink + ?Sized),
+    context: &GatewayQuicContext,
+    auth_frame: &ramflux_node_core::GatewayAuthFrame,
+    open: &ramflux_node_core::GatewayOpenFrame,
+) -> anyhow::Result<Option<ramflux_node_core::DeviceAuthKeyResponse>> {
+    let registered_auth_key = match registered_gateway_source(context, auth_frame, open).await {
+        Ok(key) => key,
+        Err(error) => {
+            tracing::warn!(%error, request_kind="auth", "gateway authentication source rejected");
+            write_gateway_frame(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: "gateway_auth_source_rejected".into(),
+                },
+            )
+            .await?;
+            return Ok(None);
+        }
+    };
+    let Some(registered_auth_key) = registered_auth_key else {
+        write_gateway_frame(
+            send,
+            &ramflux_node_core::GatewayServerFrame::Nack {
+                reason: format!("auth rejected: unregistered device {}", open.device_id),
+            },
+        )
+        .await?;
+        return Ok(None);
+    };
+
+    Ok(Some(registered_auth_key))
 }
 
 async fn registered_gateway_source(
@@ -440,127 +468,146 @@ pub(crate) async fn run_gateway_session_loop(
                 return Ok(());
             }
         };
-        let frame =
-            match ramflux_protocol::parse_i_json::<ramflux_node_core::GatewayClientFrame>(&bytes) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    if let Some(response) = crate::ingress::registration_rejection(&bytes) {
-                        let mut sink = send.lock().await;
-                        ramflux_transport::write_gateway_session_json(&mut **sink, &response)
-                            .await?;
-                        continue;
-                    }
-                    return Err(error.into());
+        let frame = match ramflux_protocol::parse_i_json::<ramflux_node_core::GatewayClientFrame>(
+            &bytes,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Some(response) = crate::ingress::registration_rejection(&bytes) {
+                    let mut sink = send.lock().await;
+                    ramflux_transport::write_gateway_session_json(&mut **sink, &response).await?;
+                    continue;
                 }
-            };
-        match frame {
-            ramflux_node_core::GatewayClientFrame::Submit { submit } => {
-                handle_gateway_submit(&send, &context, &runtime, &submit).await?;
-            }
-            ramflux_node_core::GatewayClientFrame::OwnDeviceFanout { fanout } => {
-                handle_gateway_own_device_fanout(&send, &context, &runtime, &fanout).await?;
-            }
-            ramflux_node_core::GatewayClientFrame::IdentityRegister { request } => {
-                let response = crate::registration::forward(
-                    &context.router,
-                    serde_json::json!(request),
-                    context.remote_addr.ip(),
-                );
-                write_gateway_handle(&send, &crate::registration::session_response(response))
-                    .await?;
-            }
-            ramflux_node_core::GatewayClientFrame::PrekeyPublish { request } => {
-                let response: ramflux_node_core::PrekeyResponse =
-                    router_post_json(&context.router, "/mvp1/prekey/publish", &request)?;
+                tracing::warn!(%error, request_kind="invalid", "gateway session request rejected");
                 write_gateway_handle(
                     &send,
-                    &ramflux_node_core::GatewayServerFrame::PrekeyPublished { response },
+                    &ramflux_node_core::GatewayServerFrame::Nack {
+                        reason: "gateway_request_invalid".into(),
+                    },
                 )
                 .await?;
+                continue;
             }
-            ramflux_node_core::GatewayClientFrame::PrincipalManifestFetch { principal_id } => {
-                crate::principal_directory::fetch(&send, &context, &runtime, principal_id).await?;
-            }
-            ramflux_node_core::GatewayClientFrame::PrekeyFetch { device_id } => {
-                let response: ramflux_node_core::PrekeyResponse = match router_get_json_async(
-                    &context.router,
-                    &format!("/mvp1/prekey/{device_id}"),
-                )
-                .await
-                {
-                    Ok(response) => response,
-                    Err(error) => {
+        };
+        let request_kind = super::session_response::request_kind(&frame);
+        let result = async {
+            match frame {
+                ramflux_node_core::GatewayClientFrame::Submit { submit } => {
+                    handle_gateway_submit(&send, &context, &runtime, &submit).await?;
+                }
+                ramflux_node_core::GatewayClientFrame::OwnDeviceFanout { fanout } => {
+                    handle_gateway_own_device_fanout(&send, &context, &runtime, &fanout).await?;
+                }
+                ramflux_node_core::GatewayClientFrame::IdentityRegister { request } => {
+                    let response = crate::registration::forward(
+                        &context.router,
+                        serde_json::json!(request),
+                        context.remote_addr.ip(),
+                    );
+                    write_gateway_handle(&send, &crate::registration::session_response(response))
+                        .await?;
+                }
+                ramflux_node_core::GatewayClientFrame::PrekeyPublish { request } => {
+                    let response: ramflux_node_core::PrekeyResponse =
+                        router_post_json(&context.router, "/mvp1/prekey/publish", &request)?;
+                    write_gateway_handle(
+                        &send,
+                        &ramflux_node_core::GatewayServerFrame::PrekeyPublished { response },
+                    )
+                    .await?;
+                }
+                ramflux_node_core::GatewayClientFrame::PrincipalManifestFetch { principal_id } => {
+                    crate::principal_directory::fetch(&send, &context, &runtime, principal_id)
+                        .await?;
+                }
+                ramflux_node_core::GatewayClientFrame::PrekeyFetch { device_id } => {
+                    let response: ramflux_node_core::PrekeyResponse = router_get_json_async(
+                        &context.router,
+                        &format!("/mvp1/prekey/{device_id}"),
+                    )
+                    .await?;
+                    write_gateway_handle(
+                        &send,
+                        &ramflux_node_core::GatewayServerFrame::Prekey { response },
+                    )
+                    .await?;
+                }
+                ramflux_node_core::GatewayClientFrame::RelayTokenIssue { request } => {
+                    // T22-A1 / RQ-04: the legacy v2 shared-HMAC relay-token issuance path is compiled
+                    // only under `itest-local-mint`. Production gateways reject the frame outright and
+                    // hold no relay service key.
+                    #[cfg(feature = "itest-local-mint")]
+                    handle_gateway_relay_token_issue(&send, &context, &runtime, &request).await?;
+                    #[cfg(not(feature = "itest-local-mint"))]
+                    {
+                        let _ = &request;
                         write_gateway_handle(
                             &send,
                             &ramflux_node_core::GatewayServerFrame::Nack {
-                                reason: error.to_string(),
+                                reason: "v2 relay token issuance is not supported".to_owned(),
                             },
                         )
                         .await?;
-                        continue;
                     }
-                };
-                write_gateway_handle(
-                    &send,
-                    &ramflux_node_core::GatewayServerFrame::Prekey { response },
-                )
-                .await?;
-            }
-            ramflux_node_core::GatewayClientFrame::RelayTokenIssue { request } => {
-                // T22-A1 / RQ-04: the legacy v2 shared-HMAC relay-token issuance path is compiled
-                // only under `itest-local-mint`. Production gateways reject the frame outright and
-                // hold no relay service key.
-                #[cfg(feature = "itest-local-mint")]
-                handle_gateway_relay_token_issue(&send, &context, &runtime, &request).await?;
-                #[cfg(not(feature = "itest-local-mint"))]
-                {
-                    let _ = &request;
+                }
+                ramflux_node_core::GatewayClientFrame::RelayTokenV3Issue { request } => {
+                    handle_gateway_relay_token_v3_issue(&send, &context, &runtime, &request)
+                        .await?;
+                }
+                ramflux_node_core::GatewayClientFrame::Ack { ack } => {
+                    handle_gateway_ack(&send, &context, &runtime, &ack).await?;
+                }
+                ramflux_node_core::GatewayClientFrame::Cursor { target_delivery_id } => {
+                    let cursor = router_cursor_async(&context.router, &target_delivery_id).await?;
+                    write_gateway_handle(
+                        &send,
+                        &ramflux_node_core::GatewayServerFrame::Cursor { cursor },
+                    )
+                    .await?;
+                }
+                ramflux_node_core::GatewayClientFrame::Resume { resume } => {
+                    handle_gateway_resume(&send, &context, &runtime, &resume).await?;
+                }
+                ramflux_node_core::GatewayClientFrame::Nack { nack } => {
+                    handle_gateway_nack(&send, &context, &runtime, &nack).await?;
+                }
+                ramflux_node_core::GatewayClientFrame::Heartbeat { now } => {
+                    write_gateway_handle(
+                        &send,
+                        &ramflux_node_core::GatewayServerFrame::Heartbeat { now },
+                    )
+                    .await?;
+                }
+                ramflux_node_core::GatewayClientFrame::Close { reason } => {
+                    handle_gateway_close(&send, &context, &runtime, reason).await?;
+                    return Ok::<bool, anyhow::Error>(true);
+                }
+                ramflux_node_core::GatewayClientFrame::Open { .. }
+                | ramflux_node_core::GatewayClientFrame::Auth { .. } => {
                     write_gateway_handle(
                         &send,
                         &ramflux_node_core::GatewayServerFrame::Nack {
-                            reason: "v2 relay token issuance is not supported".to_owned(),
+                            reason: "unexpected gateway session frame".to_owned(),
                         },
                     )
                     .await?;
                 }
             }
-            ramflux_node_core::GatewayClientFrame::RelayTokenV3Issue { request } => {
-                handle_gateway_relay_token_v3_issue(&send, &context, &runtime, &request).await?;
-            }
-            ramflux_node_core::GatewayClientFrame::Ack { ack } => {
-                handle_gateway_ack(&send, &context, &runtime, &ack).await?;
-            }
-            ramflux_node_core::GatewayClientFrame::Cursor { target_delivery_id } => {
-                let cursor = router_cursor_async(&context.router, &target_delivery_id).await?;
-                write_gateway_handle(
-                    &send,
-                    &ramflux_node_core::GatewayServerFrame::Cursor { cursor },
-                )
-                .await?;
-            }
-            ramflux_node_core::GatewayClientFrame::Resume { resume } => {
-                handle_gateway_resume(&send, &context, &runtime, &resume).await?;
-            }
-            ramflux_node_core::GatewayClientFrame::Nack { nack } => {
-                handle_gateway_nack(&send, &context, &runtime, &nack).await?;
-            }
-            ramflux_node_core::GatewayClientFrame::Heartbeat { now } => {
-                write_gateway_handle(
-                    &send,
-                    &ramflux_node_core::GatewayServerFrame::Heartbeat { now },
-                )
-                .await?;
-            }
-            ramflux_node_core::GatewayClientFrame::Close { reason } => {
-                handle_gateway_close(&send, &context, &runtime, reason).await?;
-                return Ok(());
-            }
-            ramflux_node_core::GatewayClientFrame::Open { .. }
-            | ramflux_node_core::GatewayClientFrame::Auth { .. } => {
+            Ok(false)
+        }
+        .await;
+        match result {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => {
+                if error.downcast_ref::<super::session_response::ClientWriteFailure>().is_some() {
+                    return Err(error);
+                }
+                tracing::warn!(%error,request_kind,"gateway session request failed");
                 write_gateway_handle(
                     &send,
                     &ramflux_node_core::GatewayServerFrame::Nack {
-                        reason: "unexpected gateway session frame".to_owned(),
+                        reason: format!("gateway_request_failed:{request_kind}"),
                     },
                 )
                 .await?;
@@ -587,6 +634,7 @@ async fn handle_gateway_relay_token_issue(
             .await
         }
         Err(error) => {
+            tracing::warn!(%error,request_kind="relay_token_issue","gateway session request rejected");
             write_gateway_handle(
                 send,
                 &ramflux_node_core::GatewayServerFrame::Nack {
@@ -617,6 +665,7 @@ async fn handle_gateway_relay_token_v3_issue(
             .await
         }
         Err(error) => {
+            tracing::warn!(%error,request_kind="relay_token_v3_issue","gateway session request rejected");
             write_gateway_handle(
                 send,
                 &ramflux_node_core::GatewayServerFrame::Nack {
@@ -1213,19 +1262,7 @@ pub(crate) async fn handle_gateway_ack(
         ack: ack.clone(),
     };
     let cursor: ramflux_node_core::InboxCursorResponse =
-        match router_post_json(&context.router, "/mvp0/ack-bound", &request) {
-            Ok(cursor) => cursor,
-            Err(error) => {
-                write_gateway_handle(
-                    send,
-                    &ramflux_node_core::GatewayServerFrame::Nack {
-                        reason: format!("ack rejected: {error}"),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        router_post_json(&context.router, "/mvp0/ack-bound", &request)?;
     write_gateway_handle(
         send,
         &ramflux_node_core::GatewayServerFrame::Ack { cursor: cursor.clone() },
@@ -1249,19 +1286,7 @@ pub(crate) async fn handle_gateway_nack(
         nack: nack.clone(),
     };
     let cursor: ramflux_node_core::InboxCursorResponse =
-        match router_post_json(&context.router, "/mvp0/nack-bound", &request) {
-            Ok(cursor) => cursor,
-            Err(error) => {
-                write_gateway_handle(
-                    send,
-                    &ramflux_node_core::GatewayServerFrame::Nack {
-                        reason: format!("nack rejected: {error}"),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        router_post_json(&context.router, "/mvp0/nack-bound", &request)?;
     write_gateway_handle(
         send,
         &ramflux_node_core::GatewayServerFrame::Cursor { cursor: Some(cursor) },
@@ -1348,7 +1373,9 @@ pub(crate) async fn write_gateway_frame(
 ) -> anyhow::Result<()> {
     #[cfg(feature = "itest-http")]
     delay_itest_gateway_frame().await;
-    ramflux_transport::write_gateway_session_json(send, frame).await?;
+    ramflux_transport::write_gateway_session_json(send, frame)
+        .await
+        .map_err(super::session_response::ClientWriteFailure)?;
     Ok(())
 }
 
@@ -1418,7 +1445,6 @@ mod tests {
         issue_relay_token_for_authenticated_session, relay_device_hash,
         validate_relay_token_issue_session_binding,
     };
-    #[cfg(feature = "itest-local-mint")]
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -1864,7 +1890,6 @@ mod tests {
         Ok(request)
     }
 
-    #[cfg(feature = "itest-local-mint")]
     pub(super) fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
         // A process-wide counter guarantees a unique redb path per context even when parallel tests
         // create contexts within the same clock tick (redb rejects opening the same file twice).
@@ -1919,6 +1944,7 @@ mod tests {
                 signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x42; 32]),
                 mesh: None,
             },
+            #[cfg(feature = "itest-local-mint")]
             relay_service_key: b"relay-service-key-test".to_vec(),
             state: Arc::new(Mutex::new(state)),
             store,
@@ -1935,3 +1961,6 @@ mod principal_directory_tests;
 #[cfg(all(test, feature = "itest-local-mint"))]
 #[path = "submit_ack_tests.rs"]
 mod submit_ack_tests;
+#[cfg(test)]
+#[path = "session_resilience_tests.rs"]
+mod resilience_tests;

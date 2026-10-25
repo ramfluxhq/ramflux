@@ -15,6 +15,7 @@ mod registration;
 mod registration_forward_tests;
 mod serve;
 mod session;
+mod session_response;
 mod state;
 mod submit_source;
 
