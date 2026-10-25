@@ -22,10 +22,15 @@ impl AccountIndex {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                self.root.join(crate::ACCOUNT_INDEX_FILE),
-                std::fs::Permissions::from_mode(0o600),
-            )?;
+            // Existing WAL files may predate the recovery manifest and the stricter DB mode.
+            for suffix in ["", "-wal", "-shm"] {
+                let path = self.root.join(format!("{}{suffix}", crate::ACCOUNT_INDEX_FILE));
+                match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
         Ok(())
     }
@@ -93,6 +98,37 @@ impl AccountIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn recovery_manifest_index_and_existing_wal_files_are_owner_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "rf-backup-index-permissions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let index = AccountIndex::open(&root)?;
+        index.create_account("account", "root")?;
+        let paths = ["", "-wal", "-shm"]
+            .map(|suffix| root.join(format!("{}{suffix}", crate::ACCOUNT_INDEX_FILE)));
+        assert!(paths[1].exists(), "the fixture must exercise an existing WAL");
+        for path in &paths {
+            if path.exists() {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+            }
+        }
+        let reopened = AccountIndex::open(&root)?;
+        for path in &paths {
+            if path.exists() {
+                assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+            }
+        }
+        drop(reopened);
+        drop(index);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     #[test]
     fn a_failed_generation_index_commit_keeps_the_entire_previous_selection()
     -> Result<(), Box<dyn std::error::Error>> {
