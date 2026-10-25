@@ -79,11 +79,13 @@ impl Spec {
     pub fn daemon(&self, mail: Shared) -> Result<Rc<Supervisor>, SdkError> {
         let spec = self.clone();
         let initialize: AccountInitializer = Box::new(move |index| spec.account(Some(index), mail));
-        Supervisor::from_initializers(
+        let daemon = Supervisor::from_initializers(
             &LocalBusConfig::new(self.root.join("daemon.sock"), &self.root),
             vec![(self.principal.clone(), initialize)],
             None,
-        )
+        )?;
+        daemon.start_test_event_router();
+        Ok(daemon)
     }
     pub fn trust(&self, client: &RamfluxClient, other: &Spec) -> Result<(), SdkError> {
         let mut peer = RamfluxClient::new();

@@ -79,8 +79,6 @@ impl Supervisor {
         if let Some(active) = active {
             supervisor.index.set_active_account(&active)?;
         }
-        // Test-injected unlocked accounts need the same outbox service as restored accounts.
-        supervisor.start_event_router();
         Ok(supervisor)
     }
 
@@ -446,6 +444,11 @@ impl Supervisor {
 
     pub(super) fn broadcast(&self, events: &[LocalBusFrame]) {
         super::events::broadcast(&mut self.subscribers.borrow_mut(), events);
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_test_event_router(&self) {
+        self.start_event_router();
     }
 
     fn start_event_router(&self) {
