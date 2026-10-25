@@ -101,8 +101,10 @@ async fn r5_one_conversation_fills_only_its_share_and_another_choice_is_served()
     }
     let state = serde_json::to_value(host.checkpoint())?;
     let queue = state["deferred_surfaces"].as_object().ok_or("queue")?;
-    assert_eq!(queue.len(), 8);
-    assert!(queue.values().all(|row| row["action"] != "x-choice-8"));
+    assert_eq!(queue.len(), 4);
+    assert!(queue.values().all(|row| row["action"].as_str().is_some_and(|id| {
+        ["x-choice-0", "x-choice-1", "x-choice-2", "x-choice-3", "decision"].contains(&id)
+    })));
     assert_eq!(host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason, Code::TooLarge);
     host.apply(&mut bus, notification(29, true, "decision"), 2001).await?;
     assert_eq!(
@@ -110,7 +112,7 @@ async fn r5_one_conversation_fills_only_its_share_and_another_choice_is_served()
             .as_object()
             .ok_or("queue")?
             .len(),
-        9
+        5
     );
     drain(&mut host, &mut bus).await?;
     assert!(bus.y.state.is_closed());
@@ -191,11 +193,59 @@ async fn r5_an_older_oversized_conversation_queue_retires_its_newest_rows_before
     host.start(&mut bus).await?;
     let state = serde_json::to_value(host.checkpoint())?;
     let rows = state["deferred_surfaces"].as_object().ok_or("queue")?;
-    assert_eq!(rows.len(), 9);
-    assert!(rows.values().all(|row| row["action"] != "x-choice-8"));
+    assert_eq!(rows.len(), 5);
+    assert!(rows.values().all(|row| row["action"].as_str().is_some_and(|id| {
+        ["x-choice-0", "x-choice-1", "x-choice-2", "x-choice-3", "decision"].contains(&id)
+    })));
     assert_eq!(host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason, Code::TooLarge);
     drain(&mut host, &mut bus).await?;
     assert!(bus.y.state.is_closed());
     assert_eq!(host.checkpoint().cursor, Some(40));
+    Ok(())
+}
+
+#[tokio::test]
+async fn eight_busy_conversations_leave_durable_headroom_for_a_new_conversation() -> TestResult {
+    let (f, mut bus, host) = setup().await?;
+    let mut state = serde_json::to_value(host.checkpoint())?;
+    drop(host);
+    let mut rows = serde_json::Map::new();
+    for conversation in 0..8 {
+        for action in 0..8 {
+            let seq = 20 + conversation * 8 + action;
+            rows.insert(
+                format!("busy-{conversation}-{action}"),
+                json!({
+                    "seq":seq,"conversation":format!("busy-{conversation}"),
+                    "reference":"ref-busy","action":format!("choice-{action}"),"ready_at":3000,
+                }),
+            );
+        }
+    }
+    state["deferred_surfaces"] = json!(rows);
+    state["cursor"] = json!(83);
+    std::fs::write(&f.config.state_file, serde_json::to_vec(&state)?)?;
+    bus.head = 83;
+    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
+    host.start(&mut bus).await?;
+    let normalized = serde_json::to_value(host.checkpoint())?;
+    assert_eq!(normalized["deferred_surfaces"].as_object().ok_or("queue")?.len(), 32);
+    assert_eq!(host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason, Code::TooLarge);
+    host.apply(&mut bus, notification(90, true, "decision"), 2001).await?;
+    let state = serde_json::to_value(host.checkpoint())?;
+    assert_eq!(state["deferred_surfaces"].as_object().ok_or("queue")?.len(), 33);
+    drop(host);
+    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
+    host.start(&mut bus).await?;
+    assert_eq!(
+        serde_json::to_value(host.checkpoint())?["deferred_surfaces"]
+            .as_object()
+            .ok_or("queue")?
+            .len(),
+        33
+    );
+    drain(&mut host, &mut bus).await?;
+    assert!(bus.y.state.is_closed());
+    assert_eq!(host.checkpoint().cursor, Some(90));
     Ok(())
 }

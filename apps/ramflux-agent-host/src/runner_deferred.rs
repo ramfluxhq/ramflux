@@ -8,8 +8,9 @@ use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
 use serde_json::json;
 const MAX_DEFERRED: usize = 64;
 const MAX_DEFERRED_BYTES: usize = 32 * 1024;
-const MAX_PER_CONVERSATION: usize = 8;
-const MAX_CONVERSATION_BYTES: usize = MAX_DEFERRED_BYTES / 8;
+// Eight busy conversations consume at most half of the shared queue and byte budget.
+const MAX_PER_CONVERSATION: usize = 4;
+const MAX_CONVERSATION_BYTES: usize = MAX_DEFERRED_BYTES / 16;
 impl<E: EngineProvider> AgentHost<E> {
     pub(crate) fn defer_surface(
         &mut self,
