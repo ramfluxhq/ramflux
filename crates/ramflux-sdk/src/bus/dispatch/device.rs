@@ -57,8 +57,8 @@ pub(crate) fn stored_push_route(
     })
 }
 
-/// Sets or clears the push route after a token change and registers it now; reconnects and
-/// liveness checks re-register and renew it from then on.
+/// Sets the push route after a token change and registers it now, or clears it and deletes
+/// the node route; reconnects and liveness checks re-register and renew a set route.
 async fn dispatch_push_route_set(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -71,14 +71,14 @@ async fn dispatch_push_route_set(
         .client
         .set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, stored.as_deref().unwrap_or(""))?;
     account.gateway_config.push_route.clone_from(&body.registration);
-    let expires_at = if let Some(engine) = account.engine.as_mut() {
-        engine.set_push_route(body.registration).await?
-    } else {
-        account.ensure_gateway_live().await?;
-        account.engine.as_ref().and_then(GatewaySessionEngine::push_route_expires_at)
-    };
+    account.ensure_gateway_live().await?;
+    let cleared = body.registration.is_none();
+    let engine = account.engine.as_mut().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    // A null route sends an explicit deregistration, so the node stops waking the old token.
+    let expires_at = engine.set_push_route(body.registration).await?;
     Ok(local_bus_ok(serde_json::json!({
         "registered": expires_at.is_some(),
+        "deregistered": cleared,
         "expires_at": expires_at,
     })))
 }

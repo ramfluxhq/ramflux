@@ -376,6 +376,7 @@ pub struct GatewaySessionEstablishedFrame {
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
     PushRouteRegister { request: Box<super::GatewayPushRouteFrame> },
+    PushRouteDeregister { request: Box<super::GatewayPushRouteDeregistrationFrame> },
     VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
@@ -398,26 +399,78 @@ pub enum GatewayClientFrame {
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayServerFrame {
-    PushRouteRegistered { expires_at: u64 },
-    VoiceLease { response: Box<ramflux_protocol::VoiceLeaseResponse> },
-    SessionEstablished { session: GatewaySessionEstablishedFrame },
-    Deliver { entry: GatewayInboxEntry },
-    OwnDeviceFanout { response: GatewayOwnDeviceFanoutResponse },
-    IdentityRegistered { response: SdkIdentityRegistrationResponse },
-    PrincipalManifest { response: ramflux_protocol::PrincipalLookupResponse<serde_json::Value> },
-    IdentityRegistrationRejected { reason_code: ramflux_protocol::IdentityDirectoryReason },
-    PrekeyPublished { response: SdkPrekeyResponse },
-    Prekey { response: SdkPrekeyResponse },
-    RelayTokenIssued { response: GatewayRelayTokenIssueResponse },
-    RelayTokenV3Issued { response: Box<GatewayRelayTokenV3IssueResponse> },
-    Ack { cursor: GatewayCursor },
-    Cursor { cursor: Option<GatewayCursor> },
-    Resume { entries: Vec<GatewayInboxEntry> },
-    Nack { reason: String },
-    Heartbeat { now: u64 },
-    Drain { session_id: String, reason: String },
-    InBandWake { target_delivery_id: String, delivery_class: ramflux_protocol::DeliveryClass },
-    Close { reason: String },
+    PushRouteRegistered {
+        expires_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    PushRouteRefused {
+        request_id: String,
+        reason: String,
+    },
+    PushRouteDeregistered {
+        request_id: String,
+        removed: u64,
+    },
+    VoiceLease {
+        response: Box<ramflux_protocol::VoiceLeaseResponse>,
+    },
+    SessionEstablished {
+        session: GatewaySessionEstablishedFrame,
+    },
+    Deliver {
+        entry: GatewayInboxEntry,
+    },
+    OwnDeviceFanout {
+        response: GatewayOwnDeviceFanoutResponse,
+    },
+    IdentityRegistered {
+        response: SdkIdentityRegistrationResponse,
+    },
+    PrincipalManifest {
+        response: ramflux_protocol::PrincipalLookupResponse<serde_json::Value>,
+    },
+    IdentityRegistrationRejected {
+        reason_code: ramflux_protocol::IdentityDirectoryReason,
+    },
+    PrekeyPublished {
+        response: SdkPrekeyResponse,
+    },
+    Prekey {
+        response: SdkPrekeyResponse,
+    },
+    RelayTokenIssued {
+        response: GatewayRelayTokenIssueResponse,
+    },
+    RelayTokenV3Issued {
+        response: Box<GatewayRelayTokenV3IssueResponse>,
+    },
+    Ack {
+        cursor: GatewayCursor,
+    },
+    Cursor {
+        cursor: Option<GatewayCursor>,
+    },
+    Resume {
+        entries: Vec<GatewayInboxEntry>,
+    },
+    Nack {
+        reason: String,
+    },
+    Heartbeat {
+        now: u64,
+    },
+    Drain {
+        session_id: String,
+        reason: String,
+    },
+    InBandWake {
+        target_delivery_id: String,
+        delivery_class: ramflux_protocol::DeliveryClass,
+    },
+    Close {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]

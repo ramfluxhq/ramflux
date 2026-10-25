@@ -105,10 +105,11 @@ pub use gateway::{
     GatewayAuthFrame, GatewayClientFrame, GatewayCursor, GatewayDirectMessage, GatewayInboxEntry,
     GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery, GatewayOwnDeviceFanoutFrame,
     GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery, GatewayPushProvider,
-    GatewayPushRouteFrame, GatewayPushRouteRegistration, GatewayQuicEndpointConfig,
-    GatewayResumeFrame, GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine,
-    GatewaySessionEstablishedFrame, GatewaySessionState, GatewaySessionTransportKind,
-    GatewaySubmitFrame, GatewayTcpTlsEndpointConfig,
+    GatewayPushRouteDeregistration, GatewayPushRouteDeregistrationFrame, GatewayPushRouteFrame,
+    GatewayPushRouteRegistration, GatewayQuicEndpointConfig, GatewayResumeFrame,
+    GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine, GatewaySessionEstablishedFrame,
+    GatewaySessionState, GatewaySessionTransportKind, GatewaySubmitFrame,
+    GatewayTcpTlsEndpointConfig,
 };
 pub use group::SdkGroupSenderKeyDistribution;
 pub use object::{OBJECT_PUT_PROTOCOL_VERSION, SdkObjectKeySlot, SdkObjectSharePackage};

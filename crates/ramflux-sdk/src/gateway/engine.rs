@@ -12,8 +12,9 @@ pub struct GatewaySessionEngine {
     pub(crate) stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     pub(crate) session: GatewaySessionState,
     request_counter: u64,
-    pending_deliveries: VecDeque<GatewayInboxEntry>,
+    pub(crate) pending_deliveries: VecDeque<GatewayInboxEntry>,
     pub(crate) push_route_expires_at: Option<u64>,
+    pub(crate) pending_push_route: Option<super::push_route::PendingPushRoute>,
 }
 
 enum GatewaySessionClientTransport {
@@ -127,7 +128,11 @@ impl GatewaySessionEngine {
     /// Returns an error when the QUIC session cannot connect, authenticate, or receive
     /// `session_established`.
     pub async fn connect(config: GatewaySessionConfig) -> Result<Self, SdkError> {
-        gateway_session_timeout("gateway session connect", Self::connect_inner(config)).await
+        let mut engine =
+            gateway_session_timeout("gateway session connect", Self::connect_inner(config)).await?;
+        // Outside the connect timeout and write-only: push registration never fails a connect.
+        engine.refresh_push_route_if_due().await;
+        Ok(engine)
     }
 
     async fn connect_inner(mut config: GatewaySessionConfig) -> Result<Self, SdkError> {
@@ -165,9 +170,9 @@ impl GatewaySessionEngine {
             request_counter: 1,
             pending_deliveries: VecDeque::new(),
             push_route_expires_at: None,
+            pending_push_route: None,
         };
         engine.remember_session_for_resume();
-        engine.refresh_push_route_if_due().await;
         Ok(engine)
     }
 
@@ -190,6 +195,7 @@ impl GatewaySessionEngine {
             request_counter: 0,
             pending_deliveries: VecDeque::new(),
             push_route_expires_at: None,
+            pending_push_route: None,
         }
     }
 
@@ -642,7 +648,25 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// Reads the next frame for a request; push route answers, which may arrive at any time,
+    /// are applied here and never returned as the reply to another request.
     async fn read_gateway_frame(
+        &mut self,
+        operation: &'static str,
+    ) -> Result<GatewayServerFrame, SdkError> {
+        loop {
+            let frame = self.read_raw_gateway_frame(operation).await?;
+            if super::push_route::is_push_route_reply(&frame) {
+                if let Err(error) = self.apply_push_route_reply(frame) {
+                    tracing::warn!(%error, "push route registration refused");
+                }
+                continue;
+            }
+            return Ok(frame);
+        }
+    }
+
+    pub(crate) async fn read_raw_gateway_frame(
         &mut self,
         operation: &'static str,
     ) -> Result<GatewayServerFrame, SdkError> {

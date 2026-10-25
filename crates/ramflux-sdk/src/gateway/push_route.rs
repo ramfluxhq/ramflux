@@ -4,15 +4,19 @@
 //! Keeps this device's push route registered with its home node.
 //!
 //! The node assigns a sliding 30-day route lifetime. The engine registers the configured route
-//! on every authenticated session (re)connect, again whenever the token changes, and renews it
-//! from [`GatewaySessionEngine::ensure_live`] once less than 15 days remain, so a device left in
-//! the background keeps receiving wakes. Revoking the device deletes the route on the node.
+//! after every authenticated session (re)connect, again whenever the token changes, and renews
+//! it from [`GatewaySessionEngine::ensure_live`] once less than 15 days remain, so a device left
+//! in the background keeps receiving wakes. Registration never blocks the session: the frame is
+//! written outside the connect timeout and its answer is matched by request id whenever it
+//! arrives. Clearing the route deregisters it; revoking the device deletes it on the node.
 #![allow(clippy::wildcard_imports)]
 use super::{GatewaySessionEngine, write_gateway_client_frame};
 use crate::prelude::*;
 
 /// Gateway path the registration request is signed for.
 pub const GATEWAY_PUSH_ROUTE_PATH: &str = "/notify/v1/push-route";
+/// Gateway path the deregistration request is signed for.
+pub const GATEWAY_PUSH_ROUTE_DELETE_PATH: &str = "/notify/v1/push-route/delete";
 /// Re-register once less than this much node-assigned route lifetime remains.
 pub const GATEWAY_PUSH_ROUTE_RENEW_BEFORE_SECONDS: u64 = 15 * 86_400;
 
@@ -56,12 +60,40 @@ pub struct GatewayPushRouteFrame {
     pub body: GatewayPushRouteRegistration,
 }
 
+/// Explicit deregistration of this device's route (`None` removes every provider).
+#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayPushRouteDeregistration {
+    #[serde(default)]
+    pub provider: Option<GatewayPushProvider>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayPushRouteDeregistrationFrame {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub body: GatewayPushRouteDeregistration,
+}
+
 /// Whether a route that expires at `expires_at` must be registered again at `now`.
 #[must_use]
 pub fn push_route_renewal_due(expires_at: Option<u64>, now: u64) -> bool {
     expires_at.is_none_or(|expires_at| {
         expires_at.saturating_sub(now) < GATEWAY_PUSH_ROUTE_RENEW_BEFORE_SECONDS
     })
+}
+
+/// Bound for writing a registration frame; the reply is awaited only by explicit callers.
+const PUSH_ROUTE_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an explicit caller waits for the node's answer.
+const PUSH_ROUTE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// After this long without an answer a registration is considered lost and may be resent.
+const PUSH_ROUTE_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Registration or deregistration awaiting the node's answer.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingPushRoute {
+    request_id: String,
+    sent_at: std::time::Instant,
 }
 
 impl GatewaySessionEngine {
@@ -72,30 +104,81 @@ impl GatewaySessionEngine {
     }
 
     /// Replaces the device's push route (for example after a token rotation) and registers it
-    /// immediately; `None` stops future re-registration. Reconnects re-register automatically.
+    /// now; `None` sends an explicit deregistration that deletes the node's route. Waits a
+    /// bounded time for the answer; a later answer is still matched by request id.
     /// # Errors
     /// Returns transport, signing or gateway rejection errors.
     pub async fn set_push_route(
         &mut self,
         registration: Option<GatewayPushRouteRegistration>,
     ) -> Result<Option<u64>, SdkError> {
-        let changed = self.config.push_route != registration;
-        self.config.push_route = registration;
-        if changed {
+        if self.config.push_route != registration {
             self.push_route_expires_at = None;
         }
-        self.register_push_route().await
+        self.config.push_route.clone_from(&registration);
+        let request_id = if registration.is_some() {
+            self.send_push_route_registration().await?
+        } else {
+            self.send_push_route_deregistration().await?
+        };
+        let Some(request_id) = request_id else {
+            return Ok(None);
+        };
+        match tokio::time::timeout(PUSH_ROUTE_REPLY_TIMEOUT, self.await_push_reply(&request_id))
+            .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(SdkError::GatewaySessionRejected(
+                "push route answer pending; it will be applied when it arrives".to_owned(),
+            )),
+        }
     }
 
-    /// Registers the configured route over the authenticated session.
+    /// Sends the configured registration without waiting for the answer.
     /// # Errors
-    /// Returns transport, signing or gateway rejection errors.
-    pub async fn register_push_route(&mut self) -> Result<Option<u64>, SdkError> {
+    /// Returns signing or transport write errors.
+    pub async fn register_push_route(&mut self) -> Result<Option<String>, SdkError> {
+        self.send_push_route_registration().await
+    }
+
+    async fn send_push_route_registration(&mut self) -> Result<Option<String>, SdkError> {
         let Some(body) = self.config.push_route.clone() else {
             return Ok(None);
         };
-        let mut signed_request =
-            self.signed_request("POST", GATEWAY_PUSH_ROUTE_PATH, "already_authed", &body)?;
+        let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_PATH, &body)?;
+        let request_id = signed_request.request_id.clone();
+        self.write_push_route_frame(GatewayClientFrame::PushRouteRegister {
+            request: Box::new(GatewayPushRouteFrame { signed_request, body }),
+        })
+        .await?;
+        self.pending_push_route = Some(PendingPushRoute {
+            request_id: request_id.clone(),
+            sent_at: std::time::Instant::now(),
+        });
+        Ok(Some(request_id))
+    }
+
+    async fn send_push_route_deregistration(&mut self) -> Result<Option<String>, SdkError> {
+        let body = GatewayPushRouteDeregistration { provider: None };
+        let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_DELETE_PATH, &body)?;
+        let request_id = signed_request.request_id.clone();
+        self.write_push_route_frame(GatewayClientFrame::PushRouteDeregister {
+            request: Box::new(GatewayPushRouteDeregistrationFrame { signed_request, body }),
+        })
+        .await?;
+        self.pending_push_route = Some(PendingPushRoute {
+            request_id: request_id.clone(),
+            sent_at: std::time::Instant::now(),
+        });
+        Ok(Some(request_id))
+    }
+
+    fn session_bound_request<T: serde::Serialize>(
+        &mut self,
+        path: &str,
+        body: &T,
+    ) -> Result<ramflux_protocol::SignedRequest, SdkError> {
+        let mut signed_request = self.signed_request("POST", path, "already_authed", body)?;
         signed_request
             .ext
             .ext
@@ -105,41 +188,112 @@ impl GatewaySessionEngine {
         })?;
         signed_request.signed.signature =
             ramflux_crypto::sign_protocol_object_with_device_branch(branch, &signed_request)?;
-        write_gateway_client_frame(
-            &mut *self.stream,
-            &GatewayClientFrame::PushRouteRegister {
-                request: Box::new(GatewayPushRouteFrame { signed_request, body }),
-            },
+        Ok(signed_request)
+    }
+
+    async fn write_push_route_frame(&mut self, frame: GatewayClientFrame) -> Result<(), SdkError> {
+        tokio::time::timeout(
+            PUSH_ROUTE_SEND_TIMEOUT,
+            write_gateway_client_frame(&mut *self.stream, &frame),
         )
-        .await?;
-        match self.read_non_deliver_frame().await? {
-            GatewayServerFrame::PushRouteRegistered { expires_at } => {
-                self.push_route_expires_at = Some(expires_at);
-                Ok(Some(expires_at))
+        .await
+        .map_err(|_| SdkError::GatewaySessionRejected("push route send timed out".to_owned()))?
+    }
+
+    /// Reads frames until the answer to `request_id`, buffering deliveries meanwhile.
+    async fn await_push_reply(&mut self, request_id: &str) -> Result<Option<u64>, SdkError> {
+        loop {
+            let frame = self.read_raw_gateway_frame("push route answer").await?;
+            match frame {
+                GatewayServerFrame::Deliver { entry } => self.pending_deliveries.push_back(entry),
+                frame if is_push_route_reply(&frame) => {
+                    let matched = push_route_reply_id(&frame) == Some(request_id);
+                    let outcome = self.apply_push_route_reply(frame);
+                    if matched {
+                        return outcome;
+                    }
+                }
+                _ => {}
             }
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
-            other => Err(SdkError::GatewaySessionRejected(format!(
-                "expected push route registration, got {other:?}"
-            ))),
         }
     }
 
-    /// Best-effort registration after (re)connect or when renewal is due. A failure is
-    /// retried on the next liveness check and never fails the session itself.
+    /// Applies a registration answer; answers to superseded requests only update state.
+    pub(crate) fn apply_push_route_reply(
+        &mut self,
+        frame: GatewayServerFrame,
+    ) -> Result<Option<u64>, SdkError> {
+        let id = push_route_reply_id(&frame).map(str::to_owned);
+        if self
+            .pending_push_route
+            .as_ref()
+            .is_some_and(|pending| Some(&pending.request_id) == id.as_ref())
+        {
+            self.pending_push_route = None;
+        }
+        match frame {
+            GatewayServerFrame::PushRouteRegistered { expires_at, .. } => {
+                if self.config.push_route.is_some() {
+                    self.push_route_expires_at = Some(expires_at);
+                }
+                Ok(Some(expires_at))
+            }
+            GatewayServerFrame::PushRouteDeregistered { .. } => {
+                self.push_route_expires_at = None;
+                Ok(None)
+            }
+            GatewayServerFrame::PushRouteRefused { reason, .. } => {
+                Err(SdkError::GatewaySessionRejected(reason))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Best-effort, non-blocking registration after (re)connect or when renewal is due. Only the
+    /// frame is written; the answer is applied whenever it arrives and never read as the reply
+    /// to another request. A failure is retried on the next liveness check.
     pub(crate) async fn refresh_push_route_if_due(&mut self) {
         if self.config.push_route.is_none()
             || !push_route_renewal_due(
                 self.push_route_expires_at,
                 now_unix_timestamp().unsigned_abs(),
             )
+            || self
+                .pending_push_route
+                .as_ref()
+                .is_some_and(|pending| pending.sent_at.elapsed() < PUSH_ROUTE_RETRY_AFTER)
         {
             return;
         }
-        if let Err(error) = Box::pin(self.register_push_route()).await {
+        if let Err(error) = Box::pin(self.send_push_route_registration()).await {
             tracing::warn!(%error, "push route registration deferred");
         }
     }
 }
+
+/// Whether a server frame answers push route control (registration or deregistration).
+#[must_use]
+pub(crate) const fn is_push_route_reply(frame: &GatewayServerFrame) -> bool {
+    matches!(
+        frame,
+        GatewayServerFrame::PushRouteRegistered { .. }
+            | GatewayServerFrame::PushRouteRefused { .. }
+            | GatewayServerFrame::PushRouteDeregistered { .. }
+    )
+}
+
+fn push_route_reply_id(frame: &GatewayServerFrame) -> Option<&str> {
+    match frame {
+        GatewayServerFrame::PushRouteRegistered { request_id, .. } => request_id.as_deref(),
+        GatewayServerFrame::PushRouteRefused { request_id, .. }
+        | GatewayServerFrame::PushRouteDeregistered { request_id, .. } => Some(request_id),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "push_route_session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -182,8 +336,17 @@ mod tests {
                     Some(GatewayClientFrame::Heartbeat { now }) => {
                         GatewayServerFrame::Heartbeat { now }
                     }
-                    Some(GatewayClientFrame::PushRouteRegister { .. }) => {
-                        GatewayServerFrame::PushRouteRegistered { expires_at: self.expires_at }
+                    Some(GatewayClientFrame::PushRouteRegister { request }) => {
+                        GatewayServerFrame::PushRouteRegistered {
+                            expires_at: self.expires_at,
+                            request_id: Some(request.signed_request.request_id),
+                        }
+                    }
+                    Some(GatewayClientFrame::PushRouteDeregister { request }) => {
+                        GatewayServerFrame::PushRouteDeregistered {
+                            request_id: request.signed_request.request_id,
+                            removed: 1,
+                        }
                     }
                     _ => GatewayServerFrame::Nack { reason: "unexpected".into() },
                 };
@@ -257,6 +420,16 @@ mod tests {
         engine.push_route_expires_at = Some(now + 86_400);
         engine.ensure_live(0).await.expect("live");
         assert_eq!(registrations.lock().expect("lock").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn clearing_the_push_route_sends_an_explicit_deregistration() {
+        let now = now_unix_timestamp().unsigned_abs();
+        let (mut engine, _registrations) = engine(now + 30 * 86_400);
+        engine.set_push_route(Some(webpush("first"))).await.expect("register");
+        assert_eq!(engine.set_push_route(None).await.expect("deregister"), None);
+        assert_eq!(engine.push_route_expires_at(), None);
+        assert!(engine.config.push_route.is_none());
     }
 
     #[test]
