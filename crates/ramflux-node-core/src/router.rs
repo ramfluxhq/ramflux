@@ -439,19 +439,33 @@ impl RouterCore {
                     migration.migration_proof_hash, migration.new_home_node
                 )));
             }
+            let renewal = control
+                .mvp1_identities
+                .device_identity_for_root(&request.principal_commitment, &request.proof.device_id)
+                .and_then(|identity| control.mvp1_identities.device_auth_key(&identity))
+                .is_some_and(|prior| {
+                    !prior.revoked
+                        && prior.principal_id == request.proof.principal_id
+                        && prior.device_epoch == request.proof.device_epoch
+                        && prior.branch_public_key == request.branch_public_key
+                        && prior.target_delivery_id == request.target_delivery_id
+                });
             let mut candidate = control.mvp1_identities.clone();
             candidate.authorize_root_bound_registration(request)?;
             let (mut session, tier) =
                 candidate.register_admitted_identity(request, registration_trust_tier)?;
             let mut target = self.target_shard(&session.target_delivery_id);
-            if let Some(existing) = target.registry.session(&session.target_delivery_id)
-                && existing.device_id == session.device_id
-                && existing.device_epoch == session.device_epoch
-            {
-                // Registration publishes authority; it cannot replace an established route
-                // with the client's provisional sequence-1 session descriptor. Session-open
-                // admission owns route changes and its monotonic sequence/cursor.
-                session = existing.clone();
+            if let Some(existing) = target.registry.session(&session.target_delivery_id) {
+                if renewal
+                    && existing.device_id == session.device_id
+                    && existing.device_epoch == session.device_epoch
+                {
+                    // Publishing a renewed proof does not move an established live route.
+                    session = existing.clone();
+                } else if existing.session_id == session.session_id {
+                    session.session_seq = existing.session_seq;
+                    session.last_cursor.clone_from(&existing.last_cursor);
+                }
             }
             let mut sessions = target.registry.clone();
             // Validate the session before consuming or persisting any proof. Stale session
