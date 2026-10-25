@@ -37,7 +37,7 @@ pub(crate) enum McpServerAction {
 pub(crate) struct McpServerAdd {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) server: String,
     #[arg(long, default_value = "stdio-echo")]
     pub(crate) command: String,
@@ -65,7 +65,7 @@ pub(crate) enum McpToolAction {
 pub(crate) struct McpToolCall {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) server: String,
     #[arg(long)]
     pub(crate) tool: String,
@@ -91,6 +91,6 @@ pub(crate) enum McpApprovalAction {
 pub(crate) struct McpApprovalSelector {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) approval: String,
 }

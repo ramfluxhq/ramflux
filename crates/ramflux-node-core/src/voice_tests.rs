@@ -93,7 +93,7 @@ fn voice_framing_bandwidth_and_unknown_credentials_fail_closed() {
     }
     assert!(state.route(&packet, source, 100, false).is_err());
     assert!(state.route(&packet, source, 101, false).is_ok());
-    assert!(state.route(&packet, source, 100, false).is_err());
+    assert!(state.route(&packet, source, 100, false).is_ok());
 }
 
 #[test]
@@ -112,3 +112,6 @@ fn an_expired_voice_credential_cannot_disrupt_another_live_allocation()
     assert_eq!(state.tokens.len(), 2);
     Ok(())
 }
+
+#[path = "voice_rebinding_tests.rs"]
+mod rebinding;

@@ -288,25 +288,32 @@ impl LiveCall {
         }
         Ok(false)
     }
-    fn acknowledge(&mut self, allocation: &VoiceAllocation, now: i64) -> Result<(), SdkError> {
+    fn acknowledge(
+        &mut self,
+        allocation: &ramflux_protocol::VoicePeerAllocation,
+        now: i64,
+    ) -> Result<(), SdkError> {
         if allocation.expires_at <= now.unsigned_abs()
             || allocation.expires_at > now.unsigned_abs().saturating_add(120)
             || allocation.endpoint.is_empty()
-            || [&allocation.caller_token, &allocation.callee_token].into_iter().any(|t| {
-                !ramflux_protocol::decode_base64url(t).is_ok_and(|token| token.len() == 32)
-            })
+            || !ramflux_protocol::decode_base64url(&allocation.token)
+                .is_ok_and(|token| token.len() == 32)
         {
             return Err(invalid("invalid relay allocation"));
         }
         if let Some(old) = &self.allocation
             && (old.endpoint != allocation.endpoint
-                || old.caller_token != allocation.caller_token
-                || old.callee_token != allocation.callee_token
+                || old.callee_token != allocation.token
                 || old.expires_at > allocation.expires_at)
         {
             return Err(invalid("relay allocation changed"));
         }
-        self.allocation = Some(allocation.clone());
+        self.allocation = Some(VoiceAllocation {
+            endpoint: allocation.endpoint.clone(),
+            caller_token: String::new(),
+            callee_token: allocation.token.clone(),
+            expires_at: allocation.expires_at,
+        });
         if self.row.state == "connecting" {
             self.set_state("active", now)?;
         }
@@ -317,7 +324,7 @@ impl LiveCall {
             return Err(invalid("allocation outside connecting caller"));
         }
         let ack =
-            self.control(CallAction::Ack { allocation: Box::new(allocation.clone()) }, now)?;
+            self.control(CallAction::Ack { allocation: Box::new(allocation.for_callee()) }, now)?;
         self.allocation = Some(allocation);
         self.next_lease_refresh = now.saturating_add(20);
         self.pending.push(ack);

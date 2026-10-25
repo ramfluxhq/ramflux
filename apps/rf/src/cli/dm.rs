@@ -30,7 +30,7 @@ pub(crate) enum DmAction {
 pub(crate) struct ConversationSelector {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
 }
 
@@ -38,7 +38,7 @@ pub(crate) struct ConversationSelector {
 pub(crate) struct DmRead {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
     #[arg(long)]
     pub(crate) relay_service_key: Option<String>,
@@ -48,21 +48,21 @@ pub(crate) struct DmRead {
 pub(crate) struct DmSend {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) envelope: String,
     #[arg(long)]
     pub(crate) source_principal: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) sender: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_device: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_principal_commitment: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: String,
     #[arg(long)]
     pub(crate) body: String,
@@ -94,13 +94,13 @@ pub(crate) struct DmSend {
 pub(crate) struct DmAck {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) envelope: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) receiver_device: String,
     #[arg(long)]
     pub(crate) received_at: Option<i64>,
@@ -110,13 +110,13 @@ pub(crate) struct DmAck {
 pub(crate) struct DmDelete {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
     #[arg(long, default_value = "own_devices")]
     pub(crate) scope: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) tombstone: Option<String>,
 }
 
@@ -136,15 +136,15 @@ pub(crate) enum DmReceiptAction {
 pub(crate) struct DmReceiptDelivered {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) receiver_device: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_device: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
     #[arg(long)]
     pub(crate) delivered_at: Option<i64>,
@@ -156,15 +156,15 @@ pub(crate) struct DmReceiptDelivered {
 pub(crate) struct DmReceiptRead {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) reader: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_device: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
     #[arg(long)]
     pub(crate) read_at: Option<i64>,
@@ -186,7 +186,7 @@ pub(crate) enum DmDisappearingAction {
 pub(crate) struct DmDisappearingSet {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
     #[arg(long)]
     pub(crate) ttl_secs: i64,
@@ -196,7 +196,7 @@ pub(crate) struct DmDisappearingSet {
 pub(crate) struct DmDisappearingExpire {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
     #[arg(long)]
     pub(crate) now: Option<i64>,
@@ -206,7 +206,7 @@ pub(crate) struct DmDisappearingExpire {
 pub(crate) struct DmMute {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
     #[arg(long)]
     pub(crate) unmute: bool,

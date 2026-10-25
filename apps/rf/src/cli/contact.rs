@@ -34,13 +34,13 @@ pub(crate) enum ContactAction {
 pub(crate) struct ContactAdd {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) principal: Option<String>,
     #[arg(long)]
     pub(crate) card: Option<String>,
     #[arg(long, requires = "card")]
     pub(crate) replace_provisional_root: Option<String>,
-    #[arg(long, requires_all = ["link", "requester"])]
+    #[arg(long, requires_all = ["link", "requester"], allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
     #[arg(long, requires = "target")]
     pub(crate) link: Option<String>,
@@ -56,7 +56,7 @@ pub(crate) struct ContactLink {
     pub(crate) link: String,
     #[arg(long)]
     pub(crate) requester: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: String,
 }
 
@@ -96,17 +96,17 @@ pub(crate) struct ContactFederatedLink {
 
 #[derive(Args, Clone)]
 pub(crate) struct ContactFederatedArgs {
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) envelope: String,
     #[arg(long)]
     pub(crate) source_principal: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) sender: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_device: String,
     #[arg(long)]
     pub(crate) target_delivery: String,

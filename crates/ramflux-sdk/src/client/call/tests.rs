@@ -41,21 +41,21 @@ fn first_answer_wins_and_other_devices_do_not_share_the_winners_media_key() -> R
     second.pending.clear();
     first.answer(101)?;
     second.answer(101)?;
-    let answer = first.pending.pop().ok_or_else(|| state::invalid("test answer missing"))?;
+    let answer = first.pending.pop().ok_or_else(|| invalid("test answer missing"))?;
     assert!(origin.apply(&answer, 102)?);
-    let alternative = second.pending.pop().ok_or_else(|| state::invalid("test answer missing"))?;
+    let alternative = second.pending.pop().ok_or_else(|| invalid("test answer missing"))?;
     assert!(!origin.apply(&alternative, 102)?);
     assert_eq!(origin.callee.device_id, "b1");
     assert_eq!(
         origin.send_key,
-        first.receive_key.clone().ok_or_else(|| state::invalid("test key missing"))?
+        first.receive_key.clone().ok_or_else(|| invalid("test key missing"))?
     );
     assert_eq!(origin.receive_key, Some(first.send_key.clone()));
     let loser = origin
         .pending
         .iter()
         .find(|c| c.callee.device_id == "b2")
-        .ok_or_else(|| state::invalid("test loser missing"))?;
+        .ok_or_else(|| invalid("test loser missing"))?;
     second.apply(loser, 102)?;
     assert_eq!(second.row.end_reason.as_deref(), Some("answered_elsewhere"));
     origin.activate(allocation(), 103)?;
@@ -64,7 +64,7 @@ fn first_answer_wins_and_other_devices_do_not_share_the_winners_media_key() -> R
         .pending
         .iter()
         .find(|c| matches!(c.body, CallAction::Ack { .. }))
-        .ok_or_else(|| state::invalid("test ack missing"))?;
+        .ok_or_else(|| invalid("test ack missing"))?;
     first.apply(ack, 103)?;
     assert_eq!(first.row.state, "active");
     Ok(())
@@ -73,7 +73,7 @@ fn first_answer_wins_and_other_devices_do_not_share_the_winners_media_key() -> R
 fn replay_cross_call_and_uninvited_endpoint_cannot_mutate_call() -> Result<(), SdkError> {
     let mut origin = outgoing()?;
     let mut peer = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
-    let ringing = peer.pending.pop().ok_or_else(|| state::invalid("test ringing missing"))?;
+    let ringing = peer.pending.pop().ok_or_else(|| invalid("test ringing missing"))?;
     origin.apply(&ringing, 100)?;
     assert!(origin.clone().apply(&ringing, 100).is_err());
     let before = origin.row.clone();
@@ -182,12 +182,13 @@ fn authenticated_lease_updates_preserve_active_state_until_the_new_expiry() -> R
         .iter()
         .find(|c| matches!(c.body, CallAction::Ack { .. }))
         .cloned()
-        .ok_or_else(|| state::invalid("ack missing"))?;
+        .ok_or_else(|| invalid("ack missing"))?;
     recipient.apply(&ack, 103)?;
     let version = recipient.row.seq;
     let mut renewed = allocation();
     renewed.expires_at = 220;
-    let renewal = origin.control(CallAction::Ack { allocation: Box::new(renewed) }, 110)?;
+    let renewal =
+        origin.control(CallAction::Ack { allocation: Box::new(renewed.for_callee()) }, 110)?;
     recipient.apply(&renewal, 110)?;
     assert_eq!(recipient.row.seq, version);
     assert_eq!(recipient.row.state, "active");
@@ -210,7 +211,7 @@ fn a_device_key_change_requires_a_new_call_with_fresh_media_secrets() -> Result<
     let mut fresh = outgoing()?;
     fresh.pin_peer(device, replacement)?;
     if fresh.send_key == origin.send_key {
-        return Err(state::invalid("fresh call reused a media secret"));
+        return Err(invalid("fresh call reused a media secret"));
     }
     Ok(())
 }
@@ -222,5 +223,26 @@ fn terminal_calls_discard_unsent_invites_and_their_media_secrets() -> Result<(),
     assert_eq!(origin.pending.len(), 0);
     assert_eq!(origin.send_key.as_ref(), &[0; 32]);
     assert!(origin.receive_key.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_callee_ack_contains_only_the_callees_own_relay_credential() -> Result<(), SdkError> {
+    let mut origin = outgoing()?;
+    let invite = origin.pending[0].clone();
+    let mut receiver = LiveCall::incoming(&invite, origin.callee.clone(), 100)?;
+    receiver.pending.clear();
+    receiver.answer(101)?;
+    origin.apply(&receiver.pending[0], 101)?;
+    let lease = allocation();
+    origin.activate(lease.clone(), 102)?;
+    let ack = origin.pending.last().ok_or_else(|| invalid("ack"))?;
+    let encoded = serde_json::to_value(ack)?;
+    assert!(encoded["body"]["allocation"].get("caller_token").is_none());
+    assert!(!serde_json::to_string(ack)?.contains(&lease.caller_token));
+    receiver.apply(ack, 102)?;
+    let media_lease = receiver.allocation.as_ref().ok_or_else(|| invalid("allocation"))?;
+    assert_eq!(media_lease.callee_token, lease.callee_token);
+    assert_eq!(media_lease.caller_token.len(), 0);
     Ok(())
 }

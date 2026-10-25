@@ -195,7 +195,7 @@ async fn maintain_lease(
             let allocation =
                 next.allocation.clone().ok_or_else(|| invalid("renewed lease missing"))?;
             let ack = next.control(
-                ramflux_protocol::CallAction::Ack { allocation: Box::new(allocation) },
+                ramflux_protocol::CallAction::Ack { allocation: Box::new(allocation.for_callee()) },
                 now,
             )?;
             next.pending.push(ack);

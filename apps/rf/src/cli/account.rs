@@ -56,13 +56,13 @@ pub(crate) struct AccountCreate {
     pub(crate) node: Option<String>,
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) principal: String,
     #[arg(long, hide = true)]
     pub(crate) expected_commitment: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) device: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: String,
     #[arg(long)]
     pub(crate) secret: String,

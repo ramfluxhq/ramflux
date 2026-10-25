@@ -26,7 +26,7 @@ pub(crate) enum CallAction {
 pub(crate) struct CallInvite {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
 }
 
@@ -34,7 +34,7 @@ pub(crate) struct CallInvite {
 pub(crate) struct CallAnswer {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) call: String,
 }
 
@@ -42,7 +42,7 @@ pub(crate) struct CallAnswer {
 pub(crate) struct CallHangup {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) call: String,
 }
 
@@ -75,11 +75,11 @@ pub(crate) enum BotTrustAction {
 pub(crate) struct BotTrustAdd {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) bot: String,
-    #[arg(long = "public-key")]
+    #[arg(long = "public-key", allow_hyphen_values = true)]
     pub(crate) public_key: String,
-    #[arg(long = "signing-key-id")]
+    #[arg(long = "signing-key-id", allow_hyphen_values = true)]
     pub(crate) signing_key_id: String,
     #[arg(long = "trust-source", default_value = "local_pin")]
     pub(crate) trust_source: String,
@@ -101,6 +101,6 @@ pub(crate) struct BotInstall {
 pub(crate) struct BotRevoke {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) bot: String,
 }

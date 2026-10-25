@@ -32,7 +32,7 @@ pub(crate) enum GroupAction {
 pub(crate) struct GroupCreate {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) creator: String,
@@ -62,7 +62,7 @@ pub(crate) struct GroupCreate {
 pub(crate) struct GroupMembers {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
 }
 
@@ -85,7 +85,7 @@ pub(crate) enum GroupMemberAction {
 pub(crate) struct GroupMemberAdd {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) member_device: String,
@@ -115,7 +115,7 @@ pub(crate) struct GroupMemberAdd {
 pub(crate) struct GroupMemberRemove {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) actor: String,
@@ -127,7 +127,7 @@ pub(crate) struct GroupMemberRemove {
 pub(crate) struct GroupMemberKick {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) actor: String,
@@ -141,7 +141,7 @@ pub(crate) struct GroupMemberKick {
 pub(crate) struct GroupMemberBan {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) actor: String,
@@ -166,11 +166,11 @@ pub(crate) enum GroupMessageAction {
 pub(crate) struct GroupMessageDelete {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) actor: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
     #[arg(long, default_value = "group_tombstone")]
     pub(crate) delete_scope: String,
@@ -194,7 +194,7 @@ pub(crate) enum GroupInviteAction {
 pub(crate) struct GroupInviteCreate {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) actor: String,
@@ -218,7 +218,7 @@ pub(crate) struct GroupInviteCreate {
 pub(crate) struct GroupInviteAccept {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) actor: String,
@@ -245,7 +245,7 @@ pub(crate) enum GroupRoleAction {
 pub(crate) struct GroupRoleSet {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) actor: String,
@@ -271,7 +271,7 @@ pub(crate) enum GroupDisappearingAction {
 pub(crate) struct GroupDisappearingSet {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) ttl_secs: i64,
@@ -281,7 +281,7 @@ pub(crate) struct GroupDisappearingSet {
 pub(crate) struct GroupDisappearingExpire {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) now: Option<i64>,
@@ -291,7 +291,7 @@ pub(crate) struct GroupDisappearingExpire {
 pub(crate) struct GroupMute {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
     #[arg(long)]
     pub(crate) unmute: bool,
@@ -303,21 +303,21 @@ pub(crate) struct GroupMute {
 pub(crate) struct GroupSend {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) sender: String,
     #[arg(long)]
     pub(crate) body: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) envelope: Option<String>,
     #[arg(long)]
     pub(crate) source_principal: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
     #[arg(long)]
     pub(crate) federation_url: Option<String>,
@@ -339,8 +339,8 @@ pub(crate) struct GroupSend {
 pub(crate) struct GroupRead {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
 }

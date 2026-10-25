@@ -205,3 +205,96 @@ async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media
     assert_eq!(bob.client.voice_calls[&id].row.end_reason.as_deref(), Some("completed"));
     Ok(())
 }
+
+#[tokio::test]
+async fn an_established_pair_cannot_create_an_unrelated_call_conversation() -> Result<(), SdkError>
+{
+    let alice = Fixture::new("alice", 21)?;
+    let mut bob = Fixture::new("bob", 31)?;
+    contacts(&alice, &bob)?;
+    let first = control(&alice, &bob, 1, "direct-thread")?;
+    let invite = signed(&alice, first.pending[0].clone())?;
+    let packet = entry(&alice, &bob, &invite, "first-call", "direct-thread")?;
+    apply(&mut bob, &packet).await?;
+    let injected = control(&alice, &bob, 2, "unrelated-thread")?;
+    let invite = signed(&alice, injected.pending[0].clone())?;
+    let packet = entry(&alice, &bob, &invite, "injected-call", "unrelated-thread")?;
+    assert!(apply(&mut bob, &packet).await.is_err());
+    assert!(bob.client.account_db()?.client_record("conversation", "unrelated-thread")?.is_none());
+    assert!(!bob.client.voice_calls.contains_key(&invite.call_id));
+    Ok(())
+}
+#[tokio::test]
+async fn retiring_a_call_removes_control_receipts_without_reviving_keys_on_redelivery()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 21)?;
+    let mut bob = Fixture::new("bob", 31)?;
+    contacts(&alice, &bob)?;
+    let first = control(&alice, &bob, 1, "direct-thread")?;
+    let invite = signed(&alice, first.pending[0].clone())?;
+    let packet = entry(&alice, &bob, &invite, "first-call", "direct-thread")?;
+    apply(&mut bob, &packet).await?;
+    let prefix = format!("voice/control/{}/", invite.call_id);
+    assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 1);
+    bob.client.retire_call_without_keys(&invite.call_id)?;
+    bob.client.voice_calls.clear();
+    assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 0);
+    let retry = entry(&alice, &bob, &invite, "retry-call", "direct-thread")?;
+    apply(&mut bob, &retry).await?;
+    assert!(bob.client.voice_calls.is_empty());
+    assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 0);
+    Ok(())
+}
+#[tokio::test]
+async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_message_keys()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 21)?;
+    let mut bob = Fixture::new("bob", 31)?;
+    contacts(&alice, &bob)?;
+    let first = control(&alice, &bob, 1, "direct-thread")?;
+    let invite = signed(&alice, first.pending[0].clone())?;
+    let packet = entry(&alice, &bob, &invite, "first-call", "direct-thread")?;
+    apply(&mut bob, &packet).await?;
+    let envelope = decode(&packet.envelope)?;
+    let pair = bob
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&format!(
+            "dm-pair/session/{}",
+            envelope.ciphertext.session_id
+        ))?
+        .ok_or_else(|| invalid("pair"))?;
+    let bundle: [u8; 32] = serde_json::from_value(pair["bundle"].clone())?;
+    let mut restored = ramflux_crypto::DmSession::from_snapshot(serde_json::from_value(
+        pair["snapshot"].clone(),
+    )?)?;
+    let aad = associated_data(&packet.envelope.envelope_id, "alice", "bob", &bundle)?;
+    assert!(restored.decrypt_with_franking_keys(&envelope.ciphertext, &aad).is_err());
+    // Consumed ratchet keys are gone, but retained static X3DH private prekeys can reconstruct
+    // a bootstrap packet. This is why even encrypted call controls must not remain in receipts.
+    let header = envelope.x3dh.as_ref().ok_or_else(|| invalid("bootstrap"))?;
+    let bootstrap_aad = associated_data(
+        header.bootstrap_envelope_id.as_deref().unwrap_or(&packet.envelope.envelope_id),
+        "alice",
+        "bob",
+        &bundle,
+    )?;
+    let mut reconstructed = bob.client.create_recv_dm_session_with_aad(header, &bootstrap_aad)?;
+    let recovered = reconstructed.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?;
+    assert_ne!(recovered.plaintext.len(), 0);
+
+    let receipt = bob
+        .client
+        .account_db()?
+        .load_actor_state::<super::committed::Committed>(&committed_key(&packet)?)?
+        .ok_or_else(|| invalid("receipt"))?;
+    assert_eq!(receipt.entry.envelope.encrypted_payload.len(), 0);
+    let stored =
+        bob.client.event_body(&packet.envelope.envelope_id)?.ok_or_else(|| invalid("event"))?;
+    assert!(!String::from_utf8_lossy(&stored).contains(&packet.envelope.encrypted_payload));
+    bob.client.retire_call_without_keys(&invite.call_id)?;
+    bob.client.voice_calls.clear();
+    apply(&mut bob, &packet).await?;
+    assert!(bob.client.voice_calls.is_empty());
+    Ok(())
+}

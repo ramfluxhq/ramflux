@@ -105,7 +105,7 @@ async fn invite(
             device_id: t.device.clone(),
         })
         .collect();
-    let id = ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..16]);
+    let id = new_call_id()?;
     let mut call = LiveCall::outgoing(
         id.clone(),
         conversation.into(),
@@ -176,3 +176,12 @@ pub(crate) fn list(client: &RamfluxClient) -> Result<Value, SdkError> {
 #[cfg(test)]
 #[path = "call_tests.rs"]
 mod tests;
+
+fn new_call_id() -> Result<String, SdkError> {
+    loop {
+        let id = ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..16]);
+        if !id.starts_with('-') {
+            return Ok(id);
+        }
+    }
+}

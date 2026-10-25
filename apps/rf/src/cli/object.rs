@@ -29,7 +29,7 @@ pub(crate) enum ObjectAction {
 pub(crate) struct ObjectPut {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
     #[arg(long, default_value_t = 1024)]
     pub(crate) chunk_size: usize,
@@ -47,7 +47,7 @@ pub(crate) struct ObjectPut {
 pub(crate) struct ObjectGet {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
@@ -65,7 +65,7 @@ pub(crate) struct ObjectGet {
 pub(crate) struct ObjectStatus {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) direction: Option<String>,
@@ -75,7 +75,7 @@ pub(crate) struct ObjectStatus {
 pub(crate) struct ObjectResume {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) direction: String,
@@ -92,17 +92,17 @@ pub(crate) struct ObjectResume {
 pub(crate) struct ObjectShare {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) to: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) sender: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_device: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_principal_commitment: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
     #[arg(long)]
     pub(crate) out_package: Option<PathBuf>,
@@ -112,7 +112,7 @@ pub(crate) struct ObjectShare {
 pub(crate) struct ObjectDelete {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,

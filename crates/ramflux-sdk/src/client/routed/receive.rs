@@ -384,14 +384,18 @@ impl RamfluxClient {
                 &super::conversation_watermark(&opened.routing.conversation_id),
                 &receipt,
             )?;
-            self.append_gateway_delivery(entry)?;
+            let mut retained = entry.clone();
+            if opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX) {
+                // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
+                // call ciphertext alongside them: committed replay needs only attribution/hash.
+                retained.envelope.encrypted_payload.clear();
+                self.append_event(&entry.envelope.envelope_id, "call.control.committed", &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;
+            } else {
+                self.append_gateway_delivery(entry)?;
+            }
             self.account_db()?.persist_actor_state(
                 receipt,
-                &Committed {
-                    routing: opened.routing.clone(),
-                    entry: entry.clone(),
-                    projected: false,
-                },
+                &Committed { routing: opened.routing.clone(), entry: retained, projected: false },
             )?;
             Ok(plaintext)
         })

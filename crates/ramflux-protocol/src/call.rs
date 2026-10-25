@@ -19,7 +19,7 @@ pub enum CallAction {
     Invite { base_key: String },
     Ringing,
     Answer { base_key: String },
-    Ack { allocation: Box<VoiceAllocation> },
+    Ack { allocation: Box<VoicePeerAllocation> },
     Reject,
     Busy,
     Hangup,
@@ -60,6 +60,30 @@ pub struct VoiceAllocation {
     pub caller_token: String,
     pub callee_token: String,
     pub expires_at: u64,
+}
+/// Only the callee's credential crosses the encrypted call-control channel.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoicePeerAllocation {
+    pub endpoint: String,
+    pub token: String,
+    pub expires_at: u64,
+}
+impl VoiceAllocation {
+    #[must_use]
+    pub fn for_callee(&self) -> VoicePeerAllocation {
+        VoicePeerAllocation {
+            endpoint: self.endpoint.clone(),
+            token: self.callee_token.clone(),
+            expires_at: self.expires_at,
+        }
+    }
+}
+impl Drop for VoicePeerAllocation {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.token.zeroize();
+    }
 }
 /// Redacted diagnostics prevent accidental bearer-token disclosure in frame logging.
 impl std::fmt::Debug for VoiceAllocation {

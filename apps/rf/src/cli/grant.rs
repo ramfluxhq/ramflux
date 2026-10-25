@@ -28,7 +28,7 @@ pub(crate) enum GrantAction {
 pub(crate) struct ApprovalSelector {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) approval: String,
 }
 
@@ -36,7 +36,7 @@ pub(crate) struct ApprovalSelector {
 pub(crate) struct GrantSelector {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) grant: String,
 }
 
@@ -44,9 +44,9 @@ pub(crate) struct GrantSelector {
 pub(crate) struct GrantRequest {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) grant: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) server: Option<String>,
     #[arg(long)]
     pub(crate) tool: Option<String>,
@@ -60,6 +60,6 @@ pub(crate) struct GrantRequest {
 pub(crate) struct GrantRevoke {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) grant: String,
 }

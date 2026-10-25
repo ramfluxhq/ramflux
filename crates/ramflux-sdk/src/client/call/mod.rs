@@ -73,6 +73,23 @@ impl RamfluxClient {
             _ => None,
         };
         db.persist_client_record("call",&row.call_id,&json!({"kind":"call","call":row,"duration_seconds":duration,"missed":row.end_reason.as_deref()==Some("missed")}))?;
+        if row.state == "ended" {
+            self.remove_call_control_receipts(&row.call_id)?;
+        }
+        Ok(())
+    }
+    fn remove_call_control_receipts(&self, id: &str) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let prefix = format!("voice/control/{id}/");
+        loop {
+            let keys = db.actor_state_key_page(&prefix, 128)?;
+            if keys.is_empty() {
+                break;
+            }
+            for key in keys {
+                db.remove_actor_state(&key)?;
+            }
+        }
         Ok(())
     }
     fn verify_call(
@@ -110,7 +127,23 @@ impl RamfluxClient {
         if local.principal_id == c.sender.principal_id {
             return Err(invalid("self calls are unsupported"));
         }
-        if let Some(thread) = self.account_db()?.client_record("conversation", conversation)? {
+        let db = self.account_db()?;
+        let thread = db.client_record("conversation", conversation)?;
+        if thread.is_none()
+            && self
+                .voice_calls
+                .get(&c.call_id)
+                .is_none_or(|call| call.row.conversation_id != conversation)
+        {
+            let envelope = crate::client::routed::decode(&entry.envelope)?;
+            if db.actor_state_exists(&format!(
+                "dm-pair/session/{}",
+                envelope.ciphertext.session_id
+            ))? {
+                return Err(invalid("established pair requires its existing direct conversation"));
+            }
+        }
+        if let Some(thread) = thread {
             let expected = std::collections::BTreeSet::from([
                 local.principal_id.as_str(),
                 c.sender.principal_id.as_str(),
@@ -190,6 +223,13 @@ impl RamfluxClient {
             return Err(invalid("group calls are unsupported"));
         }
         self.verify_call(&c, entry, conversation)?;
+        if self
+            .account_db()?
+            .load_actor_state::<CallRow>(&format!("voice/public/{}", c.call_id))?
+            .is_some_and(|row| row.state == "ended")
+        {
+            return Ok(true);
+        }
         let receipt = format!(
             "voice/control/{}/{}",
             c.call_id,
@@ -212,7 +252,9 @@ impl RamfluxClient {
             db.persist_client_record("conversation", conversation, &json!({"kind":"direct","group_id":null,"participants":[c.caller.principal_id,c.callee.principal_id]}))?;
         }
         self.persist_call_row(&next.row)?;
-        db.persist_actor_state(&receipt, &hash)?;
+        if next.row.state != "ended" {
+            db.persist_actor_state(&receipt, &hash)?;
+        }
         self.voice_transition.replace(Some((transition_key(body), Box::new(next))));
         Ok(true)
     }

@@ -32,9 +32,9 @@ pub(crate) struct DeviceActivate {
     pub(crate) node: Option<String>,
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) device: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: String,
     #[arg(long)]
     pub(crate) device_seed_byte_hex: Option<String>,
@@ -46,7 +46,7 @@ pub(crate) struct DeviceActivate {
 pub(crate) struct DeviceRevoke {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) device: String,
 }
 
@@ -66,7 +66,7 @@ pub(crate) enum DeviceSyncAction {
 pub(crate) struct DeviceSyncExport {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target_device: String,
     #[arg(long)]
     pub(crate) relay_endpoint: String,

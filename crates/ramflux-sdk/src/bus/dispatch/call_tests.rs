@@ -216,3 +216,18 @@ fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn generated_call_ids_are_full_length_and_never_look_like_cli_flags() -> Result<(), SdkError> {
+    for _ in 0..512 {
+        let id = super::new_call_id()?;
+        assert!(!id.starts_with('-'));
+        assert_eq!(
+            ramflux_protocol::decode_base64url(&id)
+                .map_err(|_| super::invalid("call ID encoding"))?
+                .len(),
+            16
+        );
+    }
+    Ok(())
+}

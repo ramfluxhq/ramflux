@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Production opaque UDP data plane and gateway-only mTLS allocation leases.
-use ramflux_node_core::{NodeServiceConfig, VoiceRelayState};
+use ramflux_node_core::{NodeServiceConfig, VoiceRelayState, VoiceRoute};
 use ramflux_protocol::{VoiceLeaseRequest, VoiceLeaseStatus};
 use std::sync::{Arc, Mutex};
 
@@ -134,10 +134,14 @@ pub(crate) async fn run_udp(
                 let (len,source)=result?;
                 let route={
                     let mut state=state.lock().map_err(|_|anyhow::anyhow!("voice state poisoned"))?;
-                    state.route(&buffer[..len],source,crate::config::now_unix_seconds(),allow_private)
+                    state.route_with_rebinding(&buffer[..len],source,crate::config::now_unix_seconds(),allow_private)
                 };
-                if let Ok(Some((target,packet)))=route
-                    && socket.send_to(packet,target).await.is_err() { tracing::debug!("voice datagram forwarding failed"); }
+                let sent = match route {
+                    Ok(VoiceRoute::Forward { target, packet }) => socket.send_to(packet, target).await,
+                    Ok(VoiceRoute::Challenge { target, packet }) => socket.send_to(&packet, target).await,
+                    Ok(VoiceRoute::Drop) | Err(_) => continue,
+                };
+                if sent.is_err() { tracing::debug!("voice datagram forwarding failed"); }
             }
             _=sweep.tick() => { state.lock().map_err(|_|anyhow::anyhow!("voice state poisoned"))?.expire(crate::config::now_unix_seconds()); }
         }

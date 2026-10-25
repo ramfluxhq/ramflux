@@ -9,6 +9,7 @@ pub const VOICE_LEASE_SECONDS: u64 = 60;
 pub const VOICE_PACKET_MAX_BYTES: usize = 1400;
 const MAX_ALLOCATIONS: usize = 4096;
 const ACCOUNT_LIMIT: usize = 2;
+const MAX_LEASE_LIFETIME: u64 = 4 * 60 * 60;
 const BYTES_PER_SECOND: usize = 128 * 1024;
 fn refused(message: &str) -> NodeCoreError {
     NodeCoreError::Unauthorized(message.into())
@@ -18,10 +19,12 @@ struct Side {
     source: Option<SocketAddr>,
     second: u64,
     bytes: usize,
+    challenge: Option<rebinding::Challenge>,
 }
 struct Lease {
     scope: VoiceAllocationRequest,
     expires_at: u64,
+    hard_expires_at: u64,
     sides: [Side; 2],
 }
 /// Credentials and source bindings are RAM-only. Restart drops all leases and fails closed.
@@ -29,6 +32,7 @@ struct Lease {
 pub struct VoiceRelayState {
     leases: BTreeMap<(String, String), Lease>,
     tokens: BTreeMap<String, ((String, String), usize)>,
+    usage: quota::Usage,
 }
 impl VoiceRelayState {
     /// Allocates or recovers an exact scope owned by the authenticated node.
@@ -54,15 +58,7 @@ impl VoiceRelayState {
             return Ok(allocation(lease, endpoint));
         }
         if self.leases.len() >= MAX_ALLOCATIONS
-            || [&scope.caller, &scope.callee].into_iter().any(|a| {
-                self.leases
-                    .values()
-                    .filter(|l| {
-                        same_account(a, &l.scope.caller) || same_account(a, &l.scope.callee)
-                    })
-                    .count()
-                    >= ACCOUNT_LIMIT
-            })
+            || self.account_usage(&scope.caller) >= ACCOUNT_LIMIT
         {
             return Err(refused("voice allocation capacity exhausted"));
         }
@@ -75,12 +71,14 @@ impl VoiceRelayState {
         let lease = Lease {
             scope: scope.clone(),
             expires_at: now.saturating_add(VOICE_LEASE_SECONDS),
+            hard_expires_at: now.saturating_add(MAX_LEASE_LIFETIME),
             sides,
         };
         let response = allocation(&lease, endpoint);
         for (i, s) in lease.sides.iter().enumerate() {
             self.tokens.insert(s.token.clone(), (key.clone(), i));
         }
+        self.usage.charge(&lease.scope.caller);
         self.leases.insert(key, lease);
         Ok(response)
     }
@@ -101,7 +99,10 @@ impl VoiceRelayState {
         if &lease.scope != scope {
             return Err(refused("voice scope changed"));
         }
-        lease.expires_at = now.saturating_add(VOICE_LEASE_SECONDS);
+        if now >= lease.hard_expires_at {
+            return Err(refused("voice maximum lifetime reached"));
+        }
+        lease.expires_at = now.saturating_add(VOICE_LEASE_SECONDS).min(lease.hard_expires_at);
         Ok(lease.expires_at)
     }
     /// Releases a matching scope idempotently.
@@ -121,12 +122,14 @@ impl VoiceRelayState {
                 self.tokens.remove(&side.token);
             }
         }
-        self.leases.remove(&key);
+        if let Some(lease) = self.leases.remove(&key) {
+            self.usage.release(&lease);
+        }
         Ok(())
     }
     /// Authenticates a datagram and learns only its own source. Empty payloads maintain NAT.
     /// # Errors
-    /// Rejects malformed/expired credentials, private targets, clock rollback and bandwidth excess.
+    /// Rejects malformed/expired credentials, private targets, bandwidth excess.
     pub fn route<'a>(
         &mut self,
         packet: &'a [u8],
@@ -134,6 +137,21 @@ impl VoiceRelayState {
         now: u64,
         allow_private: bool,
     ) -> Result<Option<(SocketAddr, &'a [u8])>, NodeCoreError> {
+        match self.route_with_rebinding(packet, source, now, allow_private)? {
+            VoiceRoute::Forward { target, packet } => Ok(Some((target, packet))),
+            VoiceRoute::Drop | VoiceRoute::Challenge { .. } => Ok(None),
+        }
+    }
+    /// Routes opaque media or a bounded return-routability challenge; see `route` for admission.
+    /// # Errors
+    /// Rejects malformed credentials, expired leases, private sources and exhausted budgets.
+    pub fn route_with_rebinding<'a>(
+        &mut self,
+        packet: &'a [u8],
+        source: SocketAddr,
+        now: u64,
+        allow_private: bool,
+    ) -> Result<VoiceRoute<'a>, NodeCoreError> {
         let (token, payload) = decode_voice_datagram(packet)?;
         if !allow_private && !crate::relay_socket_target_allowed(source, &[]) {
             return Err(refused("voice source forbidden"));
@@ -144,17 +162,23 @@ impl VoiceRelayState {
         // and allocation path, so unauthenticated UDP traffic cannot scan all active calls.
         if self.leases.get(&key).is_some_and(|lease| now >= lease.expires_at) {
             if let Some(lease) = self.leases.remove(&key) {
+                self.usage.release(&lease);
                 for side in lease.sides {
                     self.tokens.remove(&side.token);
                 }
             }
             return Err(refused("voice lease unavailable"));
         }
-        let lease = self.leases.get_mut(&key).ok_or_else(|| refused("voice lease unavailable"))?;
-        let side = &mut lease.sides[i];
-        if now < side.second {
-            return Err(refused("voice clock rollback"));
+        let lease = self.leases.get(&key).ok_or_else(|| refused("voice lease unavailable"))?;
+        if i == 1
+            && lease.sides[1].source.is_none()
+            && self.account_usage(&lease.scope.callee) >= ACCOUNT_LIMIT
+        {
+            return Err(refused("voice callee capacity exhausted"));
         }
+        let lease = self.leases.get_mut(&key).ok_or_else(|| refused("voice lease unavailable"))?;
+        let charge_callee = i == 1 && lease.sides[1].source.is_none();
+        let side = &mut lease.sides[i];
         if now != side.second {
             side.second = now;
             side.bytes = 0;
@@ -164,23 +188,32 @@ impl VoiceRelayState {
             return Err(refused("voice bandwidth exhausted"));
         }
         side.bytes = bytes;
-        side.source = Some(source);
+        if let Some(result) = rebinding::admit(side, source, payload, now)? {
+            return Ok(result);
+        }
+        if charge_callee {
+            self.usage.charge(&lease.scope.callee);
+        }
         if payload.is_empty() {
-            return Ok(None);
+            return Ok(VoiceRoute::Drop);
         }
         let Some(target) = lease.sides[1 - i].source else {
-            return Ok(None);
+            return Ok(VoiceRoute::Drop);
         };
         if !allow_private && !crate::relay_socket_target_allowed(target, &[]) {
             return Err(refused("voice target forbidden"));
         }
-        Ok(Some((target, payload)))
+        Ok(VoiceRoute::Forward { target, packet: payload })
+    }
+    fn account_usage(&self, account: &CallEndpoint) -> usize {
+        self.usage.count(account)
     }
     /// Expires credentials with their lease; live allocations are never evicted for admission.
     pub fn expire(&mut self, now: u64) {
         self.leases.retain(|_, lease| {
             let live = now < lease.expires_at;
             if !live {
+                self.usage.release(lease);
                 for s in &lease.sides {
                     self.tokens.remove(&s.token);
                 }
@@ -197,6 +230,7 @@ fn new_side(now: u64) -> Result<Side, NodeCoreError> {
         source: None,
         second: now,
         bytes: 0,
+        challenge: None,
     })
 }
 fn allocation(l: &Lease, endpoint: &str) -> VoiceAllocation {
@@ -257,3 +291,16 @@ fn decode_voice_datagram(p: &[u8]) -> Result<(String, &[u8]), NodeCoreError> {
 #[cfg(test)]
 #[path = "voice_tests.rs"]
 mod tests;
+
+/// A data-plane decision; challenges are never forwarded as media.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VoiceRoute<'a> {
+    Drop,
+    Forward { target: SocketAddr, packet: &'a [u8] },
+    Challenge { target: SocketAddr, packet: [u8; 36] },
+}
+#[path = "voice_rebinding.rs"]
+mod rebinding;
+
+#[path = "voice_quota.rs"]
+mod quota;

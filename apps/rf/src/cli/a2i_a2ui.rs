@@ -24,13 +24,13 @@ pub(crate) enum A2iAction {
 pub(crate) struct A2iAppend {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) event: String,
     #[arg(long = "type")]
     pub(crate) event_type: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) source_device: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) target_device: String,
     #[arg(long = "control-domain")]
     pub(crate) control_domain: String,
@@ -48,7 +48,7 @@ pub(crate) struct A2iAppend {
 pub(crate) struct A2iAck {
     #[arg(long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) event: String,
 }
 

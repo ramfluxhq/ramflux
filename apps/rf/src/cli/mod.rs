@@ -211,3 +211,7 @@ mod tests {
         assert_eq!(peer.now, Some(1_760_000_020));
     }
 }
+
+#[cfg(test)]
+#[path = "opaque_id_tests.rs"]
+mod opaque_id_tests;

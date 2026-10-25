@@ -78,7 +78,9 @@ live signed session and current registry branch on every allocation, renewal and
 release. Tokens bind a call and both root-qualified device endpoints. Leases last
 60 seconds; the caller renews after 20 seconds and sends authenticated lease updates
 to the callee. Expired media authorization ends the call. Concurrent limits are two
-allocations per root-qualified account, 4096 globally, and 128 KiB/s per endpoint.
+allocations per root-qualified account (caller charged on allocation, callee only on its
+first credential use), 4096 globally, and 128 KiB/s per endpoint. Renewal cannot extend
+the original lease beyond four hours. Clock rollback starts a fresh bandwidth window.
 Payloads are bounded to 1400 bytes. The relay learns destinations from authenticated
 UDP sources; an allocation cannot supply an arbitrary forwarding address. Private
 and special-use destinations remain refused by default. Development fixtures use the
@@ -91,3 +93,31 @@ The dedicated realnet mode additionally requires `RAMFLUX_ITEST_VOICE=1`, select
 voice fixture uses named stacks and dedicated ports, two daemon processes, real
 signed signaling and production mTLS allocation; synthetic Opus frames travel both
 ways through the opaque UDP relay. Run it on the container QA host.
+
+## Source pinning and NAT changes
+
+The relay pins each side's UDP source on its first token-authenticated datagram. Media
+or keepalives from another source cannot replace that pin. A new source receives a
+36-byte raw challenge, `RFVC || random_cookie[32]`, from the relay. Within five seconds,
+it must echo `RFVE || cookie` as the payload of a normal datagram framed with its own
+token. The cookie is bound to that source and side. Until the echo succeeds, media
+continues to the previous address. The echo is consumed, never forwarded as media.
+One challenge per side can be outstanding; new sources cannot churn it before expiry.
+Challenge replies are no larger than the smallest authenticated request, and share
+the endpoint bandwidth budget. Clients accept challenges only from their configured
+relay. The caller's credential is never sent to the callee.
+
+Generated call IDs never begin with `-`. Use `--call=CALL_ID` and `--conversation=ID`
+when scripting with opaque selectors; the CLI also accepts hyphen-prefixed IDs as
+separate argument values. Call controls do not create unrelated conversations on an
+established pair. Each media key starts exactly once at counter zero; live endpoint
+handoff/rekey is deferred. Device or key change ends a call with `end_reason: failed`.
+
+Committed call receipts retain routing attribution and the original payload hash but
+omit the encrypted call payload. The local event log likewise stores only commitment
+metadata for those controls. Consumed ratchet message keys are removed before the
+post-decrypt snapshot is persisted. This ciphertext omission also matters because
+reusable private X3DH prekeys can otherwise reconstruct bootstrap decryption. It is
+not a claim of post-compromise secrecy for ciphertext independently captured on the
+wire together with the reusable private bootstrap keys. Terminal calls delete their
+control-sequence receipts; retained public call rows continue to prevent resurrection.
