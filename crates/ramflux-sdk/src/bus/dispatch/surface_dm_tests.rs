@@ -129,6 +129,11 @@ pub(super) async fn peer_fixture(
             peer.client.persist_root_verified_directory(manifest)?;
             peer.client
                 .persist_root_verified_directory(&super::fixture::manifest(&source.client)?)?;
+            peer.client.establish_friend_link(
+                "surface-receiver-consent",
+                source.client.owned_device_identity()?.root_commitment(),
+                peer.client.owned_device_identity()?.root_commitment(),
+            )?;
         }
     }
     let peer_manifest = peer_manifest.ok_or("peer manifest")?;
