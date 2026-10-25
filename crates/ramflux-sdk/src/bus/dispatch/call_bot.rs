@@ -5,59 +5,6 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
-pub(crate) fn dispatch_call_bus_request(
-    request: &LocalBusFrame,
-    state: &mut LocalBusDaemonState,
-) -> Result<LocalBusDispatchResult, SdkError> {
-    let account_id = request_account_id(request)?;
-    let account = local_bus_account_mut(state, account_id)?;
-    match request.method.as_str() {
-        "call.invite" => {
-            let body: LocalBusCallInviteRequest = serde_json::from_value(request.body.clone())?;
-            let opaque_payload = ramflux_protocol::decode_base64url(&body.opaque_offer_base64)
-                .map_err(|error| SdkError::LocalBus(format!("invalid call offer: {error}")))?;
-            let signal = OpaqueCallSignal { call_id: body.call_id.clone(), opaque_payload };
-            let relay = ramflux_sync::relay_opaque_call_signal(&signal);
-            ramflux_sync::assert_srtp_relay_has_no_media_key(&relay)?;
-            let record = LocalCallRecord {
-                call_id: body.call_id.clone(),
-                target_id: body.target_id,
-                state: "invited".to_owned(),
-                relay,
-                turn_allocation_id: format!("turn_alloc_{}", body.call_id),
-                node_sees_sdp: false,
-                relay_holds_media_key: false,
-            };
-            account.calls.insert(body.call_id, record.clone());
-            Ok(local_bus_ok(serde_json::to_value(record)?))
-        }
-        "call.answer" => {
-            let body: LocalBusCallAnswerRequest = serde_json::from_value(request.body.clone())?;
-            let opaque_payload = ramflux_protocol::decode_base64url(&body.opaque_answer_base64)
-                .map_err(|error| SdkError::LocalBus(format!("invalid call answer: {error}")))?;
-            let record = account
-                .calls
-                .get_mut(&body.call_id)
-                .ok_or_else(|| SdkError::LocalBus(format!("call not found: {}", body.call_id)))?;
-            let signal = OpaqueCallSignal { call_id: body.call_id, opaque_payload };
-            record.relay = ramflux_sync::relay_opaque_call_signal(&signal);
-            ramflux_sync::assert_srtp_relay_has_no_media_key(&record.relay)?;
-            "answered".clone_into(&mut record.state);
-            Ok(local_bus_ok(serde_json::to_value(record)?))
-        }
-        "call.hangup" => {
-            let body: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
-            let record = account
-                .calls
-                .get_mut(&body.call_id)
-                .ok_or_else(|| SdkError::LocalBus(format!("call not found: {}", body.call_id)))?;
-            "hung_up".clone_into(&mut record.state);
-            Ok(local_bus_ok(serde_json::to_value(record)?))
-        }
-        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
-    }
-}
-
 pub(crate) fn dispatch_bot_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,

@@ -109,6 +109,7 @@ pub struct SFrameSender {
     kid: u64,
     key: Key,
     next: Option<u64>,
+    end: u64,
 }
 impl std::fmt::Debug for SFrameSender {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -122,7 +123,22 @@ impl SFrameSender {
     /// # Errors
     /// Rejects base keys outside 16..=64 bytes or a failed key derivation. Calls use random 32-byte keys.
     pub fn new(base_key: &[u8], kid: u64) -> Result<Self, CryptoError> {
-        Ok(Self { kid, key: Key::derive(base_key, kid)?, next: Some(0) })
+        Self::with_counter_range(base_key, kid, 0, u64::MAX)
+    }
+    /// Starts a sender within a freshly reserved, non-overlapping counter range.
+    /// The owner must never reissue a range for the same base key and KID.
+    /// # Errors
+    /// Rejects an empty range, invalid base key or failed key derivation.
+    pub fn with_counter_range(
+        base_key: &[u8],
+        kid: u64,
+        start: u64,
+        end: u64,
+    ) -> Result<Self, CryptoError> {
+        if start > end {
+            return Err(CryptoError::SFrame("empty counter range"));
+        }
+        Ok(Self { kid, key: Key::derive(base_key, kid)?, next: Some(start), end })
     }
     /// # Errors
     /// Rejects exhausted counters, excessive input or authenticated encryption failure.
@@ -131,7 +147,7 @@ impl SFrameSender {
             return Err(CryptoError::SFrame("frame byte budget"));
         }
         let counter = self.next.ok_or(CryptoError::SFrame("counter exhausted"))?;
-        self.next = counter.checked_add(1);
+        self.next = if counter == self.end { None } else { counter.checked_add(1) };
         let mut frame = SFrameHeader { kid: self.kid, counter }.encode();
         let mut aad = frame.clone();
         aad.extend_from_slice(metadata);

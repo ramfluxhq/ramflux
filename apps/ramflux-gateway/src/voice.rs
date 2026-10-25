@@ -77,17 +77,14 @@ async fn issue(
     let body = request.body.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<VoiceLeaseResponse> {
         let client = ramflux_transport::MeshHttpClient::new();
-        match &body {
-            VoiceLeaseRequest::Allocate { .. } => {
-                let allocation: VoiceAllocation =
-                    client.post_json(&endpoint, "/voice/v1/lease", &tls, "ramflux-relay", &body)?;
-                Ok(VoiceLeaseResponse::Allocation { allocation })
-            }
-            _ => {
-                let status: VoiceLeaseStatus =
-                    client.post_json(&endpoint, "/voice/v1/lease", &tls, "ramflux-relay", &body)?;
-                Ok(VoiceLeaseResponse::Status { status })
-            }
+        if let VoiceLeaseRequest::Allocate { .. } = &body {
+            let allocation: VoiceAllocation =
+                client.post_json(&endpoint, "/voice/v1/lease", &tls, "ramflux-relay", &body)?;
+            Ok(VoiceLeaseResponse::Allocation { allocation })
+        } else {
+            let status: VoiceLeaseStatus =
+                client.post_json(&endpoint, "/voice/v1/lease", &tls, "ramflux-relay", &body)?;
+            Ok(VoiceLeaseResponse::Status { status })
         }
     })
     .await?

@@ -3,6 +3,7 @@
 
 pub mod a2i_a2ui;
 pub mod account;
+pub(crate) mod call;
 pub mod call_bot;
 pub mod contact;
 mod contact_resolution;

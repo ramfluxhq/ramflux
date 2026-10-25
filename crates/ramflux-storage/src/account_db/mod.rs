@@ -38,6 +38,7 @@ pub mod recovery;
 pub mod runtime;
 pub mod surface;
 mod task;
+mod voice;
 
 pub struct AccountDb {
     pub local_account_id: String,

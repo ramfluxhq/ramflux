@@ -5,6 +5,7 @@ pub mod a2i;
 mod a2i_identity;
 pub mod account;
 mod backup_contacts;
+pub(crate) mod call;
 pub mod contact;
 pub(crate) mod contact_resolution;
 pub(crate) mod contact_roots;
@@ -46,6 +47,7 @@ pub(crate) mod task;
 use crate::prelude::*;
 
 pub struct RamfluxClient {
+    pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
     pub(crate) node_relay_options: Option<crate::object::RelayTransferOptions>,
     pub(crate) identity_root: Option<IdentityRoot>,
     pub(crate) reader_device_identity: Option<ramflux_crypto::RootQualifiedDeviceRef>,
@@ -62,6 +64,7 @@ pub struct RamfluxClient {
 impl Default for RamfluxClient {
     fn default() -> Self {
         Self {
+            voice_calls: BTreeMap::new(),
             node_relay_options: None,
             identity_root: None,
             reader_device_identity: None,

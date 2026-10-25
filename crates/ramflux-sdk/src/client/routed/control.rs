@@ -11,6 +11,9 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, SdkError> {
+        if self.project_call_control(entry, &opened.routing.conversation_id, body)? {
+            return Ok(None);
+        }
         if self.receive_surface_resync_request(entry, &opened.routing.conversation_id, body)? {
             return Ok(None);
         }
@@ -214,6 +217,9 @@ impl RamfluxClient {
         opened: &Opened,
         body: &[u8],
     ) -> Result<(), SdkError> {
+        if self.refresh_call_control(body)? {
+            return Ok(());
+        }
         if body.starts_with(crate::client::task::approval::PREFIX)
             || body.starts_with(crate::client::task::own_history::PREFIX)
             || body.starts_with(crate::client::task::control::PREFIX)

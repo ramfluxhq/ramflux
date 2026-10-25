@@ -211,6 +211,21 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
         }
         messages.push(value);
     }
+    for row in
+        db.voice_call_rows(false)?.into_iter().filter(|row| row.conversation_id == conversation)
+    {
+        let duration = match (row.answered_at, row.ended_at) {
+            (Some(start), Some(end)) => Some(end.saturating_sub(start)),
+            _ => None,
+        };
+        messages.push(serde_json::json!({"id":row.call_id,"message_id":row.call_id,"conversation_id":row.conversation_id,"kind":"call","created_at":row.created_at,"call":row,"duration_seconds":duration,"missed":row.end_reason.as_deref()==Some("missed")}));
+    }
+    messages.sort_by_key(|row| {
+        (
+            row["created_at"].as_i64().unwrap_or(0),
+            row["message_id"].as_str().unwrap_or("").to_owned(),
+        )
+    });
     Ok(serde_json::json!({"messages":messages,"rejected":client.rejected_inbox(conversation)?}))
 }
 

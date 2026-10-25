@@ -68,7 +68,14 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
-    Ok(received + tasks_applied + task_sent + approvals + receipts)
+    let voice = match super::dispatch::call::drive(account).await {
+        Ok(n) => n,
+        Err(error) => {
+            tracing::warn!(%error,"call signaling deferred");
+            0
+        }
+    };
+    Ok(received + tasks_applied + task_sent + approvals + receipts + voice)
 }
 
 /// Projection is best-effort; the durable message remains available when its claim cannot be written.
