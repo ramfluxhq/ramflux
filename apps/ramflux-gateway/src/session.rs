@@ -232,12 +232,16 @@ async fn run_registered_gateway_session(
     let target_delivery_id = runtime.target_delivery_id.clone();
     let session_id = runtime.session_id.clone();
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
-    let mut registration =
+    let registration =
         context.hub.register(target_delivery_id.clone(), session_id, Arc::clone(&send)).await?;
-    let result = tokio::select! {
-        result = run_gateway_session_loop(send, recv, context.clone(), runtime) => result,
-        _ = registration.closed.changed() => Ok(()),
-    };
+    let result = run_gateway_session_loop_until_closed(
+        send,
+        recv,
+        context.clone(),
+        runtime,
+        Some(registration.closed),
+    )
+    .await;
     context.hub.unregister(&target_delivery_id, registration.token).await;
     result
 }
@@ -505,15 +509,37 @@ fn fresh_gateway_session_id(device_id: &str) -> anyhow::Result<String> {
     Ok(format!("s1_{}_{}_{}", device_id, ramflux_node_core::now_unix_seconds(), nonce))
 }
 
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 pub(crate) async fn run_gateway_session_loop(
+    send: GatewaySendHandle,
+    recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
+    context: GatewayQuicContext,
+    runtime: GatewaySessionRuntime,
+) -> anyhow::Result<()> {
+    run_gateway_session_loop_until_closed(send, recv, context, runtime, None).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_gateway_session_loop_until_closed(
     send: GatewaySendHandle,
     mut recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
     context: GatewayQuicContext,
     runtime: GatewaySessionRuntime,
+    mut closed: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> anyhow::Result<()> {
     loop {
-        let bytes = match recv.recv_frame().await {
+        // Replacement may stop an idle reader, but never cancel an admitted request after
+        // its router commit and before its reply. Finish the request before checking again.
+        let incoming = tokio::select! {
+            biased;
+            () = async {
+                if let Some(closed) = closed.as_mut() {
+                    if !*closed.borrow() { let _ = closed.changed().await; }
+                } else { std::future::pending::<()>().await; }
+            } => return Ok(()),
+            bytes = recv.recv_frame() => bytes,
+        };
+        let bytes = match incoming {
             Ok(bytes) => bytes,
             Err(error) => {
                 tracing::debug!(%error, "gateway session read ended");

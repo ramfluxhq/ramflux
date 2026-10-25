@@ -3,9 +3,9 @@
 
 //! Read-only discovery, transport, application, and account-session diagnostics.
 use super::{
-    Duration, GatewaySessionEngine, LocalBusDaemonState, LocalBusDispatchResult, LocalBusFrame,
-    NodeProfile, Path, SdkError, Serialize, SocketAddr, fetch_client_record, local_bus_ok,
-    node_error, now_unix_timestamp, read_local_bus_account_manifest, resolve_node_addr,
+    Duration, LocalBusDaemonState, LocalBusDispatchResult, LocalBusFrame, NodeProfile, Path,
+    SdkError, Serialize, SocketAddr, fetch_client_record, local_bus_ok, node_error,
+    now_unix_timestamp, read_local_bus_account_manifest, resolve_node_addr,
 };
 use crate::bus::io::local_bus_error_body;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource};
@@ -23,7 +23,7 @@ pub struct GatewayProbe {
     pub errors: serde_json::Value,
     /// `ok`, `unexpected_response`, `timeout`, or `not_available`.
     pub app: &'static str,
-    /// `requires_account` for a pre-account probe.
+    /// `requires_account` before binding, `not_probed` for an account-bound diagnostic.
     pub session: &'static str,
     /// Total gateway probe duration.
     pub rtt_ms: u64,
@@ -81,7 +81,7 @@ pub(crate) async fn dispatch_probe(
     let fresh = NodeProfile::from_record(record, now);
     let ca = fresh.write_ca(&state.config.data_root)?;
     let mut gateway = probe_gateway(&fresh, &ca).await;
-    gateway.session = match probe_bound_session(state, id).await {
+    gateway.session = match probe_bound_session(state, id) {
         Ok(session) => session,
         Err(error) => {
             gateway.errors["session"] = serde_json::json!(local_bus_error_body(&error));
@@ -104,7 +104,7 @@ pub(crate) async fn dispatch_probe(
         "prekey": {"status": if prekey_ok {"ok"} else {"failed"}, "error": prekey_error}, "checked_at": now})))
 }
 
-async fn probe_bound_session(
+pub(super) fn probe_bound_session(
     state: &LocalBusDaemonState,
     id: &str,
 ) -> Result<&'static str, SdkError> {
@@ -119,16 +119,9 @@ async fn probe_bound_session(
             if manifest.node_id.as_deref() != Some(id) {
                 continue;
             }
-            let Some(account) = state.accounts.get(&manifest.local_account_id) else {
-                return Ok("failed");
-            };
-            return Ok(match GatewaySessionEngine::connect(account.gateway_config.clone()).await {
-                Ok(mut engine) => {
-                    let _ = engine.close("node probe finished").await;
-                    "ok"
-                }
-                Err(error) => return Err(error),
-            });
+            // An authenticated Open would replace the account actor's live registration.
+            // Transport/application health is already checked with the non-registering probe.
+            return Ok("not_probed");
         }
     }
     Ok("requires_account")

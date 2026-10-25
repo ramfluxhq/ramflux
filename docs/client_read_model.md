@@ -42,6 +42,9 @@ query strings and fragments while preserving their source chain.
 `prekey.error` when those stages fail. Each uses the same bus error shape. Not every failure has
 an OS cause: protocol rejection, missing authentication, and QUIC timeouts need not provide errno.
 These diagnostics do not establish a platform permission denial from a string or invent errno.
+Gateway health uses the verified, non-registering Heartbeat-first probe. For a bound account,
+`gateway.session` is `not_probed`: diagnostics never open another authenticated session, which
+would replace the account actor's live gateway registration.
 
 ## Pagination
 
@@ -108,6 +111,11 @@ Verified device rows contain `id`/`device_id`, `signing_public_key`, `target_del
 and delivery targets. `verified_at` is a verification observation, not a fabricated last-seen time.
 A new verified manifest replaces the active device set. Cached safety numbers survive unchanged
 sets and are cleared on set changes. A previously verified changed set reports `verification_stale`.
+Safety numbers and device-set hashes use the root-signed set's Active entries and their key
+commitments, including siblings whose transport proof is temporarily not ready. An omitted or
+aged proof changes reachability, not safety identity. Preview uses the same material. Upgrading
+from hashes of transport-ready entries changes that representation once; existing verification
+then reports `verification_stale` and must be compared again.
 
 Display names, remote principal kinds, device labels and last-seen times are null when not supplied
 by an authoritative local source. The current remote manifest does not carry those profile fields.

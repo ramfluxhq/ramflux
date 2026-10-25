@@ -35,16 +35,25 @@ fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<GatewayServerFrame>>>) {
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_succeeds_when_the_inbox_is_empty()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(false).await
+    submit_after_recipient_ack(false, false).await
 }
 
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_never_confirms_a_later_envelope()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(true).await
+    submit_after_recipient_ack(true, false).await
 }
 
-async fn submit_after_recipient_ack(later_message: bool) -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn replacing_a_registration_during_submit_finishes_its_reply_and_keeps_the_new_sink()
+-> Result<(), Box<dyn std::error::Error>> {
+    submit_after_recipient_ack(false, true).await
+}
+
+async fn submit_after_recipient_ack(
+    later_message: bool,
+    replace_during_reply: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
     let root = temp_cert_root("submit-ack-race")?;
     let gateway = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-gateway")?;
@@ -99,16 +108,29 @@ async fn submit_after_recipient_ack(later_message: bool) -> Result<(), Box<dyn s
     let (send, frames) = sink();
     let (recipient, received) = sink();
     context.hub.register("alice-target".into(), "alice-session".into(), recipient).await?;
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        super::handle_gateway_submit(
-            &send,
-            &context,
-            &runtime,
-            &ramflux_node_core::GatewaySubmitFrame { signed_request, envelope: envelope.clone() },
-        ),
-    )
-    .await?;
+    let result = if replace_during_reply {
+        submit_while_replacing(
+            context.clone(),
+            runtime,
+            ramflux_node_core::GatewaySubmitFrame { signed_request, envelope: envelope.clone() },
+            frames.clone(),
+        )
+        .await
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::handle_gateway_submit(
+                &send,
+                &context,
+                &runtime,
+                &ramflux_node_core::GatewaySubmitFrame {
+                    signed_request,
+                    envelope: envelope.clone(),
+                },
+            ),
+        )
+        .await?
+    };
     let _ = finished.send(());
     serving.await??;
     result?;
@@ -122,6 +144,45 @@ async fn submit_after_recipient_ack(later_message: bool) -> Result<(), Box<dyn s
     assert_eq!(entry.target_delivery_id, "alice-target");
     assert_eq!(*received.lock().map_err(|_| anyhow::anyhow!("recipient mutex"))?, *frames);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+async fn submit_while_replacing(
+    context: crate::GatewayQuicContext,
+    runtime: super::GatewaySessionRuntime,
+    submit: ramflux_node_core::GatewaySubmitFrame,
+    frames: Arc<Mutex<Vec<GatewayServerFrame>>>,
+) -> anyhow::Result<()> {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(tokio::sync::Notify::new());
+    let mut task = tokio::spawn(super::run_registered_gateway_session(
+        Box::new(DelayedReply {
+            frames: frames.clone(),
+            entered: entered.clone(),
+            released: released.clone(),
+        }),
+        Box::new(OneSubmit(Some(serde_json::to_vec(
+            &ramflux_node_core::GatewayClientFrame::Submit { submit },
+        )?))),
+        context.clone(),
+        runtime,
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await?;
+    // The router has committed and the old loop is writing the reply. A replacement
+    // must close that loop only after the reply completes, never by dropping its future.
+    let (replacement, replacement_frames) = sink();
+    context.hub.register("agent-target".into(), "replacement".into(), replacement).await?;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut task).await.is_err(),
+        "replacement cancelled an in-flight reply before the sink was released"
+    );
+    released.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), task).await???;
+    assert!(context.hub.send_to("agent-target", &GatewayServerFrame::Heartbeat { now: 7 }).await);
+    assert_eq!(
+        replacement_frames.lock().map_err(|_| anyhow::anyhow!("replacement frames"))?.len(),
+        1
+    );
     Ok(())
 }
 
@@ -330,4 +391,43 @@ fn fanout_confirmation_requires_a_positive_committed_sequence_for_an_accepted_de
         assert!(super::committed_fanout_entry(&delivery, &envelope).is_err());
     }
     Ok(())
+}
+
+struct OneSubmit(Option<Vec<u8>>);
+impl ramflux_transport::GatewaySessionFrameSource for OneSubmit {
+    fn recv_frame(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>,
+    > {
+        let frame = self.0.take();
+        Box::pin(async move {
+            if let Some(frame) = frame { Ok(frame) } else { std::future::pending().await }
+        })
+    }
+}
+struct DelayedReply {
+    frames: Arc<Mutex<Vec<GatewayServerFrame>>>,
+    entered: Arc<tokio::sync::Notify>,
+    released: Arc<tokio::sync::Notify>,
+}
+impl GatewaySessionFrameSink for DelayedReply {
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn send_frame<'a>(
+        &'a mut self,
+        body: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransportError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.released.notified().await;
+            self.frames
+                .lock()
+                .map_err(|_| TransportError::LockPoisoned)?
+                .push(serde_json::from_slice(body)?);
+            Ok(())
+        })
+    }
 }

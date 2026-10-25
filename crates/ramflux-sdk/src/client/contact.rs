@@ -765,10 +765,7 @@ impl RamfluxClient {
             ))?
             .ok_or_else(|| SdkError::LocalBus("verified manifest unavailable".into()))?;
         verify_device_manifest(&manifest, commitment)?;
-        complete_safety_material(&super::identity_authority::ready_manifest(
-            manifest,
-            now_unix_timestamp(),
-        ))
+        complete_safety_material(&manifest)
     }
     async fn contact_safety_material_pair_via_gateway(
         &self,
@@ -955,19 +952,8 @@ pub(crate) fn verify_device_manifest(
 fn complete_safety_material(
     manifest: &SdkDeviceManifestResponse,
 ) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {
-    let record = manifest.signed_device_set.as_ref().ok_or_else(|| {
-        SdkError::LocalBus("signed authority required for safety verification".into())
-    })?;
-    if record
-        .devices
-        .iter()
-        .filter(|d| d.status == ramflux_protocol::DeviceSetStatus::Active)
-        .count()
-        != manifest.devices.len()
-    {
-        return Err(SdkError::LocalBus(
-            "complete active key material required for safety verification".into(),
-        ));
+    if manifest.signed_device_set.is_none() {
+        return Err(SdkError::LocalBus("signed authority required for safety verification".into()));
     }
     contact_safety_material_from_manifest(manifest)
 }
@@ -987,11 +973,40 @@ pub(crate) fn contact_safety_material_from_manifest(
             manifest.root_public_key.as_bytes(),
         )
         .to_vec(),
-        devices: manifest
-            .devices
-            .iter()
-            .map(device_safety_material)
-            .collect::<Result<Vec<_>, _>>()?,
+        // The signed set is durable authority. Transport key material may be omitted when
+        // a sibling's proof ages; that must not silently change a verified safety number.
+        devices: if let Some(set) = &manifest.signed_device_set {
+            set.devices
+                .iter()
+                .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
+                .map(|device| {
+                    let signing =
+                        ramflux_protocol::decode_base64url(&device.signing_key_commitment)
+                            .map_err(|error| {
+                                SdkError::LocalBus(format!("invalid signing commitment: {error}"))
+                            })?;
+                    Ok(ramflux_crypto::DeviceSafetyMaterial {
+                        device_id_hash: ramflux_crypto::blake3_256(
+                            "ramflux.sdk.contact.device_id_hash.v1",
+                            device.device_id.as_bytes(),
+                        )
+                        .to_vec(),
+                        device_identity_key_hash: signing.clone(),
+                        device_signing_key_hash: signing,
+                        device_x25519_identity_key_hash: ramflux_protocol::decode_base64url(
+                            &device.agreement_key_commitment,
+                        )
+                        .map_err(|error| {
+                            SdkError::LocalBus(format!("invalid agreement commitment: {error}"))
+                        })?,
+                        device_epoch: device.device_epoch,
+                        branch_authorized_event_id: Vec::new(),
+                    })
+                })
+                .collect::<Result<Vec<_>, SdkError>>()?
+        } else {
+            manifest.devices.iter().map(device_safety_material).collect::<Result<Vec<_>, _>>()?
+        },
     })
 }
 

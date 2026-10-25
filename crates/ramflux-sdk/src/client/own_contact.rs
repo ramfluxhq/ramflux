@@ -247,7 +247,8 @@ impl RamfluxClient {
         db.persist_actor_state("own-contact/backfill", &progress)?;
         Ok(Some(root))
     }
-    /// The caller must first verify the packet's active sibling signature and owned root.
+    /// The caller must authenticate the containing owned-root payload first: either an active
+    /// sibling packet or the account backup AEAD. This decoder never establishes that authority.
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
         if self.receive_own_contact_tombstone(body)? {
             return Ok(true);

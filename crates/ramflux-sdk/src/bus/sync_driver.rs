@@ -71,6 +71,34 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     Ok(received + tasks_applied + task_sent + approvals + receipts)
 }
 
+/// Projection is best-effort; the durable message remains available when its claim cannot be written.
+pub(crate) fn project_committed_message(
+    account: &mut LocalBusAccountState,
+    entry: &GatewayInboxEntry,
+) -> Result<(), SdkError> {
+    match account.client.claim_inbox_projection(entry) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(error) => {
+            tracing::warn!(%error, envelope_id = %entry.envelope.envelope_id,
+                "inbox projection claim failed; message remains durable");
+            return Ok(());
+        }
+    }
+    let pending_keys = account
+        .pending_deliveries
+        .iter()
+        .map(|item| account.client.inbox_admission_key(item))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if !pending_keys.contains(&account.client.inbox_admission_key(entry)?) {
+        account.pending_deliveries.push(entry.clone());
+        if account.pending_deliveries.len() > 64 {
+            account.pending_deliveries.remove(0);
+        }
+    }
+    Ok(())
+}
+
 async fn receive(
     account: &mut LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
@@ -133,18 +161,8 @@ async fn receive(
             }
         };
         // Keep committed messages visible while acknowledgement retries remain pending.
-        if project_message && account.client.claim_inbox_projection(&entry)? {
-            let pending_keys = account
-                .pending_deliveries
-                .iter()
-                .map(|item| account.client.inbox_admission_key(item))
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            if !pending_keys.contains(&account.client.inbox_admission_key(&entry)?) {
-                account.pending_deliveries.push(entry.clone());
-                if account.pending_deliveries.len() > 64 {
-                    account.pending_deliveries.remove(0);
-                }
-            }
+        if project_message {
+            project_committed_message(account, &entry)?;
         }
         if account.client.ack_gateway_entry(engine, &entry, now).await.is_err() {
             let bytes = serde_json::to_vec(&entry)?;

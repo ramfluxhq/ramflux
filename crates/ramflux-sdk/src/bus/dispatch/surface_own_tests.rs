@@ -730,6 +730,16 @@ async fn sibling_control_is_applied_and_acked_without_entering_message_receive_p
 #[tokio::test]
 async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer_bootstrap()
 -> TestResult {
+    Box::pin(restored_contact_bootstrap(false)).await
+}
+
+#[tokio::test]
+async fn encrypted_backup_restores_contacts_before_the_first_peer_message_without_sibling_sync()
+-> TestResult {
+    Box::pin(restored_contact_bootstrap(true)).await
+}
+
+async fn restored_contact_bootstrap(backup: bool) -> TestResult {
     let root = runtime_tests::root("restored-contact-dm");
     let mut source = runtime_tests::account(
         &root.join("source"),
@@ -737,7 +747,7 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, receiver, directory, peer) =
+    let (mut sibling, config, receiver, directory, peer) =
         sibling_fixture_with_peer(&root, &mut source, false).await?;
     let peer_root = peer.client.owned_device_identity()?.root_commitment().to_owned();
     let own_root = source.client.owned_device_identity()?.root_commitment().to_owned();
@@ -747,17 +757,26 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
     db.remove_actor_state("identity/manifest/peer")?;
     assert!(sibling.client.device_identity_for_root(&peer_root, "device-peer-one").is_err());
     source.client.establish_friend_link("accepted-before-restore", &own_root, &peer_root)?;
-    let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
-    let own = Arc::clone(&gateway.own);
-    source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
-    // The live session has selected TCP-TLS; the original Auto endpoint is unavailable.
-    source.gateway_config.transport_kind = GatewaySessionTransportKind::Auto;
-    source.gateway_config.gateway_addr = "127.0.0.1:9".parse()?;
-    assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
-    assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 1);
-    assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
-    let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
+    if backup {
+        (source, sibling) =
+            Box::pin(restore_contacts_from_encrypted_backup(&root, source, sibling, &peer_root))
+                .await?;
+    } else {
+        let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
+        let own = Arc::clone(&gateway.own);
+        source.put_engine(GatewaySessionEngine::with_test_transport(
+            config.clone(),
+            Box::new(gateway),
+        ));
+        // The live session has selected TCP-TLS; the original Auto endpoint is unavailable.
+        source.gateway_config.transport_kind = GatewaySessionTransportKind::Auto;
+        source.gateway_config.gateway_addr = "127.0.0.1:9".parse()?;
+        assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
+        assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 1);
+        assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
+        let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+        assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
+    }
     sibling.client.require_cached_root_authority(
         &sibling.client.device_identity_for_root(&peer_root, "device-peer-one")?,
     )?;
@@ -799,6 +818,45 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
     drop((source, state, peer));
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+async fn restore_contacts_from_encrypted_backup(
+    root: &Path,
+    mut source: LocalBusAccountState,
+    mut sibling: LocalBusAccountState,
+    peer_root: &str,
+) -> Result<(LocalBusAccountState, LocalBusAccountState), Box<dyn std::error::Error>> {
+    // Exercise the real encrypted export/import dispatch, without any sibling backfill tick.
+    let path = root.join("account-backup.json");
+    let mut source_state = receiving_state(&root.join("source"), source);
+    let export = LocalBusFrame::request(
+        "export",
+        Some("sender".into()),
+        "account",
+        "account.backup.export",
+        json!({"output_path":path,"passphrase":"restore-test-secret"}),
+    );
+    super::super::account::dispatch_account_bus_request(&export, &mut source_state).await?;
+    source = source_state.accounts.remove("sender").ok_or("source")?;
+    let encoded = std::fs::read_to_string(&path)?;
+    assert!(!encoded.contains(peer_root));
+    assert!(!encoded.contains("accepted-before-restore"));
+    assert!(!sibling.client.friend_link_peer_is_accepted(peer_root)?);
+    let mut restored = receiving_state(&root.join("sibling"), sibling);
+    let import = LocalBusFrame::request(
+        "import",
+        None,
+        "account",
+        "account.backup.import",
+        json!({"input_path":path,"passphrase":"restore-test-secret"}),
+    );
+    super::super::account::dispatch_account_bus_request(&import, &mut restored).await?;
+    sibling = restored.accounts.remove("sender").ok_or("restored account")?;
+    assert!(sibling.engine.is_none(), "backup import must remain offline");
+    assert!(sibling.client.friend_link_peer_is_accepted(peer_root)?);
+    // The already-published native fixture branch/prekeys model activation's fresh device.
+    sibling.client.create_device_branch("sender", "device-sibling", 1, [77; 32]);
+    Ok((source, sibling))
 }
 
 async fn receive_first_bootstrap(
@@ -879,6 +937,18 @@ async fn receive_first_bootstrap(
         !account.client.claim_inbox_projection(&retry)?,
         "pre-upgrade receipts default to already projected"
     );
+    let account = state.accounts.get_mut("sender").ok_or("account")?;
+    account.pending_deliveries.clear();
+    let key = account.client.authenticated_committed_key(&retry)?;
+    let mut malformed = old_receipt.clone();
+    malformed["projected"] = json!("invalid stored claim flag");
+    account.client.account_db()?.persist_actor_state(&key, &malformed)?;
+    crate::bus::sync_driver::project_committed_message(account, &retry)?;
+    assert!(account.pending_deliveries.is_empty(), "claim errors do not project or fail receive");
+    old_receipt["projected"] = json!(false);
+    account.client.account_db()?.persist_actor_state(&key, &old_receipt)?;
+    crate::bus::sync_driver::project_committed_message(account, &retry)?;
+    assert_eq!(account.pending_deliveries.len(), 1, "a valid later claim remains usable");
     let mut sibling = state.accounts.remove("sender").ok_or("account")?;
     let engine = sibling.take_live_engine().await?;
     Ok((sibling, engine))

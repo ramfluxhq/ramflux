@@ -464,3 +464,80 @@ fn verify_manifest_json_rejects_swapped_branch_and_agreement_keys() -> TestResul
 
 #[path = "proof_lifetime_tests.rs"]
 mod proof_lifetime;
+
+#[test]
+fn dormant_sibling_readiness_does_not_change_safety_number_or_directory_hash() -> TestResult {
+    let owner = Actor::new("owner", "active", 161, 162, 1)?;
+    let sibling = Actor::new("owner", "dormant", 161, 163, 1)?;
+    let peer = Actor::new("peer", "peer", 164, 165, 1)?;
+    let mut full = owner.manifest()?;
+    full.devices.extend(sibling.manifest()?.devices);
+    sign_set(&owner, &mut full, 2)?;
+    let own = peer.manifest()?;
+    observe(&peer.client, &own)?;
+    observe(&peer.client, &full)?;
+    peer.client.establish_friend_link(
+        "contact",
+        &own.principal_commitment,
+        &full.principal_commitment,
+    )?;
+    peer.client.mark_contact_safety_verified(&full.principal_commitment, "peer")?;
+    let before = peer.client.contact_safety_number(&full.principal_commitment)?;
+    let row = peer.client.account_db()?.client_record("identity", "owner")?.ok_or("identity")?;
+    let mut served = full.clone();
+    served.devices.retain(|device| device.device_id == "active");
+    observe(&peer.client, &served)?;
+    let after = peer.client.contact_safety_number(&full.principal_commitment)?;
+    assert_eq!(before.safety_number, after.safety_number);
+    assert_eq!(after.verification_state, "verified");
+    assert_eq!(before.contact_device_set_hash, after.contact_device_set_hash);
+    assert_eq!(after.contact_device_count, 2);
+    assert_eq!(
+        row["device_set_hash"],
+        peer.client.account_db()?.client_record("identity", "owner")?.ok_or("identity")?["device_set_hash"]
+    );
+    let preview = crate::client::contact::contact_safety_material_from_manifest(&served)?;
+    assert_eq!(
+        after.contact_device_set_hash,
+        ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&preview.devices))
+    );
+    Ok(())
+}
+
+#[test]
+fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions() -> TestResult {
+    let owner = Actor::new("owner", "original", 171, 172, 1)?;
+    let restored = Actor::new("owner", "restored", 171, 173, 1)?;
+    let foreign = Actor::new("foreign", "foreign", 174, 175, 1)?;
+    let peer = Actor::new("peer", "peer", 176, 177, 1)?;
+    let own = owner.manifest()?;
+    let remote = peer.manifest()?;
+    observe(&owner.client, &remote)?;
+    owner.client.establish_friend_link(
+        "accepted",
+        &own.principal_commitment,
+        &remote.principal_commitment,
+    )?;
+    let accepted = owner.client.backup_contacts()?;
+    assert_eq!(accepted.len(), 1);
+    assert!(foreign.client.restore_backup_contacts(&accepted).is_err());
+    assert!(!foreign.client.friend_link_peer_is_accepted(&remote.principal_commitment)?);
+    let mut invalid = accepted.clone();
+    invalid.push(ramflux_protocol::encode_base64url(b"invalid contact packet"));
+    assert!(restored.client.restore_backup_contacts(&invalid).is_err());
+    assert!(
+        !restored.client.friend_link_peer_is_accepted(&remote.principal_commitment)?,
+        "failed snapshots roll back earlier accepted contacts"
+    );
+    assert!(restored.client.restore_backup_contacts(&vec![String::new(); 513]).is_err());
+    assert!(restored.client.restore_backup_contacts(&["x".repeat(3 * 1024 * 1024 + 1)]).is_err());
+    restored.client.restore_backup_contacts(&accepted)?;
+    assert!(restored.client.friend_link_peer_is_accepted(&remote.principal_commitment)?);
+    owner.client.block_friend_link("accepted")?;
+    let restricted = owner.client.backup_contacts()?;
+    restored.client.restore_backup_contacts(&restricted)?;
+    restored.client.restore_backup_contacts(&accepted)?;
+    assert!(restored.client.account_db()?.friend_link("accepted")?.blocked);
+    assert!(!restored.client.friend_link_peer_is_accepted(&remote.principal_commitment)?);
+    Ok(())
+}

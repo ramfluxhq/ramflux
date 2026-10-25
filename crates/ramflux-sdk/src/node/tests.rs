@@ -242,3 +242,28 @@ fn loading_saved_discovery_urls_persists_origins_without_changing_pins() -> Resu
     assert!(super::discovery_origin("file:///tmp/node").is_err());
     Ok(())
 }
+
+#[test]
+fn bound_node_probe_does_not_open_a_replacement_account_session() -> Result<(), SdkError> {
+    let root = TestRoot::new()?;
+    let manifest = manifest()?;
+    write_local_bus_account_manifest(&root.0, &manifest)?;
+    let account = LocalBusAccountState::disconnected(
+        RamfluxClient::new(),
+        GatewaySessionConfig::quic(manifest.gateway),
+        "commitment".into(),
+    );
+    let state = LocalBusDaemonState {
+        config: LocalBusConfig::new(root.0.join("bus.sock"), &root.0),
+        account_index: None,
+        nodes: NodeStore::default(),
+        accounts: std::collections::BTreeMap::from([("bound".into(), account)]),
+        active_account_id: Some("bound".into()),
+        attended_accounts: std::collections::BTreeSet::new(),
+        subscribers: std::collections::BTreeMap::new(),
+    };
+    let result = super::probe::probe_bound_session(&state, "node.example.com")?;
+    assert_eq!(result, "not_probed");
+    assert!(state.accounts["bound"].engine.is_none());
+    Ok(())
+}

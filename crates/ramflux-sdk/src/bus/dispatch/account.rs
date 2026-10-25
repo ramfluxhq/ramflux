@@ -299,10 +299,11 @@ fn local_bus_account_backup_export(
     account_id: &str,
     body: &mut LocalBusAccountBackupExportRequest,
 ) -> Result<(), SdkError> {
-    let _account = local_bus_account(state, account_id)?;
+    let account = local_bus_account(state, account_id)?;
     let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
     let manifest = read_local_bus_account_manifest(&manifest_path)?;
-    let backup = encrypt_account_backup(&manifest, &mut body.passphrase)?;
+    let backup =
+        encrypt_account_backup(&manifest, account.client.backup_contacts()?, &mut body.passphrase)?;
     let output_path = PathBuf::from(&body.output_path);
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
@@ -333,7 +334,8 @@ async fn local_bus_account_backup_import(
 ) -> Result<LocalBusAccountCreateResponse, SdkError> {
     let bytes = std::fs::read(&body.input_path)?;
     let backup: LocalBusAccountBackupFile = serde_json::from_slice(&bytes)?;
-    let manifest = decrypt_account_backup(&backup, &mut body.passphrase)?;
+    let restored = decrypt_account_backup_state(&backup, &mut body.passphrase)?;
+    let manifest = restored.manifest;
     if expected_account.is_some_and(|id| id != manifest.local_account_id) {
         return Err(SdkError::LocalBus("backup account changed during import".to_owned()));
     }
@@ -347,6 +349,9 @@ async fn local_bus_account_backup_import(
     // Backup import is an offline root/account restore. Rejoining gateway and publishing a fresh
     // device prekey is a separate device-activation flow, so do not touch the network here.
     let response = restore_local_bus_account_offline(state, &manifest).await?;
+    local_bus_account(state, &manifest.local_account_id)?
+        .client
+        .restore_backup_contacts(&restored.contacts)?;
     state.active_account_id = Some(response.local_account_id.clone());
     Ok(response)
 }
@@ -430,10 +435,13 @@ struct LocalBusAccountBackupAead {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct LocalBusAccountBackupPlaintext {
     manifest: LocalBusPersistedAccount,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    contacts: Vec<String>,
 }
 
 fn encrypt_account_backup(
     manifest: &LocalBusPersistedAccount,
+    contacts: Vec<String>,
     passphrase: &mut String,
 ) -> Result<LocalBusAccountBackupFile, SdkError> {
     let salt = ramflux_crypto::random_32()?;
@@ -443,7 +451,7 @@ fn encrypt_account_backup(
     passphrase.zeroize();
     let cipher = Aes256Gcm::new_from_slice(key.expose())
         .map_err(|_error| SdkError::LocalBus("account backup AEAD key init failed".to_owned()))?;
-    let plaintext = LocalBusAccountBackupPlaintext { manifest: manifest.clone() };
+    let plaintext = LocalBusAccountBackupPlaintext { manifest: manifest.clone(), contacts };
     let plaintext_bytes = serde_json::to_vec(&plaintext)?;
     let ciphertext = cipher
         .encrypt(
@@ -473,6 +481,13 @@ fn decrypt_account_backup(
     backup: &LocalBusAccountBackupFile,
     passphrase: &mut String,
 ) -> Result<LocalBusPersistedAccount, SdkError> {
+    Ok(decrypt_account_backup_state(backup, passphrase)?.manifest)
+}
+
+fn decrypt_account_backup_state(
+    backup: &LocalBusAccountBackupFile,
+    passphrase: &mut String,
+) -> Result<LocalBusAccountBackupPlaintext, SdkError> {
     if backup.schema != ACCOUNT_BACKUP_SCHEMA || backup.version != ACCOUNT_BACKUP_VERSION {
         return Err(SdkError::LocalBus("unsupported account backup format".to_owned()));
     }
@@ -505,7 +520,7 @@ fn decrypt_account_backup(
             )
         })?;
     let backup_plaintext: LocalBusAccountBackupPlaintext = serde_json::from_slice(&plaintext)?;
-    Ok(backup_plaintext.manifest)
+    Ok(backup_plaintext)
 }
 
 #[cfg(test)]
@@ -555,7 +570,7 @@ mod tests {
         let manifest = backup_manifest();
         let mut passphrase = "backup-passphrase-at-least-128-bit".to_owned();
 
-        let backup = encrypt_account_backup(&manifest, &mut passphrase)?;
+        let backup = encrypt_account_backup(&manifest, Vec::new(), &mut passphrase)?;
         let encoded = serde_json::to_string(&backup)?;
 
         assert!(!encoded.contains("correct-horse-battery-staple"));
@@ -629,7 +644,7 @@ mod tests {
     fn account_backup_rejects_wrong_passphrase() -> Result<(), SdkError> {
         let manifest = backup_manifest();
         let mut passphrase = "backup-passphrase-at-least-128-bit".to_owned();
-        let backup = encrypt_account_backup(&manifest, &mut passphrase)?;
+        let backup = encrypt_account_backup(&manifest, Vec::new(), &mut passphrase)?;
         let mut wrong = "wrong-passphrase-at-least-128bit".to_owned();
 
         let result = decrypt_account_backup(&backup, &mut wrong);
