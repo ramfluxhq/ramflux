@@ -1,13 +1,16 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
 
+# One group per ref: a newer push to a feature branch cancels the older run.
+# Main runs get a per-commit group so they are never cancelled or superseded.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
