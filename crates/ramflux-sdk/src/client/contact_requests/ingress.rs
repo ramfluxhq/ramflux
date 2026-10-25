@@ -109,8 +109,10 @@ impl RamfluxClient {
         use crate::client::routed::Kind;
         if matches!(route.kind, Kind::GroupControl | Kind::GroupMessage) {
             let source = self.authenticated_device_identity(entry)?;
-            if self.friend_rejection_reason(source.root_commitment())?.is_some()
-                || self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some()
+            if self.friend_rejection_reason(source.root_commitment())?.as_deref()
+                == Some("friend.blocked")
+                || self.friend_rejection_reason(&entry.envelope.source_principal_id)?.as_deref()
+                    == Some("friend.blocked")
             {
                 return Err(invalid("group sender is blocked"));
             }

@@ -18,24 +18,35 @@ fn key(group: &str) -> String {
     format!("{PREFIX}{}", ramflux_protocol::encode_base64url(group))
 }
 impl RamfluxClient {
-    pub(super) fn group_snapshot_requires_consent(
+    fn group_parties_blocked(
         &self,
-        state: &VerifiedGroupState,
+        snapshot: &ramflux_protocol::GroupStateSnapshot,
     ) -> Result<bool, SdkError> {
-        let creator = &state.creator().identity;
-        let inviter = &state.snapshot().issuer.identity;
-        for identity in [creator, inviter] {
-            if self.friend_rejection_reason(&identity.root_commitment)?.is_some()
+        for identity in [&snapshot.creator.identity, &snapshot.issuer.identity] {
+            if self.friend_rejection_reason(&identity.root_commitment)?.as_deref()
+                == Some("friend.blocked")
                 || (self
                     .account_db()?
                     .client_record("identity", &identity.principal_id)?
                     .is_some_and(|row| {
                         row["contact_identity_commitment"] == identity.root_commitment
                     })
-                    && self.friend_rejection_reason(&identity.principal_id)?.is_some())
+                    && self.friend_rejection_reason(&identity.principal_id)?.as_deref()
+                        == Some("friend.blocked"))
             {
-                return Err(super::invalid("group creator or inviter is blocked"));
+                return Ok(true);
             }
+        }
+        Ok(false)
+    }
+    pub(super) fn group_snapshot_requires_consent(
+        &self,
+        state: &VerifiedGroupState,
+    ) -> Result<bool, SdkError> {
+        let creator = &state.creator().identity;
+        let inviter = &state.snapshot().issuer.identity;
+        if self.group_parties_blocked(state.snapshot())? {
+            return Err(super::invalid("group creator or inviter is blocked"));
         }
         if self.account_db()?.shared_group_state(&state.view().group_id)?.is_some() {
             return Ok(false);
@@ -109,7 +120,7 @@ impl RamfluxClient {
         db.retain_expiring_actor_states(PREFIX, now, 128)?;
         let mut rows = Vec::new();
         for invitation in db.list_actor_states::<Invitation>(PREFIX)? {
-            if invitation.declined || self.friend_rejection_reason(&invitation.inviter)?.is_some() {
+            if invitation.declined || self.group_parties_blocked(&invitation.snapshot)? {
                 continue;
             }
             rows.push(serde_json::json!({"group_id":invitation.snapshot.group_id,"name":invitation.snapshot.state.name,"creator":invitation.snapshot.creator.identity.root_commitment,"inviter":invitation.inviter,"expires_at":invitation.expires_at}));
@@ -223,6 +234,19 @@ mod tests {
             state.view()
         );
         assert!(!peer.group_snapshot_requires_consent(&state)?);
+        let remote = owner.owned_device_identity()?.root_commitment().to_owned();
+        peer.establish_friend_link("formerly-contact", "peer", &remote)?;
+        peer.remove_friend_link("formerly-contact", "local")?;
+        assert!(!peer.friend_link_peer_is_accepted(&remote)?);
+        assert!(
+            !peer.group_snapshot_requires_consent(&state)?,
+            "contact removal does not revoke joined group membership"
+        );
+        peer.block_friend_link("formerly-contact")?;
+        assert!(
+            peer.group_snapshot_requires_consent(&state).is_err(),
+            "explicit blocks apply even after joining"
+        );
         drop((owner, peer));
         std::fs::remove_dir_all(root)?;
         Ok(())
