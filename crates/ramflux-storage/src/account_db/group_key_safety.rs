@@ -16,6 +16,12 @@ impl AccountDb {
         commitment: &str,
         key: &str,
     ) -> Result<(), StorageError> {
+        if self.is_shared_group(group)? {
+            if commitment != device.root_commitment() {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            return self.check_shared_member_key(group, device, Some(principal), key);
+        }
         if commitment != device.root_commitment() {
             return Err(StorageError::GroupPermissionDenied);
         }
@@ -64,6 +70,9 @@ impl AccountDb {
         group: &str,
         device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Option<GroupMemberKeyBinding>, StorageError> {
+        if self.is_shared_group(group)? {
+            return self.shared_member_binding(group, device);
+        }
         let Some(device) = self.group_pin_key(group, device)? else { return Ok(None) };
         Ok(self.connection.query_row("SELECT k.device_signing_public_key,k.member_principal_id,k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE k.group_id=?1 AND k.member_id=?2 AND m.active=1",params![group,device],|r|Ok(GroupMemberKeyBinding{signing_public_key:r.get(0)?,principal_id:r.get(1)?,principal_commitment:r.get(2)?})).optional()?)
     }
@@ -75,6 +84,9 @@ impl AccountDb {
         group: &str,
         raw: &str,
     ) -> Result<Option<GroupMemberKeyBinding>, StorageError> {
+        if self.is_shared_group(group)? {
+            return self.shared_member_metadata(group, raw);
+        }
         // Display/source-discovery metadata only. Callers must authenticate its root-signed
         // device set before constructing an identity reference or using this key.
         let mut query=self.connection.prepare("SELECT k.device_signing_public_key,k.member_principal_id,k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE k.group_id=?1 AND COALESCE(k.raw_device_id,k.member_id)=?2 AND m.active=1 AND k.principal_commitment IS NOT NULL LIMIT 2")?;
@@ -117,7 +129,7 @@ impl AccountDb {
         &self,
         device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Vec<(String, String)>, StorageError> {
-        let mut query=self.connection.prepare("SELECT k.group_id,k.device_signing_public_key FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE m.active=1 AND COALESCE(k.raw_device_id,k.member_id)=?1 AND k.principal_commitment=?2 ORDER BY k.group_id")?;
+        let mut query=self.connection.prepare("SELECT k.group_id,k.device_signing_public_key FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE m.active=1 AND COALESCE(k.raw_device_id,k.member_id)=?1 AND k.principal_commitment=?2 UNION SELECT group_id,current_signing_key FROM shared_group_member_projection WHERE active=1 AND device_id=?1 AND root_commitment=?2 ORDER BY group_id")?;
         Ok(query
             .query_map(params![device.device_id(), device.root_commitment()], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -133,7 +145,7 @@ impl AccountDb {
         principal: &str,
         name: &str,
     ) -> Result<Vec<String>, StorageError> {
-        let mut query = self.connection.prepare("SELECT DISTINCT k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE m.active=1 AND (k.member_principal_id=?1 OR k.member_principal_id IS NULL) AND COALESCE(k.raw_device_id,k.member_id)=?2 AND k.principal_commitment IS NOT NULL")?;
+        let mut query = self.connection.prepare("SELECT DISTINCT k.principal_commitment FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE m.active=1 AND (k.member_principal_id=?1 OR k.member_principal_id IS NULL) AND COALESCE(k.raw_device_id,k.member_id)=?2 AND k.principal_commitment IS NOT NULL UNION SELECT DISTINCT root_commitment FROM shared_group_member_projection WHERE active=1 AND principal_id=?1")?;
         Ok(query
             .query_map(params![principal, name], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -167,6 +179,16 @@ impl AccountDb {
             previous_key: old,
             next_key: new,
         } = rotation;
+        if self.is_shared_group(group)? {
+            if commitment != device.root_commitment() {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            let changed=self.connection.execute("UPDATE shared_group_member_projection SET current_signing_key=?6 WHERE group_id=?1 AND root_commitment=?2 AND device_id=?3 AND principal_id=?4 AND current_signing_key=?5 AND active=1",params![group,device.root_commitment(),device.device_id(),principal,old,new])?;
+            if changed != 1 {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            return Ok(());
+        }
         let Some(device) = self.group_pin_key(group, device)? else {
             return Err(StorageError::GroupPermissionDenied);
         };
@@ -187,6 +209,6 @@ impl AccountDb {
         principal: &str,
         device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<bool, StorageError> {
-        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE m.active=1 AND COALESCE(k.raw_device_id,k.member_id)=?1 AND k.member_principal_id=?2 AND k.principal_commitment=?3)",params![device.device_id(),principal,device.root_commitment()],|row|row.get(0))?)
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key k JOIN group_member_projection m ON m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND m.principal_commitment=k.principal_commitment WHERE m.active=1 AND COALESCE(k.raw_device_id,k.member_id)=?1 AND k.member_principal_id=?2 AND k.principal_commitment=?3) OR EXISTS(SELECT 1 FROM shared_group_member_projection WHERE active=1 AND device_id=?1 AND principal_id=?2 AND root_commitment=?3)",params![device.device_id(),principal,device.root_commitment()],|row|row.get(0))?)
     }
 }

@@ -33,6 +33,20 @@ fn three_devices_converge_and_each_first_group_message_reaches_the_other_members
     let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
     let peer = person(&root.join("peer"), "agent", "agent", 21, 22)?;
     let sibling = person(&root.join("sibling"), "owner", "laptop", 11, 32)?;
+    let mut own = crate::client::identity_authority::test_support::public_manifest(&owner)?;
+    own.devices.extend(
+        crate::client::identity_authority::test_support::public_manifest(&sibling)?.devices,
+    );
+    crate::client::identity_authority::test_support::sign_manifest(
+        owner.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut own,
+        2,
+    )?;
+    let remote = crate::client::identity_authority::test_support::public_manifest(&peer)?;
+    for client in [&owner, &peer, &sibling] {
+        client.persist_identity_directory(&own)?;
+        client.persist_identity_directory(&remote)?;
+    }
     owner.shared_group_create("group", "thread", Some("Checklist".into()), "target-owner")?;
     let peer_actor = peer.owned_group_actor("target-agent")?;
     let sibling_actor = sibling.owned_group_actor("target-laptop")?;

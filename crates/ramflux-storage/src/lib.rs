@@ -49,3 +49,5 @@ pub use records::*;
 mod contact_request_tests;
 #[cfg(test)]
 mod tests;
+
+mod schema_shared_group;

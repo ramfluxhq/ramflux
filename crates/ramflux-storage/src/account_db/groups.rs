@@ -362,6 +362,9 @@ impl AccountDb {
         member: &ramflux_crypto::RootQualifiedDeviceRef,
         device_signing_public_key: &str,
     ) -> Result<(), StorageError> {
+        if self.is_shared_group(group_id)? {
+            return self.check_shared_member_key(group_id, member, None, device_signing_public_key);
+        }
         self.write_transaction(|| {
             if self.group_member_requires_readd(group_id,member)? { return Err(StorageError::GroupPermissionDenied); }
             let conflicting_slot: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM group_member_projection WHERE group_id=?1 AND member_id=?2 AND principal_commitment IS NOT NULL AND principal_commitment<>?3)",params![group_id,member.device_id(),member.root_commitment()],|row|row.get(0))?;
@@ -386,6 +389,11 @@ impl AccountDb {
         group_id: &str,
         member_id: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Option<String>, StorageError> {
+        if self.is_shared_group(group_id)? {
+            return Ok(self
+                .shared_member_binding(group_id, member_id)?
+                .map(|binding| binding.signing_public_key));
+        }
         let Some(member_id) = self.group_pin_key(group_id, member_id)? else { return Ok(None) };
         Ok(self
             .connection
@@ -1081,6 +1089,9 @@ impl AccountDb {
         group: &str,
         member: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Option<String>, StorageError> {
+        if self.is_shared_group(group)? {
+            return self.shared_member_role(group, member);
+        }
         if self.group_member_key_binding(group, member)?.is_none() {
             return Ok(None);
         }
@@ -1095,6 +1106,11 @@ impl AccountDb {
         group_id: &str,
         member_id: &str,
     ) -> Result<Option<String>, StorageError> {
+        if self.is_shared_group(group_id)? {
+            return Ok(self
+                .shared_member_metadata_role_epoch(group_id, member_id)?
+                .map(|value| value.0));
+        }
         Ok(self
             .connection
             .query_row(
@@ -1114,6 +1130,9 @@ impl AccountDb {
         group: &str,
         member: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Option<u64>, StorageError> {
+        if self.is_shared_group(group)? {
+            return self.shared_member_joined_epoch(group, member);
+        }
         if self.group_member_key_binding(group, member)?.is_none() {
             return Ok(None);
         }
@@ -1128,6 +1147,11 @@ impl AccountDb {
         group_id: &str,
         member_id: &str,
     ) -> Result<Option<u64>, StorageError> {
+        if self.is_shared_group(group_id)? {
+            return Ok(self
+                .shared_member_metadata_role_epoch(group_id, member_id)?
+                .map(|value| value.1));
+        }
         let joined_epoch = self
             .connection
             .query_row(

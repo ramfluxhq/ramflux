@@ -21,6 +21,17 @@ fn person(
     let actor = certify_group_state_actor(&root, &branch, &format!("target-{device}"))?;
     Ok((branch, actor))
 }
+fn owned_device(
+    principal: &str,
+    device: &str,
+    seed: u8,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, StorageError> {
+    Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
+        &create_identity_root(principal, [seed; 32]),
+        &create_device_branch(principal, device, 1, [seed + 1; 32]),
+    )?)
+}
+
 fn create(
     branch: &DeviceBranch,
     actor: &GroupStateActor,
@@ -97,8 +108,8 @@ fn full_state_projects_all_three_members_and_the_same_epoch_and_name() -> Result
             .ok_or(StorageError::GroupPermissionDenied)?;
         assert_ne!(owner_key, peer_key, "copied device names have independent pins");
         assert_ne!(
-            db.group_member_device_key("group", &owner_key)?,
-            db.group_member_device_key("group", &peer_key)?
+            db.group_member_device_key("group", &owned_device("owner", "phone", 10)?)?,
+            db.group_member_device_key("group", &owned_device("peer", "phone", 20)?)?
         );
         drop(db);
         std::fs::remove_dir_all(root)?;
@@ -113,8 +124,7 @@ fn sibling_inherits_membership_and_a_later_removal_cannot_be_reversed_by_replay(
     let state = create(&owner, &a)?;
     let (root, db) = test_db("group-sibling-removal")?;
     db.commit_shared_group_state(&state, &sibling)?;
-    let id =
-        state.member_storage_key(&sibling.identity)?.ok_or(StorageError::GroupPermissionDenied)?;
+    let id = owned_device("owner", "laptop", 10)?;
     assert_eq!(db.group_member_role("group", &id)?.as_deref(), Some("owner"));
     let joined = advance_group_state(
         &owner,
@@ -150,7 +160,7 @@ fn a_conflicting_thread_rolls_back_the_proof_roster_and_all_pins() -> Result<(),
     assert!(db.commit_shared_group_state(&state, &a).is_err());
     assert!(db.group_snapshot_epoch("group")?.is_none());
     assert!(db.shared_group_state("group")?.is_none());
-    let id = state.member_storage_key(&a.identity)?.ok_or(StorageError::GroupPermissionDenied)?;
+    let id = owned_device("owner", "owner", 10)?;
     assert!(db.group_member_device_key("group", &id)?.is_none());
     assert_eq!(
         db.client_record("conversation", "thread")?.ok_or(StorageError::GroupPermissionDenied)?["title"],

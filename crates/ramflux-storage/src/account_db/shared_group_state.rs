@@ -50,11 +50,11 @@ impl AccountDb {
                 // An unsolicited full-state proof cannot take over a legacy group with the same id.
                 return Err(StorageError::GroupPermissionDenied);
             }
-            self.check_shared_group_pins(verified)?;
             let now = self.now_unix();
             let role = state.effective_role(&local.identity.root_commitment, &local.identity.device_id);
             self.connection.execute("INSERT INTO group_projection (group_id,group_epoch,role,max_members,new_member_history,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?6) ON CONFLICT(group_id) DO UPDATE SET group_epoch=excluded.group_epoch,role=excluded.role,max_members=excluded.max_members,new_member_history=excluded.new_member_history,updated_at=excluded.updated_at",params![state.group_id,state.epoch,role.map(ramflux_protocol::SharedGroupRole::as_str),state.max_members,state.new_member_history,now])?;
             self.connection.execute("UPDATE group_member_projection SET active=0,removed_epoch=?2,updated_at=?3 WHERE group_id=?1 AND active=1",params![state.group_id,state.epoch,now])?;
+            self.connection.execute("UPDATE shared_group_member_projection SET active=0 WHERE group_id=?1",params![state.group_id])?;
             for member in &state.members {
                 self.project_shared_group_member(verified, &member.identity, member.joined_epoch)?;
             }
@@ -75,22 +75,6 @@ impl AccountDb {
             Ok(changed)
         })
     }
-    fn check_shared_group_pins(&self, verified: &VerifiedGroupState) -> Result<(), StorageError> {
-        for member in &verified.view().members {
-            let id = verified
-                .member_storage_key(&member.identity)?
-                .ok_or(StorageError::GroupPermissionDenied)?;
-            if let Some(old) = self.group_member_key_binding(&verified.view().group_id, &id)?
-                && (old.signing_public_key != member.identity.signing_public_key
-                    || old.principal_id.as_deref() != Some(&member.identity.principal_id)
-                    || old.principal_commitment.as_deref()
-                        != Some(&member.identity.root_commitment))
-            {
-                return Err(StorageError::GroupPermissionDenied);
-            }
-        }
-        Ok(())
-    }
     fn project_shared_group_member(
         &self,
         verified: &VerifiedGroupState,
@@ -103,21 +87,10 @@ impl AccountDb {
         let role = state
             .effective_role(&identity.root_commitment, &identity.device_id)
             .ok_or(StorageError::GroupPermissionDenied)?;
-        // Validate the old pin even for the local sibling, before changing its membership projection.
-        if let Some(old) = self.group_member_device_key(&state.group_id, &id)?
-            && old != identity.signing_public_key
-        {
-            return Err(StorageError::GroupPermissionDenied);
-        }
-        self.connection.execute("INSERT INTO group_member_projection (group_id,member_principal_id,member_id,role,joined_epoch,active,updated_at) VALUES (?1,?2,?2,?3,?4,1,?5) ON CONFLICT(group_id,member_principal_id) DO UPDATE SET role=excluded.role,joined_epoch=excluded.joined_epoch,active=1,removed_epoch=NULL,updated_at=excluded.updated_at",params![state.group_id,id,role.as_str(),joined,self.now_unix()])?;
-        self.persist_group_member_device_key(&state.group_id, &id, &identity.signing_public_key)?;
-        self.bind_group_member_key_identity(
-            &state.group_id,
-            &id,
-            &identity.principal_id,
-            &identity.root_commitment,
-            &identity.signing_public_key,
-        )?;
+        // This is a group-authorized declaration, not a device-set authentication result.
+        // Key consumers must supply a RootQualifiedDeviceRef and verify its current manifest.
+        self.connection.execute("INSERT INTO group_member_projection (group_id,member_principal_id,member_id,principal_commitment,role,joined_epoch,active,updated_at) VALUES (?1,?2,?2,?3,?4,?5,1,?6) ON CONFLICT(group_id,member_principal_id) DO UPDATE SET principal_commitment=excluded.principal_commitment,role=excluded.role,joined_epoch=excluded.joined_epoch,active=1,removed_epoch=NULL,updated_at=excluded.updated_at",params![state.group_id,id,identity.root_commitment,role.as_str(),joined,self.now_unix()])?;
+        self.connection.execute("INSERT INTO shared_group_member_projection(group_id,root_commitment,device_id,principal_id,declared_signing_key,current_signing_key,target_delivery_id,role,joined_epoch,active) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,1) ON CONFLICT(group_id,root_commitment,device_id) DO UPDATE SET principal_id=excluded.principal_id,current_signing_key=CASE WHEN declared_signing_key=excluded.declared_signing_key THEN current_signing_key ELSE excluded.current_signing_key END,declared_signing_key=excluded.declared_signing_key,target_delivery_id=excluded.target_delivery_id,role=excluded.role,joined_epoch=excluded.joined_epoch,active=1",params![state.group_id,identity.root_commitment,identity.device_id,identity.principal_id,identity.signing_public_key,identity.target_delivery_id,role.as_str(),joined])?;
         Ok(())
     }
     fn project_shared_group_link(&self, verified: &VerifiedGroupState) -> Result<(), StorageError> {

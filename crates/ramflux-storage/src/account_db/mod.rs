@@ -47,6 +47,7 @@ mod object_payload;
 pub mod read_model;
 pub mod recovery;
 pub mod runtime;
+mod shared_group_members;
 mod shared_group_state;
 pub mod surface;
 mod task;
@@ -95,6 +96,7 @@ impl AccountDb {
             volatile_presence: RefCell::new(BTreeMap::new()),
         };
         crate::schema_contact_requests::upgrade(&db.connection)?;
+        crate::schema_shared_group::upgrade(&db.connection)?;
         db.enable_runtime()?;
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;

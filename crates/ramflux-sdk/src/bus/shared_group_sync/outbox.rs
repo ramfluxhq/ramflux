@@ -192,6 +192,7 @@ async fn deliver(
             source_principal_id: engine.config.principal_id.clone(),
             sender_id: engine.config.device_id.clone(),
             recipient_device_id: Some(device.device_id.clone()),
+            recipient_principal_commitment: Some(root.clone()),
             target_delivery_id: device.target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: intent.created_at,

@@ -207,63 +207,6 @@ impl RamfluxClient {
         value["name_epoch"] = json!(state.name_epoch);
         Ok(Some(value))
     }
-    /// Translate a known identity only after its root/key agrees with the signed group's pin.
-    pub(crate) fn shared_group_storage_member(
-        &self,
-        group: &str,
-        identity: &GroupMemberIdentity,
-    ) -> Result<String, SdkError> {
-        let state = self
-            .account_db()?
-            .shared_group_state(group)?
-            .ok_or_else(|| invalid("shared group absent"))?;
-        state.member_storage_key(identity)?.ok_or_else(|| invalid("device is not a group member"))
-    }
-    pub(crate) fn group_member_storage_id(
-        &self,
-        group: &str,
-        device: &str,
-    ) -> Result<String, SdkError> {
-        let Some(state) = self.account_db()?.shared_group_state(group)? else {
-            return Ok(device.into());
-        };
-        if self.device_branch.as_ref().is_some_and(|branch| branch.device_id == device) {
-            return self
-                .shared_group_storage_member(group, &self.owned_group_actor("local")?.identity);
-        }
-        let matches = state
-            .view()
-            .members
-            .iter()
-            .filter(|member| member.identity.device_id == device)
-            .collect::<Vec<_>>();
-        if matches.len() > 1 {
-            return Err(invalid("ambiguous device name requires a root-qualified identity"));
-        }
-        if let Some(member) = matches.first() {
-            return self.shared_group_storage_member(group, &member.identity);
-        }
-        let record = self
-            .account_db()?
-            .client_record("device", device)?
-            .ok_or_else(|| invalid("group sender identity is unavailable"))?;
-        let required = |field: &str| {
-            record[field]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| invalid("group sender identity is incomplete"))
-        };
-        self.shared_group_storage_member(
-            group,
-            &GroupMemberIdentity {
-                principal_id: required("principal_id")?,
-                root_commitment: required("principal_commitment")?,
-                device_id: device.into(),
-                signing_public_key: required("signing_public_key")?,
-                target_delivery_id: required("target_delivery_id")?,
-            },
-        )
-    }
 }
 
 #[cfg(test)]

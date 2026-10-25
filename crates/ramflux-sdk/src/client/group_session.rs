@@ -310,11 +310,11 @@ impl RamfluxClient {
         &self,
         distribution: &SdkGroupSenderKeyDistribution,
     ) -> Result<(), SdkError> {
-        let local_device_id =
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.as_str();
+        let local = self.owned_device_identity()?;
+        let local_device_id = local.device_id();
         let joined_epoch = self
             .account_db()?
-            .group_member_joined_epoch_metadata(&distribution.group_id, local_device_id)?
+            .group_member_joined_epoch(&distribution.group_id, &local)?
             .ok_or_else(|| SdkError::from(StorageError::GroupPermissionDenied))?;
         if distribution.group_key_epoch < joined_epoch {
             return Err(SdkError::LocalBus(format!(
