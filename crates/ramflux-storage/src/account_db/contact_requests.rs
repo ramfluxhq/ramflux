@@ -144,7 +144,7 @@ impl AccountDb {
         if !matches!(state, "accepted" | "declined" | "blocked" | "expired") {
             return Err(StorageError::AuthorizationRejected);
         }
-        Ok(self.connection.execute("UPDATE contact_request_projection SET state=?4,updated_at=?5 WHERE contact_identity_commitment=?1 AND direction=?2 AND request_id=?3 AND (state='pending' OR state=?4 OR ?4='blocked')",params![root,direction,request_id,state,now])?>0)
+        Ok(self.connection.execute("UPDATE contact_request_projection SET state=?4,updated_at=?5 WHERE contact_identity_commitment=?1 AND direction=?2 AND request_id=?3 AND (state='pending' OR state=?4 OR ?4='blocked') AND (?4<>'accepted' OR state='accepted' OR expires_at>?5)",params![root,direction,request_id,state,now])?>0)
     }
     /// Check a sender's existing bucket without charging unauthenticated traffic.
     /// # Errors
@@ -156,6 +156,18 @@ impl AccountDb {
         now: i64,
     ) -> Result<bool, StorageError> {
         Ok(!self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contact_request_rate WHERE bucket=?1 AND window_end>?2 AND count>=?3)",params![bucket,now,limit],|row|row.get::<_,bool>(0))?)
+    }
+    /// Refresh expiry for a single selected request, independently of periodic maintenance.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn expire_contact_request(
+        &self,
+        root: &str,
+        direction: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        self.connection.execute("UPDATE contact_request_projection SET state='expired',updated_at=?3 WHERE contact_identity_commitment=?1 AND direction=?2 AND state='pending' AND expires_at<=?3",params![root,direction,now])?;
+        Ok(())
     }
     /// Consume one bounded rolling-window bucket. Invalid requests cannot roll this write back.
     /// # Errors

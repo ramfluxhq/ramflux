@@ -281,3 +281,50 @@ async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_r
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn contact02_r3_expiry_is_enforced_between_janitor_intervals() -> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 151)?;
+    let mut b = Fixture::new("bob", 161)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    pending(&mut state, &directory).await?;
+    let source = r2::root(&state, "alice")?;
+    let target = r2::root(&state, "bob")?;
+    for (who, root, direction) in [("bob", &source, "inbound"), ("alice", &target, "outbound")] {
+        let db = account(&state, who)?.account_db()?;
+        let mut row = db.contact_request(root, direction)?.ok_or_else(|| invalid("request"))?;
+        row.expires_at = now_unix_timestamp() - 1;
+        let mut metadata: Value = serde_json::from_slice(&row.request_json)?;
+        metadata["issued_at"] = json!(row.expires_at - 604_800);
+        row.request_json = serde_json::to_vec(&metadata)?;
+        db.remove_contact_request(root, direction, &row.request_id)?;
+        db.persist_contact_request(&row)?;
+        db.persist_actor_state("contact-request/maintenance-next", &(now_unix_timestamp() + 60))?;
+    }
+    let list = contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
+    assert_eq!(
+        list["requests"],
+        json!([]),
+        "elapsed pending request remained visible until cleanup"
+    );
+    assert!(
+        contact(&mut state, "bob", "contact.accept", json!({"root_commitment":source}))
+            .await
+            .is_err(),
+        "janitor backoff allowed expired consent"
+    );
+    assert!(!account(&state, "bob")?.friend_link_peer_is_accepted(&source)?);
+    let old = account(&state, "alice")?
+        .account_db()?
+        .contact_request(&target, "outbound")?
+        .ok_or_else(|| invalid("old"))?;
+    contact(&mut state, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
+    let fresh = account(&state, "alice")?
+        .account_db()?
+        .contact_request(&target, "outbound")?
+        .ok_or_else(|| invalid("fresh"))?;
+    assert_ne!(fresh.request_id, old.request_id, "re-add reused elapsed request metadata");
+    assert!(fresh.expires_at > now_unix_timestamp());
+    Ok(())
+}

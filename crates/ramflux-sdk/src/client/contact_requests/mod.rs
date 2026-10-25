@@ -328,8 +328,15 @@ impl RamfluxClient {
     pub(crate) fn contact_requests_list(&self) -> Result<Value, SdkError> {
         self.maintain_contact_requests()?;
         let db = self.account_db()?;
+        let now = now_unix_timestamp();
         let mut records = db.pending_contact_requests()?;
-        records.extend(db.outgoing_contact_requests()?);
+        records.retain(|row| row.expires_at > now);
+        records.extend(db.outgoing_contact_requests()?.into_iter().map(|mut row| {
+            if row.state == "pending" && row.expires_at <= now {
+                row.state = "expired".into();
+            }
+            row
+        }));
         let requests = records
             .iter()
             .map(|record| self.contact_request_preview(record))

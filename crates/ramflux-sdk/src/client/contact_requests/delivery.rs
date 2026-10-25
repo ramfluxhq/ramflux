@@ -191,6 +191,7 @@ impl RamfluxClient {
             return Err(crate::ContactReason::InvalidRequestNote.into());
         }
         let db = self.account_db()?;
+        db.expire_contact_request(&peer.principal_commitment, "outbound", now_unix_timestamp())?;
         let old = db.contact_request(&peer.principal_commitment, "outbound")?;
         if old.is_none() {
             self.check_retained_outbound_contact_cooldown(&peer.principal_commitment)?;
