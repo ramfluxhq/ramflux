@@ -105,12 +105,10 @@ impl RamfluxClient {
                         continue;
                     }
                     let next = if let Some(request) = &change.request {
-                        ramflux_crypto::apply_group_change_request(
-                            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                            &actor,
+                        self.apply_authorized_group_request(
                             &state,
                             request,
+                            &actor,
                             now_unix_timestamp(),
                         )
                     } else {
@@ -121,18 +119,36 @@ impl RamfluxClient {
                             &state,
                             change.change.clone(),
                         )
+                        .map_err(SdkError::from)
                     };
-                    if let Ok(next) = next {
-                        if let Some(request) = &change.request {
-                            self.record_group_request_write(&next, request)?;
-                        } else {
-                            self.record_group_write(&next, change.change)?;
+                    match next {
+                        Ok(next) => {
+                            if let Some(request) = &change.request {
+                                self.record_group_request_write(&next, request)?;
+                            } else {
+                                self.record_group_write(&next, change.change)?;
+                            }
+                            state = next;
                         }
-                        state = next;
-                    } else {
-                        self.group_conflict_event(incoming, "creator_pending_change_refused")?;
-                        if let Some(request) = change.request {
-                            self.reject_reconciled_group_request(&request, &state, &actor)?;
+                        Err(error) => {
+                            self.group_conflict_event(incoming, "creator_pending_change_refused")?;
+                            if let Some(request) = change.request {
+                                let status = if matches!(
+                                    error,
+                                    SdkError::Protocol(
+                                        ramflux_protocol::ProtocolError::GroupStateLimit(_)
+                                    ) | SdkError::Crypto(ramflux_crypto::CryptoError::Protocol(
+                                        ramflux_protocol::ProtocolError::GroupStateLimit(_)
+                                    ))
+                                ) {
+                                    ramflux_protocol::GroupChangeStatus::Capacity
+                                } else {
+                                    ramflux_protocol::GroupChangeStatus::PermissionDenied
+                                };
+                                self.reject_reconciled_group_request(
+                                    &request, &state, &actor, status,
+                                )?;
+                            }
                         }
                     }
                 }

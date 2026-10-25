@@ -286,3 +286,92 @@ fn pending_requests_are_bounded_per_root_and_capacity_has_a_signed_result() -> R
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn creator_conflict_rechecks_device_revocation_before_replaying_a_foreign_request()
+-> Result<(), SdkError> {
+    let root = temp_root("request-revoked-repair")?;
+    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
+    let sibling = person(&root.join("sibling"), "owner", "laptop", 11, 32)?;
+    let admin = person(&root.join("admin"), "admin", "admin", 21, 22)?;
+    owner.shared_group_create("group", "thread", None, "target-owner")?;
+    let base = owner.shared_group_change(
+        "group",
+        "target-owner",
+        GroupStateChange::Add {
+            member: admin.owned_group_actor("target-admin")?.identity,
+            role: SharedGroupRole::Admin,
+        },
+    )?;
+    admin.accept_shared_group_state(&base, "target-admin")?;
+    sibling.accept_shared_group_state(&base, "target-laptop")?;
+    let first = admin.stage_group_change_request(
+        "group",
+        "target-admin",
+        GroupStateChange::SetName { name: "Foreign first".into() },
+        Some("repair-first"),
+    )?;
+    let second = admin.stage_group_change_request(
+        "group",
+        "target-admin",
+        GroupStateChange::SetName { name: "Foreign second".into() },
+        Some("repair-second"),
+    )?;
+    let mut manifest = crate::client::identity_authority::test_support::public_manifest(&admin)?;
+    for (client, target, request) in
+        [(&owner, "target-owner", &first), (&sibling, "target-laptop", &second)]
+    {
+        client.persist_identity_directory(&manifest)?;
+        client.insert_group_request(request, true)?;
+        assert_eq!(
+            client.process_group_request(request, target)?.status,
+            GroupChangeStatus::Applied
+        );
+    }
+    let left = owner
+        .account_db()?
+        .shared_group_state("group")?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    let right = sibling
+        .account_db()?
+        .shared_group_state("group")?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    let (loser, winning, request, target) =
+        if right.relation_to(&left)? == ramflux_crypto::GroupStateRelation::IncomingPreferred {
+            (&owner, right, &first, "target-owner")
+        } else {
+            (&sibling, left, &second, "target-laptop")
+        };
+    let record = manifest.signed_device_set.as_ref().ok_or(StorageError::GroupPermissionDenied)?;
+    let mut devices = record.devices.clone();
+    devices[0].status = ramflux_protocol::DeviceSetStatus::Revoked;
+    devices[0].revoked_at = Some(now_unix_timestamp());
+    manifest.signed_device_set = Some(ramflux_crypto::sign_device_set(
+        admin.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: record.principal_kind,
+            device_set_epoch: 2,
+            devices,
+        },
+    )?);
+    manifest.devices.clear();
+    loser.persist_identity_directory(&manifest)?;
+    loser.accept_shared_group_state(&winning, target)?;
+    assert_eq!(
+        loser
+            .account_db()?
+            .shared_group_state("group")?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .view()
+            .name,
+        winning.view().name
+    );
+    let refused = loser
+        .group_change_record(request, true)?
+        .and_then(|record| record.result)
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(refused.status, GroupChangeStatus::PermissionDenied);
+    drop((owner, sibling, admin));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

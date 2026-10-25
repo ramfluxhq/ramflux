@@ -493,9 +493,16 @@ async fn group_message_before_distribution_keeps_content_retryable() -> Result<(
         ramflux_transport::RelayQuicPoolConfig::functional_default()
             .map_err(|e| invalid(&e.to_string()))?,
     );
+    let sender = a.client.owned_device_identity()?;
+    let logical = ramflux_protocol::group_message_id(
+        "pending-group",
+        sender.root_commitment(),
+        sender.device_id(),
+        "pending-message",
+    )?;
     let pending = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
     assert!(pending.plaintext.is_none());
-    assert_eq!(b.client.account_db()?.message_content("pending-message")?, None);
+    assert_eq!(b.client.account_db()?.message_content(&logical)?, None);
     let wrapper = SdkGroupSenderKeyDistributionEnvelope {
         schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".to_owned(),
         version: 1,
@@ -511,7 +518,7 @@ async fn group_message_before_distribution_keeps_content_retryable() -> Result<(
     )?;
     b.client.apply_routed_entry(&mut engine, &pool, &control, false).await?;
     assert_eq!(
-        b.client.account_db()?.message_content("pending-message")?,
+        b.client.account_db()?.message_content(&logical)?,
         Some(b"delayed-key plaintext".to_vec())
     );
     assert_eq!(b.client.account_db()?.group_pending_undecrypted_count("pending-group")?, 0);

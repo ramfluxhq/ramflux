@@ -191,37 +191,7 @@ impl RamfluxClient {
             if actor.identity.root_commitment != previous.creator().identity.root_commitment {
                 return Err(StorageError::GroupPermissionDenied.into());
             }
-            let authority = self
-                .device_identity_for_root(
-                    &request.actor.identity.root_commitment,
-                    &request.actor.identity.device_id,
-                )
-                .and_then(|identity| {
-                    self.require_cached_root_authority(&identity)?;
-                    self.ensure_shared_group_device(&previous, &identity)?;
-                    let trusted = self.trusted_device(&identity)?;
-                    if trusted["principal_id"] != request.actor.identity.principal_id
-                        || trusted["signing_public_key"]
-                            != request.actor.identity.signing_public_key
-                    {
-                        return Err(StorageError::GroupPermissionDenied.into());
-                    }
-                    Ok(())
-                });
-            let next = if authority.is_err() {
-                Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::InvalidGroupState(
-                    "requester device authority unavailable",
-                )))
-            } else {
-                ramflux_crypto::apply_group_change_request(
-                    self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                    self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                    &actor,
-                    &previous,
-                    request,
-                    now,
-                )
-            };
+            let next = self.apply_authorized_group_request(&previous, request, &actor, now);
             let (state, status) = match next {
                 Ok(state) => {
                     let changed = state.snapshot().state_hash != previous.snapshot().state_hash;
@@ -248,9 +218,12 @@ impl RamfluxClient {
                         },
                     )
                 }
-                Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(_))) => {
-                    (previous, GroupChangeStatus::Capacity)
-                }
+                Err(
+                    SdkError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(_))
+                    | SdkError::Crypto(CryptoError::Protocol(
+                        ramflux_protocol::ProtocolError::GroupStateLimit(_),
+                    )),
+                ) => (previous, GroupChangeStatus::Capacity),
                 Err(_) => (previous, GroupChangeStatus::PermissionDenied),
             };
             let result = ramflux_crypto::sign_group_change_result(
@@ -269,11 +242,51 @@ impl RamfluxClient {
             Ok(result)
         })
     }
+    pub(super) fn apply_authorized_group_request(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        request: &GroupChangeRequest,
+        actor: &ramflux_protocol::GroupStateActor,
+        now: i64,
+    ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
+        self.validate_group_requester(state, request)?;
+        Ok(ramflux_crypto::apply_group_change_request(
+            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            actor,
+            state,
+            request,
+            now,
+        )?)
+    }
+    pub(super) fn validate_group_requester(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        request: &GroupChangeRequest,
+    ) -> Result<(), SdkError> {
+        let identity = self.device_identity_for_root(
+            &request.actor.identity.root_commitment,
+            &request.actor.identity.device_id,
+        )?;
+        self.require_cached_root_authority(&identity)?;
+        if state.view().effective_role(identity.root_commitment(), identity.device_id()).is_none() {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
+        self.ensure_shared_group_device(state, &identity)?;
+        let trusted = self.trusted_device(&identity)?;
+        if trusted["principal_id"] != request.actor.identity.principal_id
+            || trusted["signing_public_key"] != request.actor.identity.signing_public_key
+        {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
+        Ok(())
+    }
     pub(super) fn reject_reconciled_group_request(
         &self,
         request: &GroupChangeRequest,
         state: &ramflux_crypto::VerifiedGroupState,
         actor: &ramflux_protocol::GroupStateActor,
+        status: GroupChangeStatus,
     ) -> Result<(), SdkError> {
         let Some(mut record) = self.group_change_record(request, true)? else {
             return Ok(());
@@ -283,7 +296,7 @@ impl RamfluxClient {
             actor,
             request,
             state,
-            GroupChangeStatus::PermissionDenied,
+            status,
             now_unix_timestamp(),
         )?);
         record.local_status = "result_ready".into();

@@ -116,12 +116,19 @@ impl RamfluxClient {
             {
                 return Err(invalid("group sender is blocked"));
             }
-            if route.kind == Kind::GroupMessage
-                && !self.local_is_group_member(
-                    route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?,
-                )?
-            {
-                return Err(invalid("group has not been joined"));
+            if route.kind == Kind::GroupMessage {
+                let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
+                if !self
+                    .local_is_group_member(group)
+                    .map_err(|error| SdkError::InboundPending(error.to_string()))?
+                {
+                    if self.account_db()?.shared_group_state(group)?.is_some() {
+                        return Err(invalid("group membership has ended"));
+                    }
+                    return Err(SdkError::InboundPending(
+                        "group consent or membership is pending".into(),
+                    ));
+                }
             }
             return Ok(());
         }
