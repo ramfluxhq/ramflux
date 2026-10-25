@@ -53,3 +53,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Gateway local-mint regression tests
+        run: cargo test -p ramflux-gateway --features itest-local-mint
