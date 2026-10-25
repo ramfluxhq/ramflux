@@ -13,13 +13,11 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
         // Record attempts too, so a network outage cannot create an unbounded retry loop.
         db.persist_actor_state("own-contact/last-refresh", &now)?;
         let root = client.owned_device_identity()?.root_commitment().to_owned();
+        let gateway =
+            account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
         tokio::time::timeout(
             Duration::from_millis(250),
-            client.cache_verified_device_manifest(
-                &account.gateway_config,
-                &root,
-                "own-contact-backfill",
-            ),
+            client.cache_verified_device_manifest(gateway, &root, "own-contact-backfill"),
         )
         .await
         .map_err(|_| {

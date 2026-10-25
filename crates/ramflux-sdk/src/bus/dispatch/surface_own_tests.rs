@@ -609,6 +609,44 @@ async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pai
     Ok(())
 }
 
+async fn receive_with_invalid_pending_row(
+    root: &Path,
+    mut sibling: LocalBusAccountState,
+    receiver_engine: GatewaySessionEngine,
+    incoming: GatewayInboxEntry,
+) -> Result<LocalBusDaemonState, Box<dyn std::error::Error>> {
+    // A stale/forged pending row cannot abort projection of the valid next DM.
+    let mut bad = incoming.clone();
+    bad.inbox_seq = 3;
+    bad.envelope.envelope_id = "bad-pending-signature".into();
+    bad.envelope.signed.signature = ramflux_protocol::encode_base64url([0_u8; 64]);
+    sibling.pending_deliveries = vec![bad, incoming];
+    sibling.put_engine(receiver_engine);
+    let mut state = receiving_state(root, sibling);
+    let (outbound, _) = tokio::sync::mpsc::channel(16);
+    let connection = LocalBusConnectionState::new(1, outbound);
+    let request = LocalBusFrame::request(
+        "receive",
+        Some("sender".into()),
+        "message",
+        "message.receive",
+        json!({"limit":64}),
+    );
+    let response =
+        super::super::message::dispatch_message_receive_request(&request, &mut state, &connection)
+            .await?;
+    let rows = response.response_body["decrypted_messages"].as_array().ok_or("rows")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        ramflux_protocol::decode_base64url(
+            rows[0]["plaintext_body_base64"].as_str().ok_or("body")?
+        )?,
+        b"peer to restored device"
+    );
+    assert_eq!(state.accounts["sender"].pending_deliveries.len(), 1);
+    Ok(state)
+}
+
 fn empty_engine(config: GatewaySessionConfig) -> GatewaySessionEngine {
     GatewaySessionEngine::with_test_transport(
         config,
@@ -719,7 +757,10 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
     let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
     let own = Arc::clone(&gateway.own);
     source.put_engine(GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway)));
-    assert_eq!(source.client.stage_contact_backfill_batch()?, 1);
+    // The live session has selected TCP-TLS; the original Auto endpoint is unavailable.
+    source.gateway_config.transport_kind = GatewaySessionTransportKind::Auto;
+    source.gateway_config.gateway_addr = "127.0.0.1:9".parse()?;
+    assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 1);
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
@@ -767,35 +808,7 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
         )?,
         b"peer to restored device"
     );
-    // A stale/forged pending row cannot abort projection of the valid next DM.
-    let mut bad = incoming.clone();
-    bad.inbox_seq = 3;
-    bad.envelope.envelope_id = "bad-pending-signature".into();
-    bad.envelope.signed.signature = ramflux_protocol::encode_base64url([0_u8; 64]);
-    sibling.pending_deliveries = vec![bad, incoming];
-    sibling.put_engine(receiver_engine);
-    let mut state = receiving_state(&root, sibling);
-    let (outbound, _) = tokio::sync::mpsc::channel(16);
-    let connection = LocalBusConnectionState::new(1, outbound);
-    let request = LocalBusFrame::request(
-        "receive",
-        Some("sender".into()),
-        "message",
-        "message.receive",
-        json!({"limit":64}),
-    );
-    let response =
-        super::super::message::dispatch_message_receive_request(&request, &mut state, &connection)
-            .await?;
-    let rows = response.response_body["decrypted_messages"].as_array().ok_or("rows")?;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(
-        ramflux_protocol::decode_base64url(
-            rows[0]["plaintext_body_base64"].as_str().ok_or("body")?
-        )?,
-        b"peer to restored device"
-    );
-    assert_eq!(state.accounts["sender"].pending_deliveries.len(), 1);
+    let state = receive_with_invalid_pending_row(&root, sibling, receiver_engine, incoming).await?;
     directory.abort();
     drop((source, state, peer));
     std::fs::remove_dir_all(root)?;
