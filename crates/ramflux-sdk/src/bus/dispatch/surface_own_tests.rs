@@ -808,7 +808,9 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
         )?,
         b"peer to restored device"
     );
-    let state = receive_with_invalid_pending_row(&root, sibling, receiver_engine, incoming).await?;
+    let state =
+        Box::pin(receive_with_invalid_pending_row(&root, sibling, receiver_engine, incoming))
+            .await?;
     directory.abort();
     drop((source, state, peer));
     std::fs::remove_dir_all(root)?;
