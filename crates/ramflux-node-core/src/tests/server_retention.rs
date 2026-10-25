@@ -271,16 +271,16 @@ fn server_retention_router_wal_does_not_resurrect_expired_entries()
     let mut inbox = OpaqueDeviceInbox::new();
     let mut message = envelope("retire-wal", "mailbox", DeliveryClass::OpaqueEvent);
     message.created_at = now;
-    message.ttl = 1;
+    message.ttl = 600;
     let entry = inbox.append(message);
-    store.record_submission_increment("wal-expiry", now + 1, Some(&entry))?;
-    assert!(store.sweep_delivery_retention(now + 2, true)? > 0);
+    store.record_submission_increment("wal-expiry", now + 600, Some(&entry))?;
+    assert!(store.sweep_delivery_retention(now + 601, true)? > 0);
     let router = store.load_router()?.ok_or("WAL router")?;
-    assert_eq!(router.sweep_delivery_retention(now + 2), 1);
+    assert_eq!(router.sweep_delivery_retention(now + 601), 1);
     for cursor in router.retention_cursors() {
         store.retain_cursor_checkpoint(&cursor)?;
     }
-    store.sweep_delivery_retention(now + 2, false)?;
+    store.sweep_delivery_retention(now + 601, false)?;
     drop(store);
     let store = RouterRedbStore::open_with_wal(&path, &wal)?;
     let restored = store.load_router()?.ok_or("cursor checkpoint")?;
