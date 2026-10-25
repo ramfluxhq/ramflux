@@ -236,7 +236,7 @@ mod tests {
         assert!(!peer.group_snapshot_requires_consent(&state)?);
         let remote = owner.owned_device_identity()?.root_commitment().to_owned();
         peer.establish_friend_link("formerly-contact", "peer", &remote)?;
-        peer.remove_friend_link("formerly-contact", "local")?;
+        peer.remove_friend_link("formerly-contact", "me")?;
         assert!(!peer.friend_link_peer_is_accepted(&remote)?);
         assert!(
             !peer.group_snapshot_requires_consent(&state)?,
