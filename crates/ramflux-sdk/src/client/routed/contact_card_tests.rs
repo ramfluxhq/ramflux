@@ -225,5 +225,52 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
     Ok(())
 }
 
+#[tokio::test]
+async fn node_add_confirm_and_card_export_use_origins_from_discovery_urls_with_paths()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 21)?;
+    let mut b = Fixture::new("bob", 31)?;
+    let directory = Directory::new(&a, &b).await?;
+    let origin = Origin::new(&directory).await?;
+    let mut s = state(&mut a, &mut b, &directory)?;
+    let added = crate::bus::dispatch::node::dispatch_node_bus_request(
+        &request(
+            "alice",
+            "node.add",
+            json!({"url":format!("{}/start?private=value#section",origin.url)}),
+        ),
+        &mut s,
+    )
+    .await?
+    .response_body;
+    assert_eq!(added["node"]["discovery_url"], origin.url);
+    let confirmed = crate::bus::dispatch::node::dispatch_node_bus_request(
+        &request("alice", "node.confirm", json!({"node_id":origin.record.node_id})),
+        &mut s,
+    )
+    .await?
+    .response_body;
+    assert_eq!(confirmed["discovery_url"], origin.url);
+    assert_eq!(
+        crate::node::NodeStore::load(&s.config.data_root, &[])?.profiles[&origin.record.node_id]
+            .discovery_url,
+        origin.url
+    );
+    origin.configure(&mut s, "alice")?;
+    origin.configure(&mut s, "bob")?;
+    // An older in-memory profile must also produce an importable card.
+    s.nodes
+        .profiles
+        .get_mut(&origin.record.node_id)
+        .ok_or_else(|| invalid("profile"))?
+        .discovery_url = format!("{}/legacy?private=value", origin.url);
+    let exported = call(&mut s, "alice", "contact.card.export", json!({})).await?;
+    let card = exported["card"].as_str().ok_or_else(|| invalid("card"))?;
+    assert_eq!(crate::parse_contact_card(card, now_unix_timestamp())?.node.url, origin.url);
+    let added = call(&mut s, "bob", "contact.add", json!({"card":card})).await?;
+    assert_eq!(added["contact"]["reachable"], true);
+    Ok(())
+}
+
 #[path = "contact_locator_tests.rs"]
 mod locator;

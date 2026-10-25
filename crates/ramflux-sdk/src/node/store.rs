@@ -44,6 +44,19 @@ impl NodeStore {
                 store.profiles.insert(profile.node_id.clone(), profile.clone());
             }
         }
+        let mut changed = false;
+        for profile in store.profiles.values_mut() {
+            if !profile.discovery_url.is_empty()
+                && let Ok(origin) = profile.discovery_origin()
+                && origin != profile.discovery_url
+            {
+                profile.discovery_url = origin;
+                changed = true;
+            }
+        }
+        if changed {
+            store.save(root)?;
+        }
         Ok(store)
     }
 

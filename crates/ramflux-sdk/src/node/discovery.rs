@@ -6,15 +6,22 @@ use super::{
     Duration, SdkError, WellKnownClientRecord, node_error, now_unix_timestamp,
     verify_client_discovery_record,
 };
-pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRecord, SdkError> {
+pub(crate) fn discovery_origin(input: &str) -> Result<String, SdkError> {
     let origin = if input.contains("://") { input.to_owned() } else { format!("https://{input}") };
-    let mut url = reqwest::Url::parse(&origin).map_err(|error| node_error(&error.to_string()))?;
+    let url = reqwest::Url::parse(&origin).map_err(|_| node_error("invalid node URL"))?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
+        || url.host_str().is_none()
     {
         return Err(node_error("node URL must be an HTTP(S) origin without credentials"));
     }
+    Ok(url.origin().ascii_serialization())
+}
+
+pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRecord, SdkError> {
+    let mut url = reqwest::Url::parse(&discovery_origin(input)?)
+        .map_err(|_| node_error("invalid discovery origin"))?;
     url.set_path("/.well-known/ramflux/client");
     url.set_query(None);
     url.set_fragment(None);

@@ -223,3 +223,22 @@ async fn gateway_probe_retains_tcp_socket_cause_in_failed_health_response() -> R
     assert!(probe.errors["tcp"]["cause"]["raw_os_error"].is_number());
     Ok(())
 }
+
+#[test]
+fn loading_saved_discovery_urls_persists_origins_without_changing_pins() -> Result<(), SdkError> {
+    let root = TestRoot::new()?;
+    let mut store = NodeStore::default();
+    let mut profile = NodeProfile::from_record(record(1)?, 1500);
+    profile.discovery_url = "https://NODE.example.com:443/start?secret=value#section".into();
+    let pin = profile.node_public_key.clone();
+    store.profiles.insert(profile.node_id.clone(), profile);
+    store.save(&root.0)?;
+    let loaded = NodeStore::load(&root.0, &[])?;
+    assert_eq!(loaded.profiles["node.example.com"].discovery_url, "https://node.example.com");
+    assert_eq!(loaded.profiles["node.example.com"].node_public_key, pin);
+    let persisted: NodeStore = serde_json::from_slice(&std::fs::read(root.0.join("nodes.json"))?)?;
+    assert_eq!(persisted.profiles["node.example.com"].discovery_url, "https://node.example.com");
+    assert!(super::discovery_origin("https://user:password@node.example.com").is_err());
+    assert!(super::discovery_origin("file:///tmp/node").is_err());
+    Ok(())
+}

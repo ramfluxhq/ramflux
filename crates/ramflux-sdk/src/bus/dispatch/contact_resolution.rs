@@ -112,11 +112,7 @@ async fn card_gateway(
     home: &crate::NodeProfile,
 ) -> Result<GatewaySessionConfig, SdkError> {
     // A self-signed locator is not authority to contact an arbitrary host.
-    let home_origin = if home.discovery_url.is_empty() {
-        format!("https://{}", home.node_id)
-    } else {
-        home.discovery_url.clone()
-    };
+    let home_origin = home.discovery_origin().map_err(|_| ContactReason::HomeProfileStale)?;
     if home_origin != card.node.url {
         return Err(SdkError::ContactHomeNodeUnsupported);
     }
@@ -174,11 +170,7 @@ pub(super) fn export(
                 root.signing_key.verifying_key().to_bytes(),
             ),
             node: ContactNode {
-                url: if profile.discovery_url.is_empty() {
-                    format!("https://{}", profile.node_id)
-                } else {
-                    profile.discovery_url
-                },
+                url: profile.discovery_origin().map_err(|_| ContactReason::HomeProfileStale)?,
                 key_fingerprint: crate::contact_node_fingerprint(&profile.node_public_key)?,
             },
             display_name: identity["display_name"].as_str().map(str::to_owned),

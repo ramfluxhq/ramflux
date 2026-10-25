@@ -56,6 +56,14 @@ pub struct NodeProfile {
 }
 
 impl NodeProfile {
+    pub(crate) fn discovery_origin(&self) -> Result<String, SdkError> {
+        super::discovery_origin(if self.discovery_url.is_empty() {
+            &self.node_id
+        } else {
+            &self.discovery_url
+        })
+    }
+
     pub(crate) fn from_record(record: WellKnownClientRecord, now: u64) -> Self {
         Self {
             discovery_url: String::new(),

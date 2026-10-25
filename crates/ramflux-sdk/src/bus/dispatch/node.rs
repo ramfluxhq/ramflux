@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use crate::node::{PendingNode, fetch_client_record, node_error};
+use crate::node::{PendingNode, discovery_origin, fetch_client_record, node_error};
 use crate::prelude::*;
 use ramflux_protocol::{DISCOVERY_MAX_CACHE_TTL_SECONDS, discovery_cache_ttl};
 use serde::Deserialize;
@@ -42,7 +42,7 @@ pub(crate) async fn dispatch_node_bus_request(
                 .iter()
                 .find(|(_, pending)| pending.record.node_id == body.node_id)
                 .ok_or_else(|| node_error("no pending node; add it first"))?;
-            let url = url.clone();
+            let url = discovery_origin(url)?;
             let record = pending.record.clone();
             let mut nodes = state.nodes.clone();
             let mut profile = nodes.confirm(
@@ -120,16 +120,20 @@ async fn add_node(
     now: u64,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: NodeAdd = serde_json::from_value(request.body.clone())?;
+    let origin = discovery_origin(&body.url)?;
     let cached = state
         .nodes
         .pending
-        .get(&body.url)
+        .get(&origin)
         .filter(|pending| !body.refresh && now < pending.cache_until);
     let record = if let Some(pending) = cached {
         pending.record.clone()
     } else {
         fetch_client_record(&body.url).await?
     };
+    if !body.url.contains("://") && record.node_id != body.url {
+        return Err(node_error("discovery node_id mismatch"));
+    }
     if state.nodes.observe(&record) {
         state.nodes.save(&state.config.data_root)?;
     }
@@ -139,12 +143,9 @@ async fn add_node(
         DISCOVERY_MAX_CACHE_TTL_SECONDS,
     ));
     state.nodes.pending.retain(|_, pending| pending.record.node_id != record.node_id);
-    state
-        .nodes
-        .pending
-        .insert(body.url.clone(), PendingNode { record: record.clone(), cache_until });
+    state.nodes.pending.insert(origin.clone(), PendingNode { record: record.clone(), cache_until });
     let mut profile = NodeProfile::from_record(record, now);
-    profile.discovery_url = body.url;
+    profile.discovery_url = origin;
     if let Some(existing) = state.nodes.profiles.get(&profile.node_id) {
         profile.safety_warnings.extend(existing.safety_warnings.clone());
         if profile.node_public_key == existing.node_public_key {

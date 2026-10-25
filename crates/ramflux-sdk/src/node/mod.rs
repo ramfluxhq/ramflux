@@ -10,7 +10,7 @@ pub(crate) mod probe;
 pub use probe::{GatewayProbe, probe_gateway_pre_account};
 mod profile;
 mod store;
-pub(crate) use discovery::fetch_client_record;
+pub(crate) use discovery::{discovery_origin, fetch_client_record};
 pub use profile::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 pub(crate) use store::{NodeStore, PendingNode};
 pub(crate) async fn resolve_node_addr(addr: &str) -> Result<SocketAddr, SdkError> {
