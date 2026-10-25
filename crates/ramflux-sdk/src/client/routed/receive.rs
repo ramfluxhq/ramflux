@@ -27,7 +27,7 @@ struct Commit<'a> {
     metadata: Option<&'a MessageMetadata>,
     membership: Option<&'a (ramflux_protocol::GroupEvent, String)>,
     shared_group: Option<&'a crate::client::shared_group::PreparedSharedGroup>,
-    local_target: &'a str,
+    local_target: Option<&'a str>,
     slots: &'a [crate::SdkObjectKeySlot],
     references: Vec<(
         &'a crate::dm::SdkDmAttachmentRef,
@@ -163,7 +163,7 @@ impl RamfluxClient {
             metadata: metadata.as_ref(),
             membership: groups.legacy.as_ref(),
             shared_group: groups.shared.as_ref(),
-            local_target: &engine.config.target_delivery_id,
+            local_target: Some(&engine.config.target_delivery_id),
             slots: &consumed_slots,
             references,
             receipt: &commit,
@@ -388,6 +388,8 @@ impl RamfluxClient {
                 body: &opened.body,
                 metadata: None,
                 membership: None,
+                shared_group: None,
+                local_target: None,
                 slots: &[],
                 references: Vec::new(),
                 receipt: &receipt,
@@ -410,7 +412,7 @@ impl RamfluxClient {
         } = context;
         self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
             if let Some(shared) = shared_group {
-                self.apply_prepared_shared_group(shared, local_target)?;
+                self.apply_prepared_shared_group(shared, local_target.ok_or_else(|| invalid("group receive target is absent"))?)?;
             }
             if let Some((event, key)) = membership {
                 self.apply_bootstrap_group_member_join_event(
