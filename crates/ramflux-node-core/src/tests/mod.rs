@@ -34,3 +34,5 @@ mod session_authority_refresh;
 mod server_retention;
 mod server_retention_r2;
 mod server_retention_r2_api;
+mod server_retention_r3;
+mod server_retention_r3_api;
