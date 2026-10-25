@@ -76,12 +76,13 @@ async fn signed_registration_survives_gateway_forwarding_and_bad_signature_does_
     let state = Arc::new(RouterCore::new());
     let store = Arc::new(RouterRedbStore::open(directory.join("router.redb"))?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let honest = registration(now)?;
+    let honest = registration(now - 7200)?;
+    let renewed = registration(now)?;
     let expected_proof = honest.proof.clone();
     let source = Arc::clone(&state);
     let durable = Arc::clone(&store);
     let worker = std::thread::spawn(move || -> Result<(), String> {
-        for _ in 0..2 {
+        for index in 0..5 {
             let mut stream = server
                 .accept_authenticated_with_pem_roots(
                     &router.tls,
@@ -103,7 +104,7 @@ async fn signed_registration_survives_gateway_forwarding_and_bad_signature_does_
             if forwarded.source_ip_hash.as_deref() == Some("caller-claim") {
                 return Err("forwarding trusted caller source".into());
             }
-            forwarded.now = now;
+            forwarded.now = if index < 2 { now - 7200 } else { now };
             let response = match source.register_identity_durable(&forwarded, &durable) {
                 Ok(response) => serde_json::to_value(response).map_err(|e| e.to_string())?,
                 Err(_) => serde_json::json!(ramflux_protocol::IdentityRegistrationFailure {
@@ -141,6 +142,21 @@ async fn signed_registration_survives_gateway_forwarding_and_bad_signature_does_
     assert_eq!(accepted.status, 200);
     assert_eq!(accepted.body["session_bound"], true);
     assert_eq!(store.identity_registry_write_count(), 1);
+    let mut live = state.session("delivery").ok_or("registered session")?;
+    live.session_id = "live-session".into();
+    live.gateway_id = "live-gateway".into();
+    live.session_seq = 9;
+    live.last_cursor = Some("cursor-8".into());
+    state.upsert_session(live.clone())?;
+    let response =
+        dispatch_quic_json_request(&client, send(&renewed)?, "127.0.0.1".parse()?).await?;
+    assert_eq!(response.status, 200);
+    assert_eq!(state.session("delivery"), Some(live));
+    for replay in [&honest, &renewed] {
+        let response =
+            dispatch_quic_json_request(&client, send(replay)?, "127.0.0.1".parse()?).await?;
+        assert_eq!(response.status, 409);
+    }
     worker.join().map_err(|_| "router worker panicked")?.map_err(std::io::Error::other)?;
     drop(store);
     drop(state);

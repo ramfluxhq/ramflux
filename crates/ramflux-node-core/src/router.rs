@@ -445,10 +445,13 @@ impl RouterCore {
                 candidate.register_admitted_identity(request, registration_trust_tier)?;
             let mut target = self.target_shard(&session.target_delivery_id);
             if let Some(existing) = target.registry.session(&session.target_delivery_id)
-                && existing.session_id == session.session_id
+                && existing.device_id == session.device_id
+                && existing.device_epoch == session.device_epoch
             {
-                session.session_seq = existing.session_seq;
-                session.last_cursor.clone_from(&existing.last_cursor);
+                // Registration publishes authority; it cannot replace an established route
+                // with the client's provisional sequence-1 session descriptor. Session-open
+                // admission owns route changes and its monotonic sequence/cursor.
+                session = existing.clone();
             }
             let mut sessions = target.registry.clone();
             // Validate the session before consuming or persisting any proof. Stale session

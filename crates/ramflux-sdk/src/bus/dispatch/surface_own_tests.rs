@@ -647,13 +647,6 @@ async fn receive_with_invalid_pending_row(
     Ok(state)
 }
 
-fn empty_engine(config: GatewaySessionConfig) -> GatewaySessionEngine {
-    GatewaySessionEngine::with_test_transport(
-        config,
-        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
-    )
-}
-
 fn receiving_state(root: &Path, sibling: LocalBusAccountState) -> LocalBusDaemonState {
     LocalBusDaemonState {
         config: LocalBusConfig::new(root.join("bus.sock"), root),
@@ -744,7 +737,7 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (mut sibling, config, receiver, directory, peer) =
+    let (sibling, config, receiver, directory, peer) =
         sibling_fixture_with_peer(&root, &mut source, false).await?;
     let peer_root = peer.client.owned_device_identity()?.root_commitment().to_owned();
     let own_root = source.client.owned_device_identity()?.root_commitment().to_owned();
@@ -797,18 +790,8 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
         target_delivery_id: sealed.envelope.target_delivery_id.clone(),
         envelope: sealed.envelope,
     };
-    let pool = ramflux_transport::RelayQuicPool::new(
-        ramflux_transport::RelayQuicPoolConfig::functional_default()?,
-    );
-    let mut receiver_engine = empty_engine(receiver);
-    let delivery =
-        sibling.client.apply_routed_entry(&mut receiver_engine, &pool, &incoming, false).await?;
-    assert_eq!(
-        ramflux_protocol::decode_base64url(
-            &delivery.plaintext.ok_or("plaintext")?.plaintext_body_base64
-        )?,
-        b"peer to restored device"
-    );
+    let (sibling, receiver_engine) =
+        receive_first_bootstrap(&root, sibling, receiver, incoming.clone()).await?;
     let state =
         Box::pin(receive_with_invalid_pending_row(&root, sibling, receiver_engine, incoming))
             .await?;
@@ -816,4 +799,41 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
     drop((source, state, peer));
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+async fn receive_first_bootstrap(
+    root: &Path,
+    mut sibling: LocalBusAccountState,
+    config: GatewaySessionConfig,
+    incoming: GatewayInboxEntry,
+) -> Result<(LocalBusAccountState, GatewaySessionEngine), Box<dyn std::error::Error>> {
+    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    gateway.inbox.push(incoming);
+    sibling.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    let mut state = receiving_state(root, sibling);
+    let (outbound, _) = tokio::sync::mpsc::channel(16);
+    let request = LocalBusFrame::request(
+        "first-receive",
+        Some("sender".into()),
+        "message",
+        "message.receive",
+        json!({"limit":10,"conversation_id":"new-after-restore"}),
+    );
+    let response = super::super::message::dispatch_message_receive_request(
+        &request,
+        &mut state,
+        &LocalBusConnectionState::new(1, outbound),
+    )
+    .await?;
+    let rows = response.response_body["decrypted_messages"].as_array().ok_or("rows")?;
+    assert_eq!(rows.len(), 1, "first fresh bootstrap response: {}", response.response_body);
+    assert_eq!(
+        ramflux_protocol::decode_base64url(
+            rows[0]["plaintext_body_base64"].as_str().ok_or("body")?
+        )?,
+        b"peer to restored device"
+    );
+    let mut sibling = state.accounts.remove("sender").ok_or("account")?;
+    let engine = sibling.take_live_engine().await?;
+    Ok((sibling, engine))
 }

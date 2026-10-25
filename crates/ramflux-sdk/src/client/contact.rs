@@ -1055,8 +1055,8 @@ mod tests {
             &branch,
             "ramflux-node",
             vec!["device.delivery.bind".to_owned()],
-            1_700_000_000,
-            4_000_000_000,
+            now_unix_timestamp(),
+            now_unix_timestamp().saturating_add(3600),
         )?;
         let identity_key = ramflux_crypto::X25519KeyPair::from_seed(x25519_seed);
         let signed_prekey = ramflux_crypto::X25519KeyPair::from_seed(signed_prekey_seed);
