@@ -34,6 +34,7 @@ impl NodeSecret {
         operation(&self.0)
     }
 
+    /// Accepted modes are 0600, 0400, 0640 and 0440.
     /// # Errors
     /// Rejects non-regular files, permissive Unix modes, oversized input and invalid key encoding.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
@@ -45,7 +46,9 @@ impl NodeSecret {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if !matches!(metadata.permissions().mode() & 0o777, 0o600 | 0o400) {
+            // Owner read (optionally write) plus optional group read: containers that drop
+            // every capability read the secret through a supplementary group, never "other".
+            if !matches!(metadata.permissions().mode() & 0o777, 0o600 | 0o400 | 0o640 | 0o440) {
                 return Err(invalid());
             }
         }
@@ -146,6 +149,29 @@ mod tests {
         assert!(a.open(b"device-b", &sealed).is_err());
         assert!(b.open(b"device-a", &sealed).is_err());
         assert_ne!(a.pseudonym("ip", b"192.0.2.1"), b.pseudonym("ip", b"192.0.2.1"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mounted_secret_allows_group_read_but_never_world_access() -> Result<(), NodeCoreError> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("rf-node-secret-mode-{}", std::process::id()));
+        std::fs::write(&path, ramflux_protocol::encode_base64url([7_u8; 32]))
+            .map_err(|_| invalid())?;
+        for (mode, accepted) in [
+            (0o600, true),
+            (0o400, true),
+            (0o640, true),
+            (0o440, true),
+            (0o644, false),
+            (0o660, false),
+        ] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .map_err(|_| invalid())?;
+            assert_eq!(NodeSecret::from_file(&path).is_ok(), accepted, "mode {mode:o}");
+        }
+        std::fs::remove_file(&path).map_err(|_| invalid())?;
         Ok(())
     }
 }

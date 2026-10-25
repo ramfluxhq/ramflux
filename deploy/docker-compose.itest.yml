@@ -126,6 +126,9 @@ services:
     command: ["--config", "/etc/ramflux/config/notify.toml"]
     environment:
       RAMFLUX_NOTIFY_ROUTE_KEY_FILE: "/etc/ramflux/mesh/route.key"
+      # Empty means "not configured"; s13 provides a credentials file and WebPush origin.
+      RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE: "${RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE:-}"
+      RAMFLUX_NOTIFY_WEBPUSH_ORIGINS: "${RAMFLUX_NOTIFY_WEBPUSH_ORIGINS:-}"
       RAMFLUX_NODE_ID: "${RAMFLUX_NODE_ID:-localhost}"
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
@@ -163,7 +166,7 @@ services:
       RAMFLUX_FEDERATION_ADMIN_TOKEN: "ramflux-local-admin-token"
       RAMFLUX_FEDERATION_NODE_ID: "${RAMFLUX_FEDERATION_NODE_ID:-localhost}"
       RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RAMFLUX_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
-      RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/mesh/node-signing.key"
+      RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/node-identity/node-signing.key"
       RAMFLUX_FEDERATION_FORCE_TCP_MESH: "${RAMFLUX_FEDERATION_FORCE_TCP_MESH:-0}"
       RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "${RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK:-0}"
       RAMFLUX_FEDERATION_DISABLE_QUIC_LISTENER: "${RAMFLUX_FEDERATION_DISABLE_QUIC_LISTENER:-0}"
@@ -173,6 +176,7 @@ services:
     volumes:
       - ./config/federation.toml:/etc/ramflux/config/federation.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/federation:/etc/ramflux/mesh:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/node-identity:/etc/ramflux/node-identity:ro
       - federation-redb:/var/lib/ramflux/federation
     ports:
       - "${RAMFLUX_ITEST_FEDERATION_HTTP_PORT:-18082}:18082"
@@ -261,7 +265,7 @@ services:
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_RETENTION_HTTP_ADDR: "0.0.0.0:18087"
     volumes:
-      - ${RAMFLUX_CERTS_DIR:-./certs}/federation:/etc/ramflux/node-identity:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/node-identity:/etc/ramflux/node-identity:ro
       - ./config/retention.toml:/etc/ramflux/config/retention.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/retention:/etc/ramflux/mesh:ro
       - retention-redb:/var/lib/ramflux/retention

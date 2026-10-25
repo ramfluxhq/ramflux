@@ -37,6 +37,10 @@ DEMO_HEALTH_TIMEOUT_SECONDS=180
 DEMO_HEALTH_POLL_SECONDS=2
 ```
 
+Node secrets are mode 0640 and the capability-dropped services read them through
+the operator's group (`RAMFLUX_SECRET_GID`, set to `id -g` by the wrapper). See
+`docs/server-data.md` for rootful Docker and rootless Podman.
+
 `DEMO_HOST` accepts a DNS name or IPv4 address, without a URL scheme or port.
 `DEMO_NODE_ID` is the stable logical identity, independent of the host name.
 The data directory must initially be empty and dedicated to this project. Once

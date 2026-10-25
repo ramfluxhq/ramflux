@@ -229,6 +229,13 @@ for config in Path(sys.argv[1], "config").glob("*.toml"):
     config.write_text(config.read_text().replace('node_id = "localhost"', f'node_id = "{sys.argv[2]}"'))
 PY
     "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
+    # The signing seed has its own mount, shared only by federation and retention.
+    if [ -e "$state/certs/federation/node-signing.key" ] && [ ! -e "$state/certs/node-identity/node-signing.key" ]; then
+      mkdir -p "$state/certs/node-identity"
+      mv "$state/certs/federation/node-signing.key" "$state/certs/node-identity/node-signing.key"
+    fi
+    rm -f "$state/certs/federation/node-signing.key"
+    chmod 755 "$state/certs/node-identity"
     # Containers need to traverse their read-only mounts; the containing state directory stays private.
     chmod 755 "$state/certs" "$state/config" "$state/secrets" "$state/secrets/gateway-v3" "$state/secrets/federation"
     for service in gateway router notify federation relay signaling retention; do
@@ -240,7 +247,8 @@ PY
     cat "$state/identity.env" > "$state/runtime.env"
     cat >> "$state/runtime.env" <<ENV
 RAMFLUX_NOTIFY_ROUTE_KEY_FILE=/etc/ramflux/mesh/route.key
-RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE=/etc/ramflux/mesh/node-signing.key
+RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE=/etc/ramflux/node-identity/node-signing.key
+RAMFLUX_SECRET_GID=$(id -g)
 RAMFLUX_VERSION=$DEMO_VERSION
 RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE=/etc/ramflux/gateway-v3/issuer-cert.json
 RAMFLUX_RELAY_CLIENT_QUIC_ADDR=0.0.0.0:17447

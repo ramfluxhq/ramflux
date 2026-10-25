@@ -94,18 +94,32 @@ EOF
   rm -f "${_tmp_csr}" "${_tmp_ext}"
 }
 
+# Node secrets live in their own directories, so each container mounts only the secret it
+# needs: federation and retention share node-identity/, notify reads notify/route.key.
+# Mode 0640: never world-readable. Containers drop every capability, so container root
+# reads these through the group named by RAMFLUX_SECRET_GID (compose group_add); see
+# docs/server-data.md for rootful Docker and rootless Podman.
 ensure_node_secrets() {
-  for _secret in federation/node-signing.key notify/route.key; do
+  _legacy="${cert_dir}/federation/node-signing.key"
+  _identity="${cert_dir}/node-identity/node-signing.key"
+  if [ -e "${_legacy}" ] && [ ! -e "${_identity}" ]; then
+    # Preserve an existing development identity when moving it out of the mesh directory.
+    mkdir -p "$(dirname "${_identity}")"
+    mv "${_legacy}" "${_identity}"
+  fi
+  rm -f "${_legacy}"
+  for _secret in node-identity/node-signing.key notify/route.key; do
     _path="${cert_dir}/${_secret}"
     if [ ! -e "${_path}" ]; then
       mkdir -p "$(dirname "${_path}")"
       _temp=$(mktemp "${_path}.XXXXXX")
       openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' > "${_temp}"
-      chmod 600 "${_temp}"
+      chmod 640 "${_temp}"
       mv "${_temp}" "${_path}"
     fi
-    chmod 600 "${_path}"
+    chmod 640 "${_path}"
   done
+  chmod 755 "${cert_dir}/node-identity"
 }
 
 issue_certs_locked() {
