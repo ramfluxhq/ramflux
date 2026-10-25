@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Account-owned bounded receipt courier; retries reuse the committed ciphertext.
+use crate::client::delivery_receipts::{MAX_PENDING, PREFIX, Work};
+use crate::prelude::*;
+use serde_json::json;
+const ATTEMPTS: u32 = 8;
+const LIFETIME: i64 = 600;
+pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    let now = now_unix_timestamp();
+    let db = account.client.account_db()?;
+    let mut due = Vec::new();
+    for key in db.actor_state_key_page(PREFIX, MAX_PENDING)? {
+        if let Some(work) = db.load_actor_state::<Work>(&key)?
+            && work.next_at <= now
+        {
+            due.push((key, work));
+        }
+    }
+    due.sort_by_key(|(_, work)| work.at);
+    let mut sent = 0;
+    for (key, mut work) in due.into_iter().take(16) {
+        if work.at.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
+            finish(&account.client, &key, &work, "failed")?;
+            continue;
+        }
+        work.attempts += 1;
+        work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
+        account.client.account_db()?.persist_actor_state(&key, &work)?;
+        let mut engine = match account.take_live_engine().await {
+            Ok(engine) => engine,
+            Err(error) => {
+                tracing::warn!(%error,"delivery receipt connection deferred");
+                continue;
+            }
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            send(account, &mut engine, &key, &mut work),
+        )
+        .await;
+        account.put_engine(engine);
+        match result {
+            Ok(Ok(())) => {
+                finish(&account.client, &key, &work, "sent")?;
+                sent += 1;
+            }
+            Ok(Err(error)) => tracing::warn!(%error,"delivery receipt deferred"),
+            Err(_) => tracing::warn!("delivery receipt deadline exceeded"),
+        }
+    }
+    Ok(sent)
+}
+async fn send(
+    account: &LocalBusAccountState,
+    engine: &mut GatewaySessionEngine,
+    key: &str,
+    work: &mut Work,
+) -> Result<(), SdkError> {
+    if work.packet.is_none() {
+        let device = account.client.trusted_device(&work.sender)?;
+        if work
+            .root
+            .as_deref()
+            .is_some_and(|root| device["principal_commitment"].as_str() != Some(root))
+        {
+            return Err(SdkError::InboundRejected("receipt sender root changed".into()));
+        }
+        let target = device["target_delivery_id"]
+            .as_str()
+            .ok_or_else(|| SdkError::InboundPending("receipt sender route missing".into()))?;
+        let receipt = crate::client::delivery_receipts::id(
+            &work.conversation,
+            &work.message,
+            &work.receiver,
+        )?;
+        let event = SdkReceiptEventEnvelope {
+            schema: "ramflux.sdk.receipt_event.v1".into(),
+            version: 1,
+            receipt_id: receipt.clone(),
+            event_seq: u64::try_from(work.at).unwrap_or(0),
+            nonce: receipt.clone(),
+            reader_device_id: work.receiver.clone(),
+            event: SdkReceiptEventBody::Delivered {
+                conversation_id: work.conversation.clone(),
+                message_id: work.message.clone(),
+                delivered_at: work.at,
+                receiver_device_id: work.receiver.clone(),
+                scope: "e2ee_private".into(),
+                ttl_seconds: 300,
+            },
+        };
+        let mut message = GatewayDirectMessage {
+            conversation_id: work.conversation.clone(),
+            message_id: receipt.clone(),
+            envelope_id: format!("receipt_evt_{receipt}"),
+            source_principal_id: engine.config.principal_id.clone(),
+            sender_id: work.receiver.clone(),
+            recipient_device_id: Some(work.sender.clone()),
+            target_delivery_id: target.into(),
+            encrypted_body: Vec::new(),
+            created_at: work.at,
+            ttl: u32::try_from(LIFETIME).unwrap_or(600),
+        };
+        let sealed = account
+            .client
+            .seal_routed_as(
+                engine,
+                &message,
+                &serde_json::to_vec(&event)?,
+                crate::client::routed::Route::receipt(),
+            )
+            .await?;
+        message.encrypted_body = serde_json::to_vec(&sealed)?;
+        work.packet = Some(gateway_direct_message_envelope(&engine.config, &message, None)?);
+        account.client.account_db()?.persist_actor_state(key, work)?;
+    }
+    let packet =
+        work.packet.as_ref().ok_or_else(|| SdkError::LocalBus("receipt packet absent".into()))?;
+    engine.submit_envelope(packet.clone()).await?;
+    Ok(())
+}
+fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    db.write_transaction(|| {
+        let id = crate::client::delivery_receipts::id(&work.conversation,&work.message,&work.receiver)?;
+        db.persist_actor_state(&format!("delivery-receipt/status/{id}"),&json!({"state":state,"delivered_at":work.at,"attempts":work.attempts}))?;
+        db.remove_actor_state(key)?;
+        if state == "failed" { db.append_journal(&format!("receipt-failed:{id}"),"message.delivery_receipt.failed",&json!({"conversation_id":work.conversation,"message_id":work.message,"receiver_device_id":work.receiver}),now_unix_timestamp(),None)?; }
+        Ok(())
+    })
+}

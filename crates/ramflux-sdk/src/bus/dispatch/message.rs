@@ -348,6 +348,16 @@ async fn dispatch_message_receipt_delivered(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusMessageReceiptDeliveredRequest =
         serde_json::from_value(request.body.clone())?;
+    if let Some(status) = account.client.delivery_receipt_status(
+        &body.conversation_id,
+        &body.message_id,
+        &body.receiver_device_id,
+    )? && status["state"] == "sent"
+    {
+        return Ok(local_bus_ok(
+            serde_json::json!({"conversation_id":body.conversation_id,"receiver_device_id":body.receiver_device_id,"delivered_through_message_id":body.message_id,"delivered_at":status["delivered_at"],"ttl_seconds":300,"scope":"network_e2ee","already_sent":true}),
+        ));
+    }
     let delivered_at = body.delivered_at.unwrap_or_else(now_unix_timestamp);
     let ttl_seconds = body.ttl_seconds.unwrap_or(300);
     let receipt = account.client.mark_delivered(

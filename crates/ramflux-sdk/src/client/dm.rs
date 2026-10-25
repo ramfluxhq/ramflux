@@ -645,31 +645,36 @@ impl RamfluxClient {
         plaintext: &[u8],
         metadata: Option<&MessageMetadata>,
     ) -> Result<(), SdkError> {
-        let message_id = &entry.envelope.envelope_id;
-        self.account_db()?.store_message_content(conversation_id, message_id, plaintext)?;
-        if self
-            .direct_messages(conversation_id)?
-            .iter()
-            .any(|message| message.message_id == *message_id)
-        {
-            return Ok(());
-        }
-        if let Some(metadata) = metadata {
-            self.send_direct_message_with_metadata(
-                conversation_id,
-                message_id,
-                &entry.envelope.source_principal_id,
-                plaintext,
-                metadata,
-            )
-        } else {
-            self.send_direct_message(
-                conversation_id,
-                message_id,
-                &entry.envelope.source_principal_id,
-                plaintext,
-            )
-        }
+        self.account_db()?.write_transaction(|| {
+            let message_id = &entry.envelope.envelope_id;
+            self.account_db()?.store_message_content(conversation_id, message_id, plaintext)?;
+            if self
+                .direct_messages(conversation_id)?
+                .iter()
+                .any(|message| message.message_id == *message_id)
+            {
+                self.stage_delivery_receipt(conversation_id, message_id, entry)?;
+                return Ok(());
+            }
+            if let Some(metadata) = metadata {
+                self.send_direct_message_with_metadata(
+                    conversation_id,
+                    message_id,
+                    &entry.envelope.source_principal_id,
+                    plaintext,
+                    metadata,
+                )
+            } else {
+                self.send_direct_message(
+                    conversation_id,
+                    message_id,
+                    &entry.envelope.source_principal_id,
+                    plaintext,
+                )
+            }?;
+            self.stage_delivery_receipt(conversation_id, message_id, entry)?;
+            Ok(())
+        })
     }
 
     pub(crate) fn apply_receipt_event_plaintext(

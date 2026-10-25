@@ -9,6 +9,7 @@ pub(crate) mod contact_roots;
 mod contact_safety_preview;
 pub mod conversation;
 mod deferred_attachment;
+pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;
 pub mod federation;

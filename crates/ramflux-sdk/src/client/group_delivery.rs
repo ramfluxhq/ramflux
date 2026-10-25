@@ -280,7 +280,7 @@ impl RamfluxClient {
             return Ok(Vec::new());
         }
         match self.decrypt_group_envelope(envelope, message_id) {
-            Ok(plaintext) => {
+            Ok(plaintext) => self.account_db()?.write_transaction(|| {
                 self.send_direct_message(
                     conversation_id,
                     message_id,
@@ -293,8 +293,9 @@ impl RamfluxClient {
                     &plaintext,
                 )?;
                 self.account_db()?.remove_group_pending_undecrypted(message_id)?;
+                self.stage_delivery_receipt(conversation_id, message_id, entry)?;
                 Ok(plaintext)
-            }
+            }),
             Err(error) if is_missing_group_sender_key_error(&error) => {
                 self.account_db()?.upsert_group_pending_undecrypted(
                     &GroupPendingUndecryptedRecord {

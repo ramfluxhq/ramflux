@@ -53,6 +53,13 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
+    let receipts = match super::delivery_receipts::flush(account).await {
+        Ok(n) => n,
+        Err(error) => {
+            tracing::warn!(%error,"delivery receipt courier deferred");
+            0
+        }
+    };
     let tasks_applied = account.client.retry_pending_tasks(now_unix_timestamp())?;
     let task_sent = match super::dispatch::task_transport::drain_confirmations(account).await {
         Ok(n) => n,
@@ -61,7 +68,7 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
-    Ok(received + tasks_applied + task_sent + approvals)
+    Ok(received + tasks_applied + task_sent + approvals + receipts)
 }
 
 async fn receive(
