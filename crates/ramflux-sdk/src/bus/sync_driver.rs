@@ -259,6 +259,10 @@ pub(super) fn quarantine_failure(
     error: &SdkError,
     now: i64,
 ) -> Result<bool, SdkError> {
+    tracing::debug!(%error, error_code = local_bus_error_code(error),
+        envelope_id = %entry.envelope.envelope_id, source_device_id = %entry.envelope.source_device_id,
+        target_delivery_id = %entry.target_delivery_id, inbox_seq = entry.inbox_seq,
+        "gateway receive entry handling failed");
     let bytes = serde_json::to_vec(entry)?;
     let code = if let Some(code) = crate::client::inbox_failure::deterministic(error) {
         code
