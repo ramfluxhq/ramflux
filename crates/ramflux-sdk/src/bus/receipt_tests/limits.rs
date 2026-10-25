@@ -34,7 +34,7 @@ async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
         .await?;
     drop(engine);
     drop(source);
-    let receipt = crate::client::delivery_receipts::id("thread", "first", &b.device)?;
+    let receipt = crate::client::delivery_receipts::id("thread", "first", &b.identity()?)?;
     mail.lock().map_err(|_| "mailbox")?.reject_id = Some(format!("receipt_evt_{receipt}"));
     let mut receiver = b.account(None, mail.clone())?;
     crate::bus::sync_driver::run(&mut receiver).await?;
@@ -67,11 +67,12 @@ fn backlog(client: &RamfluxClient, a: &Spec, b: &Spec) -> Result<(), SdkError> {
         db.persist_actor_state(
             &format!("{PREFIX}placeholder-{n}"),
             &Work {
+                status_id: format!("old-{n}"),
                 conversation: "thread".into(),
                 message: format!("old-{n}"),
                 wire_message: None,
-                receiver: b.device.clone(),
-                sender: a.device.clone(),
+                receiver: b.identity()?.storage_key().into(),
+                sender: a.identity()?.storage_key().into(),
                 root: root.clone(),
                 at: now_unix_timestamp(),
                 attempts: 1,
@@ -114,7 +115,7 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "second", &p.b.device)?
+            .delivery_receipt_status("thread", "second", &p.b.identity()?)?
             .ok_or("second status")?["state"],
         "sent"
     );
@@ -131,14 +132,14 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "first", &p.b.device)?
+            .delivery_receipt_status("thread", "first", &p.b.identity()?)?
             .ok_or("terminal")?["state"],
         "failed"
     );
     assert_eq!(p.receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
     let second_id = format!(
         "receipt_evt_{}",
-        crate::client::delivery_receipts::id("thread", "second", &p.b.device)?
+        crate::client::delivery_receipts::id("thread", "second", &p.b.identity()?)?
     );
     let packets = p
         .mail
@@ -174,24 +175,16 @@ async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepa
             work.at = now_unix_timestamp() - 601;
             p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
         } else if reason == "revoked" {
-            p.receiver
-                .client
-                .account_db()?
-                .persist_actor_state(&format!("device/revoked/{}", p.a.device), &true)?;
-        } else {
-            let mut device = p
-                .receiver
-                .client
-                .account_db()?
-                .client_record("device", &p.a.device)?
-                .ok_or("device")?;
-            device["principal_commitment"] =
-                serde_json::json!(p.receiver.client.surface_local_root_commitment()?);
-            p.receiver.client.account_db()?.persist_client_record(
-                "device",
-                &p.a.device,
-                &device,
+            p.receiver.client.account_db()?.persist_actor_state(
+                &format!("device/revoked/{}", p.a.identity()?.storage_key()),
+                &true,
             )?;
+        } else {
+            let mut foreign = Spec::new(&p.root, "mallory", 71);
+            foreign.device.clone_from(&p.a.device);
+            p.b.trust(&p.receiver.client, &foreign)?;
+            work.sender = foreign.identity()?.storage_key().into();
+            p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
         }
         assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
         assert_eq!(
@@ -202,12 +195,13 @@ async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepa
                 .iter()
                 .filter(|e| e.source_device_id == p.b.device)
                 .count(),
-            1
+            1,
+            "terminal receipt reason: {reason}"
         );
         assert_eq!(
             p.receiver
                 .client
-                .delivery_receipt_status("thread", "first", &p.b.device)?
+                .delivery_receipt_status("thread", "first", &p.b.identity()?)?
                 .ok_or("terminal")?["state"],
             "failed"
         );
@@ -261,8 +255,13 @@ async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> T
     for (spec, client) in [(&a, &source), (&b, &receiver)] {
         spec.trust(client, &a)?;
         spec.trust(client, &b)?;
-        client.create_group("group", &a.device)?;
-        client.add_group_member("group", &b.device, "member")?;
+        client.create_group("group", a.identity()?.storage_key())?;
+        client.add_group_member_with_root(
+            "group",
+            &b.device,
+            "member",
+            b.identity()?.root_commitment(),
+        )?;
     }
     receiver.import_group_sender_key_distribution(
         &source.export_group_sender_key_distribution("group", &a.device)?,
@@ -363,7 +362,10 @@ async fn a_page_of_backed_off_receipts_cannot_hide_later_due_work() -> TestResul
     assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
     assert_eq!(super::super::flush(&mut p.receiver).await?, 1);
     assert_eq!(
-        p.receiver.client.delivery_receipt_status("thread", "first", &p.b.device)?.ok_or("sent")?["state"],
+        p.receiver
+            .client
+            .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+            .ok_or("sent")?["state"],
         "sent"
     );
     assert!(!p.receiver.client.account_db()?.actor_state_exists(&due_key)?);

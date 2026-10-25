@@ -44,10 +44,20 @@ impl Spec {
             client.create_account(&self.principal, &client.surface_local_root_commitment()?)?;
         }
         client.unlock_account(&self.principal, b"receipt-test")?;
+        client.initialize_and_publish_prekey_bundle(
+            &client.surface_local_root_commitment()?,
+            &self.device,
+            &self.device,
+            [self.seed + 1; 32],
+            None,
+        )?;
+        client.persist_identity_directory(
+            &crate::client::identity_authority::test_support::manifest(&client)?,
+        )?;
         Ok(client)
     }
     pub fn config(&self, client: &RamfluxClient) -> Result<GatewaySessionConfig, SdkError> {
-        Ok(GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+        GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse().map_err(|_| SdkError::IdentityRootMissing)?,
             gateway_addr: "127.0.0.1:1".parse().map_err(|_| SdkError::IdentityRootMissing)?,
             server_name: "receipt-test".into(),
@@ -57,7 +67,7 @@ impl Spec {
             target_delivery_id: self.device.clone(),
             prekey_http_url: None,
         })
-        .with_device_branch(client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?))
+        .with_account_identity(client)
     }
     pub fn account(
         &self,
@@ -88,29 +98,33 @@ impl Spec {
         Ok(daemon)
     }
     pub fn trust(&self, client: &RamfluxClient, other: &Spec) -> Result<(), SdkError> {
-        let mut peer = RamfluxClient::new();
-        peer.create_identity_root(&other.principal, [other.seed; 32]);
-        peer.create_device_branch(&other.principal, &other.device, 1, [other.seed + 1; 32]);
-        let root = peer.surface_local_root_commitment()?;
-        let branch = peer.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let key = ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
+        let peer = other.client(None)?;
+        let manifest = crate::client::identity_authority::test_support::manifest(&peer)?;
+        client.persist_identity_directory(&manifest)?;
+        let identity = other.identity()?;
         let db = client.account_db()?;
-        db.persist_client_record("device",&other.device,&json!({"principal_id":other.principal,"principal_commitment":root,"signing_public_key":key,"x25519_identity_public":vec![0_u8;32],"target_delivery_id":other.device,"label":"Laptop"}))?;
-        db.persist_client_record("identity",&other.principal,&json!({"contact_identity_commitment":root,"devices":[{"device_id":other.device,"signing_public_key":key,"target_delivery_id":other.device}]}))?;
-        db.upsert_device_directory_entry(
-            &other.device,
-            &root,
-            "receipt-test",
-            now_unix_timestamp(),
-        )?;
+        let mut row = db.client_device_record(&identity)?.ok_or(SdkError::IdentityRootMissing)?;
+        row["label"] = json!("Laptop");
+        db.persist_client_record("device", identity.storage_key(), &row)?;
         if self.principal != other.principal {
             db.establish_friend_link(
                 &format!("friend:{}", other.principal),
-                &self.principal,
-                &other.principal,
+                &client.surface_local_root_commitment()?,
+                &manifest.principal_commitment,
             )?;
         }
         Ok(())
+    }
+    pub fn identity(&self) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
+        Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
+            &ramflux_crypto::create_identity_root(&self.principal, [self.seed; 32]),
+            &ramflux_crypto::create_device_branch(
+                &self.principal,
+                &self.device,
+                1,
+                [self.seed + 1; 32],
+            ),
+        )?)
     }
     pub fn message(&self, to: &Spec, id: &str) -> GatewayDirectMessage {
         GatewayDirectMessage {
@@ -120,6 +134,11 @@ impl Spec {
             source_principal_id: self.principal.clone(),
             sender_id: self.device.clone(),
             recipient_device_id: Some(to.device.clone()),
+            recipient_principal_commitment: Some(ramflux_crypto::identity_root_commitment(
+                &ramflux_crypto::create_identity_root(&to.principal, [to.seed; 32])
+                    .signing_key
+                    .verifying_key(),
+            )),
             target_delivery_id: to.device.clone(),
             encrypted_body: vec![],
             created_at: now_unix_timestamp(),
@@ -146,8 +165,8 @@ pub(super) fn seed_pair(a: &Spec, b: &Spec) -> TestResult {
         dm_device_id_hash(&a.device),
         [3; 32],
     )?;
-    one.persist_pair(&a.device, &b.device, &[4; 32], &sender)?;
-    two.persist_pair(&b.device, &a.device, &[4; 32], &receiver)?;
+    one.persist_pair(&a.identity()?, &b.identity()?, &[4; 32], &sender)?;
+    two.persist_pair(&b.identity()?, &a.identity()?, &[4; 32], &receiver)?;
     for client in [&one, &two] {
         client.account_db()?.persist_client_record(
             "conversation",

@@ -791,7 +791,7 @@ async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer
         envelope: sealed.envelope,
     };
     let (sibling, receiver_engine) =
-        receive_first_bootstrap(&root, sibling, receiver, incoming.clone()).await?;
+        Box::pin(receive_first_bootstrap(&root, sibling, receiver, incoming.clone())).await?;
     let state =
         Box::pin(receive_with_invalid_pending_row(&root, sibling, receiver_engine, incoming))
             .await?;

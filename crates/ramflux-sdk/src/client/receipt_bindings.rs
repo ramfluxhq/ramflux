@@ -10,19 +10,27 @@ struct Binding {
     message: String,
     recipient_root: Option<String>,
 }
-fn key(local: &str, recipient: &str, wire: &str) -> Result<String, SdkError> {
+fn key(
+    local: &ramflux_crypto::RootQualifiedDeviceRef,
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    wire: &str,
+) -> Result<String, SdkError> {
     Ok(format!(
         "delivery-receipt/outbound/{}",
         ramflux_crypto::blake3_256_base64url(
             "ramflux.delivery-receipt.outbound.v1",
-            &ramflux_protocol::canonical_json_bytes(&(local, recipient, wire))?
+            &ramflux_protocol::canonical_json_bytes(&(
+                local.storage_key(),
+                recipient.storage_key(),
+                wire
+            ))?
         )
     ))
 }
 impl RamfluxClient {
     pub(crate) fn bind_outgoing_delivery(
         &self,
-        local: &str,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
         message: &GatewayDirectMessage,
         kind: &crate::client::routed::Kind,
     ) -> Result<(), SdkError> {
@@ -32,18 +40,10 @@ impl RamfluxClient {
         ) {
             return Ok(());
         }
-        let recipient = message
-            .recipient_device_id
-            .as_deref()
-            .ok_or_else(|| SdkError::InboundRejected("receipt recipient missing".into()))?;
+        let recipient = self.device_identity(&Self::qualified_recipient(message)?)?;
         let db = self.account_db()?;
-        let storage = key(local, recipient, &message.envelope_id)?;
-        let device = db.client_record("device", recipient)?;
-        let root = device
-            .as_ref()
-            .and_then(|row| row["principal_commitment"].as_str())
-            .map(str::to_owned)
-            .or(db.device_directory_entry(recipient)?.map(|entry| entry.principal_commitment));
+        let storage = key(local, &recipient, &message.envelope_id)?;
+        let root = Some(recipient.root_commitment().to_owned());
         let old = db.load_actor_state::<Binding>(&storage)?;
         if let Some(old) = &old
             && (old.conversation != message.conversation_id
@@ -64,13 +64,17 @@ impl RamfluxClient {
     }
     pub(crate) fn resolve_delivery_receipt_message(
         &self,
-        recipient: &str,
+        recipient: &ramflux_crypto::RootQualifiedDeviceRef,
         conversation: &str,
         wire: &str,
     ) -> Result<String, SdkError> {
         let db = self.account_db()?;
         let bound = if let Some(local) = &self.device_branch {
-            db.load_actor_state::<Binding>(&key(&local.device_id, recipient, wire)?)?
+            db.load_actor_state::<Binding>(&key(
+                &self.local_device_identity(&local.device_id)?,
+                recipient,
+                wire,
+            )?)?
         } else {
             None
         };
@@ -81,10 +85,7 @@ impl RamfluxClient {
                 ));
             }
             if let Some(expected) = &binding.recipient_root {
-                let device = self.trusted_device(recipient)?;
-                let current = device["principal_commitment"].as_str().map(str::to_owned).or(db
-                    .device_directory_entry(recipient)?
-                    .map(|entry| entry.principal_commitment));
+                let current = Some(recipient.root_commitment().to_owned());
                 if current.as_ref() != Some(expected) {
                     return Err(SdkError::InboundRejected(
                         "receipt root differs from outbound binding".into(),

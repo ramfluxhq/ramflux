@@ -130,7 +130,11 @@ impl RamfluxClient {
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
-        self.bind_outgoing_delivery(&engine.config.device_id, message, &route.kind)?;
+        self.bind_outgoing_delivery(
+            &self.local_device_identity(&engine.config.device_id)?,
+            message,
+            &route.kind,
+        )?;
         self.seal_routed_with_route(
             message,
             body,
@@ -155,9 +159,15 @@ impl RamfluxClient {
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session_from_url(
-            &self.local_device_identity(&engine.config.device_id)?, message, url,
+            &self.local_device_identity(&engine.config.device_id)?,
+            message,
+            url,
         )?;
-        self.bind_outgoing_delivery(&engine.config.device_id, message, &route.kind)?;
+        self.bind_outgoing_delivery(
+            &self.local_device_identity(&engine.config.device_id)?,
+            message,
+            &route.kind,
+        )?;
         self.seal_routed_with_route(
             message,
             body,

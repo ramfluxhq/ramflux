@@ -112,9 +112,19 @@ async fn group_delivery_receipts_go_only_to_the_sender_device_without_recipient_
                 for member in [&a, &b, &c] {
                     spec.trust(client, member)?;
                 }
-                client.create_group("group", &a.device)?;
-                client.add_group_member("group", &b.device, "member")?;
-                client.add_group_member("group", &c.device, "member")?;
+                client.create_group("group", a.identity()?.storage_key())?;
+                client.add_group_member_with_root(
+                    "group",
+                    &b.device,
+                    "member",
+                    b.identity()?.root_commitment(),
+                )?;
+                client.add_group_member_with_root(
+                    "group",
+                    &c.device,
+                    "member",
+                    c.identity()?.root_commitment(),
+                )?;
                 client.account_db()?.persist_client_record(
                     "conversation",
                     "thread",

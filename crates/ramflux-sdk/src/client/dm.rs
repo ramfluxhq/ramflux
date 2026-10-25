@@ -764,7 +764,11 @@ impl RamfluxClient {
             )));
         }
         if let SdkReceiptEventBody::Delivered { message_id, .. } = &mut envelope.event {
-            *message_id = self.resolve_delivery_receipt_message(source.storage_key(), authenticated_conversation, message_id)?;
+            *message_id = self.resolve_delivery_receipt_message(
+                source,
+                authenticated_conversation,
+                message_id,
+            )?;
         }
         let inserted = match &envelope.event {
             SdkReceiptEventBody::Delivered {

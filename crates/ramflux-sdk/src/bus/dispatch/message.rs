@@ -376,7 +376,7 @@ async fn dispatch_message_receipt_delivered(
     if let Some(status) = account.client.delivery_receipt_status(
         &body.conversation_id,
         &body.message_id,
-        &body.receiver_device_id,
+        &account.client.local_device_identity(&body.receiver_device_id)?,
     )? && matches!(status["state"].as_str(), Some("pending" | "sent" | "failed"))
     {
         return Ok(local_bus_ok(

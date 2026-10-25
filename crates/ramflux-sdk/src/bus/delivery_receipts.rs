@@ -90,39 +90,35 @@ async fn send(
     key: &str,
     work: &mut Work,
 ) -> Result<(), SdkError> {
-    let device = account.client.trusted_device(&work.sender)?;
-    let current_root = device["principal_commitment"].as_str().map(str::to_owned).or(account
-        .client
-        .account_db()?
-        .device_directory_entry(&work.sender)?
-        .map(|entry| entry.principal_commitment));
-    if work.root.as_deref().is_some_and(|root| current_root.as_deref() != Some(root)) {
-        return Err(SdkError::InboundRejected("receipt sender root changed".into()));
-    }
-    if work.receiver != engine.config.device_id {
+    let source = account.client.device_identity(&work.sender)?;
+    let receiver = account.client.owned_device_identity()?;
+    if work.receiver != receiver.storage_key() || receiver.device_id() != engine.config.device_id {
         return Err(SdkError::InboundRejected("receipt receiving device changed".into()));
+    }
+    let device = account.client.trusted_device(&source)?;
+    if work.root.as_deref() != Some(source.root_commitment())
+        || device["principal_commitment"].as_str() != Some(source.root_commitment())
+    {
+        return Err(SdkError::InboundRejected("receipt sender root changed".into()));
     }
     if work.packet.is_none() {
         let target = device["target_delivery_id"]
             .as_str()
             .ok_or_else(|| SdkError::InboundPending("receipt sender route missing".into()))?;
-        let receipt = crate::client::delivery_receipts::id(
-            &work.conversation,
-            &work.message,
-            &work.receiver,
-        )?;
+        let receipt =
+            crate::client::delivery_receipts::id(&work.conversation, &work.message, &receiver)?;
         let event = SdkReceiptEventEnvelope {
             schema: "ramflux.sdk.receipt_event.v1".into(),
             version: 1,
             receipt_id: receipt.clone(),
             event_seq: u64::try_from(work.at).unwrap_or(0),
             nonce: receipt.clone(),
-            reader_device_id: work.receiver.clone(),
+            reader_device_id: receiver.device_id().into(),
             event: SdkReceiptEventBody::Delivered {
                 conversation_id: work.conversation.clone(),
                 message_id: work.wire_message.as_ref().unwrap_or(&work.message).clone(),
                 delivered_at: work.at,
-                receiver_device_id: work.receiver.clone(),
+                receiver_device_id: receiver.device_id().into(),
                 scope: "e2ee_private".into(),
                 ttl_seconds: 300,
             },
@@ -132,8 +128,9 @@ async fn send(
             message_id: receipt.clone(),
             envelope_id: format!("receipt_evt_{receipt}"),
             source_principal_id: engine.config.principal_id.clone(),
-            sender_id: work.receiver.clone(),
-            recipient_device_id: Some(work.sender.clone()),
+            sender_id: receiver.device_id().into(),
+            recipient_device_id: Some(source.device_id().into()),
+            recipient_principal_commitment: Some(source.root_commitment().into()),
             target_delivery_id: target.into(),
             encrypted_body: Vec::new(),
             created_at: work.at,
@@ -160,11 +157,12 @@ async fn send(
 fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result<(), SdkError> {
     let db = client.account_db()?;
     db.write_transaction(|| {
-        let id = crate::client::delivery_receipts::id(
-            &work.conversation,
-            &work.message,
-            &work.receiver,
-        )?;
+        let id = if work.status_id.is_empty() {
+            key.strip_prefix(PREFIX)
+                .ok_or_else(|| SdkError::InboundRejected("invalid receipt work key".into()))?
+        } else {
+            work.status_id.as_str()
+        };
         db.persist_actor_state(
             &format!("delivery-receipt/status/{id}"),
             &json!({
