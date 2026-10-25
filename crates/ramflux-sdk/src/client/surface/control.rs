@@ -306,6 +306,7 @@ impl RamfluxClient {
                 &metadata,
             )?;
             let routing = crate::client::routed::Routing {
+                group_message_id: None,
                 kind: if group.is_some() {
                     crate::client::routed::Kind::GroupMessage
                 } else {

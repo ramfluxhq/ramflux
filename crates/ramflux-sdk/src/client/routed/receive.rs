@@ -115,7 +115,7 @@ impl RamfluxClient {
         let mut opened = self.open_routed_with_recovery(engine, entry).await?;
         self.contact_route_gate(entry, &opened.routing, &opened.body)?;
         if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
-            opened.routing.message_id = self.projection_id(entry)?;
+            opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
         }
         self.confirm_routed_context(&opened.routing, entry)?;
         let (body, refs) = if opened.routing.attachments {

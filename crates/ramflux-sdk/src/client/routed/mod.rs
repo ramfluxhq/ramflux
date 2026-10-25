@@ -42,6 +42,8 @@ pub(crate) struct Routing {
     pub conversation_id: String,
     pub group_id: Option<String>,
     pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_message_id: Option<String>,
     #[serde(default)]
     pub attachments: bool,
 }
@@ -104,11 +106,14 @@ impl Route {
     }
 }
 fn routing(message: &GatewayDirectMessage, route: Route) -> Routing {
+    let group_message_id =
+        matches!(&route.kind, Kind::GroupMessage).then(|| message.message_id.clone());
     Routing {
         kind: route.kind,
         attachments: route.attachments,
         group_id: route.group_id,
         conversation_id: message.conversation_id.clone(),
+        group_message_id,
         message_id: message.envelope_id.clone(),
     }
 }
@@ -272,6 +277,14 @@ impl RamfluxClient {
             && plaintext.routing.group_id.as_deref().is_none_or(str::is_empty)
         {
             return Err(invalid("missing authenticated group id"));
+        }
+        if let Some(id) = &plaintext.routing.group_message_id
+            && (plaintext.routing.kind != Kind::GroupMessage
+                || id.is_empty()
+                || id.len() > 256
+                || !ramflux_protocol::text_safety::single_line_is_safe(id))
+        {
+            return Err(invalid("invalid authenticated group message id"));
         }
         let body = ramflux_protocol::decode_base64url(&plaintext.body_base64)
             .map_err(|_| invalid("invalid routed body"))?;

@@ -256,3 +256,7 @@ mod shared_group_transport_tests;
 #[cfg(test)]
 #[path = "shared_group_federation_tests.rs"]
 mod shared_group_federation_tests;
+
+#[cfg(test)]
+#[path = "shared_group_sibling_tests.rs"]
+mod shared_group_sibling_tests;

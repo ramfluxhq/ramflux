@@ -135,9 +135,22 @@ pub(crate) fn object_watermark(
 }
 
 impl RamfluxClient {
-    pub(super) fn projection_id(&self, entry: &GatewayInboxEntry) -> Result<String, SdkError> {
+    pub(super) fn projection_id(
+        &self,
+        entry: &GatewayInboxEntry,
+        route: &Routing,
+    ) -> Result<String, SdkError> {
+        self.projection_id_for(
+            entry,
+            route.group_message_id.as_deref().unwrap_or(&entry.envelope.envelope_id),
+        )
+    }
+    pub(super) fn projection_id_for(
+        &self,
+        entry: &GatewayInboxEntry,
+        wire: &str,
+    ) -> Result<String, SdkError> {
         let db = self.account_db()?;
-        let wire = &entry.envelope.envelope_id;
         let scoped = format!(
             "routed:{}",
             self.authenticated_committed_key(entry)?.trim_start_matches("routed/committed/")
@@ -151,7 +164,7 @@ impl RamfluxClient {
             && self.direct_message_by_id(wire)?.is_none()
             && db.load_actor_state::<String>(&format!("routed/message-owner/{wire}"))?.is_none()
         {
-            return Ok(wire.clone());
+            return Ok(wire.to_owned());
         }
         if self.direct_message_by_id(&scoped)?.is_some()
             || db.load_actor_state::<String>(&format!("routed/message-owner/{scoped}"))?.is_some()
