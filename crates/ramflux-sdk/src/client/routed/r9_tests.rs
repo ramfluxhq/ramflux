@@ -30,6 +30,7 @@ fn forged_group_traffic(sender: &Fixture) -> Result<(Vec<u8>, Vec<u8>), SdkError
         group_id: group.into(),
         sender_id: "alice".into(),
         group_key_epoch: epoch,
+        group_state_hash: None,
         sender_key_seed: seed,
         sender_device_signing_public_key: Some(
             manifest(sender)?.devices[0].branch_public_key.clone(),
@@ -41,6 +42,7 @@ fn forged_group_traffic(sender: &Fixture) -> Result<(Vec<u8>, Vec<u8>), SdkError
         group_id: group.into(),
         sender_id: "alice".into(),
         group_key_epoch: epoch,
+        group_state_hash: None,
         ciphertext,
     };
     Ok((serde_json::to_vec(&distribution)?, serde_json::to_vec(&body)?))

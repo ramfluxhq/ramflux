@@ -316,3 +316,6 @@ fn shared_group_implicit_sibling_can_send_and_own_history_keeps_signed_names()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[path = "head_scope_tests.rs"]
+mod head_scope_tests;

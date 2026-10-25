@@ -140,7 +140,7 @@ impl VerifiedGroupState {
             ))?)
         )))
     }
-    /// Compare authenticated ancestry; a newer creator-root checkpoint resolves older forks.
+    /// Compare authenticated ancestry without treating checkpoint recency as proof of extension.
     #[must_use]
     pub fn extends(&self, previous: &Self) -> bool {
         self.relation_to(previous).is_ok_and(|relation| {

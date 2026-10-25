@@ -290,11 +290,12 @@ impl RamfluxClient {
                     &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id,
                     &source,
                 )?;
-                let checkpoint = group_sender_key_checkpoint_name(
+                let checkpoint = crate::group::group_key_checkpoint(
                     &distribution.group_id,
                     &source,
                     distribution.group_key_epoch,
                     "recv",
+                    distribution.group_state_hash.as_deref(),
                 )?;
                 if self.projection_checkpoint(&checkpoint)?.is_none() {
                     self.import_group_key_for_identity(&bytes, &source, false)?;

@@ -120,8 +120,10 @@ impl RamfluxClient {
                 let source =
                     self.device_identity_for_root(&issuer.root_commitment, &issuer.device_id)?;
                 let trusted = self.trusted_device(&source)?;
-                if parsed.schema != "ramflux.sdk.group_sender_key.distribution.v2"
-                    || parsed.version != 2
+                if parsed.schema != "ramflux.sdk.group_sender_key.distribution.v3"
+                    || parsed.version != 3
+                    || parsed.group_state_hash.as_deref()
+                        != Some(state.snapshot().state_hash.as_str())
                     || parsed.group_id != state.view().group_id
                     || parsed.group_key_epoch != state.view().epoch
                     || parsed.sender_id != issuer.device_id
@@ -163,11 +165,12 @@ impl RamfluxClient {
                 let issuer = &state.snapshot().issuer.identity;
                 let source =
                     self.device_identity_for_root(&issuer.root_commitment, &issuer.device_id)?;
-                let checkpoint = group_sender_key_checkpoint_name(
+                let checkpoint = crate::group::group_key_checkpoint(
                     &distribution.group_id,
                     &source,
                     distribution.group_key_epoch,
                     "recv",
+                    distribution.group_state_hash.as_deref(),
                 )?;
                 let marker = format!(
                     "group/bootstrap-key/{}",

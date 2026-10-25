@@ -12,6 +12,8 @@ pub struct SdkGroupSenderKeyDistribution {
     pub group_id: String,
     pub sender_id: String,
     pub group_key_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_state_hash: Option<String>,
     pub sender_key_seed: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_device_signing_public_key: Option<String>,
@@ -37,6 +39,8 @@ pub(crate) struct SdkGroupSenderKeyState {
     pub(crate) group_id: String,
     pub(crate) sender_id: String,
     pub(crate) group_key_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_state_hash: Option<String>,
     pub(crate) session_snapshot: ramflux_crypto::DmSessionSnapshot,
 }
 
@@ -47,6 +51,8 @@ pub(crate) struct SdkGroupEncryptedEnvelope {
     pub(crate) group_id: String,
     pub(crate) sender_id: String,
     pub(crate) group_key_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_state_hash: Option<String>,
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
 }
 
@@ -87,6 +93,55 @@ pub(crate) fn group_sender_key_checkpoint_name(
             ))?
         )
     ))
+}
+
+pub(crate) fn group_key_checkpoint(
+    group: &str,
+    sender: &ramflux_crypto::RootQualifiedDeviceRef,
+    epoch: u64,
+    direction: &str,
+    head: Option<&str>,
+) -> Result<String, SdkError> {
+    let Some(head) = head else {
+        return group_sender_key_checkpoint_name(group, sender, epoch, direction);
+    };
+    Ok(format!(
+        "group_sender_key:v3/{}",
+        ramflux_protocol::hash_base64url(
+            "ramflux.sdk.shared_group.sender.state.v1",
+            &ramflux_protocol::canonical_json_bytes(&(
+                group,
+                sender.storage_key(),
+                epoch,
+                head,
+                direction
+            ))?
+        )
+    ))
+}
+pub(crate) fn group_key_associated_data(
+    group: &str,
+    sender: &ramflux_crypto::RootQualifiedDeviceRef,
+    epoch: u64,
+    head: Option<&str>,
+) -> Result<Vec<u8>, SdkError> {
+    let Some(head) = head else {
+        return Ok(group_associated_data(group, sender.device_id(), epoch));
+    };
+    Ok(ramflux_protocol::canonical_json_bytes(&(
+        "ramflux.shared_group.sender_key.v1",
+        group,
+        sender.root_commitment(),
+        sender.device_id(),
+        epoch,
+        head,
+    ))?)
+}
+pub(crate) fn group_message_schema(schema: &str) -> bool {
+    matches!(
+        schema,
+        "ramflux.sdk.group_sender_key.message.v1" | "ramflux.sdk.group_sender_key.message.v2"
+    )
 }
 
 pub(crate) fn group_sender_session_id(group_id: &str, sender_id: &str, epoch: u64) -> String {

@@ -6,6 +6,50 @@
 use crate::prelude::*;
 
 impl RamfluxClient {
+    pub(crate) fn current_group_key_head(
+        &self,
+        group: &str,
+        epoch: u64,
+    ) -> Result<Option<String>, SdkError> {
+        let Some(state) = self.account_db()?.shared_group_state(group)? else {
+            return Ok(None);
+        };
+        if state.view().epoch != epoch {
+            return Err(SdkError::InboundPending("shared group key epoch is not current".into()));
+        }
+        Ok(Some(state.snapshot().state_hash.clone()))
+    }
+    fn validate_group_key_head(
+        &self,
+        group: &str,
+        epoch: u64,
+        head: Option<&str>,
+    ) -> Result<(), SdkError> {
+        let shared = self.account_db()?.shared_group_state(group)?;
+        if shared.is_some() != head.is_some()
+            || head.is_some_and(|head| {
+                ramflux_protocol::decode_base64url(head).map_or(true, |bytes| {
+                    bytes.len() != 32 || ramflux_protocol::encode_base64url(bytes) != head
+                })
+            })
+        {
+            return Err(SdkError::InboundRejected(
+                "group key head does not match its group mode".into(),
+            ));
+        }
+        if let Some(state) = shared
+            && (epoch > state.view().epoch
+                || (epoch == state.view().epoch
+                    && head != Some(state.snapshot().state_hash.as_str()))
+                || (epoch != state.view().epoch
+                    && head == Some(state.snapshot().state_hash.as_str())))
+        {
+            return Err(SdkError::InboundPending(
+                "shared group state head is not available".into(),
+            ));
+        }
+        Ok(())
+    }
     pub(crate) fn load_group_sender_key_state(
         &self,
         group_id: &str,
@@ -13,8 +57,19 @@ impl RamfluxClient {
         group_key_epoch: u64,
         direction: &str,
     ) -> Result<SdkGroupSenderKeyState, SdkError> {
+        let head = self.current_group_key_head(group_id, group_key_epoch)?;
+        self.load_group_key_at_head(group_id, sender, group_key_epoch, direction, head.as_deref())
+    }
+    fn load_group_key_at_head(
+        &self,
+        group_id: &str,
+        sender: &ramflux_crypto::RootQualifiedDeviceRef,
+        group_key_epoch: u64,
+        direction: &str,
+        head: Option<&str>,
+    ) -> Result<SdkGroupSenderKeyState, SdkError> {
         let checkpoint =
-            group_sender_key_checkpoint_name(group_id, sender, group_key_epoch, direction)?;
+            crate::group::group_key_checkpoint(group_id, sender, group_key_epoch, direction, head)?;
         let sender_id = sender.device_id();
         let event_id = self.projection_checkpoint(&checkpoint)?.ok_or_else(|| {
             SdkError::LocalBus(format!(
@@ -29,6 +84,7 @@ impl RamfluxClient {
             || state.group_key_epoch != group_key_epoch
             || state.sender_id != sender.device_id()
             || state.principal_commitment.as_deref() != Some(sender.root_commitment())
+            || state.group_state_hash.as_deref() != head
         {
             return Err(SdkError::InboundRejected("group sender state root mismatch".into()));
         }
@@ -47,11 +103,12 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("group sender state root mismatch".into()));
         }
-        let checkpoint = group_sender_key_checkpoint_name(
+        let checkpoint = crate::group::group_key_checkpoint(
             &state.group_id,
             sender,
             state.group_key_epoch,
             direction,
+            state.group_state_hash.as_deref(),
         )?;
         let event_id = format!(
             "{checkpoint}/chain/{}/{}",
@@ -89,16 +146,24 @@ impl RamfluxClient {
         }
         self.pin_local_group_member(group_id)?;
         let sender_id = sender.device_id();
+        let head = self.current_group_key_head(group_id, group_key_epoch)?;
         if self
-            .projection_checkpoint(&group_sender_key_checkpoint_name(
+            .projection_checkpoint(&crate::group::group_key_checkpoint(
                 group_id,
                 sender,
                 group_key_epoch,
                 "send",
+                head.as_deref(),
             )?)?
             .is_some()
         {
-            return self.load_group_sender_key_state(group_id, sender, group_key_epoch, "send");
+            return self.load_group_key_at_head(
+                group_id,
+                sender,
+                group_key_epoch,
+                "send",
+                head.as_deref(),
+            );
         }
         let root_seed = ramflux_crypto::random_32()?;
         let local_hash = group_sender_device_hash(group_id, sender_id, "local");
@@ -113,6 +178,7 @@ impl RamfluxClient {
             group_id: group_id.to_owned(),
             sender_id: sender_id.to_owned(),
             group_key_epoch,
+            group_state_hash: head,
             session_snapshot: ramflux_crypto::DmSession::initiator(
                 root_seed,
                 local_hash,
@@ -164,6 +230,7 @@ impl RamfluxClient {
             group_id: group_id.to_owned(),
             sender_id: sender_id.to_owned(),
             group_key_epoch: group.group_epoch,
+            group_state_hash: state.group_state_hash.clone(),
             sender_key_seed: state.session_snapshot.root_key_bytes(),
             sender_device_signing_public_key,
         };
@@ -207,15 +274,18 @@ impl RamfluxClient {
         let distribution: SdkGroupSenderKeyDistribution =
             serde_json::from_slice(distribution_bytes)?;
         if !matches!(
-            (distribution.schema.as_str(), distribution.version),
-            ("ramflux.sdk.group_sender_key.distribution.v3", 3)
-                | ("ramflux.sdk.group_sender_key.distribution.v2", 2)
-                | ("ramflux.sdk.group_sender_key.distribution.v1", 1)
+            (
+                distribution.schema.as_str(),
+                distribution.version,
+                distribution.group_state_hash.is_some()
+            ),
+            ("ramflux.sdk.group_sender_key.distribution.v1", 1, false)
+                | ("ramflux.sdk.group_sender_key.distribution.v2", 2, false)
+                | ("ramflux.sdk.group_sender_key.distribution.v3", 3, _)
         ) {
-            return Err(SdkError::LocalBus(format!(
-                "unsupported group sender key distribution schema: {}",
-                distribution.schema
-            )));
+            return Err(SdkError::InboundRejected(
+                "unsupported group key distribution schema or head".into(),
+            ));
         }
         self.assert_group_sender_key_epoch_allowed(&distribution)?;
         let public_key = distribution
@@ -247,12 +317,21 @@ impl RamfluxClient {
                 "safety: distribution signing key differs from member pin".into(),
             ));
         }
+        self.validate_group_key_head(
+            &distribution.group_id,
+            distribution.group_key_epoch,
+            distribution.group_state_hash.as_deref(),
+        )?;
+        if let Some(pending) = self.reuse_shared_group_key(&distribution, &source, retry_pending)? {
+            return Ok((distribution, pending));
+        }
         let state = SdkGroupSenderKeyState {
             chain_version: distribution.version,
             principal_commitment: Some(source.root_commitment().to_owned()),
             group_id: distribution.group_id.clone(),
             sender_id: distribution.sender_id.clone(),
             group_key_epoch: distribution.group_key_epoch,
+            group_state_hash: distribution.group_state_hash.clone(),
             session_snapshot: ramflux_crypto::DmSession::recipient(
                 distribution.sender_key_seed,
                 group_sender_device_hash(&distribution.group_id, &distribution.sender_id, "remote"),
@@ -291,11 +370,12 @@ impl RamfluxClient {
         state: &SdkGroupSenderKeyState,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<bool, SdkError> {
-        let base = group_sender_key_checkpoint_name(
+        let base = crate::group::group_key_checkpoint(
             &state.group_id,
             source,
             state.group_key_epoch,
             "recv",
+            state.group_state_hash.as_deref(),
         )?;
         let checkpoint = self.projection_checkpoint(&format!(
             "{base}/chain/{}",
@@ -323,6 +403,48 @@ impl RamfluxClient {
             false
         };
         Ok(known)
+    }
+
+    fn reuse_shared_group_key(
+        &self,
+        distribution: &SdkGroupSenderKeyDistribution,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        retry_pending: bool,
+    ) -> Result<Option<Vec<SdkGroupPendingPlaintext>>, SdkError> {
+        if distribution.group_state_hash.is_none() {
+            return Ok(None);
+        }
+        let checkpoint = crate::group::group_key_checkpoint(
+            &distribution.group_id,
+            source,
+            distribution.group_key_epoch,
+            "recv",
+            distribution.group_state_hash.as_deref(),
+        )?;
+        if self.projection_checkpoint(&checkpoint)?.is_some() {
+            let existing = self.load_group_key_at_head(
+                &distribution.group_id,
+                source,
+                distribution.group_key_epoch,
+                "recv",
+                distribution.group_state_hash.as_deref(),
+            )?;
+            if existing.session_snapshot.root_key_bytes() != distribution.sender_key_seed {
+                return Err(SdkError::InboundRejected(
+                    "shared group key changed at an existing head".into(),
+                ));
+            }
+            let pending = if retry_pending {
+                self.retry_pending_group_messages(
+                    &distribution.group_id,
+                    distribution.group_key_epoch,
+                )?
+            } else {
+                Vec::new()
+            };
+            return Ok(Some(pending));
+        }
+        Ok(None)
     }
 
     fn assert_group_sender_key_epoch_allowed(
@@ -435,7 +557,12 @@ impl RamfluxClient {
             &self.local_device_identity(sender_id)?,
             group.group_epoch,
         )?;
-        let associated_data = group_associated_data(group_id, sender_id, group.group_epoch);
+        let associated_data = crate::group::group_key_associated_data(
+            group_id,
+            &self.local_device_identity(sender_id)?,
+            group.group_epoch,
+            state.group_state_hash.as_deref(),
+        )?;
         let mut session = ramflux_crypto::DmSession::from_snapshot(state.session_snapshot.clone())?;
         let ciphertext = session.encrypt(plaintext, &associated_data)?;
         state.session_snapshot = session.snapshot();
@@ -446,11 +573,17 @@ impl RamfluxClient {
             &format!("send:{}", ciphertext.counter),
         )?;
         Ok(serde_json::to_vec(&SdkGroupEncryptedEnvelope {
-            schema: "ramflux.sdk.group_sender_key.message.v1".to_owned(),
-            version: 1,
+            schema: if state.group_state_hash.is_some() {
+                "ramflux.sdk.group_sender_key.message.v2"
+            } else {
+                "ramflux.sdk.group_sender_key.message.v1"
+            }
+            .into(),
+            version: if state.group_state_hash.is_some() { 2 } else { 1 },
             group_id: group_id.to_owned(),
             sender_id: sender_id.to_owned(),
             group_key_epoch: group.group_epoch,
+            group_state_hash: state.group_state_hash.clone(),
             ciphertext,
         })?)
     }
@@ -492,16 +625,24 @@ impl RamfluxClient {
         if source.device_id() != envelope.sender_id {
             return Err(SdkError::InboundRejected("group sender identity mismatch".into()));
         }
-        if envelope.schema != "ramflux.sdk.group_sender_key.message.v1" {
-            return Err(SdkError::LocalBus(format!(
-                "unsupported group message schema: {}",
-                envelope.schema
-            )));
+        if !matches!(
+            (envelope.schema.as_str(), envelope.version, envelope.group_state_hash.is_some()),
+            ("ramflux.sdk.group_sender_key.message.v1", 1, false)
+                | ("ramflux.sdk.group_sender_key.message.v2", 2, true)
+        ) {
+            return Err(SdkError::InboundRejected(
+                "unsupported group message schema or head".into(),
+            ));
         }
-        let base = group_sender_key_checkpoint_name(
+        self.validate_group_key_head(
+            &envelope.group_id, envelope.group_key_epoch, envelope.group_state_hash.as_deref(),
+        )?;
+        let base = crate::group::group_key_checkpoint(
             &envelope.group_id,
-            source,            envelope.group_key_epoch,
+            source,
+            envelope.group_key_epoch,
             "recv",
+            envelope.group_state_hash.as_deref(),
         )?;
         let mut state = if let Some(event) =
             self.projection_checkpoint(&format!("{base}/chain/{}", envelope.ciphertext.session_id))?
@@ -512,18 +653,20 @@ impl RamfluxClient {
                 })?,
             )?
         } else {
-            self.load_group_sender_key_state(
+            self.load_group_key_at_head(
                 &envelope.group_id,
                 source,
                 envelope.group_key_epoch,
                 "recv",
+                envelope.group_state_hash.as_deref(),
             )?
         };
-        let associated_data = group_associated_data(
+        let associated_data = crate::group::group_key_associated_data(
             &envelope.group_id,
-            &envelope.sender_id,
+            source,
             envelope.group_key_epoch,
-        );
+            envelope.group_state_hash.as_deref(),
+        )?;
         let mut session = ramflux_crypto::DmSession::from_snapshot(state.session_snapshot.clone())?;
         let plaintext = session.decrypt(&envelope.ciphertext, &associated_data)?;
         state.session_snapshot = session.snapshot();
@@ -597,6 +740,7 @@ mod tests {
             group_id: "group_floor".to_owned(),
             sender_id: "owner_device".to_owned(),
             group_key_epoch: joined_epoch.saturating_sub(1),
+            group_state_hash: None,
             sender_key_seed: [0x93; 32],
             sender_device_signing_public_key: None,
         };

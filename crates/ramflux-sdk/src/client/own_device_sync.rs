@@ -509,6 +509,7 @@ impl RamfluxClient {
                         group_id: group.group_id.clone(),
                         sender_id: member_id.clone(),
                         group_key_epoch: group.group_epoch,
+                        group_state_hash: None,
                         sender_key_seed: state.session_snapshot.root_key_bytes(),
                         sender_device_signing_public_key: self
                             .account_db()?
@@ -1101,6 +1102,7 @@ pub(crate) mod tests {
                 group_id: "group_sync".to_owned(),
                 sender_id: "source_device_sync".to_owned(),
                 group_key_epoch: 1,
+                group_state_hash: None,
                 ciphertext: ramflux_crypto::DmCiphertext {
                     session_id: "group_sync".to_owned(),
                     counter: 0,

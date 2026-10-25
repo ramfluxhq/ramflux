@@ -49,7 +49,7 @@ impl RamfluxClient {
         let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
         if let Ok(envelope) = serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&encrypted_body)
-            && envelope.schema == "ramflux.sdk.group_sender_key.message.v1"
+            && crate::group::group_message_schema(&envelope.schema)
         {
             if envelope.group_id != group_id {
                 return Err(SdkError::InboundRejected(
@@ -119,7 +119,7 @@ impl RamfluxClient {
         let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
         if let Ok(envelope) = serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&encrypted_body)
-            && envelope.schema == "ramflux.sdk.group_sender_key.message.v1"
+            && crate::group::group_message_schema(&envelope.schema)
         {
             if envelope.group_id != group_id {
                 return Err(SdkError::InboundRejected(
