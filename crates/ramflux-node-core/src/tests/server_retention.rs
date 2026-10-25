@@ -139,6 +139,10 @@ fn server_retention_push_routes_encrypt_rotate_and_revoke_on_current_authority()
     route.registered_at = now;
     route.expires_at = now + 600;
     route.token = "opaque-private-provider-token-never-in-redb".into();
+    let mut legacy = route.clone();
+    legacy.provider = PushProviderKind::Apns;
+    legacy.token = "unverified-other-provider-token".into();
+    store.register_push_route(legacy)?;
     store.register_authenticated_push_route(&authority, &route)?;
     route.token = "rotated-private-provider-token-never-in-redb".into();
     store.register_authenticated_push_route(&authority, &route)?;

@@ -58,6 +58,7 @@ impl NotifyRedbStore {
             &serde_json::to_vec(authority).map_err(error)?,
         )?;
         let txn = self.db.begin_write().map_err(error)?;
+        let same_owner = self.same_registered_owner(&txn, authority)?;
         {
             let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
             let prior = table
@@ -65,6 +66,7 @@ impl NotifyRedbStore {
                 .map_err(error)?
                 .map(|v| v.value().to_vec());
             let mut values = prior
+                .filter(|_| same_owner)
                 .map(|bytes| routes::open(&self.route_key, &route.device_delivery_id, &bytes))
                 .transpose()?
                 .unwrap_or_default();
@@ -82,6 +84,28 @@ impl NotifyRedbStore {
                 .map_err(error)?;
         }
         txn.commit().map_err(error)
+    }
+    fn same_registered_owner(
+        &self,
+        txn: &redb::WriteTransaction,
+        current: &DeviceAuthKeyResponse,
+    ) -> Result<bool, NodeCoreError> {
+        let bytes = txn
+            .open_table(OWNERS)
+            .map_err(error)?
+            .get(current.target_delivery_id.as_str())
+            .map_err(error)?
+            .map(|value| value.value().to_vec());
+        let Some(bytes) = bytes else {
+            return Ok(false);
+        };
+        let previous: DeviceAuthKeyResponse = serde_json::from_slice(
+            &self.route_key.open(&context(&current.target_delivery_id), &bytes)?,
+        )
+        .map_err(error)?;
+        Ok(previous.authenticated_device_identity()? == current.authenticated_device_identity()?
+            && previous.device_epoch == current.device_epoch
+            && previous.branch_public_key == current.branch_public_key)
     }
     pub(super) fn prune_route_owners(&self) -> Result<(), NodeCoreError> {
         let txn = self.db.begin_write().map_err(error)?;
