@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod dead_letters;
+mod retention;
 pub use dead_letters::FederationOutboundDeadLetter;
 
 pub struct FederationRedbStore {
@@ -128,12 +129,19 @@ impl FederationRedbStore {
             FEDERATION_DISCOVERY_PIN_KEY,
             &state.discovery_pins_by_node,
         )?;
-        save_snapshot(
-            &self.db,
-            FEDERATION_STATE_TABLE,
-            FEDERATION_NODE_SIGNING_SEED_KEY,
-            &state.node_signing_seed,
-        )
+        let txn = self.db.begin_write().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        txn.open_table(FEDERATION_STATE_TABLE)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?
+            .remove(FEDERATION_NODE_SIGNING_SEED_KEY)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        txn.commit().map_err(|error| NodeCoreError::Redb(error.to_string()))
+    }
+
+    /// # Errors
+    /// Compact retired secret pages during offline startup migration, before sharing the store.
+    pub fn compact_migrated_secrets(&mut self) -> Result<(), NodeCoreError> {
+        self.db.compact().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        Ok(())
     }
 
     /// # Errors
@@ -210,7 +218,15 @@ impl FederationRedbStore {
                 forward: forward.clone(),
                 enqueued_at,
                 attempt_count: 0,
-                expires_at: enqueued_at.saturating_add(ttl_seconds),
+                expires_at: enqueued_at.saturating_add(ttl_seconds.min(604_800)).min(
+                    u64::try_from(
+                        forward
+                            .envelope
+                            .created_at
+                            .saturating_add(i64::from(forward.envelope.ttl.min(604_800))),
+                    )
+                    .unwrap_or(0),
+                ),
             }
         };
         let bytes = serialize_spool_entry(&entry)?;

@@ -630,6 +630,9 @@ async fn run_gateway_session_loop_until_closed(
                         .await?;
                     }
                 }
+                ramflux_node_core::GatewayClientFrame::PushRouteRegister { request } => {
+                    crate::push_registration::handle(&send, &context, &runtime, &request).await?;
+                }
                 ramflux_node_core::GatewayClientFrame::VoiceLease { request } => {
                     crate::voice::handle(&send, &context, &runtime, &request).await?;
                 }

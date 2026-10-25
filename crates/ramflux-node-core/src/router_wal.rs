@@ -304,6 +304,23 @@ impl RouterWalStore {
     }
 
     /// # Errors
+    /// # Errors
+    /// Counts logical WAL retention candidates without changing delivery recovery state.
+    pub fn retention_candidate_count(&self, now: i64) -> Result<usize, NodeCoreError> {
+        let state =
+            self.state.lock().map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+        Ok(state
+            .submissions_by_replay_key
+            .values()
+            .filter(|record| {
+                record.replay_expires_at < now
+                    || record.entry.as_ref().is_some_and(|entry| {
+                        entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl))
+                            <= now
+                    })
+            })
+            .count())
+    }
     /// Removes expired recovery records and segment files older than the maximum retention window.
     pub fn prune_expired(&self, now: i64) -> Result<usize, NodeCoreError> {
         let mut state =
@@ -332,7 +349,7 @@ impl RouterWalStore {
                     .is_some_and(|age| {
                         age.as_secs()
                             > u64::try_from(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS)
-                                .unwrap_or(604800)
+                                .unwrap_or(604_800)
                     });
                 if expired {
                     fs::remove_file(&path)

@@ -170,6 +170,7 @@ pub struct GatewaySessionEstablishedFrame {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
+    PushRouteRegister { request: Box<crate::PushRouteRegistrationFrame> },
     VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
@@ -192,6 +193,9 @@ pub enum GatewayClientFrame {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayServerFrame {
+    PushRouteRegistered {
+        expires_at: u64,
+    },
     VoiceLease {
         response: Box<ramflux_protocol::VoiceLeaseResponse>,
     },

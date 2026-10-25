@@ -74,8 +74,9 @@ impl RouterRedbStore {
         } else {
             txn.commit().map_err(redb_error)?;
         }
-        if !dry_run && let Some(wal) = &self.submission_wal {
-            removed += wal.prune_expired(now)?;
+        if let Some(wal) = &self.submission_wal {
+            removed +=
+                if dry_run { wal.retention_candidate_count(now)? } else { wal.prune_expired(now)? };
         }
         Ok(removed)
     }

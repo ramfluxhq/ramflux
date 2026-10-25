@@ -59,6 +59,26 @@ impl NodeServiceSigningKey {
         )
     }
 
+    #[must_use]
+    pub fn sign_push_route_control(&self, body: &[u8]) -> String {
+        let mut bytes = b"ramflux.notify.route_control.v1\0".to_vec();
+        bytes.extend_from_slice(body);
+        ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, self.seed)
+    }
+
+    /// # Errors
+    /// Rejects a forged or cross-domain route-control signature.
+    pub fn verify_push_route_control(
+        &self,
+        body: &[u8],
+        signature: &str,
+    ) -> Result<(), NodeCoreError> {
+        let mut bytes = b"ramflux.notify.route_control.v1\0".to_vec();
+        bytes.extend_from_slice(body);
+        ramflux_crypto::verify_canonical_signature(&bytes, signature, self.public_key_base64url())
+            .map_err(|_| NodeCoreError::Unauthorized("push route control rejected".into()))
+    }
+
     /// # Errors
     /// Returns an error when the wake cannot be canonicalized or signed.
     pub fn sign_notification_wake(

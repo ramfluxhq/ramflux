@@ -331,8 +331,22 @@ pub(crate) fn handle_mesh_request(
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
-            ramflux_transport::write_mesh_json_response(stream, "200 OK", &sweep.response(0))
-                .map_err(|error| mesh_transport_error(&error))?;
+            if sweep.owner_service != "federation" {
+                return Err(ramflux_node_core::NodeCoreError::Unauthorized(
+                    "retention owner mismatch".into(),
+                ));
+            }
+            ramflux_transport::write_mesh_json_response(
+                stream,
+                "200 OK",
+                &sweep.response(
+                    u64::try_from(
+                        context.store.sweep_delivery_retention(sweep.now, sweep.dry_run)?,
+                    )
+                    .unwrap_or(u64::MAX),
+                ),
+            )
+            .map_err(|error| mesh_transport_error(&error))?;
         }
         _ => {
             ramflux_transport::write_mesh_text_response(stream, "404 Not Found", "not found")
@@ -633,9 +647,20 @@ fn handle_federation_mesh_quic_request(
                 serde_json::from_value(request.body.clone()).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
+            if sweep.owner_service != "federation" {
+                return Ok(text_quic_response(400, "retention owner mismatch"));
+            }
             Ok(ramflux_transport::GatewayQuicResponse {
                 status: 200,
-                body: serde_json::to_value(sweep.response(0)).map_err(|source| {
+                body: serde_json::to_value(
+                    sweep.response(
+                        u64::try_from(
+                            context.store.sweep_delivery_retention(sweep.now, sweep.dry_run)?,
+                        )
+                        .unwrap_or(u64::MAX),
+                    ),
+                )
+                .map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?,
             })

@@ -18,7 +18,9 @@ cryptography, storage, transport, sync, and core libraries.
   delivery.
 - `apps/ramflux-relay` — encrypted object and media relay.
 - `apps/ramflux-signaling` — call signaling and TURN credential support.
-- `apps/ramflux-retention` — retention policy and deletion enforcement.
+- `apps/ramflux-retention` — retention policy and authenticated router/federation GC.
+  See [server data and retention](docs/server-data.md) for actual TTLs, metadata
+  exposure, mounted secrets and migration requirements.
 - `apps/rf` — reference CLI over the SDK local bus.
 - `crates/ramflux-sdk` — Rust SDK facade and C ABI substrate.
 - `crates/ramflux-{core,protocol,crypto,storage,transport,sync,node-core}` —

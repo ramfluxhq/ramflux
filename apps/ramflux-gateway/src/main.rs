@@ -9,6 +9,7 @@ mod ingress;
 mod itest_http;
 mod object_issue;
 mod principal_directory;
+mod push_registration;
 mod quic_dispatch;
 mod registration;
 #[cfg(test)]

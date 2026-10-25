@@ -346,7 +346,7 @@ fn handle_itest_request(
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
-            let signer = retention_node_signer(config);
+            let signer = retention_node_signer(config)?;
             let context = request.into_context(now_unix_seconds());
             let response = store.finalize_identity_delete(&context, &signer)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
@@ -764,23 +764,15 @@ fn mesh_tls_config(
 #[cfg(feature = "itest-http")]
 fn retention_node_signer(
     config: &ramflux_node_core::NodeServiceConfig,
-) -> ramflux_node_core::RetentionNodeSigner {
-    let signing_seed = std::env::var("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL")
-        .ok()
-        .and_then(|encoded| ramflux_protocol::decode_base64url(&encoded).ok())
-        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
-        .unwrap_or_else(|| {
-            ramflux_crypto::blake3_256(
-                "ramflux.retention.dev_node_signing_seed.v1",
-                config.node_id.as_bytes(),
-            )
-        });
-    ramflux_node_core::RetentionNodeSigner {
+) -> Result<ramflux_node_core::RetentionNodeSigner, ramflux_node_core::NodeCoreError> {
+    let key =
+        ramflux_node_core::NodeSecret::required_env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")?;
+    Ok(ramflux_node_core::RetentionNodeSigner {
         node_id: config.node_id.clone(),
         node_epoch: 1,
         signing_key_id: format!("{}#node", config.node_id),
-        signing_seed,
-    }
+        signing_seed: key.with_bytes(|bytes| *bytes),
+    })
 }
 
 fn now_unix_seconds() -> u64 {

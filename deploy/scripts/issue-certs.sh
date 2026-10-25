@@ -94,7 +94,22 @@ EOF
   rm -f "${_tmp_csr}" "${_tmp_ext}"
 }
 
+ensure_node_secrets() {
+  for _secret in federation/node-signing.key notify/route.key; do
+    _path="${cert_dir}/${_secret}"
+    if [ ! -e "${_path}" ]; then
+      mkdir -p "$(dirname "${_path}")"
+      _temp=$(mktemp "${_path}.XXXXXX")
+      openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' > "${_temp}"
+      chmod 600 "${_temp}"
+      mv "${_temp}" "${_path}"
+    fi
+    chmod 600 "${_path}"
+  done
+}
+
 issue_certs_locked() {
+  ensure_node_secrets
   if service_is_complete; then
     normalize_service_mesh_permissions
     return 0

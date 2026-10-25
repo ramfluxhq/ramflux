@@ -34,8 +34,14 @@ cursor rules, and route frames, but it must not need message plaintext.
 
 The node can see routing metadata required to operate the service, including
 delivery identifiers, node identifiers, timing, sizes, transport endpoints, and
-some coarse delivery classes. It is not trusted for message content
-confidentiality.
+coarse delivery classes, and **sender principal and device ids in plaintext
+Envelope headers**. Message encryption does not provide sender anonymity.
+Servers also retain public identity/device authority and revocation metadata.
+Push tokens are readable to the running notify service; encryption with its
+separately mounted key protects copied database volumes, not a live compromise.
+See [Server data and retention](server-data.md) for the per-service stored fields,
+TTLs, bounded diagnostics, secret migration and provider disclosure. The node is
+not trusted for message content confidentiality.
 
 ### Federated Boundary: Peer Nodes
 
@@ -145,7 +151,7 @@ not as a claim about arbitrary application handlers.
 ### Metadata and Traffic Analysis
 
 Ramflux does not hide all metadata. Nodes and network observers may learn timing,
-message sizes, delivery identifiers, node identifiers, endpoint addresses,
+message sizes, sender principal/device ids, delivery identifiers, node identifiers, endpoint addresses,
 federation relationships, coarse delivery classes, and traffic volume. Padding,
 mixing, cover traffic, and global anonymity are outside the current core.
 

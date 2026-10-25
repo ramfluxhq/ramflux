@@ -903,6 +903,7 @@ impl RouterRedbStore {
         for cursor in incremental_cursors {
             inbox.restore_cursor_state(cursor);
         }
+        inbox.bound_retained_receipts();
         let mut replay_guard_state = if has_incremental_replay {
             NodeReplayGuardState::new()
         } else {

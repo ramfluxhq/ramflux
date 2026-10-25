@@ -318,7 +318,7 @@ mod retention_budget_tests {
     #[test]
     fn configured_object_ttl_cannot_exceed_seven_days() {
         for value in ["604800", "604801", "18446744073709551615"] {
-            assert_eq!(object_relay_chunk_max_ttl_seconds_from_env(Some(value)), 604800);
+            assert_eq!(object_relay_chunk_max_ttl_seconds_from_env(Some(value)), 604_800);
         }
         for value in [None, Some("0"), Some("invalid")] {
             assert_eq!(

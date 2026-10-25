@@ -49,7 +49,7 @@ pub struct BadNodeAdvisory {
 pub struct FederationTrustState {
     pub(crate) routes_by_node: BTreeMap<String, FederationPeerRoute>,
     pub(crate) advisories_by_id: BTreeMap<String, BadNodeAdvisory>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub(crate) node_signing_seed: Option<[u8; 32]>,
     #[serde(default)]
     pub(crate) lifecycle_tombstones_by_target:

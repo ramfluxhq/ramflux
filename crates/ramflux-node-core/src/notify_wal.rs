@@ -545,6 +545,12 @@ impl NotifyWalStore {
     }
 
     /// # Errors
+    /// Prunes expired wakes and bounded provider diagnostics in the writer's compaction barrier.
+    pub fn prune_expired(&self, now: u64) -> Result<(), NodeCoreError> {
+        self.writer.compact_at(Some(now))
+    }
+
+    /// # Errors
     /// Returns an error when the WAL cannot be compacted durably.
     pub fn compact(&self) -> Result<(), NodeCoreError> {
         self.writer.compact()
@@ -573,6 +579,7 @@ struct NotifyWalAppendBatchRequest {
 }
 
 struct NotifyWalCompactRequest {
+    prune_at: Option<u64>,
     reply: mpsc::SyncSender<Result<(), NodeCoreError>>,
 }
 
@@ -742,11 +749,14 @@ impl NotifyWalWriter {
     }
 
     fn compact(&self) -> Result<(), NodeCoreError> {
+        self.compact_at(None)
+    }
+    fn compact_at(&self, prune_at: Option<u64>) -> Result<(), NodeCoreError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
             .as_ref()
             .ok_or_else(|| NodeCoreError::ItestJson("notify WAL writer stopped".to_owned()))?
-            .send(NotifyWalWriterRequest::Compact(NotifyWalCompactRequest { reply }))
+            .send(NotifyWalWriterRequest::Compact(NotifyWalCompactRequest { prune_at, reply }))
             .map_err(|source| {
                 NodeCoreError::ItestJson(format!("notify WAL writer stopped: {source}"))
             })?;
@@ -927,7 +937,11 @@ fn notify_wal_writer_loop(
                     notify_wal_ack_batch_request(*request, &mut state, wal_state);
                 }
                 NotifyWalWriterRequest::Compact(request) => {
-                    let _sent = request.reply.send(notify_wal_compact(&mut state, wal_state));
+                    let _sent = request.reply.send(notify_wal_compact(
+                        &mut state,
+                        wal_state,
+                        request.prune_at,
+                    ));
                     last_compaction = Instant::now();
                 }
                 NotifyWalWriterRequest::Append(_) => {}
@@ -976,11 +990,12 @@ fn notify_wal_writer_loop(
             notify_wal_ack_batch_request(request, &mut state, wal_state);
         }
         for request in compact_requests {
-            let _sent = request.reply.send(notify_wal_compact(&mut state, wal_state));
+            let _sent =
+                request.reply.send(notify_wal_compact(&mut state, wal_state, request.prune_at));
             last_compaction = Instant::now();
         }
         if notify_wal_should_compact(&state, last_compaction, compaction) {
-            if let Err(error) = notify_wal_compact(&mut state, wal_state) {
+            if let Err(error) = notify_wal_compact(&mut state, wal_state, None) {
                 eprintln!("notify WAL background compaction failed: {error}");
             } else {
                 last_compaction = Instant::now();
@@ -1030,13 +1045,32 @@ fn notify_wal_should_compact(
 fn notify_wal_compact(
     state: &mut NotifyWalWriterState,
     wal_state: &Arc<Mutex<NotifyWalState>>,
+    prune_at: Option<u64>,
 ) -> Result<(), NodeCoreError> {
-    let payloads = wal_state
-        .lock()
-        .map_err(|source| {
-            NodeCoreError::ItestJson(format!("notify WAL index lock poisoned: {source}"))
-        })?
-        .compacted_payloads();
+    let mut retained =
+        wal_state.lock().map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+    if let Some(now) = prune_at {
+        retained.entries_by_id.retain(|_, record| match &record.payload {
+            NotifyWalPayload::QueueEntry(entry) => {
+                entry.expires_at > now && entry.status == crate::NotifyQueueStatus::Pending
+            }
+            _ => false,
+        });
+        retained.raw_wakes_by_id.retain(|_, record| match &record.payload {
+            NotifyWalPayload::RawWake(raw) => {
+                let ttl = serde_json::from_slice::<serde_json::Value>(&raw.raw_body)
+                    .ok()
+                    .and_then(|value| value["wake"]["ttl"].as_u64())
+                    .unwrap_or(0)
+                    .min(86400);
+                raw.queued_at.saturating_add(ttl) > now
+            }
+            _ => false,
+        });
+        crate::notify::retention::prune_attempts(&mut retained.provider_attempts_by_queue, now);
+    }
+    let payloads = retained.compacted_payloads();
+    drop(retained);
     state.compact(&payloads)
 }
 

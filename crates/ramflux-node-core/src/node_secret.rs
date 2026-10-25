@@ -30,6 +30,10 @@ fn invalid() -> NodeCoreError {
 }
 
 impl NodeSecret {
+    pub fn with_bytes<T>(&self, operation: impl FnOnce(&[u8; 32]) -> T) -> T {
+        operation(&self.0)
+    }
+
     /// # Errors
     /// Rejects non-regular files, permissive Unix modes, oversized input and invalid key encoding.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
@@ -60,6 +64,16 @@ impl NodeSecret {
         Ok(Self(Zeroizing::new(decoded.as_slice().try_into().map_err(|_| invalid())?)))
     }
     /// # Errors
+    /// Rejects a secret mounted inside the durable database volume.
+    pub fn require_external_path(secret: &Path, database: &Path) -> Result<(), NodeCoreError> {
+        let parent = secret.parent().ok_or_else(invalid)?.canonicalize().map_err(|_| invalid())?;
+        let data = database.parent().ok_or_else(invalid)?.canonicalize().map_err(|_| invalid())?;
+        if parent.starts_with(data) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    /// # Errors
     /// Rejects an unset or invalid mounted secret.
     pub fn required_env(name: &str) -> Result<Self, NodeCoreError> {
         Self::from_file(std::env::var_os(name).ok_or_else(invalid)?)
@@ -72,7 +86,7 @@ impl NodeSecret {
     }
     pub(crate) fn process_key() -> &'static Self {
         static KEY: OnceLock<NodeSecret> = OnceLock::new();
-        KEY.get_or_init(|| Self::ephemeral().expect("operating system entropy is required"))
+        KEY.get_or_init(|| Self::ephemeral().unwrap_or_else(|_| std::process::abort()))
     }
     /// # Errors
     /// Returns encryption, randomness or serialization errors; never includes credential bytes.
@@ -111,7 +125,7 @@ impl NodeSecret {
     pub fn pseudonym(&self, domain: &str, value: &[u8]) -> String {
         use hmac::{Hmac, Mac};
         let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(self.0.as_ref())
-            .expect("HMAC accepts a 32-byte key");
+            .unwrap_or_else(|_| std::process::abort());
         mac.update(domain.as_bytes());
         mac.update(&[0]);
         mac.update(value);

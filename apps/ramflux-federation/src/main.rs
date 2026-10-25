@@ -7,6 +7,7 @@ mod flow;
 mod helpers;
 #[cfg(feature = "itest-http")]
 mod itest_http;
+mod key_migration;
 mod mesh;
 mod state;
 
@@ -51,13 +52,37 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
         let redb_path = ramflux_node_core::effective_redb_path(&config);
-        let store = ramflux_node_core::FederationRedbStore::open(redb_path)?;
+        let mut store = ramflux_node_core::FederationRedbStore::open(&redb_path)?;
         let mut state = match store.load_state()? {
             Some(state) => state,
             None => ramflux_node_core::FederationTrustState::new(),
         };
+        if let Some(path) = std::env::args().skip_while(|arg| arg != "--export-signing-seed").nth(1)
+        {
+            ramflux_node_core::NodeSecret::require_external_path(
+                std::path::Path::new(&path),
+                std::path::Path::new(&redb_path),
+            )?;
+            key_migration::export(&state, &path)?;
+            return Ok(());
+        }
+        let secret_path = std::env::var_os("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")
+            .ok_or_else(|| {
+                ramflux_node_core::NodeCoreError::Unauthorized(
+                    "mounted federation secret required".into(),
+                )
+            })?;
+        ramflux_node_core::NodeSecret::require_external_path(
+            std::path::Path::new(&secret_path),
+            std::path::Path::new(&redb_path),
+        )?;
+        let had_legacy_seed = state.node_signing_seed().is_some();
         let node_signing_seed = federation_node_signing_seed(&mut state)?;
+        store.verify_mounted_signing_identity(node_signing_seed)?;
         store.save_state(&state)?;
+        if had_legacy_seed {
+            store.compact_migrated_secrets()?;
+        }
         tracing::info!(service, node_id = config.node_id, "federation trust store initialized");
         let state = Arc::new(SharedFederationTrustState::new(state));
         let store = Arc::new(store);

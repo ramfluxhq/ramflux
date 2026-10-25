@@ -995,6 +995,10 @@ fn handle_mvp1_inbox_fetch(
             limit = value.parse()?;
         }
     }
+    state.expire_target_delivery(
+        target_delivery_id,
+        i64::try_from(ramflux_node_core::now_unix_seconds())?,
+    );
     let response = state.mvp1_inbox(target_delivery_id, after_inbox_seq, limit);
     tracing::info!(
         target_delivery_id = %response.target_delivery_id,

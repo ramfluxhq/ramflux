@@ -21,6 +21,8 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub(crate) mod retention;
+mod route_authority;
 mod routes;
 
 pub const NOTIFY_RATE_ALIAS_PER_MINUTE: usize = 60;
@@ -467,6 +469,8 @@ impl NotifyQueueState {
 
 pub struct NotifyRedbStore {
     route_key: crate::NodeSecret,
+    route_authorizer: Option<Box<route_authority::RouteAuthorizer>>,
+    allow_itest_unbound_routes: bool,
     db: std::sync::Arc<redb::Database>,
     commit_writer: NotifyCommitWriter,
     runtime_state: Mutex<NotifyRuntimeState>,
@@ -697,6 +701,16 @@ impl NotifyRedbStore {
         Self::open_with_wal_root(path, wal_root.as_deref())
     }
 
+    /// # Errors
+    /// Opens persistent routes using an explicitly loaded mounted encryption key.
+    pub fn open_with_route_key(
+        path: impl AsRef<Path>,
+        key: crate::NodeSecret,
+    ) -> Result<Self, NodeCoreError> {
+        let root = notify_wal_enabled().then(|| notify_wal_root_for_redb_path(path.as_ref()));
+        Self::open_with_wal_root_and_shard_count(path, root.as_deref(), None, Some(key))
+    }
+
     #[cfg(test)]
     pub(crate) fn open_with_wal(
         path: impl AsRef<Path>,
@@ -711,7 +725,12 @@ impl NotifyRedbStore {
         wal_root: impl AsRef<Path>,
         shard_count: usize,
     ) -> Result<Self, NodeCoreError> {
-        Self::open_with_wal_root_and_shard_count(path, Some(wal_root.as_ref()), Some(shard_count))
+        Self::open_with_wal_root_and_shard_count(
+            path,
+            Some(wal_root.as_ref()),
+            Some(shard_count),
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -723,13 +742,14 @@ impl NotifyRedbStore {
         path: impl AsRef<Path>,
         wal_root: Option<&Path>,
     ) -> Result<Self, NodeCoreError> {
-        Self::open_with_wal_root_and_shard_count(path, wal_root, None)
+        Self::open_with_wal_root_and_shard_count(path, wal_root, None, None)
     }
 
     fn open_with_wal_root_and_shard_count(
         path: impl AsRef<Path>,
         wal_root: Option<&Path>,
         shard_count_override: Option<usize>,
+        route_key_override: Option<crate::NodeSecret>,
     ) -> Result<Self, NodeCoreError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
@@ -762,7 +782,7 @@ impl NotifyRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let route_key = routes::configured_key()?;
+        let route_key = route_key_override.map_or_else(routes::configured_key, Ok)?;
         routes::migrate(&mut db, &route_key)?;
         let wal_shards = match (wal_root, shard_count_override) {
             (Some(root), Some(shard_count)) => {
@@ -775,6 +795,8 @@ impl NotifyRedbStore {
         let commit_writer = NotifyCommitWriter::start(std::sync::Arc::clone(&db))?;
         Ok(Self {
             route_key,
+            route_authorizer: None,
+            allow_itest_unbound_routes: false,
             db,
             commit_writer,
             runtime_state: Mutex::new(NotifyRuntimeState::default()),
@@ -1113,6 +1135,9 @@ impl NotifyRedbStore {
         let mut pushes = Vec::new();
         let mut deferred_changed = false;
         for route in routes {
+            if !self.authorize_push_route(&route.device_delivery_id)? {
+                continue;
+            }
             let collapse_key = canonical_collapse_key(&normalized_wake, device_delivery_id);
             let collapse_key_hash = notification_hash(
                 "ramflux.notification.collapse_key_hash.v1",
@@ -1470,6 +1495,9 @@ impl NotifyRedbStore {
         let mut credential_cache: BTreeMap<String, ProviderCredential> = BTreeMap::new();
         let mut pushes = Vec::new();
         for route in routes {
+            if !self.authorize_push_route(&route.device_delivery_id)? {
+                continue;
+            }
             let collapse_key = canonical_collapse_key(&entry.wake, &entry.device_delivery_id);
             let collapse_key_hash = notification_hash(
                 "ramflux.notification.collapse_key_hash.v1",

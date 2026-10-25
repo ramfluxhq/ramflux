@@ -4,6 +4,9 @@
 //! Delivery expiry and bounded cursor indexes share the mailbox shard's lock.
 use super::{RouterCore, lock_unpoisoned};
 impl RouterCore {
+    pub fn expire_target_delivery(&self, target: &str, now: i64) {
+        self.target_shard(target).inbox.expire(now);
+    }
     #[must_use]
     pub fn retention_cursors(&self) -> Vec<crate::CursorAckState> {
         self.target_shards

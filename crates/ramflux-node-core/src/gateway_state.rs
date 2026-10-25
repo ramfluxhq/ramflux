@@ -346,6 +346,7 @@ impl GatewayState {
         window: u64,
         active: &BTreeSet<String>,
     ) -> usize {
+        self.replay_guard_state.prune(i64::try_from(now).unwrap_or(i64::MAX));
         let before = self.sessions_by_id.len();
         self.sessions_by_id.retain(|id, session| {
             session.lifecycle != GatewaySessionLifecycle::Closed

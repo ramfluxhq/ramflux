@@ -71,6 +71,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      RAMFLUX_NOTIFY_ROUTE_KEY_FILE: "/etc/ramflux/mesh/route.key"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
     volumes:
       - notify-redb:/var/lib/ramflux/notify
@@ -108,7 +109,7 @@ services:
       RAMFLUX_CLIENT_PREKEY_HTTP_URL: "${RAMFLUX_CLIENT_PREKEY_HTTP_URL:-http://localhost:18082}"
       RAMFLUX_CLIENT_SIGNALING_TURN_ADDR: "${RAMFLUX_CLIENT_SIGNALING_TURN_ADDR:-localhost:3478}"
       RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RAMFLUX_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
-      RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL: "${RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL:-}"
+      RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/mesh/node-signing.key"
       # T23-A2b2b: the pre-signed trust-snapshot envelope is served from the read-only federation
       # secrets mount at a fixed container path (operators place the offline-signed file there).
       RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE: "${RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE:-/etc/ramflux/federation/trust-snapshot.json}"
@@ -215,7 +216,10 @@ services:
     cap_drop: ["ALL"]
     read_only: true
     tmpfs: ["/tmp"]
+    environment:
+      RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/node-identity/node-signing.key"
     volumes:
+      - ./certs/federation:/etc/ramflux/node-identity:ro
       - retention-redb:/var/lib/ramflux/retention
       - ./config/retention.toml:/etc/ramflux/config/retention.toml:ro
       - ./certs/retention:/etc/ramflux/mesh:ro

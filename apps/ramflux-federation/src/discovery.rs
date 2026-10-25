@@ -31,12 +31,13 @@ pub(crate) fn federation_discovery_surface(
 pub(crate) fn federation_node_signing_seed(
     state: &mut ramflux_node_core::FederationTrustState,
 ) -> Result<[u8; 32], ramflux_node_core::NodeCoreError> {
-    let configured = std::env::var("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL").ok();
-    federation_node_signing_seed_from_config(
-        state,
-        configured.as_deref(),
-        ramflux_crypto::random_32,
-    )
+    let key =
+        ramflux_node_core::NodeSecret::required_env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")?;
+    let seed = key.with_bytes(|bytes| *bytes);
+    if state.node_signing_seed().is_some_and(|old| old != seed) {
+        return Err(ramflux_node_core::NodeCoreError::Unauthorized("mounted federation key differs from legacy identity; export and mount the existing key".into()));
+    }
+    Ok(seed)
 }
 
 impl FederationDiscoverySurface {
@@ -124,32 +125,6 @@ impl FederationDiscoverySurface {
     }
 }
 
-fn federation_node_signing_seed_from_config(
-    state: &mut ramflux_node_core::FederationTrustState,
-    configured_seed: Option<&str>,
-    random_seed: impl FnOnce() -> Result<[u8; 32], ramflux_crypto::CryptoError>,
-) -> Result<[u8; 32], ramflux_node_core::NodeCoreError> {
-    if let Some(encoded) = configured_seed.filter(|value| !value.trim().is_empty()) {
-        let bytes = ramflux_protocol::decode_base64url(encoded)
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
-        let seed = <[u8; 32]>::try_from(bytes).map_err(|bytes: Vec<u8>| {
-            ramflux_node_core::NodeCoreError::ItestHttp(format!(
-                "invalid RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL length: {}",
-                bytes.len()
-            ))
-        })?;
-        state.set_node_signing_seed(seed);
-        return Ok(seed);
-    }
-    if let Some(seed) = state.node_signing_seed() {
-        return Ok(seed);
-    }
-    let seed = random_seed()
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
-    state.set_node_signing_seed(seed);
-    Ok(seed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,77 +150,6 @@ mod tests {
         assert!(record.updated_at >= now);
         assert_eq!(record.expires_at, record.updated_at.saturating_add(86_400));
         ramflux_node_core::verify_federation_server_record(&record, record.updated_at)?;
-        Ok(())
-    }
-
-    #[test]
-    fn node_signing_seed_uses_env_and_persists_to_state()
-    -> Result<(), ramflux_node_core::NodeCoreError> {
-        let env_seed = [0x42; 32];
-        let encoded = ramflux_protocol::encode_base64url(env_seed);
-        let mut state = ramflux_node_core::FederationTrustState::new();
-
-        let resolved = federation_node_signing_seed_from_config(
-            &mut state,
-            Some(&encoded),
-            || Ok([0x77; 32]),
-        )?;
-
-        assert_eq!(resolved, env_seed);
-        assert_eq!(state.node_signing_seed(), Some(env_seed));
-        Ok(())
-    }
-
-    #[test]
-    fn node_signing_seed_rejects_invalid_env_seed() -> Result<(), ramflux_node_core::NodeCoreError>
-    {
-        let mut state = ramflux_node_core::FederationTrustState::new();
-
-        let Err(error) =
-            federation_node_signing_seed_from_config(&mut state, Some("bad-seed"), || {
-                Ok([0x77; 32])
-            })
-        else {
-            return Err(ramflux_node_core::NodeCoreError::ItestHttp(
-                "invalid configured federation seed must fail".to_owned(),
-            ));
-        };
-
-        assert!(
-            error
-                .to_string()
-                .contains("invalid RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL length"),
-            "{error}"
-        );
-        assert_eq!(state.node_signing_seed(), None);
-        Ok(())
-    }
-
-    #[test]
-    fn node_signing_seed_reuses_persisted_seed_before_random()
-    -> Result<(), ramflux_node_core::NodeCoreError> {
-        let persisted_seed = [0x33; 32];
-        let mut state = ramflux_node_core::FederationTrustState::new();
-        state.set_node_signing_seed(persisted_seed);
-
-        let resolved =
-            federation_node_signing_seed_from_config(&mut state, None, || Ok([0x99; 32]))?;
-
-        assert_eq!(resolved, persisted_seed);
-        Ok(())
-    }
-
-    #[test]
-    fn node_signing_seed_generates_and_persists_when_missing()
-    -> Result<(), ramflux_node_core::NodeCoreError> {
-        let generated_seed = [0x55; 32];
-        let mut state = ramflux_node_core::FederationTrustState::new();
-
-        let resolved =
-            federation_node_signing_seed_from_config(&mut state, None, || Ok(generated_seed))?;
-
-        assert_eq!(resolved, generated_seed);
-        assert_eq!(state.node_signing_seed(), Some(generated_seed));
         Ok(())
     }
 }

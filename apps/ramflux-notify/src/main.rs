@@ -3,6 +3,9 @@
 
 #![cfg_attr(not(feature = "itest-http"), allow(dead_code))]
 
+mod push_registration;
+mod retention;
+
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
@@ -46,11 +49,26 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
-        let _route_key =
+        let route_key =
             ramflux_node_core::NodeSecret::required_env("RAMFLUX_NOTIFY_ROUTE_KEY_FILE")?;
         let redb_path = ramflux_node_core::effective_redb_path(&config);
-        let store = Arc::new(ramflux_node_core::NotifyRedbStore::open(redb_path)?);
+        if let Some(parent) = std::path::Path::new(&redb_path).parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| ramflux_node_core::NodeCoreError::Redb(error.to_string()))?;
+        }
+        let secret_path = std::env::var_os("RAMFLUX_NOTIFY_ROUTE_KEY_FILE").ok_or_else(|| {
+            ramflux_node_core::NodeCoreError::Unauthorized("mounted notify secret required".into())
+        })?;
+        ramflux_node_core::NodeSecret::require_external_path(
+            std::path::Path::new(&secret_path),
+            std::path::Path::new(&redb_path),
+        )?;
+        let mut store =
+            ramflux_node_core::NotifyRedbStore::open_with_route_key(redb_path, route_key)?;
+        push_registration::configure(&mut store, &config)?;
+        let store = Arc::new(store);
         log_notify_wal_recovery(&store);
+        retention::start(Arc::clone(&store))?;
         let state = match store.load_state()? {
             Some(state) => state,
             None => ramflux_node_core::NotifyQueueState::new(),
@@ -488,6 +506,13 @@ fn handle_notify_mesh_quic_request(
     ingress: &NotifyIngressState,
 ) -> Result<ramflux_transport::GatewayQuicResponse, ramflux_node_core::NodeCoreError> {
     match (request.method.as_str(), request.path.as_str()) {
+        ("POST", ramflux_node_core::PUSH_ROUTE_PATH) => {
+            let expires_at = push_registration::register(ingress, request.body.clone())?;
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::json!(expires_at),
+            })
+        }
         ("POST", "/s13/notify/wake") => {
             let body: S13WakeRequest =
                 serde_json::from_value(request.body.clone()).map_err(|source| {

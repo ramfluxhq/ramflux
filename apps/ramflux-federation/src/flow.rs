@@ -280,7 +280,7 @@ fn retry_outbound_spool_with(
         &ramflux_node_core::FederationOutboundSpoolEntry,
     ) -> Result<String, ramflux_node_core::NodeCoreError>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let expired = store.expire_outbound_spool(now)?;
+    let expired = store.sweep_delivery_retention(now, false)?;
     if expired > 0 {
         tracing::info!(expired, "expired federation outbound spool entries");
     }

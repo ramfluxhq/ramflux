@@ -49,9 +49,9 @@ fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn federation_redb_store_restores_node_signing_seed_without_routes()
--> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("federation_redb_store_restores_node_signing_seed_without_routes")?;
+fn federation_redb_store_never_persists_node_signing_seed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let path = temp_store_path("federation_redb_store_never_persists_node_signing_seed")?;
     let store = FederationRedbStore::open(&path)?;
     let mut state = FederationTrustState::new();
     let seed = seed_from_nonce(0x77, 11);
@@ -63,7 +63,7 @@ fn federation_redb_store_restores_node_signing_seed_without_routes()
     let restored = reopened
         .load_state()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("federation_state".to_owned()))?;
-    assert_eq!(restored.node_signing_seed(), Some(seed));
+    assert_eq!(restored.node_signing_seed(), None);
     Ok(())
 }
 
@@ -479,7 +479,7 @@ fn federation_route_with_key(
     }
 }
 
-fn federation_forward_request(
+pub(super) fn federation_forward_request(
     envelope_id: &str,
     target_delivery_id: &str,
 ) -> FederatedEnvelopeForwardRequest {

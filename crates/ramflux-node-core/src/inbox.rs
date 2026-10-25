@@ -41,6 +41,22 @@ pub struct CursorAckState {
     pub nacked_envelope_ids: BTreeMap<String, ramflux_protocol::NackReason>,
 }
 
+impl CursorAckState {
+    fn bound_receipts(&mut self) {
+        if self.recent_ack_ids.is_empty() {
+            self.recent_ack_ids
+                .extend(self.acked_envelope_ids.iter().rev().take(ROUTER_ACK_WINDOW).cloned());
+        }
+        while self.recent_ack_ids.len() > ROUTER_ACK_WINDOW {
+            self.recent_ack_ids.pop_front();
+        }
+        self.acked_envelope_ids = self.recent_ack_ids.iter().cloned().collect();
+        while self.nacked_envelope_ids.len() > ROUTER_ACK_WINDOW {
+            self.nacked_envelope_ids.pop_first();
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EnvelopeSubmitResponse {
     pub outcome: String,
@@ -310,6 +326,13 @@ impl OpaqueDeviceInbox {
     }
 
     pub(crate) fn restore_pending_entry(&mut self, entry: InboxEntry) {
+        let cursor = self.cursors.entry(entry.target_delivery_id.clone()).or_insert_with(|| {
+            CursorAckState {
+                target_delivery_id: entry.target_delivery_id.clone(),
+                ..CursorAckState::default()
+            }
+        });
+        cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(entry.inbox_seq);
         let next_seq = self.next_seq.entry(entry.target_delivery_id.clone()).or_insert(1);
         *next_seq = (*next_seq).max(entry.inbox_seq.saturating_add(1));
         let entries = self.pending.entry(entry.target_delivery_id.clone()).or_default();
@@ -319,11 +342,18 @@ impl OpaqueDeviceInbox {
         }
     }
 
-    pub(crate) fn restore_cursor_state(&mut self, cursor: CursorAckState) {
+    pub(crate) fn restore_cursor_state(&mut self, mut cursor: CursorAckState) {
+        cursor.bound_receipts();
         let next_seq = self.next_seq.entry(cursor.target_delivery_id.clone()).or_insert(1);
         *next_seq =
             (*next_seq).max(cursor.inbox_seq.max(cursor.issued_inbox_seq).saturating_add(1));
         self.cursors.insert(cursor.target_delivery_id.clone(), cursor);
+    }
+
+    pub(crate) fn bound_retained_receipts(&mut self) {
+        for cursor in self.cursors.values_mut() {
+            cursor.bound_receipts();
+        }
     }
 
     pub(crate) fn merge_from(&mut self, other: &Self) {

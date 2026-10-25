@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Encrypt provider tokens and WebPush keys with a mounted node secret, bound to delivery id.
+//! Encrypt provider tokens and `WebPush` keys with a mounted node secret, bound to delivery id.
 use super::{
     DevicePushRoute, NOTIFY_QUEUE_KEY, NOTIFY_QUEUE_TABLE, NOTIFY_ROUTE_TABLE, NodeCoreError,
     NotifyQueueState, serialize_notify_value,

@@ -239,6 +239,8 @@ PY
     # The keyring is read-only trust material; the relay owns its durable cache in relay-redb.
     cat "$state/identity.env" > "$state/runtime.env"
     cat >> "$state/runtime.env" <<ENV
+RAMFLUX_NOTIFY_ROUTE_KEY_FILE=/etc/ramflux/mesh/route.key
+RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE=/etc/ramflux/mesh/node-signing.key
 RAMFLUX_VERSION=$DEMO_VERSION
 RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE=/etc/ramflux/gateway-v3/issuer-cert.json
 RAMFLUX_RELAY_CLIENT_QUIC_ADDR=0.0.0.0:17447
