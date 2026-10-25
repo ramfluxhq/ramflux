@@ -68,8 +68,17 @@ async fn submit_after_recipient_ack(later_message: bool) -> Result<(), Box<dyn s
         }),
     };
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let envelope = test_envelope(now)?;
-    let signed_request: ramflux_protocol::SignedRequest = serde_json::from_value(
+    let runtime = test_runtime()?;
+    let mut envelope = test_envelope(now)?;
+    envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(runtime.source_identity.root_commitment()),
+    );
+    envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+        [4; 32],
+    );
+    let mut signed_request: ramflux_protocol::SignedRequest = serde_json::from_value(
         serde_json::json!({
             "schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1",
             "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
@@ -77,19 +86,19 @@ async fn submit_after_recipient_ack(later_message: bool) -> Result<(), Box<dyn s
             "device_proof_hash":"already_authed","body_hash":"opaque-hash","nonce":"submit-nonce","created_at":now,"expires_at":now+60
         }),
     )?;
+    signed_request.body_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        &ramflux_protocol::canonical_json_bytes(&envelope)?,
+    );
+    signed_request.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::signed_bytes(&signed_request)?,
+        [4; 32],
+    );
     let (finished, done) = tokio::sync::oneshot::channel();
     let serving = tokio::spawn(ack_before_response(server, done, later_message));
     let (send, frames) = sink();
     let (recipient, received) = sink();
-    context.hub.register("alice-target".into(), "alice-session".into(), recipient).await;
-    let runtime = crate::GatewaySessionRuntime {
-        session_id: "agent-session".into(),
-        resume_token: "resume".into(),
-        principal_id: "agent".into(),
-        device_id: "agent-device".into(),
-        target_delivery_id: "agent-target".into(),
-        branch_public_key: "fixture".into(),
-    };
+    context.hub.register("alice-target".into(), "alice-session".into(), recipient).await?;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         super::handle_gateway_submit(
@@ -242,6 +251,83 @@ fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committe
         let mut response = accepted.clone();
         response.outcome = outcome.into();
         assert!(super::committed_submit_entry(&response, envelope.clone()).is_err());
+    }
+    Ok(())
+}
+
+fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
+    let root = ramflux_crypto::create_identity_root("agent", [3; 32]);
+    let branch = ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]);
+    Ok(crate::GatewaySessionRuntime {
+        source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?,
+        session_id: "agent-session".into(),
+        resume_token: "resume".into(),
+        principal_id: "agent".into(),
+        device_id: "agent-device".into(),
+        target_delivery_id: "agent-target".into(),
+        device_epoch: 1,
+        branch_public_key: ramflux_protocol::encode_base64url(
+            branch.signing_key.verifying_key().to_bytes(),
+        ),
+    })
+}
+#[tokio::test]
+async fn fanout_confirmation_survives_recipient_ack_with_an_empty_or_later_inbox()
+-> Result<(), Box<dyn std::error::Error>> {
+    for later in [false, true] {
+        let context = super::tests::test_gateway_context()?;
+        let runtime = test_runtime()?;
+        let submitted = test_envelope(i64::try_from(ramflux_node_core::now_unix_seconds())?)?;
+        let mut expected = submitted.clone();
+        expected.envelope_id =
+            ramflux_node_core::mvp10_fanout_envelope_id(&submitted.envelope_id, "alice-device");
+        let mut inbox = OpaqueDeviceInbox::new();
+        let entry = inbox.append(expected.clone());
+        let ack = serde_json::from_value(serde_json::json!({
+            "schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1",
+            "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
+            "ack_id":"fanout-race-ack","envelope_id":expected.envelope_id,
+            "receiver_device_id":"alice-device","received_at":submitted.created_at,
+        }))?;
+        inbox.apply_ack(&ack)?;
+        assert_eq!(inbox.pull_after("alice-target", 0, 10).len(), 0);
+        if later {
+            let mut next = expected.clone();
+            next.envelope_id = "later".into();
+            inbox.append(next);
+        }
+        let (recipient, received) = sink();
+        context.hub.register("alice-target".into(), "same-session".into(), recipient).await?;
+        let delivery = ramflux_node_core::GatewayOwnDeviceFanoutDelivery {
+            device_id: "alice-device".into(),
+            target_delivery_id: "alice-target".into(),
+            outcome: "online".into(),
+            inbox_seq: Some(entry.inbox_seq),
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            super::deliver_own_device_fanout_entry(&context, &runtime, &delivery, &submitted),
+        )
+        .await??;
+        assert_eq!(
+            *received.lock().map_err(|_| anyhow::anyhow!("frames"))?,
+            vec![GatewayServerFrame::Deliver { entry }]
+        );
+    }
+    Ok(())
+}
+#[test]
+fn fanout_confirmation_requires_a_positive_committed_sequence_for_an_accepted_delivery()
+-> anyhow::Result<()> {
+    let envelope = test_envelope(100)?;
+    for sequence in [None, Some(0)] {
+        let delivery = ramflux_node_core::GatewayOwnDeviceFanoutDelivery {
+            device_id: "alice-device".into(),
+            target_delivery_id: "alice-target".into(),
+            outcome: "online".into(),
+            inbox_seq: sequence,
+        };
+        assert!(super::committed_fanout_entry(&delivery, &envelope).is_err());
     }
     Ok(())
 }

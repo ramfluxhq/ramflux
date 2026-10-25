@@ -136,7 +136,7 @@ mod tests {
             db.persist_actor_state(key, &json!({"state":"idle","last_run":7}))?;
         }
         db.append_journal("unrelated", "message.received", &json!({}), 1, None)?;
-        let readers = crate::bus::readers::AccountReaders::start(db)?;
+        let readers = crate::bus::readers::AccountReaders::start(db, None)?;
         for key in ["sync/status/event", "sync/health/event"] {
             assert_eq!(db.load_actor_state::<Value>(key)?, Some(Value::Null));
         }

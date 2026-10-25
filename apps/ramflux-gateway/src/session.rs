@@ -1118,7 +1118,9 @@ pub(crate) async fn handle_gateway_own_device_fanout(
         };
     let response = ramflux_node_core::GatewayOwnDeviceFanoutResponse::from(shim_response);
     for delivery in &response.delivered {
-        if let Err(error) = deliver_own_device_fanout_entry(context, runtime, delivery).await {
+        if let Err(error) =
+            deliver_own_device_fanout_entry(context, runtime, delivery, &request.envelope).await
+        {
             tracing::warn!(%error, target_delivery_id = %delivery.target_delivery_id, "fanout peer delivery deferred to durable inbox");
         }
     }
@@ -1130,19 +1132,9 @@ async fn deliver_own_device_fanout_entry(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     delivery: &ramflux_node_core::GatewayOwnDeviceFanoutDelivery,
+    envelope: &ramflux_protocol::Envelope,
 ) -> anyhow::Result<()> {
-    let Some(inbox_seq) = delivery.inbox_seq else {
-        return Ok(());
-    };
-    let after = inbox_seq.saturating_sub(1);
-    let inbox = router_inbox_async(&context.router, &delivery.target_delivery_id, after, 1).await?;
-    let Some(entry) = inbox.entries.into_iter().find(|entry| entry.inbox_seq == inbox_seq) else {
-        return Err(anyhow::anyhow!(
-            "gateway fanout did not find inbox entry for {} at seq {}",
-            delivery.target_delivery_id,
-            inbox_seq
-        ));
-    };
+    let Some(entry) = committed_fanout_entry(delivery, envelope)? else { return Ok(()) };
     let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry: entry.clone() };
     match delivery.outcome.as_str() {
         "online" if delivery.target_delivery_id != runtime.target_delivery_id => {
@@ -1161,6 +1153,30 @@ async fn deliver_own_device_fanout_entry(
         _ => {}
     }
     Ok(())
+}
+
+fn committed_fanout_entry(
+    delivery: &ramflux_node_core::GatewayOwnDeviceFanoutDelivery,
+    submitted: &ramflux_protocol::Envelope,
+) -> anyhow::Result<Option<ramflux_node_core::InboxEntry>> {
+    if delivery.inbox_seq.is_none()
+        && !matches!(delivery.outcome.as_str(), "online" | "offline_queued")
+    {
+        return Ok(None);
+    }
+    ramflux_protocol::validate_device_name(&delivery.device_id)?;
+    let mut envelope = submitted.clone();
+    envelope.target_delivery_id.clone_from(&delivery.target_delivery_id);
+    envelope.envelope_id =
+        ramflux_node_core::mvp10_fanout_envelope_id(&submitted.envelope_id, &delivery.device_id);
+    let committed = ramflux_node_core::EnvelopeSubmitResponse {
+        outcome: delivery.outcome.clone(),
+        target_delivery_id: delivery.target_delivery_id.clone(),
+        inbox_seq: delivery.inbox_seq,
+        cursor: None,
+        nack: None,
+    };
+    committed_submit_entry(&committed, envelope).map(Some)
 }
 
 fn own_device_fanout_session_rejection(
@@ -2028,9 +2044,9 @@ mod tests {
 #[path = "principal_directory_session_tests.rs"]
 mod principal_directory_tests;
 
-#[cfg(all(test, feature = "itest-local-mint"))]
-#[path = "submit_ack_tests.rs"]
-mod submit_ack_tests;
 #[cfg(test)]
 #[path = "session_resilience_tests.rs"]
 mod resilience_tests;
+#[cfg(all(test, feature = "itest-local-mint"))]
+#[path = "submit_ack_tests.rs"]
+mod submit_ack_tests;
