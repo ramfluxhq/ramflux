@@ -3,7 +3,7 @@
 
 use crate::{InboxEntry, NodeCoreError};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +23,9 @@ const ROUTER_WAL_SHARDS_ENV: &str = "RAMFLUX_ROUTER_WAL_SHARDS";
 const ROUTER_WAL_PIPELINE_ENV: &str = "RAMFLUX_ROUTER_WAL_PIPELINE";
 const ROUTER_WAL_SHARD_DIR_PREFIX: &str = "router-wal-shard-";
 const ROUTER_WAL_MAGIC: &[u8] = b"ramflux-router-wal-v1\n";
+/// Extra time after the retention window before a closed segment is unlinked: one roll
+/// interval plus the 30-second sweep, so recovered watermarks are checkpointed first.
+const ROUTER_WAL_RETIRE_MARGIN_SECONDS: u64 = 3_600 + 30;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouterWalRecordLocation {
@@ -33,14 +36,27 @@ pub struct RouterWalRecordLocation {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum RouterWalPayload {
-    Submission { replay_key: String, replay_expires_at: i64, entry: Option<Box<InboxEntry>> },
+    Submission {
+        replay_key: String,
+        replay_expires_at: i64,
+        entry: Option<Box<InboxEntry>>,
+        /// Server acceptance time; absent in records written before deadlines were logged.
+        accepted_at: Option<i64>,
+    },
 }
 
+/// Postcard encodes the variant index, so new record shapes are appended, never edited.
 #[derive(Deserialize, Serialize)]
 enum StoredRouterWalPayload {
     Submission {
         replay_key: String,
         replay_expires_at: i64,
+        entry: Option<Box<StoredRouterWalInboxEntry>>,
+    },
+    SubmissionAccepted {
+        replay_key: String,
+        replay_expires_at: i64,
+        accepted_at: i64,
         entry: Option<Box<StoredRouterWalInboxEntry>>,
     },
 }
@@ -77,15 +93,24 @@ impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
 
     fn try_from(payload: &RouterWalPayload) -> Result<Self, Self::Error> {
         match payload {
-            RouterWalPayload::Submission { replay_key, replay_expires_at, entry } => {
-                Ok(Self::Submission {
-                    replay_key: replay_key.clone(),
-                    replay_expires_at: *replay_expires_at,
-                    entry: entry
-                        .as_ref()
-                        .map(|entry| StoredRouterWalInboxEntry::try_from(entry.as_ref()))
-                        .transpose()?
-                        .map(Box::new),
+            RouterWalPayload::Submission { replay_key, replay_expires_at, entry, accepted_at } => {
+                let entry = entry
+                    .as_ref()
+                    .map(|entry| StoredRouterWalInboxEntry::try_from(entry.as_ref()))
+                    .transpose()?
+                    .map(Box::new);
+                Ok(match accepted_at {
+                    Some(accepted_at) => Self::SubmissionAccepted {
+                        replay_key: replay_key.clone(),
+                        replay_expires_at: *replay_expires_at,
+                        accepted_at: *accepted_at,
+                        entry,
+                    },
+                    None => Self::Submission {
+                        replay_key: replay_key.clone(),
+                        replay_expires_at: *replay_expires_at,
+                        entry,
+                    },
                 })
             }
         }
@@ -105,8 +130,20 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
                         .map(|entry| InboxEntry::try_from(*entry))
                         .transpose()?
                         .map(Box::new),
+                    accepted_at: None,
                 })
             }
+            StoredRouterWalPayload::SubmissionAccepted {
+                replay_key,
+                replay_expires_at,
+                accepted_at,
+                entry,
+            } => Ok(Self::Submission {
+                replay_key,
+                replay_expires_at,
+                entry: entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?.map(Box::new),
+                accepted_at: Some(accepted_at),
+            }),
         }
     }
 }
@@ -203,29 +240,107 @@ pub struct RouterWalSubmissionRecord {
     pub replay_key: String,
     pub replay_expires_at: i64,
     pub entry: Option<InboxEntry>,
+    pub accepted_at: Option<i64>,
     pub location: RouterWalRecordLocation,
+}
+
+impl RouterWalSubmissionRecord {
+    /// Server retention deadline of the logged delivery (the envelope expiry for old records).
+    #[must_use]
+    pub fn retain_until(&self) -> i64 {
+        self.entry.as_ref().map_or(self.replay_expires_at, |entry| {
+            crate::inbox_retain_until(
+                &entry.envelope,
+                self.accepted_at.unwrap_or(entry.envelope.created_at),
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 struct RouterWalState {
     submissions_by_replay_key: BTreeMap<String, RouterWalSubmissionRecord>,
+    /// Highest sequence ever logged per mailbox, including records that later expired.
+    issued_by_target: BTreeMap<String, u64>,
+    replay_due: BTreeSet<(i64, String)>,
+    entry_due: BTreeSet<(i64, String)>,
 }
 
 impl RouterWalState {
     fn apply(&mut self, payload: RouterWalPayload, location: RouterWalRecordLocation) {
         match payload {
-            RouterWalPayload::Submission { replay_key, replay_expires_at, entry } => {
-                self.submissions_by_replay_key.insert(
-                    replay_key.clone(),
-                    RouterWalSubmissionRecord {
-                        replay_key,
-                        replay_expires_at,
-                        entry: entry.map(|entry| *entry),
-                        location,
-                    },
-                );
+            RouterWalPayload::Submission { replay_key, replay_expires_at, entry, accepted_at } => {
+                if let Some(entry) = entry.as_ref() {
+                    let issued =
+                        self.issued_by_target.entry(entry.target_delivery_id.clone()).or_default();
+                    *issued = (*issued).max(entry.inbox_seq);
+                }
+                let record = RouterWalSubmissionRecord {
+                    replay_key: replay_key.clone(),
+                    replay_expires_at,
+                    entry: entry.map(|entry| *entry),
+                    accepted_at,
+                    location,
+                };
+                self.index(&record);
+                if let Some(previous) = self.submissions_by_replay_key.insert(replay_key, record) {
+                    self.unindex(&previous);
+                    if let Some(current) =
+                        self.submissions_by_replay_key.get(&previous.replay_key).cloned()
+                    {
+                        self.index(&current);
+                    }
+                }
             }
         }
+    }
+
+    fn index(&mut self, record: &RouterWalSubmissionRecord) {
+        self.replay_due.insert((record.replay_expires_at, record.replay_key.clone()));
+        if record.entry.is_some() {
+            self.entry_due.insert((record.retain_until(), record.replay_key.clone()));
+        }
+    }
+
+    fn unindex(&mut self, record: &RouterWalSubmissionRecord) {
+        self.replay_due.remove(&(record.replay_expires_at, record.replay_key.clone()));
+        if record.entry.is_some() {
+            self.entry_due.remove(&(record.retain_until(), record.replay_key.clone()));
+        }
+    }
+
+    /// Visits only due index entries; returns the number of retired records and entries.
+    fn prune(&mut self, now: i64) -> usize {
+        let mut removed = 0;
+        while let Some((expires_at, key)) = self.replay_due.first().cloned() {
+            if expires_at >= now {
+                break;
+            }
+            self.replay_due.pop_first();
+            if let Some(record) = self.submissions_by_replay_key.remove(&key) {
+                if record.entry.is_some() {
+                    self.entry_due.remove(&(record.retain_until(), key));
+                }
+                removed += 1;
+            }
+        }
+        while let Some((deadline, key)) = self.entry_due.first().cloned() {
+            if deadline > now {
+                break;
+            }
+            self.entry_due.pop_first();
+            if let Some(record) = self.submissions_by_replay_key.get_mut(&key)
+                && record.entry.take().is_some()
+            {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    fn due_count(&self, now: i64) -> usize {
+        self.replay_due.iter().take_while(|(expires_at, _)| *expires_at < now).count()
+            + self.entry_due.iter().take_while(|(deadline, _)| *deadline <= now).count()
     }
 }
 
@@ -283,6 +398,7 @@ impl RouterWalStore {
             replay_key: replay_key.to_owned(),
             replay_expires_at,
             entry: entry.cloned().map(Box::new),
+            accepted_at: Some(router_wal_now()),
         })
     }
 
@@ -299,6 +415,7 @@ impl RouterWalStore {
                 replay_key: replay_key.to_owned(),
                 replay_expires_at,
                 entry: entry.cloned().map(Box::new),
+                accepted_at: Some(router_wal_now()),
             })
             .await
     }
@@ -308,54 +425,45 @@ impl RouterWalStore {
     pub fn retention_candidate_count(&self, now: i64) -> Result<usize, NodeCoreError> {
         let state =
             self.state.lock().map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
-        Ok(state
-            .submissions_by_replay_key
-            .values()
-            .filter(|record| {
-                record.replay_expires_at < now
-                    || record.entry.as_ref().is_some_and(|entry| {
-                        entry.envelope.created_at.saturating_add(
-                            i64::from(entry.envelope.ttl)
-                                .min(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS),
-                        ) <= now
-                    })
-            })
-            .count())
+        Ok(state.due_count(now))
     }
-    /// Removes expired recovery records and segment files older than the maximum retention window.
+
+    /// Highest mailbox sequence ever logged per target, so recovery never reissues one.
+    #[must_use]
+    pub fn issued_watermarks(&self) -> BTreeMap<String, u64> {
+        self.state.lock().map_or_else(|_| BTreeMap::new(), |state| state.issued_by_target.clone())
+    }
+
+    /// Removes expired recovery records and closed segment files older than the full retention
+    /// window. The newest segment of each directory is the writer's active file and is never
+    /// unlinked, even when idle.
     /// # Errors
     /// Returns lock, directory or segment deletion errors.
     pub fn prune_expired(&self, now: i64) -> Result<usize, NodeCoreError> {
-        let mut state =
-            self.state.lock().map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
-        let before = state.submissions_by_replay_key.len();
-        state.submissions_by_replay_key.retain(|_, record| record.replay_expires_at >= now);
-        let mut removed = before - state.submissions_by_replay_key.len();
-        for record in state.submissions_by_replay_key.values_mut() {
-            if record.entry.as_ref().is_some_and(|entry| {
-                entry.envelope.created_at.saturating_add(
-                    i64::from(entry.envelope.ttl).min(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS),
-                ) <= now
-            }) {
-                record.entry = None;
-                removed += 1;
-            }
-        }
-        drop(state);
+        let mut removed = self
+            .state
+            .lock()
+            .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?
+            .prune(now);
+        let retire_after = u64::try_from(
+            ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS
+                .saturating_add(ramflux_protocol::MAX_CLOCK_SKEW_SECONDS),
+        )
+        .unwrap_or(u64::MAX)
+        .saturating_add(ROUTER_WAL_RETIRE_MARGIN_SECONDS);
         let roots = std::iter::once(self.root.clone())
             .chain(router_wal_existing_shard_roots(&self.root)?.into_iter().map(|(_, path)| path));
         for root in roots {
-            for id in router_wal_segment_ids(&root)? {
+            let mut ids = router_wal_segment_ids(&root)?;
+            ids.sort_unstable();
+            ids.pop();
+            for id in ids {
                 let path = router_wal_segment_path(&root, id);
                 let expired = fs::metadata(&path)
                     .and_then(|metadata| metadata.modified())
                     .ok()
                     .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| {
-                        age.as_secs()
-                            > u64::try_from(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS)
-                                .unwrap_or(604_800)
-                    });
+                    .is_some_and(|age| age.as_secs() > retire_after);
                 if expired {
                     fs::remove_file(&path)
                         .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
@@ -1065,6 +1173,10 @@ fn router_wal_shard_root(root: &Path, shard_id: usize) -> PathBuf {
     root.join(format!("{ROUTER_WAL_SHARD_DIR_PREFIX}{shard_id:04}"))
 }
 
+fn router_wal_now() -> i64 {
+    i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX)
+}
+
 fn router_wal_segment_path(root: &Path, segment_id: u64) -> PathBuf {
     root.join(format!("router-wal-{segment_id:020}.wal"))
 }
@@ -1203,6 +1315,7 @@ mod tests {
                 replay_key: left_replay_key.clone(),
                 replay_expires_at: 9_999_999_999,
                 entry: Some(Box::new(left_entry)),
+                accepted_at: None,
             },
             shard_count,
         );
@@ -1211,6 +1324,7 @@ mod tests {
                 replay_key: right_replay_key.clone(),
                 replay_expires_at: 9_999_999_999,
                 entry: Some(Box::new(right_entry)),
+                accepted_at: None,
             },
             shard_count,
         );
@@ -1489,6 +1603,7 @@ mod tests {
             replay_key: replay_key.to_owned(),
             replay_expires_at: 9_999_999_999,
             entry: Some(Box::new(router_wal_inbox_entry(envelope_id, target_delivery_id))),
+            accepted_at: None,
         }
     }
 

@@ -15,7 +15,8 @@ use crate::{
     ROUTER_LIFECYCLE_TOMBSTONE_KEY, ROUTER_LIFECYCLE_TOMBSTONE_TABLE,
     ROUTER_REPLAY_GUARD_STATE_KEY, ROUTER_REPLAY_TUPLE_TABLE, ROUTER_SESSION_CHECKPOINT_KEY,
     ROUTER_SESSION_ENTRY_TABLE, ROUTER_SNAPSHOT_TABLE, RouterCore, RouterWalStore,
-    SessionDescriptor, SessionRegistry, load_snapshot, now_unix_seconds, save_snapshot,
+    SessionDescriptor, SessionRegistry, inbox_retain_until, load_snapshot, now_unix_seconds,
+    save_snapshot,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod expiry_index;
 mod retention;
 
 const ROUTER_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_ROUTER_COMMIT_BATCH_MAX";
@@ -214,28 +216,43 @@ fn record_replay_tuple_in_txn(
     replay_table
         .insert(replay_key, replay_bytes.as_slice())
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    Ok(())
+    drop(replay_table);
+    expiry_index::index_replay_row(write_txn, replay_key, replay_expires_at)
 }
 
 #[path = "router_store/mailbox_keys.rs"]
 mod mailbox_keys;
 use mailbox_keys::storage_key as inbox_entry_storage_key;
 
+/// Stores a mailbox row with the deadline assigned at server acceptance time.
 fn record_inbox_entry_in_txn(
     write_txn: &redb::WriteTransaction,
     entry: &InboxEntry,
 ) -> Result<(), NodeCoreError> {
-    let entry_bytes = serialize_value(entry)?;
+    let accepted_at = i64::try_from(now_unix_seconds()).unwrap_or(i64::MAX);
+    record_inbox_entry_until_in_txn(
+        write_txn,
+        entry,
+        inbox_retain_until(&entry.envelope, accepted_at),
+    )
+}
+
+fn record_inbox_entry_until_in_txn(
+    write_txn: &redb::WriteTransaction,
+    entry: &InboxEntry,
+    retain_until: i64,
+) -> Result<(), NodeCoreError> {
+    let entry_bytes = expiry_index::encode_entry(entry, retain_until)?;
+    let key = inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq);
+    expiry_index::remove_inbox_row(write_txn, &key)?;
     let mut inbox_table = write_txn
         .open_table(ROUTER_INBOX_ENTRY_TABLE)
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     inbox_table
-        .insert(
-            inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq).as_str(),
-            entry_bytes.as_slice(),
-        )
+        .insert(key.as_str(), entry_bytes.as_slice())
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    Ok(())
+    drop(inbox_table);
+    expiry_index::index_inbox_row(write_txn, &key, retain_until)
 }
 
 impl RouterRedbStore {
@@ -315,6 +332,7 @@ impl RouterRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         mailbox_keys::upgrade(&write_txn)?;
+        expiry_index::upgrade(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
@@ -606,14 +624,13 @@ impl RouterRedbStore {
             cursor_table
                 .insert(cursor.target_delivery_id.as_str(), cursor_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let mut inbox_table = write_txn
-                .open_table(ROUTER_INBOX_ENTRY_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
-                NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
-            })?;
+        }
+        let sequence = cursor.last_acknowledged_inbox_seq.ok_or_else(|| {
+            NodeCoreError::ItestHttp("ACK lacks a mailbox delivery sequence".into())
+        })?;
+        for sequence in std::iter::once(sequence).chain(cursor.retired_inbox_seqs.iter().copied()) {
             let key = inbox_entry_storage_key(&cursor.target_delivery_id, sequence);
-            inbox_table.remove(key.as_str()).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
@@ -636,6 +653,10 @@ impl RouterRedbStore {
             cursor_table
                 .insert(cursor.target_delivery_id.as_str(), cursor_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        }
+        for sequence in &cursor.retired_inbox_seqs {
+            let key = inbox_entry_storage_key(&cursor.target_delivery_id, *sequence);
+            expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
@@ -879,40 +900,7 @@ impl RouterRedbStore {
     pub fn load_router(&self) -> Result<Option<RouterCore>, NodeCoreError> {
         let mut registry = self.load_session_registry()?;
         let now = i64::try_from(now_unix_seconds()).unwrap_or(i64::MAX);
-        let mut incremental_entries = self.load_incremental_inbox_entries()?;
-        let incremental_cursors = self.load_incremental_cursor_states()?;
-        let mut incremental_replay_tuples = self.load_incremental_replay_tuples(now)?;
-        self.merge_wal_submissions(
-            now,
-            &incremental_cursors,
-            &mut incremental_entries,
-            &mut incremental_replay_tuples,
-        );
-        let has_incremental_inbox =
-            !incremental_entries.is_empty() || !incremental_cursors.is_empty();
-        let has_incremental_replay = !incremental_replay_tuples.is_empty();
-        let mut inbox = if has_incremental_inbox {
-            OpaqueDeviceInbox::new()
-        } else {
-            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_INBOX_SLICE_KEY)?
-                .unwrap_or_default()
-        };
-        for entry in incremental_entries {
-            inbox.restore_pending_entry(entry);
-        }
-        for cursor in incremental_cursors {
-            inbox.restore_cursor_state(cursor);
-        }
-        inbox.bound_retained_receipts();
-        let mut replay_guard_state = if has_incremental_replay {
-            NodeReplayGuardState::new()
-        } else {
-            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY)?
-                .unwrap_or_default()
-        };
-        for (key, expires_at) in incremental_replay_tuples {
-            replay_guard_state.restore_accepted(key, expires_at);
-        }
+        let (mut inbox, replay_guard_state) = self.load_delivery_state(now)?;
         let mvp1_identities = self.load_identity_registry(now)?;
         let foreign_device_heads = crate::foreign_device_store::load(
             &self.db,
@@ -943,7 +931,7 @@ impl RouterRedbStore {
         let identity_lineage_heads: BTreeMap<String, String> =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_LINEAGE_HEADS_KEY)?
                 .unwrap_or_default();
-        if registry == SessionRegistry::default()
+        let router_is_empty = registry == SessionRegistry::default()
             && inbox == OpaqueDeviceInbox::default()
             && mvp1_identities == IdentityRegistry::default()
             && foreign_device_heads.is_empty()
@@ -956,11 +944,12 @@ impl RouterRedbStore {
             && abuse_reports.is_empty()
             && home_node_migrations.is_empty()
             && home_node_routes.is_empty()
-            && replay_guard_state == NodeReplayGuardState::default()
-        {
+            && replay_guard_state == NodeReplayGuardState::default();
+        if router_is_empty {
             return Ok(None);
         }
-        Ok(Some(RouterCore::from_snapshot(crate::RouterCoreSnapshot {
+        let due_checkpoints = inbox.take_checkpoint_due();
+        let router = RouterCore::from_snapshot(crate::RouterCoreSnapshot {
             foreign_device_heads,
             registry,
             inbox,
@@ -976,7 +965,58 @@ impl RouterRedbStore {
             home_node_routes,
             identity_lineage_events,
             identity_lineage_heads,
-        })))
+        });
+        // Sequence watermarks recovered from the log are durable before any new submission.
+        self.retain_cursor_checkpoints(&due_checkpoints)?;
+        Ok(Some(router))
+    }
+
+    /// Mailbox entries, cursors and replay tuples from redb plus the submission WAL. Sequence
+    /// watermarks of every logged record are observed, so no sequence is reissued.
+    fn load_delivery_state(
+        &self,
+        now: i64,
+    ) -> Result<(OpaqueDeviceInbox, NodeReplayGuardState), NodeCoreError> {
+        let mut incremental_entries = self.load_incremental_inbox_entries()?;
+        let incremental_cursors = self.load_incremental_cursor_states()?;
+        let mut incremental_replay_tuples = self.load_incremental_replay_tuples(now)?;
+        let issued_watermarks =
+            self.submission_wal.as_ref().map(RouterWalStore::issued_watermarks).unwrap_or_default();
+        self.merge_wal_submissions(
+            now,
+            &incremental_cursors,
+            &mut incremental_entries,
+            &mut incremental_replay_tuples,
+        );
+        let has_incremental_inbox =
+            !incremental_entries.is_empty() || !incremental_cursors.is_empty();
+        let has_incremental_replay = !incremental_replay_tuples.is_empty();
+        let mut inbox = if has_incremental_inbox {
+            OpaqueDeviceInbox::new()
+        } else {
+            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_INBOX_SLICE_KEY)?
+                .unwrap_or_default()
+        };
+        for (entry, retain_until) in incremental_entries {
+            inbox.restore_pending_entry_until(entry, Some(retain_until));
+        }
+        for cursor in incremental_cursors {
+            inbox.restore_cursor_state(cursor);
+        }
+        for (target, seq) in issued_watermarks {
+            inbox.observe_issued_seq(&target, seq);
+        }
+        inbox.bound_retained_receipts();
+        let mut replay_guard_state = if has_incremental_replay {
+            NodeReplayGuardState::new()
+        } else {
+            load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_REPLAY_GUARD_STATE_KEY)?
+                .unwrap_or_default()
+        };
+        for (key, expires_at) in incremental_replay_tuples {
+            replay_guard_state.restore_accepted(key, expires_at);
+        }
+        Ok((inbox, replay_guard_state))
     }
 
     fn load_identity_registry(&self, now: i64) -> Result<IdentityRegistry, NodeCoreError> {
@@ -995,7 +1035,7 @@ impl RouterRedbStore {
         &self,
         now_unix_seconds: i64,
         incremental_cursors: &[CursorAckState],
-        incremental_entries: &mut Vec<InboxEntry>,
+        incremental_entries: &mut Vec<(InboxEntry, i64)>,
         incremental_replay_tuples: &mut Vec<(String, i64)>,
     ) {
         let Some(wal) = &self.submission_wal else {
@@ -1009,13 +1049,11 @@ impl RouterRedbStore {
                 incremental_replay_tuples
                     .push((submission.replay_key.clone(), submission.replay_expires_at));
             }
+            let retain_until = submission.retain_until();
             let Some(entry) = submission.entry else {
                 continue;
             };
-            if entry.envelope.created_at.saturating_add(
-                i64::from(entry.envelope.ttl).min(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS),
-            ) <= now_unix_seconds
-            {
+            if retain_until <= now_unix_seconds {
                 continue;
             }
             if incremental_cursors.iter().any(|cursor| {
@@ -1025,13 +1063,13 @@ impl RouterRedbStore {
             }) {
                 continue;
             }
-            if incremental_entries.iter().any(|existing| {
+            if incremental_entries.iter().any(|(existing, _)| {
                 existing.target_delivery_id == entry.target_delivery_id
                     && existing.inbox_seq == entry.inbox_seq
             }) {
                 continue;
             }
-            incremental_entries.push(entry);
+            incremental_entries.push((entry, retain_until));
         }
     }
 
@@ -1039,15 +1077,21 @@ impl RouterRedbStore {
         &self,
         router: &crate::RouterCoreSnapshot,
     ) -> Result<(), NodeCoreError> {
-        let pending_entries = router.inbox.pending_entries().cloned().collect::<Vec<_>>();
+        let pending_entries = router
+            .inbox
+            .pending_entries_with_deadline()
+            .map(|(entry, deadline)| (entry.clone(), deadline))
+            .collect::<Vec<_>>();
         let cursor_states = router.inbox.cursor_states().cloned().collect::<Vec<_>>();
         let replay_tuples = router
             .replay_guard_state
             .accepted_entries()
             .map(|(key, expires_at)| (key.clone(), *expires_at))
             .collect::<Vec<_>>();
-        let pending_entry_bytes =
-            pending_entries.iter().map(serialize_value).collect::<Result<Vec<_>, _>>()?;
+        let pending_entry_bytes = pending_entries
+            .iter()
+            .map(|(entry, deadline)| expiry_index::encode_entry(entry, *deadline))
+            .collect::<Result<Vec<_>, _>>()?;
         let cursor_state_bytes =
             cursor_states.iter().map(serialize_value).collect::<Result<Vec<_>, _>>()?;
         let replay_tuple_bytes = replay_tuples
@@ -1060,21 +1104,10 @@ impl RouterRedbStore {
             let mut inbox_table = write_txn
                 .open_table(ROUTER_INBOX_ENTRY_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let inbox_keys = inbox_table
-                .iter()
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?
-                .map(|entry| {
-                    entry
-                        .map(|(key, _value)| key.value().to_owned())
-                        .map_err(|source| NodeCoreError::Redb(source.to_string()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for key in inbox_keys {
-                let _removed = inbox_table
-                    .remove(key.as_str())
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            }
-            for (entry, bytes) in pending_entries.iter().zip(pending_entry_bytes.iter()) {
+            clear_table(&mut inbox_table)?;
+            for ((entry, _deadline), bytes) in
+                pending_entries.iter().zip(pending_entry_bytes.iter())
+            {
                 inbox_table
                     .insert(
                         inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq)
@@ -1087,20 +1120,7 @@ impl RouterRedbStore {
             let mut cursor_table = write_txn
                 .open_table(ROUTER_CURSOR_STATE_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let cursor_keys = cursor_table
-                .iter()
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?
-                .map(|entry| {
-                    entry
-                        .map(|(key, _value)| key.value().to_owned())
-                        .map_err(|source| NodeCoreError::Redb(source.to_string()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for key in cursor_keys {
-                let _removed = cursor_table
-                    .remove(key.as_str())
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            }
+            clear_table(&mut cursor_table)?;
             for (cursor, bytes) in cursor_states.iter().zip(cursor_state_bytes.iter()) {
                 cursor_table
                     .insert(cursor.target_delivery_id.as_str(), bytes.as_slice())
@@ -1110,26 +1130,20 @@ impl RouterRedbStore {
             let mut replay_table = write_txn
                 .open_table(ROUTER_REPLAY_TUPLE_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let replay_keys = replay_table
-                .iter()
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?
-                .map(|entry| {
-                    entry
-                        .map(|(key, _value)| key.value().to_owned())
-                        .map_err(|source| NodeCoreError::Redb(source.to_string()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for key in replay_keys {
-                let _removed = replay_table
-                    .remove(key.as_str())
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            }
+            clear_table(&mut replay_table)?;
             for ((key, _expires_at), bytes) in replay_tuples.iter().zip(replay_tuple_bytes.iter()) {
                 replay_table
                     .insert(key.as_str(), bytes.as_slice())
                     .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             }
         }
+        expiry_index::rebuild(
+            &write_txn,
+            pending_entries.iter().map(|(entry, deadline)| {
+                (inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq), *deadline)
+            }),
+            &replay_tuples,
+        )?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         Ok(())
     }
@@ -1206,8 +1220,23 @@ impl RouterRedbStore {
         Ok(reports.into_iter().map(|report| (report.report_id.clone(), report)).collect())
     }
 
-    fn load_incremental_inbox_entries(&self) -> Result<Vec<InboxEntry>, NodeCoreError> {
-        load_table_values(&self.db, ROUTER_INBOX_ENTRY_TABLE)
+    fn load_incremental_inbox_entries(&self) -> Result<Vec<(InboxEntry, i64)>, NodeCoreError> {
+        let read_txn =
+            self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let table = match read_txn.open_table(ROUTER_INBOX_ENTRY_TABLE) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(source) => return Err(NodeCoreError::Redb(source.to_string())),
+        };
+        table
+            .iter()
+            .map_err(|source| NodeCoreError::Redb(source.to_string()))?
+            .map(|row| {
+                let (_key, value) =
+                    row.map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+                expiry_index::decode_entry(value.value())
+            })
+            .collect()
     }
 
     fn load_incremental_cursor_states(&self) -> Result<Vec<CursorAckState>, NodeCoreError> {
@@ -1253,6 +1282,23 @@ impl RouterRedbStore {
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         Ok(active)
     }
+}
+
+fn clear_table(table: &mut redb::Table<'_, &str, &[u8]>) -> Result<(), NodeCoreError> {
+    let keys = table
+        .iter()
+        .map_err(|source| NodeCoreError::Redb(source.to_string()))?
+        .map(|entry| {
+            entry
+                .map(|(key, _value)| key.value().to_owned())
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for key in keys {
+        let _removed =
+            table.remove(key.as_str()).map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+    }
+    Ok(())
 }
 
 fn serialize_value<T: Serialize>(value: &T) -> Result<Vec<u8>, NodeCoreError> {

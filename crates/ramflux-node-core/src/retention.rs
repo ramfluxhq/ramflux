@@ -686,6 +686,13 @@ pub fn authorize_retention_gc_sweep(
 }
 
 impl RetentionGcSweepRequest {
+    /// Deletion cutoff: the earlier of the requested time and this node's own clock, so a
+    /// skewed or faulty requester cannot make an owner delete live data early.
+    #[must_use]
+    pub fn effective_now(&self) -> u64 {
+        self.now.min(crate::now_unix_seconds())
+    }
+
     #[must_use]
     pub fn response(&self, deleted_count: u64) -> RetentionGcSweepResponse {
         RetentionGcSweepResponse {

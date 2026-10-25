@@ -90,7 +90,7 @@ fn router_sessions_preserve_gateway_instance_ids() -> Result<(), Box<dyn std::er
         "gateway-west-1"
     );
 
-    let submit_outcome = router.submit_envelope(
+    let submit_outcome = router.submit_envelope_at_created(
         &source_identity,
         envelope("env_gateway_west", "target_gateway_west", DeliveryClass::OpaqueEvent),
     );
@@ -162,11 +162,11 @@ fn nack_after_ack_returns_existing_cursor_idempotently() -> Result<(), Box<dyn s
 fn bound_ack_and_nack_reject_other_target_envelope() -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
     let router = RouterCore::new();
-    let _accepted_a = router.submit_envelope(
+    let _accepted_a = router.submit_envelope_at_created(
         &source_identity,
         envelope("env_bound_target_a", "target_a", DeliveryClass::OpaqueEvent),
     );
-    let _accepted_b = router.submit_envelope(
+    let _accepted_b = router.submit_envelope_at_created(
         &source_identity,
         envelope("env_bound_target_b", "target_b", DeliveryClass::OpaqueEvent),
     );
@@ -197,7 +197,7 @@ fn router_target_index_supports_concurrent_submit_and_ack() -> Result<(), Box<dy
             for envelope_index in 0..envelopes_per_worker {
                 let envelope_id = format!("env_index_{worker_index}_{envelope_index}");
                 let target_delivery_id = format!("target_index_{worker_index}_{envelope_index}");
-                let outcome = router.submit_envelope(
+                let outcome = router.submit_envelope_at_created(
                     &source_identity,
                     envelope(&envelope_id, &target_delivery_id, DeliveryClass::OpaqueEvent),
                 );
@@ -264,7 +264,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         "ip_fanout_collision_b_peer",
     )?)?;
 
-    let first = router.mvp10_own_device_fanout(ItestMvp10OwnDeviceFanoutRequest {
+    let first = router.mvp10_own_device_fanout_at_created(ItestMvp10OwnDeviceFanoutRequest {
         principal_id: "principal_fanout_collision_a".to_owned(),
         source_device_id: "source_a".to_owned(),
         envelope: signed_registered_envelope(
@@ -274,7 +274,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
             701,
         )?,
     })?;
-    let second = router.mvp10_own_device_fanout(ItestMvp10OwnDeviceFanoutRequest {
+    let second = router.mvp10_own_device_fanout_at_created(ItestMvp10OwnDeviceFanoutRequest {
         principal_id: "principal_fanout_collision_b".to_owned(),
         source_device_id: "source_b".to_owned(),
         envelope: signed_registered_envelope(
@@ -295,15 +295,16 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
     assert_eq!(second_entries[0].envelope.envelope_id, mvp10_fanout_envelope_id("a", "b:c"));
     assert_ne!(first_entries[0].envelope.envelope_id, second_entries[0].envelope.envelope_id);
 
-    let cross_principal = router.mvp10_own_device_fanout(ItestMvp10OwnDeviceFanoutRequest {
-        principal_id: "principal_fanout_collision_b".to_owned(),
-        source_device_id: "source_a".to_owned(),
-        envelope: envelope(
-            "cross_principal",
-            "unused_fanout_target",
-            DeliveryClass::SelfDeviceControl,
-        ),
-    });
+    let cross_principal =
+        router.mvp10_own_device_fanout_at_created(ItestMvp10OwnDeviceFanoutRequest {
+            principal_id: "principal_fanout_collision_b".to_owned(),
+            source_device_id: "source_a".to_owned(),
+            envelope: envelope(
+                "cross_principal",
+                "unused_fanout_target",
+                DeliveryClass::SelfDeviceControl,
+            ),
+        });
     assert!(
         matches!(cross_principal, Err(NodeCoreError::ItestHttp(message)) if message.contains("source device is not registered for principal"))
     );
@@ -354,7 +355,7 @@ fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::err
     let router = RouterCore::new();
     router.upsert_session(session("target_live", SessionLifecycle::Live, 1, 1))?;
 
-    let online = router.submit_envelope(
+    let online = router.submit_envelope_at_created(
         &source_identity,
         envelope("env_online", "target_live", DeliveryClass::OpaqueEvent),
     );
@@ -367,7 +368,7 @@ fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::err
     }
     assert_eq!(router.resume("target_live", 0, 10).len(), 1);
 
-    let offline = router.submit_envelope(
+    let offline = router.submit_envelope_at_created(
         &source_identity,
         envelope("env_offline", "target_offline", DeliveryClass::SelfDeviceControl),
     );
@@ -547,7 +548,7 @@ fn home_node_migration_delivery_returns_structured_nack() -> Result<(), Box<dyn 
     assert_eq!(delivery.nack.signed.signature, "");
     assert_eq!(router.resume(&request.target_delivery_id, 0, 10).len(), 0);
 
-    let unmigrated = router.submit_envelope(
+    let unmigrated = router.submit_envelope_at_created(
         &source_identity,
         envelope(
             "env_unmigrated_delivery",

@@ -20,11 +20,11 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     router.upsert_session(session("target_live", SessionLifecycle::Live, 1, 1))?;
-    router.submit_envelope(
+    router.submit_envelope_at_created(
         &source_identity,
         envelope("env_pending", "target_offline", DeliveryClass::OpaqueEvent),
     );
-    router.submit_envelope(
+    router.submit_envelope_at_created(
         &source_identity,
         envelope("env_acked", "target_ack", DeliveryClass::OpaqueEvent),
     );
@@ -37,7 +37,7 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_snapshot".to_owned()))?;
     assert!(matches!(
-        restored.submit_envelope(
+        restored.submit_envelope_at_created(
             &source_identity,
             envelope("env_online", "target_live", DeliveryClass::OpaqueEvent)
         ),
@@ -357,7 +357,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
         source_device_id: "device_source".to_owned(),
         envelope: fanout_envelope.clone(),
     };
-    let response = router.mvp10_own_device_fanout(request.clone())?;
+    let response = router.mvp10_own_device_fanout_at_created(request.clone())?;
     assert_eq!(response.delivered.len(), 1);
     let replay_key = envelope_replay_tuple_key(
         &router.authenticated_envelope_source(&request.envelope)?,
@@ -389,7 +389,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_fanout".to_owned()))?;
     assert_eq!(restored.resume("target_principal_fanout", 0, 10).len(), 1);
-    let replay = restored.mvp10_own_device_fanout(request);
+    let replay = restored.mvp10_own_device_fanout_at_created(request);
     assert!(matches!(replay, Err(NodeCoreError::ReplayGuard(_))));
     Ok(())
 }
@@ -506,7 +506,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
         .load_router()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("router_keyed".to_owned()))?;
     assert!(matches!(
-        restored.submit_envelope(
+        restored.submit_envelope_at_created(
             &source_identity,
             envelope(
                 "env_online_keyed_after_restart",
@@ -522,7 +522,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
         Some("env_keyed_ack".to_owned())
     );
     assert!(matches!(
-        restored.submit_envelope(
+        restored.submit_envelope_at_created(
             &source_identity,
             envelope("env_after_fed_deactivate", "target_fed_keyed", DeliveryClass::OpaqueEvent,)
         ),

@@ -8,12 +8,11 @@ pub(crate) fn sweep(
     request: &ramflux_node_core::RetentionGcSweepRequest,
 ) -> anyhow::Result<ramflux_node_core::RetentionGcSweepResponse> {
     anyhow::ensure!(request.owner_service == "router", "retention owner mismatch");
-    let now = i64::try_from(request.now)?;
+    // A skewed or faulty retention peer can never make this node delete early.
+    let now = i64::try_from(request.effective_now())?;
     if !request.dry_run {
         let changed = router.state().sweep_delivery_retention(now);
-        for cursor in router.state().retention_cursors() {
-            router.store().retain_cursor_checkpoint(&cursor)?;
-        }
+        router.store().retain_cursor_checkpoints(&router.state().take_retention_checkpoints())?;
         if changed > 0 {
             router.state().persist_identity_registry(router.store())?;
         }

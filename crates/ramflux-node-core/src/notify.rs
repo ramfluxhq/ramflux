@@ -471,6 +471,8 @@ pub struct NotifyRedbStore {
     route_key: crate::NodeSecret,
     route_authorizer: Option<Box<route_authority::RouteAuthorizer>>,
     allow_itest_unbound_routes: bool,
+    revocation_cursor: Mutex<Option<String>>,
+    ownerless_routes_cleared: std::sync::atomic::AtomicBool,
     db: std::sync::Arc<redb::Database>,
     commit_writer: NotifyCommitWriter,
     runtime_state: Mutex<NotifyRuntimeState>,
@@ -797,6 +799,8 @@ impl NotifyRedbStore {
             route_key,
             route_authorizer: None,
             allow_itest_unbound_routes: false,
+            revocation_cursor: Mutex::new(None),
+            ownerless_routes_cleared: std::sync::atomic::AtomicBool::new(false),
             db,
             commit_writer,
             runtime_state: Mutex::new(NotifyRuntimeState::default()),
@@ -1131,18 +1135,19 @@ impl NotifyRedbStore {
         } else {
             state.push_routes(device_delivery_id, queued_at)
         };
+        // All routes share the target's owner binding: one authority check per wake.
+        let routes: Vec<DevicePushRoute> =
+            if routes.is_empty() || self.authorize_push_route(device_delivery_id)? {
+                routes
+            } else {
+                Vec::new()
+            };
         let mut credential_cache: BTreeMap<String, ProviderCredential> = BTreeMap::new();
         let mut pushes = Vec::new();
         let mut deferred_changed = false;
         for route in routes {
-            if !self.authorize_push_route(&route.device_delivery_id)? {
-                continue;
-            }
             let collapse_key = canonical_collapse_key(&normalized_wake, device_delivery_id);
-            let collapse_key_hash = notification_hash(
-                "ramflux.notification.collapse_key_hash.v1",
-                collapse_key.as_bytes(),
-            );
+            let collapse_key_hash = self.collapse_key_hash(&collapse_key);
             let action = delivery_action_for_wake(&normalized_wake, dnd_active);
             if matches!(
                 action,
@@ -1470,6 +1475,13 @@ impl NotifyRedbStore {
         Ok(())
     }
 
+    /// Providers see a node-keyed pseudonym: knowing a delivery id is not enough to link a
+    /// provider-visible collapse value to that mailbox.
+    fn collapse_key_hash(&self, collapse_key: &str) -> String {
+        self.route_key
+            .pseudonym("ramflux.notification.collapse_key_hash.v2", collapse_key.as_bytes())
+    }
+
     /// # Errors
     /// Returns an error when routes, credentials, or rate-limit state cannot be read.
     pub fn prepare_provider_pushes_for_entry(
@@ -1492,17 +1504,17 @@ impl NotifyRedbStore {
         } else {
             state.push_routes(&entry.device_delivery_id, entry.queued_at)
         };
+        let routes: Vec<DevicePushRoute> =
+            if routes.is_empty() || self.authorize_push_route(&entry.device_delivery_id)? {
+                routes
+            } else {
+                Vec::new()
+            };
         let mut credential_cache: BTreeMap<String, ProviderCredential> = BTreeMap::new();
         let mut pushes = Vec::new();
         for route in routes {
-            if !self.authorize_push_route(&route.device_delivery_id)? {
-                continue;
-            }
             let collapse_key = canonical_collapse_key(&entry.wake, &entry.device_delivery_id);
-            let collapse_key_hash = notification_hash(
-                "ramflux.notification.collapse_key_hash.v1",
-                collapse_key.as_bytes(),
-            );
+            let collapse_key_hash = self.collapse_key_hash(&collapse_key);
             let action = delivery_action_for_wake(&entry.wake, entry.dnd_active);
             if matches!(
                 action,

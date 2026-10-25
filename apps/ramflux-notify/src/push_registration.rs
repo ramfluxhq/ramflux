@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Node-owned provider configuration and current device authority protect production routes.
-use ramflux_node_core::{DeviceAuthKeyResponse, NodeCoreError, NotifyRedbStore};
+use ramflux_node_core::{NodeCoreError, NotifyRedbStore};
 fn rejected() -> NodeCoreError {
     NodeCoreError::Unauthorized("push route registration rejected".into())
 }
@@ -13,25 +13,40 @@ pub(crate) fn configure(
     let endpoint = config.mesh.endpoints.get("router").cloned().ok_or_else(rejected)?;
     let tls = super::notify_mesh_tls_config(config);
     let client = ramflux_transport::MeshHttpClient::new();
-    store.set_push_route_authorizer(move |owner| {
-        let identity = owner.authenticated_device_identity()?;
-        let qualified =
-            ramflux_protocol::qualified_device_id(identity.root_commitment(), identity.device_id())
-                .map_err(|_| rejected())?;
-        let current: Option<DeviceAuthKeyResponse> = client
-            .get_json(
-                &endpoint,
-                &format!("/mvp1/device-auth-key/{qualified}"),
-                &tls,
-                "ramflux-router",
-            )
-            .map_err(|_| NodeCoreError::ItestHttp("push authority lookup unavailable".into()))?;
-        Ok(current.is_some_and(|current| {
-            current.authenticated_device_identity().is_ok_and(|source| source == identity)
-                && current.branch_public_key == owner.branch_public_key
-                && current.device_epoch == owner.device_epoch
-                && current.target_delivery_id == owner.target_delivery_id
-        }))
+    // Batched so the revocation sweep makes one router request per 256 owners.
+    store.set_push_route_batch_authorizer(move |owners| {
+        let mut verdicts = Vec::with_capacity(owners.len());
+        for batch in owners.chunks(ramflux_node_core::DEVICE_AUTH_KEY_BATCH_LIMIT) {
+            let devices = batch
+                .iter()
+                .map(|owner| {
+                    let identity = owner.authenticated_device_identity()?;
+                    ramflux_protocol::qualified_device_id(
+                        identity.root_commitment(),
+                        identity.device_id(),
+                    )
+                    .map_err(|_| rejected())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let response: ramflux_node_core::DeviceAuthKeyBatchResponse = client
+                .post_json(
+                    &endpoint,
+                    ramflux_node_core::DEVICE_AUTH_KEYS_PATH,
+                    &tls,
+                    "ramflux-router",
+                    &ramflux_node_core::DeviceAuthKeyBatchRequest { devices },
+                )
+                .map_err(|_| {
+                    NodeCoreError::ItestHttp("push authority lookup unavailable".into())
+                })?;
+            if response.keys.len() != batch.len() {
+                return Err(NodeCoreError::ItestHttp("push authority lookup mismatched".into()));
+            }
+            verdicts.extend(batch.iter().zip(&response.keys).map(|(owner, current)| {
+                ramflux_node_core::push_route_owner_is_current(owner, current.as_ref())
+            }));
+        }
+        Ok(verdicts)
     });
     #[cfg(feature = "itest-http")]
     if std::env::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
@@ -43,7 +58,10 @@ pub(crate) fn configure(
     Ok(())
 }
 fn credentials() -> Result<Vec<ramflux_node_core::ProviderCredential>, NodeCoreError> {
-    let Some(path) = std::env::var_os("RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE") else {
+    // An empty value means "not configured", so compose files can pass the variable through.
+    let Some(path) = std::env::var_os("RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE")
+        .filter(|path| !path.is_empty())
+    else {
         return Ok(Vec::new());
     };
     let bytes = std::fs::read(path).map_err(|_| rejected())?;
@@ -67,8 +85,9 @@ pub(crate) fn register(
         .find(|credential| credential.provider_kind() == registration.provider)
         .ok_or_else(rejected)?;
     let endpoint = endpoint(credential, registration)?;
-    let expires_at =
-        control.body.issued_at.saturating_add(ramflux_node_core::PUSH_ROUTE_TTL_SECONDS);
+    // Lifetimes start from this node's clock, so a skewed gateway cannot shorten or extend them.
+    let registered_at = now;
+    let expires_at = now.saturating_add(ramflux_node_core::PUSH_ROUTE_TTL_SECONDS);
     ingress.store.register_authenticated_push_route(
         &control.body.authority,
         &ramflux_node_core::DevicePushRoute {
@@ -79,7 +98,7 @@ pub(crate) fn register(
             endpoint,
             webpush_p256dh: registration.webpush_p256dh.clone(),
             webpush_auth: registration.webpush_auth.clone(),
-            registered_at: control.body.issued_at,
+            registered_at,
             expires_at,
         },
     )?;
@@ -92,8 +111,10 @@ fn endpoint(
     use ramflux_node_core::ProviderCredential;
     match credential {
         ProviderCredential::Apns(credential) => {
+            // Apple does not promise a fixed token length: accept bounded even-length hex.
             if !registration.token.bytes().all(|byte| byte.is_ascii_hexdigit())
-                || registration.token.len() != 64
+                || !(64..=400).contains(&registration.token.len())
+                || !registration.token.len().is_multiple_of(2)
                 || registration.endpoint.is_some()
             {
                 return Err(rejected());

@@ -5,7 +5,17 @@
 use crate::{DeviceAuthKeyResponse, NodeCoreError, PushProviderKind};
 use serde::{Deserialize, Serialize};
 pub const PUSH_ROUTE_PATH: &str = "/notify/v1/push-route";
-pub const PUSH_ROUTE_TTL_SECONDS: u64 = 86_400;
+/// Router mesh path answering many current device-authority lookups in one request.
+pub const DEVICE_AUTH_KEYS_PATH: &str = "/mvp1/device-auth-keys";
+/// Maximum devices per batched authority lookup.
+pub const DEVICE_AUTH_KEY_BATCH_LIMIT: usize = 256;
+/// Sliding route lifetime: every authenticated (re)registration restarts it. Long enough that a
+/// device left in the background keeps receiving wakes; revocation deletes routes earlier.
+pub const PUSH_ROUTE_TTL_SECONDS: u64 = 30 * 86_400;
+/// Clients re-register when less than this much route lifetime remains.
+pub const PUSH_ROUTE_RENEW_BEFORE_SECONDS: u64 = 15 * 86_400;
+/// Cross-host clock tolerance for a gateway-issued control.
+pub const PUSH_ROUTE_CONTROL_SKEW_SECONDS: u64 = 5;
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushRouteRegistration {
@@ -52,7 +62,9 @@ impl PushRouteControl {
         key: &crate::NodeServiceSigningKey,
         now: u64,
     ) -> Result<(), NodeCoreError> {
-        if self.body.issued_at > now || now.saturating_sub(self.body.issued_at) > 30 {
+        if self.body.issued_at > now.saturating_add(PUSH_ROUTE_CONTROL_SKEW_SECONDS)
+            || now.saturating_sub(self.body.issued_at) > 30
+        {
             return Err(NodeCoreError::Unauthorized("push route control expired".into()));
         }
         let bytes = ramflux_protocol::canonical_json_bytes(&self.body)
@@ -80,4 +92,33 @@ impl PushRouteRegistration {
         }
         Ok(())
     }
+}
+
+/// Batched lookup of current device authority by root-qualified device id.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceAuthKeyBatchRequest {
+    pub devices: Vec<String>,
+}
+/// One entry per requested device, in request order; unknown or invalid selectors are `None`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceAuthKeyBatchResponse {
+    pub keys: Vec<Option<DeviceAuthKeyResponse>>,
+}
+/// Whether `current` (from the router) still authorizes the stored route owner.
+#[must_use]
+pub fn push_route_owner_is_current(
+    owner: &DeviceAuthKeyResponse,
+    current: Option<&DeviceAuthKeyResponse>,
+) -> bool {
+    let Ok(identity) = owner.authenticated_device_identity() else {
+        return false;
+    };
+    current.is_some_and(|current| {
+        current.authenticated_device_identity().is_ok_and(|source| source == identity)
+            && current.branch_public_key == owner.branch_public_key
+            && current.device_epoch == owner.device_epoch
+            && current.target_delivery_id == owner.target_delivery_id
+    })
 }

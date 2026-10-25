@@ -4,7 +4,7 @@
 //! Bounded acknowledgement windows, expiry and disconnected-session retention.
 use super::*;
 #[test]
-fn server_retention_ack_history_is_bounded_without_losing_out_of_order_deliveries()
+fn server_retention_full_ack_window_dead_letters_the_stuck_head()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
     let first = inbox.append(envelope("first", "target", DeliveryClass::OpaqueEvent));
@@ -15,22 +15,22 @@ fn server_retention_ack_history_is_bounded_without_losing_out_of_order_deliverie
         request.ext.ext.insert("inbox_seq".into(), serde_json::json!(entry.inbox_seq));
         inbox.apply_ack_for_target("target", &request)?;
     }
+    assert_eq!(inbox.pull_after("target", 0, 10).len(), 1, "the gap is preserved");
     let extra = inbox.append(envelope("extra", "target", DeliveryClass::OpaqueEvent));
     let mut extra_ack = ack("extra");
     extra_ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(extra.inbox_seq));
-    assert!(matches!(
-        inbox.apply_ack_for_target("target", &extra_ack),
-        Err(NodeCoreError::Capacity { .. })
-    ));
-    assert_eq!(inbox.pull_after("target", 0, 10).len(), 2);
-    let mut first_ack = ack("first");
-    first_ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(first.inbox_seq));
-    inbox.apply_ack_for_target("target", &first_ack)?;
-    inbox.apply_ack_for_target("target", &extra_ack)?;
-    let cursor = inbox.cursor_state("target").ok_or("cursor")?;
+    // A full window dead-letters the stuck head instead of refusing the ACK.
+    let cursor = inbox.apply_ack_for_target("target", &extra_ack)?;
     assert_eq!(cursor.settled_inbox_seq, extra.inbox_seq);
     assert_eq!(cursor.acked_inbox_seqs.len(), 0);
     assert!(cursor.acked_envelope_ids.len() <= crate::inbox::ROUTER_ACK_WINDOW);
+    assert_eq!(cursor.retired_inbox_seqs, vec![first.inbox_seq]);
+    let dead = cursor.dead_letters.back().ok_or("dead letter")?;
+    assert_eq!(dead.inbox_seq, first.inbox_seq);
+    assert_eq!(dead.reason, crate::DeadLetterReason::AckWindowOverflow);
+    assert_eq!(inbox.pull_after("target", 0, 10).len(), 0);
+    let mut first_ack = ack("first");
+    first_ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(first.inbox_seq));
     inbox.apply_ack_for_target("target", &first_ack)?;
     Ok(())
 }
@@ -254,7 +254,9 @@ fn server_retention_signed_push_control_rejects_forgery_expiry_and_selector_inje
     let signature = key.sign_push_route_control(&ramflux_protocol::canonical_json_bytes(&body)?);
     let mut control = PushRouteControl { body, signature };
     control.verify(&key, 100)?;
-    assert!(control.verify(&key, 99).is_err());
+    // Cross-host skew of a few seconds is tolerated; larger future dates are not.
+    control.verify(&key, 96)?;
+    assert!(control.verify(&key, 94).is_err());
     assert!(control.verify(&key, 131).is_err());
     assert!(control.verify(&NodeServiceSigningKey::from_seed([24; 32]), 100).is_err());
     control.body.authority.target_delivery_id = "foreign-mailbox".into();
@@ -281,9 +283,7 @@ fn server_retention_router_wal_does_not_resurrect_expired_entries()
     assert!(store.sweep_delivery_retention(now + 601, true)? > 0);
     let router = store.load_router()?.ok_or("WAL router")?;
     assert_eq!(router.sweep_delivery_retention(now + 601), 1);
-    for cursor in router.retention_cursors() {
-        store.retain_cursor_checkpoint(&cursor)?;
-    }
+    store.retain_cursor_checkpoints(&router.take_retention_checkpoints())?;
     store.sweep_delivery_retention(now + 601, false)?;
     drop(store);
     let store = RouterRedbStore::open_with_wal(&path, &wal)?;

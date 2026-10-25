@@ -489,7 +489,24 @@ async fn handle_notify_mesh_quic_accepted_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     ingress: Arc<NotifyIngressState>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    match handle_notify_mesh_quic_request(&accepted.request, &ingress) {
+    let result = if accepted.request.method == "POST"
+        && accepted.request.path == ramflux_node_core::PUSH_ROUTE_PATH
+    {
+        // Registration makes a blocking router authority lookup; keep it off runtime workers.
+        let body = accepted.request.body.clone();
+        let ingress = Arc::clone(&ingress);
+        tokio::task::spawn_blocking(move || push_registration::register(&ingress, body))
+            .await
+            .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))
+            .and_then(|result| result)
+            .map(|expires_at| ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::json!(expires_at),
+            })
+    } else {
+        handle_notify_mesh_quic_request(&accepted.request, &ingress)
+    };
+    match result {
         Ok(response) => accepted
             .write_json_response(response.status, &response.body)
             .await

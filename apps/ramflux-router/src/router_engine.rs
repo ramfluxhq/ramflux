@@ -211,7 +211,8 @@ pub(crate) fn own_device_fanout(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
-    let response = state.mvp10_own_device_fanout(request.clone())?;
+    let now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
+    let response = state.mvp10_own_device_fanout_at(request.clone(), now)?;
     let entries = response
         .delivered
         .iter()

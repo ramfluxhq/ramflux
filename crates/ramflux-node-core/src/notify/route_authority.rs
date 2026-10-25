@@ -2,12 +2,20 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bind encrypted routes to verified root-qualified devices and recheck current revocation.
+//!
+//! Delivery rechecks one owner per wake. The periodic revocation sweep is batched and bounded:
+//! each call checks at most [`PUSH_ROUTE_SWEEP_LIMIT`] owners in batches of
+//! [`PUSH_ROUTE_AUTHORITY_BATCH`], resuming where the previous call stopped.
 use super::{DevicePushRoute, NOTIFY_ROUTE_TABLE, NotifyRedbStore, routes};
 use crate::{DeviceAuthKeyResponse, NodeCoreError};
-use redb::{ReadableTable, TableDefinition};
+use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 const OWNERS: TableDefinition<&str, &[u8]> = TableDefinition::new("notify_route_authority_v1");
+/// Owners per authority lookup request.
+pub const PUSH_ROUTE_AUTHORITY_BATCH: usize = 256;
+/// Owners checked per revocation sweep call.
+pub const PUSH_ROUTE_SWEEP_LIMIT: usize = 1_024;
 pub(super) type RouteAuthorizer =
-    dyn Fn(&DeviceAuthKeyResponse) -> Result<bool, NodeCoreError> + Send + Sync;
+    dyn Fn(&[DeviceAuthKeyResponse]) -> Result<Vec<bool>, NodeCoreError> + Send + Sync;
 fn error(value: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(value.to_string())
 }
@@ -21,12 +29,38 @@ impl NotifyRedbStore {
         self.allow_itest_unbound_routes = true;
     }
 
-    /// Production installs an authoritative router lookup before accepting or dispatching routes.
+    /// Installs a per-device authority lookup (each check is a batch of one).
     pub fn set_push_route_authorizer<F>(&mut self, authorize: F)
     where
         F: Fn(&DeviceAuthKeyResponse) -> Result<bool, NodeCoreError> + Send + Sync + 'static,
     {
+        self.route_authorizer = Some(Box::new(move |owners: &[DeviceAuthKeyResponse]| {
+            owners.iter().map(&authorize).collect()
+        }));
+    }
+
+    /// Production installs an authoritative batched router lookup before accepting or
+    /// dispatching routes. The result must hold one verdict per owner, in order.
+    pub fn set_push_route_batch_authorizer<F>(&mut self, authorize: F)
+    where
+        F: Fn(&[DeviceAuthKeyResponse]) -> Result<Vec<bool>, NodeCoreError> + Send + Sync + 'static,
+    {
         self.route_authorizer = Some(Box::new(authorize));
+    }
+
+    fn authorize_owners(
+        &self,
+        owners: &[DeviceAuthKeyResponse],
+    ) -> Result<Vec<bool>, NodeCoreError> {
+        let authorize = self
+            .route_authorizer
+            .as_ref()
+            .ok_or_else(|| error("route authority lookup unavailable"))?;
+        let verdicts = authorize(owners)?;
+        if verdicts.len() != owners.len() {
+            return Err(error("route authority lookup returned a mismatched batch"));
+        }
+        Ok(verdicts)
     }
     /// # Errors
     /// Refuses unverified, revoked, substituted or unavailable device authority.
@@ -38,11 +72,10 @@ impl NotifyRedbStore {
         authority.authenticated_device_identity()?;
         if authority.target_delivery_id != route.device_delivery_id
             || !self
-                .route_authorizer
-                .as_ref()
-                .ok_or_else(|| error("route authority lookup unavailable"))?(
-                authority
-            )?
+                .authorize_owners(std::slice::from_ref(authority))?
+                .first()
+                .copied()
+                .unwrap_or(false)
         {
             return Err(NodeCoreError::Unauthorized("push route owner rejected".into()));
         }
@@ -125,54 +158,131 @@ impl NotifyRedbStore {
         }
         txn.commit().map_err(error)
     }
-    pub(super) fn authorize_push_route(&self, target: &str) -> Result<bool, NodeCoreError> {
-        let Some(authorize) = &self.route_authorizer else {
-            return Ok(true);
+    fn owner_binding(&self, target: &str) -> Result<Option<Vec<u8>>, NodeCoreError> {
+        let txn = self.db.begin_read().map_err(error)?;
+        let table = match txn.open_table(OWNERS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(other) => return Err(error(other)),
         };
+        Ok(table.get(target).map_err(error)?.map(|value| value.value().to_vec()))
+    }
+
+    fn open_binding(
+        &self,
+        target: &str,
+        bytes: &[u8],
+    ) -> Result<DeviceAuthKeyResponse, NodeCoreError> {
+        serde_json::from_slice(&self.route_key.open(&context(target), bytes)?).map_err(error)
+    }
+
+    /// Deletes a revoked owner's routes, but only if the encrypted binding is unchanged, so a
+    /// delayed lookup cannot delete a route that was re-registered meanwhile.
+    fn revoke_if_unchanged(&self, target: &str, bytes: &[u8]) -> Result<bool, NodeCoreError> {
         let txn = self.db.begin_write().map_err(error)?;
-        let bytes = txn
-            .open_table(OWNERS)
-            .map_err(error)?
-            .get(target)
-            .map_err(error)?
-            .map(|v| v.value().to_vec());
-        txn.abort().map_err(error)?;
-        let Some(bytes) = bytes else {
-            return Ok(self.allow_itest_unbound_routes);
-        };
-        let authority = serde_json::from_slice(&self.route_key.open(&context(target), &bytes)?)
-            .map_err(error)?;
-        if authorize(&authority)? {
-            return Ok(true);
-        }
-        // Compare the encrypted binding so a delayed lookup cannot delete a rotated route.
-        let txn = self.db.begin_write().map_err(error)?;
+        let removed;
         {
             let mut owners = txn.open_table(OWNERS).map_err(error)?;
-            let unchanged = owners.get(target).map_err(error)?.is_some_and(|v| v.value() == bytes);
-            if unchanged {
+            removed = owners.get(target).map_err(error)?.is_some_and(|v| v.value() == bytes);
+            if removed {
                 owners.remove(target).map_err(error)?;
                 txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?.remove(target).map_err(error)?;
             }
         }
         txn.commit().map_err(error)?;
+        Ok(removed)
+    }
+
+    pub(super) fn authorize_push_route(&self, target: &str) -> Result<bool, NodeCoreError> {
+        if self.route_authorizer.is_none() {
+            return Ok(true);
+        }
+        let Some(bytes) = self.owner_binding(target)? else {
+            return Ok(self.allow_itest_unbound_routes);
+        };
+        let authority = self.open_binding(target, &bytes)?;
+        if self
+            .authorize_owners(std::slice::from_ref(&authority))?
+            .first()
+            .copied()
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+        self.revoke_if_unchanged(target, &bytes)?;
         Ok(false)
     }
+
+    /// Checks up to [`PUSH_ROUTE_SWEEP_LIMIT`] owners in batched lookups, continuing from the
+    /// previous call, and deletes revoked owners' routes. In production it also deletes legacy
+    /// routes that have no verified owner: they can never be delivered.
     /// # Errors
     /// Unavailable authority defers deletion; it never authorizes provider delivery.
-    pub fn sweep_push_route_revocations(&self) -> Result<(), NodeCoreError> {
-        let txn = self.db.begin_write().map_err(error)?;
-        let targets = txn
-            .open_table(OWNERS)
-            .map_err(error)?
-            .iter()
-            .map_err(error)?
-            .map(|row| row.map(|(key, _)| key.value().to_owned()).map_err(error))
-            .collect::<Result<Vec<_>, _>>()?;
-        txn.abort().map_err(error)?;
-        for target in targets {
-            self.authorize_push_route(&target)?;
+    pub fn sweep_push_route_revocations(&self) -> Result<usize, NodeCoreError> {
+        if self.route_authorizer.is_none() {
+            return Ok(0);
         }
-        Ok(())
+        let mut removed = self.remove_ownerless_routes()?;
+        let start = self.revocation_cursor.lock().map_err(error)?.clone();
+        let txn = self.db.begin_read().map_err(error)?;
+        let mut owners = Vec::new();
+        if let Ok(table) = txn.open_table(OWNERS) {
+            let rows = match start.as_deref() {
+                Some(start) => table
+                    .range::<&str>((std::ops::Bound::Excluded(start), std::ops::Bound::Unbounded)),
+                None => table.range::<&str>(..),
+            }
+            .map_err(error)?;
+            for row in rows.take(PUSH_ROUTE_SWEEP_LIMIT) {
+                let (key, value) = row.map_err(error)?;
+                owners.push((key.value().to_owned(), value.value().to_vec()));
+            }
+        }
+        drop(txn);
+        *self.revocation_cursor.lock().map_err(error)? = (owners.len() == PUSH_ROUTE_SWEEP_LIMIT)
+            .then(|| owners.last().map(|(key, _)| key.clone()))
+            .flatten();
+        for batch in owners.chunks(PUSH_ROUTE_AUTHORITY_BATCH) {
+            let authorities = batch
+                .iter()
+                .map(|(target, bytes)| self.open_binding(target, bytes))
+                .collect::<Result<Vec<_>, _>>()?;
+            for ((target, bytes), live) in batch.iter().zip(self.authorize_owners(&authorities)?) {
+                if !live && self.revoke_if_unchanged(target, bytes)? {
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Runs once per process: production never creates ownerless rows, so only legacy rows
+    /// from before ownership binding are removed.
+    fn remove_ownerless_routes(&self) -> Result<usize, NodeCoreError> {
+        if self.allow_itest_unbound_routes
+            || self.ownerless_routes_cleared.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(0);
+        }
+        let txn = self.db.begin_write().map_err(error)?;
+        let mut removed = 0;
+        {
+            let owners = txn.open_table(OWNERS).map_err(error)?;
+            let mut routes = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
+            let mut ownerless = Vec::new();
+            for row in routes.iter().map_err(error)? {
+                let (key, _) = row.map_err(error)?;
+                if owners.get(key.value()).map_err(error)?.is_none() {
+                    ownerless.push(key.value().to_owned());
+                }
+            }
+            for key in ownerless {
+                routes.remove(key.as_str()).map_err(error)?;
+                removed += 1;
+            }
+        }
+        txn.commit().map_err(error)?;
+        self.ownerless_routes_cleared.store(true, std::sync::atomic::Ordering::Release);
+        Ok(removed)
     }
 }

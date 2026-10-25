@@ -662,17 +662,49 @@ impl RouterCore {
         }
     }
 
+    /// Reads deliveries still inside their retention deadline at server time `now`.
+    #[must_use]
+    pub fn mvp1_inbox_at(
+        &self,
+        target_delivery_id: &str,
+        after_inbox_seq: u64,
+        limit: usize,
+        now: i64,
+    ) -> InboxFetchResponse {
+        InboxFetchResponse {
+            target_delivery_id: target_delivery_id.to_owned(),
+            entries: self.target_shard(target_delivery_id).inbox.pull_live_after(
+                target_delivery_id,
+                after_inbox_seq,
+                limit,
+                now,
+            ),
+        }
+    }
+
+    /// Fans out at the current server time.
     /// # Errors
     /// Returns an error when the source device is not registered under the principal.
     pub fn mvp10_own_device_fanout(
         &self,
         request: ItestMvp10OwnDeviceFanoutRequest,
     ) -> Result<ItestMvp10OwnDeviceFanoutResponse, NodeCoreError> {
-        let plan = self.accept_own_device_fanout_replay(request)?;
+        self.mvp10_own_device_fanout_at(request, server_now())
+    }
+
+    /// Fans out using server time `now` for replay, clock-skew and retention checks.
+    /// # Errors
+    /// Returns an error when the source device is not registered under the principal.
+    pub fn mvp10_own_device_fanout_at(
+        &self,
+        request: ItestMvp10OwnDeviceFanoutRequest,
+        now: i64,
+    ) -> Result<ItestMvp10OwnDeviceFanoutResponse, NodeCoreError> {
+        let plan = self.accept_own_device_fanout_replay(request, now)?;
         let delivered = plan
             .deliveries
             .into_iter()
-            .map(|delivery| self.submit_replay_accepted_fanout_delivery(delivery).0)
+            .map(|delivery| self.submit_replay_accepted_fanout_delivery(delivery, now).0)
             .collect();
         Ok(ItestMvp10OwnDeviceFanoutResponse {
             principal_id: plan.principal_id,
@@ -697,8 +729,8 @@ impl RouterCore {
     pub fn submit_replay_accepted_envelope(
         &self,
         accepted: ReplayAcceptedEnvelope,
+        now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
-        let now_unix_seconds = accepted.envelope.created_at;
         self.submit_envelope_after_replay_check(accepted.envelope, now_unix_seconds)
     }
 
@@ -708,10 +740,11 @@ impl RouterCore {
     pub fn accept_own_device_fanout_replay(
         &self,
         request: ItestMvp10OwnDeviceFanoutRequest,
+        now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
         let targets = self.mvp10_own_device_targets(&request)?;
         let source = self.authenticated_envelope_source(&request.envelope)?;
-        self.check_envelope_replay_once(&source, &request.envelope, request.envelope.created_at)?;
+        self.check_envelope_replay_once(&source, &request.envelope, now_unix_seconds)?;
         let deliveries = targets
             .into_iter()
             .map(|(device_id, target_delivery_id)| {
@@ -733,8 +766,8 @@ impl RouterCore {
     pub fn submit_replay_accepted_fanout_delivery(
         &self,
         delivery: ReplayAcceptedFanoutDelivery,
+        now_unix_seconds: i64,
     ) -> (ItestMvp10OwnDeviceFanoutDelivery, Option<InboxEntry>) {
-        let now_unix_seconds = delivery.envelope.created_at;
         let outcome = self.submit_envelope_after_replay_check(delivery.envelope, now_unix_seconds);
         let (outcome, inbox_seq, entry) = match outcome {
             RouterSubmitOutcome::Online(delivery) => (
@@ -823,13 +856,13 @@ impl RouterCore {
         self.target_shard(target_delivery_id).registry.close_session(target_delivery_id)
     }
 
+    /// Submits at the current server time.
     pub fn submit_envelope(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: ramflux_protocol::Envelope,
     ) -> RouterSubmitOutcome {
-        let now = envelope.created_at;
-        self.submit_envelope_at(source, envelope, now)
+        self.submit_envelope_at(source, envelope, server_now())
     }
 
     pub fn submit_envelope_at(
@@ -888,7 +921,7 @@ impl RouterCore {
                 self.node_service_signer().as_ref(),
             ));
         }
-        self.submit_local_envelope_after_migration_check(envelope)
+        self.submit_local_envelope_after_migration_check(envelope, now_unix_seconds)
     }
 
     fn submit_envelope_after_replay_check_with_home_node_forward<F>(
@@ -930,12 +963,13 @@ impl RouterCore {
                 self.node_service_signer().as_ref(),
             ));
         }
-        self.submit_local_envelope_after_migration_check(envelope)
+        self.submit_local_envelope_after_migration_check(envelope, now_unix_seconds)
     }
 
     fn submit_local_envelope_after_migration_check(
         &self,
         envelope: ramflux_protocol::Envelope,
+        now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
         let mut shard = self.target_shard(&envelope.target_delivery_id);
         if shard.deleted_delivery_targets.contains(&envelope.target_delivery_id) {
@@ -951,7 +985,7 @@ impl RouterCore {
         match shard.registry.route_envelope(&envelope) {
             DeliveryDecision::Online { gateway_id, session_id, target_delivery_id } => {
                 crate::record_router_envelope_accepted();
-                let entry = shard.inbox.append(envelope.clone());
+                let entry = shard.inbox.append_at(envelope.clone(), now_unix_seconds);
                 self.index_envelope_target(&entry);
                 RouterSubmitOutcome::Online(OnlineDelivery {
                     gateway_id,
@@ -963,7 +997,7 @@ impl RouterCore {
             }
             DeliveryDecision::OfflineWake(wake_hint) => {
                 crate::record_router_envelope_accepted();
-                let entry = shard.inbox.append(envelope);
+                let entry = shard.inbox.append_at(envelope, now_unix_seconds);
                 self.index_envelope_target(&entry);
                 RouterSubmitOutcome::OfflineQueued(OfflineQueuedDelivery { entry, wake_hint })
             }
@@ -1046,7 +1080,7 @@ impl RouterCore {
                 actual_target_delivery_id,
             });
         }
-        self.apply_nack(nack)
+        self.target_shard(target_delivery_id).inbox.apply_nack_for_target(target_delivery_id, nack)
     }
 
     /// Returns the indexed target for an envelope, including entries restored from pending inbox
@@ -1138,9 +1172,12 @@ impl RouterCore {
                 .registry
                 .restore_session(session.clone());
         }
-        for entry in snapshot.inbox.pending_entries().cloned().collect::<Vec<_>>() {
-            router.index_envelope_target(&entry);
-            router.target_shard(&entry.target_delivery_id).inbox.restore_pending_entry(entry);
+        for (entry, deadline) in snapshot.inbox.pending_entries_with_deadline() {
+            router.index_envelope_target(entry);
+            router
+                .target_shard(&entry.target_delivery_id)
+                .inbox
+                .restore_pending_entry_until(entry.clone(), Some(deadline));
         }
         for cursor in snapshot.inbox.cursor_states().cloned().collect::<Vec<_>>() {
             router.index_cursor_targets(&cursor);
@@ -1183,9 +1220,11 @@ impl RouterCore {
                 .registry
                 .restore_session(session.clone());
         }
-        for entry in snapshot.inbox.pending_entries().cloned().collect::<Vec<_>>() {
-            self.index_envelope_target(&entry);
-            self.target_shard(&entry.target_delivery_id).inbox.restore_pending_entry(entry);
+        for (entry, deadline) in snapshot.inbox.pending_entries_with_deadline() {
+            self.index_envelope_target(entry);
+            self.target_shard(&entry.target_delivery_id)
+                .inbox
+                .restore_pending_entry_until(entry.clone(), Some(deadline));
         }
         for cursor in snapshot.inbox.cursor_states().cloned().collect::<Vec<_>>() {
             self.index_cursor_targets(&cursor);
@@ -1589,6 +1628,11 @@ impl PartialEq for RouterCore {
 }
 
 impl Eq for RouterCore {}
+
+/// Router decisions use the server clock, never a client-chosen timestamp.
+fn server_now() -> i64 {
+    i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX)
+}
 
 fn target_shard_index(target_delivery_id: &str) -> usize {
     hash_shard_index(target_delivery_id, ROUTER_TARGET_SHARD_COUNT)

@@ -503,12 +503,40 @@ fn handle_mesh_mvp0_value(
     }
 }
 
+/// Public prekey and current device-authority lookups (single and batched).
+fn handle_mesh_device_lookup(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> Option<anyhow::Result<MeshResponse>> {
+    let state = router.state();
+    let value = match (method, path) {
+        ("GET", path) if path.starts_with("/mvp1/prekey/") => {
+            handle_mvp1_prekey_fetch(path, state).and_then(|r| Ok(serde_json::to_value(r)?))
+        }
+        ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => {
+            handle_mvp1_device_auth_key_fetch(path, state)
+                .and_then(|r| Ok(serde_json::to_value(r)?))
+        }
+        ("POST", ramflux_node_core::DEVICE_AUTH_KEYS_PATH) => {
+            handle_mvp1_device_auth_key_batch(body, state)
+                .and_then(|r| Ok(serde_json::to_value(r)?))
+        }
+        _ => return None,
+    };
+    Some(device_lookup_mesh_response(value))
+}
+
 fn handle_mesh_general_value(
     method: &str,
     path: &str,
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
+    if let Some(response) = handle_mesh_device_lookup(method, path, body, router) {
+        return response;
+    }
     match (method, path) {
         ("POST", "/mvp2/device-set") => {
             let response = handle_signed_device_set(body, router)?;
@@ -585,10 +613,6 @@ fn handle_mesh_general_value(
             let response = handle_mvp1_prekey_publish(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
-        ("GET", path) if path.starts_with("/mvp1/prekey/") => device_lookup_mesh_response(
-            handle_mvp1_prekey_fetch(path, router.state())
-                .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from)),
-        ),
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => Ok(MeshResponse::json(
             "401 Unauthorized",
             serde_json::to_vec(&unauthenticated_principal_lookup())?,
@@ -598,10 +622,6 @@ fn handle_mesh_general_value(
             let response = handle_mvp1_device_manifest_fetch(path, router.state());
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
-        ("GET", path) if path.starts_with("/mvp1/device-auth-key/") => device_lookup_mesh_response(
-            handle_mvp1_device_auth_key_fetch(path, router.state())
-                .and_then(|r| serde_json::to_value(r).map_err(anyhow::Error::from)),
-        ),
         ("GET", path) if path.starts_with("/mvp1/inbox/") => {
             let response = handle_mvp1_inbox_fetch(path, router.state())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
@@ -882,6 +902,25 @@ fn handle_mvp1_device_auth_key_fetch(
     Ok(state.mvp1_device_auth_key_checked(device_id)?)
 }
 
+/// Answers up to 256 current-authority lookups; invalid selectors read as absent devices.
+fn handle_mvp1_device_auth_key_batch(
+    body: &[u8],
+    state: &ramflux_node_core::RouterCore,
+) -> anyhow::Result<ramflux_node_core::DeviceAuthKeyBatchResponse> {
+    let request: ramflux_node_core::DeviceAuthKeyBatchRequest = serde_json::from_slice(body)?;
+    anyhow::ensure!(
+        request.devices.len() <= ramflux_node_core::DEVICE_AUTH_KEY_BATCH_LIMIT,
+        "device authority batch too large"
+    );
+    Ok(ramflux_node_core::DeviceAuthKeyBatchResponse {
+        keys: request
+            .devices
+            .iter()
+            .map(|device| state.mvp1_device_auth_key_checked(device).ok().flatten())
+            .collect(),
+    })
+}
+
 fn handle_mvp6_registration_policy(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
@@ -995,11 +1034,13 @@ fn handle_mvp1_inbox_fetch(
             limit = value.parse()?;
         }
     }
-    state.expire_target_delivery(
+    // Reads filter by deadline only; the periodic sweep owns deletion.
+    let response = state.mvp1_inbox_at(
         target_delivery_id,
+        after_inbox_seq,
+        limit,
         i64::try_from(ramflux_node_core::now_unix_seconds())?,
     );
-    let response = state.mvp1_inbox(target_delivery_id, after_inbox_seq, limit);
     tracing::info!(
         target_delivery_id = %response.target_delivery_id,
         after_inbox_seq,

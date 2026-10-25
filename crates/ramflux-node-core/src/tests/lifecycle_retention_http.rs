@@ -11,7 +11,7 @@ fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
     let register =
         registration_request(&router, "principal_delete", "device_delete", 91, None, "ip_a")?;
     router.mvp1_register_identity(&register)?;
-    router.submit_envelope(
+    router.submit_envelope_at_created(
         &source_identity,
         envelope("env_before_delete", "target_principal_delete", DeliveryClass::OpaqueEvent),
     );
@@ -52,7 +52,7 @@ fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
     assert!(finalized.record.deletion_proof.is_some());
     assert!(!router.mvp7_metadata_summary("principal_delete").metadata_present);
     assert!(matches!(
-        router.submit_envelope(
+        router.submit_envelope_at_created(
             &source_identity,
             envelope("env_after_delete", "target_principal_delete", DeliveryClass::OpaqueEvent,)
         ),

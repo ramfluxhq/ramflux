@@ -864,3 +864,34 @@ pub(super) fn same_root_registration(
     }
     Ok(request)
 }
+
+/// Fixtures carry fixed timestamps; production paths always pass the server clock.
+pub(super) trait FixtureClock {
+    fn submit_envelope_at_created(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: Envelope,
+    ) -> RouterSubmitOutcome;
+    fn mvp10_own_device_fanout_at_created(
+        &self,
+        request: ItestMvp10OwnDeviceFanoutRequest,
+    ) -> Result<ItestMvp10OwnDeviceFanoutResponse, NodeCoreError>;
+}
+
+impl FixtureClock for RouterCore {
+    fn submit_envelope_at_created(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: Envelope,
+    ) -> RouterSubmitOutcome {
+        let now = envelope.created_at;
+        self.submit_envelope_at(source, envelope, now)
+    }
+    fn mvp10_own_device_fanout_at_created(
+        &self,
+        request: ItestMvp10OwnDeviceFanoutRequest,
+    ) -> Result<ItestMvp10OwnDeviceFanoutResponse, NodeCoreError> {
+        let now = request.envelope.created_at;
+        self.mvp10_own_device_fanout_at(request, now)
+    }
+}

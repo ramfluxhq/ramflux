@@ -341,7 +341,9 @@ pub(crate) fn handle_mesh_request(
                 "200 OK",
                 &sweep.response(
                     u64::try_from(
-                        context.store.sweep_delivery_retention(sweep.now, sweep.dry_run)?,
+                        context
+                            .store
+                            .sweep_delivery_retention(sweep.effective_now(), sweep.dry_run)?,
                     )
                     .unwrap_or(u64::MAX),
                 ),
@@ -655,7 +657,9 @@ fn handle_federation_mesh_quic_request(
                 body: serde_json::to_value(
                     sweep.response(
                         u64::try_from(
-                            context.store.sweep_delivery_retention(sweep.now, sweep.dry_run)?,
+                            context
+                                .store
+                                .sweep_delivery_retention(sweep.effective_now(), sweep.dry_run)?,
                         )
                         .unwrap_or(u64::MAX),
                     ),
