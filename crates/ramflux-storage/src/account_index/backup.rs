@@ -60,6 +60,33 @@ impl AccountIndex {
             params![id, manifest],
         )? != 0)
     }
+    fn ensure_generation_hint(&self, id: &str) -> Result<(), StorageError> {
+        let accounts = self.root.join("accounts");
+        let parent = accounts.join(id);
+        std::fs::create_dir_all(&parent)?;
+        let path = parent.join(crate::BACKUP_GENERATION_MARKER);
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::File::open(&path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        file.sync_all()?;
+        // The hint precedes commit, so false positives only cause an index lookup. Sync newly
+        // created account-parent entries as well as files before publishing the generation.
+        for directory in [&parent, &accounts, &self.root] {
+            std::fs::File::open(directory)?.sync_all()?;
+        }
+        Ok(())
+    }
     /// Atomically installs prepared paths, key wrapping and recovery manifest under FULL/WAL.
     /// Files must already be durable. An error leaves the selected generation unchanged.
     /// # Errors
@@ -76,6 +103,13 @@ impl AccountIndex {
                 return Err(StorageError::AuthorizationRejected);
             }
         }
+        let id = std::path::Path::new(install.account_id);
+        if id.components().count() != 1
+            || id.components().any(|p| !matches!(p, std::path::Component::Normal(_)))
+        {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.ensure_generation_hint(install.account_id)?;
         let transaction = self.connection.unchecked_transaction()?;
         let previous = self
             .connection

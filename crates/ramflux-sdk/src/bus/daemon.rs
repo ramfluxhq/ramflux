@@ -64,6 +64,8 @@ pub(crate) fn read_local_bus_account_manifest(
     path: &Path,
 ) -> Result<LocalBusPersistedAccount, SdkError> {
     if let Some((root, id)) = manifest_index_location(path)
+        && (root.join("accounts").join(id).join(ramflux_storage::BACKUP_GENERATION_MARKER).exists()
+            || !path.exists())
         && root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
         && let Some(bytes) = AccountIndex::open(root)?.backup_generation_manifest(id)?
     {
@@ -84,7 +86,8 @@ fn manifest_index_location(path: &Path) -> Option<(&Path, &str)> {
 pub(crate) fn account_manifest_available(path: &Path) -> bool {
     path.exists()
         || manifest_index_location(path).is_some_and(|(root, id)| {
-            root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
+            root.join("accounts").join(id).join(ramflux_storage::BACKUP_GENERATION_MARKER).exists()
+                && root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
                 && AccountIndex::open(root)
                     .and_then(|index| index.backup_generation_manifest(id))
                     .is_ok_and(|manifest| manifest.is_some())
@@ -96,7 +99,12 @@ pub(crate) fn write_local_bus_account_manifest(
     manifest: &LocalBusPersistedAccount,
 ) -> Result<(), SdkError> {
     let bytes = serde_json::to_vec_pretty(manifest)?;
-    if data_root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
+    if data_root
+        .join("accounts")
+        .join(&manifest.local_account_id)
+        .join(ramflux_storage::BACKUP_GENERATION_MARKER)
+        .exists()
+        && data_root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
         && AccountIndex::open(data_root)?
             .update_backup_generation_manifest(&manifest.local_account_id, &bytes)?
     {

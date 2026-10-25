@@ -602,6 +602,22 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn legacy_manifest_reads_do_not_open_an_unrelated_account_index() -> Result<(), SdkError> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |t| t.as_nanos());
+        let root = std::env::temp_dir()
+            .join(format!("rf-legacy-manifest-index-{}-{unique}", std::process::id()));
+        let manifest = backup_manifest();
+        write_local_bus_account_manifest(&root, &manifest)?;
+        std::fs::write(root.join(ramflux_storage::ACCOUNT_INDEX_FILE), b"not an index database")?;
+        let path = local_bus_account_manifest_path(&root, &manifest.local_account_id);
+        assert!(crate::bus::daemon::account_manifest_available(&path));
+        assert_eq!(read_local_bus_account_manifest(&path)?.device_id, manifest.device_id);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     #[tokio::test]
     async fn account_status_reports_the_local_sender_device() -> Result<(), SdkError> {
         let unique = std::time::SystemTime::now()

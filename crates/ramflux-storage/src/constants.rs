@@ -4,6 +4,8 @@
 pub const CRATE_NAME: &str = "ramflux-storage";
 pub const ACCOUNT_DB_FILE: &str = "ramflux_local.sqlite";
 pub const ACCOUNT_INDEX_FILE: &str = "account_index.sqlite";
+/// Durable per-account hint; the index transaction remains the selection authority.
+pub const BACKUP_GENERATION_MARKER: &str = ".backup-generation";
 pub const SCHEMA_VERSION: i64 = 1;
 pub(crate) const DEFAULT_DELIVERY_RECEIPT_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 pub(crate) const MAX_DELIVERY_RECEIPT_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
