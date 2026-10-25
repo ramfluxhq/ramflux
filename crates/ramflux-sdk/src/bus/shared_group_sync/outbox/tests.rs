@@ -252,3 +252,41 @@ fn shared_group_device_removal_keeps_its_boundary_when_the_root_is_removed_later
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn shared_group_coalescing_during_round_eight_keeps_the_existing_retry_window()
+-> Result<(), SdkError> {
+    let root = crate::bus::runtime_tests::root("group-final-round");
+    let account = crate::bus::runtime_tests::account(
+        &root,
+        "owner",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    account.client.shared_group_create("group", "thread", Some("Before".into()), "target")?;
+    let id = key("group");
+    let db = account.client.account_db()?;
+    let mut intent =
+        db.load_actor_state::<Intent>(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
+    intent.attempt = 8;
+    intent.round_active = true;
+    intent.next_at = now_unix_timestamp() + 10;
+    let deadline = intent.expires_at;
+    let next = intent.next_at;
+    db.persist_actor_state(&id, &intent)?;
+    account.client.shared_group_change(
+        "group",
+        "target",
+        GroupStateChange::SetName { name: "During final round".into() },
+    )?;
+    let coalesced =
+        db.load_actor_state::<Intent>(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(coalesced.attempt, 8, "coalescing cannot create a new eight-round budget");
+    assert!(coalesced.round_active);
+    assert_eq!(coalesced.expires_at, deadline);
+    assert_eq!(coalesced.next_at, next);
+    assert_eq!(coalesced.snapshot.epoch, 2);
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

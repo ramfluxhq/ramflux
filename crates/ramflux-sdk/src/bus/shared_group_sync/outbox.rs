@@ -149,32 +149,31 @@ pub(crate) fn enqueue(
         merge_eligible(&mut eligible, eligibility(old));
     }
     let now = now_unix_timestamp();
-    let mut intent =
-        if let Some(mut old) = pending.filter(|old| old.expires_at > now && old.attempt < 8) {
-            merge_eligible(&mut eligible, old.eligible);
-            old.snapshot = state.snapshot().clone();
-            old.eligible = eligible;
-            old.delivered.clear();
-            old.cursor = None;
-            old.round_devices = 0;
-            old
-        } else {
-            Intent {
-                snapshot: state.snapshot().clone(),
-                eligible,
-                terminal: Vec::new(),
-                created_at: now,
-                active: None,
-                delivered: BTreeSet::new(),
-                attempt: 0,
-                next_at: now,
-                expires_at: now.saturating_add(3600),
-                round_active: false,
-                round_failed: false,
-                round_devices: 0,
-                cursor: None,
-            }
-        };
+    let mut intent = if let Some(mut old) = pending.filter(|old| old.expires_at > now) {
+        merge_eligible(&mut eligible, old.eligible);
+        old.snapshot = state.snapshot().clone();
+        old.eligible = eligible;
+        old.delivered.clear();
+        old.cursor = None;
+        old.round_devices = 0;
+        old
+    } else {
+        Intent {
+            snapshot: state.snapshot().clone(),
+            eligible,
+            terminal: Vec::new(),
+            created_at: now,
+            active: None,
+            delivered: BTreeSet::new(),
+            attempt: 0,
+            next_at: now,
+            expires_at: now.saturating_add(3600),
+            round_active: false,
+            round_failed: false,
+            round_devices: 0,
+            cursor: None,
+        }
+    };
     if let Some(previous) = previous {
         freeze_removals(&mut intent, previous, state);
     }
