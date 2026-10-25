@@ -219,6 +219,10 @@ impl std::fmt::Debug for MessageKeys {
 
 impl DmSessionSnapshot {
     #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+    #[must_use]
     pub const fn root_key_bytes(&self) -> [u8; 32] {
         self.root_key
     }

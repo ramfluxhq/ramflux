@@ -51,6 +51,7 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
 }
 fn command(method: &str, body: Value, outbound: mpsc::Sender<LocalBusFrame>) -> AccountCommand {
     AccountCommand {
+        backup: None,
         request: LocalBusFrame::request(method, Some("alice".into()), "surface", method, body),
         connection_id: 1,
         topics: BTreeSet::new(),

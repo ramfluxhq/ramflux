@@ -55,6 +55,7 @@ rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 aes-gcm = "0.10"
+fs2 = "0.4"
 mime = "0.3"
 blake3 = "1.5"
 # Only used by the itest-local-mint v2 HMAC relay-token minting path; optional so production

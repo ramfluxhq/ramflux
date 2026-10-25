@@ -72,6 +72,15 @@ impl AccountDb {
         })
     }
 
+    /// Pins a read snapshot for an account-ordered backup capture.
+    /// # Errors
+    /// Returns encrypted reader or transaction errors.
+    pub fn open_backup_reader(&self) -> Result<Self, StorageError> {
+        let reader = self.open_reader()?;
+        reader.connection.execute_batch("BEGIN; SELECT key_fingerprint FROM account_key_check;")?;
+        Ok(reader)
+    }
+
     /// Groups all reads in the callback under one SQLite snapshot.
     ///
     /// # Errors

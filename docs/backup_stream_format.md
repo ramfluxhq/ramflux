@@ -1,14 +1,14 @@
 # Authenticated backup stream format
 
 The `ramflux_crypto::backup_stream` API encrypts arbitrary byte streams in bounded
-memory. Account export/import integration is separate from this primitive; the
-current account backup API is described in `account_backup.md`.
+memory. The daemon integrates it with encrypted SQLCipher snapshots; the job workflow is
+described in `account_backup.md`.
 
 The envelope begins with ASCII `RFLXBA02`, followed by a four-byte big-endian JSON
 header length and that many exact JSON bytes. Headers are limited to 4096 bytes;
 this is a framing metadata bound, not a limit on content or item counts. The header
 contains schema `ramflux.account.backup.stream.v2`, version 2, account ID, creation
-time, 65536-byte chunk size, cipher `xchacha20poly1305-stream64be`, KDF
+time, per-category totals and database_bytes, 65536-byte chunk size, cipher `xchacha20poly1305-stream64be`, KDF
 `argon2id-v19`, its fixed parameters, a random 32-byte salt, random 24-byte wrapping
 nonce and random 15-byte stream prefix. Unsupported parameters are rejected
 before expensive KDF work. Account IDs are nonempty and at most 1024 UTF-8 bytes.
@@ -59,3 +59,14 @@ all tables and BLOBs, including current WAL content, without materializing each
 row or attachment in Rust. The destination must be a new file in a private staging
 directory. Snapshot key material is secret and may enter only the authenticated
 encrypted archive. A busy snapshot or I/O failure fails rather than truncating.
+
+
+The account payload is `identity_length_u64be || identity_JSON || encrypted_database`.
+Identity JSON contains the recovery manifest, the fresh snapshot database key and
+CA bytes. Its 16 MiB metadata budget does not limit database contents. The complete
+payload, including those keys, is inside the authenticated stream. Verification
+rekeys the staged database under an independently derived RAM-only staging key
+and seals identity metadata with AES-256-GCM under a separate derived key. Database
+integrity, actual counts and every attachment's existing ChaCha20-Poly1305 tag and
+hashes must agree before the job can become Verified. A complete stream alone does
+not authorize installation or outbound chain resumption.

@@ -69,6 +69,7 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
         request.operation_id = Some("fetch-op".to_owned());
         let (outbound, _events) = mpsc::channel(16);
         let command = AccountCommand {
+            backup: None,
             request,
             connection_id: 1,
             topics: BTreeSet::new(),
@@ -100,6 +101,7 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
     request.operation_id = Some(String::new());
     let (outbound, _events) = mpsc::channel(16);
     let command = AccountCommand {
+        backup: None,
         request,
         connection_id: 1,
         topics: BTreeSet::new(),

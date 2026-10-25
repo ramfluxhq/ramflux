@@ -193,6 +193,7 @@ impl RamfluxClient {
         route: Route,
         pair: SealPair<'_>,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
+        self.require_backup_outbound_ready()?;
         let SealPair { local, remote, session, header, bundle } = pair;
         let remote = self.device_reference(remote)?;
         let wire_remote =

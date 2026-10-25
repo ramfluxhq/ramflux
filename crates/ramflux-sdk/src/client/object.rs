@@ -35,7 +35,7 @@ impl RamfluxClient {
             tombstoned: object.tombstoned,
             backup_excluded: object.backup_excluded,
             content_key,
-            object,
+            object: &persisted_descriptor(object),
             updated_at: now_unix_timestamp(),
         })?;
         Ok(())
@@ -733,7 +733,7 @@ impl RamfluxClient {
                 tombstoned: object.tombstoned,
                 backup_excluded: object.backup_excluded,
                 content_key: Some(prepared.object_key()),
-                object,
+                object: &persisted_descriptor(object),
                 updated_at: now,
             };
             let operation = ObjectOperationWrite {
@@ -2692,4 +2692,11 @@ fn verify_attachment_plaintext(
         return Err(SdkError::LocalBus("DM attachment plaintext hash mismatch".to_owned()));
     }
     Ok(hash)
+}
+
+// Payload bytes live once in the incremental BLOB column, never duplicated as a JSON array.
+fn persisted_descriptor(object: &EncryptedObject) -> serde_json::Value {
+    serde_json::json!({"object_id":object.object_id,"manifest_hash":object.manifest_hash,
+        "nonce":object.nonce,"ciphertext":"ramflux:column:1","plaintext_hash":object.plaintext_hash,
+        "tombstoned":object.tombstoned,"backup_excluded":object.backup_excluded})
 }

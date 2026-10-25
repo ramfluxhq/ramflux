@@ -54,13 +54,27 @@ impl RamfluxClient {
             direction,
         )?;
         let event_id = format!(
-            "{checkpoint}/{}",
+            "{checkpoint}/chain/{}/{}",
+            state.session_snapshot.session_id(),
             ramflux_protocol::hash_base64url(
                 "ramflux.sdk.group.sender.event.v2",
                 event_suffix.as_bytes()
             )
         );
         self.append_event(&event_id, "group.sender_key.state", &serde_json::to_vec(state)?)?;
+        if let Some(previous) = self.projection_checkpoint(&checkpoint)?
+            && let Some(bytes) = self.event_body(&previous)?
+            && let Ok(old) = serde_json::from_slice::<SdkGroupSenderKeyState>(&bytes)
+        {
+            self.set_projection_checkpoint(
+                &format!("{checkpoint}/chain/{}", old.session_snapshot.session_id()),
+                &previous,
+            )?;
+        }
+        self.set_projection_checkpoint(
+            &format!("{checkpoint}/chain/{}", state.session_snapshot.session_id()),
+            &event_id,
+        )?;
         self.set_projection_checkpoint(&checkpoint, &event_id)
     }
 
@@ -89,8 +103,26 @@ impl RamfluxClient {
         let root_seed = ramflux_crypto::random_32()?;
         let local_hash = group_sender_device_hash(group_id, sender_id, "local");
         let remote_hash = group_sender_device_hash(group_id, sender_id, "remote");
-        let transcript_hash = group_sender_transcript_hash(group_id, sender_id, group_key_epoch);
+        let transcript_hash = if self
+            .account_db()?
+            .load_actor_state::<bool>("backup/fresh-outbound")?
+            .unwrap_or(false)
+        {
+            fresh_group_transcript(group_id, sender_id, group_key_epoch, &root_seed)?
+        } else {
+            group_sender_transcript_hash(group_id, sender_id, group_key_epoch)
+        };
+        let chain_version = if self
+            .account_db()?
+            .load_actor_state::<bool>("backup/fresh-outbound")?
+            .unwrap_or(false)
+        {
+            3
+        } else {
+            2
+        };
         let state = SdkGroupSenderKeyState {
+            chain_version,
             principal_commitment: Some(sender.root_commitment().to_owned()),
             group_id: group_id.to_owned(),
             sender_id: sender_id.to_owned(),
@@ -136,8 +168,13 @@ impl RamfluxClient {
             ));
         }
         let distribution = SdkGroupSenderKeyDistribution {
-            schema: "ramflux.sdk.group_sender_key.distribution.v2".to_owned(),
-            version: 2,
+            schema: if state.chain_version == 3 {
+                "ramflux.sdk.group_sender_key.distribution.v3"
+            } else {
+                "ramflux.sdk.group_sender_key.distribution.v2"
+            }
+            .to_owned(),
+            version: if state.chain_version == 3 { 3 } else { 2 },
             group_id: group_id.to_owned(),
             sender_id: sender_id.to_owned(),
             group_key_epoch: group.group_epoch,
@@ -167,7 +204,8 @@ impl RamfluxClient {
             serde_json::from_slice(distribution_bytes)?;
         if !matches!(
             (distribution.schema.as_str(), distribution.version),
-            ("ramflux.sdk.group_sender_key.distribution.v2", 2)
+            ("ramflux.sdk.group_sender_key.distribution.v3", 3)
+                | ("ramflux.sdk.group_sender_key.distribution.v2", 2)
                 | ("ramflux.sdk.group_sender_key.distribution.v1", 1)
         ) {
             return Err(SdkError::LocalBus(format!(
@@ -205,6 +243,7 @@ impl RamfluxClient {
             &self.group_device_reference(&distribution.group_id, &distribution.sender_id)?,
         )?;
         let state = SdkGroupSenderKeyState {
+            chain_version: distribution.version,
             principal_commitment: Some(source.root_commitment().to_owned()),
             group_id: distribution.group_id.clone(),
             sender_id: distribution.sender_id.clone(),
@@ -213,15 +252,48 @@ impl RamfluxClient {
                 distribution.sender_key_seed,
                 group_sender_device_hash(&distribution.group_id, &distribution.sender_id, "remote"),
                 group_sender_device_hash(&distribution.group_id, &distribution.sender_id, "local"),
-                group_sender_transcript_hash(
-                    &distribution.group_id,
-                    &distribution.sender_id,
-                    distribution.group_key_epoch,
-                ),
+                if distribution.version == 3 {
+                    fresh_group_transcript(
+                        &distribution.group_id,
+                        &distribution.sender_id,
+                        distribution.group_key_epoch,
+                        &distribution.sender_key_seed,
+                    )?
+                } else {
+                    group_sender_transcript_hash(
+                        &distribution.group_id,
+                        &distribution.sender_id,
+                        distribution.group_key_epoch,
+                    )
+                },
             )?
             .snapshot(),
         };
-        self.persist_group_sender_key_state(&state, &source, "recv", "import")?;
+        let base = group_sender_key_checkpoint_name(
+            &state.group_id,
+            &source,
+            state.group_key_epoch,
+            "recv",
+        )?;
+        let known = self
+            .projection_checkpoint(&format!(
+                "{base}/chain/{}",
+                state.session_snapshot.session_id()
+            ))?
+            .is_some()
+            || self
+                .load_group_sender_key_state(
+                    &state.group_id,
+                    &source,
+                    state.group_key_epoch,
+                    "recv",
+                )
+                .is_ok_and(|old| {
+                    old.session_snapshot.session_id() == state.session_snapshot.session_id()
+                });
+        if !known {
+            self.persist_group_sender_key_state(&state, &source, "recv", "import")?;
+        }
         let pending = if retry_pending {
             self.retry_pending_group_messages(&distribution.group_id, distribution.group_key_epoch)?
         } else {
@@ -330,6 +402,7 @@ impl RamfluxClient {
         sender_id: &str,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, SdkError> {
+        self.require_backup_outbound_ready()?;
         let group = self.group_state(group_id)?;
         if !group.members.contains(sender_id) {
             return Err(SdkError::from(StorageError::GroupPermissionDenied));
@@ -387,14 +460,31 @@ impl RamfluxClient {
                 envelope.schema
             )));
         }
-        let mut state = self.load_group_sender_key_state(
+        let sender = self.device_identity(
+            &self.group_device_reference(&envelope.group_id, &envelope.sender_id)?,
+        )?;
+        let base = group_sender_key_checkpoint_name(
             &envelope.group_id,
-            &self.device_identity(
-                &self.group_device_reference(&envelope.group_id, &envelope.sender_id)?,
-            )?,
+            &sender,
             envelope.group_key_epoch,
             "recv",
         )?;
+        let mut state = if let Some(event) =
+            self.projection_checkpoint(&format!("{base}/chain/{}", envelope.ciphertext.session_id))?
+        {
+            serde_json::from_slice::<SdkGroupSenderKeyState>(
+                &self.event_body(&event)?.ok_or_else(|| {
+                    SdkError::InboundPending("archived group chain missing".into())
+                })?,
+            )?
+        } else {
+            self.load_group_sender_key_state(
+                &envelope.group_id,
+                &sender,
+                envelope.group_key_epoch,
+                "recv",
+            )?
+        };
         let associated_data = group_associated_data(
             &envelope.group_id,
             &envelope.sender_id,
@@ -428,6 +518,23 @@ impl RamfluxClient {
         )?;
         Ok(plaintext)
     }
+}
+
+fn fresh_group_transcript(
+    group: &str,
+    sender: &str,
+    epoch: u64,
+    seed: &[u8; 32],
+) -> Result<[u8; 32], SdkError> {
+    Ok(ramflux_crypto::blake3_256(
+        "ramflux.group.sender.chain.v3",
+        &ramflux_protocol::canonical_json_bytes(&(
+            group,
+            sender,
+            epoch,
+            ramflux_crypto::blake3_256("ramflux.group.sender.seed-id.v3", seed),
+        ))?,
+    ))
 }
 
 #[cfg(test)]

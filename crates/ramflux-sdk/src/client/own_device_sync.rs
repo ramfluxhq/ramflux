@@ -61,18 +61,56 @@ impl RamfluxClient {
             target_device_id,
             &snapshot_id,
         )?;
+        let mut next = None;
+        let mut result = None;
+        for mut page in super::own_device_history_pages::pages(bundle)?.into_iter().rev() {
+            page.next_page = next;
+            let exported = self
+                .export_own_history_page(
+                    engine,
+                    pool,
+                    page,
+                    super::own_device_history_pages::UploadOptions {
+                        endpoint: relay_endpoint,
+                        service_key: relay_service_key_base64.clone(),
+                        chunk_size,
+                    },
+                )
+                .await?;
+            next = Some(Box::new(exported.envelope.clone()));
+            result = Some(exported);
+        }
+        result.ok_or_else(|| SdkError::InboundRejected("empty own history page sequence".into()))
+    }
+    async fn export_own_history_page(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        bundle: SdkOwnDeviceHistoryBundle,
+        options: super::own_device_history_pages::UploadOptions<'_>,
+    ) -> Result<SdkOwnDeviceSyncExportResponse, SdkError> {
+        let relay_endpoint = options.endpoint;
+        let chunk_size = options.chunk_size;
+        let source_branch = self.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?;
+        let source_device_id = source_branch.device_id.clone();
+        let target_device_id = bundle.target_device_id.as_str();
+        let principal_commitment = bundle.principal_commitment.as_str();
+        let snapshot_id = bundle.snapshot_id.clone();
+        let manifest = self
+            .cache_verified_device_manifest(
+                &engine.config,
+                principal_commitment,
+                "own_history_page",
+            )
+            .await?;
+        let target_device =
+            manifest.devices.iter().find(|d| d.device_id == target_device_id).ok_or_else(|| {
+                SdkError::InboundRejected("own history target unavailable".into())
+            })?;
         let plaintext = serde_json::to_vec(&bundle)?;
         let object_id = format!("own-device-sync:{snapshot_id}");
         let object = self.put_encrypted_object(&object_id, &plaintext)?;
-        let relay_options = self
-            .relay_transfer_options(
-                Some(relay_endpoint.to_owned()),
-                relay_service_key_base64,
-                None,
-            )?
-            .ok_or_else(|| {
-                SdkError::LocalBus("own-device sync relay endpoint missing".to_owned())
-            })?;
+        let relay_options = self.own_history_relay_options(relay_endpoint, options.service_key)?;
         let transfer = self
             .upload_object_to_relay_inner_via_gateway(
                 engine,
@@ -151,6 +189,14 @@ impl RamfluxClient {
         })
     }
 
+    fn own_history_relay_options(
+        &self,
+        endpoint: &str,
+        key: Option<String>,
+    ) -> Result<RelayTransferOptions, SdkError> {
+        self.relay_transfer_options(Some(endpoint.to_owned()), key, None)?
+            .ok_or_else(|| SdkError::LocalBus("own-device sync relay endpoint missing".into()))
+    }
     pub(crate) async fn import_own_device_sync(
         &mut self,
         engine: &mut GatewaySessionEngine,
@@ -159,6 +205,50 @@ impl RamfluxClient {
         envelope: &SdkOwnDeviceSyncEnvelope,
         relay_service_key_base64: Option<String>,
     ) -> Result<SdkOwnDeviceSyncImportResponse, SdkError> {
+        let mut current = envelope.clone();
+        let mut seen = BTreeSet::new();
+        let mut total = SdkOwnDeviceSyncImportResponse {
+            snapshot_id: envelope.snapshot_id.clone(),
+            imported_messages: 0,
+            imported_dm_sessions: 0,
+            imported_groups: 0,
+            imported_sender_keys: 0,
+        };
+        loop {
+            if current.source_device_id != envelope.source_device_id
+                || current.target_device_id != envelope.target_device_id
+                || !seen.insert(current.snapshot_id.clone())
+            {
+                return Err(SdkError::InboundRejected(
+                    "own history continuation binding or cycle".into(),
+                ));
+            }
+            let (result, next) = self
+                .import_own_history_page(
+                    engine,
+                    pool,
+                    expected_principal_commitment,
+                    &current,
+                    relay_service_key_base64.clone(),
+                )
+                .await?;
+            total.imported_messages += result.imported_messages;
+            total.imported_dm_sessions += result.imported_dm_sessions;
+            total.imported_groups += result.imported_groups;
+            total.imported_sender_keys += result.imported_sender_keys;
+            let Some(next) = next else { return Ok(total) };
+            current = *next;
+        }
+    }
+    async fn import_own_history_page(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        expected_principal_commitment: &str,
+        envelope: &SdkOwnDeviceSyncEnvelope,
+        relay_service_key_base64: Option<String>,
+    ) -> Result<(SdkOwnDeviceSyncImportResponse, Option<Box<SdkOwnDeviceSyncEnvelope>>), SdkError>
+    {
         self.verify_own_device_sync_envelope(
             &engine.config,
             expected_principal_commitment,
@@ -169,7 +259,10 @@ impl RamfluxClient {
         if let Some(result) =
             self.account_db()?.load_actor_state::<SdkOwnDeviceSyncImportResponse>(&receipt)?
         {
-            return Ok(result);
+            let next = self
+                .account_db()?
+                .load_actor_state::<SdkOwnDeviceSyncEnvelope>(&format!("{receipt}/next"))?;
+            return Ok((result, next.map(Box::new)));
         }
         let cached = self
             .object_store_object(&envelope.history_ref.object_id)?
@@ -194,7 +287,10 @@ impl RamfluxClient {
         self.account_db()?.write_transaction(|| {
             let result = self.import_own_device_history_bundle(envelope, &bundle)?;
             self.cache_own_sync_import_receipt(envelope, &result)?;
-            Ok(result)
+            if let Some(next) = &bundle.next_page {
+                self.account_db()?.persist_actor_state(&format!("{receipt}/next"), next)?;
+            }
+            Ok((result, bundle.next_page.clone()))
         })
     }
     pub(crate) fn own_sync_receipt_key(
@@ -258,8 +354,9 @@ impl RamfluxClient {
         let group_member_pins = self.own_device_group_member_pins(&groups)?;
         let device_manifests = self.own_history_device_manifests(&group_member_pins)?;
         let accepted_contacts = self.own_history_contacts()?;
-        Self::check_own_history_authority_budget(&device_manifests, &accepted_contacts)?;
         Ok(SdkOwnDeviceHistoryBundle {
+            authority_only: false,
+            next_page: None,
             schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
             version: 1,
             principal_commitment: principal_commitment.to_owned(),
@@ -362,8 +459,13 @@ impl RamfluxClient {
                     "recv",
                 ) {
                     let distribution = SdkGroupSenderKeyDistribution {
-                        schema: "ramflux.sdk.group_sender_key.distribution.v1".to_owned(),
-                        version: 1,
+                        schema: if state.chain_version == 3 {
+                            "ramflux.sdk.group_sender_key.distribution.v3"
+                        } else {
+                            "ramflux.sdk.group_sender_key.distribution.v1"
+                        }
+                        .to_owned(),
+                        version: if state.chain_version == 3 { 3 } else { 1 },
                         group_id: group.group_id.clone(),
                         sender_id: member_id.clone(),
                         group_key_epoch: group.group_epoch,
@@ -494,31 +596,13 @@ impl RamfluxClient {
         self.account_db()?
             .write_transaction(|| self.import_own_device_history_bundle_inner(envelope, bundle))
     }
-    fn import_own_device_history_bundle_inner(
+    fn import_own_history_messages(
         &self,
-        envelope: &SdkOwnDeviceSyncEnvelope,
         bundle: &SdkOwnDeviceHistoryBundle,
-    ) -> Result<SdkOwnDeviceSyncImportResponse, SdkError> {
-        if bundle.schema != "ramflux.sdk.own_device_history_bundle.v1"
-            || bundle.principal_commitment != envelope.principal_commitment
-            || bundle.source_device_id != envelope.source_device_id
-            || bundle.target_device_id != envelope.target_device_id
-            || bundle.snapshot_id != envelope.snapshot_id
-        {
-            return Err(SdkError::LocalBus("own-device sync bundle binding mismatch".to_owned()));
-        }
-        let local_device_id =
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone();
-        if bundle.target_device_id != local_device_id {
-            return Err(SdkError::LocalBus("own-device sync bundle target mismatch".to_owned()));
-        }
-        self.restore_own_history_authority(bundle)?;
-        let floor_by_group = self.restore_own_groups(bundle)?;
-        let blocked = self.restore_own_device_group_member_pins(bundle, &floor_by_group)?;
-        self.import_own_task_packets(&bundle.task_packets, &bundle.source_device_id)?;
+        floor_by_group: &BTreeMap<String, u64>,
+        blocked: &BTreeSet<(String, String)>,
+    ) -> Result<usize, SdkError> {
         let mut imported_messages = 0_usize;
-        // Legacy snapshots may be decoded for compatibility, but never become live state on another device.
-        let imported_dm_sessions = 0_usize;
         for message in &bundle.messages {
             if serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
                 .is_ok_and(|g| !floor_by_group.contains_key(&g.group_id))
@@ -530,7 +614,7 @@ impl RamfluxClient {
                 )?;
                 continue;
             }
-            if !Self::message_allowed_by_group_floor(message, &floor_by_group) {
+            if !Self::message_allowed_by_group_floor(message, floor_by_group) {
                 self.account_db()?.record_own_device_restore_skip(
                     &bundle.snapshot_id,
                     &message.message_id,
@@ -555,7 +639,7 @@ impl RamfluxClient {
                 )?;
                 continue;
             }
-            if self.skip_owned_surface_message(bundle, &message.message_id, &floor_by_group)? {
+            if self.skip_owned_surface_message(bundle, &message.message_id, floor_by_group)? {
                 continue;
             }
             self.account_db()?.import_direct_message_projection(DirectMessageWrite {
@@ -575,6 +659,45 @@ impl RamfluxClient {
             }
             imported_messages = imported_messages.saturating_add(1);
         }
+        Ok(imported_messages)
+    }
+    fn import_own_device_history_bundle_inner(
+        &self,
+        envelope: &SdkOwnDeviceSyncEnvelope,
+        bundle: &SdkOwnDeviceHistoryBundle,
+    ) -> Result<SdkOwnDeviceSyncImportResponse, SdkError> {
+        if !matches!(
+            (bundle.schema.as_str(), bundle.version),
+            ("ramflux.sdk.own_device_history_bundle.v1", 1)
+                | ("ramflux.sdk.own_device_history_bundle.v2", 2)
+        ) || bundle.principal_commitment != envelope.principal_commitment
+            || bundle.source_device_id != envelope.source_device_id
+            || bundle.target_device_id != envelope.target_device_id
+            || bundle.snapshot_id != envelope.snapshot_id
+        {
+            return Err(SdkError::LocalBus("own-device sync bundle binding mismatch".to_owned()));
+        }
+        let local_device_id =
+            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone();
+        if bundle.target_device_id != local_device_id {
+            return Err(SdkError::LocalBus("own-device sync bundle target mismatch".to_owned()));
+        }
+        self.restore_own_history_authority(bundle)?;
+        if bundle.authority_only {
+            return Ok(SdkOwnDeviceSyncImportResponse {
+                snapshot_id: bundle.snapshot_id.clone(),
+                imported_messages: 0,
+                imported_dm_sessions: 0,
+                imported_groups: 0,
+                imported_sender_keys: 0,
+            });
+        }
+        let floor_by_group = self.restore_own_groups(bundle)?;
+        let blocked = self.restore_own_device_group_member_pins(bundle, &floor_by_group)?;
+        self.import_own_task_packets(&bundle.task_packets, &bundle.source_device_id)?;
+        let imported_messages =
+            self.import_own_history_messages(bundle, &floor_by_group, &blocked)?;
+        let imported_dm_sessions = 0;
         let mut imported_sender_keys = 0_usize;
         for distribution_base64 in &bundle.sender_key_distributions_base64 {
             if self.restore_own_sender_key(bundle, distribution_base64, &blocked)? {
@@ -751,7 +874,7 @@ pub(crate) mod tests {
         std::env::temp_dir().join(format!("ramflux-sdk-own-device-sync-{test_name}-{nanos}"))
     }
 
-    fn client_with_account(
+    pub(super) fn client_with_account(
         test_name: &str,
         principal: &str,
         device_id: &str,
@@ -828,13 +951,15 @@ pub(crate) mod tests {
         }
     }
 
-    fn bundle(
+    pub(super) fn bundle(
         source_device_id: &str,
         target_device_id: &str,
         messages: Vec<DirectMessageRecord>,
         groups: Vec<SdkOwnDeviceGroupSnapshot>,
     ) -> SdkOwnDeviceHistoryBundle {
         SdkOwnDeviceHistoryBundle {
+            authority_only: false,
+            next_page: None,
             task_packets: Vec::new(),
             task_export_metadata: crate::client::task::own_history::TaskExportMetadata::default(),
             surface_controls: Vec::new(),
@@ -1123,6 +1248,85 @@ pub(crate) mod tests {
         assert_eq!(rows.len(), 2);
         drop(client);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backup_paging_tests {
+    use super::tests::bundle;
+    use super::*;
+    #[test]
+    fn own_history_continuation_pages_preserve_every_contact_beyond_old_count_and_byte_caps()
+    -> Result<(), SdkError> {
+        let mut history = bundle("source", "target", Vec::new(), Vec::new());
+        history.accepted_contacts =
+            (0..1100).map(|n| format!("{n:04}:{}", "x".repeat(4096))).collect();
+        let expected = history.accepted_contacts.clone();
+        let pages = crate::client::own_device_history_pages::pages(history)?;
+        assert!(pages.len() > 2);
+        let mut actual = Vec::new();
+        for page in &pages {
+            RamfluxClient::check_own_history_authority_budget(
+                &page.device_manifests,
+                &page.accepted_contacts,
+            )?;
+            actual.extend(page.accepted_contacts.iter().cloned());
+        }
+        assert_eq!(actual, expected);
+        assert!(
+            !pages
+                .last()
+                .ok_or_else(|| SdkError::InboundRejected("page absent".into()))?
+                .authority_only
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backup_contact_paging_tests {
+    use super::*;
+    #[test]
+    fn every_restricted_contact_is_restored_across_authenticated_authority_pages()
+    -> Result<(), SdkError> {
+        let (source, source_root) = super::tests::client_with_account(
+            "backup-contact-pages-source",
+            "principal_sync",
+            "source",
+        )?;
+        let (target, target_root) = super::tests::client_with_account(
+            "backup-contact-pages-target",
+            "principal_sync",
+            "target",
+        )?;
+        let root = source.owned_device_identity()?.root_commitment().to_owned();
+        for n in 0..1100_u32 {
+            let id = format!("link-{n:04}");
+            source.account_db()?.establish_friend_link(
+                &id,
+                &root,
+                &ramflux_protocol::hash_base64url("backup-peer", &n.to_be_bytes()),
+            )?;
+            source.account_db()?.block_friend_link(&id, 1_800_000_000)?;
+        }
+        let mut history = super::tests::bundle("source", "target", Vec::new(), Vec::new());
+        history.principal_commitment = root.clone();
+        history.accepted_contacts = source.own_history_contacts()?;
+        assert_eq!(history.accepted_contacts.len(), 1100);
+        let mut envelope = super::tests::envelope("source", "target");
+        envelope.principal_commitment = root;
+        for page in crate::client::own_device_history_pages::pages(history)? {
+            envelope.snapshot_id = page.snapshot_id.clone();
+            target.import_own_device_history_bundle(&envelope, &page)?;
+        }
+        let links = target.account_db()?.friend_links()?;
+        assert_eq!(links.len(), 1100);
+        assert!(links.iter().all(|link| link.blocked));
+        drop(source);
+        drop(target);
+        std::fs::remove_dir_all(source_root)?;
+        std::fs::remove_dir_all(target_root)?;
         Ok(())
     }
 }

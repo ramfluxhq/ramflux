@@ -4,6 +4,7 @@
 pub mod a2i;
 mod a2i_identity;
 pub mod account;
+mod backup_activation;
 mod backup_contacts;
 pub(crate) mod call;
 pub mod contact;
@@ -105,3 +106,4 @@ impl RamfluxClient {
 }
 
 mod own_device_history_authority;
+mod own_device_history_pages;

@@ -52,7 +52,10 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
         account_id: request.account_id.clone(),
         sdk_api: request.sdk_api.clone(),
         method: request.method.clone(),
-        body: serde_json::Value::Null,
+        body: match error {
+            SdkError::LocalBusRefused { body, .. } => (**body).clone(),
+            _ => serde_json::Value::Null,
+        },
         trace_id: request.trace_id.clone(),
         seq: None,
         at: None,
@@ -64,6 +67,19 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
 }
 
 pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
+    if let SdkError::LocalBusRefused { code, message, body } = error {
+        return LocalBusErrorBody {
+            code: code.clone(),
+            message: message.clone(),
+            reason_code: body
+                .get("reason_code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            details: body.get("details").cloned().map(Box::new),
+            retry_after_ms: None,
+            cause: None,
+        };
+    }
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
     let mut cause = None;
     while let Some(source) = current {

@@ -26,6 +26,10 @@ pub struct AccountDbKey {
 }
 
 impl AccountDbKey {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self { bytes }
+    }
     /// # Errors
     /// Returns an error when the operating system CSPRNG cannot provide fresh key material.
     pub fn generate() -> Result<Self, StorageError> {

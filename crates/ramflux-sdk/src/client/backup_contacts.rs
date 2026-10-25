@@ -6,7 +6,17 @@ use crate::{RamfluxClient, SdkError};
 
 impl RamfluxClient {
     pub(crate) fn backup_contacts(&self) -> Result<Vec<String>, SdkError> {
-        self.own_history_contacts()
+        // Preserve the legacy key-backup format's admission budget. Full jobs copy all rows.
+        let mut bytes = 0;
+        Ok(self
+            .own_history_contacts()?
+            .into_iter()
+            .take(512)
+            .take_while(|packet| {
+                bytes += packet.len();
+                bytes <= 3 * 1024 * 1024
+            })
+            .collect())
     }
 
     pub(crate) fn restore_backup_contacts(&self, contacts: &[String]) -> Result<(), SdkError> {

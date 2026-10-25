@@ -45,6 +45,7 @@ pub(crate) async fn dispatch_account_bus_request(
             ))?;
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
+                "secure_sessions":if account.client.account_db()?.load_actor_state::<bool>("backup/reestablishing")?.unwrap_or(false){"reestablishing"}else{"ready"},
                 "node_id": manifest.node_id,
                 "client_mode":manifest.client_mode,
                 "local_device_authorized":manifest.devices.iter().any(|device|device.device_id==account.gateway_config.device_id),
@@ -115,7 +116,7 @@ pub(crate) async fn local_bus_account_create(
     }
     let data_root = state.config.data_root.clone();
     let manifest_path = local_bus_account_manifest_path(&data_root, &body.local_account_id);
-    if manifest_path.exists() {
+    if crate::bus::daemon::account_manifest_available(&manifest_path) {
         let manifest = read_local_bus_account_manifest(&manifest_path)?;
         if body.node_id.is_some() && body.node_id != manifest.node_id {
             return Err(crate::node::node_error("account node binding cannot be changed"));

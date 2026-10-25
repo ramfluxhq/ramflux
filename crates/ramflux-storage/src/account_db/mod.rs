@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod backup;
+pub(crate) mod backup_database;
+pub(crate) mod backup_merge;
 pub mod bot;
 mod contact_request_retention;
 mod contact_requests;
@@ -36,6 +38,7 @@ pub mod journal;
 pub mod mcp;
 pub mod messages;
 pub mod object;
+mod object_payload;
 pub mod read_model;
 pub mod recovery;
 pub mod runtime;
@@ -211,3 +214,6 @@ const fn insecure_test_sqlite_allowed() -> bool {
 mod contact_root;
 #[cfg(test)]
 mod receipt_identity_tests;
+
+#[cfg(test)]
+mod backup_merge_tests;

@@ -10,10 +10,15 @@ use std::cell::RefCell;
 use tokio::sync::oneshot;
 
 pub(super) struct Supervisor {
-    config: LocalBusConfig,
-    index: AccountIndex,
+    pub(super) config: LocalBusConfig,
+    owner: RefCell<std::rc::Weak<Supervisor>>,
+    pub(super) index: AccountIndex,
     nodes: RefCell<crate::node::NodeStore>,
     node_actor: AccountActor,
+    pub(super) backup_jobs: super::backup_jobs::BackupJobs,
+    pub(super) daemon_attended: RefCell<BTreeSet<u64>>,
+    pub(super) installing: RefCell<BTreeSet<String>>,
+    backup_expiry: RefCell<Option<tokio::task::JoinHandle<()>>>,
     accounts: RefCell<BTreeMap<String, AccountActor>>,
     subscribers: Rc<RefCell<BTreeMap<u64, LocalBusSubscriber>>>,
     events: mpsc::Sender<EventBatch>,
@@ -40,7 +45,12 @@ impl Supervisor {
             index.clone(),
             events.clone(),
         )?;
-        Ok(Rc::new(Self {
+        let supervisor = Rc::new(Self {
+            owner: RefCell::new(std::rc::Weak::new()),
+            backup_jobs: super::backup_jobs::BackupJobs::new(&config.data_root, index.clone())?,
+            daemon_attended: RefCell::new(BTreeSet::default()),
+            installing: RefCell::new(BTreeSet::default()),
+            backup_expiry: RefCell::new(None),
             config,
             index,
             stop_requested,
@@ -55,7 +65,9 @@ impl Supervisor {
             subscribers: Rc::new(RefCell::new(BTreeMap::new())),
             streams: RefCell::new(BTreeMap::new()),
             attended: RefCell::new(BTreeMap::new()),
-        }))
+        });
+        *supervisor.owner.borrow_mut() = Rc::downgrade(&supervisor);
+        Ok(supervisor)
     }
 
     #[cfg(test)]
@@ -86,15 +98,22 @@ impl Supervisor {
         self: &Rc<Self>,
         tasks: &mut tokio::task::JoinSet<()>,
     ) -> Result<(), SdkError> {
-        let path = self.config.data_root.join("local_bus_accounts");
-        if !path.exists() {
-            return Ok(());
-        }
-        for entry in std::fs::read_dir(path)? {
-            let path = entry?.path();
-            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
-                continue;
+        let directory = self.config.data_root.join("local_bus_accounts");
+        let mut paths = self
+            .index
+            .known_account_ids()?
+            .into_iter()
+            .map(|id| local_bus_account_manifest_path(&self.config.data_root, &id))
+            .collect::<BTreeSet<_>>();
+        if directory.exists() {
+            for entry in std::fs::read_dir(directory)? {
+                let path = entry?.path();
+                if path.extension().and_then(std::ffi::OsStr::to_str) == Some("json") {
+                    paths.insert(path);
+                }
             }
+        }
+        for path in paths {
             let manifest = match read_local_bus_account_manifest(&path) {
                 Ok(manifest) => manifest,
                 Err(error) => {
@@ -169,17 +188,24 @@ impl Supervisor {
         result
     }
 
+    fn ensure_request_allowed(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+        if *self.stop_requested.borrow() && request.method != "daemon.stop" {
+            return Err(SdkError::LocalBus("daemon is stopping".to_owned()));
+        }
+        if request.kind != LocalBusFrameKind::Request {
+            return Err(SdkError::LocalBus("expected request frame".to_owned()));
+        }
+        Ok(())
+    }
     async fn route(
         &self,
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
         self.start_event_router();
-        if *self.stop_requested.borrow() && request.method != "daemon.stop" {
-            return Err(SdkError::LocalBus("daemon is stopping".to_owned()));
-        }
-        if request.kind != LocalBusFrameKind::Request {
-            return Err(SdkError::LocalBus("expected request frame".to_owned()));
+        self.ensure_request_allowed(&request)?;
+        if crate::backup::BACKUP_JOB_METHODS.contains(&request.method.as_str()) {
+            return self.backup_request(request, connection).await;
         }
         match request.method.as_str() {
             "account.list" => {
@@ -231,6 +257,9 @@ impl Supervisor {
         } else {
             request_account_id(&request)?.to_owned()
         };
+        if self.installing.borrow().contains(&id) {
+            return Err(super::backup_jobs::refusal("restore_install_in_progress"));
+        }
         let actor = self.accounts.borrow().get(&id).cloned();
         let creating = matches!(
             request.method.as_str(),
@@ -277,7 +306,7 @@ impl Supervisor {
             let mut known=Vec::new();
             for id in index.known_account_ids()? {
                 let path=local_bus_account_manifest_path(&root,&id);
-                let manifest=path.exists().then(||read_local_bus_account_manifest(&path)).transpose()?;
+                let manifest=super::daemon::account_manifest_available(&path).then(||read_local_bus_account_manifest(&path)).transpose()?;
                 known.push(serde_json::json!({"id":id,"label":manifest.as_ref().and_then(|m|m.label.as_ref()),"kind":manifest.as_ref().and_then(|m|m.kind.as_ref()),"principal_id":manifest.as_ref().map(|m|&m.principal_id)}));
             }
             Ok((index.active_account()?,known))
@@ -354,7 +383,28 @@ impl Supervisor {
         Ok(())
     }
 
-    #[cfg(test)]
+    pub(super) fn owned_backup_handle(&self) -> Result<Rc<Self>, SdkError> {
+        self.owner.borrow().upgrade().ok_or_else(|| SdkError::LocalBus("daemon stopped".into()))
+    }
+    pub(super) fn replace_backup_stream(&self, id: u64, task: tokio::task::JoinHandle<()>) {
+        if let Some(previous) = self.streams.borrow_mut().insert(id, task) {
+            previous.abort();
+        }
+    }
+    pub(super) fn remove_backup_actor(&self, id: &str) {
+        self.accounts.borrow_mut().remove(id);
+    }
+    pub(super) fn new_backup_actor(&self, id: &str) -> Result<AccountActor, SdkError> {
+        let actor = AccountActor::start(
+            id.into(),
+            self.config.clone(),
+            self.nodes.borrow().clone(),
+            self.index.clone(),
+            self.events.clone(),
+        )?;
+        self.accounts.borrow_mut().insert(id.into(), actor.clone());
+        Ok(actor)
+    }
     pub(super) fn account_actor(&self, id: &str) -> Option<AccountActor> {
         self.accounts.borrow().get(id).cloned()
     }
@@ -383,6 +433,7 @@ impl Supervisor {
     }
 
     pub(super) async fn shutdown(&self) -> Result<(), SdkError> {
+        self.backup_jobs.stop().await;
         self.start_event_router();
         let actors = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
         let mut result = Ok(());
@@ -405,6 +456,9 @@ impl Supervisor {
         self.start_event_router();
         if let Some(id) = &connection.attended_account_id {
             self.attended.borrow_mut().insert(connection.connection_id, id.clone());
+        }
+        if request.account_id.is_none() {
+            return self.subscribe_backup_stream(request, connection).await;
         }
         let id = request_account_id(&request)?;
         let actor = self.accounts.borrow().get(id).cloned().ok_or_else(|| not_open(id))?;
@@ -440,6 +494,7 @@ impl Supervisor {
         }
         self.subscribers.borrow_mut().remove(&id);
         self.attended.borrow_mut().remove(&id);
+        self.daemon_attended.borrow_mut().remove(&id);
     }
 
     pub(super) fn broadcast(&self, events: &[LocalBusFrame]) {
@@ -452,6 +507,15 @@ impl Supervisor {
     }
 
     fn start_event_router(&self) {
+        if self.backup_expiry.borrow().is_none() {
+            let jobs = self.backup_jobs.clone();
+            *self.backup_expiry.borrow_mut() = Some(tokio::task::spawn_local(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    jobs.expire();
+                }
+            }));
+        }
         if let Some(mut receiver) = self.event_receiver.borrow_mut().take() {
             let subscribers = Rc::clone(&self.subscribers);
             *self.event_task.borrow_mut() = Some(tokio::task::spawn_local(async move {
@@ -466,6 +530,9 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
+        if let Some(task) = self.backup_expiry.get_mut().take() {
+            task.abort();
+        }
         for (_, task) in std::mem::take(self.streams.get_mut()) {
             task.abort();
         }
@@ -478,6 +545,7 @@ impl Drop for Supervisor {
 fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> AccountCommand {
     let (reply, _) = oneshot::channel();
     AccountCommand {
+        backup: None,
         request,
         connection_id: connection.connection_id,
         topics: connection.topics.clone(),

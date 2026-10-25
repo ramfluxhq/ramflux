@@ -72,3 +72,15 @@ pub enum StorageError {
     #[error("pending recovery {recovery_id} is not in expected state: {expected}")]
     InvalidRecoveryState { recovery_id: String, expected: String },
 }
+
+impl StorageError {
+    /// Whether a storage operation exhausted its filesystem or SQLite page budget.
+    #[must_use]
+    pub fn is_insufficient_space(&self) -> bool {
+        match self {
+            Self::Io(error) => error.kind() == std::io::ErrorKind::StorageFull,
+            Self::Sqlite(error) => error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull),
+            _ => false,
+        }
+    }
+}

@@ -25,6 +25,8 @@ const TAG_SIZE: usize = 16;
 pub struct BackupContext {
     pub account_id: String,
     pub created_at: u64,
+    #[serde(default)]
+    pub totals: std::collections::BTreeMap<String, u64>,
 }
 
 /// Validated metadata and authenticated byte count, available only after final verification.
@@ -147,6 +149,57 @@ fn encrypt_with_key(
     let plaintext_bytes =
         framing::encrypt_chunks(input, output, &file_key, &header.stream_prefix, &authenticated)?;
     Ok(BackupStreamSummary { context: header.context.clone(), plaintext_bytes })
+}
+
+/// Authenticated header and RAM-only file key for streaming restore progress.
+pub struct BackupStreamDecoder {
+    header: Header,
+    authenticated: Vec<u8>,
+    key: Zeroizing<[u8; 32]>,
+}
+impl BackupStreamDecoder {
+    /// Authenticates the header before any archive content or totals are trusted.
+    /// # Errors
+    /// Returns framing, key derivation or authentication errors.
+    pub fn open(input: &mut impl Read, passphrase: &[u8]) -> Result<Self, BackupStreamError> {
+        let (header, mut authenticated, wrapped) = read_header(input)?;
+        let wrapping = crate::derive_recovery_secret(passphrase, &header.salt)?;
+        let cipher = XChaCha20Poly1305::new(wrapping.expose().into());
+        let bytes = Zeroizing::new(
+            cipher
+                .decrypt(
+                    XNonce::from_slice(&header.wrap_nonce),
+                    Payload { msg: &wrapped, aad: &authenticated },
+                )
+                .map_err(|_| BackupStreamError::Authentication)?,
+        );
+        let key = Zeroizing::new(
+            bytes.as_slice().try_into().map_err(|_| BackupStreamError::Invalid("file key"))?,
+        );
+        authenticated.extend_from_slice(&wrapped);
+        Ok(Self { header, authenticated, key })
+    }
+    #[must_use]
+    pub fn context(&self) -> &BackupContext {
+        &self.header.context
+    }
+    /// Writes authenticated chunks only into private staging and requires final EOF.
+    /// # Errors
+    /// Returns truncation, tamper or I/O failures; staging must then be discarded.
+    pub fn decrypt(
+        self,
+        input: &mut impl Read,
+        output: &mut impl Write,
+    ) -> Result<BackupStreamSummary, BackupStreamError> {
+        let plaintext_bytes = framing::decrypt_chunks(
+            input,
+            output,
+            &self.key,
+            &self.header.stream_prefix,
+            &self.authenticated,
+        )?;
+        Ok(BackupStreamSummary { context: self.header.context, plaintext_bytes })
+    }
 }
 
 /// Authenticates an archive into caller-owned private staging, using bounded memory.

@@ -8,6 +8,8 @@ use rusqlite::{OptionalExtension, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod backup;
+pub use backup::BackupIndexInstall;
 mod operations;
 
 #[derive(Clone)]
@@ -29,6 +31,7 @@ impl AccountIndex {
         migrate_account_index(&connection)?;
         let index = Self { root: root.as_ref().to_path_buf(), connection };
         index.install_operation_schema()?;
+        index.install_backup_schema()?;
         Ok(index)
     }
 

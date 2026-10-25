@@ -40,6 +40,10 @@ pub(crate) struct SdkOwnDeviceSyncSigningBody<'a> {
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkOwnDeviceHistoryBundle {
+    #[serde(default)]
+    pub(crate) authority_only: bool,
+    #[serde(default)]
+    pub(crate) next_page: Option<Box<SdkOwnDeviceSyncEnvelope>>,
     pub(crate) schema: String,
     pub(crate) version: u32,
     pub(crate) principal_commitment: String,

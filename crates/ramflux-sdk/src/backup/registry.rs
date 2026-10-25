@@ -245,6 +245,38 @@ impl BackupJobRegistry {
         self.entry_mut(id)?.row = row.clone();
         Ok(row)
     }
+    /// Publishes totals only after the archive header authenticates.
+    /// # Errors
+    /// Refuses non-verifying jobs or sequence overflow.
+    pub fn authenticated_totals(
+        &mut self,
+        id: &str,
+        counts: ramflux_storage::BackupCounts,
+    ) -> Result<BackupJob, crate::SdkError> {
+        let entry = self.entry_mut(id)?;
+        if entry.row.state != BackupJobState::Verifying {
+            return Err(refused("invalid_job_phase"));
+        }
+        entry.row.seq = entry.row.seq.checked_add(1).ok_or_else(|| refused("interrupted"))?;
+        entry.row.counts = Some(counts);
+        Ok(entry.row.clone())
+    }
+    /// Reports every attachment check, including failures that prevent verification.
+    /// # Errors
+    /// Refuses terminal jobs or sequence overflow.
+    pub fn attachment_checks(
+        &mut self,
+        id: &str,
+        checks: BackupAttachmentChecks,
+    ) -> Result<BackupJob, crate::SdkError> {
+        let entry = self.entry_mut(id)?;
+        if entry.row.state.terminal() {
+            return Err(refused("invalid_job_phase"));
+        }
+        entry.row.seq = entry.row.seq.checked_add(1).ok_or_else(|| refused("interrupted"))?;
+        entry.row.attachments = Some(checks);
+        Ok(entry.row.clone())
+    }
     /// Updates progress while preserving job identity and state.
     /// # Errors
     /// Refuses terminal jobs, unknown IDs and sequence overflow.

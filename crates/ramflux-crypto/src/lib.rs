@@ -5,6 +5,7 @@
 
 pub mod backup_stream;
 mod device_reference;
+pub mod object_verification;
 pub use device_reference::RootQualifiedDeviceRef;
 mod double_ratchet;
 mod error;

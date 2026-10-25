@@ -5,6 +5,7 @@ mod account_runtime;
 mod ack_cache;
 mod actor;
 mod attachment_scheduler;
+mod backup_jobs;
 pub mod client;
 mod connection;
 mod control_state;

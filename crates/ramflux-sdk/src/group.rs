@@ -31,6 +31,8 @@ pub(crate) struct SdkGroupSenderKeyDistributionEnvelope {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SdkGroupSenderKeyState {
     #[serde(default)]
+    pub(crate) chain_version: u32,
+    #[serde(default)]
     pub(crate) principal_commitment: Option<String>,
     pub(crate) group_id: String,
     pub(crate) sender_id: String,

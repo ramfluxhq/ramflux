@@ -128,7 +128,11 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn event_body(&self, event_id: &str) -> Result<Option<Vec<u8>>, SdkError> {
-        Ok(self.account_db()?.event_body(event_id)?)
+        let db = self.account_db()?;
+        match db.event_body(event_id)? {
+            Some(body) => Ok(Some(body)),
+            None => Ok(db.archived_backup_event_body(event_id)?),
+        }
     }
 
     /// # Errors
@@ -226,7 +230,7 @@ impl RamfluxClient {
     }
 }
 
-fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
+pub(crate) fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ramflux.account_db_kek.v2");
     hasher.update(vault_secret);

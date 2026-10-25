@@ -13,6 +13,7 @@ pub(super) type AccountInitializer =
     Box<dyn FnOnce(AccountIndex) -> Result<LocalBusAccountState, SdkError> + Send>;
 
 pub(super) struct AccountCommand {
+    pub backup: Option<oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>>,
     pub request: LocalBusFrame,
     pub connection_id: u64,
     pub topics: BTreeSet<String>,
@@ -90,6 +91,32 @@ impl AccountActor {
             initialized.recv().map_err(|_| stopped())?;
         }
         Ok(Self { sender, readers, shutdown_signal: lifetime, done })
+    }
+
+    pub(super) async fn capture_backup(
+        &self,
+    ) -> Result<super::backup_jobs::CapturedAccount, SdkError> {
+        let (backup, received) = oneshot::channel();
+        let (reply, _) = oneshot::channel();
+        let (outbound, _) = mpsc::channel(1);
+        let command = AccountCommand {
+            backup: Some(backup),
+            request: LocalBusFrame::request(
+                "backup-capture",
+                None,
+                "account",
+                "account.backup.capture",
+                serde_json::json!({}),
+            ),
+            connection_id: 0,
+            topics: BTreeSet::default(),
+            attended: false,
+            nodes: None,
+            outbound,
+            reply: Some(reply),
+        };
+        self.sender.send(command).await.map_err(|_| stopped())?;
+        received.await.map_err(|_| stopped())?
     }
 
     pub(super) fn reader_pool(&self) -> Result<AccountReaders, SdkError> {

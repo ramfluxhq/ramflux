@@ -5,7 +5,10 @@
 
 mod account_db;
 pub use account_db::backup::{AccountBackupSnapshot, BackupCounts};
+pub use account_db::backup_database::{BackupAttachmentVerification, BackupDatabase};
+pub use account_db::backup_merge::BackupMergeReport;
 mod account_index;
+pub use account_index::BackupIndexInstall;
 mod clock;
 mod constants;
 mod conversation_helpers;

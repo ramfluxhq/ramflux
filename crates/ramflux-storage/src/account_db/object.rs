@@ -159,11 +159,11 @@ impl AccountDb {
         &self,
         object_id: &str,
     ) -> Result<Option<StoredObject<T>>, StorageError> {
-        let row: Option<(Vec<u8>, Option<Vec<u8>>)> = self.connection.query_row(
-            "SELECT object_body,object_content_key FROM object_index WHERE object_id=?1 AND object_body IS NOT NULL",
-            params![object_id], |row| Ok((row.get(0)?,row.get(1)?))
+        let row: Option<(i64, Vec<u8>, Option<Vec<u8>>)> = self.connection.query_row(
+            "SELECT rowid,object_body,object_content_key FROM object_index WHERE object_id=?1 AND object_body IS NOT NULL",
+            params![object_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))
         ).optional()?;
-        row.map(|(body, key)| {
+        row.map(|(rowid, body, key)| {
             let key = key
                 .map(|key| {
                     key.try_into().map_err(|_| {
@@ -173,7 +173,7 @@ impl AccountDb {
                     })
                 })
                 .transpose()?;
-            Ok((serde_json::from_slice(&body)?, key))
+            Ok((super::object_payload::decode(&self.connection, rowid, &body)?, key))
         })
         .transpose()
     }
@@ -184,7 +184,7 @@ impl AccountDb {
         &self,
         limit: usize,
     ) -> Result<StoredObjects<T>, StorageError> {
-        let mut statement = self.connection.prepare("SELECT object_id FROM object_index WHERE object_body IS NOT NULL ORDER BY updated_at DESC,object_id LIMIT ?1")?;
+        let mut statement = self.connection.prepare("SELECT object_id FROM object_index WHERE object_body IS NOT NULL AND length(ciphertext)<=1048576 ORDER BY updated_at DESC,object_id LIMIT ?1")?;
         let ids = statement
             .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
                 row.get::<_, String>(0)
@@ -208,31 +208,19 @@ impl AccountDb {
         T: DeserializeOwned,
     {
         let mut statement = self.connection.prepare(
-            "SELECT object_id, object_body, object_content_key
-               FROM object_index
-              WHERE object_body IS NOT NULL
-              ORDER BY object_id ASC",
+            "SELECT object_id FROM object_index WHERE object_body IS NOT NULL ORDER BY object_id",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-            ))
-        })?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut objects = Vec::new();
         let mut object_keys = BTreeMap::new();
-        for row in rows {
-            let (object_id, body, key) = row?;
-            objects.push(serde_json::from_slice(&body)?);
-            if let Some(key) = key {
-                let key: [u8; 32] = key.try_into().map_err(|bad: Vec<u8>| {
-                    StorageError::KeyWrappingFailed(format!(
-                        "invalid object content key length for {object_id}: {}",
-                        bad.len()
-                    ))
-                })?;
-                object_keys.insert(object_id, key);
+        for id in ids {
+            if let Some((object, key)) = self.load_object(&id)? {
+                objects.push(object);
+                if let Some(key) = key {
+                    object_keys.insert(id, key);
+                }
             }
         }
         Ok((objects, object_keys))

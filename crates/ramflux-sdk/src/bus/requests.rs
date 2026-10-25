@@ -30,6 +30,7 @@ pub(super) async fn respond(
     supervisor: Rc<Supervisor>,
     context: LocalBusConnectionState,
 ) -> (String, Result<(), SdkError>) {
+    let request = OwnedRequest(request);
     let mut stop_response = (request.method == "daemon.stop").then(|| StopResponse {
         supervisor: Rc::clone(&supervisor),
         connection: context.connection_id,
@@ -46,11 +47,11 @@ pub(super) async fn respond(
         match crate::itest_bus_fault::should_drop_response(&request.method) {
             Ok(true) => {
                 return (
-                    request.request_id,
+                    request.request_id.clone(),
                     Err(SdkError::LocalBus("local bus response dropped".to_owned())),
                 );
             }
-            Err(error) => return (request.request_id, Err(error)),
+            Err(error) => return (request.request_id.clone(), Err(error)),
             Ok(false) => {}
         }
     }
@@ -64,7 +65,7 @@ pub(super) async fn respond(
         }
         supervisor.broadcast(&events);
     }
-    (request.request_id, sent)
+    (request.request_id.clone(), sent)
 }
 
 async fn dispatch(
@@ -95,5 +96,19 @@ impl Drop for StopResponse {
         if self.armed {
             self.supervisor.finish_stop_response(self.connection, &self.request);
         }
+    }
+}
+
+// Own the original decoded body as well as the dispatch copy; cancellation also erases it.
+struct OwnedRequest(LocalBusFrame);
+impl std::ops::Deref for OwnedRequest {
+    type Target = LocalBusFrame;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for OwnedRequest {
+    fn drop(&mut self) {
+        super::secrets::wipe(&mut self.0.body);
     }
 }

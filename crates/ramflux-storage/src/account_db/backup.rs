@@ -28,6 +28,35 @@ pub struct AccountBackupSnapshot {
 }
 
 impl AccountDb {
+    /// Reads an unambiguous preserved historical event which could not enter the live event log.
+    /// A local record, including an explicitly retired record, always takes precedence.
+    /// # Errors
+    /// Returns SQL errors or refuses conflicting archived bodies for one event ID.
+    pub fn archived_backup_event_body(&self, id: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let exists:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_archived_local_event')",[],|r|r.get(0))?;
+        if !exists {
+            return Ok(None);
+        }
+        let variants:u64=self.connection.query_row("SELECT count(DISTINCT event_body) FROM backup_archived_local_event WHERE event_id=?1 AND signature_status!='retired' AND NOT EXISTS(SELECT 1 FROM local_event_log WHERE event_id=?1)",rusqlite::params![id],|r|r.get(0))?;
+        if variants > 1 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        if variants == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.connection.query_row("SELECT event_body FROM backup_archived_local_event WHERE event_id=?1 AND signature_status!='retired' LIMIT 1",rusqlite::params![id],|r|r.get(0))?))
+    }
+    /// Returns a conservative encrypted snapshot size without enumerating domain rows.
+    /// # Errors
+    /// Returns SQL errors reading the current pinned snapshot page metadata.
+    pub fn backup_estimated_bytes(&self) -> Result<u64, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT page_count*page_size FROM pragma_page_count(),pragma_page_size()",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Writes a consistent encrypted snapshot without materializing rows or BLOBs.
     /// The destination must be inside a private staging directory and must not exist.
     /// On any error the caller must discard the private staging directory.
@@ -39,6 +68,29 @@ impl AccountDb {
         &self,
         destination: &Path,
     ) -> Result<AccountBackupSnapshot, StorageError> {
+        self.write_backup_snapshot_cancellable(
+            destination,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    }
+    /// Writes a snapshot with cancellation checked between bounded page batches.
+    /// # Errors
+    /// Returns snapshot errors or SQLite interruption when cancellation is requested.
+    pub fn write_backup_snapshot_cancellable(
+        &self,
+        destination: &Path,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<AccountBackupSnapshot, StorageError> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?
+            .to_owned();
+        let estimate = self.connection.query_row(
+            "SELECT page_count*page_size FROM pragma_page_count(),pragma_page_size()",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        super::backup_database::require_space(&parent, estimate.saturating_add(20 * 1024 * 1024))?;
         let file = std::fs::OpenOptions::new().create_new(true).write(true).open(destination)?;
         #[cfg(unix)]
         {
@@ -51,7 +103,7 @@ impl AccountDb {
         let fingerprint = key.fingerprint();
         let path = destination.to_owned();
         let counts = self.connection.call(move |source| {
-            if !source.is_autocommit() {
+            if !source.is_autocommit() && source.query_row("PRAGMA query_only",[],|row|row.get::<_,u32>(0))?!=1 {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             let mut target = rusqlite::Connection::open(path)?;
@@ -59,9 +111,14 @@ impl AccountDb {
             {
                 let snapshot = rusqlite::backup::Backup::new(source, &mut target)?;
                 loop {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire){return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),None));}
                     match snapshot.step(128)? {
                         rusqlite::backup::StepResult::Done => break,
-                        rusqlite::backup::StepResult::More => {},
+                        rusqlite::backup::StepResult::More => {
+                            if fs2::available_space(&parent).unwrap_or(0)<2*1024*1024 {
+                                return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),None));
+                            }
+                        },
                         _ => return Err(rusqlite::Error::SqliteFailure(
                             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
                             Some("account backup snapshot busy".into()),
@@ -71,22 +128,37 @@ impl AccountDb {
             }
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
             // All domain tables, keys and object payloads were copied by SQLite itself.
-            let counts = BackupCounts {
-                contacts: target.query_row("SELECT count(*) FROM friend_link_projection", [], |row| row.get(0))?,
-                conversations: target.query_row("SELECT count(*) FROM conversation_projection", [], |row| row.get(0))?,
-                messages: target.query_row("SELECT count(*) FROM message_projection", [], |row| row.get(0))?,
-                groups: target.query_row("SELECT count(*) FROM group_projection", [], |row| row.get(0))?,
-                surfaces: target.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'surface/state/%'", [], |row| row.get(0))?,
-                tasks: target.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'task/view/%'", [], |row| row.get(0))?,
-                attachments: target.query_row("SELECT count(*) FROM object_index", [], |row| row.get(0))?,
-                attachment_bytes: target.query_row("SELECT coalesce(sum(length(ciphertext)),0) FROM object_index", [], |row| row.get(0))?,
-            };
+            let counts=read_counts(&target)?;
             target.close().map_err(|(_, error)| error)?;
             Ok(counts)
         })?;
         std::fs::File::open(destination)?.sync_all()?;
         Ok(AccountBackupSnapshot { key, counts })
     }
+}
+
+pub(super) fn read_counts(db: &rusqlite::Connection) -> rusqlite::Result<BackupCounts> {
+    let count = |sql| db.query_row(sql, [], |row| row.get::<_, u64>(0));
+    Ok(BackupCounts {
+        contacts: count("SELECT count(*) FROM friend_link_projection")?,
+        conversations: count(
+            "SELECT (SELECT count(*) FROM conversation_projection)+(SELECT count(*) FROM conversation_list_state l WHERE NOT EXISTS(SELECT 1 FROM conversation_projection c WHERE c.conversation_id=l.conversation_id))+(SELECT count(*) FROM (SELECT conversation_id FROM direct_message_projection GROUP BY conversation_id) d WHERE NOT EXISTS(SELECT 1 FROM conversation_projection c WHERE c.conversation_id=d.conversation_id) AND NOT EXISTS(SELECT 1 FROM conversation_list_state l WHERE l.conversation_id=d.conversation_id))",
+        )?,
+        messages: count(
+            "SELECT (SELECT count(*) FROM direct_message_projection)+(SELECT count(*) FROM message_projection m WHERE NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=m.message_id))",
+        )?,
+        groups: count("SELECT count(*) FROM group_projection")?,
+        surfaces: count(
+            "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'surface/state/%'",
+        )?,
+        tasks: count(
+            "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'task/view/%'",
+        )?,
+        attachments: count("SELECT count(*) FROM object_index WHERE backup_excluded=0")?,
+        attachment_bytes: count(
+            "SELECT coalesce(sum(length(ciphertext)),0) FROM object_index WHERE backup_excluded=0",
+        )?,
+    })
 }
 
 #[cfg(test)]
@@ -157,6 +229,42 @@ mod tests {
         drop(db);
         drop(index);
         std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod archived_event_tests {
+    use super::*;
+    use crate::{AccountIndex, EventStore};
+    #[test]
+    fn archived_history_never_revives_retired_events_or_guesses_conflicting_bodies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-backup-archive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let index = AccountIndex::open(&root)?;
+        index.create_account("account", "root")?;
+        let key = AccountDbKey::generate()?;
+        let db = AccountDb::open(&index, "account", &key)?;
+        db.append_event("retired", "test.history", b"retired secret")?;
+        db.append_event("archive-only", "test.history", b"historical state")?;
+        db.connection.execute_batch("CREATE TABLE backup_archived_local_event AS SELECT 'source' AS source,* FROM local_event_log; UPDATE local_event_log SET signature_status='retired',event_body=x'' WHERE event_id='retired'; DELETE FROM local_event_log WHERE event_id='archive-only';")?;
+        assert_eq!(db.archived_backup_event_body("retired")?, None);
+        assert_eq!(
+            db.archived_backup_event_body("archive-only")?,
+            Some(b"historical state".to_vec())
+        );
+        db.connection.execute_batch("INSERT INTO backup_archived_local_event SELECT 'conflict',event_id,event_type,actor_principal_id,actor_device_id,device_counter,lamport_time,created_at,causal_prev_json,x'0102',signature,signature_status,projection_status FROM backup_archived_local_event WHERE event_id='archive-only';")?;
+        assert!(matches!(
+            db.archived_backup_event_body("archive-only"),
+            Err(StorageError::AuthorizationRejected)
+        ));
+        drop(db);
+        drop(index);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

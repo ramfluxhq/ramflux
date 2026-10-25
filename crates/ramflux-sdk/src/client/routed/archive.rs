@@ -49,6 +49,9 @@ impl RamfluxClient {
         id: &str,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
+        if db.actor_state_exists(&format!("backup/inactive-pair/{id}"))? {
+            return Ok(());
+        }
         let key = RamfluxClient::pair_key(local, remote)?;
         if let Some(old) = db.load_actor_state::<String>(&key)?
             && old != id

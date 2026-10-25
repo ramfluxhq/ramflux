@@ -983,7 +983,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             serde_json::from_slice(&distribution)?;
         let sender = account.client.owned_device_identity()?;
         let recipient = account.client.device_identity_for_root(&member_principal_commitment, recipient_device_id)?;
-        let distribution_key = crate::group::distribution_envelope_key(group_id, &sender, &recipient, decoded_distribution.group_key_epoch)?;
+        let distribution_key = format!("{}/{}",crate::group::distribution_envelope_key(group_id, &sender, &recipient, decoded_distribution.group_key_epoch)?,ramflux_protocol::hash_base64url("ramflux.group.distribution.content.v3",&distribution));
         let envelope_id = if let Some(id) = account.client.account_db()?.load_actor_state::<String>(&distribution_key)? { id } else {
             let id = format!("envelope_{}",ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
             account.client.account_db()?.persist_actor_state(&distribution_key,&id)?;

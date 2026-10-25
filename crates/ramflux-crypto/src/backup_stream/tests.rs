@@ -8,7 +8,11 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const TEST_KEY: [u8; 32] = [37; 32];
 
 fn context() -> BackupContext {
-    BackupContext { account_id: "backup-account".into(), created_at: 1_761_350_400 }
+    BackupContext {
+        account_id: "backup-account".into(),
+        created_at: 1_761_350_400,
+        totals: std::collections::BTreeMap::default(),
+    }
 }
 fn seal(plaintext: &[u8]) -> Result<Vec<u8>, BackupStreamError> {
     let mut archive = Vec::new();

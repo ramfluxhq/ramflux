@@ -75,7 +75,6 @@ impl RamfluxClient {
         let own = self.owned_device_identity()?;
         let db = self.account_db()?;
         let mut result = Vec::new();
-        let mut bytes = 0;
         // Restrictions precede acceptances both in history and in the ordered own-device queue.
         for restrictions in [true, false] {
             let mut after = String::new();
@@ -105,10 +104,6 @@ impl RamfluxClient {
                         continue;
                     };
                     let encoded = ramflux_protocol::encode_base64url(body);
-                    if result.len() >= 512 || bytes + encoded.len() > 3 * 1024 * 1024 {
-                        return Ok(result);
-                    }
-                    bytes += encoded.len();
                     result.push(encoded);
                 }
                 if page.len() < 64 {

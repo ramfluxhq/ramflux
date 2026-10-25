@@ -21,6 +21,12 @@ impl RamfluxClient {
             return Ok(None);
         }
         let Some((session, bundle)) = self.active_pair(local, remote)? else { return Ok(None) };
+        if self
+            .account_db()?
+            .actor_state_exists(&format!("backup/inactive-pair/{}", session.session_id))?
+        {
+            return Ok(None);
+        }
         let header = self.account_db()?.load_actor_state::<SdkDmX3dhHeader>(&format!(
             "dm-pair/bootstrap/{}",
             session.session_id

@@ -101,7 +101,9 @@ impl RamfluxClient {
             .load_actor_state::<String>(&RamfluxClient::pair_key(local, remote)?)?;
         let mut order = current.into_iter().collect::<Vec<_>>();
         order.extend(self.archived_pairs(local, remote)?);
-        if !order.iter().any(|candidate| candidate == id) {
+        if !order.iter().any(|candidate| candidate == id)
+            && !self.account_db()?.actor_state_exists(&format!("backup/inactive-pair/{id}"))?
+        {
             return Ok(None);
         }
         let Some(record) =

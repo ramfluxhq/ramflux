@@ -17,16 +17,10 @@ impl RamfluxClient {
             .filter_map(|pin| pin.principal_commitment.as_deref())
             .collect::<BTreeSet<_>>();
         let mut manifests = Vec::new();
-        let mut bytes = 0;
         for root in roots {
             if let Some(manifest) =
                 self.account_db()?.load_actor_state(&format!("identity/manifest-root/{root}"))?
             {
-                let encoded = serde_json::to_vec(&manifest)?;
-                if manifests.len() >= 512 || bytes + encoded.len() > 3 * 1024 * 1024 {
-                    break;
-                }
-                bytes += encoded.len();
                 manifests.push(manifest);
             }
         }

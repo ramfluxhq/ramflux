@@ -224,8 +224,11 @@ impl LocalBusAccountState {
             let root = self.client.account_index()?.root().to_path_buf();
             let id = self.client.account_db()?.local_account_id.clone();
             let path = local_bus_account_manifest_path(&root, &id);
-            let mut pending =
-                if path.exists() { Some(read_local_bus_account_manifest(&path)?) } else { None };
+            let mut pending = if super::daemon::account_manifest_available(&path) {
+                Some(read_local_bus_account_manifest(&path)?)
+            } else {
+                None
+            };
             let refresh_due = self.client.own_proof_refresh_due(now_unix_timestamp())?;
             if let Some(manifest) =
                 pending.as_ref().filter(|manifest| manifest.activation_pending || refresh_due)
@@ -297,6 +300,7 @@ impl LocalBusAccountState {
             if self.gateway_config.push_route_clear_pending {
                 self.forget_confirmed_push_clear();
             }
+            self.client.complete_backup_activation()?;
             if let Some(manifest) = pending.as_mut().filter(|manifest| manifest.activation_pending)
             {
                 manifest.activation_pending = false;

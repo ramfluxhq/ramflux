@@ -63,20 +63,50 @@ pub(crate) fn set_owner_only_file_permissions(path: &Path) -> Result<(), SdkErro
 pub(crate) fn read_local_bus_account_manifest(
     path: &Path,
 ) -> Result<LocalBusPersistedAccount, SdkError> {
+    if let Some((root, id)) = manifest_index_location(path)
+        && root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
+        && let Some(bytes) = AccountIndex::open(root)?.backup_generation_manifest(id)?
+    {
+        return Ok(serde_json::from_slice(&bytes)?);
+    }
     let bytes = std::fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn manifest_index_location(path: &Path) -> Option<(&Path, &str)> {
+    let parent = path.parent()?;
+    if parent.file_name()?.to_str()? != "local_bus_accounts" {
+        return None;
+    }
+    Some((parent.parent()?, path.file_stem()?.to_str()?))
+}
+
+pub(crate) fn account_manifest_available(path: &Path) -> bool {
+    path.exists()
+        || manifest_index_location(path).is_some_and(|(root, id)| {
+            root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
+                && AccountIndex::open(root)
+                    .and_then(|index| index.backup_generation_manifest(id))
+                    .is_ok_and(|manifest| manifest.is_some())
+        })
 }
 
 pub(crate) fn write_local_bus_account_manifest(
     data_root: &Path,
     manifest: &LocalBusPersistedAccount,
 ) -> Result<(), SdkError> {
+    let bytes = serde_json::to_vec_pretty(manifest)?;
+    if data_root.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists()
+        && AccountIndex::open(data_root)?
+            .update_backup_generation_manifest(&manifest.local_account_id, &bytes)?
+    {
+        return Ok(());
+    }
     let accounts_dir = local_bus_accounts_dir(data_root);
     std::fs::create_dir_all(&accounts_dir)?;
     set_owner_only_dir_permissions(&accounts_dir)?;
     let path = local_bus_account_manifest_path(data_root, &manifest.local_account_id);
     let tmp_path = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(manifest)?;
     if tmp_path.exists() {
         std::fs::remove_file(&tmp_path)?;
     }
@@ -188,7 +218,14 @@ async fn restore_local_bus_account_impl(
     rehydrate_object_put_spools(&mut account, &state.config.data_root, &manifest.local_account_id)?;
     state.accounts.insert(manifest.local_account_id.clone(), account);
     let account = local_bus_account_mut(state, &manifest.local_account_id)?;
-    if connect_gateway && let Err(error) = account.ensure_gateway_live().await {
+    if connect_gateway
+        && !account
+            .client
+            .account_db()?
+            .load_actor_state::<bool>("backup/reestablishing")?
+            .unwrap_or(false)
+        && let Err(error) = account.ensure_gateway_live().await
+    {
         tracing::warn!(account_id = %manifest.local_account_id,%error,"local bus account restored without live gateway session");
     }
     Ok(local_bus_account_response(manifest, account))

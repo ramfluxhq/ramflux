@@ -100,11 +100,17 @@ pub(super) fn read(db: &AccountDb) -> Result<Value, SdkError> {
             result[field] = json!({"seq":coordinates["seq"],"at":coordinates["at"],"body":body});
         }
     }
+    result["secure_sessions"] =
+        json!(if db.load_actor_state::<bool>("backup/reestablishing")?.unwrap_or(false) {
+            "reestablishing"
+        } else {
+            "ready"
+        });
     Ok(result)
 }
 
 pub(super) fn optional_manifest(path: &Path) -> Option<LocalBusPersistedAccount> {
-    if !path.exists() {
+    if !super::daemon::account_manifest_available(path) {
         return None;
     }
     match read_local_bus_account_manifest(path) {

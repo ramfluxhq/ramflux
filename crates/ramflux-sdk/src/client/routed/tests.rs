@@ -720,3 +720,6 @@ mod root_ack;
 mod calls;
 #[path = "recipient_context_tests.rs"]
 mod recipient_context;
+
+#[path = "backup_tests.rs"]
+mod backup;
