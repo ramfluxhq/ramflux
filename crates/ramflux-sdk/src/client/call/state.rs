@@ -17,6 +17,8 @@ pub(crate) struct LiveCall {
     pub send_key: Zeroizing<[u8; 32]>,
     pub receive_key: Option<Zeroizing<[u8; 32]>>,
     pub allocation: Option<VoiceAllocation>,
+    pub lease_offer: Option<ramflux_protocol::VoicePeerAllocation>,
+    pub lease_consent: Option<ramflux_protocol::VoiceLeaseConsent>,
     pub next_lease_refresh: i64,
     pub retry_at: i64,
     pub retry_attempts: u32,
@@ -147,6 +149,8 @@ impl LiveCall {
             send_key: key,
             receive_key: None,
             allocation: None,
+            lease_offer: None,
+            lease_consent: None,
             next_lease_refresh: 0,
             retry_at: 0,
             retry_attempts: 0,
@@ -251,7 +255,12 @@ impl LiveCall {
                 if self.local == self.callee
                     && matches!(self.row.state.as_str(), "connecting" | "active") =>
             {
-                self.acknowledge(allocation, now)?;
+                self.acknowledge_offer(allocation, now)?;
+            }
+            CallAction::Ready { consent }
+                if self.local == self.caller && self.row.state == "active" =>
+            {
+                self.remember_consent(consent)?;
             }
             CallAction::AnsweredElsewhere if self.local == self.callee => {
                 self.finish("answered_elsewhere", now)?;
@@ -287,48 +296,6 @@ impl LiveCall {
             _ => return Err(invalid("control invalid for current state")),
         }
         Ok(false)
-    }
-    fn acknowledge(
-        &mut self,
-        allocation: &ramflux_protocol::VoicePeerAllocation,
-        now: i64,
-    ) -> Result<(), SdkError> {
-        if allocation.expires_at <= now.unsigned_abs()
-            || allocation.expires_at > now.unsigned_abs().saturating_add(120)
-            || allocation.endpoint.is_empty()
-            || !ramflux_protocol::decode_base64url(&allocation.token)
-                .is_ok_and(|token| token.len() == 32)
-        {
-            return Err(invalid("invalid relay allocation"));
-        }
-        if let Some(old) = &self.allocation
-            && (old.endpoint != allocation.endpoint
-                || old.callee_token != allocation.token
-                || old.expires_at > allocation.expires_at)
-        {
-            return Err(invalid("relay allocation changed"));
-        }
-        self.allocation = Some(VoiceAllocation {
-            endpoint: allocation.endpoint.clone(),
-            caller_token: String::new(),
-            callee_token: allocation.token.clone(),
-            expires_at: allocation.expires_at,
-        });
-        if self.row.state == "connecting" {
-            self.set_state("active", now)?;
-        }
-        Ok(())
-    }
-    pub fn activate(&mut self, allocation: VoiceAllocation, now: i64) -> Result<(), SdkError> {
-        if self.local != self.caller || self.row.state != "connecting" {
-            return Err(invalid("allocation outside connecting caller"));
-        }
-        let ack =
-            self.control(CallAction::Ack { allocation: Box::new(allocation.for_callee()) }, now)?;
-        self.allocation = Some(allocation);
-        self.next_lease_refresh = now.saturating_add(20);
-        self.pending.push(ack);
-        self.set_state("active", now)
     }
     pub fn end(&mut self, reject: bool, now: i64) -> Result<(), SdkError> {
         if self.row.state == "ended" {
@@ -410,7 +377,7 @@ impl LiveCall {
             && self.row.answered_at.is_none()
             && now >= self.ring_deadline
     }
-    fn set_state(&mut self, state: &str, now: i64) -> Result<(), SdkError> {
+    pub(super) fn set_state(&mut self, state: &str, now: i64) -> Result<(), SdkError> {
         self.row.seq =
             self.row.seq.checked_add(1).ok_or_else(|| invalid("row sequence exhausted"))?;
         self.row.state = state.into();
@@ -438,10 +405,10 @@ impl LiveCall {
         self.offer_keys.clear();
         self.send_key = Zeroizing::new([0; 32]);
         self.receive_key = None;
-        if self.local == self.caller {
-            self.release_until = self.allocation.as_ref().map_or(0, |a| a.expires_at);
-        }
+        self.release_until = self.allocation.as_ref().map_or(0, |a| a.expires_at);
         self.allocation = None;
+        self.lease_offer = None;
+        self.lease_consent = None;
         Ok(())
     }
 }

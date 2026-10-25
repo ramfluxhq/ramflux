@@ -40,6 +40,7 @@ sha2 = { workspace = true }
 thiserror = "2.0"
 tokio = { workspace = true, features = ["rt", "sync"] }
 toml = { workspace = true }
+zeroize = { workspace = true }
 
 [lints]
 workspace = true

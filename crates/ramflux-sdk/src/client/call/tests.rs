@@ -24,8 +24,11 @@ fn outgoing() -> Result<LiveCall, SdkError> {
 fn allocation() -> VoiceAllocation {
     VoiceAllocation {
         endpoint: "relay.example:17449".into(),
-        caller_token: ramflux_protocol::encode_base64url([9; 32]),
-        callee_token: ramflux_protocol::encode_base64url([10; 32]),
+        lease_id: ramflux_protocol::encode_base64url([8; 16]),
+        side: 0,
+        token: ramflux_protocol::encode_base64url([9; 32]),
+        rebind_key: ramflux_protocol::encode_base64url([12; 32]),
+        hard_expires_at: 14500,
         expires_at: 200,
     }
 }
@@ -66,6 +69,7 @@ fn first_answer_wins_and_other_devices_do_not_share_the_winners_media_key() -> R
         .find(|c| matches!(c.body, CallAction::Ack { .. }))
         .ok_or_else(|| invalid("test ack missing"))?;
     first.apply(ack, 103)?;
+    claim(&mut first, &allocation(), 103)?;
     assert_eq!(first.row.state, "active");
     Ok(())
 }
@@ -184,12 +188,14 @@ fn authenticated_lease_updates_preserve_active_state_until_the_new_expiry() -> R
         .cloned()
         .ok_or_else(|| invalid("ack missing"))?;
     recipient.apply(&ack, 103)?;
+    claim(&mut recipient, &allocation(), 103)?;
     let version = recipient.row.seq;
     let mut renewed = allocation();
     renewed.expires_at = 220;
     let renewal =
         origin.control(CallAction::Ack { allocation: Box::new(renewed.for_callee()) }, 110)?;
     recipient.apply(&renewal, 110)?;
+    claim(&mut recipient, &renewed, 110)?;
     assert_eq!(recipient.row.seq, version);
     assert_eq!(recipient.row.state, "active");
     assert!(!recipient.expire_media(200)?);
@@ -239,10 +245,31 @@ fn a_callee_ack_contains_only_the_callees_own_relay_credential() -> Result<(), S
     let ack = origin.pending.last().ok_or_else(|| invalid("ack"))?;
     let encoded = serde_json::to_value(ack)?;
     assert!(encoded["body"]["allocation"].get("caller_token").is_none());
-    assert!(!serde_json::to_string(ack)?.contains(&lease.caller_token));
+    assert!(!serde_json::to_string(ack)?.contains(&lease.token));
+    assert!(!serde_json::to_string(ack)?.contains(&lease.rebind_key));
+    assert!(encoded["body"]["allocation"].get("token").is_none());
+    assert!(encoded["body"]["allocation"].get("rebind_key").is_none());
     receiver.apply(ack, 102)?;
+    assert_eq!(receiver.row.state, "connecting");
+    assert!(receiver.allocation.is_none());
+    claim(&mut receiver, &lease, 102)?;
     let media_lease = receiver.allocation.as_ref().ok_or_else(|| invalid("allocation"))?;
-    assert_eq!(media_lease.callee_token, lease.callee_token);
-    assert_eq!(media_lease.caller_token.len(), 0);
+    assert_eq!(media_lease.side, 1);
+    assert_ne!(media_lease.token, lease.token);
+    assert_ne!(media_lease.rebind_key, lease.rebind_key);
     Ok(())
+}
+
+fn claim(call: &mut LiveCall, caller: &VoiceAllocation, now: i64) -> Result<(), SdkError> {
+    let mut private = caller.clone();
+    private.side = 1;
+    private.token = ramflux_protocol::encode_base64url([10; 32]);
+    private.rebind_key = ramflux_protocol::encode_base64url([11; 32]);
+    let consent = ramflux_protocol::VoiceLeaseConsent {
+        scope: call.lease_scope(),
+        lease_id: caller.lease_id.clone(),
+        expires_at: caller.hard_expires_at,
+        signature: "gateway-verified-unit".into(),
+    };
+    call.accept_lease(private, consent, now)
 }

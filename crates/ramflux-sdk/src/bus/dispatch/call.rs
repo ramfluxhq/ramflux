@@ -156,7 +156,7 @@ fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatc
     let allocation = c.allocation.as_ref().ok_or_else(|| invalid("allocation unavailable"))?;
     let receive = c.receive_key.as_ref().ok_or_else(|| invalid("receive key unavailable"))?;
     let outgoing = c.local == c.caller;
-    let value = json!({"relay":{"endpoint":allocation.endpoint,"token":if outgoing {&allocation.caller_token}else{&allocation.callee_token}},
+    let value = json!({"relay":{"endpoint":allocation.endpoint,"token":allocation.token,"rebind_key":allocation.rebind_key,"lease_id":allocation.lease_id,"side":allocation.side},
         "sframe":{"cipher_suite":5,"send":{"kid":u64::from(!outgoing),"base_key":ramflux_protocol::encode_base64url(c.send_key.as_ref())},
         "receive":{"kid":u64::from(outgoing),"base_key":ramflux_protocol::encode_base64url(receive.as_ref())}}});
     // This contract's client always restarts at counter zero. Never return a used key twice.

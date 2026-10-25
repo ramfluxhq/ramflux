@@ -20,6 +20,7 @@ pub enum CallAction {
     Ringing,
     Answer { base_key: String },
     Ack { allocation: Box<VoicePeerAllocation> },
+    Ready { consent: Box<VoiceLeaseConsent> },
     Reject,
     Busy,
     Hangup,
@@ -52,43 +53,66 @@ pub struct VoiceAllocationRequest {
     pub caller: CallEndpoint,
     pub callee: CallEndpoint,
 }
-/// Both endpoint credentials; only the matching credential is exposed to each media engine.
+/// One participant's credentials, issued only over that participant's authenticated gateway.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceAllocation {
+    pub lease_id: String,
     pub endpoint: String,
-    pub caller_token: String,
-    pub callee_token: String,
+    pub side: u8,
+    pub token: String,
+    pub rebind_key: String,
     pub expires_at: u64,
+    pub hard_expires_at: u64,
 }
-/// Only the callee's credential crosses the encrypted call-control channel.
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+/// Public lease advertisement; no credential crosses the peer signaling channel.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VoicePeerAllocation {
+    pub lease_id: String,
     pub endpoint: String,
-    pub token: String,
     pub expires_at: u64,
+    pub hard_expires_at: u64,
+}
+/// Callee-device signature authorizing exactly one immutable lease scope and deadline.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceLeaseConsent {
+    pub scope: VoiceAllocationRequest,
+    pub lease_id: String,
+    pub expires_at: u64,
+    pub signature: String,
+}
+/// Domain-separated consent bytes; never include media key material or conversation identifiers.
+/// # Errors
+/// Returns protocol serialization errors.
+pub fn voice_lease_consent_bytes(
+    consent: &VoiceLeaseConsent,
+) -> Result<Vec<u8>, crate::ProtocolError> {
+    crate::canonical_json_bytes(&(
+        "ramflux.voice.lease-consent.v1",
+        &consent.scope,
+        &consent.lease_id,
+        consent.expires_at,
+    ))
 }
 impl VoiceAllocation {
     #[must_use]
     pub fn for_callee(&self) -> VoicePeerAllocation {
         VoicePeerAllocation {
+            lease_id: self.lease_id.clone(),
             endpoint: self.endpoint.clone(),
-            token: self.callee_token.clone(),
             expires_at: self.expires_at,
+            hard_expires_at: self.hard_expires_at,
         }
     }
 }
-impl Drop for VoicePeerAllocation {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.token.zeroize();
-    }
-}
-/// Redacted diagnostics prevent accidental bearer-token disclosure in frame logging.
 impl std::fmt::Debug for VoiceAllocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VoiceAllocation").field("endpoint", &self.endpoint).finish_non_exhaustive()
+        f.debug_struct("VoiceAllocation")
+            .field("lease_id", &self.lease_id)
+            .field("side", &self.side)
+            .finish_non_exhaustive()
     }
 }
 /// Daemon-owned public call state, shared by list, mutation replies and journal events.
@@ -113,7 +137,8 @@ pub struct CallRow {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VoiceLeaseRequest {
     Allocate { scope: VoiceAllocationRequest },
-    Renew { scope: VoiceAllocationRequest },
+    Accept { consent: Box<VoiceLeaseConsent> },
+    Renew { consent: Box<VoiceLeaseConsent> },
     Release { scope: VoiceAllocationRequest },
 }
 /// Secret-free lease mutation acknowledgment.
@@ -140,8 +165,8 @@ pub enum VoiceLeaseResponse {
 impl Drop for VoiceAllocation {
     fn drop(&mut self) {
         use zeroize::Zeroize;
-        self.caller_token.zeroize();
-        self.callee_token.zeroize();
+        self.token.zeroize();
+        self.rebind_key.zeroize();
     }
 }
 impl Drop for CallAction {

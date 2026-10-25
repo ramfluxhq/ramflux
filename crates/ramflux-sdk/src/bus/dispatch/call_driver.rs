@@ -123,90 +123,9 @@ pub(crate) fn expire_due(account: &mut LocalBusAccountState) -> Result<(), SdkEr
     Ok(())
 }
 
-async fn maintain_lease(
-    account: &mut LocalBusAccountState,
-    next: &mut LiveCall,
-    now: i64,
-) -> Result<(), SdkError> {
-    if next.next_lease_refresh > now {
-        return Ok(());
-    }
-    if next.local == next.caller
-        && matches!(next.row.state.as_str(), "connecting" | "active")
-        && (next.row.state == "connecting" || next.next_lease_refresh <= now)
-    {
-        let thread = account
-            .client
-            .account_db()?
-            .client_record("conversation", &next.row.conversation_id)?
-            .ok_or_else(|| invalid("call conversation absent"))?;
-        let targets = match crate::bus::dispatch::task_transport::direct_targets(
-            account,
-            &account.gateway_config,
-            &thread,
-        )
-        .await
-        {
-            Ok(targets) => targets,
-            Err(error @ (SdkError::Storage(_) | SdkError::Io(_))) => return Err(error),
-            Err(error)
-                if crate::error_policy::approval_retryable(&error)
-                    && crate::error_policy::security_code(&error).is_none() =>
-            {
-                next.next_lease_refresh = now.saturating_add(5);
-                return Ok(());
-            }
-            Err(_) => {
-                next.fail(now)?;
-                return Ok(());
-            }
-        };
-        let record = account.client.trusted_device(&next.callee.device_id)?;
-        if !targets.iter().any(|t| t.device == next.callee.device_id)
-            || !record["signing_public_key"]
-                .as_str()
-                .is_some_and(|key| next.peer_key_matches(&next.callee, key))
-        {
-            next.fail(now)?;
-            return Ok(());
-        }
-    }
-    if next.local == next.caller && next.row.state == "connecting" && next.receive_key.is_some() {
-        let mut engine = account.take_live_engine().await?;
-        let result = engine.voice_lease(VoiceLeaseRequest::Allocate { scope: scope(next) }).await;
-        account.put_engine(engine);
-        match result {
-            Ok(VoiceLeaseResponse::Allocation { allocation }) => {
-                next.activate(allocation, now)?;
-            }
-            Ok(_) | Err(_) => next.fail(now)?,
-        }
-    } else if next.local == next.caller
-        && next.row.state == "active"
-        && next.next_lease_refresh <= now
-    {
-        let mut engine = account.take_live_engine().await?;
-        let result = engine.voice_lease(VoiceLeaseRequest::Renew { scope: scope(next) }).await;
-        account.put_engine(engine);
-        if let Ok(VoiceLeaseResponse::Status { status }) = result {
-            if let Some(allocation) = next.allocation.as_mut() {
-                allocation.expires_at = status.expires_at;
-            }
-            let allocation =
-                next.allocation.clone().ok_or_else(|| invalid("renewed lease missing"))?;
-            let ack = next.control(
-                ramflux_protocol::CallAction::Ack { allocation: Box::new(allocation.for_callee()) },
-                now,
-            )?;
-            next.pending.push(ack);
-            next.next_lease_refresh = now.saturating_add(20);
-        } else {
-            // Existing authorization remains bounded by its lease; retry without extending it.
-            next.next_lease_refresh = now.saturating_add(5);
-        }
-    }
-    Ok(())
-}
+#[path = "call_lease.rs"]
+mod leases;
+use leases::maintain_lease;
 async fn release_lease(
     account: &mut LocalBusAccountState,
     id: &str,

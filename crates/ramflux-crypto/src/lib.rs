@@ -28,7 +28,9 @@ mod prekey;
 mod recovery;
 mod sframe;
 mod signing;
+mod voice_rebind;
 mod x3dh;
+pub use voice_rebind::{verify_voice_rebind_tag, voice_rebind_response, voice_rebind_tag};
 #[cfg(test)]
 mod zeroize_tests;
 

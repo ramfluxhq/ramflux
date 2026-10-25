@@ -110,8 +110,11 @@ fn mutate(
         VoiceLeaseRequest::Allocate { scope } => {
             Ok(serde_json::to_value(state.allocate(owner, &scope, public, now)?)?)
         }
-        VoiceLeaseRequest::Renew { scope } => Ok(serde_json::to_value(VoiceLeaseStatus {
-            expires_at: state.renew(owner, &scope, now)?,
+        VoiceLeaseRequest::Accept { consent } => {
+            Ok(serde_json::to_value(state.accept_verified(owner, &consent, public, now)?)?)
+        }
+        VoiceLeaseRequest::Renew { consent } => Ok(serde_json::to_value(VoiceLeaseStatus {
+            expires_at: state.renew_consented(owner, &consent, now)?,
         })?),
         VoiceLeaseRequest::Release { scope } => {
             state.release(owner, &scope)?;

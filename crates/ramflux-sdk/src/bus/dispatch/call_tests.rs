@@ -24,8 +24,11 @@ fn fixture(name: &str) -> Result<(PathBuf, LocalBusDaemonState, String), SdkErro
     call.receive_key = Some(zeroize::Zeroizing::new([3; 32]));
     call.allocation = Some(ramflux_protocol::VoiceAllocation {
         endpoint: "relay.example:9000".into(),
-        caller_token: ramflux_protocol::encode_base64url([4; 32]),
-        callee_token: ramflux_protocol::encode_base64url([5; 32]),
+        lease_id: ramflux_protocol::encode_base64url([8; 16]),
+        side: 0,
+        token: ramflux_protocol::encode_base64url([4; 32]),
+        rebind_key: ramflux_protocol::encode_base64url([12; 32]),
+        hard_expires_at: u64::MAX,
         expires_at: u64::MAX,
     });
     call.next_lease_refresh = i64::MAX;

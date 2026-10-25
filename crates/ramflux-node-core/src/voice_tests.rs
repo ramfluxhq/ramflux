@@ -23,7 +23,7 @@ fn scope(id: u8) -> VoiceAllocationRequest {
 fn voice_learned_sources_are_opaque_and_keepalive_cannot_renew_lease() {
     let mut state = VoiceRelayState::default();
     let scope = scope(1);
-    let a = state.allocate("node", &scope, "relay:9000", 100).expect("allocate");
+    let a = pair(&mut state, "node", &scope, "relay:9000", 100).expect("allocate");
     let sender_addr = "8.8.8.8:10000".parse().expect("address");
     let receiver_addr = "1.1.1.1:20000".parse().expect("address");
     let bind = encode_voice_datagram(&a.callee_token, &[]).expect("frame");
@@ -46,11 +46,11 @@ fn voice_learned_sources_are_opaque_and_keepalive_cannot_renew_lease() {
 fn voice_exact_scope_and_authenticated_owner_control_renewal_and_release() {
     let mut state = VoiceRelayState::default();
     let s = scope(2);
-    let a = state.allocate("node", &s, "relay:9000", 100).expect("allocate");
-    assert_eq!(a, state.allocate("node", &s, "relay:9000", 101).expect("idempotent"));
+    let a = pair(&mut state, "node", &s, "relay:9000", 100).expect("allocate");
+    assert_eq!(a, pair(&mut state, "node", &s, "relay:9000", 101).expect("idempotent"));
     let mut changed = s.clone();
     changed.callee.root_public_key = ramflux_protocol::encode_base64url([3; 32]);
-    assert!(state.allocate("node", &changed, "relay:9000", 100).is_err());
+    assert!(pair(&mut state, "node", &changed, "relay:9000", 100).is_err());
     assert!(state.renew("other-node", &s, 120).is_err());
     assert!(state.renew("node", &changed, 120).is_err());
     assert!(state.release("node", &changed).is_err());
@@ -65,23 +65,23 @@ fn voice_exact_scope_and_authenticated_owner_control_renewal_and_release() {
 fn voice_capacity_counts_root_qualified_accounts_and_forbids_private_sources() {
     let mut state = VoiceRelayState::default();
     for id in [1, 2] {
-        state.allocate("node", &scope(id), "relay:9000", 100).expect("allocate");
+        pair(&mut state, "node", &scope(id), "relay:9000", 100).expect("allocate");
     }
-    assert!(state.allocate("node", &scope(3), "relay:9000", 100).is_err());
-    let a = state.allocate("node", &scope(1), "relay:9000", 100).expect("existing survives cap");
+    assert!(pair(&mut state, "node", &scope(3), "relay:9000", 100).is_err());
+    let a = pair(&mut state, "node", &scope(1), "relay:9000", 100).expect("existing survives cap");
     let packet = encode_voice_datagram(&a.caller_token, &[]).expect("packet");
     assert!(state.route(&packet, "127.0.0.1:1234".parse().expect("addr"), 100, false).is_err());
     assert!(state.route(&packet, "127.0.0.1:1234".parse().expect("addr"), 100, true).is_ok());
     let mut other = scope(3);
     other.caller.root_public_key = ramflux_protocol::encode_base64url([3; 32]);
     other.callee.root_public_key = ramflux_protocol::encode_base64url([4; 32]);
-    assert!(state.allocate("node", &other, "relay:9000", 100).is_ok());
-    assert!(state.allocate("node", &scope(4), "relay:9000", 160).is_ok());
+    assert!(pair(&mut state, "node", &other, "relay:9000", 100).is_ok());
+    assert!(pair(&mut state, "node", &scope(4), "relay:9000", 160).is_ok());
 }
 #[test]
 fn voice_framing_bandwidth_and_unknown_credentials_fail_closed() {
     let mut state = VoiceRelayState::default();
-    let a = state.allocate("node", &scope(1), "relay:9000", 100).expect("allocate");
+    let a = pair(&mut state, "node", &scope(1), "relay:9000", 100).expect("allocate");
     let source = "8.8.8.8:1234".parse().expect("source");
     assert!(state.route(&[0; 3], source, 100, false).is_err());
     let bad =
@@ -100,8 +100,8 @@ fn voice_framing_bandwidth_and_unknown_credentials_fail_closed() {
 fn an_expired_voice_credential_cannot_disrupt_another_live_allocation()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut state = VoiceRelayState::default();
-    let expired = state.allocate("node", &scope(1), "relay:9000", 100)?;
-    let live = state.allocate("node", &scope(2), "relay:9000", 110)?;
+    let expired = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
+    let live = pair(&mut state, "node", &scope(2), "relay:9000", 110)?;
     let source = "8.8.8.8:1234".parse()?;
     let expired_packet = encode_voice_datagram(&expired.caller_token, &[])?;
     assert!(state.route(&expired_packet, source, 160, false).is_err());
@@ -115,3 +115,44 @@ fn an_expired_voice_credential_cannot_disrupt_another_live_allocation()
 
 #[path = "voice_rebinding_tests.rs"]
 mod rebinding;
+
+#[derive(Eq, PartialEq)]
+struct TestAllocation {
+    caller_token: String,
+    callee_token: String,
+    callee_key: [u8; 32],
+    lease_id: String,
+}
+impl std::fmt::Debug for TestAllocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestAllocation(<redacted>)")
+    }
+}
+fn consent(scope: &VoiceAllocationRequest, allocation: &VoiceAllocation) -> VoiceLeaseConsent {
+    VoiceLeaseConsent {
+        scope: scope.clone(),
+        lease_id: allocation.lease_id.clone(),
+        expires_at: allocation.hard_expires_at,
+        signature: "gateway-verified-test".into(),
+    }
+}
+fn pair(
+    state: &mut VoiceRelayState,
+    owner: &str,
+    scope: &VoiceAllocationRequest,
+    endpoint: &str,
+    now: u64,
+) -> Result<TestAllocation, NodeCoreError> {
+    let caller = state.allocate(owner, scope, endpoint, now)?;
+    let callee = state.accept_verified(owner, &consent(scope, &caller), endpoint, now)?;
+    let bytes =
+        ramflux_protocol::decode_base64url(&callee.rebind_key).map_err(|_| refused("test key"))?;
+    let mut key = [0; 32];
+    key.copy_from_slice(&bytes);
+    Ok(TestAllocation {
+        caller_token: caller.token.clone(),
+        callee_token: callee.token.clone(),
+        callee_key: key,
+        lease_id: caller.lease_id.clone(),
+    })
+}

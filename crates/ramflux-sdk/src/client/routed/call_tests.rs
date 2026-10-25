@@ -170,8 +170,11 @@ async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media
     origin.activate(
         VoiceAllocation {
             endpoint: "relay.example:9000".into(),
-            caller_token: ramflux_protocol::encode_base64url([9; 32]),
-            callee_token: ramflux_protocol::encode_base64url([10; 32]),
+            lease_id: ramflux_protocol::encode_base64url([8; 16]),
+            side: 0,
+            token: ramflux_protocol::encode_base64url([9; 32]),
+            rebind_key: ramflux_protocol::encode_base64url([12; 32]),
+            hard_expires_at: now_unix_timestamp().unsigned_abs() + 14400,
             expires_at: now_unix_timestamp().unsigned_abs().saturating_add(60),
         },
         now_unix_timestamp(),
@@ -185,6 +188,42 @@ async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media
     let ack = signed(&alice, ack)?;
     let ack = entry(&alice, &bob, &ack, "ack", "voice-thread")?;
     apply(&mut bob, &ack).await?;
+    assert_eq!(bob.client.voice_calls[&id].row.state, "connecting");
+    let lease =
+        bob.client.voice_calls[&id].lease_offer.clone().ok_or_else(|| invalid("lease offer"))?;
+    let mut consent = ramflux_protocol::VoiceLeaseConsent {
+        scope: bob.client.voice_calls[&id].lease_scope(),
+        lease_id: lease.lease_id.clone(),
+        expires_at: lease.hard_expires_at,
+        signature: String::new(),
+    };
+    consent.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &ramflux_protocol::voice_lease_consent_bytes(&consent)?,
+        bob.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+    );
+    bob.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("call"))?.accept_lease(
+        VoiceAllocation {
+            lease_id: lease.lease_id,
+            endpoint: lease.endpoint,
+            side: 1,
+            token: ramflux_protocol::encode_base64url([10; 32]),
+            rebind_key: ramflux_protocol::encode_base64url([11; 32]),
+            expires_at: lease.expires_at,
+            hard_expires_at: lease.hard_expires_at,
+        },
+        consent,
+        now_unix_timestamp(),
+    )?;
+    let ready = bob.client.voice_calls[&id]
+        .pending
+        .iter()
+        .find(|c| matches!(c.body, CallAction::Ready { .. }))
+        .cloned()
+        .ok_or_else(|| invalid("ready"))?;
+    let ready = signed(&bob, ready)?;
+    let ready = entry(&bob, &alice, &ready, "ready", "voice-thread")?;
+    apply(&mut alice, &ready).await?;
+    assert!(alice.client.voice_calls[&id].lease_consent.is_some());
     assert_eq!(bob.client.voice_calls[&id].row.state, "active");
     alice
         .client

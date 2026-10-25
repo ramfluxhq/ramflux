@@ -38,46 +38,24 @@ async fn issue(
         "/voice/v1/lease",
         &request.body,
     )?;
-    let scope = match &request.body {
-        VoiceLeaseRequest::Allocate { scope }
-        | VoiceLeaseRequest::Renew { scope }
-        | VoiceLeaseRequest::Release { scope } => scope,
-    };
+    let scope = scope(&request.body);
     ramflux_node_core::validate_voice_scope(scope)?;
-    if scope.caller.device_id != runtime.device_id
-        || scope.caller.principal_id != runtime.principal_id
-    {
-        anyhow::bail!("voice caller mismatch");
-    }
-    // Query the current registry for every mutation; session-open state is not revocation authority.
-    let lookup = ramflux_node_core::PrincipalLookupRequest {
-        principal_id: runtime.principal_id.clone(),
-        session_id: runtime.session_id.clone(),
-        requester_device_id: runtime.device_id.clone(),
-        target_delivery_id: runtime.target_delivery_id.clone(),
-        gateway_id: context.gateway_id.clone(),
-        source: context.remote_addr.ip(),
-    };
-    let lookup: ramflux_protocol::PrincipalLookupResponse<
-        ramflux_node_core::DeviceManifestResponse,
-    > = crate::router_post_json_async(&context.router, "/mvp1/principal-lookup", &lookup).await?;
-    let manifest =
-        lookup.manifest.ok_or_else(|| anyhow::anyhow!("voice caller authority unavailable"))?;
-    if manifest.principal_id != scope.caller.principal_id
-        || manifest.root_public_key != scope.caller.root_public_key
-        || !manifest.devices.iter().any(|d| {
-            d.device_id == runtime.device_id && d.branch_public_key == runtime.branch_public_key
-        })
-    {
-        anyhow::bail!("voice caller authority changed");
-    }
+    let caller = manifest(context, runtime, &scope.caller.principal_id).await?;
+    let callee = manifest(context, runtime, &scope.callee.principal_id).await?;
+    validate_authority(
+        &request.body,
+        runtime,
+        &caller,
+        &callee,
+        ramflux_node_core::now_unix_seconds(),
+    )?;
     let endpoint = std::env::var("RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT")
         .map_err(|_| anyhow::anyhow!("voice relay is not configured"))?;
     let tls = context.peers.tls().clone();
     let body = request.body.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<VoiceLeaseResponse> {
         let client = ramflux_transport::MeshHttpClient::new();
-        if let VoiceLeaseRequest::Allocate { .. } = &body {
+        if matches!(&body, VoiceLeaseRequest::Allocate { .. } | VoiceLeaseRequest::Accept { .. }) {
             let allocation: VoiceAllocation =
                 client.post_json(&endpoint, "/voice/v1/lease", &tls, "ramflux-relay", &body)?;
             Ok(VoiceLeaseResponse::Allocation { allocation })
@@ -89,3 +67,92 @@ async fn issue(
     })
     .await?
 }
+
+fn scope(request: &VoiceLeaseRequest) -> &ramflux_protocol::VoiceAllocationRequest {
+    match request {
+        VoiceLeaseRequest::Allocate { scope } | VoiceLeaseRequest::Release { scope } => scope,
+        VoiceLeaseRequest::Accept { consent } | VoiceLeaseRequest::Renew { consent } => {
+            &consent.scope
+        }
+    }
+}
+async fn manifest(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    principal: &str,
+) -> anyhow::Result<ramflux_node_core::DeviceManifestResponse> {
+    let lookup = ramflux_node_core::PrincipalLookupRequest {
+        principal_id: principal.into(),
+        session_id: runtime.session_id.clone(),
+        requester_device_id: runtime.device_id.clone(),
+        target_delivery_id: runtime.target_delivery_id.clone(),
+        gateway_id: context.gateway_id.clone(),
+        source: context.remote_addr.ip(),
+    };
+    let response: ramflux_protocol::PrincipalLookupResponse<
+        ramflux_node_core::DeviceManifestResponse,
+    > = crate::router_post_json_async(&context.router, "/mvp1/principal-lookup", &lookup).await?;
+    response.manifest.ok_or_else(|| anyhow::anyhow!("voice endpoint authority unavailable"))
+}
+fn branch<'a>(
+    endpoint: &ramflux_protocol::CallEndpoint,
+    manifest: &'a ramflux_node_core::DeviceManifestResponse,
+) -> anyhow::Result<&'a str> {
+    anyhow::ensure!(
+        manifest.principal_id == endpoint.principal_id
+            && manifest.root_public_key == endpoint.root_public_key,
+        "voice endpoint root changed"
+    );
+    manifest
+        .devices
+        .iter()
+        .find(|d| d.device_id == endpoint.device_id && d.principal_id == endpoint.principal_id)
+        .map(|d| d.branch_public_key.as_str())
+        .ok_or_else(|| anyhow::anyhow!("voice endpoint device revoked"))
+}
+fn validate_authority(
+    request: &VoiceLeaseRequest,
+    runtime: &GatewaySessionRuntime,
+    caller: &ramflux_node_core::DeviceManifestResponse,
+    callee: &ramflux_node_core::DeviceManifestResponse,
+    now: u64,
+) -> anyhow::Result<()> {
+    let scope = scope(request);
+    let caller_key = branch(&scope.caller, caller)?;
+    let callee_key = branch(&scope.callee, callee)?;
+    let actor = match request {
+        VoiceLeaseRequest::Accept { .. } => &scope.callee,
+        VoiceLeaseRequest::Release { .. }
+            if runtime.device_id == scope.callee.device_id
+                && runtime.principal_id == scope.callee.principal_id =>
+        {
+            &scope.callee
+        }
+        _ => &scope.caller,
+    };
+    let key = if actor == &scope.caller { caller_key } else { callee_key };
+    anyhow::ensure!(
+        actor.device_id == runtime.device_id
+            && actor.principal_id == runtime.principal_id
+            && key == runtime.branch_public_key,
+        "voice session actor mismatch"
+    );
+    if let VoiceLeaseRequest::Accept { consent } | VoiceLeaseRequest::Renew { consent } = request {
+        anyhow::ensure!(
+            consent.expires_at > now
+                && consent.expires_at <= now.saturating_add(4 * 60 * 60)
+                && ramflux_protocol::decode_base64url(&consent.lease_id)
+                    .is_ok_and(|id| id.len() == 16),
+            "voice consent deadline or lease id invalid"
+        );
+        ramflux_crypto::verify_canonical_signature(
+            &ramflux_protocol::voice_lease_consent_bytes(consent)?,
+            &consent.signature,
+            callee_key,
+        )?;
+    }
+    Ok(())
+}
+#[cfg(test)]
+#[path = "voice_tests.rs"]
+mod tests;

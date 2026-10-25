@@ -26,7 +26,7 @@ impl Usage {
     }
     pub(super) fn release(&mut self, lease: &Lease) {
         self.uncharge(&lease.scope.caller);
-        if lease.sides[1].source.is_some() {
+        if lease.consent.is_some() {
             self.uncharge(&lease.scope.callee);
         }
     }

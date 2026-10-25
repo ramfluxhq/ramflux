@@ -3,7 +3,7 @@
 
 //! Bounded production voice leases and opaque UDP forwarding; no media keys enter this module.
 use crate::NodeCoreError;
-use ramflux_protocol::{CallEndpoint, VoiceAllocation, VoiceAllocationRequest};
+use ramflux_protocol::{CallEndpoint, VoiceAllocation, VoiceAllocationRequest, VoiceLeaseConsent};
 use std::{collections::BTreeMap, net::SocketAddr};
 pub const VOICE_LEASE_SECONDS: u64 = 60;
 pub const VOICE_PACKET_MAX_BYTES: usize = 1400;
@@ -16,6 +16,7 @@ fn refused(message: &str) -> NodeCoreError {
 }
 struct Side {
     token: String,
+    rebind_key: zeroize::Zeroizing<[u8; 32]>,
     source: Option<SocketAddr>,
     second: u64,
     bytes: usize,
@@ -23,6 +24,8 @@ struct Side {
 }
 struct Lease {
     scope: VoiceAllocationRequest,
+    lease_id: String,
+    consent: Option<VoiceLeaseConsent>,
     expires_at: u64,
     hard_expires_at: u64,
     sides: [Side; 2],
@@ -55,7 +58,7 @@ impl VoiceRelayState {
             if &lease.scope != scope {
                 return Err(refused("voice scope changed"));
             }
-            return Ok(allocation(lease, endpoint));
+            return Ok(allocation(lease, endpoint, 0));
         }
         if self.leases.len() >= MAX_ALLOCATIONS
             || self.account_usage(&scope.caller) >= ACCOUNT_LIMIT
@@ -70,17 +73,74 @@ impl VoiceRelayState {
         }
         let lease = Lease {
             scope: scope.clone(),
+            lease_id: ramflux_protocol::encode_base64url(
+                &ramflux_crypto::random_32().map_err(|_| refused("voice entropy unavailable"))?
+                    [..16],
+            ),
+            consent: None,
             expires_at: now.saturating_add(VOICE_LEASE_SECONDS),
             hard_expires_at: now.saturating_add(MAX_LEASE_LIFETIME),
             sides,
         };
-        let response = allocation(&lease, endpoint);
-        for (i, s) in lease.sides.iter().enumerate() {
-            self.tokens.insert(s.token.clone(), (key.clone(), i));
-        }
+        let response = allocation(&lease, endpoint, 0);
+        self.tokens.insert(lease.sides[0].token.clone(), (key.clone(), 0));
         self.usage.charge(&lease.scope.caller);
         self.leases.insert(key, lease);
         Ok(response)
+    }
+    /// Claims only the callee's secrets after gateway verification of its device-signed consent.
+    /// # Errors
+    /// Rejects changed lease scope/deadline, expired leases and exhausted callee capacity.
+    pub fn accept_verified(
+        &mut self,
+        owner: &str,
+        consent: &VoiceLeaseConsent,
+        endpoint: &str,
+        now: u64,
+    ) -> Result<VoiceAllocation, NodeCoreError> {
+        self.expire(now);
+        let key = (owner.to_owned(), consent.scope.call_id.clone());
+        let lease = self.leases.get(&key).ok_or_else(|| refused("voice lease unavailable"))?;
+        if lease.lease_id != consent.lease_id
+            || lease.scope != consent.scope
+            || consent.expires_at != lease.hard_expires_at
+            || now >= consent.expires_at
+        {
+            return Err(refused("voice consent binding changed"));
+        }
+        if let Some(old) = &lease.consent {
+            if old != consent {
+                return Err(refused("voice consent changed"));
+            }
+            return Ok(allocation(lease, endpoint, 1));
+        }
+        if self.account_usage(&lease.scope.callee) >= ACCOUNT_LIMIT {
+            return Err(refused("voice callee capacity exhausted"));
+        }
+        let lease = self.leases.get_mut(&key).ok_or_else(|| refused("voice lease unavailable"))?;
+        lease.consent = Some(consent.clone());
+        self.usage.charge(&lease.scope.callee);
+        self.tokens.insert(lease.sides[1].token.clone(), (key, 1));
+        Ok(allocation(lease, endpoint, 1))
+    }
+    /// Renews only the exact consent previously verified and committed by the gateway.
+    /// # Errors
+    /// Rejects a different, absent or expired consent.
+    pub fn renew_consented(
+        &mut self,
+        owner: &str,
+        consent: &VoiceLeaseConsent,
+        now: u64,
+    ) -> Result<u64, NodeCoreError> {
+        if self
+            .leases
+            .get(&(owner.to_owned(), consent.scope.call_id.clone()))
+            .and_then(|l| l.consent.as_ref())
+            != Some(consent)
+        {
+            return Err(refused("voice consent unavailable"));
+        }
+        self.renew(owner, &consent.scope, now)
     }
     /// Renews authorization only from the live caller's authenticated home node.
     /// # Errors
@@ -98,6 +158,9 @@ impl VoiceRelayState {
             .ok_or_else(|| refused("voice lease unavailable"))?;
         if &lease.scope != scope {
             return Err(refused("voice scope changed"));
+        }
+        if lease.consent.is_none() {
+            return Err(refused("voice consent required"));
         }
         if now >= lease.hard_expires_at {
             return Err(refused("voice maximum lifetime reached"));
@@ -170,14 +233,10 @@ impl VoiceRelayState {
             return Err(refused("voice lease unavailable"));
         }
         let lease = self.leases.get(&key).ok_or_else(|| refused("voice lease unavailable"))?;
-        if i == 1
-            && lease.sides[1].source.is_none()
-            && self.account_usage(&lease.scope.callee) >= ACCOUNT_LIMIT
-        {
-            return Err(refused("voice callee capacity exhausted"));
+        if i == 1 && lease.consent.is_none() {
+            return Err(refused("voice consent required"));
         }
         let lease = self.leases.get_mut(&key).ok_or_else(|| refused("voice lease unavailable"))?;
-        let charge_callee = i == 1 && lease.sides[1].source.is_none();
         let side = &mut lease.sides[i];
         if now != side.second {
             side.second = now;
@@ -188,11 +247,15 @@ impl VoiceRelayState {
             return Err(refused("voice bandwidth exhausted"));
         }
         side.bytes = bytes;
-        if let Some(result) = rebinding::admit(side, source, payload, now)? {
+        if let Some(result) = rebinding::admit(
+            side,
+            &lease.lease_id,
+            u8::try_from(i).unwrap_or(0),
+            source,
+            payload,
+            now,
+        )? {
             return Ok(result);
-        }
-        if charge_callee {
-            self.usage.charge(&lease.scope.callee);
         }
         if payload.is_empty() {
             return Ok(VoiceRoute::Drop);
@@ -227,18 +290,24 @@ fn new_side(now: u64) -> Result<Side, NodeCoreError> {
         token: ramflux_protocol::encode_base64url(
             ramflux_crypto::random_32().map_err(|_| refused("voice entropy unavailable"))?,
         ),
+        rebind_key: zeroize::Zeroizing::new(
+            ramflux_crypto::random_32().map_err(|_| refused("voice entropy unavailable"))?,
+        ),
         source: None,
         second: now,
         bytes: 0,
         challenge: None,
     })
 }
-fn allocation(l: &Lease, endpoint: &str) -> VoiceAllocation {
+fn allocation(l: &Lease, endpoint: &str, side: usize) -> VoiceAllocation {
     VoiceAllocation {
+        lease_id: l.lease_id.clone(),
         endpoint: endpoint.into(),
-        caller_token: l.sides[0].token.clone(),
-        callee_token: l.sides[1].token.clone(),
+        side: u8::try_from(side).unwrap_or(0),
+        token: l.sides[side].token.clone(),
+        rebind_key: ramflux_protocol::encode_base64url(l.sides[side].rebind_key.as_ref()),
         expires_at: l.expires_at,
+        hard_expires_at: l.hard_expires_at,
     }
 }
 fn same_account(a: &CallEndpoint, b: &CallEndpoint) -> bool {
@@ -297,7 +366,7 @@ mod tests;
 pub enum VoiceRoute<'a> {
     Drop,
     Forward { target: SocketAddr, packet: &'a [u8] },
-    Challenge { target: SocketAddr, packet: [u8; 36] },
+    Challenge { target: SocketAddr, packet: Vec<u8> },
 }
 #[path = "voice_rebinding.rs"]
 mod rebinding;

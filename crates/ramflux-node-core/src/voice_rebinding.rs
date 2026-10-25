@@ -13,6 +13,8 @@ pub(super) struct Challenge {
 }
 pub(super) fn admit<'a>(
     side: &mut Side,
+    lease_id: &str,
+    index: u8,
     source: SocketAddr,
     payload: &[u8],
     now: u64,
@@ -30,9 +32,18 @@ pub(super) fn admit<'a>(
         && now < challenge.expires_at
     {
         if source == challenge.address
-            && payload.len() == 36
+            && payload.len() == 52
             && payload.starts_with(RESPONSE)
-            && payload[4..] == challenge.cookie
+            && payload[4..36] == challenge.cookie
+            && ramflux_crypto::verify_voice_rebind_tag(
+                &side.rebind_key,
+                lease_id,
+                index,
+                &challenge.cookie,
+                source,
+                &payload[36..],
+            )
+            .is_ok()
         {
             side.source = Some(source);
             side.challenge = None;
@@ -43,9 +54,19 @@ pub(super) fn admit<'a>(
         ramflux_crypto::random_32().map_err(|_| super::refused("voice entropy unavailable"))?;
     side.challenge =
         Some(Challenge { address: source, cookie, expires_at: now.saturating_add(CHALLENGE_TTL) });
-    let mut packet = [0; 36];
-    packet[..4].copy_from_slice(CHALLENGE);
-    packet[4..].copy_from_slice(&cookie);
-    // The smallest authenticated input is 36 bytes; the reply cannot amplify its byte count.
+    let mut packet = Vec::with_capacity(55);
+    packet.extend_from_slice(CHALLENGE);
+    packet.extend_from_slice(&cookie);
+    match source.ip() {
+        std::net::IpAddr::V4(ip) => {
+            packet.push(4);
+            packet.extend_from_slice(&ip.octets());
+        }
+        std::net::IpAddr::V6(ip) => {
+            packet.push(6);
+            packet.extend_from_slice(&ip.octets());
+        }
+    }
+    packet.extend_from_slice(&source.port().to_be_bytes());
     Ok(Some(VoiceRoute::Challenge { target: source, packet }))
 }
