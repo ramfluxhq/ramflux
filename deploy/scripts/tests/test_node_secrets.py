@@ -46,6 +46,43 @@ class NodeSecretsTests(unittest.TestCase):
             self.assertEqual(moved.read_text(), "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")
             self.assertFalse(legacy.exists())
 
+    def test_secret_group_defaults_to_the_operator_and_is_recorded_once(self):
+        with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
+            root = Path(directory)
+            env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root))
+            env.pop("RAMFLUX_SECRET_GROUP", None)
+            for script in ("bootstrap-ca.sh", "issue-certs.sh", "issue-certs.sh"):
+                subprocess.run(["sh", str(SCRIPTS / script)], env=env, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            lines = (root / ".env").read_text().splitlines()
+            self.assertEqual(lines, [f"RAMFLUX_SECRET_GID={os.getgid()}"])
+            (root / ".env").write_text("RAMFLUX_SECRET_GID=4242\n")
+            subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual((root / ".env").read_text(), "RAMFLUX_SECRET_GID=4242\n")
+
+    def test_conflicting_signing_seeds_fail_closed_and_keep_both(self):
+        with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
+            root = Path(directory)
+            env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root))
+            for script in ("bootstrap-ca.sh", "issue-certs.sh"):
+                subprocess.run(["sh", str(SCRIPTS / script)], env=env, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            current = root / "certs" / "node-identity" / "node-signing.key"
+            legacy = root / "certs" / "federation" / "node-signing.key"
+            legacy.write_text("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")
+            original = current.read_text()
+            result = subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("different node signing seeds", result.stderr)
+            self.assertTrue(legacy.exists())
+            self.assertEqual(current.read_text(), original)
+            legacy.write_text(original)
+            subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertFalse(legacy.exists())
+
     def test_compose_uses_concrete_secret_paths(self):
         for filename in ("docker-compose.yml", "docker-compose.itest.yml"):
             contents = (SCRIPTS.parent / filename).read_text()

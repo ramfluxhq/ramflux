@@ -230,11 +230,16 @@ for config in Path(sys.argv[1], "config").glob("*.toml"):
 PY
     "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
     # The signing seed has its own mount, shared only by federation and retention.
-    if [ -e "$state/certs/federation/node-signing.key" ] && [ ! -e "$state/certs/node-identity/node-signing.key" ]; then
+    legacy_seed="$state/certs/federation/node-signing.key"
+    seed="$state/certs/node-identity/node-signing.key"
+    if [ -e "$legacy_seed" ] && [ ! -e "$seed" ]; then
       mkdir -p "$state/certs/node-identity"
-      mv "$state/certs/federation/node-signing.key" "$state/certs/node-identity/node-signing.key"
+      mv "$legacy_seed" "$seed"
+    elif [ -e "$legacy_seed" ]; then
+      # Two different seeds: never guess which identity is real.
+      cmp -s "$legacy_seed" "$seed" || fail "$legacy_seed and $seed differ; keep the seed matching the identity pin"
+      rm -f "$legacy_seed"
     fi
-    rm -f "$state/certs/federation/node-signing.key"
     chmod 755 "$state/certs/node-identity"
     # Containers need to traverse their read-only mounts; the containing state directory stays private.
     chmod 755 "$state/certs" "$state/config" "$state/secrets" "$state/secrets/gateway-v3" "$state/secrets/federation"
