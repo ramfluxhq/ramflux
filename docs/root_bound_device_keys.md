@@ -461,7 +461,7 @@ builds ignore this test setting and keep the one-hour renewable admission proof.
 A registration proof's one-hour admission expiry does not revoke a device in the
 current root-signed set. Live devices renew and republish at half-life (normally
 30 minutes). A manifest's branch artifact must nevertheless have been issued
-within the last 30 days; future issuance beyond 60 seconds is rejected. This
+within the last 30 days; future issuance beyond 300 seconds is not ready. This
 bounds a first observer's acceptance of an old signed set and proof to 30 days
 from proof issuance. A root-signed set has no trusted publication timestamp, so
 this remains a residual window for an observer that has never seen a newer set.
@@ -477,3 +477,13 @@ Group-member pins authenticated in a sibling snapshot but omitted from its
 bounded manifest list remain deferred. Their pinned root is fetched and verified
 on first inbound use; an inactive group member or mismatching key cannot acquire
 an active pin from this deferred metadata.
+
+
+Directory material from one dormant device does not revoke it or invalidate live siblings.
+SDK and router omit branch artifacts more than 30 days old or more than 300 seconds
+in the future from usable directory material. The complete signed device set is
+retained, including active dormant entries, for epoch and revocation checks. Cached
+material ages under the same policy and becomes usable again after a valid renewal.
+Gateway hub registrations use unique monotonic tokens even when a resume reuses a
+session ID. Peer delivery has a two-second deadline; failure closes that exact
+registration, so partial frames cannot remain on a reusable client stream.

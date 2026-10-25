@@ -12,7 +12,7 @@ pub(crate) mod registration;
 mod verify;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{PrincipalKind, SignedDeviceSetRecord};
-pub(crate) use verify::{verify_manifest, verify_manifest_authority};
+pub(crate) use verify::{ready_manifest, verify_manifest, verify_manifest_authority};
 pub(crate) fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(format!("identity authority: {reason}"))
 }
@@ -136,6 +136,27 @@ impl RamfluxClient {
             })
         {
             return Err(invalid("device key is revoked or superseded"));
+        }
+        let now = crate::time::now_unix_timestamp();
+        let material = db.load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(
+            &format!("identity/manifest-root/{}", identity.root_commitment()),
+        )?;
+        let issued = row["proof_issued_at"].as_i64().or_else(|| {
+            material.as_ref().and_then(|manifest| {
+                manifest
+                    .devices
+                    .iter()
+                    .find(|entry| entry.device_id == raw)
+                    .map(|entry| entry.branch_proof.issued_at)
+            })
+        });
+        let issued = issued.ok_or_else(|| {
+            SdkError::InboundPending(
+                "cached proof material timestamp unavailable; refresh manifest".into(),
+            )
+        })?;
+        if !ramflux_crypto::branch_proof_material_is_ready(issued, now) {
+            return Err(SdkError::InboundPending("cached device material is not ready".into()));
         }
         Ok(())
     }

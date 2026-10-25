@@ -220,12 +220,25 @@ pub(crate) async fn handle_gateway_session_transport(
     else {
         return Ok(());
     };
+    run_registered_gateway_session(send, recv, context, runtime).await
+}
+
+async fn run_registered_gateway_session(
+    send: Box<dyn ramflux_transport::GatewaySessionFrameSink + Send>,
+    recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
+    context: GatewayQuicContext,
+    runtime: GatewaySessionRuntime,
+) -> anyhow::Result<()> {
     let target_delivery_id = runtime.target_delivery_id.clone();
     let session_id = runtime.session_id.clone();
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
-    context.hub.register(target_delivery_id.clone(), session_id.clone(), Arc::clone(&send)).await;
-    let result = run_gateway_session_loop(send, recv, context.clone(), runtime).await;
-    context.hub.unregister(&target_delivery_id, &session_id).await;
+    let mut registration =
+        context.hub.register(target_delivery_id.clone(), session_id, Arc::clone(&send)).await?;
+    let result = tokio::select! {
+        result = run_gateway_session_loop(send, recv, context.clone(), runtime) => result,
+        _ = registration.closed.changed() => Ok(()),
+    };
+    context.hub.unregister(&target_delivery_id, registration.token).await;
     result
 }
 

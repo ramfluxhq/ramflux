@@ -104,9 +104,165 @@ fn durable_manifest_proof_age_is_bounded_to_thirty_days_with_an_injectable_clock
     let root = &manifest.principal_commitment;
     super::super::verify::verify_manifest_at(&manifest, root, issued + 7200)?;
     super::super::verify::verify_manifest_at(&manifest, root, issued + 30 * 86400)?;
-    assert!(
-        super::super::verify::verify_manifest_at(&manifest, root, issued + 30 * 86400 + 1).is_err()
+    for now in [issued + 30 * 86400 + 1, issued - 301] {
+        super::super::verify::verify_manifest_at(&manifest, root, now)?;
+        assert_eq!(super::super::verify::ready_manifest(manifest.clone(), now).devices.len(), 0);
+    }
+    assert_eq!(
+        super::super::verify::ready_manifest(manifest.clone(), issued - 300).devices.len(),
+        1
     );
-    assert!(super::super::verify::verify_manifest_at(&manifest, root, issued - 61).is_err());
+    Ok(())
+}
+
+#[test]
+fn one_dormant_device_never_invalidates_live_siblings_or_becomes_revoked() -> TestResult {
+    let live = Actor::new("alice", "live", 71, 72, 1)?;
+    let stale = Actor::new("alice", "dormant", 71, 73, 1)?;
+    let future = Actor::new("alice", "future", 71, 74, 1)?;
+    let receiver = Actor::new("bob", "bob", 81, 82, 1)?;
+    let mut manifest = live.manifest()?;
+    let now = now_unix_timestamp();
+    for (actor, issued) in [(&stale, now - 31 * 86400), (&future, now + 3600)] {
+        let mut entry = actor.manifest()?.devices.remove(0);
+        let request = actor.client.mvp1_identity_registration_request_at(
+            &actor.id,
+            &actor.id,
+            "proof-age",
+            &manifest.principal_commitment,
+            issued,
+        )?;
+        entry.branch_proof = request.proof;
+        manifest.devices.push(entry);
+    }
+    test_support::sign_manifest(
+        live.client.identity_root.as_ref().ok_or("root")?,
+        &mut manifest,
+        2,
+    )?;
+    receiver.client.persist_identity_directory(&stale.manifest()?)?;
+    // Simulate a legitimately cached pre-upgrade proof which has since aged 31 days.
+    let dormant =
+        receiver.client.device_identity_for_root(&manifest.principal_commitment, "dormant")?;
+    let mut previous = stale.manifest()?;
+    previous.devices[0] = manifest.devices[1].clone();
+    let mut row = receiver
+        .client
+        .account_db()?
+        .client_record("device", dormant.storage_key())?
+        .ok_or("old cache")?;
+    row.as_object_mut().ok_or("object")?.remove("proof_issued_at");
+    receiver.client.account_db()?.persist_client_record("device", dormant.storage_key(), &row)?;
+    receiver.client.account_db()?.persist_actor_state(
+        &format!("identity/manifest-root/{}", manifest.principal_commitment),
+        &previous,
+    )?;
+    verify_manifest(&manifest, &manifest.principal_commitment)?;
+    receiver.client.persist_identity_directory(&manifest)?;
+    let ready = super::super::verify::ready_manifest(manifest.clone(), now);
+    assert_eq!(ready.devices.len(), 1);
+    assert_eq!(ready.devices[0].device_id, "live");
+    let live_ref =
+        receiver.client.device_identity_for_root(&manifest.principal_commitment, "live")?;
+    assert_eq!(receiver.client.trusted_device(&live_ref)?["target_delivery_id"], "live");
+    let stale_ref =
+        receiver.client.device_identity_for_root(&manifest.principal_commitment, "dormant")?;
+    assert!(matches!(receiver.client.trusted_device(&stale_ref), Err(SdkError::InboundPending(_))));
+    let future_ref = RamfluxClient::device_identity_from_manifest(&manifest, "future")?;
+    assert!(receiver.client.trusted_device(&future_ref).is_err());
+    assert_eq!(
+        receiver
+            .client
+            .account_db()?
+            .client_record("device", stale_ref.storage_key())?
+            .ok_or("old metadata")?["revoked"],
+        false
+    );
+    let set = receiver.client.observed_device_set(&manifest.principal_commitment)?.ok_or("set")?;
+    assert_eq!(set.devices.len(), 3);
+    assert!(set.devices.iter().all(|device| device.status == DeviceSetStatus::Active));
+    // Old cached rows without a timestamp cannot silently retain stale permission after refresh.
+    let mut cached = receiver
+        .client
+        .account_db()?
+        .client_record("device", stale_ref.storage_key())?
+        .ok_or("cached")?;
+    cached.as_object_mut().ok_or("object")?.remove("proof_issued_at");
+    receiver.client.account_db()?.persist_client_record(
+        "device",
+        stale_ref.storage_key(),
+        &cached,
+    )?;
+    receiver.client.account_db()?.persist_actor_state(
+        &format!("identity/manifest-root/{}", manifest.principal_commitment),
+        &ready,
+    )?;
+    assert!(matches!(receiver.client.trusted_device(&stale_ref), Err(SdkError::InboundPending(_))));
+    assert_served_ready_manifest(
+        [(&live, now), (&stale, now - 31 * 86400), (&future, now + 3600)],
+        &manifest,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn an_omitted_stale_advertisement_preserves_fresh_pre_upgrade_cached_material() -> TestResult {
+    let peer = Actor::new("alice", "phone", 71, 72, 1)?;
+    let receiver = Actor::new("bob", "bob", 81, 82, 1)?;
+    let mut stale = peer.manifest()?;
+    receiver.client.persist_identity_directory(&stale)?;
+    let identity =
+        receiver.client.device_identity_for_root(&stale.principal_commitment, "phone")?;
+    let mut old = receiver
+        .client
+        .account_db()?
+        .client_record("device", identity.storage_key())?
+        .ok_or("cached")?;
+    old.as_object_mut().ok_or("object")?.remove("proof_issued_at");
+    receiver.client.account_db()?.persist_client_record("device", identity.storage_key(), &old)?;
+    let request = peer.client.mvp1_identity_registration_request_at(
+        "phone",
+        "phone",
+        "stale-advertisement",
+        &stale.principal_commitment,
+        now_unix_timestamp() - 31 * 86400,
+    )?;
+    stale.devices[0].branch_proof = request.proof;
+    receiver.client.persist_identity_directory(&stale)?;
+    assert_eq!(receiver.client.trusted_device(&identity)?["device_id"], "phone");
+    assert_eq!(
+        receiver.client.observed_device_set(&stale.principal_commitment)?.ok_or("set")?.devices[0]
+            .status,
+        DeviceSetStatus::Active
+    );
+    Ok(())
+}
+
+fn assert_served_ready_manifest(
+    actors: [(&Actor, i64); 3],
+    manifest: &SdkDeviceManifestResponse,
+) -> TestResult {
+    let mut node = ramflux_node_core::IdentityRegistry::new();
+    for (actor, issued) in actors {
+        let request = actor.client.mvp1_identity_registration_request_at(
+            &actor.id,
+            &actor.id,
+            "node-age",
+            &manifest.principal_commitment,
+            issued,
+        )?;
+        let mut request: ramflux_node_core::IdentityRegisterRequest =
+            serde_json::from_value(serde_json::to_value(request)?)?;
+        request.device_set = manifest.signed_device_set.clone();
+        node.register_identity(&request)?;
+        node.publish_prekey(ramflux_node_core::PrekeyPublishRequest {
+            device_id: actor.id.clone(),
+            bundle: actor.manifest()?.devices.remove(0).prekey_bundle,
+        })?;
+    }
+    let served = node.device_manifest(&manifest.principal_commitment).ok_or("served")?;
+    assert_eq!(served.devices.len(), 1);
+    assert_eq!(served.devices[0].device_id, "live");
+    assert_eq!(served.signed_device_set.ok_or("served signed set")?.devices.len(), 3);
     Ok(())
 }

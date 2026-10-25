@@ -811,6 +811,7 @@ async fn receive_first_bootstrap(
     let admission = sibling.client.inbox_admission_key(&incoming)?;
     let target = incoming.target_delivery_id.clone();
     let sequence = incoming.inbox_seq;
+    let retry = incoming.clone();
     gateway.inbox.push(incoming);
     let rejected = Arc::new(AtomicBool::new(false));
     sibling.put_engine(GatewaySessionEngine::with_test_transport(
@@ -856,6 +857,27 @@ async fn receive_first_bootstrap(
             rows[0]["plaintext_body_base64"].as_str().ok_or("body")?
         )?,
         b"peer to restored device"
+    );
+    let account = state.accounts.get_mut("sender").ok_or("account")?;
+    account.pending_deliveries.clear(); // Stronger than eviction from the 64-entry RAM window.
+    assert!(
+        !account.client.claim_inbox_projection(&retry)?,
+        "ACK retry cannot republish after cache eviction"
+    );
+    let reader = account.client.account_db()?.open_reader()?;
+    let receipt: serde_json::Value = reader
+        .load_actor_state(&account.client.authenticated_committed_key(&retry)?)?
+        .ok_or("receipt after reopen")?;
+    assert_eq!(receipt["projected"], true, "projection claim survives DB reopen");
+    let mut old_receipt = receipt;
+    old_receipt.as_object_mut().ok_or("receipt object")?.remove("projected");
+    account
+        .client
+        .account_db()?
+        .persist_actor_state(&account.client.authenticated_committed_key(&retry)?, &old_receipt)?;
+    assert!(
+        !account.client.claim_inbox_projection(&retry)?,
+        "pre-upgrade receipts default to already projected"
     );
     let mut sibling = state.accounts.remove("sender").ok_or("account")?;
     let engine = sibling.take_live_engine().await?;

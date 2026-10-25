@@ -7,7 +7,13 @@ use super::{Deserialize, GatewayInboxEntry, RamfluxClient, Routing, SdkError, Se
 pub(super) struct Committed {
     pub routing: Routing,
     pub entry: GatewayInboxEntry,
+    #[serde(default = "already_projected")]
+    pub projected: bool,
 }
+fn already_projected() -> bool {
+    true
+}
+
 pub(crate) fn committed_key(
     source: &ramflux_crypto::RootQualifiedDeviceRef,
     envelope: &str,
@@ -46,6 +52,50 @@ impl RamfluxClient {
                 &ramflux_protocol::canonical_json_bytes(&entry.envelope)?
             )
         ))
+    }
+    pub(crate) fn persist_legacy_committed(
+        &self,
+        entry: &GatewayInboxEntry,
+        conversation: &str,
+    ) -> Result<(), SdkError> {
+        let key = self.legacy_committed_key(entry)?;
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            let new = db.load_actor_state::<String>(&key)?.is_none();
+            db.persist_actor_state(&key, &conversation)?;
+            if new {
+                db.persist_actor_state(&format!("{key}/projected"), &false)?;
+            }
+            Ok(())
+        })
+    }
+    /// Claim the application projection durably before ACK, independent of the bounded RAM cache.
+    pub(crate) fn claim_inbox_projection(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        let key = self.authenticated_committed_key(entry)?;
+        db.write_transaction(|| {
+            if let Some(mut receipt) = db.load_actor_state::<Committed>(&key)? {
+                if receipt.projected {
+                    return Ok(false);
+                }
+                receipt.projected = true;
+                db.persist_actor_state(&key, &receipt)?;
+                return Ok(true);
+            }
+            let legacy = self.legacy_committed_key(entry)?;
+            if db.load_actor_state::<String>(&legacy)?.is_none() {
+                return Ok(false);
+            }
+            let marker = format!("{legacy}/projected");
+            if db.load_actor_state::<bool>(&marker)?.unwrap_or(true) {
+                return Ok(false);
+            }
+            db.persist_actor_state(&marker, &true)?;
+            Ok(true)
+        })
     }
     pub(crate) fn committed_routing(
         &self,

@@ -387,7 +387,11 @@ impl RamfluxClient {
             self.append_gateway_delivery(entry)?;
             self.account_db()?.persist_actor_state(
                 receipt,
-                &Committed { routing: opened.routing.clone(), entry: entry.clone() },
+                &Committed {
+                    routing: opened.routing.clone(),
+                    entry: entry.clone(),
+                    projected: false,
+                },
             )?;
             Ok(plaintext)
         })

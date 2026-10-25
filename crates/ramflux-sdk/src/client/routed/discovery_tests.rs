@@ -10,14 +10,18 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[tokio::test]
 async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_chain() -> TestResult
 {
-    first_use_discovery(false).await
+    first_use_discovery(false, false).await
 }
 #[tokio::test]
 async fn group_pin_omitted_from_bounded_history_fetches_root_and_restores_pin_on_first_use()
 -> TestResult {
-    first_use_discovery(true).await
+    first_use_discovery(true, false).await
 }
-async fn first_use_discovery(lazy_group: bool) -> TestResult {
+#[tokio::test]
+async fn a_bad_deferred_pin_does_not_reject_an_authenticated_first_message() -> TestResult {
+    first_use_discovery(true, true).await
+}
+async fn first_use_discovery(lazy_group: bool, mismatched_pin: bool) -> TestResult {
     let sender = Fixture::new("alice", 91)?;
     let staging = Fixture::new("bob", 101)?;
     let receiver = Fixture::new("bob", 101)?;
@@ -39,7 +43,11 @@ async fn first_use_discovery(lazy_group: bool) -> TestResult {
         let pin = crate::own_device_sync::SdkOwnDeviceGroupMemberPin {
             group_id: "group".into(),
             device_id: "alice".into(),
-            signing_public_key: manifest.devices[0].branch_public_key.clone(),
+            signing_public_key: if mismatched_pin {
+                ramflux_protocol::encode_base64url([7; 32])
+            } else {
+                manifest.devices[0].branch_public_key.clone()
+            },
             principal_id: Some("alice".into()),
             principal_commitment: Some(manifest.principal_commitment.clone()),
         };
@@ -103,15 +111,29 @@ async fn first_use_discovery(lazy_group: bool) -> TestResult {
     receiver.client.ensure_inbound_device(&gateway, &entry).await?;
     server.await??;
     if lazy_group {
-        let device = receiver.client.device_identity_for_root(&restored_root, "alice")?;
-        receiver.client.require_group_sender_pin("group", "alice", &device)?;
-        assert_eq!(
-            receiver.client.account_db()?.actor_state_usage("own-group/pending-pins/")?.0,
-            0
-        );
+        assert_discovered_group_pin(&receiver.client, &restored_root, mismatched_pin)?;
+        if mismatched_pin {
+            receiver.client.ensure_inbound_device(&gateway, &entry).await?;
+        }
     }
     let opened = receiver.client.open_routed(&entry, "bob")?;
     assert_eq!(&*opened.body, b"hello");
+    Ok(())
+}
+
+fn assert_discovered_group_pin(client: &RamfluxClient, root: &str, mismatched: bool) -> TestResult {
+    let device = client.device_identity_for_root(root, "alice")?;
+    if mismatched {
+        assert!(client.require_group_sender_pin("group", "alice", &device).is_err());
+        let skipped = client
+            .account_db()?
+            .list_actor_states::<serde_json::Value>("own-device/restore-skip/")?;
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["reason"], "deferred_pin_key_mismatch");
+    } else {
+        client.require_group_sender_pin("group", "alice", &device)?;
+    }
+    assert_eq!(client.account_db()?.actor_state_usage("own-group/pending-pins/")?.0, 0);
     Ok(())
 }
 
@@ -259,5 +281,40 @@ fn deferred_group_authority_cannot_reactivate_after_the_snapshot_epoch_changes()
     receiver.client.finish_lazy_own_group_pins("alice", &manifest.principal_commitment, "alice")?;
     assert_eq!(db.actor_state_usage("own-group/pending-pins/")?.0, 0);
     assert!(db.group_member_identity_metadata("group", "alice")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_mismatched_deferred_pin_is_dropped_without_poisoning_authenticated_traffic() -> TestResult {
+    let sender = Fixture::new("alice", 91)?;
+    let receiver = Fixture::new("bob", 101)?;
+    let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    let db = receiver.client.account_db()?;
+    db.upsert_group_local_membership_snapshot("group", 1, 1024, "all", "bob", "owner", 1)?;
+    db.upsert_group_member_snapshot("group", "alice", "member", 1)?;
+    let pin = crate::own_device_sync::SdkOwnDeviceGroupMemberPin {
+        group_id: "group".into(),
+        device_id: "alice".into(),
+        signing_public_key: ramflux_protocol::encode_base64url([7; 32]),
+        principal_id: Some("alice".into()),
+        principal_commitment: Some(manifest.principal_commitment.clone()),
+    };
+    receiver.client.park_own_group_pin(&pin)?;
+    receiver.client.persist_identity_directory(&manifest)?;
+    for _ in 0..2 {
+        receiver.client.finish_lazy_own_group_pins(
+            "alice",
+            &manifest.principal_commitment,
+            "alice",
+        )?;
+    }
+    assert_eq!(db.actor_state_usage("own-group/pending-pins/")?.0, 0);
+    assert!(db.group_member_identity_metadata("group", "alice")?.is_none());
+    let skipped = db.list_actor_states::<serde_json::Value>("own-device/restore-skip/")?;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "deferred_pin_key_mismatch");
+    receiver.client.trusted_device(
+        &receiver.client.device_identity_for_root(&manifest.principal_commitment, "alice")?,
+    )?;
     Ok(())
 }

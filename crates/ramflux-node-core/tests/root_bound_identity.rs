@@ -10,7 +10,23 @@ use ramflux_protocol::{DeviceSetStatus, PrincipalKind, encode_base64url};
 use support::*;
 #[test]
 fn substitution_diagnostic_is_rejected_without_poisoning_the_real_registration() -> TestResult {
-    let f = Fixture::new()?;
+    let mut f = Fixture::new()?;
+    let now = i64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+    )?;
+    f.request.now = now;
+    f.request.proof = authorize_device_branch_v2(
+        &f.root,
+        &f.device,
+        BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: now - 1,
+            expires_at: now + 3600,
+            principal_kind: PrincipalKind::HeadlessAi,
+            agreement_identity_public_key: f.x.public,
+        },
+    )?;
     let mut registry = IdentityRegistry::new();
     let mut attack = f.request.clone();
     let replacement = create_device_branch("alice", "alice-device", 1, [13; 32]);
@@ -25,7 +41,7 @@ fn substitution_diagnostic_is_rejected_without_poisoning_the_real_registration()
     )?;
     verify_prekey_bundle(&replacement.signing_key.verifying_key(), &malicious)?;
     assert!(registry.register_identity(&attack).is_err());
-    assert_only_admission_charged(&registry)?;
+    assert_only_admission_charged(&registry, f.request.now)?;
     registry.register_identity(&f.request)?;
     assert!(
         registry
@@ -173,7 +189,7 @@ fn legacy_registry_load_is_readable_but_key_writes_require_root_bound_migration(
             })
             .is_err()
     );
-    assert_authority_unchanged_after_admission(&legacy, &before)?;
+    assert_authority_unchanged_after_admission(&legacy, &before, f.request.now)?;
     legacy.register_identity(&f.request)?;
     legacy.publish_prekey(PrekeyPublishRequest {
         device_id: f.device.device_id.clone(),
@@ -416,7 +432,7 @@ fn individually_valid_proof_and_record_with_different_kinds_cannot_be_combined()
     )?;
     let mut registry = IdentityRegistry::new();
     assert!(registry.register_identity(&request).is_err());
-    assert_only_admission_charged(&registry)?;
+    assert_only_admission_charged(&registry, f.request.now)?;
     registry.register_identity(&f.request)?;
     Ok(())
 }
@@ -452,19 +468,20 @@ fn historical_unqualified_proof_ids_cannot_reserve_a_current_root_qualified_proo
     Ok(())
 }
 
-fn assert_only_admission_charged(registry: &IdentityRegistry) -> TestResult {
-    assert_authority_unchanged_after_admission(registry, &IdentityRegistry::new())
+fn assert_only_admission_charged(registry: &IdentityRegistry, at: i64) -> TestResult {
+    assert_authority_unchanged_after_admission(registry, &IdentityRegistry::new(), at)
 }
 
 fn assert_authority_unchanged_after_admission(
     registry: &IdentityRegistry,
     before: &IdentityRegistry,
+    at: i64,
 ) -> TestResult {
     let mut actual = serde_json::to_value(registry)?;
     let previous = serde_json::to_value(before)?;
     assert_eq!(
         actual["registration_times_by_source_ip"]["unknown-source-ip"],
-        serde_json::json!([1100])
+        serde_json::json!([at])
     );
     actual["registration_times_by_source_ip"] = previous["registration_times_by_source_ip"].clone();
     assert_eq!(actual, previous);

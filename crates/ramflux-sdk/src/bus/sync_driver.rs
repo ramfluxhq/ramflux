@@ -133,7 +133,7 @@ async fn receive(
             }
         };
         // Keep committed messages visible while acknowledgement retries remain pending.
-        if project_message {
+        if project_message && account.client.claim_inbox_projection(&entry)? {
             let pending_keys = account
                 .pending_deliveries
                 .iter()

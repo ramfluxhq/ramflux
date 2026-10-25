@@ -764,7 +764,10 @@ impl RamfluxClient {
             ))?
             .ok_or_else(|| SdkError::LocalBus("verified manifest unavailable".into()))?;
         verify_device_manifest(&manifest, commitment)?;
-        complete_safety_material(&manifest)
+        complete_safety_material(&super::identity_authority::ready_manifest(
+            manifest,
+            now_unix_timestamp(),
+        ))
     }
     async fn contact_safety_material_pair_via_gateway(
         &self,
@@ -885,7 +888,7 @@ pub(crate) async fn fetch_verified_device_manifest(
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
     })?;
     verify_device_manifest(&manifest, identity_commitment)?;
-    Ok(manifest)
+    Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
 
 /// Fetch and verify a device manifest from an absolute federation HTTP base URL (the recipient's
@@ -903,7 +906,7 @@ pub(crate) fn fetch_verified_device_manifest_from_url(
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
     })?;
     verify_device_manifest(&manifest, identity_commitment)?;
-    Ok(manifest)
+    Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
 
 /// # Errors

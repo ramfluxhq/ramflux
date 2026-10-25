@@ -794,34 +794,41 @@ impl IdentityRegistry {
             return self.legacy_device_manifest(principal_commitment);
         }
         let root_public_key = self.root_public_keys_by_commitment.get(principal_commitment)?;
-        let mut devices =
-            self.devices
-                .values()
-                .filter(|device| {
-                    device.principal_commitment == principal_commitment
-                        && self.device_record_is_usable(device)
-                })
-                .filter_map(|device| {
-                    let prekey_bundle = self.prekey_bundle(&self.device_identity_for_root(
+        let mut devices = self
+            .devices
+            .values()
+            .filter(|device| {
+                device.principal_commitment == principal_commitment
+                    && self.device_record_is_usable(device)
+                    && ramflux_crypto::branch_proof_material_is_ready(
+                        device.branch_proof.issued_at,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |time| i64::try_from(time.as_secs()).unwrap_or(i64::MAX)),
+                    )
+            })
+            .filter_map(|device| {
+                let prekey_bundle =
+                    self.prekey_bundle(&self.device_identity_for_root(
                         &device.principal_commitment,
                         &device.device_id,
                     )?)?;
-                    Some(DeviceManifestEntry {
-                        principal_id: device.principal_id.clone(),
-                        principal_commitment: device.principal_commitment.clone(),
-                        device_id: device.device_id.clone(),
-                        device_epoch: device.device_epoch,
-                        branch_public_key: device.branch_public_key.clone(),
-                        target_delivery_id: device.target_delivery_id.clone(),
-                        branch_proof: device.branch_proof.clone(),
-                        prekey_bundle: prekey_bundle.clone(),
-                        branch_authorized_event_id: format!(
-                            "device.branch_authorized:{}:{}",
-                            device.device_id, device.device_epoch
-                        ),
-                    })
+                Some(DeviceManifestEntry {
+                    principal_id: device.principal_id.clone(),
+                    principal_commitment: device.principal_commitment.clone(),
+                    device_id: device.device_id.clone(),
+                    device_epoch: device.device_epoch,
+                    branch_public_key: device.branch_public_key.clone(),
+                    target_delivery_id: device.target_delivery_id.clone(),
+                    branch_proof: device.branch_proof.clone(),
+                    prekey_bundle: prekey_bundle.clone(),
+                    branch_authorized_event_id: format!(
+                        "device.branch_authorized:{}:{}",
+                        device.device_id, device.device_epoch
+                    ),
                 })
-                .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
         devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
         let signed_device_set = self.signed_device_sets.get(principal_commitment).cloned();
         let principal_id = signed_device_set

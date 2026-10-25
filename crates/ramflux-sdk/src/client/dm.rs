@@ -324,8 +324,7 @@ impl RamfluxClient {
         target: &str,
     ) -> Result<bool, SdkError> {
         if self.legacy_receive_checkpoint_current(conversation_id, entry)? {
-            self.account_db()?
-                .persist_actor_state(&self.legacy_committed_key(entry)?, &conversation_id)?;
+            self.persist_legacy_committed(entry, conversation_id)?;
             self.persist_gateway_receive_cursor(target, entry.inbox_seq)?;
             return Ok(true);
         }
@@ -545,8 +544,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.persist_dm_session(conversation, &entry.envelope.envelope_id, "recv", session)?;
-            self.account_db()?
-                .persist_actor_state(&self.legacy_committed_key(entry)?, &conversation)?;
+            self.persist_legacy_committed(entry, conversation)?;
             self.persist_gateway_receive_cursor(target, entry.inbox_seq)
         })
     }

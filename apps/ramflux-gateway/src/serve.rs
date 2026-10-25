@@ -472,7 +472,7 @@ mod tests {
                 "session_bob_on_gw_b".to_owned(),
                 recording_send_handle(Arc::clone(&frames)),
             )
-            .await;
+            .await?;
         let frame = deliver_frame("env_cross_gateway_forward", "target_cross_gateway_bob");
 
         let delivered = handle_gateway_forward_deliver(

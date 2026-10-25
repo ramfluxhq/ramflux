@@ -63,6 +63,9 @@ impl RamfluxClient {
         device: &str,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
+        if db.actor_state_usage(PREFIX)?.0 == 0 {
+            return Ok(false);
+        }
         for pending in db.list_actor_states::<PendingGroup>(PREFIX)? {
             if db.group_snapshot_epoch(&pending.group_id)? != Some(pending.epoch) {
                 continue;
@@ -86,10 +89,20 @@ impl RamfluxClient {
         device: &str,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
+        if db.actor_state_usage(PREFIX)?.0 == 0 {
+            return Ok(());
+        }
         for mut pending in db.list_actor_states::<PendingGroup>(PREFIX)? {
             let key = group_record(&pending.group_id);
             if db.group_snapshot_epoch(&pending.group_id)? != Some(pending.epoch) {
                 db.remove_actor_state(&key)?;
+                continue;
+            }
+            if !pending.pins.iter().any(|pin| {
+                pin.principal_id.as_deref() == Some(principal)
+                    && pin.principal_commitment.as_deref() == Some(root)
+                    && pin.device_id == device
+            }) {
                 continue;
             }
             let mut retained = Vec::new();
@@ -106,12 +119,33 @@ impl RamfluxClient {
                     if db.group_member_role_metadata(&pin.group_id, device)?.is_some() {
                         let identity = self.device_identity_for_root(root, device)?;
                         let record = self.trusted_device(&identity)?;
-                        if record["signing_public_key"] != pin.signing_public_key {
-                            return Err(SdkError::InboundRejected(
+                        let outcome = if record["signing_public_key"] == pin.signing_public_key {
+                            self.restore_own_member_pin(pin)
+                        } else {
+                            Err(SdkError::InboundRejected(
                                 "lazy group pin differs from verified root".into(),
-                            ));
+                            ))
+                        };
+                        match outcome {
+                            Ok(()) => {}
+                            Err(
+                                SdkError::InboundRejected(_)
+                                | SdkError::Storage(
+                                    ramflux_storage::StorageError::GroupPermissionDenied,
+                                ),
+                            ) => {
+                                db.record_own_device_restore_skip(
+                                    &format!("lazy-group:{}:{}", pending.group_id, pending.epoch),
+                                    &format!("{root}:{device}"),
+                                    "deferred_pin_key_mismatch",
+                                )?;
+                            }
+                            Err(SdkError::InboundPending(_)) => {
+                                retained.push(pin.clone());
+                                continue;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        self.restore_own_member_pin(pin)?;
                     }
                     changed = true;
                 }

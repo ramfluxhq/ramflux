@@ -13,13 +13,15 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         super::verify::verify_manifest_authority(manifest, &manifest.principal_commitment)?;
         let material = verify_manifest(manifest, &manifest.principal_commitment);
+        let ready =
+            super::verify::ready_manifest(manifest.clone(), crate::time::now_unix_timestamp());
         let db = self.account_db()?;
         let record =
             manifest.signed_device_set.as_ref().ok_or_else(|| invalid("missing signed set"))?;
         // Preserve the existing bounded pinned-owner safety observation, even for ownership
         // conflicts, but only after the new record and its exact keys authenticate.
         if material.is_ok() {
-            db.write_transaction(|| self.record_pinned_group_key_changes(manifest))?;
+            db.write_transaction(|| self.record_pinned_group_key_changes(&ready))?;
         }
         if let Err(error) =
             self.check_observed_set(record).and_then(|()| self.check_directory_ownership(manifest))
@@ -40,7 +42,8 @@ impl RamfluxClient {
         self.finish_pair_retirement()?;
         material?;
         db.write_transaction(|| {
-            self.write_directory_metadata(manifest, authority_changed)?;
+            self.preserve_cached_proof_timestamps(&manifest.principal_commitment)?;
+            self.write_directory_metadata(&ready, authority_changed)?;
             db.persist_actor_state(
                 &format!("identity/manifest/{}", manifest.principal_id),
                 manifest,
@@ -153,6 +156,42 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    fn preserve_cached_proof_timestamps(&self, root: &str) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let Some(previous) = db.load_actor_state::<SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{root}"
+        ))?
+        else {
+            return Ok(());
+        };
+        // Unverified legacy cache cannot block a newly authenticated root-bound publication.
+        if super::verify::verify_manifest_authority(&previous, root).is_err() {
+            return Ok(());
+        }
+        let public = ramflux_crypto::verifying_key_from_base64url(&previous.root_public_key)?;
+        let record =
+            previous.signed_device_set.as_ref().ok_or_else(|| invalid("cached set absent"))?;
+        for entry in &previous.devices {
+            let Ok(identity) = ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
+                &public,
+                record,
+                &entry.device_id,
+            ) else {
+                continue;
+            };
+            let Some(mut row) = db.client_record("device", identity.storage_key())? else {
+                continue;
+            };
+            if row["proof_issued_at"].as_i64().is_none()
+                && row["signing_public_key"] == entry.branch_public_key
+                && row["device_epoch"] == entry.device_epoch
+            {
+                row["proof_issued_at"] = json!(entry.branch_proof.issued_at);
+                db.persist_client_record("device", identity.storage_key(), &row)?;
+            }
+        }
+        Ok(())
+    }
     fn write_directory_metadata(
         &self,
         manifest: &SdkDeviceManifestResponse,
@@ -175,7 +214,7 @@ impl RamfluxClient {
         )?;
         for device in &manifest.devices {
             self.rotate_verified_group_pins(manifest, device)?;
-            db.persist_client_record("device",&device.device_id,&json!({"device_id":device.device_id,"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id,"device_epoch":device.device_epoch,"revoked":false,"authority_epoch":record.device_set_epoch,"proof_expires_at":device.branch_proof.expires_at}))?;
+            db.persist_client_record("device",&device.device_id,&json!({"device_id":device.device_id,"principal_id":manifest.principal_id,"principal_commitment":manifest.principal_commitment,"signing_public_key":device.branch_public_key,"x25519_identity_public":device.prekey_bundle.identity_key,"target_delivery_id":device.target_delivery_id,"device_epoch":device.device_epoch,"revoked":false,"authority_epoch":record.device_set_epoch,"proof_expires_at":device.branch_proof.expires_at,"proof_issued_at":device.branch_proof.issued_at}))?;
         }
         if changed {
             db.append_journal(&format!("identity-safety:{}:{}",manifest.principal_commitment,record.device_set_epoch),"safety.changed",&json!({"principal_id":manifest.principal_id,"device_set_epoch":record.device_set_epoch,"reason":"root_signed_device_set_changed"}),crate::prelude::now_unix_timestamp(),None)?;

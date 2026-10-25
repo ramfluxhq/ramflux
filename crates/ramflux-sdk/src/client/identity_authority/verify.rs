@@ -31,12 +31,8 @@ pub(super) fn verify_manifest_at(
         )?) {
             return Err(invalid("duplicate manifest device"));
         }
-        if device.branch_proof.issued_at > now.saturating_add(60)
-            || now.saturating_sub(device.branch_proof.issued_at) > 30 * 86400
-        {
-            return Err(invalid(
-                "manifest branch proof is older than 30 days or issued in the future",
-            ));
+        if !ramflux_crypto::branch_proof_material_is_ready(device.branch_proof.issued_at, now) {
+            continue; // Not ready is not a revocation of this device or any live sibling.
         }
         let bundle = &device.prekey_bundle;
         if device.principal_id != manifest.principal_id
@@ -87,6 +83,16 @@ pub(super) fn verify_manifest_at(
     // An empty ready-device array is valid, including a fully revoked root. Omission alone
     // never means revocation: only the complete signed record can authorize retirement.
     Ok(())
+}
+
+pub(crate) fn ready_manifest(
+    mut manifest: SdkDeviceManifestResponse,
+    now: i64,
+) -> SdkDeviceManifestResponse {
+    manifest.devices.retain(|device| {
+        ramflux_crypto::branch_proof_material_is_ready(device.branch_proof.issued_at, now)
+    });
+    manifest
 }
 
 pub(crate) fn verify_manifest_authority(

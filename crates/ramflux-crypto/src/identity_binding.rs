@@ -13,6 +13,14 @@ pub const BRANCH_PROOF_CLOCK_SKEW_SECONDS: i64 = 300;
 /// Maximum lifetime of a root-signed proof admitted for a new live registration (30 days).
 pub const MAX_BRANCH_PROOF_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
 
+/// Whether historical device proof material is ready for directory use, independently of revocation.
+/// The signature and signed-set binding must be verified separately.
+#[must_use]
+pub fn branch_proof_material_is_ready(issued_at: i64, now: i64) -> bool {
+    issued_at <= now.saturating_add(BRANCH_PROOF_CLOCK_SKEW_SECONDS)
+        && now.saturating_sub(issued_at) <= MAX_BRANCH_PROOF_LIFETIME_SECONDS
+}
+
 /// Local root-owned inputs; no key or kind is inferred from a server response.
 pub struct BranchAuthorization<'a> {
     pub audience: &'a str,

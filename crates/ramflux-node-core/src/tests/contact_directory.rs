@@ -49,11 +49,27 @@ fn register(
     device: &str,
     nonce: u64,
 ) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
-    let request = registration_request("alice", device, nonce, None, "test-source")?;
-    registry.register_identity(&request)?;
+    let mut request = registration_request("alice", device, nonce, None, "test-source")?;
+    let root = ramflux_crypto::create_identity_root("alice", seed_from_nonce(0x31, nonce));
     let branch =
         ramflux_crypto::create_device_branch("alice", device, 1, seed_from_nonce(0x41, nonce));
     let key = ramflux_crypto::X25519KeyPair::from_seed(seed_from_nonce(0x51, nonce));
+    request.now = i64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+    )?;
+    request.proof = ramflux_crypto::authorize_device_branch_v2(
+        &root,
+        &branch,
+        ramflux_crypto::BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: request.now - 1,
+            expires_at: request.now + 3600,
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            agreement_identity_public_key: key.public,
+        },
+    )?;
+    registry.register_identity(&request)?;
     let prekey = ramflux_crypto::X25519KeyPair::from_seed([72; 32]);
     registry.publish_prekey(PrekeyPublishRequest {
         device_id: device.into(),

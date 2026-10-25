@@ -130,15 +130,26 @@ impl GatewayPeerDirectory {
 pub(crate) type GatewaySendHandle =
     Arc<AsyncMutex<Box<dyn ramflux_transport::GatewaySessionFrameSink + Send>>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GatewayRegistrationToken(u64);
+
+pub(crate) struct GatewayRegistration {
+    pub(crate) token: GatewayRegistrationToken,
+    pub(crate) closed: tokio::sync::watch::Receiver<bool>,
+}
+
 #[derive(Clone)]
 pub(crate) struct GatewayHubEntry {
     session_id: String,
+    token: GatewayRegistrationToken,
+    closed: tokio::sync::watch::Sender<bool>,
     sender: GatewaySendHandle,
 }
 
 #[derive(Default)]
 pub(crate) struct GatewaySessionHub {
     senders_by_target: AsyncMutex<BTreeMap<String, GatewayHubEntry>>,
+    next_registration: std::sync::atomic::AtomicU64,
 }
 
 impl GatewaySessionHub {
@@ -147,16 +158,32 @@ impl GatewaySessionHub {
         target_delivery_id: String,
         session_id: String,
         sender: GatewaySendHandle,
-    ) {
-        self.senders_by_target
+    ) -> anyhow::Result<GatewayRegistration> {
+        use std::sync::atomic::Ordering;
+        let sequence = self
+            .next_registration
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| anyhow::anyhow!("gateway registration counter exhausted"))?;
+        let token = GatewayRegistrationToken(sequence);
+        let (closed, receiver) = tokio::sync::watch::channel(false);
+        let old = self
+            .senders_by_target
             .lock()
             .await
-            .insert(target_delivery_id, GatewayHubEntry { session_id, sender });
+            .insert(target_delivery_id, GatewayHubEntry { session_id, token, closed, sender });
+        if let Some(old) = old {
+            let _ = old.closed.send(true);
+        }
+        Ok(GatewayRegistration { token, closed: receiver })
     }
 
-    pub(crate) async fn unregister(&self, target_delivery_id: &str, session_id: &str) {
+    pub(crate) async fn unregister(
+        &self,
+        target_delivery_id: &str,
+        token: GatewayRegistrationToken,
+    ) {
         let mut senders = self.senders_by_target.lock().await;
-        if senders.get(target_delivery_id).is_some_and(|entry| entry.session_id == session_id) {
+        if senders.get(target_delivery_id).is_some_and(|entry| entry.token == token) {
             senders.remove(target_delivery_id);
         }
     }
@@ -171,14 +198,20 @@ impl GatewaySessionHub {
         let Some(entry) = entry else {
             return false;
         };
-        let result = {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             let mut sender = entry.sender.lock().await;
             ramflux_transport::write_gateway_session_json(&mut **sender, frame).await
-        };
-        if let Err(error) = result {
-            tracing::warn!(%error, target_delivery_id, session_id = %entry.session_id, "local peer delivery failed; unregistering session");
-            // A newer registration may already have replaced this failed session.
-            self.unregister(target_delivery_id, &entry.session_id).await;
+        })
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            tracing::warn!(result = ?result, target_delivery_id, session_id = %entry.session_id,
+                "local peer delivery failed; closing registration");
+            // Wake this exact loop before dropping a possibly partially written sink.
+            let _ = entry.closed.send(true);
+            if let Ok(mut sender) = entry.sender.try_lock() {
+                let _ = sender.finish();
+            }
+            self.unregister(target_delivery_id, entry.token).await;
             return false;
         }
         true
