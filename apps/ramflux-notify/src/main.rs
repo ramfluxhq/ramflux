@@ -489,20 +489,33 @@ async fn handle_notify_mesh_quic_accepted_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     ingress: Arc<NotifyIngressState>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let result = if accepted.request.method == "POST"
-        && accepted.request.path == ramflux_node_core::PUSH_ROUTE_PATH
-    {
-        // Registration makes a blocking router authority lookup; keep it off runtime workers.
+    let route_control = if accepted.request.method == "POST" {
+        match accepted.request.path.as_str() {
+            ramflux_node_core::PUSH_ROUTE_PATH => Some(true),
+            ramflux_node_core::PUSH_ROUTE_DELETE_PATH => Some(false),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let result = if let Some(register) = route_control {
+        // Route control makes blocking router or redb calls; keep it off runtime workers.
         let body = accepted.request.body.clone();
         let ingress = Arc::clone(&ingress);
-        tokio::task::spawn_blocking(move || push_registration::register(&ingress, body))
-            .await
-            .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))
-            .and_then(|result| result)
-            .map(|expires_at| ramflux_transport::GatewayQuicResponse {
-                status: 200,
-                body: serde_json::json!(expires_at),
-            })
+        tokio::task::spawn_blocking(move || {
+            if register {
+                push_registration::register(&ingress, body)
+            } else {
+                push_registration::deregister(&ingress, body)
+            }
+        })
+        .await
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))
+        .and_then(|result| result)
+        .map(|value| ramflux_transport::GatewayQuicResponse {
+            status: 200,
+            body: serde_json::json!(value),
+        })
     } else {
         handle_notify_mesh_quic_request(&accepted.request, &ingress)
     };

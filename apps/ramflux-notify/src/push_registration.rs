@@ -104,6 +104,21 @@ pub(crate) fn register(
     )?;
     Ok(expires_at)
 }
+/// Explicit deregistration from the device's own authenticated session.
+pub(crate) fn deregister(
+    ingress: &super::NotifyIngressState,
+    value: serde_json::Value,
+) -> Result<u64, NodeCoreError> {
+    let control: ramflux_node_core::PushRouteDeleteControl =
+        serde_json::from_value(value).map_err(|_| rejected())?;
+    let now = ramflux_node_core::now_unix_seconds();
+    control.verify(ingress.wake_auth.key.as_ref().ok_or_else(rejected)?, now)?;
+    let removed = ingress.store.delete_authenticated_push_routes(
+        &control.body.authority,
+        control.body.provider.as_ref(),
+    )?;
+    Ok(u64::try_from(removed).unwrap_or(u64::MAX))
+}
 fn endpoint(
     credential: &ramflux_node_core::ProviderCredential,
     registration: &ramflux_node_core::PushRouteRegistration,

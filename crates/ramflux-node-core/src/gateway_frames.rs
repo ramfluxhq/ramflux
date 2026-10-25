@@ -171,6 +171,7 @@ pub struct GatewaySessionEstablishedFrame {
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
     PushRouteRegister { request: Box<crate::PushRouteRegistrationFrame> },
+    PushRouteDeregister { request: Box<crate::PushRouteDeregistrationFrame> },
     VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
@@ -193,8 +194,20 @@ pub enum GatewayClientFrame {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayServerFrame {
+    /// Replies to registration carry the signed request id, so a late reply is matched to
+    /// its request and never mistaken for the answer to another frame.
     PushRouteRegistered {
         expires_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    PushRouteRefused {
+        request_id: String,
+        reason: String,
+    },
+    PushRouteDeregistered {
+        request_id: String,
+        removed: u64,
     },
     VoiceLease {
         response: Box<ramflux_protocol::VoiceLeaseResponse>,

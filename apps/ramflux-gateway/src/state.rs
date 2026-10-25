@@ -60,6 +60,7 @@ pub(crate) struct GatewayQuicContext {
     pub(crate) remote_addr: SocketAddr,
 }
 
+#[derive(Clone)]
 pub(crate) struct GatewaySessionRuntime {
     pub(crate) source_identity: ramflux_crypto::RootQualifiedDeviceRef,
     pub(crate) session_id: String,

@@ -657,19 +657,10 @@ async fn run_gateway_session_loop_until_closed(
                     }
                 }
                 ramflux_node_core::GatewayClientFrame::PushRouteRegister { request } => {
-                    // A refused registration is answered in-band; the session stays usable.
-                    if let Err(error) =
-                        crate::push_registration::handle(&send, &context, &runtime, &request).await
-                    {
-                        tracing::warn!(%error, "push route registration refused");
-                        write_gateway_handle(
-                            &send,
-                            &ramflux_node_core::GatewayServerFrame::Nack {
-                                reason: "push route registration refused".to_owned(),
-                            },
-                        )
-                        .await?;
-                    }
+                    crate::push_registration::spawn_register(&send, &context, &runtime, *request);
+                }
+                ramflux_node_core::GatewayClientFrame::PushRouteDeregister { request } => {
+                    crate::push_registration::spawn_deregister(&send, &context, &runtime, *request);
                 }
                 ramflux_node_core::GatewayClientFrame::VoiceLease { request } => {
                     crate::voice::handle(&send, &context, &runtime, &request).await?;

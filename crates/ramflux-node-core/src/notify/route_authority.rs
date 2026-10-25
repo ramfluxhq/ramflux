@@ -118,6 +118,48 @@ impl NotifyRedbStore {
         }
         txn.commit().map_err(error)
     }
+    /// Deletes the device's routes for `provider` (or all providers) on explicit deregistration.
+    /// Only the device bound as the routes' owner may delete them; a revoked device may still
+    /// remove its own routes. Returns the number of removed routes.
+    /// # Errors
+    /// Rejects a caller that is not the bound owner and returns storage errors.
+    pub fn delete_authenticated_push_routes(
+        &self,
+        authority: &DeviceAuthKeyResponse,
+        provider: Option<&crate::PushProviderKind>,
+    ) -> Result<usize, NodeCoreError> {
+        let caller = authority.authenticated_device_identity()?;
+        let target = authority.target_delivery_id.as_str();
+        let Some(binding) = self.owner_binding(target)? else {
+            return Ok(0);
+        };
+        if self.open_binding(target, &binding)?.authenticated_device_identity()? != caller {
+            return Err(NodeCoreError::Unauthorized("push route owner rejected".into()));
+        }
+        let txn = self.db.begin_write().map_err(error)?;
+        let removed;
+        {
+            let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
+            let bytes = table.get(target).map_err(error)?.map(|v| v.value().to_vec());
+            let mut values = bytes
+                .map(|bytes| routes::open(&self.route_key, target, &bytes))
+                .transpose()?
+                .unwrap_or_default();
+            let before = values.len();
+            values.retain(|route| provider.is_some_and(|provider| &route.provider != provider));
+            removed = before - values.len();
+            if values.is_empty() {
+                table.remove(target).map_err(error)?;
+                txn.open_table(OWNERS).map_err(error)?.remove(target).map_err(error)?;
+            } else {
+                table
+                    .insert(target, routes::seal(&self.route_key, target, &values)?.as_slice())
+                    .map_err(error)?;
+            }
+        }
+        txn.commit().map_err(error)?;
+        Ok(removed)
+    }
     fn same_registered_owner(
         &self,
         txn: &redb::WriteTransaction,

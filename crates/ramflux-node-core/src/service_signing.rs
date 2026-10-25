@@ -66,6 +66,26 @@ impl NodeServiceSigningKey {
         ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, self.seed)
     }
 
+    #[must_use]
+    pub fn sign_push_route_delete(&self, body: &[u8]) -> String {
+        let mut bytes = b"ramflux.notify.route_delete.v1\0".to_vec();
+        bytes.extend_from_slice(body);
+        ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, self.seed)
+    }
+
+    /// # Errors
+    /// Rejects a forged or cross-domain route-deletion signature.
+    pub fn verify_push_route_delete(
+        &self,
+        body: &[u8],
+        signature: &str,
+    ) -> Result<(), NodeCoreError> {
+        let mut bytes = b"ramflux.notify.route_delete.v1\0".to_vec();
+        bytes.extend_from_slice(body);
+        ramflux_crypto::verify_canonical_signature(&bytes, signature, self.public_key_base64url())
+            .map_err(|_| NodeCoreError::Unauthorized("push route control rejected".into()))
+    }
+
     /// # Errors
     /// Rejects a forged or cross-domain route-control signature.
     pub fn verify_push_route_control(
