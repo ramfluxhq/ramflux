@@ -516,6 +516,21 @@ pub(crate) async fn run_gateway_session_loop(
     context: GatewayQuicContext,
     runtime: GatewaySessionRuntime,
 ) -> anyhow::Result<()> {
+    {
+        // This helper enters after authentication; mirror the session opened by that phase.
+        let mut state = gateway_state(&context.state)?;
+        if state.session(&runtime.session_id).is_none() {
+            let now = ramflux_node_core::now_unix_seconds();
+            state.open_session(ramflux_node_core::GatewaySession {
+                session_id: runtime.session_id.clone(),
+                target_delivery_id: runtime.target_delivery_id.clone(),
+                device_id: runtime.device_id.clone(),
+                opened_at: now,
+                last_heartbeat_at: now,
+                lifecycle: ramflux_node_core::GatewaySessionLifecycle::Live,
+            });
+        }
+    }
     run_gateway_session_loop_until_closed(send, recv, context, runtime, None).await
 }
 

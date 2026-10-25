@@ -315,8 +315,10 @@ impl RouterWalStore {
             .filter(|record| {
                 record.replay_expires_at < now
                     || record.entry.as_ref().is_some_and(|entry| {
-                        entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl))
-                            <= now
+                        entry.envelope.created_at.saturating_add(
+                            i64::from(entry.envelope.ttl)
+                                .min(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS),
+                        ) <= now
                     })
             })
             .count())
@@ -330,7 +332,9 @@ impl RouterWalStore {
         let mut removed = before - state.submissions_by_replay_key.len();
         for record in state.submissions_by_replay_key.values_mut() {
             if record.entry.as_ref().is_some_and(|entry| {
-                entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)) <= now
+                entry.envelope.created_at.saturating_add(
+                    i64::from(entry.envelope.ttl).min(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS),
+                ) <= now
             }) {
                 record.entry = None;
                 removed += 1;

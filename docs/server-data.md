@@ -89,7 +89,7 @@ APNs and FCM endpoints are derived from that server configuration; clients canno
 choose them. WebPush requires HTTPS and an exact origin in the comma-separated
 `RAMFLUX_NOTIFY_WEBPUSH_ORIGINS` allowlist; credentials and endpoint routing must
 be provisioned by the operator before accepting subscriptions. Provider secret
-references are stored in redb; provider secrets remain in the referenced files.
+references are stored in redb; provider secrets remain in the referenced files or operator-controlled environment.
 
 Apple/Google receive their device token, a generic alert, wake id, delivery class,
 encrypted hint, and a domain-separated collapse hash. The raw canonical collapse

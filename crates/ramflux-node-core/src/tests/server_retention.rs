@@ -322,3 +322,58 @@ fn server_retention_notify_wal_prunes_expired_work_and_bounded_diagnostics()
     assert_eq!(state.provider_attempts(&entry.queue_id).len(), 0);
     Ok(())
 }
+
+#[test]
+fn server_retention_legacy_notify_routes_are_encrypted_and_compacted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("server_retention_legacy_push")?;
+    let mut state = NotifyQueueState::new();
+    let mut route = notify_webpush_route("legacy-delivery", "web");
+    route.token = "legacy-provider-token-that-must-leave-plaintext-pages".into();
+    state.register_push_route(route.clone());
+    let store = NotifyRedbStore::open_without_wal(&path)?;
+    store.save_legacy_state_only(&state)?;
+    drop(store);
+    assert!(
+        std::fs::read(&path)?
+            .windows(route.token.len())
+            .any(|bytes| bytes == route.token.as_bytes())
+    );
+    let store = NotifyRedbStore::open_with_route_key(&path, NodeSecret::ephemeral()?)?;
+    assert_eq!(
+        store
+            .load_state()?
+            .ok_or("migrated routes")?
+            .push_routes("legacy-delivery", route.registered_at),
+        vec![route.clone()]
+    );
+    drop(store);
+    assert!(
+        !std::fs::read(&path)?
+            .windows(route.token.len())
+            .any(|bytes| bytes == route.token.as_bytes())
+    );
+    Ok(())
+}
+
+#[test]
+fn server_retention_legacy_ack_receipts_are_bounded_without_forgetting_gaps()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut inbox = OpaqueDeviceInbox::new();
+    let entry = inbox.append(envelope("pending-gap", "target", DeliveryClass::OpaqueEvent));
+    let mut cursor = inbox.cursor_state("target").ok_or("cursor")?.clone();
+    cursor.issued_inbox_seq = 3000;
+    cursor.inbox_seq = 3000;
+    cursor.acked_envelope_ids = (2..=3000).map(|index| format!("old-{index}")).collect();
+    cursor.acked_inbox_seqs = (2..=3000).collect();
+    inbox.restore_cursor_state(cursor);
+    let cursor = inbox.cursor_state("target").ok_or("cursor")?;
+    assert_eq!(cursor.acked_envelope_ids.len(), crate::inbox::ROUTER_ACK_WINDOW);
+    assert_eq!(inbox.pull_after("target", 0, 10), vec![entry.clone()]);
+    let mut request = ack("pending-gap");
+    request.ext.ext.insert("inbox_seq".into(), serde_json::json!(entry.inbox_seq));
+    let cursor = inbox.apply_ack_for_target("target", &request)?;
+    assert_eq!(cursor.settled_inbox_seq, 3000);
+    assert_eq!(cursor.acked_inbox_seqs.len(), 0);
+    Ok(())
+}

@@ -1012,8 +1012,9 @@ impl RouterRedbStore {
             let Some(entry) = submission.entry else {
                 continue;
             };
-            if entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl))
-                <= now_unix_seconds
+            if entry.envelope.created_at.saturating_add(
+                i64::from(entry.envelope.ttl).min(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS),
+            ) <= now_unix_seconds
             {
                 continue;
             }
