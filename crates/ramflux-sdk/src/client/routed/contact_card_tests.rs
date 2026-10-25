@@ -145,7 +145,7 @@ async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_saf
         .await
         .err()
         .ok_or_else(|| invalid("wrong node accepted"))?;
-    assert!(matches!(error, SdkError::ContactInput(crate::ContactReason::CardSignatureInvalid)));
+    assert!(matches!(error, SdkError::ContactInput(crate::ContactReason::NodeFingerprintMismatch)));
     assert_eq!(
         s.accounts.get("bob").ok_or_else(|| invalid("account"))?.client.friend_links()?.len(),
         0

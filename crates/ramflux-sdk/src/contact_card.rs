@@ -44,6 +44,9 @@ pub enum ContactReason {
     /// The root signature or root commitment does not authenticate the card.
     #[error("card_signature_invalid")]
     CardSignatureInvalid,
+    /// The card or discovery key differs from the configured node's pinned fingerprint.
+    #[error("node_fingerprint_mismatch")]
+    NodeFingerprintMismatch,
     /// The card's validity window has ended.
     #[error("card_expired")]
     CardExpired,
@@ -131,6 +134,11 @@ fn validate(body: &ContactCardBody, now: i64) -> Result<(), SdkError> {
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
+        || url.query().is_some()
+        || body.node.url.contains('\\')
+        || body.node.url.split_once("://").is_none_or(|(_, authority)| {
+            authority.find('/').is_some_and(|start| &authority[start..] != "/")
+        })
     {
         return Err(ContactReason::InvalidCard.into());
     }
@@ -394,6 +402,49 @@ mod tests {
             parse_contact_card(&tampered, 1000),
             Err(SdkError::ContactInput(ContactReason::CardSignatureInvalid))
         ));
+        Ok(())
+    }
+    #[test]
+    fn contact_cards_require_bare_origins_and_reject_scoped_link_local_locators()
+    -> Result<(), SdkError> {
+        for url in [
+            "https://node.example/lookup",
+            "https://node.example/?q=1",
+            "https://node.example?",
+            "https://node.example/path/..",
+            "https://node.example/.",
+            "https://node.example\\",
+            "http://[fe80::1%25en0]",
+        ] {
+            let mut body = body()?;
+            body.node.url = url.into();
+            assert!(
+                matches!(
+                    encode_contact_card(body.clone(), [7; 32], 1000),
+                    Err(SdkError::ContactInput(ContactReason::InvalidCard))
+                ),
+                "{url}"
+            );
+            let signature =
+                ramflux_crypto::sign_canonical_bytes_with_seed(&signing_bytes(&body)?, [7; 32]);
+            let card = format!(
+                "{PREFIX}{}",
+                ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(
+                    &SignedCard { body, signature }
+                )?)
+            );
+            assert!(
+                matches!(
+                    parse_contact_card(&card, 1001),
+                    Err(SdkError::ContactInput(ContactReason::InvalidCard))
+                ),
+                "{url}"
+            );
+        }
+        let mut body = body()?;
+        body.node.url = "https://node.example/".into();
+        let (card, _) = encode_contact_card(body, [7; 32], 1000)?;
+        assert_eq!(parse_contact_card(&card, 1001)?.node.url, "https://node.example/");
         Ok(())
     }
 }

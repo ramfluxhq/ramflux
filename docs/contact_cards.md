@@ -54,9 +54,9 @@ contact advertised as reachable through an unavailable automatic federation rout
 The existing explicit federation route API remains separate.
 
 User input errors return `ValidationFailed` and `reason_code`: `unknown_principal`,
-`invalid_card`, `card_signature_invalid`, `card_expired`, `self_contact`, or
+`invalid_card`, `card_signature_invalid`, `card_expired`, `self_contact`,
 `already_contact`, `home_insecure_transport`, `home_profile_missing`, or
-`home_profile_stale`. An unsupported card home node uses `invalid_card` with an explanatory
+`home_profile_stale` and `node_fingerprint_mismatch`. An unsupported card home node uses `invalid_card` with an explanatory
 message. Transient directory/transport failures return `Unavailable`, preserving the
 source error for socket diagnostics. Failed resolution creates no accepted contact.
 
@@ -122,12 +122,19 @@ A card's URL must exactly match the configured home profile and its fingerprint 
 match the pinned node key before any discovery request. Plain HTTP card locators are
 accepted for loopback addresses (and the reserved `localhost` name), RFC 1918 IPv4
 literals (`10/8`, `172.16/12`, `192.168/16`), and IPv6 ULA (`fc00::/7`) or
-link-local literals (`fe80::/10`). RFC 6598 shared-address space (`100.64/10`),
+link-local literals (`fe80::/10`). Scoped link-local URLs with zone IDs (for example,
+`%25en0`) are not supported by the URL parser and return `invalid_card`. RFC 6598 shared-address space (`100.64/10`),
 IPv4 link-local, public IP addresses and other hostnames require HTTPS. DNS
 resolution never exempts a hostname from this rule. Export and import use the
 same policy; a disallowed HTTP locator returns `home_insecure_transport`,
 distinct from malformed `invalid_card` input.
 
+Card URLs must be bare origins (an optional root `/` is allowed), without a path, query
+or fragment. Node-key fingerprint mismatches return `node_fingerprint_mismatch`,
+separately from a bad card root signature (`card_signature_invalid`).
+
+Private/link-local literal discovery URLs and `localhost` bypass configured proxies;
+other hostnames retain proxy settings and receive no DNS-based private exemption.
 Plain HTTP discovery lookups on a LAN are observable to that network.
 Card integrity still depends on the root signature, exact configured-home URL,
 pinned node-key fingerprint and verified manifests, followed by gateway TLS
@@ -164,7 +171,7 @@ root-scoped device namespaces. Card import currently requires a configured home
 node profile; hand-configured accounts must configure one first.
 
 Registration admission operator notes: saved legacy unlimited/zero source limits and
-zero windows are normalized on load to the current defaults (120 attempts / 60 seconds);
+zero windows are normalized on load and when set to the current defaults (120 attempts / 60 seconds);
 finite operator limits are preserved. Enable registration proof-of-work on public nodes.
 The per-source quota is an admission bound, not a Sybil defense: a cheap IPv6 /48 can
 supply many /64 buckets and churn the bounded source table, while an IPv4 NAT shares
@@ -172,7 +179,6 @@ one quota. Stronger anti-abuse policy is an accepted follow-up. Registration PoW
 currently binds the principal name rather than the transport source or time; source/time
 binding for challenges is also an accepted follow-up. These limitations do not bypass
 the charged source quota or the permanent ownership guard.
-
 
 Registration quota rejections preserve `Unavailable`, `reason_code:"rate_limited"`
 and the default-window `retry_after_ms:60000` hint across both authenticated

@@ -5,6 +5,11 @@ use super::{NodePinSource, NodeProfile, NodeStore};
 use crate::prelude::*;
 use ramflux_protocol::WellKnownClientRecord;
 
+// A scoped client is an explicit network fixture, isolated from parallel tests and production.
+tokio::task_local! {
+    pub(crate) static DISCOVERY_CLIENT: reqwest::Client;
+}
+
 struct TestRoot(PathBuf);
 impl TestRoot {
     fn new() -> Result<Self, SdkError> {

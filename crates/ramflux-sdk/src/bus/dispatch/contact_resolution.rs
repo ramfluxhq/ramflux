@@ -121,20 +121,20 @@ async fn card_gateway(
         return Err(SdkError::ContactHomeNodeUnsupported);
     }
     if crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint {
-        return Err(ContactReason::CardSignatureInvalid.into());
+        return Err(ContactReason::NodeFingerprintMismatch.into());
     }
     let record = crate::node::fetch_client_record(&card.node.url).await.map_err(|e| match e {
         SdkError::Transport(_) | SdkError::Io(_) => lookup_failure(e),
         _ => ContactReason::ManifestInvalid.into(),
     })?;
     if crate::contact_node_fingerprint(&record.node_public_key)? != card.node.key_fingerprint {
-        return Err(ContactReason::CardSignatureInvalid.into());
+        return Err(ContactReason::NodeFingerprintMismatch.into());
     }
     if home.node_id != record.node_id {
         return Err(SdkError::ContactHomeNodeUnsupported);
     }
     if home.node_public_key != record.node_public_key {
-        return Err(ContactReason::CardSignatureInvalid.into());
+        return Err(ContactReason::NodeFingerprintMismatch.into());
     }
     let profile =
         crate::node::NodeProfile::from_record(record, now_unix_timestamp().unsigned_abs());

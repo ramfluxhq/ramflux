@@ -18,11 +18,10 @@ pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRe
     url.set_path("/.well-known/ramflux/client");
     url.set_query(None);
     url.set_fragment(None);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(discovery_error)?;
+    let client =
+        discovery_builder(reqwest::Client::builder(), &url).build().map_err(discovery_error)?;
+    #[cfg(test)]
+    let client = super::DISCOVERY_CLIENT.try_with(Clone::clone).unwrap_or(client);
     let mut response = client
         .get(url)
         .send()
@@ -48,3 +47,32 @@ pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRe
 fn discovery_error(error: reqwest::Error) -> SdkError {
     ramflux_transport::TransportError::HttpClient(error.without_url()).into()
 }
+
+fn discovery_builder(
+    builder: reqwest::ClientBuilder,
+    url: &reqwest::Url,
+) -> reqwest::ClientBuilder {
+    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let local = host == "localhost"
+        || match host.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(ip)) => {
+                ip.is_loopback() || ip.is_private() || ip.is_link_local()
+            }
+            Ok(std::net::IpAddr::V6(ip)) => {
+                ip.is_loopback()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local()
+                    || ip
+                        .to_ipv4_mapped()
+                        .is_some_and(|ip| ip.is_loopback() || ip.is_private() || ip.is_link_local())
+            }
+            Err(_) => false,
+        };
+    // Private discovery addresses must not be disclosed to an environment-configured proxy.
+    let builder = if local { builder.no_proxy() } else { builder };
+    builder.timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none())
+}
+
+#[cfg(test)]
+#[path = "discovery_proxy_tests.rs"]
+mod proxy_tests;

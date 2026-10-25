@@ -4,42 +4,24 @@
 //! LAN locator import keeps profile pins, verified discovery, and typed bus refusals.
 use super::*;
 
-#[test]
-fn cf02_lan_http_card_export_and_import_resolve_with_a_pinned_key_and_reject_a_fingerprint_change()
+#[tokio::test]
+async fn cf02_lan_http_card_export_and_import_resolve_with_a_pinned_key_and_reject_a_fingerprint_change()
 -> Result<(), SdkError> {
-    const CHILD: &str = "RAMFLUX_CONTACT_LOCATOR_CHILD";
-    if let Ok(bind) = std::env::var(CHILD) {
-        return tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(lan_round_trip(&bind));
-    }
-    // A process-local HTTP proxy routes the advertised LAN literal to this test's loopback server.
-    // Proxy variables are set only on the child process, never mutated in the parallel harness.
+    // Explicit fixture transport maps the synthetic LAN literal to a local origin.
+    // Production proxy policy is tested independently; environment proxies are never mutated.
     let reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
     let bind = reservation.local_addr()?.to_string();
     drop(reservation);
-    let name = "client::routed::tests::contact_resolution::cards::locator::cf02_lan_http_card_export_and_import_resolve_with_a_pinned_key_and_reject_a_fingerprint_change";
-    let output = std::process::Command::new(std::env::current_exe()?)
-        .args(["--exact", name, "--nocapture", "--test-threads=1"])
-        .env(CHILD, &bind)
-        .env("HTTP_PROXY", format!("http://{bind}"))
-        .env("http_proxy", format!("http://{bind}"))
-        .env("ALL_PROXY", format!("http://{bind}"))
-        .env("NO_PROXY", "")
-        .env("no_proxy", "")
-        .output()?;
-    assert!(
-        output.status.success(),
-        "child failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-        "the child must execute the exact regression"
-    );
-    Ok(())
+    let client = reqwest::Client::builder()
+        .proxy(
+            reqwest::Proxy::all(format!("http://{bind}"))
+                .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+        )
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    crate::node::DISCOVERY_CLIENT.scope(client, lan_round_trip(&bind)).await
 }
 async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
     let mut a = Fixture::new("alice", 21)?;
@@ -78,7 +60,7 @@ async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
         .ok_or_else(|| invalid("wrong fingerprint accepted"))?;
     assert_eq!(
         crate::bus::io::local_bus_error_body(&error).reason_code.as_deref(),
-        Some("card_signature_invalid")
+        Some("node_fingerprint_mismatch")
     );
     assert_eq!(origin.requests.load(Ordering::SeqCst), 0);
     let added = call(&mut s, "bob", "contact.add", json!({"card":text})).await?;

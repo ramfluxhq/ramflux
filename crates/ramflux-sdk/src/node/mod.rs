@@ -46,3 +46,6 @@ pub(crate) async fn profile_relay_options(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::DISCOVERY_CLIENT;
