@@ -28,6 +28,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod retention;
+
 const ROUTER_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_ROUTER_COMMIT_BATCH_MAX";
 const ROUTER_COMMIT_BATCH_MAX_DEFAULT: usize = 256;
 const ROUTER_COMMIT_WINDOW_US_ENV: &str = "RAMFLUX_ROUTER_COMMIT_WINDOW_US";
@@ -594,9 +596,9 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         let save_started = Instant::now();
         let inbox_started = Instant::now();
-        let cursor_bytes = serialize_value(cursor)?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let cursor_bytes = retention::cursor_bytes(&write_txn, cursor)?;
         {
             let mut cursor_table = write_txn
                 .open_table(ROUTER_CURSOR_STATE_TABLE)
@@ -624,9 +626,9 @@ impl RouterRedbStore {
     pub fn record_nack_increment(&self, cursor: &CursorAckState) -> Result<(), NodeCoreError> {
         let save_started = Instant::now();
         let inbox_started = Instant::now();
-        let cursor_bytes = serialize_value(cursor)?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let cursor_bytes = retention::cursor_bytes(&write_txn, cursor)?;
         {
             let mut cursor_table = write_txn
                 .open_table(ROUTER_CURSOR_STATE_TABLE)
@@ -1009,9 +1011,15 @@ impl RouterRedbStore {
             let Some(entry) = submission.entry else {
                 continue;
             };
+            if entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl))
+                <= now_unix_seconds
+            {
+                continue;
+            }
             if incremental_cursors.iter().any(|cursor| {
                 cursor.target_delivery_id == entry.target_delivery_id
-                    && cursor.acked_inbox_seqs.contains(&entry.inbox_seq)
+                    && (cursor.acked_inbox_seqs.contains(&entry.inbox_seq)
+                        || entry.inbox_seq <= cursor.settled_inbox_seq)
             }) {
                 continue;
             }

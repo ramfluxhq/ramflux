@@ -341,7 +341,9 @@ pub(crate) fn handle_mesh_request_value(
         }
         return forward_authority_response(&body, router);
     }
-    if let Some(response) = handle_mesh_retention_value(&method, &path, &body, peer_service_id)? {
+    if let Some(response) =
+        handle_mesh_retention_value(&method, &path, &body, peer_service_id, router)?
+    {
         return Ok(response);
     }
     if let Some(response) =
@@ -395,6 +397,7 @@ fn handle_mesh_retention_value(
     path: &str,
     body: &[u8],
     peer_service_id: &str,
+    router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<Option<MeshResponse>> {
     if peer_service_id == "ramflux-retention" && path != "/internal/retention/gc_sweep" {
         return Ok(MeshResponse::text(
@@ -412,7 +415,10 @@ fn handle_mesh_retention_value(
             .into());
         }
         let sweep: ramflux_node_core::RetentionGcSweepRequest = serde_json::from_slice(body)?;
-        return Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&sweep.response(0))?)));
+        return Ok(Some(MeshResponse::json(
+            "200 OK",
+            serde_json::to_vec(&crate::retention::sweep(router, &sweep)?)?,
+        )));
     }
     Ok(None)
 }

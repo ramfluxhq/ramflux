@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod retention;
+
 const ROUTER_TARGET_SHARD_COUNT: usize = 64;
 const ROUTER_REPLAY_GUARD_SHARD_COUNT: usize = 64;
 const ROUTER_ENVELOPE_TARGET_INDEX_SHARD_COUNT: usize = 64;

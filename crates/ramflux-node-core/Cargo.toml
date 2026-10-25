@@ -25,6 +25,7 @@ itest-provider-single-key = []
 itest-redb-cache-probe = ["redb/cache_metrics"]
 
 [dependencies]
+aes-gcm = { workspace = true }
 arc-swap = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-crypto = { workspace = true }

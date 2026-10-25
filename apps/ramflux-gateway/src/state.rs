@@ -153,6 +153,14 @@ pub(crate) struct GatewaySessionHub {
 }
 
 impl GatewaySessionHub {
+    pub(crate) fn active_session_ids(&self) -> std::collections::BTreeSet<String> {
+        self.senders_by_target
+            .blocking_lock()
+            .values()
+            .map(|entry| entry.session_id.clone())
+            .collect()
+    }
+
     pub(crate) async fn register(
         &self,
         target_delivery_id: String,

@@ -339,6 +339,30 @@ impl GatewayState {
         Some(metadata.clone())
     }
 
+    /// Expire disconnected/closed sessions, their frame queues, challenges and resume indexes.
+    pub fn prune_retained_sessions(
+        &mut self,
+        now: u64,
+        window: u64,
+        active: &BTreeSet<String>,
+    ) -> usize {
+        let before = self.sessions_by_id.len();
+        self.sessions_by_id.retain(|id, session| {
+            session.lifecycle != GatewaySessionLifecycle::Closed
+                && (active.contains(id) || now.saturating_sub(session.last_heartbeat_at) <= window)
+        });
+        self.frames_by_session.retain(|id, _| self.sessions_by_id.contains_key(id));
+        self.resume_token_index_by_hash
+            .retain(|_, token| self.sessions_by_id.contains_key(&token.session_id));
+        self.expire_resume_tokens(now, window);
+        self.challenges_by_id.retain(|_, challenge| !challenge.used && challenge.expires_at > now);
+        self.pre_auth_handshakes_by_source_ip.retain(|_, events| {
+            events.retain(|at| now.saturating_sub(*at) <= self.pre_auth_policy.window_seconds);
+            !events.is_empty()
+        });
+        before - self.sessions_by_id.len()
+    }
+
     pub fn expire_resume_tokens(&mut self, now: u64, window_seconds: u64) {
         self.resume_token_index_by_hash.retain(|_hash, metadata| {
             now >= metadata.issued_at && now.saturating_sub(metadata.issued_at) <= window_seconds

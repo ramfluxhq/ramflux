@@ -101,7 +101,9 @@ pub fn load_config_from_args(
     while let Some(arg) = args.next() {
         if arg == "--config" {
             let path = args.next().ok_or(NodeCoreError::MissingConfigPath)?;
-            return load_config(path, expected_service_id).map(Some);
+            let config = load_config(path, expected_service_id)?;
+            crate::source_privacy::configure_node_privacy()?;
+            return Ok(Some(config));
         }
     }
     Ok(None)

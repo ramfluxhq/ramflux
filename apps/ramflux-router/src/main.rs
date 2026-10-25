@@ -4,6 +4,7 @@
 mod handlers;
 mod identity_authority;
 mod lifecycle;
+mod retention;
 mod router_engine;
 mod router_runtime;
 mod serve;
@@ -55,6 +56,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         let state = Arc::new(router);
         let store = Arc::new(store);
         let router = Arc::new(router_handle_from_env(state, store, home_node_forward));
+        retention::start(Arc::clone(&router));
         serve_router_mesh_from_env(&config, &router)?;
         #[cfg(feature = "itest-http")]
         if std::env::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {

@@ -6,7 +6,9 @@
 use crate::{NodeCoreError, WakeHint};
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+pub const ROUTER_ACK_WINDOW: usize = 1024;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -25,6 +27,12 @@ pub struct CursorAckState {
     pub target_delivery_id: String,
     pub inbox_seq: u64,
     pub last_envelope_id: Option<String>,
+    #[serde(default)]
+    pub settled_inbox_seq: u64,
+    #[serde(default)]
+    pub issued_inbox_seq: u64,
+    #[serde(default)]
+    pub recent_ack_ids: VecDeque<String>,
     pub acked_envelope_ids: BTreeSet<String>,
     #[serde(default)]
     pub acked_inbox_seqs: BTreeSet<u64>,
@@ -101,7 +109,8 @@ impl OpaqueDeviceInbox {
         self.pending.entry(target_delivery_id.clone()).or_default().push(entry.clone());
         self.cursors
             .entry(target_delivery_id.clone())
-            .or_insert(CursorAckState { target_delivery_id, ..CursorAckState::default() });
+            .or_insert(CursorAckState { target_delivery_id, ..CursorAckState::default() })
+            .issued_inbox_seq = entry.inbox_seq;
         entry
     }
 
@@ -177,12 +186,17 @@ impl OpaqueDeviceInbox {
             if entry.envelope.envelope_id != ack.envelope_id {
                 return Err(NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()));
             }
-        } else if !self
-            .cursors
-            .get(target)
-            .is_some_and(|cursor| cursor.acked_inbox_seqs.contains(&entry_seq))
-        {
+        } else if !self.cursors.get(target).is_some_and(|cursor| {
+            cursor.acked_inbox_seqs.contains(&entry_seq) || entry_seq <= cursor.settled_inbox_seq
+        }) {
             return Err(NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()));
+        }
+        if self.cursors.get(target).is_some_and(|cursor| {
+            cursor.acked_inbox_seqs.len() >= ROUTER_ACK_WINDOW
+                && entry_seq > cursor.settled_inbox_seq.saturating_add(1)
+                && !cursor.acked_inbox_seqs.contains(&entry_seq)
+        }) {
+            return Err(NodeCoreError::Capacity { resource: "router_ack_window" });
         }
         let cursor = self.cursors.entry(target.into()).or_insert(CursorAckState {
             target_delivery_id: target.into(),
@@ -191,12 +205,21 @@ impl OpaqueDeviceInbox {
         cursor.inbox_seq = cursor.inbox_seq.max(entry_seq);
         cursor.last_envelope_id = Some(ack.envelope_id.clone());
         cursor.last_acknowledged_inbox_seq = Some(entry_seq);
-        cursor.acked_envelope_ids.insert(ack.envelope_id.clone());
+        if cursor.acked_envelope_ids.insert(ack.envelope_id.clone()) {
+            cursor.recent_ack_ids.push_back(ack.envelope_id.clone());
+        }
+        while cursor.recent_ack_ids.len() > ROUTER_ACK_WINDOW {
+            if let Some(old) = cursor.recent_ack_ids.pop_front() {
+                cursor.acked_envelope_ids.remove(&old);
+            }
+        }
         cursor.acked_inbox_seqs.insert(entry_seq);
         if let Some(entries) = self.pending.get_mut(target) {
             entries.retain(|entry| entry.inbox_seq != entry_seq);
         }
-        Ok(cursor.clone())
+        let result = cursor.clone();
+        self.advance_settled(target);
+        Ok(self.cursors.get(target).cloned().unwrap_or(result))
     }
 
     /// # Errors
@@ -227,7 +250,50 @@ impl OpaqueDeviceInbox {
             .entry(target_delivery_id.clone())
             .or_insert(CursorAckState { target_delivery_id, ..CursorAckState::default() });
         cursor.nacked_envelope_ids.insert(nack.envelope_id.clone(), nack.reason.clone());
+        while cursor.nacked_envelope_ids.len() > ROUTER_ACK_WINDOW {
+            cursor.nacked_envelope_ids.pop_first();
+        }
         Ok(cursor.clone())
+    }
+
+    fn advance_settled(&mut self, target: &str) {
+        let issued = self.next_seq.get(target).copied().unwrap_or(1).saturating_sub(1);
+        let settled = self
+            .pending
+            .get(target)
+            .and_then(|entries| entries.iter().map(|entry| entry.inbox_seq).min())
+            .map_or(issued, |first| first.saturating_sub(1));
+        if let Some(cursor) = self.cursors.get_mut(target) {
+            cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
+            cursor.settled_inbox_seq = cursor.settled_inbox_seq.max(settled);
+            cursor.acked_inbox_seqs.retain(|seq| *seq > cursor.settled_inbox_seq);
+            while cursor.acked_envelope_ids.len() > ROUTER_ACK_WINDOW {
+                cursor.acked_envelope_ids.pop_first();
+            }
+            while cursor.nacked_envelope_ids.len() > ROUTER_ACK_WINDOW {
+                cursor.nacked_envelope_ids.pop_first();
+            }
+        }
+    }
+
+    pub(crate) fn expire(&mut self, now: i64) -> usize {
+        let mut removed = 0;
+        let targets: Vec<_> = self.pending.keys().cloned().collect();
+        for target in targets {
+            if let Some(entries) = self.pending.get_mut(&target) {
+                let before = entries.len();
+                entries.retain(|entry| {
+                    entry.envelope.created_at.saturating_add(
+                        i64::from(entry.envelope.ttl)
+                            .min(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS),
+                    ) > now
+                });
+                removed += before - entries.len();
+            }
+            self.advance_settled(&target);
+        }
+        self.pending.retain(|_, entries| !entries.is_empty());
+        removed
     }
 
     #[must_use]
@@ -255,7 +321,8 @@ impl OpaqueDeviceInbox {
 
     pub(crate) fn restore_cursor_state(&mut self, cursor: CursorAckState) {
         let next_seq = self.next_seq.entry(cursor.target_delivery_id.clone()).or_insert(1);
-        *next_seq = (*next_seq).max(cursor.inbox_seq.saturating_add(1));
+        *next_seq =
+            (*next_seq).max(cursor.inbox_seq.max(cursor.issued_inbox_seq).saturating_add(1));
         self.cursors.insert(cursor.target_delivery_id.clone(), cursor);
     }
 

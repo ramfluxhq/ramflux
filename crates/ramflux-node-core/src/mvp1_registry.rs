@@ -464,6 +464,14 @@ impl IdentityRegistry {
         }
         changed
     }
+    pub(crate) fn prune_registration_proofs(&mut self, now: i64) -> usize {
+        self.migrate_legacy_registration_receipts(now);
+        let before = self.root_seen_proofs.len() + self.seen_proofs.len();
+        self.seen_proofs.clear();
+        self.root_seen_proofs
+            .retain(|receipt| receipt.expires_at.is_some_and(|expires| expires >= now));
+        before - self.root_seen_proofs.len()
+    }
     pub fn set_registration_policy(&mut self, policy: RegistrationPolicy) {
         self.registration_policy = normalize_registration_policy(policy);
     }

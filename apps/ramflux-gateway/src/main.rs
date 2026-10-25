@@ -13,6 +13,7 @@ mod quic_dispatch;
 mod registration;
 #[cfg(test)]
 mod registration_forward_tests;
+mod retention;
 mod serve;
 mod session;
 mod session_response;
@@ -58,10 +59,15 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     {
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let store = ramflux_node_core::GatewayRedbStore::open(redb_path)?;
-        let state = match store.load_state()? {
+        let mut state = match store.load_state()? {
             Some(state) => state,
             None => ramflux_node_core::GatewayState::new(),
         };
+        state.prune_retained_sessions(
+            ramflux_node_core::now_unix_seconds(),
+            300,
+            &std::collections::BTreeSet::new(),
+        );
         store.save_state(&state)?;
         tracing::info!(service, node_id = config.node_id, "gateway state initialized");
         let router = router_mesh_client(&config)?;

@@ -10,6 +10,7 @@ use super::{
 
 pub const OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS: u64 = 15 * 60;
 pub const OBJECT_RELAY_CHUNK_MAX_TTL_SECONDS: u64 = 24 * 60 * 60;
+pub const OBJECT_RELAY_CHUNK_HARD_MAX_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const OBJECT_RELAY_CHUNK_MAX_TTL_ENV: &str = "RAMFLUX_RELAY_OBJECT_MAX_TTL_SECONDS";
 pub const OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
@@ -282,6 +283,7 @@ pub(super) fn object_relay_chunk_max_ttl_seconds_from_env(value: Option<&str>) -
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|ttl| *ttl > 0)
         .unwrap_or(OBJECT_RELAY_CHUNK_MAX_TTL_SECONDS)
+        .min(OBJECT_RELAY_CHUNK_HARD_MAX_TTL_SECONDS)
 }
 
 #[must_use]
@@ -307,5 +309,23 @@ pub fn object_relay_retention_record(
             "ramflux.object_relay.retention_metadata.v1",
             format!("{}:{}:{}", entry.object_id, entry.manifest_hash, entry.chunk_id).as_bytes(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod retention_budget_tests {
+    use super::*;
+    #[test]
+    fn configured_object_ttl_cannot_exceed_seven_days() {
+        for value in ["604800", "604801", "18446744073709551615"] {
+            assert_eq!(object_relay_chunk_max_ttl_seconds_from_env(Some(value)), 604800);
+        }
+        for value in [None, Some("0"), Some("invalid")] {
+            assert_eq!(
+                object_relay_chunk_max_ttl_seconds_from_env(value),
+                OBJECT_RELAY_CHUNK_MAX_TTL_SECONDS
+            );
+        }
+        assert_eq!(object_relay_chunk_max_ttl_seconds_from_env(Some("60")), 60);
     }
 }

@@ -112,7 +112,7 @@ impl NodeReplayGuardState {
         self.accepted_by_key.insert(legacy_replay::isolate_unknown_key(key), expires_at);
     }
 
-    fn prune(&mut self, now_unix_seconds: i64) {
+    pub(crate) fn prune(&mut self, now_unix_seconds: i64) {
         self.accepted_by_key.retain(|_key, expires_at| *expires_at >= now_unix_seconds);
     }
 }

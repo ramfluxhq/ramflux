@@ -63,6 +63,7 @@ pub(crate) fn serve_gateway_quic(
         store,
         hub: Arc::new(GatewaySessionHub::default()),
     };
+    crate::retention::start(context.clone())?;
     if let Some(forward_listen_addr) = gateway_forward_listen_addr(config, &context.peers) {
         spawn_gateway_forward_mesh_thread(
             forward_listen_addr,

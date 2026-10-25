@@ -21,6 +21,8 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod routes;
+
 pub const NOTIFY_RATE_ALIAS_PER_MINUTE: usize = 60;
 pub const NOTIFY_RATE_ALIAS_PER_HOUR: usize = 600;
 pub const NOTIFY_RATE_PROVIDER_PER_MINUTE: usize = 3_000;
@@ -464,6 +466,7 @@ impl NotifyQueueState {
 }
 
 pub struct NotifyRedbStore {
+    route_key: crate::NodeSecret,
     db: std::sync::Arc<redb::Database>,
     commit_writer: NotifyCommitWriter,
     runtime_state: Mutex<NotifyRuntimeState>,
@@ -737,7 +740,7 @@ impl NotifyRedbStore {
                 source,
             })?;
         }
-        let db = redb::Database::create(path)
+        let mut db = redb::Database::create(path)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
@@ -759,6 +762,8 @@ impl NotifyRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let route_key = routes::configured_key()?;
+        routes::migrate(&mut db, &route_key)?;
         let wal_shards = match (wal_root, shard_count_override) {
             (Some(root), Some(shard_count)) => {
                 Some(open_notify_wal_shards_with_config(root, shard_count)?)
@@ -769,6 +774,7 @@ impl NotifyRedbStore {
         let db = std::sync::Arc::new(db);
         let commit_writer = NotifyCommitWriter::start(std::sync::Arc::clone(&db))?;
         Ok(Self {
+            route_key,
             db,
             commit_writer,
             runtime_state: Mutex::new(NotifyRuntimeState::default()),
@@ -849,7 +855,8 @@ impl NotifyRedbStore {
             .routes_by_device
             .iter()
             .map(|(device_id, routes)| {
-                serialize_notify_value(routes).map(|bytes| (device_id.clone(), bytes))
+                routes::seal(&self.route_key, device_id, routes)
+                    .map(|bytes| (device_id.clone(), bytes))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let credential_entries = state
@@ -967,8 +974,7 @@ impl NotifyRedbStore {
                 has_incremental_rows = true;
                 let (key, value) =
                     entry.map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-                let routes: Vec<DevicePushRoute> = serde_json::from_slice(value.value())
-                    .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+                let routes = routes::open(&self.route_key, key.value(), value.value())?;
                 state.routes_by_device.insert(key.value().to_owned(), routes);
             }
         }
@@ -1148,7 +1154,7 @@ impl NotifyRedbStore {
                     delivery_class: normalized_wake.delivery_class.clone(),
                     priority: normalized_wake.priority.clone(),
                     ttl: normalized_wake.ttl,
-                    collapse_key: Some(collapse_key),
+                    collapse_key: Some(collapse_key_hash.clone()),
                     encrypted_hint: normalized_wake.encrypted_hint.clone(),
                 };
                 PreparedProviderPush {
@@ -1499,7 +1505,7 @@ impl NotifyRedbStore {
                     delivery_class: entry.wake.delivery_class.clone(),
                     priority: entry.wake.priority.clone(),
                     ttl: entry.wake.ttl,
-                    collapse_key: Some(collapse_key),
+                    collapse_key: Some(collapse_key_hash.clone()),
                     encrypted_hint: entry.wake.encrypted_hint.clone(),
                 };
                 PreparedProviderPush {
@@ -1667,7 +1673,7 @@ impl NotifyRedbStore {
         else {
             return Ok(());
         };
-        let routes_bytes = serialize_notify_value(&routes)?;
+        let routes_bytes = routes::seal(&self.route_key, device_delivery_id, routes)?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -1714,8 +1720,7 @@ impl NotifyRedbStore {
             .get(device_delivery_id)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?
         {
-            Some(routes) => serde_json::from_slice(routes.value())
-                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string())),
+            Some(routes) => routes::open(&self.route_key, device_delivery_id, routes.value()),
             None => Ok(Vec::new()),
         }
     }

@@ -2480,6 +2480,7 @@ dependencies = [
 name = "ramflux-node-core"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "arc-swap",
  "crc32fast",
  "hmac",

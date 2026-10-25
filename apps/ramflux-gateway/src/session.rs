@@ -567,6 +567,8 @@ async fn run_gateway_session_loop_until_closed(
                 continue;
             }
         };
+        gateway_state(&context.state)?
+            .mark_live(&runtime.session_id, ramflux_node_core::now_unix_seconds())?;
         let request_kind = super::session_response::request_kind(&frame);
         let result = async {
             match frame {

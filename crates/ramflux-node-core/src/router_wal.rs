@@ -230,6 +230,7 @@ impl RouterWalState {
 }
 
 pub struct RouterWalStore {
+    root: PathBuf,
     state: Arc<Mutex<RouterWalState>>,
     writer: RouterWalWriter,
 }
@@ -267,7 +268,7 @@ impl RouterWalStore {
             &state,
             pipeline,
         )?;
-        Ok(Self { state, writer })
+        Ok(Self { root, state, writer })
     }
 
     /// # Errors
@@ -300,6 +301,47 @@ impl RouterWalStore {
                 entry: entry.cloned().map(Box::new),
             })
             .await
+    }
+
+    /// # Errors
+    /// Removes expired recovery records and segment files older than the maximum retention window.
+    pub fn prune_expired(&self, now: i64) -> Result<usize, NodeCoreError> {
+        let mut state =
+            self.state.lock().map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+        let before = state.submissions_by_replay_key.len();
+        state.submissions_by_replay_key.retain(|_, record| record.replay_expires_at >= now);
+        let mut removed = before - state.submissions_by_replay_key.len();
+        for record in state.submissions_by_replay_key.values_mut() {
+            if record.entry.as_ref().is_some_and(|entry| {
+                entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)) <= now
+            }) {
+                record.entry = None;
+                removed += 1;
+            }
+        }
+        drop(state);
+        let roots = std::iter::once(self.root.clone())
+            .chain(router_wal_existing_shard_roots(&self.root)?.into_iter().map(|(_, path)| path));
+        for root in roots {
+            for id in router_wal_segment_ids(&root)? {
+                let path = router_wal_segment_path(&root, id);
+                let expired = fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| {
+                        age.as_secs()
+                            > u64::try_from(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS)
+                                .unwrap_or(604800)
+                    });
+                if expired {
+                    fs::remove_file(&path)
+                        .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 
     #[must_use]
@@ -527,6 +569,7 @@ impl Drop for RouterWalWriter {
 struct RouterWalWriterState {
     root: PathBuf,
     segment_bytes: u64,
+    segment_born: std::time::SystemTime,
     segment_id: u64,
     offset: u64,
     file: Arc<File>,
@@ -556,7 +599,11 @@ impl RouterWalWriterState {
         let offset = file
             .seek(io::SeekFrom::End(0))
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        Ok(Self { root, segment_bytes, segment_id, offset, file: Arc::new(file) })
+        let segment_born = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+        Ok(Self { root, segment_bytes, segment_born, segment_id, offset, file: Arc::new(file) })
     }
 
     fn append_batch(
@@ -573,7 +620,8 @@ impl RouterWalWriterState {
                 .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
                 .ok_or_else(|| NodeCoreError::ItestJson("router WAL frame too large".to_owned()))?;
             if self.offset > u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0)
-                && self.offset.saturating_add(frame_len) > self.segment_bytes
+                && (self.offset.saturating_add(frame_len) > self.segment_bytes
+                    || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
             {
                 self.file
                     .sync_all()
@@ -606,7 +654,8 @@ impl RouterWalWriterState {
                 .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
                 .ok_or_else(|| NodeCoreError::ItestJson("router WAL frame too large".to_owned()))?;
             if self.offset > u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0)
-                && self.offset.saturating_add(frame_len) > self.segment_bytes
+                && (self.offset.saturating_add(frame_len) > self.segment_bytes
+                    || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
             {
                 self.roll_segment()?;
             }
@@ -638,6 +687,7 @@ impl RouterWalWriterState {
         file.write_all(ROUTER_WAL_MAGIC)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         self.file = Arc::new(file);
+        self.segment_born = std::time::SystemTime::now();
         self.offset = u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0);
         Ok(())
     }
