@@ -52,7 +52,7 @@ async fn message(state: &mut LocalBusDaemonState, text: &str) -> Result<(), SdkE
         json!({"conversation_id":"request-thread",
         "message_id":text,"envelope_id":text,"source_principal_id":"alice","sender_id":"alice",
         "recipient_device_id":"bob","target_delivery_id":"bob","encrypted_body_base64":"",
-        "plaintext_body_base64":ramflux_protocol::encode_base64url(text),"created_at":now_unix_timestamp(),"ttl":3600}),
+        "plaintext_body_base64":ramflux_protocol::encode_base64url(text),"created_at":now_unix_timestamp().saturating_sub(120),"ttl":3600}),
     );
     let (outbound, _receiver) = tokio::sync::mpsc::channel(8);
     let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
@@ -152,6 +152,10 @@ async fn contact02_manual_request_holds_content_without_a_thread_then_accept_rel
     let id = list["requests"][0]["request_id"].clone();
     contact(&mut state, "bob", "contact.accept", json!({"request_id":id})).await?;
     assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 1);
+    assert_eq!(
+        account(&state, "bob")?.direct_messages("request-thread")?[0].created_at,
+        entries[0].envelope.created_at
+    );
     assert_eq!(
         account(&state, "bob")?
             .account_db()?

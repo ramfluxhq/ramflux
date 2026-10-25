@@ -711,22 +711,18 @@ impl RamfluxClient {
                 self.stage_delivery_receipt(conversation_id, message_id, entry)?;
                 return Ok(());
             }
-            if let Some(metadata) = metadata {
-                self.send_direct_message_with_metadata(
+            // A held message may be accepted days later; reception/consent must not rewrite
+            // its authenticated send time in the ordinary conversation projection.
+            self.account_db()?.send_direct_message_at_with_metadata(
+                ramflux_storage::DirectMessageWrite {
                     conversation_id,
                     message_id,
-                    &entry.envelope.source_principal_id,
-                    plaintext,
-                    metadata,
-                )
-            } else {
-                self.send_direct_message(
-                    conversation_id,
-                    message_id,
-                    &entry.envelope.source_principal_id,
-                    plaintext,
-                )
-            }?;
+                    sender_id: &entry.envelope.source_principal_id,
+                    encrypted_body: plaintext,
+                    metadata: &metadata.cloned().unwrap_or_default(),
+                    created_at: entry.envelope.created_at,
+                },
+            )?;
             self.stage_delivery_receipt(conversation_id, message_id, entry)?;
             Ok(())
         })
