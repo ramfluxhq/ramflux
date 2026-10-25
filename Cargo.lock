@@ -2568,9 +2568,7 @@ dependencies = [
 name = "ramflux-retention"
 version = "0.1.0"
 dependencies = [
- "ramflux-crypto",
  "ramflux-node-core",
- "ramflux-protocol",
  "ramflux-transport",
  "serde_json",
  "tokio",
