@@ -301,3 +301,24 @@ fn historical_sender_with_only_a_foreign_live_name_stays_unattributed() -> Resul
     assert_eq!(rows["conversations"][0]["participants"], json!(["alice"]));
     Ok(())
 }
+
+#[test]
+fn r5_paginated_and_legacy_group_lists_expose_the_current_signed_name() -> Result<(), SdkError> {
+    let f = Fixture::new()?;
+    f.client.shared_group_create("g", "group-thread", Some("Initial".into()), "alice-phone")?;
+    let state = f.client.shared_group_change(
+        "g",
+        "alice-phone",
+        ramflux_protocol::GroupStateChange::SetName { name: "Reviewed checklist".into() },
+    )?;
+    for body in [json!({}), json!({"limit":1})] {
+        let listed = f.read("group.list", body)?;
+        assert_eq!(listed["groups"][0]["name"], "Reviewed checklist");
+        assert_eq!(listed["groups"][0]["name_epoch"], state.view().name_epoch);
+    }
+    assert_eq!(
+        f.read("conversation.directory", json!({}))?["conversations"][0]["title"],
+        "Reviewed checklist"
+    );
+    Ok(())
+}

@@ -114,6 +114,10 @@ fn conversation(
 
 fn group_row(client: &RamfluxClient, id: &str, saved: &Value) -> Result<Value, SdkError> {
     let mut group = serde_json::to_value(client.group_state(id)?)?;
+    if let Some(state) = client.account_db()?.shared_group_state(id)? {
+        group["name"] = json!(state.view().name);
+        group["name_epoch"] = json!(state.view().name_epoch);
+    }
     group["id"] = json!(id);
     group["safety_changes"] = saved.get("safety_changes").cloned().unwrap_or_else(|| json!([]));
     group["safety_change"] = saved.get("safety_change").cloned().unwrap_or(Value::Null);
