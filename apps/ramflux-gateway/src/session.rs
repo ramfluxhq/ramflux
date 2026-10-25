@@ -495,9 +495,13 @@ fn gateway_session_id_for_open(
     Some(metadata.session_id)
 }
 
-fn gateway_resume_window_seconds() -> u64 {
-    std::env::var("RAMFLUX_GATEWAY_RESUME_WINDOW_SECONDS")
-        .ok()
+/// Configured resume window; session retention uses the same value.
+pub(crate) fn gateway_resume_window_seconds() -> u64 {
+    resume_window_from(std::env::var("RAMFLUX_GATEWAY_RESUME_WINDOW_SECONDS").ok().as_deref())
+}
+
+pub(crate) fn resume_window_from(value: Option<&str>) -> u64 {
+    value
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS)
@@ -646,7 +650,19 @@ async fn run_gateway_session_loop_until_closed(
                     }
                 }
                 ramflux_node_core::GatewayClientFrame::PushRouteRegister { request } => {
-                    crate::push_registration::handle(&send, &context, &runtime, &request).await?;
+                    // A refused registration is answered in-band; the session stays usable.
+                    if let Err(error) =
+                        crate::push_registration::handle(&send, &context, &runtime, &request).await
+                    {
+                        tracing::warn!(%error, "push route registration refused");
+                        write_gateway_handle(
+                            &send,
+                            &ramflux_node_core::GatewayServerFrame::Nack {
+                                reason: "push route registration refused".to_owned(),
+                            },
+                        )
+                        .await?;
+                    }
                 }
                 ramflux_node_core::GatewayClientFrame::VoiceLease { request } => {
                     crate::voice::handle(&send, &context, &runtime, &request).await?;

@@ -66,7 +66,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         };
         state.prune_retained_sessions(
             ramflux_node_core::now_unix_seconds(),
-            300,
+            session::gateway_resume_window_seconds(),
             &std::collections::BTreeSet::new(),
         );
         store.save_state(&state)?;
