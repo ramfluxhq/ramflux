@@ -771,15 +771,9 @@ pub(crate) async fn handle_gateway_submit(
         .await?;
         return Ok(());
     }
-    let after = response.inbox_seq.unwrap_or(1).saturating_sub(1);
-    let inbox = router_inbox_async(&context.router, &response.target_delivery_id, after, 1).await?;
-    let Some(entry) = inbox.entries.into_iter().next() else {
-        return Err(anyhow::anyhow!(
-            "gateway submit did not find inbox entry for {} after seq {}",
-            response.target_delivery_id,
-            after
-        ));
-    };
+    // The router response confirms the durable submit. A recipient can ACK and remove its
+    // pending entry before this task resumes, so the inbox is not a submit receipt store.
+    let entry = committed_submit_entry(&response, envelope.clone())?;
     let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry };
     capture_itest_gateway_json(
         "deliver",
@@ -801,6 +795,26 @@ pub(crate) async fn handle_gateway_submit(
         }
     }
     Ok(())
+}
+
+fn committed_submit_entry(
+    response: &ramflux_node_core::EnvelopeSubmitResponse,
+    envelope: ramflux_protocol::Envelope,
+) -> anyhow::Result<ramflux_node_core::InboxEntry> {
+    anyhow::ensure!(
+        matches!(response.outcome.as_str(), "online" | "offline_queued")
+            && response.nack.is_none()
+            && response.target_delivery_id == envelope.target_delivery_id,
+        "router submit response does not confirm this target"
+    );
+    let inbox_seq = response.inbox_seq.filter(|seq| *seq > 0).ok_or_else(|| {
+        anyhow::anyhow!("router submit response is missing its committed sequence")
+    })?;
+    Ok(ramflux_node_core::InboxEntry {
+        inbox_seq,
+        target_delivery_id: response.target_delivery_id.clone(),
+        envelope,
+    })
 }
 
 pub(crate) async fn handle_gateway_own_device_fanout(
@@ -1790,3 +1804,7 @@ mod tests {
 #[cfg(all(test, feature = "itest-local-mint"))]
 #[path = "principal_directory_session_tests.rs"]
 mod principal_directory_tests;
+
+#[cfg(all(test, feature = "itest-local-mint"))]
+#[path = "submit_ack_tests.rs"]
+mod submit_ack_tests;
