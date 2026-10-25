@@ -152,11 +152,16 @@ pub fn authorize_device_branch(
 ) -> Result<BranchProofDocument, CryptoError> {
     let proof_id = blake3_256_base64url(
         ramflux_protocol::domain::BRANCH_PROOF,
-        format!(
-            "{}:{}:{}:{}",
-            device.principal_id, device.device_id, device.device_epoch, audience
-        )
-        .as_bytes(),
+        &ramflux_protocol::canonical_json_bytes(&(
+            encode_base64url(root.signing_key.verifying_key().to_bytes()),
+            &device.principal_id,
+            &device.device_id,
+            device.device_epoch,
+            audience,
+            &capability_scope,
+            issued_at,
+            expires_at,
+        ))?,
     );
     let body = BranchProofSigningBody {
         proof_id: &proof_id,

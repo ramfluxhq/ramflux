@@ -6,8 +6,24 @@ use super::invalid;
 use crate::prelude::*;
 use ramflux_protocol::SignedDeviceSetRecord;
 const REFRESH_AT: &str = "identity/owned_proof_refresh_at";
-/// Renew a one-hour proof five minutes before expiry, including on an otherwise idle live account.
-pub(crate) const OWN_PROOF_REFRESH_SECONDS: i64 = 3300;
+pub(crate) const DEFAULT_PROOF_LIFETIME_SECONDS: i64 = 3600;
+pub(crate) fn proof_lifetime_seconds() -> Result<i64, SdkError> {
+    #[cfg(feature = "itest-identity-proof")]
+    match std::env::var("RAMFLUX_TEST_BRANCH_PROOF_TTL_SECS") {
+        Ok(value) => return parse_test_proof_lifetime(&value),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(invalid("invalid test proof TTL")),
+        Err(std::env::VarError::NotPresent) => {}
+    }
+    Ok(DEFAULT_PROOF_LIFETIME_SECONDS)
+}
+#[cfg(any(test, feature = "itest-identity-proof"))]
+fn parse_test_proof_lifetime(value: &str) -> Result<i64, SdkError> {
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|ttl| (4..=DEFAULT_PROOF_LIFETIME_SECONDS).contains(ttl))
+        .ok_or_else(|| invalid("test proof TTL must be 4..3600 seconds"))
+}
 #[derive(Clone, Copy)]
 pub(crate) struct RegistrationTarget<'a> {
     pub commitment: &'a str,
@@ -17,6 +33,20 @@ pub(crate) struct RegistrationTarget<'a> {
 impl RamfluxClient {
     pub(crate) fn own_proof_refresh_due(&self, now: i64) -> Result<bool, SdkError> {
         let db = self.account_db()?;
+        let own = self.owned_device_identity()?;
+        if let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{}",
+            own.root_commitment()
+        ))? && let Some(device) =
+            manifest.devices.iter().find(|device| device.device_id == own.device_id())
+            && now
+                >= device.branch_proof.issued_at.saturating_add(
+                    (device.branch_proof.expires_at.saturating_sub(device.branch_proof.issued_at))
+                        / 2,
+                )
+        {
+            return Ok(true);
+        }
         if let Some(at) = db.load_actor_state::<i64>(REFRESH_AT)? {
             return Ok(now >= at);
         }
@@ -29,7 +59,7 @@ impl RamfluxClient {
     }
     pub(crate) fn record_owned_proof_published(&self, now: i64) -> Result<(), SdkError> {
         self.account_db()?
-            .persist_actor_state(REFRESH_AT, &now.saturating_add(OWN_PROOF_REFRESH_SECONDS))?;
+            .persist_actor_state(REFRESH_AT, &now.saturating_add(proof_lifetime_seconds()? / 2))?;
         Ok(())
     }
     pub(crate) fn validate_registration_ack(
@@ -138,5 +168,19 @@ impl RamfluxClient {
             }
         }
         Err(last.unwrap_or_else(|| invalid("registration reconciliation retry limit reached")))
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+    #[test]
+    fn test_only_ttl_is_short_bounded_and_fails_closed_on_invalid_settings() {
+        for value in ["4", "60", "3600"] {
+            assert!(parse_test_proof_lifetime(value).is_ok());
+        }
+        for value in ["0", "3", "3601", "-1", "bad", ""] {
+            assert!(parse_test_proof_lifetime(value).is_err());
+        }
     }
 }

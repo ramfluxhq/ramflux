@@ -243,7 +243,9 @@ fn append_device_branch_authorized_event(
         "ramflux-node",
         default_device_capability_scope(),
         now,
-        now.saturating_add(3_600),
+        now.saturating_add(
+            crate::client::identity_authority::registration::proof_lifetime_seconds()?,
+        ),
     )?;
     let branch_authorized_event_id = format!("device.branch_authorized:{device_id}:{device_epoch}");
     let branch_proof_hash = ramflux_crypto::blake3_256_base64url(

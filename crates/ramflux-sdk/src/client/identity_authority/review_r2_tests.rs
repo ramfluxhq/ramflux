@@ -31,7 +31,7 @@ fn concurrent_own_registration_proposals_rebase_on_the_nodes_accepted_fork() -> 
     Ok(())
 }
 #[test]
-fn expired_sibling_proof_does_not_block_newer_signed_revocation_or_authorize_a_new_session()
+fn expired_proof_keeps_durable_device_authority_but_new_registration_still_requires_freshness()
 -> TestResult {
     let owner = Actor::new("alice", "one", 191, 192, 1)?;
     let sibling = Actor::new("alice", "two", 191, 193, 1)?;
@@ -81,24 +81,16 @@ fn expired_sibling_proof_does_not_block_newer_signed_revocation_or_authorize_a_n
             "two",
         )?)
         .and_then(|identity| peer.client.require_cached_root_authority(&identity))?;
-    assert!(
-        peer.client
-            .require_fresh_device_authorization(
-                &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?
-            )
-            .is_err()
-    );
-    assert!(
-        peer.client
-            .verify_root_bound_prekey(
-                &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?,
-                &sibling
-                    .client
-                    .load_x3dh_private_state(&sibling.client.local_device_identity("two")?)?
-                    .bundle
-            )
-            .is_err()
-    );
+    peer.client.require_current_device_authorization(
+        &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?,
+    )?;
+    peer.client.verify_root_bound_prekey(
+        &peer.client.device_identity_for_root(&manifest.principal_commitment, "two")?,
+        &sibling
+            .client
+            .load_x3dh_private_state(&sibling.client.local_device_identity("two")?)?
+            .bundle,
+    )?;
     let owner_key = &owner.client.identity_root.as_ref().ok_or("root")?.signing_key.verifying_key();
     let proof =
         &manifest.devices.iter().find(|d| d.device_id == "two").ok_or("proof")?.branch_proof;
@@ -116,12 +108,12 @@ fn expired_sibling_proof_does_not_block_newer_signed_revocation_or_authorize_a_n
     Ok(())
 }
 #[test]
-fn own_proof_refresh_is_due_five_minutes_before_the_hour_expires() -> TestResult {
+fn own_proof_refresh_is_due_at_half_the_proof_lifetime() -> TestResult {
     let owner = Actor::new("alice", "one", 211, 212, 1)?;
     assert!(!owner.client.own_proof_refresh_due(1000)?);
     owner.client.record_owned_proof_published(1000)?;
-    assert!(!owner.client.own_proof_refresh_due(4299)?);
-    assert!(owner.client.own_proof_refresh_due(4300)?);
+    assert!(!owner.client.own_proof_refresh_due(2799)?);
+    assert!(owner.client.own_proof_refresh_due(2800)?);
     assert!(owner.client.own_proof_refresh_due(4601)?);
     Ok(())
 }

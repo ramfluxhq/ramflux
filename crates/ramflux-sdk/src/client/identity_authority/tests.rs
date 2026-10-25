@@ -461,3 +461,6 @@ fn verify_manifest_json_rejects_swapped_branch_and_agreement_keys() -> TestResul
     }
     Ok(())
 }
+
+#[path = "proof_lifetime_tests.rs"]
+mod proof_lifetime;

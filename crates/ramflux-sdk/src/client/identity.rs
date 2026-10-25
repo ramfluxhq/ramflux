@@ -224,14 +224,29 @@ impl RamfluxClient {
         session_id: &str,
         principal_commitment: &str,
     ) -> Result<SdkIdentityRegisterRequest, SdkError> {
+        self.mvp1_identity_registration_request_at(
+            device_id,
+            target_delivery_id,
+            session_id,
+            principal_commitment,
+            now_unix_timestamp(),
+        )
+    }
+    pub(crate) fn mvp1_identity_registration_request_at(
+        &self,
+        device_id: &str,
+        target_delivery_id: &str,
+        session_id: &str,
+        principal_commitment: &str,
+        now: i64,
+    ) -> Result<SdkIdentityRegisterRequest, SdkError> {
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let now = now_unix_timestamp();
         let proof = self.authorize_current_device(
             "ramflux-node",
             vec!["device.delivery.bind".into()],
             now,
-            now.saturating_add(3600),
+            now.saturating_add(super::identity_authority::registration::proof_lifetime_seconds()?),
         )?;
         let record = self
             .account_db()?

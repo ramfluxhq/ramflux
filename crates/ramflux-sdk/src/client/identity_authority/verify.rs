@@ -49,7 +49,9 @@ pub(crate) fn verify_manifest(
             &binding,
             "ramflux-node",
             "device.delivery.bind",
-            crate::prelude::now_unix_timestamp(),
+            // The current signed set grants durable authority; authenticate this historical
+            // registration artifact at issuance rather than using its clock as a lookup lease.
+            device.branch_proof.issued_at,
         )?;
         let keys = ramflux_crypto::device_key_commitments(
             &binding.branch_signing_public_key,
@@ -98,22 +100,12 @@ pub(crate) fn verify_manifest_authority(
 }
 
 impl crate::RamfluxClient {
-    pub(crate) fn require_fresh_device_authorization(
+    pub(crate) fn require_current_device_authorization(
         &self,
         identity: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
-        let remote = identity.storage_key();
-        let row = self
-            .account_db()?
-            .client_record("device", remote)?
-            .ok_or_else(|| invalid("device absent"))?;
-        if row["proof_expires_at"]
-            .as_i64()
-            .is_none_or(|expiry| expiry < crate::prelude::now_unix_timestamp())
-        {
-            return Err(invalid("device session proof expired; refresh required"));
-        }
-        Ok(())
+        // Registration-proof expiry cannot retire a device authorized by the latest signed set.
+        self.require_cached_root_authority(identity)
     }
     pub(crate) fn verify_root_bound_prekey(
         &self,
@@ -127,7 +119,7 @@ impl crate::RamfluxClient {
                 .client_record("device", remote)?
                 .ok_or_else(|| invalid("recipient missing"))?
         };
-        self.require_fresh_device_authorization(identity)?;
+        self.require_current_device_authorization(identity)?;
         let identity: [u8; 32] = serde_json::from_value(
             record
                 .get("x25519_identity_public")

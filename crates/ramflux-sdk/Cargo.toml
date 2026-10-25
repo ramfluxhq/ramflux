@@ -12,6 +12,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 default = []
+# Default-off short registration-proof lifetime for integration tests only.
+itest-identity-proof = []
 c-abi = []
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.

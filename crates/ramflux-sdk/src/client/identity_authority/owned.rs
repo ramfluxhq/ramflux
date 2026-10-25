@@ -223,7 +223,7 @@ impl RamfluxClient {
             "ramflux-node",
             vec!["device.delivery.bind".into()],
             now,
-            now.saturating_add(3600),
+            now.saturating_add(super::registration::proof_lifetime_seconds()?),
         )?;
         let local = entry_from_proof(&proof)?;
         let mut entries = previous.as_ref().map_or_else(Vec::new, |r| r.devices.clone());

@@ -434,3 +434,24 @@ Operators serving large shared NATs may set
 limit leaves the per-root and global limits intact but lets a single source
 consume more of the global receipt budget. Apply it consistently to router
 instances; observe capacity refusals before increasing it.
+
+
+## Durable authorization and renewable admission proofs
+
+Device authorization comes from the highest observed root-signed device set and
+ends through signed revocation or an authorized epoch/key transition. An expired
+registration proof does not invalidate a published identity, contact, prekey or
+new pair bootstrap while that signed set still authorizes its exact keys.
+Original proof signatures, key bindings and intervals remain authenticated;
+registration admission separately enforces current proof validity and the
+30-day maximum lifetime. Session authentication has its own fresh device proof.
+
+New proof identifiers bind issuance/expiry times; SDK v2 registrations additionally
+use a random signed identifier so renewals within one clock second are distinct.
+Receipts still reject replays of old live proofs. The SDK republishes registration
+and prekeys at half the one-hour proof lifetime and refreshes expired cached
+proofs on startup, without changing the device-set epoch solely for renewal.
+
+`itest-identity-proof` is a default-off SDK/rf feature for QA. Only binaries built
+with it read `RAMFLUX_TEST_BRANCH_PROOF_TTL_SECS` (4..3600 seconds). Production
+builds ignore this test setting and keep the one-hour renewable admission proof.

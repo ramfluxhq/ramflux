@@ -439,3 +439,48 @@ async fn a_legacy_commitment_selector_cannot_be_redirected_to_a_principal_with_t
 
 #[path = "contact_recovery_tests.rs"]
 mod recovery;
+
+#[tokio::test]
+async fn two_hour_old_accounts_resolve_add_contacts_and_authorize_new_prekeys()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 21)?;
+    let mut b = Fixture::new("bob", 31)?;
+    let directory = Directory::new(&a, &b).await?;
+    // Inject issuance time two hours earlier without modifying the process clock or test budgets.
+    let now = now_unix_timestamp();
+    {
+        let mut manifests = directory.records.lock().map_err(|_| invalid("directory mutex"))?;
+        for manifest in manifests.iter_mut() {
+            let root = if manifest.principal_id == "alice" {
+                a.client.identity_root.as_ref()
+            } else {
+                b.client.identity_root.as_ref()
+            }
+            .ok_or(SdkError::IdentityRootMissing)?;
+            for device in &mut manifest.devices {
+                device.branch_proof.issued_at = now - 7200;
+                device.branch_proof.expires_at = now - 3600;
+                device.branch_proof.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+                    &ramflux_crypto::branch_proof_signing_bytes(&device.branch_proof)?,
+                    root.signing_key.to_bytes(),
+                );
+            }
+        }
+    }
+    let mut state = state(&mut a, &mut b, &directory)?;
+    for (own, peer) in [("alice", "bob"), ("bob", "alice")] {
+        let added = call(&mut state, own, "contact.add", json!({"principal_id":peer})).await?;
+        assert_eq!(added["contact"]["principal_id"], peer);
+        assert_eq!(added["contact"]["reachable"], true);
+        let manifests = directory.records.lock().map_err(|_| invalid("directory mutex"))?;
+        let manifest =
+            manifests.iter().find(|m| m.principal_id == peer).ok_or_else(|| invalid("manifest"))?;
+        let device = manifest.devices.first().ok_or_else(|| invalid("device"))?;
+        let client = &state.accounts.get(own).ok_or_else(|| invalid("account"))?.client;
+        let identity =
+            client.device_identity_for_root(&manifest.principal_commitment, &device.device_id)?;
+        client.verify_root_bound_prekey(&identity, &device.prekey_bundle)?;
+        assert!(device.branch_proof.expires_at < now);
+    }
+    Ok(())
+}
