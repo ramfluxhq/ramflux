@@ -7,7 +7,7 @@ use super::{BackupStreamError, CHUNK_SIZE, TAG_SIZE};
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use std::io::{Read, Write};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 fn nonce(prefix: &[u8], counter: u64, last: bool) -> [u8; 24] {
     let mut nonce = [0; 24];
@@ -94,6 +94,8 @@ pub(super) fn decrypt_chunks(
         {
             return Err(BackupStreamError::Invalid("chunk length"));
         }
+        // Erase the previous plaintext before a shorter final frame shrinks the Vec.
+        buffer.as_mut_slice().zeroize();
         buffer.resize(size, 0);
         input.read_exact(&mut buffer)?;
         cipher
