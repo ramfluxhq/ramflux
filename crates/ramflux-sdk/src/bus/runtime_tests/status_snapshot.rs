@@ -172,7 +172,10 @@ async fn r2_older_samples_reuse_retained_coordinates_without_allocating_events()
     db.remove_actor_state("sync/health/event")?;
     // Exercise the production reader pool without an independent periodic sync writer.
     // A daemon actor may legitimately append status transitions during a socket request.
-    let readers = super::super::readers::AccountReaders::start(db)?;
+    let readers = super::super::readers::AccountReaders::start(
+        db,
+        account.client.owned_device_identity().ok(),
+    )?;
     let before = db.journal_bounds()?.head_seq;
     let events = db.journal_after(0, 128)?;
     for _ in 0..32 {
