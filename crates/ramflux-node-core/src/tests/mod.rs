@@ -32,3 +32,5 @@ mod root_mailbox;
 mod session_authority_refresh;
 
 mod server_retention;
+mod server_retention_r2;
+mod server_retention_r2_api;
