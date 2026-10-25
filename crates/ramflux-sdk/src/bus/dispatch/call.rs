@@ -44,7 +44,8 @@ pub(crate) async fn dispatch(
     }
     let id = required(&request.body, "call_id")?;
     if request.method == "call.media.session" {
-        return media(account, id, request.body["counter_lease_v1"].as_bool() == Some(true));
+        let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
+        return media(account, id);
     }
     let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
     let mut next =
@@ -144,14 +145,10 @@ pub(crate) fn recover(account: &mut LocalBusAccountState) -> Result<(), SdkError
     }
     Ok(())
 }
-fn media(
-    account: &mut LocalBusAccountState,
-    id: &str,
-    supports_counter_lease: bool,
-) -> Result<LocalBusDispatchResult, SdkError> {
+fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatchResult, SdkError> {
     let c =
         account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("media keys unavailable"))?;
-    if c.row.state != "active" || (c.media_taken && (!supports_counter_lease || !c.media_leased)) {
+    if c.row.state != "active" || c.media_taken {
         return Err(invalid(
             "media session unavailable; start a fresh call before restarting the media engine",
         ));
@@ -159,17 +156,11 @@ fn media(
     let allocation = c.allocation.as_ref().ok_or_else(|| invalid("allocation unavailable"))?;
     let receive = c.receive_key.as_ref().ok_or_else(|| invalid("receive key unavailable"))?;
     let outgoing = c.local == c.caller;
-    let counter_start = c.media_counter;
-    let next_counter = counter_start
-        .checked_add(1 << 32)
-        .ok_or_else(|| invalid("media counter leases exhausted"))?;
     let value = json!({"relay":{"endpoint":allocation.endpoint,"token":if outgoing {&allocation.caller_token}else{&allocation.callee_token}},
-        "sframe":{"cipher_suite":5,"send":{"kid":u64::from(!outgoing),"counter_start":counter_start,"counter_end":next_counter-1,"base_key":ramflux_protocol::encode_base64url(c.send_key.as_ref())},
+        "sframe":{"cipher_suite":5,"send":{"kid":u64::from(!outgoing),"base_key":ramflux_protocol::encode_base64url(c.send_key.as_ref())},
         "receive":{"kid":u64::from(outgoing),"base_key":ramflux_protocol::encode_base64url(receive.as_ref())}}});
     // This contract's client always restarts at counter zero. Never return a used key twice.
     c.media_taken = true;
-    c.media_leased = supports_counter_lease;
-    c.media_counter = next_counter;
     Ok(local_bus_ok(value))
 }
 #[path = "call_driver.rs"]

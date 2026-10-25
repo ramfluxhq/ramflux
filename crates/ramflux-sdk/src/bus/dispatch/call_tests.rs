@@ -43,21 +43,15 @@ fn fixture(name: &str) -> Result<(PathBuf, LocalBusDaemonState, String), SdkErro
     };
     Ok((root, state, id))
 }
-fn request(method: &str, id: &str, leased: bool) -> LocalBusFrame {
-    LocalBusFrame::request(
-        "call-test",
-        Some("alice".into()),
-        "test",
-        method,
-        json!({"call_id":id,"counter_lease_v1":leased}),
-    )
+fn request(method: &str, id: &str) -> LocalBusFrame {
+    LocalBusFrame::request("call-test", Some("alice".into()), "test", method, json!({"call_id":id}))
 }
 #[tokio::test]
-async fn media_key_replies_bypass_generic_receipts_and_reserve_disjoint_counter_ranges()
+async fn media_key_replies_cannot_be_replayed_from_generic_operation_receipts()
 -> Result<(), SdkError> {
     let (root, mut state, id) = fixture("call-media-receipt")?;
     let (outbound, _) = mpsc::channel(4);
-    let mut frame = request("call.media.session", &id, true);
+    let mut frame = request("call.media.session", &id);
     frame.operation_id = Some("media-key-request".into());
     let command = AccountCommand {
         request: frame,
@@ -69,11 +63,7 @@ async fn media_key_replies_bypass_generic_receipts_and_reserve_disjoint_counter_
         reply: None,
     };
     let first = crate::bus::mutations::execute(&mut state, "alice", &command).await?.body;
-    let second = crate::bus::mutations::execute(&mut state, "alice", &command).await?.body;
-    assert_eq!(first["sframe"]["send"]["counter_start"], 0);
-    assert_eq!(first["sframe"]["send"]["counter_end"], (1_u64 << 32) - 1);
-    assert_eq!(second["sframe"]["send"]["counter_start"], 1_u64 << 32);
-    assert_eq!(first["sframe"]["send"]["base_key"], second["sframe"]["send"]["base_key"]);
+    assert!(crate::bus::mutations::execute(&mut state, "alice", &command).await.is_err());
     let account = local_bus_account(&state, "alice")?;
     // A different fingerprint can reserve the key only if no generic receipt was retained.
     assert_eq!(
@@ -99,12 +89,13 @@ async fn media_key_replies_bypass_generic_receipts_and_reserve_disjoint_counter_
     Ok(())
 }
 #[tokio::test]
-async fn a_legacy_media_engine_cannot_reacquire_its_key_or_upgrade_to_overlapping_leases()
--> Result<(), SdkError> {
+async fn a_media_engine_cannot_reacquire_keys_with_a_restart_flag() -> Result<(), SdkError> {
     let (root, mut state, id) = fixture("call-legacy-media")?;
-    dispatch(&request("call.media.session", &id, false), &mut state).await?;
-    assert!(dispatch(&request("call.media.session", &id, false), &mut state).await.is_err());
-    assert!(dispatch(&request("call.media.session", &id, true), &mut state).await.is_err());
+    dispatch(&request("call.media.session", &id), &mut state).await?;
+    assert!(dispatch(&request("call.media.session", &id), &mut state).await.is_err());
+    let mut restart = request("call.media.session", &id);
+    restart.body["counter_lease_v1"] = json!(true);
+    assert!(dispatch(&restart, &mut state).await.is_err());
     drop(state);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -127,7 +118,7 @@ async fn headless_and_nonhuman_accounts_cannot_mutate_calls_or_obtain_media_keys
         {
             assert!(
                 matches!(
-                    dispatch(&request(method, &id, true), &mut state).await,
+                    dispatch(&request(method, &id), &mut state).await,
                     Err(SdkError::CapabilityDenied(_))
                 ),
                 "{method}"
@@ -163,10 +154,7 @@ fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record(
     assert_eq!(page["messages"][0]["kind"], "call");
     assert_eq!(page["messages"][0]["call"]["state"], "ended");
     assert!(crate::bus::readers::is_reader_request("call.list"));
-    assert_eq!(
-        crate::bus::readers::read(&account.client, &request("call.list", &id, false))?,
-        listed
-    );
+    assert_eq!(crate::bus::readers::read(&account.client, &request("call.list", &id))?, listed);
     drop(state);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -196,7 +184,10 @@ fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call
     let body = call::bytes(control)?;
     let incoming = LiveCall::incoming(control, local, now_unix_timestamp())?;
     account.client.persist_call_row(&incoming.row)?;
-    account.client.voice_transition.replace(Some((call::transition_key(&body), incoming)));
+    account
+        .client
+        .voice_transition
+        .replace(Some((call::transition_key(&body), Box::new(incoming))));
     assert!(account.client.refresh_call_control(&body)?);
     let before = account.client.voice_calls[&control.call_id].clone();
     assert!(account.client.refresh_call_control(&body)?);

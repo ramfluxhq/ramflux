@@ -41,7 +41,7 @@ to the local media engine; never log or journal it. The shape is:
 ```text
 relay: {endpoint: "host:port", token: base64url(opaque bytes)}
 sframe: {cipher_suite: 5,
-         send: {kid, base_key, counter_start, counter_end},
+         send: {kid, base_key},
          receive: {kid, base_key}}
 ```
 
@@ -50,14 +50,11 @@ SFrame RFC 9605 suite 5 (`AES_256_GCM_SHA512_128`) authenticates the RTP header 
 metadata. Caller-to-callee uses KID 0; the opposite direction uses KID 1. Initial
 counters start at zero. The receiver enforces a per-key 128-counter replay window.
 
-An engine that always starts at counter zero may obtain its key only once. To support
-engine replacement with the same key, every media request must opt in with
-`counter_lease_v1: true`, and every sender must honor the returned inclusive counter
-range. Each successful request reserves a disjoint range of 2^32 counters. A legacy
-engine cannot switch to leased counters after taking its key. Generic operation IDs
-do not cache or replay media replies. A daemon restart ends unfinished calls as
-`failed`; old media keys are never reconstructed from public records or control
-redelivery.
+A media engine may obtain its keys only once per call. Generic operation IDs do not
+cache or replay media replies. An engine restart requires ending the call and starting
+a fresh call, protecting both nonce uniqueness and the receiver's replay window. A
+daemon restart ends unfinished calls as `failed`; old media keys are never reconstructed
+from public records or control redelivery.
 
 UDP framing is `u32be(token byte length) || decoded token || RTP/SFrame packet`.
 The relay forwards only the RTP/SFrame packet. Send an empty framed payload every

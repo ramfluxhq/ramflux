@@ -167,3 +167,60 @@ fn a_busy_callee_sends_a_terminal_control_and_never_keeps_media_keys() -> Result
     assert_eq!(recipient.send_key.as_ref(), &[0; 32]);
     Ok(())
 }
+
+#[test]
+fn authenticated_lease_updates_preserve_active_state_until_the_new_expiry() -> Result<(), SdkError>
+{
+    let mut origin = outgoing()?;
+    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    recipient.pending.clear();
+    recipient.answer(101)?;
+    origin.apply(&recipient.pending[0], 102)?;
+    origin.activate(allocation(), 103)?;
+    let ack = origin
+        .pending
+        .iter()
+        .find(|c| matches!(c.body, CallAction::Ack { .. }))
+        .cloned()
+        .ok_or_else(|| state::invalid("ack missing"))?;
+    recipient.apply(&ack, 103)?;
+    let version = recipient.row.seq;
+    let mut renewed = allocation();
+    renewed.expires_at = 220;
+    let renewal = origin.control(CallAction::Ack { allocation: Box::new(renewed) }, 110)?;
+    recipient.apply(&renewal, 110)?;
+    assert_eq!(recipient.row.seq, version);
+    assert_eq!(recipient.row.state, "active");
+    assert!(!recipient.expire_media(200)?);
+    assert!(recipient.expire_media(220)?);
+    assert_eq!(recipient.row.end_reason.as_deref(), Some("failed"));
+    assert!(recipient.receive_key.is_none());
+    Ok(())
+}
+#[test]
+fn a_device_key_change_requires_a_new_call_with_fresh_media_secrets() -> Result<(), SdkError> {
+    let mut origin = outgoing()?;
+    let device = endpoint("bob", "b1");
+    let first = ramflux_crypto::public_key_base64url_from_seed([3; 32]);
+    let replacement = ramflux_crypto::public_key_base64url_from_seed([4; 32]);
+    origin.pin_peer(device.clone(), first.clone())?;
+    assert!(origin.pin_peer(device.clone(), replacement.clone()).is_err());
+    assert!(origin.peer_key_matches(&device, &first));
+    assert!(!origin.peer_key_matches(&device, &replacement));
+    let mut fresh = outgoing()?;
+    fresh.pin_peer(device, replacement)?;
+    if fresh.send_key == origin.send_key {
+        return Err(state::invalid("fresh call reused a media secret"));
+    }
+    Ok(())
+}
+#[test]
+fn terminal_calls_discard_unsent_invites_and_their_media_secrets() -> Result<(), SdkError> {
+    let mut origin = outgoing()?;
+    assert_eq!(origin.pending.len(), 2);
+    origin.finish("failed", 101)?;
+    assert_eq!(origin.pending.len(), 0);
+    assert_eq!(origin.send_key.as_ref(), &[0; 32]);
+    assert!(origin.receive_key.is_none());
+    Ok(())
+}

@@ -213,7 +213,7 @@ impl RamfluxClient {
         }
         self.persist_call_row(&next.row)?;
         db.persist_actor_state(&receipt, &hash)?;
-        self.voice_transition.replace(Some((transition_key(body), next)));
+        self.voice_transition.replace(Some((transition_key(body), Box::new(next))));
         Ok(true)
     }
     pub(crate) fn retire_call_without_keys(&self, id: &str) -> Result<(), SdkError> {
@@ -236,7 +236,7 @@ impl RamfluxClient {
         if let Some((key, next)) = self.voice_transition.take()
             && key == transition_key(body)
         {
-            self.voice_calls.insert(c.call_id, next);
+            self.voice_calls.insert(c.call_id, *next);
             return Ok(true);
         }
         // An already committed delivery can be retried after an ACK failure. Its cache refresh
