@@ -95,13 +95,11 @@ impl AgentBus for RfdBus {
                 // Do not resend the original operation here; its caller owns retry/idempotency.
                 let mut identity = crate::Checkpoint::default();
                 let account = self.account.clone();
-                return if Box::pin(crate::participant::identity(self, &mut identity, &account))
+                return match Box::pin(crate::participant::identity(self, &mut identity, &account))
                     .await
-                    .is_ok()
                 {
-                    Err(Error::Bus)
-                } else {
-                    Err(Error::IdentityLost)
+                    Err(error) if error.stops_host() => Err(error),
+                    Ok(()) | Err(_) => Err(Error::Bus),
                 };
             }
             return Err(match error.code.as_str() {

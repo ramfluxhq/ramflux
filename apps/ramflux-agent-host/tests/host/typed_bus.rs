@@ -178,3 +178,45 @@ async fn gateway_authentication_races_revalidate_identity_without_resending_the_
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn transient_identity_recheck_refusals_after_an_authentication_race_remain_retryable()
+-> TestResult {
+    for code in ["Unavailable", "Busy", "DeadlineExceeded"] {
+        let f = Fixture::new()?;
+        let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            for (method, code) in [("message.receive", "Unauthenticated"), ("account.status", code)]
+            {
+                let size = socket.read_u32().await?;
+                let mut bytes = vec![0; usize::try_from(size)?];
+                socket.read_exact(&mut bytes).await?;
+                let mut frame: LocalBusFrame = serde_json::from_slice(&bytes)?;
+                assert_eq!(frame.method, method);
+                frame.kind = LocalBusFrameKind::Error;
+                frame.ok = Some(false);
+                frame.body = json!(null);
+                frame.error = Some(LocalBusErrorBody {
+                    code: code.into(),
+                    message: "redacted".into(),
+                    details: None,
+                    reason_code: None,
+                    retry_after_ms: None,
+                    cause: None,
+                });
+                let bytes = serde_json::to_vec(&frame)?;
+                socket.write_u32(u32::try_from(bytes.len())?).await?;
+                socket.write_all(&bytes).await?;
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let mut bus = RfdBus::connect(&f.config.socket, "agent").await?;
+        let error =
+            bus.request("message.receive", json!({}), None).await.err().ok_or("refusal missing")?;
+        assert!(matches!(error, Error::Bus), "{code}: {error:?}");
+        assert!(!error.stops_host());
+        server.await?.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

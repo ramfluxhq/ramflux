@@ -146,8 +146,8 @@ authentication races with a valid local identity reconnect the host. Per-poll va
 event stream; an unchanged poll refusal does not rewrite the checkpoint. Authentication
 loss on an identity method stops the host. An `Unauthenticated` refusal on another
 method rechecks `account.status`, `device.list` and the self identity directory. A
-valid identity makes the original operation retryable; a failed recheck stops the
-host. This check never automatically resends the original operation. The first poll waits one interval. A connection-level
+valid identity makes the original operation retryable. Only terminal identity or
+storage errors from revalidation stop the host; other recheck errors stay retryable. This check never automatically resends the original operation. The first poll waits one interval. A connection-level
 stream gap triggers reconnect before account filtering. Foreign-account, non-event and
 unsequenced data frames are logged without consuming an account cursor. Error logs
 contain only fixed error classes and field names, never field values or reply bodies.
