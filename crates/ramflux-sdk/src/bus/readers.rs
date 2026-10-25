@@ -79,7 +79,8 @@ pub(super) fn is_reader_request(method: &str) -> bool {
     super::read_model::handles(method)
         || matches!(
             method,
-            "message.list"
+            "sync.status.get"
+                | "message.list"
                 | "message.read"
                 | "conversation.list"
                 | "surface.get"
@@ -95,6 +96,9 @@ pub(super) fn read(
 ) -> Result<serde_json::Value, SdkError> {
     if super::read_model::handles(&request.method) {
         return super::read_model::read(client, request);
+    }
+    if request.method == "sync.status.get" {
+        return super::sync_status::read(client.account_db()?);
     }
     if request.method == "stream.read" {
         return super::subscription::read(client.account_db()?, request);

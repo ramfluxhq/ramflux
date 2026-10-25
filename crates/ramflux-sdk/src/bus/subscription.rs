@@ -22,7 +22,7 @@ pub(super) fn read(db: &AccountDb, request: &LocalBusFrame) -> Result<serde_json
     let resync = cursor < bounds.pruned_through || cursor > bounds.head_seq;
     let events = if resync { Vec::new() } else { db.journal_after(cursor, 128)? };
     Ok(
-        serde_json::json!({"bounds":bounds,"cursor":cursor,"resync_required":resync,"events":events}),
+        serde_json::json!({"bounds":bounds,"cursor":cursor,"resync_required":resync,"events":events,"status":super::sync_status::read(db)?}),
     )
 }
 
@@ -54,7 +54,11 @@ pub(super) async fn start(
     }
     let cursor = body.since_seq.unwrap_or(bounds.head_seq);
     // Queue the acknowledgement before the first replay event on this same FIFO.
-    outbound.send(local_bus_response(&request, serde_json::json!({"subscribed":true,"head_seq":bounds.head_seq,"floor_seq":bounds.floor_seq}))).await.map_err(|_|closed())?;
+    let mut acknowledgement = first["status"].clone();
+    acknowledgement["subscribed"] = serde_json::json!(true);
+    acknowledgement["head_seq"] = serde_json::json!(bounds.head_seq);
+    acknowledgement["floor_seq"] = serde_json::json!(bounds.floor_seq);
+    outbound.send(local_bus_response(&request, acknowledgement)).await.map_err(|_| closed())?;
     Ok(Some(tokio::task::spawn_local(async move {
         let _ = tail(readers, query, request, outbound, body.topics, cursor).await;
     })))

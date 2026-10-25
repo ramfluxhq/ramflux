@@ -24,21 +24,25 @@ async fn subscription_refusals_preserve_replay_bounds_in_the_sdk_error() -> Resu
         }
         write_local_bus_frame(&mut socket, &response).await
     });
-    let mut client = LocalBusClient::connect(&socket).await?;
+    let client = LocalBusClient::connect(&socket).await?;
     let result = client
-        .request(
+        .request_frame_structured(LocalBusFrame::request(
+            "bounds",
             Some("a".into()),
             "stream",
             "bus.subscribe",
             serde_json::json!({"since_seq":0,"topics":["*"]}),
-        )
+        ))
         .await;
     let refusal = result.err().ok_or_else(closed)?;
-    let details = format!("{refusal:?}");
-    assert!(details.contains("floor_seq"), "structured refusal lost replay floor: {details}");
-    assert!(details.contains("head_seq"), "structured refusal lost replay head: {details}");
-    assert!(details.contains("42"));
-    assert!(details.contains("10"));
+    match refusal {
+        SdkError::LocalBusRefused { code, message, body } => {
+            assert_eq!(code, "resync_required");
+            assert!(message.contains("resync_required"));
+            assert_eq!(*body, serde_json::json!({"floor_seq":10,"head_seq":42}));
+        }
+        other => return Err(SdkError::LocalBus(format!("expected structured refusal: {other:?}"))),
+    }
     server.await.map_err(|e| SdkError::LocalBus(e.to_string()))??;
     drop(client);
     std::fs::remove_dir_all(root)?;

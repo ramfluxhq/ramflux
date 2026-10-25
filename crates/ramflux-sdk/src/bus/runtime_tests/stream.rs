@@ -344,14 +344,14 @@ async fn a_cursor_that_missed_a_pruned_message_returns_replay_bounds_through_the
                 Ok(account)
             });
             let supervisor = supervisor(&root, BTreeMap::from([("bob".into(), initialize)]))?;
-            let (mut client, server) = client(Rc::clone(&supervisor), 1).await?;
+            let (client, server) = client(Rc::clone(&supervisor), 1).await?;
             let error = client
-                .request(
-                    Some("bob".into()),
-                    "stream",
+                .request_frame_structured(request(
+                    "pruned-structured",
+                    "bob",
                     "bus.subscribe",
                     serde_json::json!({"topics":["message.received"],"since_seq":1}),
-                )
+                ))
                 .await
                 .err()
                 .ok_or_else(|| failure("lost cursor accepted"))?;

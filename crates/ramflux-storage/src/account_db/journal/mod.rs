@@ -44,6 +44,17 @@ impl AccountDb {
         Ok(())
     }
 
+    /// Returns the newest retained transition for a topic, for older snapshot upgrades.
+    ///
+    /// # Errors
+    /// Returns SQL or stored event decoding errors.
+    pub fn latest_journal_event(&self, topic: &str) -> Result<Option<JournalEvent>, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT seq,at,topic,body_json FROM runtime_journal WHERE topic=?1 ORDER BY seq DESC LIMIT 1",
+            params![topic], row,
+        ).optional()?)
+    }
+
     /// Appends compact, explicitly constructed metadata once per durable source key.
     ///
     /// # Errors

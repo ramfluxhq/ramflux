@@ -186,18 +186,40 @@ impl LocalBusClient {
     ) -> Result<serde_json::Value, SdkError> {
         let response = self.request_owned_response(protected).await?;
         if response.kind == LocalBusFrameKind::Error {
-            match response.error {
-                Some(error) if error.code == "resync_required" => Err(SdkError::LocalBusRefused {
-                    code: error.code,
-                    message: error.message,
-                    body: Box::new(response.body),
-                }),
-                error => Err(SdkError::LocalBus(error.map_or_else(
-                    || "unknown local bus error".to_owned(),
-                    |error| format!("{}: {}", error.code, error.message),
-                ))),
-            }
+            Err(SdkError::LocalBus(response.error.map_or_else(
+                || "unknown local bus error".to_owned(),
+                |error| format!("{}: {}", error.code, error.message),
+            )))
         } else {
+            Ok(response.body)
+        }
+    }
+
+    /// Sends a frame and preserves a daemon refusal's code, message and response body.
+    ///
+    /// Existing request methods retain their text-only `LocalBus` errors. Choose this
+    /// method to inspect replay bounds; transport errors keep their existing types.
+    /// Secret bodies have the same erasure protection as `request_frame`.
+    ///
+    /// # Errors
+    /// Returns `LocalBusRefused` for daemon errors, or the original transport/deadline error.
+    pub fn request_frame_structured(
+        &self,
+        frame: LocalBusFrame,
+    ) -> impl Future<Output = Result<serde_json::Value, SdkError>> + '_ {
+        let frame = SecretFrame(frame);
+        async move {
+            let response = self.request_owned_response(frame).await?;
+            if response.kind == LocalBusFrameKind::Error {
+                return Err(match response.error {
+                    Some(error) => SdkError::LocalBusRefused {
+                        code: error.code,
+                        message: error.message,
+                        body: Box::new(response.body),
+                    },
+                    None => SdkError::LocalBus("unknown local bus error".to_owned()),
+                });
+            }
             Ok(response.body)
         }
     }

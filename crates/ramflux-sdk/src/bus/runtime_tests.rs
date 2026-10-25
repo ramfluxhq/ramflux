@@ -930,3 +930,5 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
 }
 mod contact_state;
 mod group_legacy;
+
+mod status_snapshot;

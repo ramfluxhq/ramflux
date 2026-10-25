@@ -24,19 +24,18 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
         account.client.account_index()?.root(),
         &db.local_account_id,
     );
-    if path.exists() {
-        let manifest = read_local_bus_account_manifest(&path)?;
-        if let Some(mut value) = db.client_record("identity", &config.principal_id)? {
-            value["display_name"] = json!(manifest.label);
-            value["kind"] = json!(manifest.kind.unwrap_or_else(|| {
-                if manifest.client_mode == LocalBusClientMode::HeadlessAi {
-                    "headless_ai".to_owned()
-                } else {
-                    "human".to_owned()
-                }
-            }));
-            db.persist_client_record("identity", &config.principal_id, &value)?;
-        }
+    if let Some(manifest) = super::super::sync_status::optional_manifest(&path)
+        && let Some(mut value) = db.client_record("identity", &config.principal_id)?
+    {
+        value["display_name"] = json!(manifest.label);
+        value["kind"] = json!(manifest.kind.unwrap_or_else(|| {
+            if manifest.client_mode == LocalBusClientMode::HeadlessAi {
+                "headless_ai".to_owned()
+            } else {
+                "human".to_owned()
+            }
+        }));
+        db.persist_client_record("identity", &config.principal_id, &value)?;
     }
     let mut device = db.client_record("device", &config.device_id)?.unwrap_or_else(|| json!({}));
     device["principal_id"] = json!(config.principal_id);

@@ -86,7 +86,7 @@ impl AccountRuntime {
             let db = account.client.account_db()?;
             let path = local_bus_account_manifest_path(&self.state.config.data_root, &self.id);
             let node_id =
-                if path.exists() { read_local_bus_account_manifest(&path)?.node_id } else { None };
+                super::sync_status::optional_manifest(&path).and_then(|manifest| manifest.node_id);
             db.persist_actor_state("sync/node-id", &node_id)?;
             let tick = db.journal_bounds()?.head_seq;
             db.append_journal(
