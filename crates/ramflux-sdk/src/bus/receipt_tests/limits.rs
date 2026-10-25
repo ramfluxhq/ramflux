@@ -87,6 +87,14 @@ fn backlog(client: &RamfluxClient, a: &Spec, b: &Spec) -> Result<(), SdkError> {
 async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_stops_after_eight_attempts()
 -> TestResult {
     let mut p = Box::pin(pending("receipt-bounds")).await?;
+    let mut first =
+        p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("first work")?;
+    assert_eq!(first.attempts, 1);
+    assert!(first.next_at > first.at);
+    // This test advances retries explicitly with ready(). Unrelated crypto/storage work must
+    // not consume an attempt merely because the real wall clock crossed the backoff deadline.
+    first.next_at = i64::MAX;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &first)?;
     assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
     assert_eq!(
         p.mail
