@@ -14,6 +14,19 @@ impl Supervisor {
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
+        if let Some(id) = request.account_id.as_deref() {
+            let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
+                &self.config.data_root,
+                id,
+            ))?;
+            if manifest.kind.as_deref().unwrap_or("human") != "human"
+                || manifest.client_mode == LocalBusClientMode::HeadlessAi
+            {
+                return Err(SdkError::CapabilityDenied(
+                    "backup jobs require a human account".into(),
+                ));
+            }
+        }
         if request.method == "account.backup.jobs" {
             return Ok(ActorResponse {
                 body: self.backup_jobs.jobs()?,
@@ -27,19 +40,6 @@ impl Supervisor {
             return Err(SdkError::CapabilityDenied(
                 "backup jobs require an attended human frontend".into(),
             ));
-        }
-        if let Some(id) = request.account_id.as_deref() {
-            let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-                &self.config.data_root,
-                id,
-            ))?;
-            if manifest.kind.as_deref().unwrap_or("human") != "human"
-                || manifest.client_mode == LocalBusClientMode::HeadlessAi
-            {
-                return Err(SdkError::CapabilityDenied(
-                    "backup jobs require a human account".into(),
-                ));
-            }
         }
         let method = request.method.clone();
         let row = match method.as_str() {

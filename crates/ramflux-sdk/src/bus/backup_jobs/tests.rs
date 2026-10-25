@@ -488,3 +488,18 @@ async fn merge_existing_source(
     assert_eq!(client.account_db()?.load_actor_state::<bool>("backup/reestablishing")?, None);
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_accounts_cannot_list_or_start_human_backup_jobs() -> TestResult {
+    LocalSet::new().run_until(async {
+        let root=crate::bus::runtime_tests::root("backup-agent-denied");
+        let supervisor=source_supervisor(&root,SMALL)?;
+        let mut manifest=read_local_bus_account_manifest(&local_bus_account_manifest_path(&root,"alice"))?;
+        manifest.kind=Some("agent".into());manifest.client_mode=LocalBusClientMode::HeadlessAi;
+        write_local_bus_account_manifest(&root,&manifest)?;
+        assert!(call(&supervisor,"account.backup.jobs",Some("alice"),json!({})).await.is_err());
+        assert!(call(&supervisor,"account.backup.create",Some("alice"),json!({"output_path":root.join("never.rfb"),"passphrase":"never persist this test secret"})).await.is_err());
+        assert_eq!(call(&supervisor,"account.backup.jobs",None,json!({})).await?["jobs"],json!([]));
+        supervisor.shutdown().await?;drop(supervisor);std::fs::remove_dir_all(root)?;Ok::<(),Box<dyn std::error::Error>>(())
+    }).await
+}
