@@ -10,9 +10,9 @@ can observe source network addresses during a connection.
 
 | Service | Durable data and normal deletion policy |
 | --- | --- |
-| Router | Encrypted envelopes are removed on ACK or at their retention deadline: the earlier of the envelope's own expiry (creation time plus TTL) and seven days after the router accepted it, by the router's clock. Every submission path, including own-device fan-out, judges replay, expiry and clock skew by server time and rejects a `created_at` more than 120 seconds in the future. A 30-second sweep visits only due entries of a deadline index (in memory, in redb and in the WAL) and checkpoints only the mailboxes it changed. Inbox reads hide expired messages without deleting anything. Cursor sequence watermarks remain to prevent replay; envelope-id ACK and NACK diagnostics retain at most 1,024 entries per target. The out-of-order ACK window holds 1,024 sequences. When it is full, the oldest outstanding delivery moves to a dead-letter record instead of refusing the ACK. A delivery NACKed three times is dead-lettered as well. Dead letters keep only sequence, envelope id, reason and deadline (no ciphertext), at most 128 per target, until that deadline. Registration-proof receipts expire under the identity replay policy. Identity/public-key and revocation records follow identity lifecycle policy, rather than inbox TTL. |
+| Router | Encrypted envelopes are removed on ACK or at their retention deadline: the earlier of the envelope's own expiry (creation time plus TTL) and seven days after the router accepted it, by the router's clock. Every submission path, including own-device fan-out, judges replay, expiry and clock skew by server time and rejects a `created_at` more than 120 seconds in the future. A 30-second sweep visits only due entries of a deadline index (in memory, in redb and in the WAL) and checkpoints only the mailboxes it changed. Inbox reads hide expired messages without deleting anything. Cursor sequence watermarks remain to prevent replay; envelope-id ACK and NACK diagnostics retain at most 1,024 entries per target. The out-of-order ACK window holds 1,024 sequences. When it is full, the oldest outstanding delivery moves to a dead-letter record instead of refusing the ACK. A delivery NACKed three times is dead-lettered as well. Dead letters keep only sequence, envelope id, reason and deadline (no ciphertext), at most 128 per target, until that deadline. The recipient is not told about a dead-lettered delivery; see Known limitations. Rows written by builds that did not store an acceptance time are treated as accepted at the earlier of their creation time and the upgrade, so they expire at most seven days after the upgrade. A mailbox checkpoint that fails to save stays due and is retried by the next sweep. Registration-proof receipts expire under the identity replay policy. Identity/public-key and revocation records follow identity lifecycle policy, rather than inbox TTL. |
 | Gateway | Live connections retain session metadata. Closed or disconnected sessions, frame queues and resume-token checkpoints are pruned every 30 seconds; disconnected metadata is kept for the configured resume window (`RAMFLUX_GATEWAY_RESUME_WINDOW_SECONDS`, default 300 seconds). Expired challenge and replay state is pruned as well. |
-| Notify | Pending wakes retain their delivery-class TTL. Every 30 seconds terminal/expired wakes are removed, including WAL records. Provider diagnostics retain one hour, at most 16 attempts per queue and 1,024 queues after each sweep. Production push routes have a sliding 30-day lifetime set by notify's clock. Each authenticated registration restarts it, and the SDK re-registers on every session (re)connect, on token change and once less than 15 days remain. A device left in the background therefore stays wakeable. Token rotation replaces the device's prior route for that provider. Revocation deletes routes before they expire: every wake rechecks the current owner, and a batched sweep checks at most 1,024 owners per 30-second pass (256 per router request). Routes without a verified owner, left from before ownership binding, are deleted by the first revocation sweep after startup, outside synthetic test mode. Routes and ownership proofs are encrypted with a separately mounted node key. |
+| Notify | Pending wakes retain their delivery-class TTL. Every 30 seconds terminal/expired wakes are removed, including WAL records. Provider diagnostics retain one hour, at most 16 attempts per queue and 1,024 queues after each sweep. Production push routes have a sliding 30-day lifetime set by notify's clock. Each authenticated registration restarts it, and the SDK re-registers on every session (re)connect, on token change and once less than 15 days remain. A device left in the background therefore stays wakeable. Token rotation replaces the device's prior route for that provider. Revocation deletes routes before they expire. The router keeps a revoked device's record marked `revoked`; notify and the gateway treat such a device as no longer current. Every wake rechecks the owner, and a batched sweep checks at most 1,024 owners per 30-second pass (256 per router request). A still-open session of a revoked device cannot register or renew a route. Clearing the route in the SDK sends an explicit deregistration that deletes it at once. Routes without a verified owner, left from before ownership binding, are deleted by the first revocation sweep after startup, outside synthetic test mode. Routes and ownership proofs are encrypted with a separately mounted node key. |
 | Federation | The outbound spool retains opaque envelopes until delivery or the earlier of envelope expiry and a seven-day spool cap. The retry loop and authenticated retention GC remove expired spool entries and seen-forward receipts. Public trust/pin and revocation state is separate from delivery retention. The node signing secret lives in a mounted file, never a new redb value. |
 | Relay | Attachment chunks are client ciphertext. `RAMFLUX_RELAY_OBJECT_MAX_TTL_SECONDS` defaults to 86,400 seconds and cannot exceed 604,800 seconds, even with a larger environment value. Requested expiry can shorten this cap. Other object/tombstone policies remain independent. |
 | Retention | Authenticated router/federation GC requests perform real deletion, including dry-run counts. Owners delete up to the earlier of the requested time and their own clock, so a skewed requester cannot cause early deletion. Incident/evidence, legal-hold and lifecycle policies remain distinct; this does not promise that all server metadata expires after seven days. |
@@ -46,16 +46,19 @@ refuse missing, malformed or permissively accessible files. Do not check generat
 files into source control.
 
 The services drop every Linux capability, so container root cannot bypass file
-permissions. The development bootstrap writes secrets with mode 0640, and compose
-adds `RAMFLUX_SECRET_GID` (default 0) as a supplementary group of notify,
-federation and retention:
+permissions. The development bootstrap writes secrets with mode 0640 and compose
+adds `RAMFLUX_SECRET_GID` as a supplementary group of notify, federation and
+retention. `issue-certs.sh` records the group in `deploy/.env` (which compose
+reads), unless that file already sets `RAMFLUX_SECRET_GID`:
 
-- Rootless Podman maps the operator's uid to container root, which owns the files.
-  The default works.
-- Rootful Docker run by a non-root operator: set `RAMFLUX_SECRET_GID=$(id -g)`, or
-  the group that owns the files, in the environment or in `deploy/.env` before
-  `docker compose up`. Container root then reads the files through that group.
-  Without it, notify, federation and retention cannot start.
+- By default it is the invoking operator's primary group, so both rootless Podman
+  (where the operator's uid is container root) and rootful Docker run by a
+  non-root operator work without further setup.
+- Recommended for shared hosts: create a dedicated group whose only members are the
+  operators, and run `RAMFLUX_SECRET_GROUP=<group> issue-certs.sh`. The script then
+  `chgrp`s the secrets to that group and records its id. Without it, everyone in the
+  operator's primary group (for example `users` or `staff`) can read the signing
+  seed and route key.
 - Alternatively, an operator may `chown root:root` the files (mode 0600) on hosts
   where the container runtime does not remap uids.
 
@@ -71,7 +74,9 @@ Each secret has its own directory, so each container mounts only what it needs.
 - Federation requires `RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE`. Development
   bootstrap generates `certs/node-identity/node-signing.key`, mounted at
   `/etc/ramflux/node-identity/node-signing.key`; an older
-  `certs/federation/node-signing.key` is moved there unchanged. For an existing node,
+  `certs/federation/node-signing.key` is moved there unchanged. If both files exist
+and differ, the bootstrap stops with an error and deletes neither; keep the seed
+that matches the federation identity pin. For an existing node,
   stop federation and run its binary with the existing `--config` and
   `--export-signing-seed /outside-data-volume/node-signing.key`. The export is
   create-only, private and fsynced. Mount that existing key read-only, then start
@@ -92,9 +97,14 @@ keys; it does not protect against the running node or its operator.
 
 Clients normally use the SDK: set `GatewaySessionConfig::push_route`, call
 `GatewaySessionEngine::set_push_route`, or send the local bus request
-`device.push_route.set` with `{"registration": {...}}` (`null` clears it). The
-daemon stores the route in the account database and registers it on every
+`device.push_route.set` with `{"registration": {...}}`. `null` clears it and sends
+an explicit deregistration, which deletes the node's routes for the device. The
+daemon stores the route in the account database and registers it after every
 authenticated (re)connect, on token change and before renewal is due.
+Registration never blocks the session: it is sent after `connect()` returns,
+outside the connect timeout, and its answer is matched by request id whenever it
+arrives, so a slow notify or router cannot fail a connect or a heartbeat. On the
+gateway, route control runs detached from the session loop with a 10-second bound.
 
 The wire contract: send a `push_route_register` gateway session frame with `request` containing
 `signed_request` and `body`. Sign `POST /notify/v1/push-route` with the current
@@ -103,8 +113,12 @@ device branch key, canonical body hash, a fresh request id/nonce and expiry,
 session id. Body fields are `provider` (`apns`, `fcm`, `webpush`), `token`, and
 optional `endpoint`, `webpush_p256dh`, `webpush_auth`. Unknown fields are refused:
 the caller cannot supply an owner, target delivery id, credentials or expiry.
-Success returns `push_route_registered` with server-assigned `expires_at`. A
-refused registration returns a `nack` frame; the session stays open.
+Success returns `push_route_registered` with server-assigned `expires_at` and the
+signed `request_id`. A refused registration returns `push_route_refused` with the
+same `request_id`; the session stays open. A `push_route_deregister` frame (body
+`provider`, optional; signed for `POST /notify/v1/push-route/delete`) is answered
+with `push_route_deregistered`. Only the device bound as the routes' owner may
+delete them.
 
 The gateway verifies possession, session binding and fresh root-qualified router
 authority. It forwards a short-lived, domain-separated node-signed control over
@@ -144,3 +158,6 @@ they are not the production registration boundary.
 - The check that a secret lies outside the database volume is a path heuristic: it
   rejects secrets under the database's parent directory. It does not compare mount
   points, so operators must still mount secrets from a separate location.
+- A delivery dead-lettered because the ACK window overflowed is dropped without a
+  signal to the recipient: cursor responses do not report dead letters. NACKed
+  deliveries are dead-lettered only after the recipient's own repeated NACKs.
