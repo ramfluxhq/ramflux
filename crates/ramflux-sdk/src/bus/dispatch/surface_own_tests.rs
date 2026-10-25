@@ -991,3 +991,6 @@ impl ramflux_transport::GatewaySessionFrameSource for RejectFirstAck {
         ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut self.inner)
     }
 }
+
+#[path = "surface_own_sibling_consent_tests.rs"]
+mod sibling_consent;

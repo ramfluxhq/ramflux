@@ -217,12 +217,15 @@ impl RamfluxClient {
                 slot.x3dh.as_ref(),
                 &slot.ciphertext.session_id,
             )?;
-            self.persist_pair(
-                &self.local_device_identity(&slot.recipient_device_id)?,
-                &remote,
-                &bundle,
-                deferred.session.as_ref().ok_or_else(|| invalid("slot session missing"))?,
-            )?;
+            let local = self.local_device_identity(&slot.recipient_device_id)?;
+            let session =
+                deferred.session.as_ref().ok_or_else(|| invalid("slot session missing"))?;
+            self.persist_pair(&local, &remote, &bundle, session)?;
+            if !persistent_receipt {
+                // An own-device copy is the whole packet, so it confirms the pair like a routed
+                // message. Crossed bootstraps from two own devices then converge on one session.
+                self.confirm_pair(&local, &remote, session, false, slot.x3dh.is_some())?;
+            }
             if persistent_receipt { self.persist_pair_slot_receipt(slot) } else { Ok(()) }
         })
     }
