@@ -187,7 +187,11 @@ async fn receive_page(
             continue;
         }
         let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
-        let outcome = if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
+        let outcome = if backpressure.duplicate(&entry) {
+            Err(SdkError::InboundRejected(
+                "another contact envelope for this root is already deferred".into(),
+            ))
+        } else if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
             Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
         } else {
             process(account, engine, pool, &entry).await
@@ -203,9 +207,10 @@ async fn receive_page(
                 project_message = publish;
                 true
             }
-            Err(error) => {
-                if super::contact_backpressure::deferred(&entry, &error) {
-                    backpressure.record(&account.client, &entry, replay, now)?;
+            Err(mut error) => {
+                if super::contact_backpressure::deferred(&entry, &error)
+                    && backpressure.record(&account.client, &entry, now)?
+                {
                     if !replay {
                         advance_cursor(
                             &account.client,
@@ -214,6 +219,11 @@ async fn receive_page(
                         )?;
                     }
                     continue;
+                }
+                if matches!(error, SdkError::ContactRequestCapacity(_)) {
+                    error = SdkError::InboundRejected(
+                        "deferred contact root capacity exhausted".into(),
+                    );
                 }
                 if !quarantine_failure(
                     &account.client,
@@ -243,6 +253,7 @@ async fn receive_page(
             continue;
         }
         let db = account.client.account_db()?;
+        backpressure.completed(&account.client, &entry)?;
         db.remove_inbox_retry(&key)?;
         db.remove_unrouted(&key)?;
         db.remove_unrouted(&entry.envelope.envelope_id)?;

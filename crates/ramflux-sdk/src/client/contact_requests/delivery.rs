@@ -192,6 +192,9 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         let old = db.contact_request(&peer.principal_commitment, "outbound")?;
+        if old.is_none() {
+            self.check_retained_outbound_contact_cooldown(&peer.principal_commitment)?;
+        }
         if let Some(old) = &old {
             if old.state == "accepted" {
                 return Ok(());
@@ -357,7 +360,6 @@ impl RamfluxClient {
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     account.client.maintain_contact_requests()?;
     let db = account.client.account_db()?;
-    db.prune_contact_request_fences_and_previews(now_unix_timestamp())?;
     for request in db.deferred_contact_replies(now_unix_timestamp())? {
         if let Some(kind) = super::Metadata::read(&request)?.needs_reply {
             account.client.stage_contact_response(&request, kind)?;

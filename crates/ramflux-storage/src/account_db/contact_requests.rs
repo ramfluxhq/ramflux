@@ -146,6 +146,17 @@ impl AccountDb {
         }
         Ok(self.connection.execute("UPDATE contact_request_projection SET state=?4,updated_at=?5 WHERE contact_identity_commitment=?1 AND direction=?2 AND request_id=?3 AND (state='pending' OR state=?4 OR ?4='blocked')",params![root,direction,request_id,state,now])?>0)
     }
+    /// Check a sender's existing bucket without charging unauthenticated traffic.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn contact_request_budget_available(
+        &self,
+        bucket: &str,
+        limit: u64,
+        now: i64,
+    ) -> Result<bool, StorageError> {
+        Ok(!self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contact_request_rate WHERE bucket=?1 AND window_end>?2 AND count>=?3)",params![bucket,now,limit],|row|row.get::<_,bool>(0))?)
+    }
     /// Consume one bounded rolling-window bucket. Invalid requests cannot roll this write back.
     /// # Errors
     /// Returns SQL failures. False means the quota or bucket capacity is exhausted.

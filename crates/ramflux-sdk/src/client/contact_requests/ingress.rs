@@ -37,6 +37,12 @@ impl RamfluxClient {
         {
             return Err(invalid("contact requests from this root are closed"));
         }
+        let now = now_unix_timestamp();
+        for (bucket, limit) in [(format!("bootstrap:{root}"), 32), (format!("inbound:{root}"), 4)] {
+            if !db.contact_request_budget_available(&bucket, limit, now)? {
+                return Err(invalid("contact requester rate limit exceeded"));
+            }
+        }
         let manifest =
             crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
         let sender = manifest
@@ -50,10 +56,24 @@ impl RamfluxClient {
             "principal_id":manifest.principal_id,"signing_public_key":sender.branch_public_key}),
         )?;
         let now = now_unix_timestamp();
-        if !db.charge_contact_request(&format!("bootstrap:{root}"), 32, 3600, now)?
-            || !db.charge_contact_request("bootstrap-attempts", 120, 3600, now)?
-        {
-            return Err(SdkError::InboundPending("contact authentication budget exhausted".into()));
+        // Capacity retries must not spend a sender's quota repeatedly while the global window is full.
+        if !db.contact_request_budget_available("bootstrap-attempts", 120, now)? {
+            return Err(SdkError::ContactRequestCapacity(
+                "contact authentication budget exhausted".into(),
+            ));
+        }
+        if !db.charge_contact_request(&format!("bootstrap:{root}"), 32, 3600, now)? {
+            if db.contact_request_budget_available(&format!("bootstrap:{root}"), 32, now)? {
+                return Err(SdkError::ContactRequestCapacity(
+                    "contact rate bucket capacity exhausted".into(),
+                ));
+            }
+            return Err(invalid("contact requester rate limit exceeded"));
+        }
+        if !db.charge_contact_request("bootstrap-attempts", 120, 3600, now)? {
+            return Err(SdkError::ContactRequestCapacity(
+                "contact authentication budget exhausted".into(),
+            ));
         }
         let own = self.owned_device_identity()?;
         self.cache_verified_device_manifest(gateway, own.root_commitment(), "contact-request-self")

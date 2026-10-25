@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Constant-size redrive of unacknowledged contact admissions, independent of the live inbox cursor.
+//! Bounded per-root redrive of unacknowledged contact admissions, independent of the live inbox cursor.
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 const KEY: &str = "contact-admission/backpressure";
@@ -11,6 +11,13 @@ pub(super) struct Backpressure {
     next_at: i64,
     expires_at: i64,
     scan: Option<Scan>,
+    #[serde(default)]
+    roots: BTreeMap<String, Deferred>,
+}
+#[derive(Deserialize, Serialize)]
+struct Deferred {
+    sequence: u64,
+    expires_at: i64,
 }
 #[derive(Deserialize, Serialize)]
 struct Scan {
@@ -23,13 +30,14 @@ fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     a.into_iter().chain(b).min()
 }
 pub(super) fn deferred(entry: &GatewayInboxEntry, error: &SdkError) -> bool {
-    matches!(error, SdkError::InboundPending(_))
+    matches!(error, SdkError::ContactRequestCapacity(_))
         && crate::client::routed::decode(&entry.envelope)
             .is_ok_and(|packet| packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
 }
 impl Backpressure {
     pub fn load(client: &RamfluxClient, now: i64) -> Result<Self, SdkError> {
-        let state = client.account_db()?.load_actor_state::<Self>(KEY)?.unwrap_or_default();
+        let mut state = client.account_db()?.load_actor_state::<Self>(KEY)?.unwrap_or_default();
+        state.roots.retain(|_, entry| entry.expires_at > now);
         Ok(if state.expires_at <= now { Self::default() } else { state })
     }
     fn save(&self, client: &RamfluxClient) -> Result<(), SdkError> {
@@ -44,9 +52,21 @@ impl Backpressure {
         &mut self,
         client: &RamfluxClient,
         entry: &GatewayInboxEntry,
-        replay: bool,
         now: i64,
-    ) -> Result<(), SdkError> {
+    ) -> Result<bool, SdkError> {
+        let Some(root) = requester(entry) else {
+            return Ok(false);
+        };
+        if self.duplicate(entry) || (!self.roots.contains_key(&root) && self.roots.len() >= 1024) {
+            return Ok(false);
+        }
+        self.roots.insert(
+            root,
+            Deferred {
+                sequence: entry.inbox_seq,
+                expires_at: entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
+            },
+        );
         if self.floor.is_none() {
             self.next_at = now.saturating_add(60);
         }
@@ -54,14 +74,35 @@ impl Backpressure {
         let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
         self.expires_at = self.expires_at.max(expires.min(now.saturating_add(604_860)));
         if let Some(scan) = &mut self.scan {
-            if replay {
+            if entry.inbox_seq <= scan.until {
                 scan.pending = earliest(scan.pending, Some(entry.inbox_seq));
-            } else if entry.inbox_seq > scan.until {
+            } else {
                 scan.future = earliest(scan.future, Some(entry.inbox_seq));
             }
         }
         // Persist before the normal cursor advances. The gateway retains the original ciphertext.
-        self.save(client)
+        self.save(client)?;
+        // Existing generic retry rows must not stay due every tick. The durable floor owns redrive.
+        client.account_db()?.remove_inbox_retry(&client.inbox_admission_key(entry)?)?;
+        Ok(true)
+    }
+    pub fn duplicate(&self, entry: &GatewayInboxEntry) -> bool {
+        requester(entry)
+            .and_then(|root| self.roots.get(&root))
+            .is_some_and(|held| held.sequence != entry.inbox_seq)
+    }
+    pub fn completed(
+        &mut self,
+        client: &RamfluxClient,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        if let Some(root) = requester(entry)
+            && self.roots.get(&root).is_some_and(|held| held.sequence == entry.inbox_seq)
+        {
+            self.roots.remove(&root);
+            self.save(client)?;
+        }
+        Ok(())
     }
     pub fn scan_cursor(
         &mut self,
@@ -102,4 +143,11 @@ impl Backpressure {
         }
         self.save(client)
     }
+}
+
+fn requester(entry: &GatewayInboxEntry) -> Option<String> {
+    let packet = crate::client::routed::decode(&entry.envelope).ok()?;
+    (packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
+        .then_some(packet.source_principal_commitment)
+        .flatten()
 }

@@ -102,6 +102,9 @@ impl RamfluxClient {
             return Ok(());
         };
         let db = self.account_db()?;
+        if db.contact_request_fence(&root, now_unix_timestamp())?.is_some() {
+            return Err(invalid("contact request is declined or blocked"));
+        }
         if let Some(request) = db.contact_request(&root, "inbound")?
             && !self.friend_link_peer_is_accepted(&root)?
             && (request.state != "pending" || request.expires_at <= now_unix_timestamp())
@@ -142,6 +145,13 @@ impl RamfluxClient {
             return self.apply_contact_response(control);
         }
         let root = &body.requester_root;
+        if let Some((state, until)) = db.retained_contact_request_fence(root)?
+            && (state == "blocked"
+                || now < until
+                || body.issued_at <= until.saturating_sub(DECLINE_COOLDOWN_SECONDS))
+        {
+            return Err(invalid("contact request is fenced or predates the last decline"));
+        }
         if self.friend_rejection_reason(&body.actor_root)?.is_some() {
             return Ok(());
         }
@@ -169,10 +179,18 @@ impl RamfluxClient {
                 return Err(invalid("another contact request is already pending"));
             }
         }
-        if !db.charge_contact_request(&format!("inbound:{root}"), 4, 3600, now)?
-            || !db.charge_contact_request("inbound-account", 64, 3600, now)?
-        {
-            return Err(SdkError::InboundPending("contact request rate limit exceeded".into()));
+        if !db.charge_contact_request(&format!("inbound:{root}"), 4, 3600, now)? {
+            if db.contact_request_budget_available(&format!("inbound:{root}"), 4, now)? {
+                return Err(SdkError::ContactRequestCapacity(
+                    "contact rate bucket capacity exhausted".into(),
+                ));
+            }
+            return Err(invalid("contact requester rate limit exceeded"));
+        }
+        if !db.charge_contact_request("inbound-account", 64, 3600, now)? {
+            return Err(SdkError::ContactRequestCapacity(
+                "contact request rate limit exceeded".into(),
+            ));
         }
         let prior = db.friend_link_for_peer(root)?;
         let reciprocal = self.friend_link_peer_is_accepted(root)?;
@@ -192,7 +210,7 @@ impl RamfluxClient {
         };
         if !db.persist_contact_request(&request).map_err(|error| match error {
             StorageError::AuthorizationRejected => {
-                SdkError::InboundPending("pending contact capacity exhausted".into())
+                SdkError::ContactRequestCapacity("pending contact capacity exhausted".into())
             }
             other => other.into(),
         })? {

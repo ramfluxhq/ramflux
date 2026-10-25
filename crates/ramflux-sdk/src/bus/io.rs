@@ -120,7 +120,8 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
             "GrantInvalidated"
         }
         SdkError::Transport(error) => crate::error_policy::transport_code(error),
-        SdkError::ContactUnavailable(_)
+        SdkError::ContactRequestCapacity(_)
+        | SdkError::ContactUnavailable(_)
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => "Unavailable",
         SdkError::SignatureVerificationFailed(_) => "SignatureVerificationFailed",
         SdkError::RemoteAppApprovalRequired => "RemoteAppApprovalRequired",

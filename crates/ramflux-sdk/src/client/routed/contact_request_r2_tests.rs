@@ -3,10 +3,10 @@
 
 //! Adversarial contact admission, retention, selectors and consent races.
 use super::*;
-fn root(state: &LocalBusDaemonState, who: &str) -> Result<String, SdkError> {
+pub(super) fn root(state: &LocalBusDaemonState, who: &str) -> Result<String, SdkError> {
     Ok(account(state, who)?.owned_device_identity()?.root_commitment().into())
 }
-async fn outbound(
+pub(super) async fn outbound(
     state: &mut LocalBusDaemonState,
     directory: &Directory,
 ) -> Result<GatewayInboxEntry, SdkError> {
@@ -88,6 +88,14 @@ async fn contact02_r2_persists_a_compact_request_and_prunes_closed_requester_aut
     let mut b = Fixture::new("bob", 81)?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
+    let source = root(&state, "alice")?;
+    account(&state, "bob")?.account_db()?.append_journal(
+        "legacy-preview",
+        "contact.requested",
+        &json!({"preview":"old private body","note":"old note","safety_number":["1"]}),
+        now_unix_timestamp(),
+        Some(&source),
+    )?;
     pending(&mut state, &directory).await?;
     let source = root(&state, "alice")?;
     let row = account(&state, "bob")?
@@ -106,13 +114,7 @@ async fn contact02_r2_persists_a_compact_request_and_prunes_closed_requester_aut
         "declined",
         now_unix_timestamp() - 7200,
     )?;
-    account(&state, "bob")?.account_db()?.append_journal(
-        "legacy-preview",
-        "contact.requested",
-        &json!({"preview":"old private body","note":"old note","safety_number":["1"]}),
-        now_unix_timestamp(),
-        Some(&source),
-    )?;
+    account(&state, "bob")?.account_db()?.remove_actor_state("contact-request/maintenance-next")?;
     contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
     for event in account(&state, "bob")?.account_db()?.journal_after(0, 128)? {
         if event.topic == "contact.requested" {

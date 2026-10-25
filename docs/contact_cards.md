@@ -257,8 +257,21 @@ most 128 KiB. Local durable delivery survives restart; finite retry exhaustion i
 reported as `failed`. An explicit pending `contact.add` resets and resends it.
 The delivery queue allows 128 active items and at most four per peer; exhausted
 reply items are discarded. Reply capacity defers transmission without rolling back
-receipt or local consent. Authenticated inbound quota or capacity refusals retain
-the gateway ciphertext for a bounded paged retry, independently of ordinary traffic.
+receipt or local consent. Sender-specific quota exhaustion and extra pending requests
+are terminally rejected and acknowledged; exhausted known sender buckets are checked
+before a manifest fetch. Only global/account capacity pressure retains a ciphertext
+for paced retry. At most one deferred envelope per requester root is retained, with
+1024 deferred roots per account; extras and overflow are rejected and acknowledged.
+Deferred entries leave the generic retry queue and use the durable replay floor.
+Replaying a global-budget refusal does not consume the sender's bootstrap quota.
+
+Decline/block fences apply to both request envelopes and authenticated pair controls.
+A compact declined fence retains its original decision timestamp through the wire
+replay lifetime after cooldown; older signed requests cannot reopen consent. Outbound
+retained status also enforces cooldown after a closed row is pruned.
+Maintenance runs at most once per minute, retires at most 128 closed rows per pass,
+and backs off an individual failed retirement for five minutes without stopping
+contact ingress. Legacy private journal redaction runs once, using a topic index.
 
 The control binds both roots, target, request ID, nonce and validity interval under
 `ramflux.contact_request.v1`. The SDK independently verifies the embedded root-signed

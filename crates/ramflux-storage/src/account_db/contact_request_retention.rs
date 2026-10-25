@@ -98,13 +98,25 @@ impl AccountDb {
         &self,
         now: i64,
     ) -> Result<Vec<ContactRequestRecord>, StorageError> {
-        let mut query=self.connection.prepare("SELECT contact_identity_commitment,direction,request_id,principal_id,link_id,state,request_json,expires_at,updated_at FROM contact_request_projection WHERE state<>'pending' AND updated_at<=?1 AND (expires_at<=?2 OR json_extract(CAST(request_json AS TEXT),'$.needs_reply') IS NULL) ORDER BY updated_at,contact_identity_commitment LIMIT 128")?;
+        let mut query=self.connection.prepare("SELECT contact_identity_commitment,direction,request_id,principal_id,link_id,state,request_json,expires_at,updated_at FROM contact_request_projection WHERE state<>'pending' AND NOT EXISTS(SELECT 1 FROM contact_request_retirement r WHERE r.root=contact_identity_commitment AND r.direction=contact_request_projection.direction AND r.next_at>?2) AND updated_at<=?1 AND (expires_at<=?2 OR json_extract(CAST(request_json AS TEXT),'$.needs_reply') IS NULL) ORDER BY updated_at,contact_identity_commitment LIMIT 128")?;
         Ok(query
             .query_map(
                 params![now.saturating_sub(3600), now],
                 super::contact_requests::request_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    /// Delay a failed retirement without blocking later rows.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn defer_contact_request_retirement(
+        &self,
+        root: &str,
+        direction: &str,
+        next_at: i64,
+    ) -> Result<(), StorageError> {
+        self.connection.execute("INSERT INTO contact_request_retirement VALUES(?1,?2,?3) ON CONFLICT(root,direction) DO UPDATE SET next_at=excluded.next_at",params![root,direction,next_at])?;
+        Ok(())
     }
     /// # Errors
     /// Returns SQL failures; this deletes local request metadata without granting authority.
@@ -114,6 +126,10 @@ impl AccountDb {
         direction: &str,
         id: &str,
     ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM contact_request_retirement WHERE root=?1 AND direction=?2",
+            params![root, direction],
+        )?;
         self.connection.execute("DELETE FROM contact_request_projection WHERE contact_identity_commitment=?1 AND direction=?2 AND request_id=?3",params![root,direction,id])?;
         Ok(())
     }
@@ -131,6 +147,22 @@ impl AccountDb {
         self.connection.execute("INSERT INTO contact_request_fence VALUES(?1,?2,?3) ON CONFLICT(root) DO UPDATE SET state=excluded.state,until=excluded.until WHERE contact_request_fence.state<>'blocked' OR excluded.state='blocked'",params![root,state,until])?;
         Ok(())
     }
+    /// Read the retained decision, including its replay barrier after cooldown.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn retained_contact_request_fence(
+        &self,
+        root: &str,
+    ) -> Result<Option<(String, i64)>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT state,until FROM contact_request_fence WHERE root=?1",
+                params![root],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
     /// # Errors
     /// Returns SQL failures. Zero is the explicit operator block's indefinite lifetime.
     pub fn contact_request_fence(
@@ -143,11 +175,19 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL failures while deleting elapsed temporary fences and old private journal fields.
     pub fn prune_contact_request_fences_and_previews(&self, now: i64) -> Result<(), StorageError> {
+        const MARKER: &str = "contact-request/private-journal-redacted-v1";
         self.connection.execute(
-            "DELETE FROM contact_request_fence WHERE until>0 AND until<=?1",
-            params![now],
+            "DELETE FROM contact_request_fence WHERE root IN (SELECT root FROM contact_request_fence WHERE until>0 AND until<=?1 LIMIT 128)",
+            params![now.saturating_sub(604_800)],
+        )?;
+        if self.actor_state_exists(MARKER)? {
+            return Ok(());
+        }
+        self.connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS runtime_journal_contact_topic ON runtime_journal(topic)",
         )?;
         self.connection.execute("UPDATE runtime_journal SET body_json=CAST(json_remove(CAST(body_json AS TEXT),'$.preview','$.note','$.safety_number') AS BLOB) WHERE topic IN ('contact.requested','contact.accepted','contact.declined','contact.blocked','contact.request.expired') AND (json_type(CAST(body_json AS TEXT),'$.preview') IS NOT NULL OR json_type(CAST(body_json AS TEXT),'$.note') IS NOT NULL OR json_type(CAST(body_json AS TEXT),'$.safety_number') IS NOT NULL)",[])?;
+        self.persist_actor_state(MARKER, &true)?;
         Ok(())
     }
 }

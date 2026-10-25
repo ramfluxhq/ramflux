@@ -35,6 +35,8 @@ pub enum SdkError {
     InboundRejected(String),
     #[error("inbound state not ready: {0}")]
     InboundPending(String),
+    #[error("contact admission waits for capacity: {0}")]
+    ContactRequestCapacity(String),
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
     #[error("storage error: {0}")]

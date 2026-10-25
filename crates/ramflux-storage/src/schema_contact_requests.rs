@@ -19,6 +19,11 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
         );
         CREATE INDEX IF NOT EXISTS contact_request_pending
             ON contact_request_projection(direction,state,updated_at,contact_identity_commitment);
+        CREATE INDEX IF NOT EXISTS contact_request_retire_order ON contact_request_projection(state,updated_at,contact_identity_commitment);
+        CREATE TABLE IF NOT EXISTS contact_request_retirement (
+            root TEXT NOT NULL, direction TEXT NOT NULL, next_at INTEGER NOT NULL,
+            PRIMARY KEY(root,direction)
+        );
         CREATE TABLE IF NOT EXISTS contact_request_delivery (
             request_id TEXT NOT NULL,
             recipient_identity TEXT NOT NULL,

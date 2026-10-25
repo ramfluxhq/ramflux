@@ -19,6 +19,7 @@ struct Directory {
     ca: PathBuf,
     records: Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>,
     unavailable: Arc<AtomicBool>,
+    manifest_fetches: Arc<std::sync::atomic::AtomicUsize>,
     server: tokio::task::JoinHandle<Result<(), SdkError>>,
 }
 impl Drop for Directory {
@@ -47,6 +48,8 @@ impl Directory {
         let observed = records.clone();
         let unavailable = Arc::new(AtomicBool::new(false));
         let failure = unavailable.clone();
+        let manifest_fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fetches = manifest_fetches.clone();
         let server = tokio::spawn(async move {
             let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
             while let Ok((socket, _)) = listener.accept().await {
@@ -56,6 +59,7 @@ impl Directory {
                     ramflux_transport::read_gateway_session_json(&mut recv).await?;
                 assert_eq!(request.method, "GET");
 
+                fetches.fetch_add(1, Ordering::SeqCst);
                 let commitment = request.path.strip_prefix("/mvp1/device-manifest/");
                 assert!(commitment.is_some(), "names require the authenticated frame");
                 let body = {
@@ -86,6 +90,7 @@ impl Directory {
             ca,
             records,
             unavailable,
+            manifest_fetches,
             server,
         })
     }

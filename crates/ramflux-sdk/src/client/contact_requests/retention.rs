@@ -52,7 +52,7 @@ impl RamfluxClient {
             now.saturating_add(2 * TTL),
             now,
         )? {
-            return Err(SdkError::InboundPending(
+            return Err(SdkError::ContactRequestCapacity(
                 "contact requester cache capacity exhausted".into(),
             ));
         }
@@ -102,12 +102,27 @@ impl RamfluxClient {
         Ok(())
     }
     pub(crate) fn maintain_contact_requests(&self) -> Result<(), SdkError> {
+        // Maintenance is best effort; a damaged retired row must not stop consent ingress.
         let db = self.account_db()?;
+        if let Err(error) = self.maintain_contact_request_batch(db) {
+            tracing::warn!(%error, "contact request maintenance deferred");
+        }
+        Ok(())
+    }
+    fn maintain_contact_request_batch(
+        &self,
+        db: &ramflux_storage::AccountDb,
+    ) -> Result<(), SdkError> {
+        const KEY: &str = "contact-request/maintenance-next";
         let now = now_unix_timestamp();
-        db.write_transaction(|| -> Result<(), SdkError> {
-            db.expire_contact_requests(now)?;
-            db.prune_contact_request_fences_and_previews(now)?;
-            for row in db.closed_contact_requests(now)? {
+        if db.load_actor_state::<i64>(KEY)?.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        db.persist_actor_state(KEY, &now.saturating_add(60))?;
+        db.expire_contact_requests(now)?;
+        db.prune_contact_request_fences_and_previews(now)?;
+        for row in db.closed_contact_requests(now)? {
+            let result = db.write_transaction(|| -> Result<(), SdkError> {
                 if row.direction == "inbound" {
                     self.retire_contact_request_cache(&row)?;
                 } else {
@@ -122,9 +137,34 @@ impl RamfluxClient {
                     &row.direction,
                     &row.request_id,
                 )?;
+                Ok(())
+            });
+            if let Err(error) = result {
+                tracing::warn!(%error, "closed contact request retirement deferred");
+                db.defer_contact_request_retirement(
+                    &row.contact_identity_commitment,
+                    &row.direction,
+                    now.saturating_add(300),
+                )?;
             }
-            Ok(())
-        })
+        }
+        Ok(())
+    }
+    pub(super) fn check_retained_outbound_contact_cooldown(
+        &self,
+        root: &str,
+    ) -> Result<(), SdkError> {
+        if self.account_db()?.client_record("contact_request_status", root)?.is_some_and(|status| {
+            status["state"] == "declined"
+                && now_unix_timestamp()
+                    < status["updated_at"]
+                        .as_i64()
+                        .unwrap_or(0)
+                        .saturating_add(super::DECLINE_COOLDOWN_SECONDS)
+        }) {
+            return Err(invalid("contact request is cooling down"));
+        }
+        Ok(())
     }
     pub(super) fn record_outbound_contact_state(
         &self,

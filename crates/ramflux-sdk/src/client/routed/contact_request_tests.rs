@@ -540,3 +540,6 @@ async fn contact02_expired_request_can_recover_a_lost_acceptance_without_reopeni
 
 #[path = "contact_request_r2_tests.rs"]
 mod r2;
+
+#[path = "contact_request_r3_tests.rs"]
+mod r3;

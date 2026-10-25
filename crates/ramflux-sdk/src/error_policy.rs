@@ -41,6 +41,7 @@ fn transport_transient(error: &TransportError) -> bool {
 pub(crate) fn approval_retryable(error: &SdkError) -> bool {
     match error {
         SdkError::InboundPending(_)
+        | SdkError::ContactRequestCapacity(_)
         | SdkError::Storage(_)
         | SdkError::Io(_)
         | SdkError::GatewaySessionNotEstablished
