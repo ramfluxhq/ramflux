@@ -151,3 +151,10 @@ storage errors from revalidation stop the host; other recheck errors stay retrya
 stream gap triggers reconnect before account filtering. Foreign-account, non-event and
 unsequenced data frames are logged without consuming an account cursor. Error logs
 contain only fixed error classes and field names, never field values or reply bodies.
+
+Reconnect failures use a process-owned exponential delay of 1, 2, 4, 8, 16, 32,
+then at most 60 seconds, including repeated gateway authentication races with a
+valid local identity. The counter survives socket reconnects. After four failures
+stderr includes a persistent retry-status line with the count and delay, without
+endpoint paths or response data. An attempt lasting at least 60 seconds resets
+the delay to one second; Ctrl-C interrupts both requests and backoff sleeps.

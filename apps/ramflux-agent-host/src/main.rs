@@ -3,6 +3,7 @@
 use clap::Parser;
 use ramflux_agent_host::{AgentHost, Config, Error, RfdBus, RuleEngine};
 use std::path::PathBuf;
+mod reconnect;
 #[derive(Parser)]
 #[command(about = "Deterministic headless participant using an existing rfd account")]
 struct Args {
@@ -22,19 +23,34 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> ramflux_agent_host::Result<()> {
     let config = Config::load(&Args::parse().config)?;
     let mut host = AgentHost::new(config.clone(), RuleEngine::new(&config)?)?;
+    let mut backoff = reconnect::ReconnectBackoff::default();
     loop {
+        let started = std::time::Instant::now();
         let attempt = async {
             let mut bus = RfdBus::connect(&config.socket, &config.account_id).await?;
             host.start(&mut bus).await?;
             host.run(&mut bus).await
         };
-        tokio::select! {
-            result=attempt=>match result{
-                Err(error) if !error.stops_host()=>{eprintln!("agent host reconnecting: {error}");},other=>return other,
+        let error = tokio::select! {
+            result=attempt=>match result {
+                Err(error) if !error.stops_host()=>error,
+                other=>return other,
             },
             result=tokio::signal::ctrl_c()=>{result.map_err(|_|Error::State)?;return Ok(());}
-        }
+        };
+        let delay = backoff.failed(started.elapsed());
         // No response bodies, plaintext, credentials or endpoint paths enter logs.
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        eprintln!("agent host reconnecting: {error}; retry in {}s", delay.as_secs());
+        if backoff.failures() >= 4 {
+            eprintln!(
+                "agent host retry backoff: {} consecutive failures; next attempt in {}s",
+                backoff.failures(),
+                delay.as_secs()
+            );
+        }
+        tokio::select! {
+            ()=tokio::time::sleep(delay)=>{},
+            result=tokio::signal::ctrl_c()=>{result.map_err(|_|Error::State)?;return Ok(());}
+        }
     }
 }
