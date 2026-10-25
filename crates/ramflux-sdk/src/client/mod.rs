@@ -33,6 +33,7 @@ mod own_device_group_pins;
 mod own_device_group_restore;
 pub mod own_device_sync;
 mod own_device_sync_receipts;
+mod own_group_lazy_authority;
 mod private_prekeys;
 mod receipt_bindings;
 pub mod recovery;

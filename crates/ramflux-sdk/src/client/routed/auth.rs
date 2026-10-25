@@ -64,6 +64,7 @@ impl RamfluxClient {
             )?;
         }
         self.authenticated_envelope_sender(entry)?;
+        self.finish_lazy_own_group_pins(&entry.envelope.source_principal_id, &commitment, remote)?;
         Ok(())
     }
 

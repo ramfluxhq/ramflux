@@ -148,11 +148,12 @@ impl RamfluxClient {
         // Selecting a manifest to fetch is not device authentication. A saved root-bound
         // relationship/offer constrains the claim; the complete record and envelope signature
         // must still verify before a RootQualifiedDeviceRef can authorize any operation.
-        Ok(self
-            .account_db()?
-            .pinned_group_root_metadata(principal, device)?
-            .iter()
-            .any(|expected| expected == root)
+        Ok(self.pending_own_group_names_root(principal, root, device)?
+            || self
+                .account_db()?
+                .pinned_group_root_metadata(principal, device)?
+                .iter()
+                .any(|expected| expected == root)
             || self.account_db()?.pending_group_invite_root_metadata(
                 device,
                 root,

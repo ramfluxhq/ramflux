@@ -10,6 +10,14 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[tokio::test]
 async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_chain() -> TestResult
 {
+    first_use_discovery(false).await
+}
+#[tokio::test]
+async fn group_pin_omitted_from_bounded_history_fetches_root_and_restores_pin_on_first_use()
+-> TestResult {
+    first_use_discovery(true).await
+}
+async fn first_use_discovery(lazy_group: bool) -> TestResult {
     let sender = Fixture::new("alice", 91)?;
     let staging = Fixture::new("bob", 101)?;
     let receiver = Fixture::new("bob", 101)?;
@@ -24,11 +32,36 @@ async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_ch
     let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
     assert!(receiver.client.ensure_inbound_device(&receiver.config()?, &entry).await.is_err());
     assert!(receiver.client.account_db()?.client_record("device", "alice")?.is_none());
-    receiver.client.establish_friend_link(
-        "accepted-root",
-        "bob",
-        &manifest.principal_commitment,
-    )?;
+    if lazy_group {
+        let db = receiver.client.account_db()?;
+        db.upsert_group_local_membership_snapshot("group", 1, 1024, "all", "bob", "owner", 1)?;
+        db.upsert_group_member_snapshot("group", "alice", "member", 1)?;
+        let pin = crate::own_device_sync::SdkOwnDeviceGroupMemberPin {
+            group_id: "group".into(),
+            device_id: "alice".into(),
+            signing_public_key: manifest.devices[0].branch_public_key.clone(),
+            principal_id: Some("alice".into()),
+            principal_commitment: Some(manifest.principal_commitment.clone()),
+        };
+        assert!(receiver.client.restore_own_member_pin(&pin).is_err());
+        receiver.client.park_own_group_pin(&pin)?;
+        assert!(receiver.client.pending_own_group_names_root(
+            "alice",
+            &manifest.principal_commitment,
+            "alice"
+        )?);
+        assert!(!receiver.client.pending_own_group_names_root(
+            "mallory",
+            &manifest.principal_commitment,
+            "alice"
+        )?);
+    } else {
+        receiver.client.establish_friend_link(
+            "accepted-root",
+            "bob",
+            &manifest.principal_commitment,
+        )?;
+    }
     let expected_path = format!("/mvp1/device-manifest/{}", manifest.principal_commitment);
     assert_eq!(
         decode(&entry.envelope)?.source_principal_commitment.as_deref(),
@@ -50,31 +83,8 @@ async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_ch
     let config = Arc::new(config);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        for _ in 0..2 {
-            let (socket, _) =
-                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await??;
-            let mut stream =
-                tokio_rustls::TlsAcceptor::from(Arc::clone(&config)).accept(socket).await?;
-            let len = stream.read_u32().await?;
-            if len > 65536 {
-                return Err(std::io::Error::other("oversized request"));
-            }
-            let mut bytes = vec![0; len as usize];
-            stream.read_exact(&mut bytes).await?;
-            let request: ramflux_transport::GatewayQuicRequest = serde_json::from_slice(&bytes)?;
-            assert_eq!(request.method, "GET");
-            assert_eq!(request.path, expected_path);
-            let bytes = serde_json::to_vec(&ramflux_transport::GatewayQuicResponse {
-                status: 200,
-                body: serde_json::to_value(&manifest)?,
-            })?;
-            stream.write_u32(u32::try_from(bytes.len()).map_err(std::io::Error::other)?).await?;
-            stream.write_all(&bytes).await?;
-            stream.flush().await?;
-        }
-        Ok::<_, std::io::Error>(())
-    });
+    let restored_root = manifest.principal_commitment.clone();
+    let server = tokio::spawn(serve_manifest(listener, config, expected_path, manifest));
     let gateway = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
         bind_addr: "127.0.0.1:0".parse()?,
         gateway_addr: address,
@@ -92,9 +102,48 @@ async fn first_contact_fetches_only_the_hinted_root_manifest_and_verifies_the_ch
     assert!(receiver.client.account_db()?.client_record("identity", "alice")?.is_none());
     receiver.client.ensure_inbound_device(&gateway, &entry).await?;
     server.await??;
+    if lazy_group {
+        let device = receiver.client.device_identity_for_root(&restored_root, "alice")?;
+        receiver.client.require_group_sender_pin("group", "alice", &device)?;
+        assert_eq!(
+            receiver.client.account_db()?.actor_state_usage("own-group/pending-pins/")?.0,
+            0
+        );
+    }
     let opened = receiver.client.open_routed(&entry, "bob")?;
     assert_eq!(&*opened.body, b"hello");
     Ok(())
+}
+
+async fn serve_manifest(
+    listener: tokio::net::TcpListener,
+    config: Arc<rustls::ServerConfig>,
+    expected_path: String,
+    manifest: crate::prekey::SdkDeviceManifestResponse,
+) -> Result<(), std::io::Error> {
+    for _ in 0..2 {
+        let (socket, _) =
+            tokio::time::timeout(Duration::from_secs(10), listener.accept()).await??;
+        let mut stream =
+            tokio_rustls::TlsAcceptor::from(Arc::clone(&config)).accept(socket).await?;
+        let len = stream.read_u32().await?;
+        if len > 65536 {
+            return Err(std::io::Error::other("oversized request"));
+        }
+        let mut bytes = vec![0; len as usize];
+        stream.read_exact(&mut bytes).await?;
+        let request: ramflux_transport::GatewayQuicRequest = serde_json::from_slice(&bytes)?;
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, expected_path);
+        let bytes = serde_json::to_vec(&ramflux_transport::GatewayQuicResponse {
+            status: 200,
+            body: serde_json::to_value(&manifest)?,
+        })?;
+        stream.write_u32(u32::try_from(bytes.len()).map_err(std::io::Error::other)?).await?;
+        stream.write_all(&bytes).await?;
+        stream.flush().await?;
+    }
+    Ok::<_, std::io::Error>(())
 }
 
 #[test]
@@ -177,5 +226,38 @@ fn saved_group_root_selects_proof_material_but_never_authenticates_an_unproven_d
     let mut forged = entry;
     forged.envelope.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
     assert!(receiver.client.authenticated_device_identity(&forged).is_err());
+    Ok(())
+}
+
+#[test]
+fn deferred_group_authority_cannot_reactivate_after_the_snapshot_epoch_changes() -> TestResult {
+    let sender = Fixture::new("alice", 91)?;
+    let receiver = Fixture::new("bob", 101)?;
+    let manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;
+    let db = receiver.client.account_db()?;
+    db.upsert_group_local_membership_snapshot("group", 1, 1024, "all", "bob", "owner", 1)?;
+    db.upsert_group_member_snapshot("group", "alice", "member", 1)?;
+    let pin = crate::own_device_sync::SdkOwnDeviceGroupMemberPin {
+        group_id: "group".into(),
+        device_id: "alice".into(),
+        signing_public_key: manifest.devices[0].branch_public_key.clone(),
+        principal_id: Some("alice".into()),
+        principal_commitment: Some(manifest.principal_commitment.clone()),
+    };
+    receiver.client.park_own_group_pin(&pin)?;
+    assert!(receiver.client.pending_own_group_names_root(
+        "alice",
+        &manifest.principal_commitment,
+        "alice"
+    )?);
+    db.upsert_group_local_membership_snapshot("group", 2, 1024, "all", "bob", "owner", 1)?;
+    assert!(!receiver.client.pending_own_group_names_root(
+        "alice",
+        &manifest.principal_commitment,
+        "alice"
+    )?);
+    receiver.client.finish_lazy_own_group_pins("alice", &manifest.principal_commitment, "alice")?;
+    assert_eq!(db.actor_state_usage("own-group/pending-pins/")?.0, 0);
+    assert!(db.group_member_identity_metadata("group", "alice")?.is_none());
     Ok(())
 }

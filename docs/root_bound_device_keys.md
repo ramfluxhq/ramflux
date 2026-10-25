@@ -455,3 +455,25 @@ proofs on startup, without changing the device-set epoch solely for renewal.
 `itest-identity-proof` is a default-off SDK/rf feature for QA. Only binaries built
 with it read `RAMFLUX_TEST_BRANCH_PROOF_TTL_SECS` (4..3600 seconds). Production
 builds ignore this test setting and keep the one-hour renewable admission proof.
+
+### Durable manifests and bounded proof age
+
+A registration proof's one-hour admission expiry does not revoke a device in the
+current root-signed set. Live devices renew and republish at half-life (normally
+30 minutes). A manifest's branch artifact must nevertheless have been issued
+within the last 30 days; future issuance beyond 60 seconds is rejected. This
+bounds a first observer's acceptance of an old signed set and proof to 30 days
+from proof issuance. A root-signed set has no trusted publication timestamp, so
+this remains a residual window for an observer that has never seen a newer set.
+The highest observed set/epoch and explicit revocation still take precedence;
+proof renewal cannot reactivate a revoked device.
+
+Own-device contact backfill tries a missing peer manifest at most five times,
+at offsets of 0, 5, 15, 35 and 75 seconds, with the attempt and backoff recorded
+before network IO. After the
+fifth unsuccessful attempt, the link is parked with `manifest_retry_exhausted`
+and later links continue. A new device-set epoch restarts the bounded scan.
+Group-member pins authenticated in a sibling snapshot but omitted from its
+bounded manifest list remain deferred. Their pinned root is fetched and verified
+on first inbound use; an inactive group member or mismatching key cannot acquire
+an active pin from this deferred metadata.

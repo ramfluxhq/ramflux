@@ -24,17 +24,19 @@ pub(crate) async fn drive(account: &LocalBusAccountState) -> Result<usize, SdkEr
             SdkError::InboundPending("own contact refresh tick budget exhausted".into())
         })??;
     }
-    if let Some(root) = client.pending_contact_backfill_root()? {
+    if let Some(root) = client.claim_contact_backfill_refresh(now)? {
         let gateway =
             account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
-        tokio::time::timeout(
+        match tokio::time::timeout(
             Duration::from_millis(250),
             client.cache_verified_device_manifest(gateway, &root, "own-contact-peer-backfill"),
         )
         .await
-        .map_err(|_| {
-            SdkError::InboundPending("contact peer refresh tick budget exhausted".into())
-        })??;
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::debug!(%error, "contact peer manifest refresh deferred"),
+            Err(_) => tracing::debug!("contact peer manifest refresh tick budget exhausted"),
+        }
     }
     client.stage_contact_backfill_batch()
 }

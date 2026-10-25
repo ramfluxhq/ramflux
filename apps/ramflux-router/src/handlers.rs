@@ -1015,18 +1015,19 @@ fn forward_authority_response(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
-    match refresh_forward_authority(body, router) {
+    authority_refresh_response(refresh_forward_authority(body, router))
+}
+
+fn authority_refresh_response(
+    result: anyhow::Result<ramflux_protocol::Envelope>,
+) -> anyhow::Result<MeshResponse> {
+    match result {
         Ok(envelope) => Ok(MeshResponse::json("200 OK", serde_json::to_vec(&envelope)?)),
         Err(error) => {
             let reason = match error.downcast_ref::<ramflux_node_core::NodeCoreError>() {
                 Some(ramflux_node_core::NodeCoreError::SourceAuthorityRefused { reason_code }) => {
                     *reason_code
                 }
-                Some(
-                    ramflux_node_core::NodeCoreError::Unauthorized(_)
-                    | ramflux_node_core::NodeCoreError::ItestHttp(_)
-                    | ramflux_node_core::NodeCoreError::ItestJson(_),
-                ) => ramflux_node_core::EnvelopeAuthorityReason::AuthorityMismatch,
                 _ => return Err(error),
             };
             Ok(MeshResponse::json(
@@ -1060,6 +1061,32 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn only_explicit_authority_refusals_are_terminal() -> anyhow::Result<()> {
+        use ramflux_node_core::{EnvelopeAuthorityReason, NodeCoreError};
+        for error in [
+            NodeCoreError::Unauthorized("partial restore".into()),
+            NodeCoreError::ItestHttp("directory missing".into()),
+            NodeCoreError::ItestJson("incomplete state".into()),
+            NodeCoreError::Capacity { resource: "directory" },
+        ] {
+            assert!(authority_refresh_response(Err(error.into())).is_err());
+        }
+        for reason_code in [
+            EnvelopeAuthorityReason::Revoked,
+            EnvelopeAuthorityReason::AuthorityMismatch,
+            EnvelopeAuthorityReason::StaleEpoch,
+        ] {
+            let response =
+                authority_refresh_response(Err(NodeCoreError::SourceAuthorityRefused {
+                    reason_code,
+                }
+                .into()))?;
+            assert_eq!(response.status, "409 Conflict");
+        }
+        Ok(())
+    }
 
     #[test]
     fn authority_refresh_requires_federation_mesh_and_replaces_attached_authority()

@@ -6,8 +6,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::session::write_gateway_frame;
-
 const DEFAULT_GATEWAY_ID: &str = "ramflux-gateway";
 const DEFAULT_GATEWAY_FORWARD_PATH: &str = "/gateway/mesh/forward-deliver";
 const GATEWAY_ID_ENV: &str = "RAMFLUX_GATEWAY_ID";
@@ -163,24 +161,27 @@ impl GatewaySessionHub {
         }
     }
 
+    /// A peer sink failure is a delivery miss, never a failure of the calling session.
     pub(crate) async fn send_to(
         &self,
         target_delivery_id: &str,
         frame: &ramflux_node_core::GatewayServerFrame,
-    ) -> anyhow::Result<bool> {
-        let sender = self
-            .senders_by_target
-            .lock()
-            .await
-            .get(target_delivery_id)
-            .map(|entry| Arc::clone(&entry.sender));
-        if let Some(sender) = sender {
-            let mut sender = sender.lock().await;
-            write_gateway_frame(&mut **sender, frame).await?;
-            Ok(true)
-        } else {
-            Ok(false)
+    ) -> bool {
+        let entry = self.senders_by_target.lock().await.get(target_delivery_id).cloned();
+        let Some(entry) = entry else {
+            return false;
+        };
+        let result = {
+            let mut sender = entry.sender.lock().await;
+            ramflux_transport::write_gateway_session_json(&mut **sender, frame).await
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, target_delivery_id, session_id = %entry.session_id, "local peer delivery failed; unregistering session");
+            // A newer registration may already have replaced this failed session.
+            self.unregister(target_delivery_id, &entry.session_id).await;
+            return false;
         }
+        true
     }
 }
 

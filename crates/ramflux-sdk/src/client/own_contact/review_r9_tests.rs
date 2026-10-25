@@ -168,3 +168,43 @@ fn history_exports_a_bounded_prefix_instead_of_failing_heavy_accounts() -> TestR
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn unreachable_contact_manifest_is_throttled_then_parked_without_blocking_later_links() -> TestResult
+{
+    let root = path()?;
+    let own = client(&root.join("own"), "bob", 1)?;
+    let mut sibling = client(&root.join("sibling"), "bob", 1)?;
+    sibling.create_device_branch("bob", "second", 1, [8; 32]);
+    let peer = client(&root.join("peer"), "alice", 3)?;
+    let manifest = crate::client::identity_authority::test_support::public_manifest(&peer)?;
+    own.persist_identity_directory(&manifest)?;
+    own.establish_friend_link(
+        "a-unavailable",
+        own.owned_device_identity()?.root_commitment(),
+        "unavailable-root",
+    )?;
+    own.establish_friend_link(
+        "z-deliverable",
+        own.owned_device_identity()?.root_commitment(),
+        &manifest.principal_commitment,
+    )?;
+    activate(&own, &sibling)?;
+    own.stage_contact_backfill_batch_at(100)?;
+    own.stage_contact_backfill_batch_at(100)?;
+    for (at, next) in [(100, 105), (105, 115), (115, 135), (135, 175), (175, 255)] {
+        assert_eq!(own.claim_contact_backfill_refresh(at)?, Some("unavailable-root".into()));
+        assert_eq!(own.claim_contact_backfill_refresh(at)?, None);
+        assert_eq!(own.claim_contact_backfill_refresh(next - 1)?, None);
+    }
+    assert_eq!(own.stage_contact_backfill_batch_at(175)?, 1);
+    assert_eq!(own.claim_contact_backfill_refresh(999)?, None);
+    let parked = own.account_db()?.list_actor_states::<serde_json::Value>("own-contact/parked/")?;
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0]["reason"], "manifest_retry_exhausted");
+    assert_eq!(parked[0]["attempts"], 5);
+    assert_eq!(own.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
+    drop((own, sibling, peer));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

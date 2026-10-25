@@ -95,3 +95,18 @@ fn legacy_constructor_renewal_has_a_distinct_time_bound_identifier() -> TestResu
     )?;
     Ok(())
 }
+
+#[test]
+fn durable_manifest_proof_age_is_bounded_to_thirty_days_with_an_injectable_clock() -> TestResult {
+    let owner = Actor::new("alice", "one", 71, 72, 1)?;
+    let manifest = owner.manifest()?;
+    let issued = manifest.devices[0].branch_proof.issued_at;
+    let root = &manifest.principal_commitment;
+    super::super::verify::verify_manifest_at(&manifest, root, issued + 7200)?;
+    super::super::verify::verify_manifest_at(&manifest, root, issued + 30 * 86400)?;
+    assert!(
+        super::super::verify::verify_manifest_at(&manifest, root, issued + 30 * 86400 + 1).is_err()
+    );
+    assert!(super::super::verify::verify_manifest_at(&manifest, root, issued - 61).is_err());
+    Ok(())
+}

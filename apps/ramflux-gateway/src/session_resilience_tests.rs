@@ -3,6 +3,7 @@
 
 //! Request failures preserve the authenticated client stream; client transport failures end it.
 use super::*;
+use crate::state::GatewaySessionHub;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use std::collections::VecDeque;
 use std::sync::{
@@ -222,5 +223,112 @@ async fn a_missing_auth_root_gets_an_explicit_rejection_before_router_io() -> an
             reason: "gateway_auth_source_rejected".into()
         }
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reconnect_delivers()
+-> anyhow::Result<()> {
+    let context = super::tests::test_gateway_context()?;
+    let writes = Arc::new(AtomicUsize::new(0));
+    context
+        .hub
+        .register(
+            "peer".into(),
+            "broken".into(),
+            Arc::new(AsyncMutex::new(Box::new(BrokenSink(writes.clone())))),
+        )
+        .await;
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let send: GatewaySendHandle = Arc::new(AsyncMutex::new(Box::new(Sink(frames.clone()))));
+    let envelope = super::tests::test_envelope();
+    let frame = ramflux_node_core::GatewayServerFrame::Deliver {
+        entry: ramflux_node_core::InboxEntry {
+            target_delivery_id: "peer".into(),
+            inbox_seq: 1,
+            envelope: envelope.clone(),
+        },
+    };
+    let response = ramflux_node_core::EnvelopeSubmitResponse {
+        outcome: "online".into(),
+        target_delivery_id: "peer".into(),
+        inbox_seq: Some(1),
+        cursor: None,
+        nack: None,
+    };
+    super::reply_and_deliver_submitted(&send, &context, &runtime()?, &response, &frame, &envelope)
+        .await?;
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
+    assert!(!context.hub.send_to("peer", &frame).await);
+    assert_eq!(writes.load(Ordering::SeqCst), 1, "dead peer was removed, not retried");
+    // The same sender sink and authenticated session still answer the next request exactly once.
+    let source = Source(VecDeque::from([serde_json::to_vec(
+        &ramflux_node_core::GatewayClientFrame::Heartbeat { now: 9 },
+    )?]));
+    super::run_gateway_session_loop(send.clone(), Box::new(source), context.clone(), runtime()?)
+        .await?;
+    assert_eq!(frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 2);
+    let received = Arc::new(Mutex::new(Vec::new()));
+    context
+        .hub
+        .register(
+            "peer".into(),
+            "reconnected".into(),
+            Arc::new(AsyncMutex::new(Box::new(Sink(received.clone())))),
+        )
+        .await;
+    // Re-delivery of the retained inbox entry now reaches the new recipient session.
+    // This is delivery work, not another request or reply on A's stream.
+    super::deliver_submitted_to_peer(&context, &runtime()?, &response, &frame, &envelope).await?;
+    let received = received.lock().map_err(|_| anyhow::anyhow!("received"))?;
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        serde_json::from_slice::<ramflux_node_core::GatewayServerFrame>(&received[0])?,
+        frame
+    );
+    let output_frames = frames.lock().map_err(|_| anyhow::anyhow!("frames"))?;
+    assert_eq!(output_frames.len(), 2);
+    assert_eq!(
+        serde_json::from_slice::<ramflux_node_core::GatewayServerFrame>(&output_frames[0])?,
+        frame
+    );
+    assert_eq!(
+        serde_json::from_slice::<ramflux_node_core::GatewayServerFrame>(&output_frames[1])?,
+        ramflux_node_core::GatewayServerFrame::Heartbeat { now: 9 }
+    );
+    Ok(())
+}
+
+struct ReplacedSink {
+    hub: Arc<GatewaySessionHub>,
+    replacement: GatewaySendHandle,
+}
+impl GatewaySessionFrameSink for ReplacedSink {
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn send_frame<'a>(&'a mut self, _: &'a [u8]) -> Future<'a, ()> {
+        Box::pin(async move {
+            self.hub.register("peer".into(), "new".into(), self.replacement.clone()).await;
+            Err(TransportError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        })
+    }
+}
+#[tokio::test]
+async fn a_failed_old_sink_cannot_unregister_the_replacement_session() -> anyhow::Result<()> {
+    let hub = Arc::new(GatewaySessionHub::default());
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let replacement: GatewaySendHandle =
+        Arc::new(AsyncMutex::new(Box::new(Sink(received.clone()))));
+    hub.register(
+        "peer".into(),
+        "old".into(),
+        Arc::new(AsyncMutex::new(Box::new(ReplacedSink { hub: hub.clone(), replacement }))),
+    )
+    .await;
+    let frame = ramflux_node_core::GatewayServerFrame::Heartbeat { now: 1 };
+    assert!(!hub.send_to("peer", &frame).await);
+    assert!(hub.send_to("peer", &frame).await);
+    assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 1);
     Ok(())
 }

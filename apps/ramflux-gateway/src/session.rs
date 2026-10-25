@@ -982,16 +982,43 @@ pub(crate) async fn handle_gateway_submit(
             "frame": &frame,
         }),
     );
-    write_gateway_handle(send, &frame).await?;
-    if response.outcome == "offline_queued" {
-        dispatch_offline_wake(send, context, &response.target_delivery_id, &envelope).await?;
+    reply_and_deliver_submitted(send, context, runtime, &response, &frame, &envelope).await
+}
+
+async fn reply_and_deliver_submitted(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    response: &ramflux_node_core::EnvelopeSubmitResponse,
+    frame: &ramflux_node_core::GatewayServerFrame,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<()> {
+    write_gateway_handle(send, frame).await?;
+    // After this reply, peer forwarding and notification cannot send a second response.
+    if let Err(error) = deliver_submitted_to_peer(context, runtime, response, frame, envelope).await
+    {
+        tracing::warn!(%error, target_delivery_id = %response.target_delivery_id, "post-submit delivery deferred to durable inbox");
     }
-    if response.outcome == "online" && response.target_delivery_id != runtime.target_delivery_id {
-        let local_delivered = context.hub.send_to(&response.target_delivery_id, &frame).await?;
-        if !local_delivered
-            && !forward_deliver_on_local_miss(context, &response.target_delivery_id, &frame).await?
+    Ok(())
+}
+
+async fn deliver_submitted_to_peer(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    response: &ramflux_node_core::EnvelopeSubmitResponse,
+    frame: &ramflux_node_core::GatewayServerFrame,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<()> {
+    if response.outcome == "offline_queued" {
+        dispatch_offline_wake(context, &response.target_delivery_id, envelope).await?;
+    } else if response.outcome == "online"
+        && response.target_delivery_id != runtime.target_delivery_id
+    {
+        let delivered = context.hub.send_to(&response.target_delivery_id, frame).await;
+        if !delivered
+            && !forward_deliver_on_local_miss(context, &response.target_delivery_id, frame).await?
         {
-            dispatch_offline_wake(send, context, &response.target_delivery_id, &envelope).await?;
+            dispatch_offline_wake(context, &response.target_delivery_id, envelope).await?;
         }
     }
     Ok(())
@@ -1078,14 +1105,15 @@ pub(crate) async fn handle_gateway_own_device_fanout(
         };
     let response = ramflux_node_core::GatewayOwnDeviceFanoutResponse::from(shim_response);
     for delivery in &response.delivered {
-        deliver_own_device_fanout_entry(send, context, runtime, delivery).await?;
+        if let Err(error) = deliver_own_device_fanout_entry(context, runtime, delivery).await {
+            tracing::warn!(%error, target_delivery_id = %delivery.target_delivery_id, "fanout peer delivery deferred to durable inbox");
+        }
     }
     write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::OwnDeviceFanout { response })
         .await
 }
 
 async fn deliver_own_device_fanout_entry(
-    send: &GatewaySendHandle,
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     delivery: &ramflux_node_core::GatewayOwnDeviceFanoutDelivery,
@@ -1105,18 +1133,17 @@ async fn deliver_own_device_fanout_entry(
     let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry: entry.clone() };
     match delivery.outcome.as_str() {
         "online" if delivery.target_delivery_id != runtime.target_delivery_id => {
-            let local_delivered = context.hub.send_to(&delivery.target_delivery_id, &frame).await?;
+            let local_delivered = context.hub.send_to(&delivery.target_delivery_id, &frame).await;
             if !local_delivered
                 && !forward_deliver_on_local_miss(context, &delivery.target_delivery_id, &frame)
                     .await?
             {
-                dispatch_offline_wake(send, context, &delivery.target_delivery_id, &entry.envelope)
+                dispatch_offline_wake(context, &delivery.target_delivery_id, &entry.envelope)
                     .await?;
             }
         }
         "offline_queued" => {
-            dispatch_offline_wake(send, context, &delivery.target_delivery_id, &entry.envelope)
-                .await?;
+            dispatch_offline_wake(context, &delivery.target_delivery_id, &entry.envelope).await?;
         }
         _ => {}
     }
@@ -1199,7 +1226,6 @@ fn elapsed_us(started: Instant) -> u64 {
 }
 
 async fn dispatch_offline_wake(
-    send: &GatewaySendHandle,
     context: &GatewayQuicContext,
     target_delivery_id: &str,
     envelope: &ramflux_protocol::Envelope,
@@ -1220,14 +1246,6 @@ async fn dispatch_offline_wake(
             tracing::warn!(%error, "offline notify wake task failed");
         }
     }
-    write_gateway_handle(
-        send,
-        &ramflux_node_core::GatewayServerFrame::InBandWake {
-            target_delivery_id: target_delivery_id.to_owned(),
-            delivery_class: ramflux_protocol::DeliveryClass::NotificationWake,
-        },
-    )
-    .await?;
     Ok(())
 }
 
@@ -1790,7 +1808,7 @@ mod tests {
         envelope
     }
 
-    fn test_envelope() -> ramflux_protocol::Envelope {
+    pub(super) fn test_envelope() -> ramflux_protocol::Envelope {
         ramflux_protocol::Envelope {
             schema: "ramflux.envelope.v1".to_owned(),
             version: 1,

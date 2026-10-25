@@ -434,7 +434,7 @@ async fn handle_gateway_forward_deliver(
     if !forward.forwarded {
         return Err(anyhow::anyhow!("forward marker is required"));
     }
-    let delivered = hub.send_to(&forward.target_delivery_id, &forward.frame).await?;
+    let delivered = hub.send_to(&forward.target_delivery_id, &forward.frame).await;
     Ok(GatewayForwardDeliverResponse { delivered })
 }
 

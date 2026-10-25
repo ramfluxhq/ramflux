@@ -22,6 +22,14 @@ struct Backfill {
     complete: bool,
     #[serde(default)]
     restrictions_done: bool,
+    #[serde(default)]
+    missing: Option<MissingManifest>,
+}
+#[derive(Serialize, Deserialize)]
+struct MissingManifest {
+    link: String,
+    attempts: u32,
+    next_at: i64,
 }
 impl RamfluxClient {
     pub(crate) fn stage_own_contact(
@@ -111,6 +119,9 @@ impl RamfluxClient {
         Ok(result)
     }
     pub(crate) fn stage_contact_backfill_batch(&self) -> Result<usize, SdkError> {
+        self.stage_contact_backfill_batch_at(crate::time::now_unix_timestamp())
+    }
+    fn stage_contact_backfill_batch_at(&self, now: i64) -> Result<usize, SdkError> {
         let own = self.owned_device_identity()?;
         let Some(set) = self.observed_device_set(own.root_commitment())? else {
             return Ok(0);
@@ -150,10 +161,33 @@ impl RamfluxClient {
                         &format!("identity/manifest-root/{peer}"),
                     )?
                     else {
-                        // Leave the cursor immediately before this link; refresh its manifest next tick.
+                        if progress
+                            .missing
+                            .as_ref()
+                            .is_some_and(|m| m.link == link.link_id && m.attempts >= 5)
+                        {
+                            let key = ramflux_protocol::hash_base64url(
+                                "ramflux.own_contact.parked.v1",
+                                link.link_id.as_bytes(),
+                            );
+                            db.persist_actor_state(&format!("own-contact/parked/{key}"), &serde_json::json!({"link_id":link.link_id,"peer_root":peer,"reason":"manifest_retry_exhausted","attempts":5,"parked_at":now}))?;
+                            tracing::warn!(link_id = %link.link_id, "contact backfill parked: manifest retry exhausted");
+                            progress.missing = None;
+                            progress.cursor.clone_from(&link.link_id);
+                            db.persist_actor_state("own-contact/backfill", &progress)?;
+                            continue;
+                        }
+                        if progress.missing.as_ref().is_none_or(|m| m.link != link.link_id) {
+                            progress.missing = Some(MissingManifest {
+                                link: link.link_id.clone(),
+                                attempts: 0,
+                                next_at: now,
+                            });
+                        }
                         db.persist_actor_state("own-contact/backfill", &progress)?;
                         return Ok(count);
                     };
+                    progress.missing = None;
                     self.stage_own_contact(&manifest, &link.link_id)?;
                     count += 1;
                 }
@@ -191,6 +225,27 @@ impl RamfluxClient {
             }
         }
         Ok(None)
+    }
+    pub(crate) fn claim_contact_backfill_refresh(
+        &self,
+        now: i64,
+    ) -> Result<Option<String>, SdkError> {
+        let Some(root) = self.pending_contact_backfill_root()? else {
+            return Ok(None);
+        };
+        let db = self.account_db()?;
+        let mut progress =
+            db.load_actor_state::<Backfill>("own-contact/backfill")?.unwrap_or_default();
+        let Some(missing) = &mut progress.missing else {
+            return Ok(None);
+        };
+        if missing.attempts >= 5 || missing.next_at > now {
+            return Ok(None);
+        }
+        missing.attempts += 1;
+        missing.next_at = now.saturating_add(5 * (1_i64 << missing.attempts.saturating_sub(1)));
+        db.persist_actor_state("own-contact/backfill", &progress)?;
+        Ok(Some(root))
     }
     /// The caller must first verify the packet's active sibling signature and owned root.
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {

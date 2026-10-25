@@ -74,6 +74,15 @@ impl RamfluxClient {
                 {
                     return Err(SdkError::Storage(error));
                 }
+                Err(SdkError::InboundPending(_)) if accepted => {
+                    self.park_own_group_pin(pin)?;
+                    blocked.insert(id);
+                    db.record_own_device_restore_skip(
+                        &bundle.snapshot_id,
+                        &format!("{}:{}", pin.group_id, pin.device_id),
+                        "member_authority_deferred",
+                    )?;
+                }
                 Err(_) => {
                     blocked.insert(id);
                     db.record_own_device_restore_skip(
