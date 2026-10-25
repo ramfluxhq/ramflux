@@ -144,14 +144,14 @@ fn pair(
     now: u64,
 ) -> Result<TestAllocation, NodeCoreError> {
     let caller = state.allocate(owner, scope, endpoint, now)?;
-    let callee = state.accept_verified(owner, &consent(scope, &caller), endpoint, now)?;
-    let bytes =
-        ramflux_protocol::decode_base64url(&callee.rebind_key).map_err(|_| refused("test key"))?;
+    let recipient = state.accept_verified(owner, &consent(scope, &caller), endpoint, now)?;
+    let bytes = ramflux_protocol::decode_base64url(&recipient.rebind_key)
+        .map_err(|_| refused("test key"))?;
     let mut key = [0; 32];
     key.copy_from_slice(&bytes);
     Ok(TestAllocation {
         caller_token: caller.token.clone(),
-        callee_token: callee.token.clone(),
+        callee_token: recipient.token.clone(),
         callee_key: key,
         lease_id: caller.lease_id.clone(),
     })

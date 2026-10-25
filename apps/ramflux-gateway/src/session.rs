@@ -629,7 +629,7 @@ async fn run_gateway_session_loop_until_closed(
                     }
                 }
                 ramflux_node_core::GatewayClientFrame::VoiceLease { request } => {
-                    crate::voice::handle(&send,&context,&runtime,&request).await?;
+                    crate::voice::handle(&send, &context, &runtime, &request).await?;
                 }
                 ramflux_node_core::GatewayClientFrame::RelayTokenV3Issue { request } => {
                     handle_gateway_relay_token_v3_issue(&send, &context, &runtime, &request)
@@ -859,7 +859,7 @@ fn issue_relay_token_for_authenticated_session(
     )?)
 }
 
-fn validate_gateway_session_signed_request<T: serde::Serialize>(
+pub(crate) fn validate_gateway_session_signed_request<T: serde::Serialize>(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     signed_request: &ramflux_protocol::SignedRequest,

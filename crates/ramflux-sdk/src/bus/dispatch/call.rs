@@ -90,13 +90,20 @@ async fn invite(
             p.iter().filter_map(Value::as_str).find(|p| *p != account.gateway_config.principal_id)
         })
         .ok_or_else(|| invalid("direct peer missing"))?;
+    let target = targets.first().ok_or_else(|| invalid("call target absent"))?;
+    let root = target.identity.root_commitment();
     let manifest = account
         .client
         .account_db()?
         .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
-            "identity/manifest/{peer}"
+            "identity/manifest-root/{root}"
         ))?
         .ok_or_else(|| invalid("peer root missing"))?;
+    if targets.iter().any(|target| target.identity.root_commitment() != root)
+        || manifest.principal_id != peer
+    {
+        return Err(invalid("call peer root mismatch"));
+    }
     let invited = targets
         .iter()
         .map(|t| CallEndpoint {

@@ -5,6 +5,8 @@ use ramflux_protocol::ProtocolError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
+    #[error("voice rebind rejected: {0}")]
+    VoiceRebind(&'static str),
     #[error("identity authority rejected: {0}")]
     IdentityAuthority(&'static str),
     #[error("SFrame rejected: {0}")]

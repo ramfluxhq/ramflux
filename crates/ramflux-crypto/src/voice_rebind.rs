@@ -14,9 +14,9 @@ fn mac(
     address: SocketAddr,
 ) -> Result<Hmac<Sha256>, CryptoError> {
     let lease = ramflux_protocol::decode_base64url(lease_id)
-        .map_err(|_| CryptoError::SFrame("voice lease id"))?;
+        .map_err(|_| CryptoError::VoiceRebind("voice lease id"))?;
     if lease.len() != 16 || side > 1 {
-        return Err(CryptoError::SFrame("voice rebind scope"));
+        return Err(CryptoError::VoiceRebind("voice rebind scope"));
     }
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| CryptoError::HkdfFailed)?;
     mac.update(b"ramflux.voice.rebind.v1");
@@ -105,3 +105,7 @@ pub fn voice_rebind_response(
     response.extend_from_slice(&voice_rebind_tag(key, lease_id, side, &cookie, address)?);
     Ok(response)
 }
+
+#[cfg(test)]
+#[path = "voice_rebind_tests.rs"]
+mod tests;

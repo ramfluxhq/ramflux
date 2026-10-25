@@ -516,11 +516,26 @@ async fn pipelined_mutations_keep_mailbox_order_and_control_state_survives_resta
                         Arc::new(AtomicUsize::new(0)),
                         Some(index),
                     )?;
+                    account.client.initialize_and_publish_prekey_bundle(
+                        "alice",
+                        "device-alice",
+                        "target",
+                        [0x62; 32],
+                        None,
+                    )?;
+                    let authority =
+                        crate::client::identity_authority::test_support::manifest(&account.client)?;
+                    account.client.persist_identity_directory(&authority)?;
+                    account.client.record_owned_proof_published(now_unix_timestamp())?;
                     if round == 0 {
                         let event = A2iControlEvent {
                             event_id: "ordered-control".into(),
                             event_type: "request".into(),
-                            source_device_id: "device-bob".into(),
+                            source_device_id: "device-alice".into(),
+                            source_principal_id: Some("alice".into()),
+                            source_principal_commitment: Some(
+                                account.client.surface_local_root_commitment()?,
+                            ),
                             target_device_id: "device-alice".into(),
                             control_domain: "automation".into(),
                             action: "notify".into(),
@@ -530,7 +545,7 @@ async fn pipelined_mutations_keep_mailbox_order_and_control_state_survives_resta
                         };
                         account.client.account_db()?.persist_actor_state(
                             &crate::client::routed::control::a2i_key(
-                                &event.source_device_id,
+                                &account.client.local_device_identity(&event.source_device_id)?,
                                 &event.event_id,
                             )?,
                             &event,

@@ -17,6 +17,7 @@ impl std::error::Error for ClientWriteFailure {
 pub(crate) fn request_kind(frame: &ramflux_node_core::GatewayClientFrame) -> &'static str {
     use ramflux_node_core::GatewayClientFrame as Frame;
     match frame {
+        Frame::VoiceLease { .. } => "voice_lease",
         Frame::Open { .. } => "open",
         Frame::Auth { .. } => "auth",
         Frame::Submit { .. } => "submit",

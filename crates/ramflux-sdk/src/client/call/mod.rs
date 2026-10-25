@@ -48,6 +48,15 @@ fn decode(body: &[u8]) -> Result<Option<CallControl>, SdkError> {
     Ok(Some(control))
 }
 impl RamfluxClient {
+    pub(crate) fn call_device_identity(
+        &self,
+        endpoint: &CallEndpoint,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
+        self.device_identity_for_root(
+            &crate::identity_root_public_key_commitment(&endpoint.root_public_key)?,
+            &endpoint.device_id,
+        )
+    }
     pub(crate) fn call_local_endpoint(&self) -> Result<CallEndpoint, SdkError> {
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -105,17 +114,10 @@ impl RamfluxClient {
         {
             return Err(invalid("envelope binding"));
         }
-        let manifest = self
-            .account_db()?
-            .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
-                "identity/manifest/{}",
-                c.sender.principal_id
-            ))?
-            .ok_or_else(|| invalid("sender root unavailable"))?;
-        if manifest.root_public_key != c.sender.root_public_key
-            || !manifest.devices.iter().any(|d| d.device_id == c.sender.device_id)
-        {
-            return Err(invalid("sender root or membership"));
+        let identity = self.call_device_identity(&c.sender)?;
+        let sender = self.trusted_device(&identity)?;
+        if sender["principal_id"] != c.sender.principal_id {
+            return Err(invalid("sender principal differs from root authority"));
         }
         let local = self.call_local_endpoint()?;
         let peer = if c.caller == local {
@@ -167,7 +169,7 @@ impl RamfluxClient {
         if peer != &c.sender {
             return Err(invalid("control source is not peer"));
         }
-        let record = self.trusted_device(&c.sender.device_id)?;
+        let record = self.trusted_device(&self.call_device_identity(&c.sender)?)?;
         let key =
             record["signing_public_key"].as_str().ok_or_else(|| invalid("sender key missing"))?;
         ramflux_crypto::verify_canonical_signature(&signing_bytes(c)?, &c.signature, key)?;
@@ -198,10 +200,11 @@ impl RamfluxClient {
                 return Err(invalid("call capacity or retired id"));
             }
             let mut incoming = LiveCall::incoming(c, self.call_local_endpoint()?, now)?;
-            let key = self.trusted_device(&c.sender.device_id)?["signing_public_key"]
-                .as_str()
-                .ok_or_else(|| invalid("peer signing key missing"))?
-                .to_owned();
+            let key =
+                self.trusted_device(&self.call_device_identity(&c.sender)?)?["signing_public_key"]
+                    .as_str()
+                    .ok_or_else(|| invalid("peer signing key missing"))?
+                    .to_owned();
             incoming.pin_peer(c.sender.clone(), key)?;
             if self.voice_calls.values().any(|call| call.row.state != "ended") {
                 incoming.busy(now)?;

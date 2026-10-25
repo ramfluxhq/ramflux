@@ -61,6 +61,7 @@ fn entry(
             source_principal_id: sender.id.clone(),
             sender_id: sender.id.clone(),
             recipient_device_id: Some(receiver.id.clone()),
+            recipient_principal_commitment: None,
             target_delivery_id: receiver.id.clone(),
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
@@ -325,7 +326,9 @@ async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_mes
     let receipt = bob
         .client
         .account_db()?
-        .load_actor_state::<super::committed::Committed>(&committed_key(&packet)?)?
+        .load_actor_state::<super::committed::Committed>(
+            &bob.client.authenticated_committed_key(&packet)?,
+        )?
         .ok_or_else(|| invalid("receipt"))?;
     assert_eq!(receipt.entry.envelope.encrypted_payload.len(), 0);
     let stored =

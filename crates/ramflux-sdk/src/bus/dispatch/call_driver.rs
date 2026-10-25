@@ -5,7 +5,7 @@
 use super::{invalid, recover};
 use crate::client::call::{self, state::LiveCall};
 use crate::prelude::*;
-use ramflux_protocol::{VoiceAllocationRequest, VoiceLeaseRequest, VoiceLeaseResponse};
+use ramflux_protocol::{VoiceAllocationRequest, VoiceLeaseRequest};
 fn scope(c: &LiveCall) -> VoiceAllocationRequest {
     VoiceAllocationRequest {
         call_id: c.row.call_id.clone(),

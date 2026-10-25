@@ -24,7 +24,7 @@ struct Side {
 }
 struct Lease {
     scope: VoiceAllocationRequest,
-    lease_id: String,
+    id: String,
     consent: Option<VoiceLeaseConsent>,
     expires_at: u64,
     hard_expires_at: u64,
@@ -73,7 +73,7 @@ impl VoiceRelayState {
         }
         let lease = Lease {
             scope: scope.clone(),
-            lease_id: ramflux_protocol::encode_base64url(
+            id: ramflux_protocol::encode_base64url(
                 &ramflux_crypto::random_32().map_err(|_| refused("voice entropy unavailable"))?
                     [..16],
             ),
@@ -101,7 +101,7 @@ impl VoiceRelayState {
         self.expire(now);
         let key = (owner.to_owned(), consent.scope.call_id.clone());
         let lease = self.leases.get(&key).ok_or_else(|| refused("voice lease unavailable"))?;
-        if lease.lease_id != consent.lease_id
+        if lease.id != consent.lease_id
             || lease.scope != consent.scope
             || consent.expires_at != lease.hard_expires_at
             || now >= consent.expires_at
@@ -247,14 +247,9 @@ impl VoiceRelayState {
             return Err(refused("voice bandwidth exhausted"));
         }
         side.bytes = bytes;
-        if let Some(result) = rebinding::admit(
-            side,
-            &lease.lease_id,
-            u8::try_from(i).unwrap_or(0),
-            source,
-            payload,
-            now,
-        )? {
+        if let Some(result) =
+            rebinding::admit(side, &lease.id, u8::try_from(i).unwrap_or(0), source, payload, now)?
+        {
             return Ok(result);
         }
         if payload.is_empty() {
@@ -301,7 +296,7 @@ fn new_side(now: u64) -> Result<Side, NodeCoreError> {
 }
 fn allocation(l: &Lease, endpoint: &str, side: usize) -> VoiceAllocation {
     VoiceAllocation {
-        lease_id: l.lease_id.clone(),
+        lease_id: l.id.clone(),
         endpoint: endpoint.into(),
         side: u8::try_from(side).unwrap_or(0),
         token: l.sides[side].token.clone(),
