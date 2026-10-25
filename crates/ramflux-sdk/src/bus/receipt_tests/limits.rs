@@ -98,6 +98,10 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
             .count(),
         1
     );
+    // Hold the first receipt so the sync below cannot retry it on a slow runner.
+    let mut held = ready(&p)?;
+    held.next_at = now_unix_timestamp() + 3600;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &held)?;
     let mut sender = p.a.account(None, p.mail.clone())?;
     let mut engine = sender.take_live_engine().await?;
     sender
