@@ -116,6 +116,21 @@ impl RamfluxClient {
             {
                 return Err(invalid("group sender is blocked"));
             }
+            if route.kind == Kind::GroupControl
+                && !crate::client::shared_group::is_shared_group_packet(body)
+            {
+                let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
+                if self.account_db()?.group_snapshot_epoch(group)?.is_none()
+                    && !self.accepted_contact_source(
+                        source.root_commitment(),
+                        &entry.envelope.source_principal_id,
+                    )?
+                {
+                    return Err(invalid(
+                        "legacy stranger group bootstrap requires a v2 invitation",
+                    ));
+                }
+            }
             if route.kind == Kind::GroupMessage {
                 let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
                 if !self

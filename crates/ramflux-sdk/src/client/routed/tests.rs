@@ -730,3 +730,51 @@ mod recipient_context;
 
 #[path = "backup_tests.rs"]
 mod backup;
+
+#[test]
+fn a_stranger_cannot_use_legacy_bootstrap_to_bypass_group_invitation_consent()
+-> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 142)?;
+    let recipient = Fixture::new("bob", 152)?;
+    let group = "legacy-stranger-invite";
+    fixture_group(&sender.client, group, &sender)?;
+    fixture_member(&sender.client, group, &recipient)?;
+    let source = sender.client.owned_device_identity()?;
+    let event = sender.client.create_signed_group_member_join_event(
+        group,
+        "alice",
+        "bob",
+        "member",
+        source.root_commitment(),
+    )?;
+    let wrapper = SdkGroupSenderKeyDistributionEnvelope {
+        schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".into(),
+        version: 1,
+        membership_event_base64: Some(ramflux_protocol::encode_base64url(serde_json::to_vec(
+            &event,
+        )?)),
+        actor_manifest_url: None,
+        distribution_base64: ramflux_protocol::encode_base64url(
+            sender.client.export_group_sender_key_distribution(group, "alice")?,
+        ),
+    };
+    let entry = seal_group(
+        &sender,
+        &recipient,
+        message("stranger-bootstrap", "thread"),
+        &serde_json::to_vec(&wrapper)?,
+    )?;
+    let opened = recipient.client.open_routed(&entry, "bob")?;
+    assert!(
+        matches!(recipient.client.contact_route_gate(&entry,&opened.routing,&opened.body),Err(SdkError::InboundRejected(reason)) if reason=="legacy stranger group bootstrap requires a v2 invitation")
+    );
+    assert!(recipient.client.account_db()?.group_snapshot_epoch(group)?.is_none());
+    assert!(recipient.client.account_db()?.client_record("conversation", "thread")?.is_none());
+    recipient.client.establish_friend_link(
+        "known-inviter",
+        recipient.client.owned_device_identity()?.root_commitment(),
+        source.root_commitment(),
+    )?;
+    recipient.client.contact_route_gate(&entry, &opened.routing, &opened.body)?;
+    Ok(())
+}

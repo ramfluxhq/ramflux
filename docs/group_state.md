@@ -65,7 +65,9 @@ not an admin request.
 
 An unknown group is adopted automatically only if its creator or inviter is an
 accepted contact (or the local root). Otherwise its verified snapshot is held as
-an invitation, outside joined group/conversation/message projections. Explicit
+an invitation, outside joined group/conversation/message projections. A stranger's
+legacy bootstrap cannot bypass consent: it is refused and requires a v2 invitation.
+Known legacy groups retain their existing receive path. Explicit
 acceptance adopts the signed state; decline retains a replay fence. Blocked
 creators or inviters are rejected. A joined member need not be a contact to send
 group messages; individual source blocks still apply.

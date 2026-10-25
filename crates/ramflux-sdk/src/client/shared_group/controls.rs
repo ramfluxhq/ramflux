@@ -101,7 +101,14 @@ impl RamfluxClient {
                 }
                 // An expelled requester still gets a typed refusal. Candidate additions, however,
                 // can only use an active key from the current signed identity directory.
-                if let ramflux_protocol::GroupStateChange::Add { member, .. } = &request.change {
+                if let ramflux_protocol::GroupStateChange::Add { member, .. } = &request.change
+                    && ramflux_crypto::validate_group_change_request(
+                        &state,
+                        request,
+                        now_unix_timestamp(),
+                    )
+                    .is_ok()
+                {
                     let manifest = if let Some(federation) = federation {
                         let url = federation.recipient_prekey_url.clone().ok_or_else(|| {
                             super::invalid("federated addition requires prekey directory")

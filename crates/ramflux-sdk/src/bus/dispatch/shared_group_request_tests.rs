@@ -90,19 +90,18 @@ async fn shared_group_signed_request_and_result_round_trip_without_admin_state_a
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
     );
     admin.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
-    assert_eq!(
-        admin.client.group_change_statuses(Some("group"))?["requests"][0]["status"],
-        "applied"
-    );
-    assert_eq!(
-        admin.client.group_state("group")?.group_epoch,
-        2,
-        "result cannot substitute for a creator snapshot"
-    );
+    assert_result_did_not_replace_snapshot(&admin.client)?;
     admin.client.accept_shared_group_state(&current, "device-peer-one")?;
     assert_eq!(admin.client.group_state("group")?.group_epoch, 3);
     assert_eq!(owner.client.direct_messages("group-thread")?.len(), 0);
     assert_eq!(admin.client.direct_messages("group-thread")?.len(), 0);
+    Box::pin(reject_demoted_federated_add(
+        &mut owner.client,
+        &admin.client,
+        &peers[0].client,
+        &owner.gateway_config,
+    ))
+    .await?;
     directory.abort();
     drop((owner, admin, peers));
     std::fs::remove_dir_all(root)?;
@@ -119,4 +118,108 @@ fn admin_gateway(
     admin_config.target_delivery_id = "device-peer-one".into();
     admin_config = admin_config.with_account_identity(client)?;
     Ok(admin_config)
+}
+
+async fn reject_demoted_federated_add(
+    owner: &mut RamfluxClient,
+    admin: &RamfluxClient,
+    sibling: &RamfluxClient,
+    config: &GatewaySessionConfig,
+) -> TestResult {
+    let request = admin.stage_group_change_request(
+        "group",
+        "device-peer-one",
+        ramflux_protocol::GroupStateChange::Add {
+            member: sibling.owned_group_actor("device-peer-two")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+        Some("stale-federation-add"),
+    )?;
+    let before = owner.shared_group_change(
+        "group",
+        "sender",
+        ramflux_protocol::GroupStateChange::SetRole {
+            root_commitment: admin.owned_device_identity()?.root_commitment().into(),
+            device_id: "device-peer-one".into(),
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    let packet = crate::client::shared_group::GroupControlPacket::new(
+        crate::client::shared_group::GroupControlBody::Request {
+            request: request.clone(),
+            federation: Some(LocalBusFederationRoute {
+                federation_url: "invalid://must-not-fetch".into(),
+                source_node_id: "source".into(),
+                target_node_id: "remote".into(),
+                required_capability: "opaque_event".into(),
+                admin_token: None,
+                recipient_prekey_url: Some("invalid://must-not-fetch".into()),
+            }),
+        },
+    );
+    let mut sender = GatewaySessionEngine::with_test_transport(
+        admin_gateway(config, admin)?,
+        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
+    );
+    let mut message = GatewayDirectMessage {
+        conversation_id: "group-thread".into(),
+        message_id: "stale-add".into(),
+        envelope_id: "stale-add-envelope".into(),
+        source_principal_id: sender.config.principal_id.clone(),
+        sender_id: sender.config.device_id.clone(),
+        recipient_device_id: Some(config.device_id.clone()),
+        recipient_principal_commitment: Some(
+            owner.owned_device_identity()?.root_commitment().into(),
+        ),
+        target_delivery_id: config.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 3600,
+    };
+    message.encrypted_body = serde_json::to_vec(
+        &admin
+            .seal_routed_as(
+                &mut sender,
+                &message,
+                &serde_json::to_vec(&packet)?,
+                crate::client::routed::Route::group_control("group"),
+            )
+            .await?,
+    )?;
+    let incoming = GatewayInboxEntry {
+        inbox_seq: 2,
+        target_delivery_id: message.target_delivery_id.clone(),
+        envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+    };
+    let mut receiver = GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
+    );
+    let pool = ramflux_transport::RelayQuicPool::new(
+        ramflux_transport::RelayQuicPoolConfig::functional_default()?,
+    );
+    owner.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    assert_eq!(
+        owner.process_group_request(&request, "sender")?.status,
+        ramflux_protocol::GroupChangeStatus::PermissionDenied
+    );
+    assert_eq!(
+        owner
+            .account_db()?
+            .shared_group_state("group")?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .view(),
+        before.view()
+    );
+    Ok(())
+}
+
+fn assert_result_did_not_replace_snapshot(client: &RamfluxClient) -> TestResult {
+    assert_eq!(client.group_change_statuses(Some("group"))?["requests"][0]["status"], "applied");
+    assert_eq!(
+        client.group_state("group")?.group_epoch,
+        2,
+        "result cannot substitute for a creator snapshot"
+    );
+    Ok(())
 }
