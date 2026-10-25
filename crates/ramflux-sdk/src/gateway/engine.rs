@@ -597,6 +597,34 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// Allocates, renews or releases a production voice lease over the authenticated live session.
+    /// # Errors
+    /// Rejects transport, signature, caller binding or relay admission failures.
+    pub async fn voice_lease(
+        &mut self,
+        body: ramflux_protocol::VoiceLeaseRequest,
+    ) -> Result<ramflux_protocol::VoiceLeaseResponse, SdkError> {
+        let request = ramflux_protocol::VoiceLeaseFrame {
+            signed_request: self.signed_request(
+                "POST",
+                "/voice/v1/lease",
+                "already_authed",
+                &body,
+            )?,
+            body,
+        };
+        write_gateway_client_frame(
+            &mut *self.stream,
+            &GatewayClientFrame::VoiceLease { request: Box::new(request) },
+        )
+        .await?;
+        match self.read_non_deliver_frame().await? {
+            GatewayServerFrame::VoiceLease { response } => Ok(*response),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            _ => Err(SdkError::GatewaySessionRejected("expected voice lease response".into())),
+        }
+    }
+
     async fn read_non_deliver_frame(&mut self) -> Result<GatewayServerFrame, SdkError> {
         loop {
             match self.read_gateway_frame("gateway frame").await? {

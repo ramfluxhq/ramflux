@@ -628,6 +628,9 @@ async fn run_gateway_session_loop_until_closed(
                         .await?;
                     }
                 }
+                ramflux_node_core::GatewayClientFrame::VoiceLease { request } => {
+                    crate::voice::handle(&send,&context,&runtime,&request).await?;
+                }
                 ramflux_node_core::GatewayClientFrame::RelayTokenV3Issue { request } => {
                     handle_gateway_relay_token_v3_issue(&send, &context, &runtime, &request)
                         .await?;

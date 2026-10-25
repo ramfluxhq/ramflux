@@ -66,6 +66,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
+        voice::start(&config)?;
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let store = Arc::new(ramflux_node_core::RelayRedbStore::open(&redb_path)?);
         // Resident metadata budget (RELAY-MEM-01-A1): fail closed on a `0`/invalid override so an
@@ -289,6 +290,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     Ok(())
 }
 mod config;
+mod voice;
 
 #[cfg(feature = "itest-object-v2")]
 mod retention;

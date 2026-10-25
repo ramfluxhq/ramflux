@@ -43,6 +43,8 @@ mod router_wal;
 mod service_signing;
 mod session;
 mod signaling;
+mod voice;
+pub use voice::*;
 
 pub use config::*;
 pub use error::NodeCoreError;

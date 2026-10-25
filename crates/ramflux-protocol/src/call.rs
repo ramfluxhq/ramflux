@@ -51,29 +51,14 @@ pub struct VoiceAllocationRequest {
     pub caller: CallEndpoint,
     pub callee: CallEndpoint,
 }
-/// An issuer-certified, short-lived relay bearer capability, never a media key.
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct VoiceToken {
-    pub schema: String,
-    pub call_id: String,
-    pub caller: CallEndpoint,
-    pub callee: CallEndpoint,
-    pub side: u8,
-    pub allocation_id: String,
-    pub relay_endpoint: String,
-    pub issued_at: u64,
-    pub expires_at: u64,
-    pub certificate: crate::GatewayIssuerCertificate,
-    pub signature: String,
-}
 /// Both endpoint credentials; only the matching credential is exposed to each media engine.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceAllocation {
     pub endpoint: String,
-    pub caller_token: VoiceToken,
-    pub callee_token: VoiceToken,
+    pub caller_token: String,
+    pub callee_token: String,
+    pub expires_at: u64,
 }
 /// Redacted diagnostics prevent accidental bearer-token disclosure in frame logging.
 impl std::fmt::Debug for VoiceAllocation {
@@ -96,4 +81,33 @@ pub struct CallRow {
     pub answered_at: Option<i64>,
     pub ended_at: Option<i64>,
     pub media_generation: u64,
+}
+
+/// A node-mesh lease mutation; UDP keepalives cannot renew authorization.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VoiceLeaseRequest {
+    Allocate { scope: VoiceAllocationRequest },
+    Renew { scope: VoiceAllocationRequest },
+    Release { scope: VoiceAllocationRequest },
+}
+/// Secret-free lease mutation acknowledgment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VoiceLeaseStatus {
+    pub expires_at: u64,
+}
+
+/// Authenticated client request, bound to the live gateway session and exact lease mutation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceLeaseFrame {
+    pub signed_request: crate::SignedRequest,
+    pub body: VoiceLeaseRequest,
+}
+/// Redacted response variants, shared by both gateway transports.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VoiceLeaseResponse {
+    Allocation { allocation: VoiceAllocation },
+    Status { status: VoiceLeaseStatus },
 }

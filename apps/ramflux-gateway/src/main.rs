@@ -18,6 +18,7 @@ mod session;
 mod session_response;
 mod state;
 mod submit_source;
+mod voice;
 
 use std::sync::{Arc, Mutex};
 
