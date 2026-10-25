@@ -432,7 +432,8 @@ fn run_gc_sweep_once_with_async_endpoints(
         })
         .transpose()?
         .flatten();
-    for service_id in ["gateway", "router", "notify", "signaling", "federation"] {
+    // Only these services expose authenticated cross-service GC. Other services self-sweep.
+    for service_id in ["router", "federation"] {
         let Some(endpoint) = config.mesh.endpoints.get(service_id) else {
             continue;
         };
@@ -888,7 +889,9 @@ mod tests {
         let (router_quic_endpoint, received) =
             spawn_router_gc_quic_server(router.tls.clone(), retention.ca_pem.clone())?;
         let (store, store_path) = temp_retention_store("retention_router_gc_sweep_uses_quic")?;
-        let config = test_retention_config(&retention.tls, "127.0.0.1:1");
+        let mut config = test_retention_config(&retention.tls, "127.0.0.1:1");
+        config.mesh.endpoints.insert("gateway".into(), "127.0.0.1:1".into());
+        config.mesh.endpoints.insert("notify".into(), "127.0.0.1:1".into());
 
         run_gc_sweep_once_with_router_async_endpoint(
             &store,

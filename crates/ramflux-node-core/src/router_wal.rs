@@ -304,7 +304,6 @@ impl RouterWalStore {
     }
 
     /// # Errors
-    /// # Errors
     /// Counts logical WAL retention candidates without changing delivery recovery state.
     pub fn retention_candidate_count(&self, now: i64) -> Result<usize, NodeCoreError> {
         let state =
@@ -324,6 +323,8 @@ impl RouterWalStore {
             .count())
     }
     /// Removes expired recovery records and segment files older than the maximum retention window.
+    /// # Errors
+    /// Returns lock, directory or segment deletion errors.
     pub fn prune_expired(&self, now: i64) -> Result<usize, NodeCoreError> {
         let mut state =
             self.state.lock().map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
