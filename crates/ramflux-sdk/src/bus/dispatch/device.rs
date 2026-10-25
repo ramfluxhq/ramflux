@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::gateway::GatewayPushRouteRegistration;
 use crate::prelude::*;
 
 pub(crate) async fn dispatch_device_bus_request(
@@ -22,6 +23,7 @@ pub(crate) async fn dispatch_device_bus_request(
             let body: LocalBusDeviceRevokeRequest = serde_json::from_value(request.body.clone())?;
             dispatch_device_revoke(request, state, body).await
         }
+        "device.push_route.set" => Box::pin(dispatch_push_route_set(request, state)).await,
         "device.sync.export" => {
             let body: LocalBusDeviceSyncExportRequest =
                 serde_json::from_value(request.body.clone())?;
@@ -34,6 +36,51 @@ pub(crate) async fn dispatch_device_bus_request(
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
+}
+
+/// Checkpoint holding this device's push route; restored into the gateway config at startup.
+pub(crate) const PUSH_ROUTE_CHECKPOINT: &str = "gateway.push_route.v1";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalBusPushRouteSetRequest {
+    registration: Option<GatewayPushRouteRegistration>,
+}
+
+/// Restores the persisted push route so every reconnect re-registers it.
+pub(crate) fn stored_push_route(
+    client: &RamfluxClient,
+) -> Result<Option<GatewayPushRouteRegistration>, SdkError> {
+    Ok(match client.projection_checkpoint(PUSH_ROUTE_CHECKPOINT)? {
+        Some(value) if !value.is_empty() => Some(serde_json::from_str(&value)?),
+        _ => None,
+    })
+}
+
+/// Sets or clears the push route after a token change and registers it now; reconnects and
+/// liveness checks re-register and renew it from then on.
+async fn dispatch_push_route_set(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusPushRouteSetRequest = serde_json::from_value(request.body.clone())?;
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let stored = body.registration.as_ref().map(serde_json::to_string).transpose()?;
+    account
+        .client
+        .set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, stored.as_deref().unwrap_or(""))?;
+    account.gateway_config.push_route.clone_from(&body.registration);
+    let expires_at = if let Some(engine) = account.engine.as_mut() {
+        engine.set_push_route(body.registration).await?
+    } else {
+        account.ensure_gateway_live().await?;
+        account.engine.as_ref().and_then(GatewaySessionEngine::push_route_expires_at)
+    };
+    Ok(local_bus_ok(serde_json::json!({
+        "registered": expires_at.is_some(),
+        "expires_at": expires_at,
+    })))
 }
 
 fn dispatch_device_list(

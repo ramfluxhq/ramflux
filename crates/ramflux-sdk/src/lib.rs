@@ -104,7 +104,8 @@ pub use federation::{
 pub use gateway::{
     GatewayAuthFrame, GatewayClientFrame, GatewayCursor, GatewayDirectMessage, GatewayInboxEntry,
     GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery, GatewayOwnDeviceFanoutFrame,
-    GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery, GatewayQuicEndpointConfig,
+    GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery, GatewayPushProvider,
+    GatewayPushRouteFrame, GatewayPushRouteRegistration, GatewayQuicEndpointConfig,
     GatewayResumeFrame, GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine,
     GatewaySessionEstablishedFrame, GatewaySessionState, GatewaySessionTransportKind,
     GatewaySubmitFrame, GatewayTcpTlsEndpointConfig,

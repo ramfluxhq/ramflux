@@ -92,6 +92,8 @@ pub struct GatewaySessionConfig {
     pub source_ip_hash: Option<String>,
     pub max_inflight_downstream: u32,
     pub max_inflight_upstream: u32,
+    /// Push route registered on every authenticated (re)connect; `None` disables push.
+    pub push_route: Option<super::GatewayPushRouteRegistration>,
 }
 
 impl GatewaySessionConfig {
@@ -187,6 +189,7 @@ impl GatewaySessionConfig {
             source_ip_hash: None,
             max_inflight_downstream: 64,
             max_inflight_upstream: 64,
+            push_route: None,
         }
     }
 
@@ -372,6 +375,7 @@ pub struct GatewaySessionEstablishedFrame {
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
+    PushRouteRegister { request: Box<super::GatewayPushRouteFrame> },
     VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
@@ -394,6 +398,7 @@ pub enum GatewayClientFrame {
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayServerFrame {
+    PushRouteRegistered { expires_at: u64 },
     VoiceLease { response: Box<ramflux_protocol::VoiceLeaseResponse> },
     SessionEstablished { session: GatewaySessionEstablishedFrame },
     Deliver { entry: GatewayInboxEntry },

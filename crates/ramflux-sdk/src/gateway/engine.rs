@@ -9,10 +9,11 @@ use crate::prelude::*;
 pub struct GatewaySessionEngine {
     pub(crate) config: GatewaySessionConfig,
     _transport: GatewaySessionClientTransport,
-    stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
-    session: GatewaySessionState,
+    pub(crate) stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
+    pub(crate) session: GatewaySessionState,
     request_counter: u64,
     pending_deliveries: VecDeque<GatewayInboxEntry>,
+    pub(crate) push_route_expires_at: Option<u64>,
 }
 
 enum GatewaySessionClientTransport {
@@ -163,8 +164,10 @@ impl GatewaySessionEngine {
             session,
             request_counter: 1,
             pending_deliveries: VecDeque::new(),
+            push_route_expires_at: None,
         };
         engine.remember_session_for_resume();
+        engine.refresh_push_route_if_due().await;
         Ok(engine)
     }
 
@@ -186,6 +189,7 @@ impl GatewaySessionEngine {
             },
             request_counter: 0,
             pending_deliveries: VecDeque::new(),
+            push_route_expires_at: None,
         }
     }
 
@@ -217,7 +221,10 @@ impl GatewaySessionEngine {
     /// Returns an error when the session cannot be probed or reconnected.
     pub async fn ensure_live(&mut self, last_seen_inbox_seq: u64) -> Result<(), SdkError> {
         match tokio::time::timeout(Duration::from_secs(5), self.heartbeat()).await {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                self.refresh_push_route_if_due().await;
+                Ok(())
+            }
             Ok(Err(_)) | Err(_) => self.reconnect(last_seen_inbox_seq).await,
         }
     }
@@ -625,7 +632,7 @@ impl GatewaySessionEngine {
         }
     }
 
-    async fn read_non_deliver_frame(&mut self) -> Result<GatewayServerFrame, SdkError> {
+    pub(crate) async fn read_non_deliver_frame(&mut self) -> Result<GatewayServerFrame, SdkError> {
         loop {
             match self.read_gateway_frame("gateway frame").await? {
                 GatewayServerFrame::Deliver { entry } => self.pending_deliveries.push_back(entry),
@@ -661,7 +668,7 @@ impl GatewaySessionEngine {
         Ok(())
     }
 
-    fn signed_request<T>(
+    pub(crate) fn signed_request<T>(
         &mut self,
         method: &str,
         path: &str,
@@ -781,7 +788,7 @@ async fn open_tcp_tls_gateway_session_transport(
     Ok((GatewaySessionClientTransport::TcpTls { _client: client }, Box::new(stream)))
 }
 
-async fn write_gateway_client_frame(
+pub(crate) async fn write_gateway_client_frame(
     stream: &mut (dyn ramflux_transport::GatewaySessionTransport + Send),
     frame: &GatewayClientFrame,
 ) -> Result<(), SdkError> {
