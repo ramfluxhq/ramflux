@@ -163,45 +163,34 @@ async fn r2_an_unparsable_optional_manifest_keeps_readers_available_and_clears_t
 #[tokio::test(flavor = "current_thread")]
 async fn r2_older_samples_reuse_retained_coordinates_without_allocating_events()
 -> Result<(), SdkError> {
-    LocalSet::new()
-        .run_until(async {
-            let root = root("older-status-coordinates");
-            let data = root.clone();
-            let (tx, rx) = oneshot::channel();
-            let init: AccountInitializer = Box::new(move |index| {
-                let account = initialized(&data, index)?;
-                super::super::sync_status::record(&account, "idle", 1000)?;
-                let db = account.client.account_db()?;
-                db.remove_actor_state("sync/status/event")?;
-                db.remove_actor_state("sync/health/event")?;
-                tx.send(db.open_reader()?).map_err(|_| failure("observer gone"))?;
-                Ok(account)
-            });
-            let supervisor = supervisor(&root, BTreeMap::from([("bob".into(), init)]))?;
-            let db = rx.await.map_err(|_| failure("observer missing"))?;
-            let (bus, server) = client(Rc::clone(&supervisor), 1).await?;
-            let before = db.journal_bounds()?.head_seq;
-            let snapshot =
-                bus.request_frame(request("status", "bob", "sync.status.get", json!({}))).await?;
-            let events = db.journal_after(0, 128)?;
-            for (field, topic) in [("sync_status", "sync.status"), ("node_health", "node.health")] {
-                let event = events
-                    .iter()
-                    .find(|event| event.topic == topic)
-                    .ok_or_else(|| failure("transition missing"))?;
-                assert_eq!(snapshot[field]["seq"], event.seq);
-                assert_eq!(snapshot[field]["at"], event.at);
-                assert_eq!(snapshot[field]["body"], event.body);
-            }
-            assert_eq!(db.journal_bounds()?.head_seq, before);
-            supervisor.shutdown().await?;
-            drop(bus);
-            server.abort();
-            let _ = server.await;
-            drop(supervisor);
-            drop(db);
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
+    let root = root("older-status-coordinates");
+    let index = AccountIndex::open(&root)?;
+    let account = initialized(&root, index)?;
+    super::super::sync_status::record(&account, "idle", 1000)?;
+    let db = account.client.account_db()?;
+    db.remove_actor_state("sync/status/event")?;
+    db.remove_actor_state("sync/health/event")?;
+    // Exercise the production reader pool without an independent periodic sync writer.
+    // A daemon actor may legitimately append status transitions during a socket request.
+    let readers = super::super::readers::AccountReaders::start(db)?;
+    let before = db.journal_bounds()?.head_seq;
+    let events = db.journal_after(0, 128)?;
+    for _ in 0..32 {
+        let snapshot =
+            readers.request(request("status", "bob", "sync.status.get", json!({}))).await?;
+        for (field, topic) in [("sync_status", "sync.status"), ("node_health", "node.health")] {
+            let event = events
+                .iter()
+                .find(|event| event.topic == topic)
+                .ok_or_else(|| failure("transition missing"))?;
+            assert_eq!(snapshot[field]["seq"], event.seq);
+            assert_eq!(snapshot[field]["at"], event.at);
+            assert_eq!(snapshot[field]["body"], event.body);
+        }
+    }
+    assert_eq!(db.journal_bounds()?.head_seq, before);
+    readers.stop().await;
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }

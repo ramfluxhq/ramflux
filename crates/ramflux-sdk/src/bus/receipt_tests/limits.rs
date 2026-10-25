@@ -416,3 +416,29 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn an_empty_receipt_queue_never_allocates_journal_events_or_requires_a_live_connection()
+-> TestResult {
+    let root = runtime_tests::root("empty-receipt-queue");
+    let spec = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
+    let mut account = spec.account(None, mail)?;
+    account.engine = None;
+    for previous_cursor in [None, Some(format!("{PREFIX}retired"))] {
+        if let Some(cursor) = previous_cursor {
+            account.client.account_db()?.persist_actor_state(SCAN_CURSOR, &cursor)?;
+        }
+        let before = account.client.account_db()?.journal_bounds()?.head_seq;
+        let usage = account.client.account_db()?.actor_state_usage("delivery-receipt/")?;
+        for _ in 0..32 {
+            assert_eq!(flush(&mut account).await?, 0);
+            assert_eq!(account.client.account_db()?.journal_bounds()?.head_seq, before);
+            assert_eq!(account.client.account_db()?.actor_state_usage("delivery-receipt/")?, usage);
+            assert!(account.engine.is_none());
+        }
+    }
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
