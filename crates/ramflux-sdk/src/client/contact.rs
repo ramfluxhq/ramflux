@@ -16,7 +16,8 @@ impl RamfluxClient {
 
     /// # Errors
     /// Returns an error when the manifest JSON is malformed or fails fail-closed device-set
-    /// verification for the expected identity commitment.
+    /// verification for the expected identity commitment. Historical unavailable entries
+    /// still require valid key bindings; readiness is applied when resolving device material.
     pub fn verify_device_manifest_json(
         manifest: serde_json::Value,
         expected_identity_commitment: &str,

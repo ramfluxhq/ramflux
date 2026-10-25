@@ -102,10 +102,16 @@ fn durable_manifest_proof_age_is_bounded_to_thirty_days_with_an_injectable_clock
     let manifest = owner.manifest()?;
     let issued = manifest.devices[0].branch_proof.issued_at;
     let root = &manifest.principal_commitment;
-    super::super::verify::verify_manifest_at(&manifest, root, issued + 7200)?;
-    super::super::verify::verify_manifest_at(&manifest, root, issued + 30 * 86400)?;
+    verify_manifest(&manifest, root)?;
+    assert_eq!(
+        super::super::verify::ready_manifest(manifest.clone(), issued + 7200).devices.len(),
+        1
+    );
+    assert_eq!(
+        super::super::verify::ready_manifest(manifest.clone(), issued + 30 * 86400).devices.len(),
+        1
+    );
     for now in [issued + 30 * 86400 + 1, issued - 301] {
-        super::super::verify::verify_manifest_at(&manifest, root, now)?;
         assert_eq!(super::super::verify::ready_manifest(manifest.clone(), now).devices.len(), 0);
     }
     assert_eq!(
@@ -264,5 +270,39 @@ fn assert_served_ready_manifest(
     assert_eq!(served.devices.len(), 1);
     assert_eq!(served.devices[0].device_id, "live");
     assert_eq!(served.signed_device_set.ok_or("served signed set")?.devices.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn unready_material_never_bypasses_root_bound_key_checks() -> TestResult {
+    let owner = Actor::new("alice", "future", 71, 72, 1)?;
+    let mut manifest = owner.manifest()?;
+    manifest.devices[0].branch_proof = owner
+        .client
+        .mvp1_identity_registration_request_at(
+            "future",
+            "future",
+            "future-proof",
+            &manifest.principal_commitment,
+            now_unix_timestamp() + 3600,
+        )?
+        .proof;
+    verify_manifest(&manifest, &manifest.principal_commitment)?;
+    assert_eq!(
+        super::super::verify::ready_manifest(manifest.clone(), now_unix_timestamp()).devices.len(),
+        0
+    );
+    let mut substituted = manifest.clone();
+    substituted.devices[0].branch_public_key =
+        ramflux_crypto::public_key_base64url_from_seed([99; 32]);
+    assert!(
+        verify_manifest(&substituted, &manifest.principal_commitment).is_err(),
+        "unready cannot authenticate a substituted key"
+    );
+    manifest.devices[0].branch_proof.signature = "forged".into();
+    assert!(
+        verify_manifest(&manifest, &manifest.principal_commitment).is_err(),
+        "unready cannot authenticate an invalid proof"
+    );
     Ok(())
 }

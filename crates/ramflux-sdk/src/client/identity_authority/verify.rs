@@ -9,14 +9,6 @@ pub(crate) fn verify_manifest(
     manifest: &SdkDeviceManifestResponse,
     expected: &str,
 ) -> Result<(), SdkError> {
-    verify_manifest_at(manifest, expected, crate::time::now_unix_timestamp())
-}
-
-pub(super) fn verify_manifest_at(
-    manifest: &SdkDeviceManifestResponse,
-    expected: &str,
-    now: i64,
-) -> Result<(), SdkError> {
     verify_manifest_authority(manifest, expected)?;
     let root = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
     let record =
@@ -30,9 +22,6 @@ pub(super) fn verify_manifest_at(
             &device.device_id,
         )?) {
             return Err(invalid("duplicate manifest device"));
-        }
-        if !ramflux_crypto::branch_proof_material_is_ready(device.branch_proof.issued_at, now) {
-            continue; // Not ready is not a revocation of this device or any live sibling.
         }
         let bundle = &device.prekey_bundle;
         if device.principal_id != manifest.principal_id
