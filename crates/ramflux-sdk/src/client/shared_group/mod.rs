@@ -169,6 +169,14 @@ impl RamfluxClient {
         {
             return Err(invalid("group state issuer differs from authenticated transport"));
         }
+        if !self.account_db()?.charge_contact_request(
+            &format!("group-control:{}", source.root_commitment()),
+            32,
+            60,
+            now_unix_timestamp(),
+        )? {
+            return Err(SdkError::InboundPending("group control source rate exceeded".into()));
+        }
         let manifest = crate::client::contact::fetch_verified_device_manifest(
             gateway,
             &issuer.identity.root_commitment,

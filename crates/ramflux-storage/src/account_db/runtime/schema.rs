@@ -28,6 +28,7 @@ impl AccountDb {
                 response_json TEXT
              );",
         )?;
+        self.install_group_message_retention_schema()?;
         let columns: i64 = self.connection.query_row(
             "SELECT count(*) FROM pragma_table_info('runtime_outbox') WHERE name='keys_json'",
             [],

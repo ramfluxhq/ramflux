@@ -13,6 +13,8 @@ struct Invitation {
     inviter: String,
     expires_at: i64,
     declined: bool,
+    #[serde(default)]
+    accepted: bool,
 }
 fn key(group: &str) -> String {
     format!("{PREFIX}{}", ramflux_protocol::encode_base64url(group))
@@ -44,23 +46,47 @@ impl RamfluxClient {
         state: &VerifiedGroupState,
     ) -> Result<bool, SdkError> {
         let creator = &state.creator().identity;
-        let inviter = &state.snapshot().issuer.identity;
         if self.group_parties_blocked(state.snapshot())? {
             return Err(super::invalid("group creator or inviter is blocked"));
         }
-        if self.account_db()?.shared_group_state(&state.view().group_id)?.is_some() {
+        self.check_group_decline_fence(&state.view().group_id)?;
+        if let Some(previous) = self.account_db()?.shared_group_state(&state.view().group_id)? {
+            if state.relation_to(&previous)? == ramflux_crypto::GroupStateRelation::Unrelated {
+                return Err(super::invalid("group creator authority differs from joined group"));
+            }
             return Ok(false);
         }
         let own = self.owned_device_identity()?;
         if state.view().effective_role(own.root_commitment(), own.device_id()).is_none() {
             return Err(StorageError::GroupPermissionDenied.into());
         }
-        for identity in [creator, inviter] {
-            if self.accepted_contact_source(&identity.root_commitment, &identity.principal_id)? {
-                return Ok(false);
-            }
+        if self
+            .account_db()?
+            .load_actor_state::<Invitation>(&key(&state.view().group_id))?
+            .is_some_and(|row| {
+                row.accepted
+                    && row.expires_at > now_unix_timestamp()
+                    && row.snapshot.genesis == *state.genesis()
+            })
+        {
+            return Ok(false);
+        }
+        // A transport forwarder is never an inviter. Until a separately signed
+        // invitation exists, only the creator can supply implicit contact consent.
+        if self.accepted_contact_source(&creator.root_commitment, &creator.principal_id)? {
+            return Ok(false);
         }
         Ok(true)
+    }
+    pub(crate) fn check_group_decline_fence(&self, group: &str) -> Result<(), SdkError> {
+        if self
+            .account_db()?
+            .load_actor_state::<Invitation>(&key(group))?
+            .is_some_and(|row| row.declined && row.expires_at > now_unix_timestamp())
+        {
+            return Err(super::invalid("group invitation was declined"));
+        }
+        Ok(())
     }
     pub(super) fn hold_group_invitation(
         &self,
@@ -85,7 +111,7 @@ impl RamfluxClient {
                 db.persist_actor_state(&id, &previous)?;
                 return Ok(());
             }
-            let inviter = &state.snapshot().issuer.identity.root_commitment;
+            let inviter = &state.creator().identity.root_commitment;
             let invitations = db.list_actor_states::<Invitation>(PREFIX)?;
             if invitations.len() >= 128
                 || invitations.iter().filter(|row| !row.declined).count() >= 32
@@ -109,6 +135,7 @@ impl RamfluxClient {
                     inviter: inviter.clone(),
                     expires_at: now.saturating_add(7 * 86400),
                     declined: false,
+                    accepted: false,
                 },
             )?;
             Ok(())
@@ -143,6 +170,8 @@ impl RamfluxClient {
             let state = ramflux_crypto::verify_group_state_snapshot(invitation.snapshot.clone())?;
             if accept {
                 self.group_snapshot_requires_consent(&state)?;
+                invitation.accepted = true;
+                db.persist_actor_state(&key(group), &invitation)?;
                 let prepared =
                     self.prepare_shared_group_payload(state.clone(), &invitation.packet)?;
                 self.apply_prepared_shared_group(&prepared, target)?;

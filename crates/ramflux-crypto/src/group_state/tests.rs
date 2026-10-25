@@ -271,7 +271,7 @@ fn removal_excludes_siblings_and_transport_certificates_never_sign_creator_state
 }
 
 #[test]
-fn group_only_exclusions_expire_after_the_boundary_window() -> Result<(), CryptoError> {
+fn r5_group_only_exclusions_survive_while_the_root_remains_a_member() -> Result<(), CryptoError> {
     let owner = person("owner", "phone", 11, 12)?;
     let sibling = person("owner", "laptop", 11, 32)?;
     let base = add(&create(&owner)?, &owner, &sibling, SharedGroupRole::Member)?;
@@ -303,11 +303,11 @@ fn group_only_exclusions_expire_after_the_boundary_window() -> Result<(), Crypto
             now: 1000 + GROUP_REQUEST_TTL_SECONDS,
         },
     )?;
-    assert_eq!(pruned.view().excluded.len(), 0);
+    assert_eq!(pruned.view().excluded.len(), 1);
     assert!(
-        pruned.view().effective_role(&owner.actor.identity.root_commitment, "laptop").is_some(),
-        "permanent removal requires signed account revocation"
+        pruned.view().effective_role(&owner.actor.identity.root_commitment, "laptop").is_none()
     );
+    assert!(add(&pruned, &owner, &sibling, SharedGroupRole::Member).is_err());
     Ok(())
 }
 
@@ -332,5 +332,32 @@ fn ownership_transfer_budget_has_a_typed_capacity_refusal() -> Result<(), Crypto
             GroupStateLimit::Transfers
         )))
     ));
+    Ok(())
+}
+
+#[test]
+fn r5_transfer_dominates_same_epoch_edit_and_old_owner_higher_fork() -> Result<(), CryptoError> {
+    let alice = person("alice", "phone", 11, 12)?;
+    let laptop = person("alice", "laptop", 11, 32)?;
+    let bob = person("bob", "phone", 21, 22)?;
+    let base = add(&create(&alice)?, &alice, &bob, SharedGroupRole::Member)?;
+    let transfer =
+        step(&base, &alice, GroupStateChange::TransferOwnership { creator: bob.actor.clone() })?;
+    // Exercise both hash orders rather than depending on one favorable golden.
+    for index in 0..8 {
+        let edit =
+            step(&base, &laptop, GroupStateChange::SetName { name: format!("racing-{index}") })?;
+        assert_eq!(transfer.relation_to(&edit)?, GroupStateRelation::Extension);
+        assert_eq!(edit.relation_to(&transfer)?, GroupStateRelation::Unrelated);
+    }
+    let mut fork = base;
+    for index in 0..8 {
+        fork = step(&fork, &laptop, GroupStateChange::SetName { name: format!("fork-{index}") })?;
+    }
+    let bob_head = step(&transfer, &bob, GroupStateChange::SetName { name: "new owner".into() })?;
+    assert!(fork.view().epoch > bob_head.view().epoch);
+    assert_eq!(bob_head.relation_to(&fork)?, GroupStateRelation::Extension);
+    assert_eq!(fork.relation_to(&bob_head)?, GroupStateRelation::Unrelated);
+    assert!(step(&bob_head, &alice, GroupStateChange::SetName { name: "undo".into() }).is_err());
     Ok(())
 }

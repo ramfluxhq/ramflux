@@ -108,6 +108,8 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         use crate::client::routed::Kind;
         if matches!(route.kind, Kind::GroupControl | Kind::GroupMessage) {
+            let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
+            self.check_group_decline_fence(group)?;
             let source = self.authenticated_device_identity(entry)?;
             if self.friend_rejection_reason(source.root_commitment())?.as_deref()
                 == Some("friend.blocked")
@@ -120,12 +122,9 @@ impl RamfluxClient {
                 && !crate::client::shared_group::is_shared_group_packet(body)
             {
                 let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
-                if self.account_db()?.group_snapshot_epoch(group)?.is_none()
-                    && !self.accepted_contact_source(
-                        source.root_commitment(),
-                        &entry.envelope.source_principal_id,
-                    )?
-                {
+                // A legacy bootstrap cannot prove a creator-bound invitation.
+                // Already joined legacy groups remain readable during upgrade.
+                if self.account_db()?.group_snapshot_epoch(group)?.is_none() {
                     return Err(invalid(
                         "legacy stranger group bootstrap requires a v2 invitation",
                     ));

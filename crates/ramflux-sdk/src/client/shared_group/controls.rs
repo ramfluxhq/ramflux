@@ -71,7 +71,34 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
-    pub(super) async fn prepare_group_control(
+    fn admit_group_control(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        entry: &GatewayInboxEntry,
+        packet: &GroupControlPacket,
+    ) -> Result<(), SdkError> {
+        ramflux_crypto::verify_group_state_actor(packet.actor())?;
+        let actor = &packet.actor().identity;
+        // The certified local roster is sufficient for admission; outsiders must
+        // not trigger directory IO or consume persistent request/result capacity.
+        if state.view().effective_role(&actor.root_commitment, &actor.device_id).is_none()
+            || (matches!(packet.body, GroupControlBody::Result { .. })
+                && actor.root_commitment != state.creator().identity.root_commitment)
+            || (matches!(packet.body, GroupControlBody::Request { .. })
+                && self.owned_device_identity()?.root_commitment()
+                    != state.creator().identity.root_commitment)
+        {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
+        let source = self.authenticated_device_identity(entry)?;
+        if source.root_commitment() != actor.root_commitment
+            || source.device_id() != actor.device_id
+        {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
+        Ok(())
+    }
+    pub(crate) async fn prepare_group_control(
         &self,
         engine: &GatewaySessionEngine,
         entry: &GatewayInboxEntry,
@@ -88,7 +115,7 @@ impl RamfluxClient {
         if routing.conversation_id != state.view().conversation_id {
             return Err(super::invalid("group control conversation mismatch"));
         }
-        ramflux_crypto::verify_group_state_actor(packet.actor())?;
+        self.admit_group_control(&state, entry, packet)?;
         self.verify_group_actor_source(&engine.config, packet.actor(), entry).await?;
         match &packet.body {
             GroupControlBody::Request { request, federation } => {
@@ -99,8 +126,7 @@ impl RamfluxClient {
                 {
                     return Err(StorageError::GroupPermissionDenied.into());
                 }
-                // An expelled requester still gets a typed refusal. Candidate additions, however,
-                // can only use an active key from the current signed identity directory.
+                // Candidate additions can only use an active key from the current directory.
                 if let ramflux_protocol::GroupStateChange::Add { member, .. } = &request.change
                     && ramflux_crypto::validate_group_change_request(
                         &state,

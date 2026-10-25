@@ -268,3 +268,7 @@ mod shared_group_beacon_tests;
 #[cfg(test)]
 #[path = "shared_group_request_tests.rs"]
 mod shared_group_request_tests;
+
+#[cfg(test)]
+#[path = "shared_group_consent_tests.rs"]
+mod shared_group_consent_tests;

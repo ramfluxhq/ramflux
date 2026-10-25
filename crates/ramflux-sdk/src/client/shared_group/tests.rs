@@ -163,6 +163,7 @@ fn one_bootstrap_packet_supplies_the_first_key_and_replays_do_not_reset_the_rece
     )?;
     let bytes = owner.shared_group_packet(&state, true)?;
     let decoded = decode_packet(&bytes)?.ok_or(SdkError::IdentityRootMissing)?;
+    peer.establish_friend_link("creator-consent", "peer", &own.principal_commitment)?;
     let prepared = peer.prepare_shared_group_payload(decoded, &bytes)?;
     assert!(peer.apply_prepared_shared_group(&prepared, "target-peer")?);
     let encrypted =
@@ -322,3 +323,327 @@ mod head_scope_tests;
 
 #[path = "fork_tests.rs"]
 mod fork_tests;
+
+#[test]
+fn r5_contact_forwarding_cannot_adopt_a_stranger_group_or_override_decline() -> Result<(), SdkError>
+{
+    let root = temp_root("r5-consent")?;
+    let stranger = person(&root.join("stranger"), "stranger", "phone", 11, 12)?;
+    let contact = person(&root.join("contact"), "contact", "phone", 21, 22)?;
+    let user = person(&root.join("user"), "user", "phone", 31, 32)?;
+    stranger.shared_group_create("g", "t", None, "target-phone")?;
+    stranger.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::Add {
+            member: contact.owned_group_actor("target-phone")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    let state = stranger.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::Add {
+            member: user.owned_group_actor("target-phone")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    let contact_root = contact.owned_device_identity()?.root_commitment().to_owned();
+    user.establish_friend_link("friend", "user", &contact_root)?;
+    let forwarded = ramflux_crypto::resign_group_state_snapshot(
+        contact.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &contact.owned_group_actor("target-phone")?,
+        &state,
+    )?;
+    assert!(user.group_snapshot_requires_consent(&forwarded)?);
+    let packet = packet_bytes(&forwarded)?;
+    user.hold_group_invitation(&forwarded, &packet)?;
+    user.decide_group_invitation("g", false, "target-phone")?;
+    assert!(user.group_snapshot_requires_consent(&forwarded).is_err());
+    let prepared = user.prepare_shared_group_payload(forwarded, &packet)?;
+    assert!(user.apply_prepared_shared_group(&prepared, "target-phone").is_err());
+    assert!(user.account_db()?.shared_group_state("g")?.is_none());
+    assert!(user.account_db()?.client_record("conversation", "t")?.is_none());
+    drop((stranger, contact, user));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn r5_removed_requester_flood_is_not_stored_and_other_groups_keep_capacity() -> Result<(), SdkError>
+{
+    use ramflux_crypto::{GroupChangeRequestInput, sign_group_change_request};
+    let root = temp_root("r5-requests")?;
+    let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
+    let removed = person(&root.join("removed"), "removed", "phone", 21, 22)?;
+    let admin = person(&root.join("admin"), "admin", "phone", 31, 32)?;
+    let victim = person(&root.join("victim"), "victim", "phone", 41, 42)?;
+    for person in [&owner, &removed, &admin, &victim] {
+        owner.persist_identity_directory(
+            &crate::client::identity_authority::test_support::public_manifest(person)?,
+        )?;
+    }
+    owner.shared_group_create("g", "t", None, "target-phone")?;
+    owner.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::Add {
+            member: removed.owned_group_actor("target-phone")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Admin,
+        },
+    )?;
+    owner.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::Add {
+            member: admin.owned_group_actor("target-phone")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Admin,
+        },
+    )?;
+    let before = owner.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::Add {
+            member: victim.owned_group_actor("target-phone")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    owner.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::Remove {
+            root_commitment: removed.owned_device_identity()?.root_commitment().into(),
+            device_id: "phone".into(),
+        },
+    )?;
+    for index in 0..80 {
+        let request = sign_group_change_request(
+            removed.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &removed.owned_group_actor("target-phone")?,
+            &before,
+            GroupChangeRequestInput {
+                request_id: format!("flood-{index}"),
+                change: GroupStateChange::SetName { name: "spam".into() },
+                now: now_unix_timestamp(),
+            },
+        )?;
+        assert!(owner.insert_group_request(&request, true).is_err());
+    }
+    assert!(owner.group_change_records()?.is_empty());
+    let removal = sign_group_change_request(
+        admin.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &admin.owned_group_actor("target-phone")?,
+        &before,
+        GroupChangeRequestInput {
+            request_id: "admin-removal".into(),
+            change: GroupStateChange::Remove {
+                root_commitment: victim.owned_device_identity()?.root_commitment().into(),
+                device_id: "phone".into(),
+            },
+            now: now_unix_timestamp(),
+        },
+    )?;
+    owner.insert_group_request(&removal, true)?;
+    assert_eq!(
+        owner.process_group_request(&removal, "target-phone")?.status,
+        ramflux_protocol::GroupChangeStatus::Applied
+    );
+
+    owner.shared_group_create("other", "other-thread", None, "target-phone")?;
+    let other = owner
+        .account_db()?
+        .shared_group_state("other")?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    let request = sign_group_change_request(
+        owner.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &owner.owned_group_actor("target-phone")?,
+        &other,
+        GroupChangeRequestInput {
+            request_id: "legitimate-removal".into(),
+            change: GroupStateChange::SetName { name: "legitimate".into() },
+            now: now_unix_timestamp(),
+        },
+    )?;
+    owner.insert_group_request(&request, true)?;
+    assert_eq!(owner.group_change_records()?.len(), 2);
+    drop((owner, removed, admin, victim));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[test]
+fn r5_processed_results_still_count_toward_the_source_partition() -> Result<(), SdkError> {
+    let root = temp_root("r5-result-pool")?;
+    let owner = person(&root, "owner", "phone", 11, 12)?;
+    owner.shared_group_create("g", "t", None, "target-phone")?;
+    let state =
+        owner.account_db()?.shared_group_state("g")?.ok_or(StorageError::GroupPermissionDenied)?;
+    for index in 0..65 {
+        let request = ramflux_crypto::sign_group_change_request(
+            owner.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &owner.owned_group_actor("target-phone")?,
+            &state,
+            ramflux_crypto::GroupChangeRequestInput {
+                request_id: format!("processed-{index}"),
+                change: GroupStateChange::SetName { name: "name".into() },
+                now: now_unix_timestamp(),
+            },
+        )?;
+        let result = owner.insert_group_request(&request, true);
+        if index == 64 {
+            assert!(result.is_err());
+        } else {
+            result?;
+            let mut row = owner
+                .group_change_record(&request, true)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            row.local_status = "result_ready".into();
+            owner.persist_group_request(&row)?;
+        }
+    }
+    assert_eq!(owner.group_change_records()?.len(), 64);
+    drop(owner);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn r5_group_aliases_follow_message_deletion_and_pending_expiry() -> Result<(), SdkError> {
+    let root = temp_root("r5-alias")?;
+    let owner = person(&root, "owner", "phone", 11, 12)?;
+    owner.shared_group_create("g", "t", None, "target-phone")?;
+    let (canonical, _) = owner.qualify_outgoing_group_message("g", "logical")?;
+    owner.send_direct_message("t", &canonical, "phone", b"body")?;
+    owner.account_db()?.delete_direct_message("t", &canonical, "local", "delete")?;
+    assert_eq!(owner.outgoing_group_logical_id(&canonical)?, None);
+    let (pending, _) = owner.qualify_outgoing_group_message("g", "pending")?;
+    let alias_key = format!("group-message/alias/{pending}");
+    let mut row: serde_json::Value =
+        owner.account_db()?.load_actor_state(&alias_key)?.ok_or(SdkError::IdentityRootMissing)?;
+    row["expires_at"] = serde_json::json!(0);
+    owner.account_db()?.persist_actor_state(&alias_key, &row)?;
+    owner.qualify_outgoing_group_message("g", "next")?;
+    assert_eq!(owner.outgoing_group_logical_id(&pending)?, None);
+    drop(owner);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn r5_successor_transfer_chain_replaces_an_offline_members_higher_epoch_projection()
+-> Result<(), SdkError> {
+    let root = temp_root("r5-transfer-projection")?;
+    let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
+    let laptop = person(&root.join("laptop"), "owner", "laptop", 11, 32)?;
+    let bob = person(&root.join("bob"), "bob", "phone", 21, 22)?;
+    let observer = person(&root.join("observer"), "observer", "phone", 41, 42)?;
+    owner.shared_group_create("g", "t", None, "target-phone")?;
+    for member in [&bob, &observer] {
+        owner.shared_group_change(
+            "g",
+            "target-phone",
+            GroupStateChange::Add {
+                member: member.owned_group_actor("target-phone")?.identity,
+                role: ramflux_protocol::SharedGroupRole::Member,
+            },
+        )?;
+    }
+    let base =
+        owner.account_db()?.shared_group_state("g")?.ok_or(StorageError::GroupPermissionDenied)?;
+    let mut fork = base.clone();
+    for index in 0..5 {
+        fork = ramflux_crypto::advance_group_state(
+            laptop.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            laptop.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &laptop.owned_group_actor("target-laptop")?,
+            &fork,
+            GroupStateChange::SetName { name: format!("fork-{index}") },
+        )?;
+    }
+    observer.accept_shared_group_state(&fork, "target-phone")?;
+    let transfer = owner.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::TransferOwnership { creator: bob.owned_group_actor("target-phone")? },
+    )?;
+    bob.accept_shared_group_state(&transfer, "target-phone")?;
+    let successor = bob.shared_group_change(
+        "g",
+        "target-phone",
+        GroupStateChange::SetName { name: "successor".into() },
+    )?;
+    assert!(successor.view().epoch < fork.view().epoch);
+    assert!(observer.accept_shared_group_state(&successor, "target-phone")?);
+    assert_eq!(
+        observer
+            .account_db()?
+            .shared_group_state("g")?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .creator(),
+        successor.creator()
+    );
+    assert!(!observer.accept_shared_group_state(&fork, "target-phone")?);
+    drop((owner, laptop, bob, observer));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn r5_legacy_nonmember_results_are_pruned_on_new_admission() -> Result<(), SdkError> {
+    let root = temp_root("r5-old-result")?;
+    let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
+    let outsider = person(&root.join("outsider"), "outsider", "phone", 21, 22)?;
+    let base = owner.shared_group_create("g", "t", None, "target-phone")?;
+    // Reconstruct a row admitted by the former receive path, using a genuine
+    // root-certified outsider and a creator-signed refusal.
+    let mut request = ramflux_protocol::GroupChangeRequest {
+        schema: ramflux_protocol::group_state::GROUP_CHANGE_REQUEST_DOMAIN.into(),
+        group_id: "g".into(),
+        genesis_hash: base.genesis_hash()?,
+        base_epoch: 1,
+        creator_root: owner.owned_device_identity()?.root_commitment().into(),
+        request_id: "old-outsider".into(),
+        actor: outsider.owned_group_actor("target-phone")?,
+        change: GroupStateChange::SetName { name: "spam".into() },
+        issued_at: now_unix_timestamp(),
+        expires_at: now_unix_timestamp() + 86400,
+        signature: String::new(),
+    };
+    let mut body = serde_json::to_value(&request)?;
+    body.as_object_mut().ok_or(SdkError::IdentityRootMissing)?.remove("signature");
+    request.signature = ramflux_crypto::sign_with_device_branch(
+        outsider.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &body,
+    )?;
+    ramflux_crypto::verify_group_change_request(&request, now_unix_timestamp())?;
+    // Retention reads stored rows; wire verification remains mandatory on new admission.
+    let result = ramflux_crypto::sign_group_change_result(
+        owner.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &owner.owned_group_actor("target-phone")?,
+        &request,
+        &base,
+        ramflux_protocol::GroupChangeStatus::PermissionDenied,
+        now_unix_timestamp(),
+    )?;
+    owner.persist_group_request(&super::requests::RequestRecord {
+        request,
+        incoming: true,
+        result: Some(result),
+        local_status: "result_ready".into(),
+        expires_at: now_unix_timestamp() + 86400,
+        next_at: 0,
+        delivered: BTreeSet::new(),
+        federation: None,
+    })?;
+    owner.shared_group_create("other", "other-thread", None, "target-phone")?;
+    let request = owner.stage_group_change_request(
+        "other",
+        "target-phone",
+        GroupStateChange::SetName { name: "legitimate".into() },
+        None,
+    )?;
+    let rows = owner.group_change_records()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].request, request);
+    drop((owner, outsider));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -114,9 +114,10 @@ impl RamfluxClient {
         {
             return Err(invalid("group state routing mismatch"));
         }
+        let needs_consent = self.group_snapshot_requires_consent(&state)?;
         self.verify_shared_group_source(&engine.config, &state, entry).await?;
         self.authenticated_envelope_sender(entry)?;
-        if self.group_snapshot_requires_consent(&state)? {
+        if needs_consent {
             return Ok(Some(PreparedSharedGroup::Invitation {
                 state,
                 body: Zeroizing::new(body.to_vec()),
@@ -180,6 +181,9 @@ impl RamfluxClient {
             PreparedSharedGroup::Control(packet) => return self.apply_group_control(packet),
         };
         let state = &prepared.state;
+        if self.group_snapshot_requires_consent(state)? {
+            return Err(invalid("group consent is pending"));
+        }
         self.account_db()?.write_transaction(|| {
             let changed = self.accept_shared_group_state(state, local_target)?;
             if self

@@ -6,6 +6,25 @@ use super::AccountDb;
 use crate::StorageError;
 use rusqlite::{OptionalExtension, params};
 impl AccountDb {
+    pub(super) fn install_group_message_retention_schema(&self) -> Result<(), StorageError> {
+        self.connection.execute_batch("             INSERT OR IGNORE INTO runtime_actor_state(state_kind,state_json)
+                VALUES('group-message/upgrade-start',CAST(unixepoch() AS TEXT));
+             CREATE TRIGGER IF NOT EXISTS group_alias_delete AFTER DELETE ON direct_message_projection
+                BEGIN DELETE FROM runtime_actor_state WHERE state_kind='group-message/alias/'||OLD.message_id; END;
+             CREATE TRIGGER IF NOT EXISTS group_alias_redact AFTER UPDATE OF deleted ON direct_message_projection
+                WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_actor_state WHERE state_kind='group-message/alias/'||NEW.message_id; END;
+")?;
+        Ok(())
+    }
+
+    /// Remove expired uncommitted message aliases; committed aliases live exactly
+    /// as long as their message and are deleted by history-retention triggers.
+    /// # Errors
+    /// Returns database errors.
+    pub fn retain_group_message_aliases(&self, now: i64) -> Result<(), StorageError> {
+        self.connection.execute("DELETE FROM runtime_actor_state WHERE substr(state_kind,1,20)='group-message/alias/' AND NOT EXISTS(SELECT 1 FROM direct_message_projection m WHERE m.message_id=substr(state_kind,21) AND m.deleted=0) AND coalesce(json_extract(CAST(state_json AS TEXT),'$.expires_at'),0)<=?1",params![now])?;
+        Ok(())
+    }
     /// Retains at most 64 active key-head checkpoints per group, sender and direction.
     /// Historical event bodies remain governed by account history retention.
     /// # Errors

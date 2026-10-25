@@ -162,7 +162,15 @@ fn verify_roster(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
         return Err(invalid("invalid owner or member cap"));
     }
     let mut excluded = BTreeSet::new();
+    let mut excluded_counts = BTreeMap::new();
     for entry in &state.excluded {
+        let count = excluded_counts.entry(&entry.root_commitment).or_insert(0);
+        *count += 1;
+        if *count + roots.get(&entry.root_commitment).map_or(0, |(_, count)| *count)
+            > MAX_GROUP_DEVICES_PER_ROOT
+        {
+            return Err(invalid("excluded device root cap"));
+        }
         hash_valid(&entry.root_commitment)?;
         ramflux_protocol::validate_device_name(&entry.device_id)?;
         if entry.removed_epoch == 0
@@ -296,9 +304,16 @@ pub(super) fn advance_as(
     snapshot.previous_hash = Some(snapshot.state_hash.clone());
     snapshot.epoch = epoch;
     snapshot.issued_at = now;
-    // Group-only device exclusions share the seven-day boundary window. Permanent
-    // exclusion of a device from an active member root uses signed account revocation.
-    snapshot.state.excluded.retain(|entry| entry.expires_at > now);
+    // A still-member root must never silently regain an excluded sibling.
+    // Only departed-root exclusions can age out with their delivery boundary.
+    snapshot.state.excluded.retain(|entry| {
+        entry.expires_at > now
+            || snapshot
+                .state
+                .members
+                .iter()
+                .any(|member| member.identity.root_commitment == entry.root_commitment)
+    });
     if let GroupStateChange::TransferOwnership { creator } = &change {
         if requester.identity.root_commitment != previous.creator().identity.root_commitment {
             return Err(invalid("ownership transfer not authorized"));

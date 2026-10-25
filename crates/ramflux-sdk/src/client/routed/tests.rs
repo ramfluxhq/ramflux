@@ -775,6 +775,85 @@ fn a_stranger_cannot_use_legacy_bootstrap_to_bypass_group_invitation_consent()
         recipient.client.owned_device_identity()?.root_commitment(),
         source.root_commitment(),
     )?;
-    recipient.client.contact_route_gate(&entry, &opened.routing, &opened.body)?;
+    assert!(recipient.client.contact_route_gate(&entry, &opened.routing, &opened.body).is_err());
+    Ok(())
+}
+
+#[test]
+fn r5_direct_messages_cannot_preclaim_group_ids() -> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 11)?;
+    let bob = Fixture::new("bob", 21)?;
+    let entry = seal(&alice, &bob, message("wire", "thread"), b"hello")?;
+    let direct = bob.client.projection_id_for(&entry, "groupmsg:reserved")?;
+    assert!(direct.starts_with("routed:"));
+    Ok(())
+}
+#[test]
+fn r5_legacy_group_messages_have_a_seven_day_upgrade_window() -> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 11)?;
+    let bob = Fixture::new("bob", 21)?;
+    let entry = seal(&alice, &bob, message("wire", "thread"), b"hello")?;
+    let mut route = routing(&message("legacy", "thread"), Route::group_message("g"));
+    route.group_message_id = None;
+    let legacy = entry.clone();
+    let start = legacy.envelope.created_at;
+    bob.client.account_db()?.persist_actor_state("group-message/upgrade-start", &start)?;
+    let actual = bob.client.projection_id(&legacy, &route)?;
+    let source = bob.client.authenticated_device_identity(&legacy)?;
+    assert_eq!(
+        actual,
+        ramflux_protocol::group_message_id(
+            "g",
+            source.root_commitment(),
+            source.device_id(),
+            &legacy.envelope.envelope_id
+        )?
+    );
+    bob.client
+        .account_db()?
+        .persist_actor_state("group-message/upgrade-start", &(start - 8 * 86400))?;
+    assert!(bob.client.projection_id(&legacy, &route).is_err());
+    route.group_message_id = Some("modern".into());
+    assert!(bob.client.projection_id(&legacy, &route).is_ok());
+    Ok(())
+}
+#[tokio::test]
+async fn r5_outsider_controls_are_rejected_before_directory_io() -> Result<(), SdkError> {
+    use crate::client::shared_group::{GroupControlBody, GroupControlPacket};
+    let outsider = Fixture::new("alice", 11)?;
+    let owner = Fixture::new("bob", 21)?;
+    owner.client.shared_group_create("g", "thread", None, "bob")?;
+    let entry = seal(&outsider, &owner, message("outsider", "thread"), b"hello")?;
+    let packet = GroupControlPacket::new(GroupControlBody::DeviceSet {
+        group_id: "g".into(),
+        actor: outsider.client.owned_group_actor("alice")?,
+        device_set_epoch: 1,
+    });
+    let engine = GatewaySessionEngine::with_test_transport(owner.config()?, Box::new(NoNetwork));
+    let route = routing(&message("outsider", "thread"), Route::group_control("g"));
+    assert!(matches!(
+        owner.client.prepare_group_control(&engine, &entry, &route, &packet).await,
+        Err(SdkError::Storage(StorageError::GroupPermissionDenied))
+    ));
+    owner.client.shared_group_change(
+        "g",
+        "bob",
+        ramflux_protocol::GroupStateChange::Add {
+            member: outsider.client.owned_group_actor("alice")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    let key =
+        format!("group-control:{}", outsider.client.owned_device_identity()?.root_commitment());
+    for _ in 0..32 {
+        assert!(owner.client.account_db()?.charge_contact_request(
+            &key,
+            32,
+            60,
+            now_unix_timestamp()
+        )?);
+    }
+    assert!(matches!(owner.client.prepare_group_control(&engine, &entry, &route, &packet).await,
+        Err(SdkError::InboundPending(reason)) if reason == "group control source rate exceeded"));
     Ok(())
 }

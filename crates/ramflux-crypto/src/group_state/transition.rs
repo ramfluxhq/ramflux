@@ -104,12 +104,28 @@ fn add(
         )
         .into());
     }
+    if roots.contains(&identity.root_commitment)
+        && state.excluded.iter().any(|entry| {
+            entry.root_commitment == identity.root_commitment
+                && entry.device_id == identity.device_id
+        })
+    {
+        return Err(invalid("device remains excluded from this member root"));
+    }
+    if !roots.contains(&identity.root_commitment) {
+        state.excluded.retain(|entry| entry.root_commitment != identity.root_commitment);
+    }
     if state.members.len() >= MAX_GROUP_DEVICES
         || state
             .members
             .iter()
             .filter(|member| member.identity.root_commitment == identity.root_commitment)
             .count()
+            + state
+                .excluded
+                .iter()
+                .filter(|entry| entry.root_commitment == identity.root_commitment)
+                .count()
             >= MAX_GROUP_DEVICES_PER_ROOT
     {
         return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
@@ -151,6 +167,21 @@ fn remove(
         || state.excluded.len() >= MAX_GROUP_STATE_EXCLUSIONS
     {
         return Err(invalid("invalid removed identity or exclusion budget"));
+    }
+    if state.excluded.iter().filter(|entry| entry.root_commitment == root).count()
+        + state
+            .members
+            .iter()
+            .filter(|member| {
+                member.identity.root_commitment == root && member.identity.device_id != device
+            })
+            .count()
+        >= MAX_GROUP_DEVICES_PER_ROOT
+    {
+        return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
+            ramflux_protocol::GroupStateLimit::Devices,
+        )
+        .into());
     }
     state.members.retain(|m| m.identity.root_commitment != root || m.identity.device_id != device);
     state.excluded.push(GroupDeviceExclusion {

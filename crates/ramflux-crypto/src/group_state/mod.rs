@@ -101,6 +101,19 @@ impl VerifiedGroupState {
         if self.genesis() != previous.genesis() {
             return Ok(Unrelated);
         }
+        // A certified handover dominates an old-owner fork, even if that fork
+        // advanced farther while the receiver was offline. Epoch ordering and
+        // creator-device hash ties apply only within the same transfer lineage.
+        if self.snapshot.transfers != previous.snapshot.transfers {
+            return Ok(if self.snapshot.transfers.starts_with(&previous.snapshot.transfers) {
+                Extension
+            } else if previous.snapshot.transfers.starts_with(&self.snapshot.transfers) {
+                let transfer = &previous.snapshot.transfers[self.snapshot.transfers.len()];
+                if self.view().epoch < transfer.epoch { Ancestor } else { Unrelated }
+            } else {
+                Unrelated
+            });
+        }
         if self.view().epoch < previous.view().epoch {
             return Ok(Ancestor);
         }

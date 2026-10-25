@@ -106,6 +106,23 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         ramflux_crypto::verify_group_change_request(request, now_unix_timestamp())?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            let state = self
+                .account_db()?
+                .shared_group_state(&request.group_id)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            if state
+                .view()
+                .effective_role(
+                    &request.actor.identity.root_commitment,
+                    &request.actor.identity.device_id,
+                )
+                .is_none()
+                || (incoming
+                    && self.owned_device_identity()?.root_commitment()
+                        != state.creator().identity.root_commitment)
+            {
+                return Err(StorageError::GroupPermissionDenied.into());
+            }
             if let Some(previous) = self.group_change_record(request, incoming)? {
                 if previous.request != *request {
                     return Err(SdkError::InboundRejected(
@@ -116,59 +133,98 @@ impl RamfluxClient {
             }
             let now = now_unix_timestamp();
             self.account_db()?.retain_expiring_actor_states(REQUEST_PREFIX, now, 4096)?;
-            let rows = self.group_change_records()?;
+            let rows = self.prune_group_request_partitions(self.group_change_records()?)?;
             if rows.len() >= 4096 {
                 return Err(capacity());
             }
-            let live = rows.iter().filter(|row| {
-                row.incoming == incoming
-                    && row.request.group_id == request.group_id
-                    && row.result.is_none()
-                    && row.request.expires_at > now
-                    && row.local_status == "waiting_for_owner"
-            });
-            let same: Vec<_> = live.collect();
-            let full = same.len() >= MAX_GROUP_PENDING_REQUESTS
-                || same
+            // Partition retained results as well as pending work. A group can
+            // occupy at most 256 of the 4096 account rows; a source root at most
+            // 64 in that group. Overflow is a transient refusal, never another row.
+            let group_rows: Vec<_> =
+                rows.iter().filter(|row| row.request.group_id == request.group_id).collect();
+            if group_rows.len() >= 256
+                || group_rows
                     .iter()
                     .filter(|row| {
                         row.request.actor.identity.root_commitment
                             == request.actor.identity.root_commitment
                     })
                     .count()
-                    >= MAX_GROUP_REQUESTS_PER_ROOT;
-            let result = if full {
-                if !incoming {
-                    return Err(capacity());
-                }
-                let state = self
-                    .account_db()?
-                    .shared_group_state(&request.group_id)?
-                    .ok_or(StorageError::GroupPermissionDenied)?;
-                let actor =
-                    self.owned_group_actor(&self.shared_group_local_target(&request.group_id)?)?;
-                Some(ramflux_crypto::sign_group_change_result(
-                    self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                    &actor,
-                    request,
-                    &state,
-                    GroupChangeStatus::Capacity,
-                    now,
-                )?)
-            } else {
-                None
-            };
+                    >= 64
+            {
+                return Err(capacity());
+            }
+            let pending: Vec<_> = group_rows
+                .iter()
+                .filter(|row| {
+                    row.incoming == incoming
+                        && row.result.is_none()
+                        && row.request.expires_at > now
+                        && row.local_status == "waiting_for_owner"
+                })
+                .collect();
+            if pending.len() >= MAX_GROUP_PENDING_REQUESTS
+                || pending
+                    .iter()
+                    .filter(|row| {
+                        row.request.actor.identity.root_commitment
+                            == request.actor.identity.root_commitment
+                    })
+                    .count()
+                    >= MAX_GROUP_REQUESTS_PER_ROOT
+            {
+                return Err(capacity());
+            }
             self.persist_group_request(&RequestRecord {
                 request: request.clone(),
                 incoming,
-                result,
-                local_status: if full { "result_ready" } else { "waiting_for_owner" }.into(),
+                result: None,
+                local_status: "waiting_for_owner".into(),
                 expires_at: request.expires_at.saturating_add(86400),
                 next_at: now,
                 delivered: BTreeSet::new(),
                 federation: None,
             })
         })
+    }
+    fn prune_group_request_partitions(
+        &self,
+        mut rows: Vec<RequestRecord>,
+    ) -> Result<Vec<RequestRecord>, SdkError> {
+        // Repair pre-upgrade stores too: an old outsider flood must not keep
+        // the account blocked until all of its former retention periods expire.
+        rows.sort_by_key(|row| {
+            (row.local_status != "waiting_for_owner", std::cmp::Reverse(row.request.issued_at))
+        });
+        let mut states = BTreeMap::new();
+        let mut groups = BTreeMap::new();
+        let mut roots = BTreeMap::new();
+        let mut kept = Vec::new();
+        for row in rows {
+            let group = &row.request.group_id;
+            if !states.contains_key(group) {
+                states.insert(group.clone(), self.account_db()?.shared_group_state(group)?);
+            }
+            let actor = &row.request.actor.identity;
+            let authorized = !row.incoming
+                // Previously admitted pending intent must receive its typed
+                // result even if the requester was removed in the meantime.
+                || (row.result.is_none() && row.local_status == "waiting_for_owner")
+                || states.get(group).and_then(Option::as_ref).is_some_and(|state| {
+                    state.view().effective_role(&actor.root_commitment, &actor.device_id).is_some()
+                });
+            let group_count = groups.entry(group.clone()).or_insert(0);
+            let root_count =
+                roots.entry((group.clone(), actor.root_commitment.clone())).or_insert(0);
+            if !authorized || *group_count >= 256 || *root_count >= 64 {
+                self.account_db()?.remove_actor_state(&request_key(&row.request, row.incoming)?)?;
+            } else {
+                *group_count += 1;
+                *root_count += 1;
+                kept.push(row);
+            }
+        }
+        Ok(kept)
     }
     pub(crate) fn process_group_request(
         &self,

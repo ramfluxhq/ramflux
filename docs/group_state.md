@@ -9,8 +9,12 @@ fresh signed device manifest. A forwarding member cannot alter creator authority
 
 Receivers accept a higher creator-certified epoch, including an arbitrary gap.
 There is no operation history, delegated checkpoint or cross-root state writer.
-Conflicting snapshots at the same epoch can only be creator-device writes; the
-lowest content hash wins, and the losing creator device reapplies its own pending
+A verified ownership-transfer chain dominates an old-owner fork even when that
+fork has a larger epoch. Once a transfer at epoch E is known, old-owner snapshots
+at E or later are rejected; the transfer also wins a same-epoch edit. This can
+replace a higher numeric epoch with a lower one on the certified successor line.
+Conflicting snapshots within the same transfer chain can only be creator-device
+writes; the lowest content hash wins, and the losing creator device reapplies its own pending
 intents. Requests from other roots are always revalidated against the winning
 current roster. This is an honest same-user concurrency rule, not multi-writer
 consensus. A newly joining member cannot discover a creator snapshot withheld by
@@ -49,8 +53,13 @@ original request hash. Statuses include `applied`, `already_applied`,
 
 **When the creator is offline, changes wait for the group owner.** No admin or
 member device signs replacement group state. There are at most 8 pending requests
-per requester root/group and 64 per group, with seven-day expiry. The account
-retains at most 4096 request/result records, including short-lived replay receipts.
+per requester root/group and 64 per group, with seven-day expiry. Admission checks current membership before directory IO and before persistence;
+removed roots cannot stage new requests. The account retains at most 4096
+request/result records, partitioned to at most 256 per group and 64 per requester
+root/group, including completed results. Pending limits remain 64 per group and
+8 per root/group. Overflow returns a transient typed refusal without adding a
+capacity-result row. One group therefore cannot fill the account pool. Controls
+are limited to 32 per minute per authenticated source root before directory IO.
 A refusal of a removal is returned as a typed signed result, not a silent success.
 
 Only the creator may call `group.owner.transfer`. Its body contains `group_id`,
@@ -63,10 +72,13 @@ not an admin request.
 
 ## Consent, membership and names
 
-An unknown group is adopted automatically only if its creator or inviter is an
-accepted contact (or the local root). Otherwise its verified snapshot is held as
-an invitation, outside joined group/conversation/message projections. A stranger's
-legacy bootstrap cannot bypass consent: it is refused and requires a v2 invitation.
+An unknown group is adopted automatically only if its creator is an
+accepted contact (or the local root). A transport forwarder is never an inviter;
+currently only the creator grants implicit contact consent. Any future explicit
+v2 invitation must separately authenticate its inviter. Otherwise the verified snapshot is held as
+an invitation, outside joined group/conversation/message projections. A
+legacy bootstrap cannot bypass consent, even when forwarded by a contact: it is
+refused and requires a v2 invitation.
 Known legacy groups retain their existing receive path. Explicit
 acceptance adopts the signed state; decline retains a replay fence. Blocked
 creators or inviters are rejected. A joined member need not be a contact to send
@@ -86,10 +98,13 @@ active devices have priority, then device selection proceeds fairly across roots
 There are at most 200 member roots, 1024 selected devices total and 16 devices per
 root. Excess devices receive typed capacity refusals; one root's excess devices
 do not stop other roots' delivery. Account device revocation is checked separately.
-Group-only device exclusions expire after their seven-day boundary window and
-are pruned on the next creator mutation. If the root remains a member, an active,
-unrevoked device may then follow its root again. Permanent removal uses signed
-account device revocation.
+Group-only device exclusions remain while their root is still a member; a timer
+never re-admits an excluded sibling. Explicit adds cannot override that exclusion.
+Members plus retained exclusions share the 16-device per-root add budget, and
+removing implicit devices cannot create more than 16 exclusions for one root.
+After the root leaves, its exclusions may expire after the seven-day boundary
+window; a deliberate re-add starts a new root membership. Signed account revocation
+independently disables the device everywhere.
 
 ## Delivery, recovery and identity
 
@@ -148,3 +163,15 @@ Shared packets use `ramflux.sdk.group_state.v2` and creator snapshots use
 are not accepted as v2. Unsigned legacy groups remain on their existing path;
 legacy storage mutators cannot modify a shared-group projection. All participants
 need v2 support. Large-group multi-writer consensus is outside this protocol.
+
+## Message identifier upgrade and retention
+
+The `groupmsg:` namespace is reserved: direct-message callers are escaped into
+the authenticated routed namespace. Outgoing group aliases follow their message
+history: deletion/redaction removes the alias in the same database statement;
+uncommitted aliases expire after one day and are cleaned on the next send.
+In-flight messages without a logical group id are accepted only for seven days
+from the account's first startup on this version, and only if their signed
+creation time is no later than that startup. Their envelope id supplies the
+logical component inside the authenticated sender namespace. After that window,
+missing ids fail closed. Modern messages are unaffected.

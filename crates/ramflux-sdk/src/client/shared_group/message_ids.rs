@@ -10,6 +10,8 @@ struct Alias {
     root: String,
     device: String,
     logical: String,
+    #[serde(default)]
+    expires_at: i64,
 }
 impl RamfluxClient {
     pub(crate) fn qualify_outgoing_group_message(
@@ -17,6 +19,7 @@ impl RamfluxClient {
         group: &str,
         supplied: &str,
     ) -> Result<(String, String), SdkError> {
+        self.account_db()?.retain_group_message_aliases(now_unix_timestamp())?;
         let own = self.owned_device_identity()?;
         let logical = if let Some(alias) = self
             .account_db()?
@@ -30,6 +33,9 @@ impl RamfluxClient {
             }
             alias.logical
         } else {
+            if supplied.starts_with("groupmsg:") {
+                return Err(SdkError::LocalBus("group message alias is no longer retained".into()));
+            }
             supplied.into()
         };
         if logical.is_empty() || logical.len() > 256 {
@@ -48,6 +54,7 @@ impl RamfluxClient {
                 root: own.root_commitment().into(),
                 device: own.device_id().into(),
                 logical: logical.clone(),
+                expires_at: now_unix_timestamp().saturating_add(86400),
             },
         )?;
         Ok((canonical, logical))
