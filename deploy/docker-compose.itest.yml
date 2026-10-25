@@ -261,7 +261,7 @@ services:
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_RETENTION_HTTP_ADDR: "0.0.0.0:18087"
     volumes:
-      - ./certs/federation:/etc/ramflux/node-identity:ro
+      - ${RAMFLUX_CERTS_DIR:-./certs}/federation:/etc/ramflux/node-identity:ro
       - ./config/retention.toml:/etc/ramflux/config/retention.toml:ro
       - ${RAMFLUX_CERTS_DIR:-./certs}/retention:/etc/ramflux/mesh:ro
       - retention-redb:/var/lib/ramflux/retention
