@@ -16,8 +16,12 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 pub(super) fn body(checkpoint: &GroupStateCheckpoint) -> Value {
-    json!({"domain":GROUP_STATE_CHECKPOINT_DOMAIN,"schema":checkpoint.schema,
-        "genesis":checkpoint.genesis,"state":checkpoint.state,"owner":checkpoint.owner})
+    let mut value = json!({"domain":GROUP_STATE_CHECKPOINT_DOMAIN,"schema":checkpoint.schema,
+        "genesis":checkpoint.genesis,"state":checkpoint.state,"owner":checkpoint.owner});
+    if !checkpoint.lineage.is_empty() {
+        value["lineage"] = json!(checkpoint.lineage);
+    }
+    value
 }
 pub(super) fn verify_checkpoint(
     checkpoint: &GroupStateCheckpoint,
@@ -36,6 +40,7 @@ pub(super) fn verify_checkpoint(
         &checkpoint.signature,
         &checkpoint.owner.root_public_key,
     )?;
+    super::lineage::validate(checkpoint)?;
     let state = &checkpoint.state;
     if state.group_id != genesis.group_id
         || state.conversation_id != genesis.conversation_id
@@ -138,22 +143,20 @@ impl VerifiedGroupState {
     /// Compare authenticated ancestry; a newer creator-root checkpoint resolves older forks.
     #[must_use]
     pub fn extends(&self, previous: &Self) -> bool {
-        self.genesis_hash() == previous.genesis_hash()
-            && self.view.group_id == previous.view.group_id
-            && (self.contains_head(previous.view.epoch, &previous.view.head_hash)
-                || self
-                    .snapshot
-                    .checkpoint
-                    .as_ref()
-                    .is_some_and(|checkpoint| checkpoint.state.epoch > previous.view.epoch))
+        self.relation_to(previous).is_ok_and(|relation| {
+            matches!(
+                relation,
+                super::GroupStateRelation::Same | super::GroupStateRelation::Extension
+            )
+        })
     }
-    fn genesis(&self) -> &ramflux_protocol::group_state::GroupStateOperation {
+    pub(super) fn genesis(&self) -> &ramflux_protocol::group_state::GroupStateOperation {
         self.snapshot
             .checkpoint
             .as_ref()
             .map_or_else(|| &self.snapshot.operations[0], |checkpoint| &checkpoint.genesis)
     }
-    fn genesis_hash(&self) -> Option<String> {
+    pub(super) fn genesis_hash(&self) -> Option<String> {
         group_state_head_hash(self.genesis()).ok()
     }
 }
@@ -180,6 +183,7 @@ pub fn compact_group_state(
         genesis: previous.genesis().clone(),
         state: previous.view.clone(),
         owner: actor.clone(),
+        lineage: super::lineage::retained(previous),
         signature: String::new(),
     };
     checkpoint.signature = crate::sign_canonical_bytes_with_seed(

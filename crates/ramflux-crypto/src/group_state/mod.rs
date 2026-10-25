@@ -3,6 +3,8 @@
 
 //! Root-authenticated group writers, signed history and monotonic snapshot proofs.
 mod checkpoint;
+mod lineage;
+pub use lineage::GroupStateRelation;
 mod transition;
 use crate::{CryptoError, DeviceBranch, IdentityRoot};
 pub use checkpoint::{advance_group_state, compact_group_state};
@@ -186,20 +188,12 @@ pub fn group_state_head_hash(operation: &GroupStateOperation) -> Result<String, 
         &canonical_json_bytes(operation)?,
     ))
 }
-fn check_issuer(
-    view: &SharedGroupState,
-    operations: &[GroupStateOperation],
-    issuer: &GroupStateActor,
-) -> Result<(), CryptoError> {
+fn check_issuer(view: &SharedGroupState, issuer: &GroupStateActor) -> Result<(), CryptoError> {
     let identity = &issuer.identity;
     let role = view.effective_role(&identity.root_commitment, &identity.device_id);
     // Transport admission verifies the issuer's current root-signed device set. Group history
     // retains the original declaration and must not pin a retired branch key forever.
-    let completed_writer = operations.last().is_some_and(|last| {
-        last.actor.identity.root_commitment == identity.root_commitment
-            && last.actor.identity.device_id == identity.device_id
-    });
-    if role.is_none() && !completed_writer {
+    if role.is_none() {
         return Err(invalid("snapshot issuer is not an authorized member"));
     }
     if view.members.iter().any(|m| {
@@ -227,8 +221,9 @@ fn sign_snapshot_parts(
     checkpoint: Option<ramflux_protocol::group_state::GroupStateCheckpoint>,
 ) -> Result<VerifiedGroupState, CryptoError> {
     branch_matches(branch, actor)?;
-    let (view, heads) = transition::derive(&operations, checkpoint.as_ref())?;
-    check_issuer(&view, &operations, actor)?;
+    let (view, mut heads) = transition::derive(&operations, checkpoint.as_ref())?;
+    lineage::merge(&mut heads, checkpoint.as_ref())?;
+    check_issuer(&view, actor)?;
     let mut snapshot = GroupStateSnapshot {
         schema: GROUP_STATE_SNAPSHOT_DOMAIN.into(),
         group_id: view.group_id.clone(),
@@ -257,7 +252,7 @@ pub fn resign_group_state_snapshot(
     state: &VerifiedGroupState,
 ) -> Result<VerifiedGroupState, CryptoError> {
     branch_matches(branch, actor)?;
-    check_issuer(state.view(), &state.snapshot().operations, actor)?;
+    check_issuer(state.view(), actor)?;
     let mut snapshot = state.snapshot().clone();
     snapshot.issuer = actor.clone();
     snapshot.signature = crate::sign_with_device_branch(branch, &snapshot_body(&snapshot))?;
@@ -276,7 +271,8 @@ pub fn verify_group_state_snapshot(
         return Err(invalid("invalid snapshot header or budget"));
     }
     verify_group_state_actor(&snapshot.issuer)?;
-    let (view, heads) = transition::derive(&snapshot.operations, snapshot.checkpoint.as_ref())?;
+    let (view, mut heads) = transition::derive(&snapshot.operations, snapshot.checkpoint.as_ref())?;
+    lineage::merge(&mut heads, snapshot.checkpoint.as_ref())?;
     if snapshot.group_id != view.group_id
         || snapshot.epoch != view.epoch
         || snapshot.state_hash
@@ -287,7 +283,7 @@ pub fn verify_group_state_snapshot(
     {
         return Err(invalid("snapshot state hash mismatch"));
     }
-    check_issuer(&view, &snapshot.operations, &snapshot.issuer)?;
+    check_issuer(&view, &snapshot.issuer)?;
     crate::verify_device_branch_signature(
         &snapshot.issuer.identity.signing_public_key,
         &snapshot_body(&snapshot),

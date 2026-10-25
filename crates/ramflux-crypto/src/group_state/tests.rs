@@ -395,3 +395,6 @@ fn group_state_root_authorized_branch_rotation_keeps_membership_and_checkpoint_a
     assert_eq!(verify_group_state_snapshot(checkpoint.snapshot().clone())?.view(), changed.view());
     Ok(())
 }
+
+#[path = "lineage_tests.rs"]
+mod lineage_tests;

@@ -12,6 +12,7 @@ pub const MAX_GROUP_STATE_BYTES: usize = 524_288;
 pub const MAX_GROUP_STATE_MEMBERS: usize = 1000;
 pub const MAX_GROUP_STATE_EXCLUSIONS: usize = 2048;
 pub const MAX_GROUP_NAME_BYTES: usize = 256;
+pub const MAX_GROUP_STATE_LINEAGE: usize = 64;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,6 +179,14 @@ impl SharedGroupState {
     }
 }
 
+/// An authenticated operation head retained across bounded history compaction.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupStateHead {
+    pub epoch: u64,
+    pub head_hash: String,
+}
+
 /// The immutable creator root can compact verified history without granting that power to an admin.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -186,5 +195,7 @@ pub struct GroupStateCheckpoint {
     pub genesis: GroupStateOperation,
     pub state: SharedGroupState,
     pub owner: GroupStateActor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<GroupStateHead>,
     pub signature: String,
 }
