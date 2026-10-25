@@ -1,0 +1,418 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Retry bounds, revoked destinations and atomic admission never acknowledge unstored messages.
+use super::{
+    fixture::{self, Shared, Spec, TestResult},
+    *,
+};
+use crate::client::delivery_receipts::{PREFIX, Work};
+struct Pending {
+    root: PathBuf,
+    a: Spec,
+    b: Spec,
+    mail: Shared,
+    receiver: LocalBusAccountState,
+    key: String,
+}
+async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
+    let root = runtime_tests::root(name);
+    let a = Spec::new(&root, "alice", 51);
+    let b = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
+    fixture::seed_pair(&a, &b)?;
+    let mut source = a.account(None, mail.clone())?;
+    let mut engine = source.take_live_engine().await?;
+    source
+        .client
+        .send_plaintext_direct_message_without_franking(
+            &mut engine,
+            a.message(&b, "first"),
+            b"first",
+            crate::client::routed::Route::direct(),
+        )
+        .await?;
+    drop(engine);
+    drop(source);
+    let receipt = crate::client::delivery_receipts::id("thread", "first", &b.device)?;
+    mail.lock().map_err(|_| "mailbox")?.reject_id = Some(format!("receipt_evt_{receipt}"));
+    let mut receiver = b.account(None, mail.clone())?;
+    crate::bus::sync_driver::run(&mut receiver).await?;
+    let key = receiver
+        .client
+        .account_db()?
+        .actor_state_key_page(PREFIX, 256)?
+        .into_iter()
+        .next()
+        .ok_or("pending")?;
+    Ok(Pending { root, a, b, mail, receiver, key })
+}
+fn ready(p: &Pending) -> Result<Work, SdkError> {
+    let mut work = p
+        .receiver
+        .client
+        .account_db()?
+        .load_actor_state::<Work>(&p.key)?
+        .ok_or(SdkError::IdentityRootMissing)?;
+    work.next_at = 0;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+    Ok(work)
+}
+fn backlog(client: &RamfluxClient, a: &Spec, b: &Spec) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    let root = db
+        .client_record("device", &a.device)?
+        .and_then(|row| row["principal_commitment"].as_str().map(str::to_owned));
+    for n in 0..256 {
+        db.persist_actor_state(
+            &format!("{PREFIX}placeholder-{n}"),
+            &Work {
+                conversation: "thread".into(),
+                message: format!("old-{n}"),
+                wire_message: None,
+                receiver: b.device.clone(),
+                sender: a.device.clone(),
+                root: root.clone(),
+                at: now_unix_timestamp(),
+                attempts: 1,
+                next_at: now_unix_timestamp() + 60,
+                packet: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+#[tokio::test]
+async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_stops_after_eight_attempts()
+-> TestResult {
+    let mut p = Box::pin(pending("receipt-bounds")).await?;
+    assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+    assert_eq!(
+        p.mail
+            .lock()
+            .map_err(|_| "mailbox")?
+            .submissions
+            .iter()
+            .filter(|e| e.source_device_id == p.b.device)
+            .count(),
+        1
+    );
+    let mut sender = p.a.account(None, p.mail.clone())?;
+    let mut engine = sender.take_live_engine().await?;
+    sender
+        .client
+        .send_plaintext_direct_message_without_franking(
+            &mut engine,
+            p.a.message(&p.b, "second"),
+            b"second",
+            crate::client::routed::Route::direct(),
+        )
+        .await?;
+    drop(engine);
+    drop(sender);
+    crate::bus::sync_driver::run(&mut p.receiver).await?;
+    assert_eq!(
+        p.receiver
+            .client
+            .delivery_receipt_status("thread", "second", &p.b.device)?
+            .ok_or("second status")?["state"],
+        "sent"
+    );
+    for attempts in 2..=8 {
+        ready(&p)?;
+        assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+        let work =
+            p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?;
+        assert_eq!(work.attempts, attempts);
+        assert!(work.next_at > now_unix_timestamp());
+    }
+    ready(&p)?;
+    assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+    assert_eq!(
+        p.receiver
+            .client
+            .delivery_receipt_status("thread", "first", &p.b.device)?
+            .ok_or("terminal")?["state"],
+        "failed"
+    );
+    assert_eq!(p.receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
+    let second_id = format!(
+        "receipt_evt_{}",
+        crate::client::delivery_receipts::id("thread", "second", &p.b.device)?
+    );
+    let packets = p
+        .mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .submissions
+        .iter()
+        .filter(|e| e.source_device_id == p.b.device && e.envelope_id != second_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(packets.len(), 8);
+    assert!(packets.windows(2).all(|pair| pair[0] == pair[1]));
+    let failures = p
+        .receiver
+        .client
+        .account_db()?
+        .journal_after(0, 128)?
+        .into_iter()
+        .filter(|e| e.topic == "message.delivery_receipt.failed")
+        .count();
+    assert_eq!(failures, 1);
+    drop(p.receiver);
+    std::fs::remove_dir_all(p.root)?;
+    Ok(())
+}
+#[tokio::test]
+async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepared_packet()
+-> TestResult {
+    for reason in ["expired", "revoked", "rebound"] {
+        let mut p = Box::pin(pending(&format!("receipt-{reason}"))).await?;
+        let mut work = ready(&p)?;
+        if reason == "expired" {
+            work.at = now_unix_timestamp() - 601;
+            p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+        } else if reason == "revoked" {
+            p.receiver
+                .client
+                .account_db()?
+                .persist_actor_state(&format!("device/revoked/{}", p.a.device), &true)?;
+        } else {
+            let mut device = p
+                .receiver
+                .client
+                .account_db()?
+                .client_record("device", &p.a.device)?
+                .ok_or("device")?;
+            device["principal_commitment"] =
+                serde_json::json!(p.receiver.client.surface_local_root_commitment()?);
+            p.receiver.client.account_db()?.persist_client_record(
+                "device",
+                &p.a.device,
+                &device,
+            )?;
+        }
+        assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+        assert_eq!(
+            p.mail
+                .lock()
+                .map_err(|_| "mailbox")?
+                .submissions
+                .iter()
+                .filter(|e| e.source_device_id == p.b.device)
+                .count(),
+            1
+        );
+        assert_eq!(
+            p.receiver
+                .client
+                .delivery_receipt_status("thread", "first", &p.b.device)?
+                .ok_or("terminal")?["state"],
+            "failed"
+        );
+        drop(p.receiver);
+        std::fs::remove_dir_all(p.root)?;
+    }
+    Ok(())
+}
+#[tokio::test]
+async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestResult {
+    let root = runtime_tests::root("receipt-admission");
+    let a = Spec::new(&root, "alice", 51);
+    let b = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
+    fixture::seed_pair(&a, &b)?;
+    let mut source = a.account(None, mail.clone())?;
+    let mut engine = source.take_live_engine().await?;
+    let entry = source
+        .client
+        .send_plaintext_direct_message_without_franking(
+            &mut engine,
+            a.message(&b, "first"),
+            b"first",
+            crate::client::routed::Route::direct(),
+        )
+        .await?;
+    drop(engine);
+    drop(source);
+    let mut receiver = b.account(None, mail)?;
+    let mut engine = receiver.take_live_engine().await?;
+    let pool = receiver.relay_quic_pool()?;
+    backlog(&receiver.client, &a, &b)?;
+    receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    assert_eq!(receiver.client.account_db()?.message_content("first")?, Some(b"first".to_vec()));
+    assert_eq!(receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 257);
+    drop(engine);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> TestResult {
+    let root = runtime_tests::root("receipt-group-admission");
+    let a = Spec::new(&root, "alice", 51);
+    let b = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
+    fixture::seed_pair(&a, &b)?;
+    let source = a.client(None)?;
+    let receiver = b.client(None)?;
+    for (spec, client) in [(&a, &source), (&b, &receiver)] {
+        spec.trust(client, &a)?;
+        spec.trust(client, &b)?;
+        client.create_group("group", &a.device)?;
+        client.add_group_member("group", &b.device, "member")?;
+    }
+    receiver.import_group_sender_key_distribution(
+        &source.export_group_sender_key_distribution("group", &a.device)?,
+    )?;
+    let raw = source.encrypt_group_message("group", &a.device, b"group body")?;
+    let group: SdkGroupEncryptedEnvelope = serde_json::from_slice(&raw)?;
+    let mut account = a.account(None, mail)?;
+    let mut engine = account.take_live_engine().await?;
+    let mut message = a.message(&b, "group-admission");
+    let sealed = source
+        .seal_routed_as(
+            &mut engine,
+            &message,
+            &raw,
+            crate::client::routed::Route::group_message("group"),
+        )
+        .await?;
+    message.encrypted_body = serde_json::to_vec(&sealed)?;
+    let entry = GatewayInboxEntry {
+        inbox_seq: 1,
+        target_delivery_id: b.device.clone(),
+        envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
+    };
+    backlog(&receiver, &a, &b)?;
+    let db = receiver.account_db()?;
+    let aborted = db.write_transaction(|| -> Result<(), SdkError> {
+        receiver.append_or_pending_group_message(
+            "thread",
+            "group-admission",
+            &entry,
+            &raw,
+            &group,
+        )?;
+        Err(SdkError::LocalBus("injected commit abort".into()))
+    });
+    assert!(aborted.is_err());
+    assert!(receiver.direct_message_by_id("group-admission")?.is_none());
+    assert!(db.message_content("group-admission")?.is_none());
+    assert_eq!(db.actor_state_usage(PREFIX)?.0, 256);
+    assert_eq!(
+        receiver.append_or_pending_group_message(
+            "thread",
+            "group-admission",
+            &entry,
+            &raw,
+            &group
+        )?,
+        b"group body"
+    );
+    assert_eq!(db.message_content("group-admission")?, Some(b"group body".to_vec()));
+    drop(engine);
+    drop(account);
+    drop(source);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+#[tokio::test]
+async fn own_principal_messages_never_stage_a_peer_delivery_receipt() -> TestResult {
+    let root = runtime_tests::root("receipt-own-exclusion");
+    let a = Spec::new(&root, "alice", 51);
+    let b = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
+    fixture::seed_pair(&a, &b)?;
+    let mut source = a.account(None, mail)?;
+    let engine = source.take_live_engine().await?;
+    let mut message = a.message(&a, "own-message");
+    message.recipient_device_id = Some("own-sibling".into());
+    let entry = GatewayInboxEntry {
+        inbox_seq: 1,
+        target_delivery_id: "own-sibling".into(),
+        envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
+    };
+    source.client.stage_delivery_receipt("thread", "own-message", &entry)?;
+    assert_eq!(source.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
+    drop(engine);
+    drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_page_of_backed_off_receipts_cannot_hide_later_due_work() -> TestResult {
+    let mut p = Box::pin(pending("receipt-paged-progress")).await?;
+    let mut work = ready(&p)?;
+    p.receiver.client.account_db()?.remove_actor_state(&p.key)?;
+    p.receiver.client.account_db()?.remove_actor_state(super::super::SCAN_CURSOR)?;
+    let due_key = format!("{PREFIX}zzzz");
+    p.receiver.client.account_db()?.persist_actor_state(&due_key, &work)?;
+    work.next_at = now_unix_timestamp() + 3600;
+    for n in 0..256 {
+        p.receiver
+            .client
+            .account_db()?
+            .persist_actor_state(&format!("{PREFIX}blocked-{n:03}"), &work)?;
+    }
+    p.mail.lock().map_err(|_| "mailbox")?.reject_id = None;
+    assert_eq!(super::super::flush(&mut p.receiver).await?, 0);
+    assert_eq!(super::super::flush(&mut p.receiver).await?, 1);
+    assert_eq!(
+        p.receiver.client.delivery_receipt_status("thread", "first", &p.b.device)?.ok_or("sent")?["state"],
+        "sent"
+    );
+    assert!(!p.receiver.client.account_db()?.actor_state_exists(&due_key)?);
+    drop(p.receiver);
+    std::fs::remove_dir_all(p.root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_storage()
+-> TestResult {
+    let root = runtime_tests::root("receipt-stall-progress");
+    let a = Spec::new(&root, "alice", 51);
+    let b = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
+    fixture::seed_pair(&a, &b)?;
+    let mut source = a.account(None, mail.clone())?;
+    let mut engine = source.take_live_engine().await?;
+    for id in ["first", "second"] {
+        source
+            .client
+            .send_plaintext_direct_message_without_franking(
+                &mut engine,
+                a.message(&b, id),
+                id.as_bytes(),
+                crate::client::routed::Route::direct(),
+            )
+            .await?;
+    }
+    drop(engine);
+    drop(source);
+    mail.lock().map_err(|_| "mailbox")?.stall_receipts = true;
+    let mut receiver = b.account(None, mail)?;
+    tokio::time::timeout(Duration::from_secs(6), crate::bus::sync_driver::run(&mut receiver))
+        .await??;
+    for id in ["first", "second"] {
+        assert_eq!(
+            receiver.client.account_db()?.message_content(id)?,
+            Some(id.as_bytes().to_vec())
+        );
+    }
+    let db = receiver.client.account_db()?;
+    let mut attempts = Vec::new();
+    for key in db.actor_state_key_page(PREFIX, 256)? {
+        attempts.push(db.load_actor_state::<Work>(&key)?.ok_or("work")?.attempts);
+    }
+    attempts.sort_unstable();
+    assert_eq!(attempts, vec![0, 1]);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

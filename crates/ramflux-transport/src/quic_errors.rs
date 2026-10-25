@@ -10,7 +10,7 @@ pub(crate) fn connection(error: &quinn::ConnectionError) -> TransportError {
         quinn::ConnectionError::ConnectionClosed(close) => Some(u64::from(close.error_code)),
         _ => None,
     };
-    if code.is_some_and(|code| trust_alert(code)) {
+    if code.is_some_and(trust_alert) {
         TransportError::Tls(error.to_string())
     } else {
         TransportError::Quic(error.to_string())
@@ -63,11 +63,27 @@ mod tests {
     use super::*;
     #[test]
     fn only_certificate_and_trust_alerts_are_permanent_tls_failures() {
-        for code in [0x12a, 0x12b, 0x12c, 0x12d, 0x12e, 0x130, 0x131, 0x133, 0x174, 0x178] {
-            assert!(trust_alert(code));
-        }
-        for code in [0x100, 0x128, 0x132, 0x150, 0x1ff, 0x200] {
-            assert!(!trust_alert(code));
+        for (alert, permanent) in [
+            (42, true),
+            (43, true),
+            (44, true),
+            (45, true),
+            (46, true),
+            (48, true),
+            (49, true),
+            (51, true),
+            (116, true),
+            (120, true),
+            (40, false),
+            (50, false),
+            (80, false),
+        ] {
+            let error = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+                error_code: quinn::TransportErrorCode::crypto(alert),
+                frame_type: None,
+                reason: bytes::Bytes::new(),
+            });
+            assert_eq!(matches!(connection(&error), TransportError::Tls(_)), permanent);
         }
         assert!(!crate::error::tls_source(&rustls::Error::AlertReceived(
             rustls::AlertDescription::HandshakeFailure

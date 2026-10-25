@@ -303,13 +303,20 @@ impl RamfluxClient {
 
     pub(crate) fn task_remote_approvals(&self) -> Result<Vec<Value>, SdkError> {
         let db = self.account_db()?;
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let local = self
+            .device_branch
+            .as_ref()
+            .map(|branch| branch.principal_id.clone())
+            .or(db
+                .client_record("self", "account")?
+                .and_then(|row| row["principal_id"].as_str().map(str::to_owned)))
+            .ok_or(SdkError::IdentityRootMissing)?;
         let rows = db.task_record_page::<Packet>("task/approval_in/", "task/approval_in/", 129)?;
         let mut result = Vec::new();
         for (_, packet) in rows {
             let id = packet.id()?;
             let request = packet.request();
-            if request.binding.requester != local.principal_id
+            if request.binding.requester != local
                 || packet.deadline() <= crate::time::now_unix_timestamp()
                 || db.actor_state_exists(&key("approval_decision_in", &id))?
             {
@@ -336,6 +343,8 @@ impl RamfluxClient {
             value["expires_at"] = json!(packet.deadline());
             value["details"] = json!({"arguments":request.approval.details["arguments"],"arguments_hash":request.grant_body.arguments_hash,"single_use":request.grant_body.single_use,"full_delegation":request.grant_body.full_delegation,"task_binding":request.binding});
             value["approval_id"] = json!(format!("task_approval_{id}"));
+            value["id"] = value["approval_id"].clone();
+            value["conversation_id"] = json!(request.binding.conversation_id);
             value["decision_id"] = json!(request.approval.approval_id);
             value["task_binding"] = serde_json::to_value(&request.binding)?;
             value["grant_id"] = json!(request.grant_body.grant_id);

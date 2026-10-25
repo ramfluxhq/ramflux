@@ -254,20 +254,17 @@ impl RamfluxClient {
                 self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
                 continue;
             }
-            match self.decrypt_group_envelope(&envelope, &record.message_id) {
+            match self.append_or_pending_group_message(
+                &record.conversation_id,
+                &record.message_id,
+                &entry,
+                &encrypted_body,
+                &envelope,
+            ) {
                 Ok(plaintext) => {
-                    self.send_direct_message(
-                        &record.conversation_id,
-                        &record.message_id,
-                        &envelope.sender_id,
-                        &encrypted_body,
-                    )?;
-                    self.account_db()?.store_message_content(
-                        &record.conversation_id,
-                        &record.message_id,
-                        &plaintext,
-                    )?;
-                    self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
+                    if self.direct_message_by_id(&record.message_id)?.is_none() {
+                        continue;
+                    }
                     decrypted.push(SdkGroupPendingPlaintext {
                         group_id: record.group_id,
                         conversation_id: record.conversation_id,

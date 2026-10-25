@@ -6,11 +6,12 @@ use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub(crate) const PREFIX: &str = "delivery-receipt/pending/";
-pub(crate) const MAX_PENDING: u32 = 256;
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Work {
     pub conversation: String,
     pub message: String,
+    #[serde(default)]
+    pub wire_message: Option<String>,
     pub receiver: String,
     pub sender: String,
     pub root: Option<String>,
@@ -62,15 +63,11 @@ impl RamfluxClient {
         if db.actor_state_exists(&status_key)? {
             return Ok(());
         }
-        let (rows, bytes) = db.actor_state_usage(PREFIX)?;
-        if rows >= u64::from(MAX_PENDING) || bytes >= 1024 * 1024 {
-            // The enclosing receive transaction rolls back; normal inbox backoff retries admission.
-            return Err(SdkError::InboundPending("delivery receipt queue full".into()));
-        }
         let at = now_unix_timestamp();
         let work = Work {
             conversation: conversation.into(),
             message: message.into(),
+            wire_message: Some(entry.envelope.envelope_id.clone()),
             receiver: local.device_id.clone(),
             sender: sender.clone(),
             root: root.clone(),

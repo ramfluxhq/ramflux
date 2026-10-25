@@ -15,6 +15,8 @@ pub(super) struct Mailbox {
     pub submissions: Vec<ramflux_protocol::Envelope>,
     pub acked: BTreeSet<(String, String)>,
     pub lose_ack: bool,
+    pub stall_receipts: bool,
+    pub reject_id: Option<String>,
 }
 #[derive(Clone)]
 pub(super) struct Spec {
@@ -215,12 +217,23 @@ type FrameFuture<'a, T> =
 impl GatewaySessionFrameSink for Gateway {
     fn send_frame<'a>(&'a mut self, bytes: &'a [u8]) -> FrameFuture<'a, ()> {
         Box::pin(async move {
-            self.last = Some(
-                serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?,
-            );
+            let frame =
+                serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?;
+            let stall = {
+                let mail = self
+                    .mail
+                    .lock()
+                    .map_err(|_| TransportError::Quic("mailbox poisoned".into()))?;
+                mail.stall_receipts && matches!(frame, GatewayClientFrame::Submit { .. })
+            };
+            if stall {
+                return std::future::pending().await;
+            }
+            self.last = Some(frame);
             Ok(())
         })
     }
+
     fn finish(&mut self) -> Result<(), TransportError> {
         Ok(())
     }
@@ -243,6 +256,9 @@ impl GatewaySessionFrameSource for Gateway {
                         .map_err(|_| TransportError::Quic("mailbox poisoned".into()))?;
                     let envelope = submit.envelope;
                     mail.submissions.push(envelope.clone());
+                    if mail.reject_id.as_deref() == Some(envelope.envelope_id.as_str()) {
+                        return Err(TransportError::Quic("injected receipt refusal".into()));
+                    }
                     let entry = if let Some(existing) = mail.messages.iter().find(|e| {
                         e.envelope.source_device_id == envelope.source_device_id
                             && e.envelope.envelope_id == envelope.envelope_id
@@ -316,4 +332,61 @@ impl GatewaySessionFrameSource for Gateway {
             serde_json::to_vec(&frame).map_err(|e| TransportError::Quic(e.to_string()))
         })
     }
+}
+
+pub(super) async fn explicit_noop(
+    receiver: &Spec,
+    peer: &Spec,
+    mail: Shared,
+    state: &str,
+    sent: usize,
+) -> TestResult {
+    let daemon = receiver.daemon(mail.clone())?;
+    let (bus, server) = socket(receiver, Rc::clone(&daemon)).await?;
+    let response = bus
+        .request_frame(LocalBusFrame::request(
+            "explicit",
+            Some(receiver.principal.clone()),
+            "test",
+            "message.receipt.delivered",
+            json!({
+                "conversation_id": "thread", "message_id": "dm-one",
+                "receiver_device_id": receiver.device, "recipient_device_id": peer.device,
+                "target_delivery_id": peer.device,
+            }),
+        ))
+        .await?;
+    assert_eq!(response["delivery_receipt_state"], state);
+    assert_eq!(response["already_sent"], state == "sent");
+    assert_eq!(response["scope"], if state == "sent" { "network_e2ee" } else { "daemon_queue" });
+    let read = bus
+        .request_frame(LocalBusFrame::request(
+            "read",
+            Some(receiver.principal.clone()),
+            "test",
+            "message.read",
+            json!({"conversation_id": "thread"}),
+        ))
+        .await?;
+    assert_eq!(read["messages"][0]["sender_device_id"], peer.device);
+    assert!(
+        read["messages"][0]["sender_device_display"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Laptop@"))
+    );
+    assert_eq!(
+        mail.lock()
+            .map_err(|_| "mailbox")?
+            .submissions
+            .iter()
+            .filter(|e| e.source_device_id == receiver.device)
+            .count(),
+        sent
+    );
+    daemon.shutdown().await?;
+    drop(bus);
+    server.abort();
+    let _ = server.await;
+    drop(daemon);
+    Ok(())
 }

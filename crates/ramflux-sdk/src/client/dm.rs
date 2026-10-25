@@ -394,6 +394,7 @@ impl RamfluxClient {
             .await?;
         self.append_plaintext_projection_once(
             conversation_id,
+            &entry.envelope.envelope_id,
             &entry,
             &projection_body,
             metadata.as_ref(),
@@ -641,17 +642,17 @@ impl RamfluxClient {
     pub(crate) fn append_plaintext_projection_once(
         &self,
         conversation_id: &str,
+        message_id: &str,
         entry: &GatewayInboxEntry,
         plaintext: &[u8],
         metadata: Option<&MessageMetadata>,
     ) -> Result<(), SdkError> {
         self.account_db()?.write_transaction(|| {
-            let message_id = &entry.envelope.envelope_id;
             self.account_db()?.store_message_content(conversation_id, message_id, plaintext)?;
             if self
                 .direct_messages(conversation_id)?
                 .iter()
-                .any(|message| message.message_id == *message_id)
+                .any(|message| message.message_id == message_id)
             {
                 self.stage_delivery_receipt(conversation_id, message_id, entry)?;
                 return Ok(());
@@ -682,7 +683,7 @@ impl RamfluxClient {
         body: &[u8],
         authenticated_source_device_id: &str,
     ) -> Result<Option<SdkReceiptEventEnvelope>, SdkError> {
-        let Ok(envelope) = serde_json::from_slice::<SdkReceiptEventEnvelope>(body) else {
+        let Ok(mut envelope) = serde_json::from_slice::<SdkReceiptEventEnvelope>(body) else {
             return Ok(None);
         };
         if envelope.schema != "ramflux.sdk.receipt_event.v1" {
@@ -693,6 +694,15 @@ impl RamfluxClient {
                 "receipt reader_device_id mismatch: claimed {}, authenticated {}",
                 envelope.reader_device_id, authenticated_source_device_id
             )));
+        }
+        if let SdkReceiptEventBody::Delivered { conversation_id, message_id, .. } =
+            &mut envelope.event
+        {
+            *message_id = self.resolve_delivery_receipt_message(
+                authenticated_source_device_id,
+                conversation_id,
+                message_id,
+            )?;
         }
         let scoped_receipt = ramflux_crypto::blake3_256_base64url(
             "ramflux.receipt.sender.v2",

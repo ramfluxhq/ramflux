@@ -317,3 +317,17 @@ message-key Debug output is redacted, and legacy routing compares typed device h
 copying a full secret snapshot to JSON.
 
 See [Account event stream](event_stream.md) for resume bounds, status transition semantics, and retention.
+
+
+Automatic delivered receipts and additive sending-device fields are documented in
+[Automatic delivery receipts](delivery_receipts.md). The daemon owns the receipt courier;
+clients do not need to trigger it when reading a conversation.
+
+Paged and legacy `mcp.approval.list` also include active remote task approval requests,
+merged with local MCP rows under the existing account-scoped keyset cursor and frame
+budget. Remote rows carry `id`, `approval_id`, `conversation_id`, `task_binding` and
+`confirmation_mode: "task_requester"`. They are filtered against current task state,
+expiry and durable decisions on every read and disappear after a decision. Reader-pool
+lookups use the persisted public self principal; private device keys are not loaded.
+`grant.list.approvals` retains its existing aggregate behavior. Listing approvals does
+not grant authority to decide them; existing requester and signature checks still apply.

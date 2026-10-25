@@ -105,6 +105,26 @@ impl AccountDb {
         let end = namespace_end(prefix)?;
         Ok(self.connection.query_row("SELECT count(*),coalesce(sum(length(state_json)),0) FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2",params![prefix,end],|row|Ok((row.get(0)?,row.get(1)?)))?)
     }
+    /// Reads an indexed namespace page strictly after a durable queue cursor.
+    ///
+    /// # Errors
+    /// Rejects an out-of-namespace cursor, unsupported prefix or SQL failures.
+    pub fn actor_state_key_page_after(
+        &self,
+        prefix: &str,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        if !after.is_empty() && !after.starts_with(prefix) {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let end = namespace_end(prefix)?;
+        let mut query=self.connection.prepare("SELECT state_kind FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2 AND state_kind>?3 ORDER BY state_kind LIMIT ?4")?;
+        Ok(query
+            .query_map(params![prefix, end, after, limit.min(4096)], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Read a bounded page of namespace keys without decoding private state values.
     /// # Errors
     /// Rejects unsupported prefixes and returns SQL errors.

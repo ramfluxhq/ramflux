@@ -191,3 +191,50 @@ mod r5;
 
 #[path = "approval_r6_tests.rs"]
 mod r6;
+
+#[test]
+fn remote_task_approvals_are_paged_with_local_mcp_rows_on_keyless_readers_and_disappear_after_decision()
+-> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let packet = request(&f)?;
+    f.human.accept_task_approval(&packet)?;
+    let db = f.human.account_db()?;
+    db.persist_client_record(
+        "self",
+        "account",
+        &json!({"principal_id":"human","device_id":"human-device"}),
+    )?;
+    db.persist_client_record(
+        "approval",
+        "local-first",
+        &json!({"id":"local-first","approval_id":"local-first","status":"pending"}),
+    )?;
+    let mut reader = RamfluxClient::new();
+    reader.active_account_db = Some(db.open_reader()?);
+    let page = |body| {
+        crate::bus::read_model::read(
+            &reader,
+            &crate::LocalBusFrame::request(
+                "page",
+                Some("human".into()),
+                "test",
+                "mcp.approval.list",
+                body,
+            ),
+        )
+    };
+    let first = page(json!({"limit":1}))?;
+    assert_eq!(first["approvals"][0]["id"], "local-first");
+    let second = page(json!({"limit":1,"cursor":first["next_cursor"]}))?;
+    let remote = &second["approvals"][0];
+    assert_eq!(remote["task_binding"]["task_id"], "task");
+    assert_eq!(remote["conversation_id"], "thread");
+    assert!(second["next_cursor"].is_null());
+    let legacy = page(json!({}))?;
+    assert_eq!(legacy["approvals"].as_array().ok_or("rows")?.len(), 2);
+    f.human.decide_task_approval(remote["approval_id"].as_str().ok_or("approval id")?, false)?;
+    let remaining = page(json!({"limit":100}))?;
+    assert_eq!(remaining["approvals"].as_array().ok_or("rows")?.len(), 1);
+    Ok(())
+}

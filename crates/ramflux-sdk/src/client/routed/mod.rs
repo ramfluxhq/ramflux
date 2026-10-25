@@ -132,6 +132,7 @@ impl RamfluxClient {
             .as_deref()
             .ok_or_else(|| invalid("v2 requires recipient device id"))?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
+        self.bind_outgoing_delivery(&engine.config.device_id, message, &route.kind)?;
         self.seal_routed_with_route(
             message,
             body,
@@ -160,6 +161,7 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("v2 requires recipient device id"))?;
         let (mut session, header, bundle) =
             self.send_pair_session_from_url(&engine.config.device_id, message, url)?;
+        self.bind_outgoing_delivery(&engine.config.device_id, message, &route.kind)?;
         self.seal_routed_with_route(
             message,
             body,

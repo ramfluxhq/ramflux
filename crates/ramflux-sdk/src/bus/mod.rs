@@ -20,7 +20,7 @@ mod metadata;
 mod mutations;
 pub(crate) mod own_device_copy;
 pub mod protocol;
-mod read_model;
+pub(crate) mod read_model;
 mod readers;
 mod requests;
 mod secrets;

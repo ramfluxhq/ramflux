@@ -28,7 +28,7 @@ struct PageRequest {
     limit: Option<u32>,
 }
 
-pub(super) fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, SdkError> {
+pub(crate) fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, SdkError> {
     let (directory, field) = match request.method.as_str() {
         "conversation.directory" => ("conversation", "conversations"),
         "identity.directory" => ("identity", "identities"),
@@ -53,11 +53,28 @@ pub(super) fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Va
         request.account_id.as_deref().ok_or_else(|| invalid("directory requires account_id"))?;
     let after = decode_cursor(page.cursor.as_deref(), account, directory)?;
     let db = client.account_db()?;
-    let ids = db.client_directory_ids(directory, &after, limit + 1)?;
+    let remote = if directory == "approval" {
+        client
+            .task_remote_approvals()?
+            .into_iter()
+            .filter_map(|row| row["approval_id"].as_str().map(str::to_owned).map(|id| (id, row)))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let mut ids = db.client_directory_ids(directory, &after, limit + 1)?;
+    ids.extend(remote.keys().filter(|id| *id > &after).cloned());
+    ids.sort();
+    ids.dedup();
+    ids.truncate(limit as usize + 1);
     let mut result = Vec::new();
     let mut next = None;
     for id in ids.iter().take(limit as usize) {
-        let row = rows::row(client, directory, id)?;
+        let row = if let Some(remote) = remote.get(id) {
+            remote.clone()
+        } else {
+            rows::row(client, directory, id)?
+        };
         result.push(row);
         let candidate = body(field, &result, None);
         if serde_json::to_vec(&local_bus_response(request, candidate))?.len() > 512 * 1024 {
@@ -162,6 +179,19 @@ fn legacy_list(
         if ids.len() < 100 {
             break;
         }
+    }
+    if directory == "approval" {
+        let existing = result
+            .iter()
+            .filter_map(|row| row["approval_id"].as_str().or_else(|| row["id"].as_str()))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        result.extend(
+            client
+                .task_remote_approvals()?
+                .into_iter()
+                .filter(|row| row["approval_id"].as_str().is_some_and(|id| !existing.contains(id))),
+        );
     }
     let response = body(field, &result, None);
     super::io::encode_local_bus_frame(&local_bus_response(request, response.clone()))?;

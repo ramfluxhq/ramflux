@@ -48,8 +48,6 @@ impl RamfluxClient {
             )?;
             return Ok(None);
         }
-        let mut projection = entry.clone();
-        projection.envelope.envelope_id.clone_from(&route.message_id);
         let surface = self.project_surface_message(
             &route.conversation_id,
             &route.message_id,
@@ -84,7 +82,8 @@ impl RamfluxClient {
         );
         self.append_plaintext_projection_once(
             &route.conversation_id,
-            &projection,
+            &route.message_id,
+            entry,
             display,
             metadata,
         )?;

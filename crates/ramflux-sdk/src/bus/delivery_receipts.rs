@@ -2,45 +2,58 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-owned bounded receipt courier; retries reuse the committed ciphertext.
-use crate::client::delivery_receipts::{MAX_PENDING, PREFIX, Work};
+use crate::client::delivery_receipts::{PREFIX, Work};
 use crate::prelude::*;
 use serde_json::json;
+const SCAN: u32 = 256;
+const SCAN_CURSOR: &str = "delivery-receipt/scan-cursor";
 const ATTEMPTS: u32 = 8;
 const LIFETIME: i64 = 600;
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let now = now_unix_timestamp();
     let db = account.client.account_db()?;
+    let after = db.load_actor_state::<String>(SCAN_CURSOR)?.unwrap_or_default();
+    let mut keys = db.actor_state_key_page_after(PREFIX, &after, SCAN)?;
+    if keys.is_empty() && !after.is_empty() {
+        keys = db.actor_state_key_page_after(PREFIX, "", SCAN)?;
+    }
+    if let Some(last) = keys.last() {
+        db.persist_actor_state(SCAN_CURSOR, last)?;
+    }
     let mut due = Vec::new();
-    for key in db.actor_state_key_page(PREFIX, MAX_PENDING)? {
+    for key in keys {
         if let Some(work) = db.load_actor_state::<Work>(&key)?
-            && work.next_at <= now
+            && (work.next_at <= now
+                || work.at.saturating_add(LIFETIME) <= now
+                || work.attempts >= ATTEMPTS)
         {
             due.push((key, work));
         }
     }
     due.sort_by_key(|(_, work)| work.at);
     let mut sent = 0;
-    for (key, mut work) in due.into_iter().take(16) {
-        if work.at.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
+    let started = std::time::Instant::now();
+    for (index, (key, mut work)) in due.into_iter().take(16).enumerate() {
+        if index > 0 && started.elapsed() >= Duration::from_millis(250) {
+            break;
+        }
+        let attempt_at = now_unix_timestamp();
+        if work.at.saturating_add(LIFETIME) <= attempt_at || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
             continue;
         }
         work.attempts += 1;
-        work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
+        let backoff = (1_i64 << work.attempts.min(6)).min(60);
+        // A crash during connection/send must not create a hot retry loop.
+        work.next_at = attempt_at.saturating_add(30).saturating_add(backoff);
         account.client.account_db()?.persist_actor_state(&key, &work)?;
-        let mut engine = match account.take_live_engine().await {
-            Ok(engine) => engine,
-            Err(error) => {
-                tracing::warn!(%error,"delivery receipt connection deferred");
-                continue;
-            }
+        let attempt = async {
+            let mut engine = account.take_live_engine().await?;
+            let outcome = send(account, &mut engine, &key, &mut work).await;
+            account.put_engine(engine);
+            outcome
         };
-        let result = tokio::time::timeout(
-            Duration::from_secs(3),
-            send(account, &mut engine, &key, &mut work),
-        )
-        .await;
-        account.put_engine(engine);
+        let result = tokio::time::timeout(Duration::from_secs(3), Box::pin(attempt)).await;
         match result {
             Ok(Ok(())) => {
                 finish(&account.client, &key, &work, "sent")?;
@@ -49,12 +62,28 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
             Ok(Err(SdkError::InboundRejected(_))) => {
                 finish(&account.client, &key, &work, "failed")?;
             }
-            Ok(Err(error)) => tracing::warn!(%error,"delivery receipt deferred"),
-            Err(_) => tracing::warn!("delivery receipt deadline exceeded"),
+            Ok(Err(error)) => {
+                tracing::warn!(%error,"delivery receipt deferred");
+                postpone(&account.client, &key, &mut work, backoff)?;
+            }
+            Err(_) => {
+                tracing::warn!("delivery receipt deadline exceeded");
+                postpone(&account.client, &key, &mut work, backoff)?;
+            }
         }
     }
     Ok(sent)
 }
+fn postpone(
+    client: &RamfluxClient,
+    key: &str,
+    work: &mut Work,
+    backoff: i64,
+) -> Result<(), SdkError> {
+    work.next_at = now_unix_timestamp().saturating_add(backoff);
+    Ok(client.account_db()?.persist_actor_state(key, work)?)
+}
+
 async fn send(
     account: &LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
@@ -91,7 +120,7 @@ async fn send(
             reader_device_id: work.receiver.clone(),
             event: SdkReceiptEventBody::Delivered {
                 conversation_id: work.conversation.clone(),
-                message_id: work.message.clone(),
+                message_id: work.wire_message.as_ref().unwrap_or(&work.message).clone(),
                 delivered_at: work.at,
                 receiver_device_id: work.receiver.clone(),
                 scope: "e2ee_private".into(),
@@ -131,10 +160,30 @@ async fn send(
 fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result<(), SdkError> {
     let db = client.account_db()?;
     db.write_transaction(|| {
-        let id = crate::client::delivery_receipts::id(&work.conversation,&work.message,&work.receiver)?;
-        db.persist_actor_state(&format!("delivery-receipt/status/{id}"),&json!({"state":state,"delivered_at":work.at,"attempts":work.attempts}))?;
+        let id = crate::client::delivery_receipts::id(
+            &work.conversation,
+            &work.message,
+            &work.receiver,
+        )?;
+        db.persist_actor_state(
+            &format!("delivery-receipt/status/{id}"),
+            &json!({
+                "state": state, "delivered_at": work.at, "attempts": work.attempts,
+            }),
+        )?;
         db.remove_actor_state(key)?;
-        if state == "failed" { db.append_journal(&format!("receipt-failed:{id}"),"message.delivery_receipt.failed",&json!({"conversation_id":work.conversation,"message_id":work.message,"receiver_device_id":work.receiver}),now_unix_timestamp(),None)?; }
+        if state == "failed" {
+            db.append_journal(
+                &format!("receipt-failed:{id}"),
+                "message.delivery_receipt.failed",
+                &json!({
+                    "conversation_id": work.conversation, "message_id": work.message,
+                    "receiver_device_id": work.receiver,
+                }),
+                now_unix_timestamp(),
+                None,
+            )?;
+        }
         Ok(())
     })
 }

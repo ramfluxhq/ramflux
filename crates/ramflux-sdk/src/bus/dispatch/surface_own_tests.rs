@@ -126,6 +126,11 @@ async fn streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_
     for field in ["snapshot", "version", "surface_hash"] {
         assert_eq!(source_view[field], sibling_view[field]);
     }
+    assert_eq!(
+        sibling.client.account_db()?.actor_state_usage(crate::client::delivery_receipts::PREFIX)?.0,
+        0,
+        "own-device copies must never create peer delivery receipts"
+    );
     assert_eq!(sibling_view["version"], 65);
     assert_eq!(sibling_view["snapshot"]["components"][0]["text"], "x".repeat(64));
     for client in [&source.client, &sibling.client] {
