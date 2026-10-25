@@ -26,7 +26,8 @@ impl BackupDatabase {
         let result = (|| {
             let roots:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state l JOIN incoming.runtime_actor_state r USING(state_kind) WHERE l.state_kind LIKE 'directory/identity/%' AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment')<>json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment'))",[],|row|row.get(0))?;
             let pins:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key l JOIN incoming.group_member_device_key r USING(group_id,member_id) WHERE l.device_signing_public_key<>r.device_signing_public_key)",[],|row|row.get(0))?;
-            if roots || pins {
+            let links:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM friend_link_projection l JOIN incoming.friend_link_projection r USING(link_id) WHERE l.requester_id<>r.requester_id OR l.target_id<>r.target_id)",[],|row|row.get(0))?;
+            if roots || pins || links {
                 return Err(StorageError::AuthorizationRejected);
             }
             Ok(())
@@ -131,7 +132,7 @@ impl BackupDatabase {
                 let _ = replacements;
             }
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),'true' FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));")?;
-            self.db.execute_batch("COMMIT;")?;
+            self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); COMMIT;")?;
             Ok(report)
         })();
         if result.is_err() {
@@ -268,7 +269,48 @@ fn columns(
         .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))?
         .collect::<rusqlite::Result<_>>()?)
 }
+const ORDER_FIELDS: &[&str] = &[
+    "group_epoch",
+    "device_epoch",
+    "lifecycle_epoch",
+    "version",
+    "edit_counter",
+    "deleted_epoch",
+    "removed_epoch",
+    "banned_epoch",
+    "group_key_epoch",
+    "invite_epoch",
+    "marker_epoch",
+    "updated_at",
+    "deleted_at",
+    "revoked_at",
+    "removed_at",
+    "blocked_at",
+    "capability_revoked_at",
+    "read_at",
+    "delivered_at",
+    "cleared_at",
+    "hidden_at",
+    "pinned_at",
+    "verified_at",
+    "shared_at",
+    "seen_at",
+    "applied_at",
+    "accepted_at",
+    "approved_at",
+    "rejected_at",
+    "received_at",
+    "cached_at",
+    "created_at",
+    "lamport_time",
+];
 fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
+    if table == "friend_link_projection" {
+        return "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND (r.blocked>l.blocked OR (r.capability_revoked_at IS NOT NULL AND l.capability_revoked_at IS NULL) OR (r.state IN ('removed','rejected') AND l.state IN ('accepted','pending'))))".into();
+    }
+    if table == "direct_message_projection" {
+        return "r.deleted>l.deleted OR (r.deleted=l.deleted AND r.created_at>l.created_at)".into();
+    }
     if table == "group_member_projection" {
         return "EXISTS(SELECT 1 FROM incoming.group_projection source JOIN main.group_projection live USING(group_id) WHERE source.group_id=r.group_id AND source.group_epoch>live.group_epoch) OR r.updated_at>l.updated_at".into();
     }
@@ -284,18 +326,11 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
             timestamp("l")
         );
     }
-    let fields = [
-        "group_epoch",
-        "device_epoch",
-        "lifecycle_epoch",
-        "version",
-        "updated_at",
-        "created_at",
-        "lamport_time",
-    ]
-    .into_iter()
-    .filter(|name| columns.iter().any(|(column, _)| column == name))
-    .collect::<Vec<_>>();
+    let fields = ORDER_FIELDS
+        .iter()
+        .copied()
+        .filter(|name| columns.iter().any(|(column, _)| column == name))
+        .collect::<Vec<_>>();
     if fields.is_empty()
         || table == "local_event_log"
         || table == "group_member_device_key"

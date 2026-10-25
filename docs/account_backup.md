@@ -78,8 +78,10 @@ verification and installation. Root replacement and epoch rollback are refused.
 ## Merge and outbound activation
 
 For an existing account, merge occurs in a private copy of the live generation.
-Rows with version/epoch/time ordering use the newer value; ties keep the live
-value. Restrictions and tombstones use their stored version/time. Immutable
+Rows with version/epoch/time ordering use the newer value. Ties keep the live
+value, except a tied contact restriction wins over an acceptance. Message deletions
+are monotonic and never revive plaintext. Restrictions and tombstones use their
+stored version/time; read/delivery receipts use their own timestamps. Immutable
 contact roots and group member pins cannot change. Unordered conflicts keep the
 live value; nonconflicting history is added. The live recovery manifest and live
 outbound crypto always win. Imported outbound state is archived, never resumed.
@@ -90,7 +92,10 @@ or archived sessions needed for late messages. Saved outbound DM sessions are
 inactive; saved outbound group chains stay archived. Before the first send, the
 device performs fresh root-authorized activation at an increased device epoch,
 starts fresh outbound DM sessions, and rotates each group's sender seed/chain ID
-before distributing it to members. The UI must show **re-establishing secure
+before distributing it to members. Rotated distributions use
+`ramflux.sdk.group_sender_key.distribution.v3`, which binds the fresh seed into the
+chain ID; participating receivers need v3 support. Existing v1/v2 receive chains
+remain readable. The UI must show **re-establishing secure
 sessions** while `account.status` / `sync.status.get` has
 `secure_sessions:reestablishing`; `account.secure_sessions.changed` announces ready.
 If activation is refused, history remains readable and sending fails closed.

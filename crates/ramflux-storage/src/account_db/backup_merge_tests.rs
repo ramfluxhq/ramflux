@@ -44,6 +44,12 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     source.create_group("new-membership", "owner")?;
     source.add_group_member("new-membership", "peer", "member")?;
     local.create_group("new-membership", "owner")?;
+    source.establish_friend_link("tie-link", "own", "tie-peer")?;
+    local.establish_friend_link("tie-link", "own", "tie-peer")?;
+    source.block_friend_link("tie-link", 1)?;
+    local
+        .connection
+        .execute_batch("UPDATE friend_link_projection SET updated_at=1 WHERE link_id='tie-link'")?;
     let incoming = root.join("incoming.db");
     let snapshot = source.write_backup_snapshot(&incoming)?;
     let target = root.join("merged.db");
@@ -73,11 +79,81 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     assert_eq!(merged.db.query_row("SELECT CAST(event_body AS TEXT) FROM backup_archived_local_event WHERE event_id='source-only-counter'",[],|r|r.get::<_,String>(0))?,"preserved despite actor-counter collision");
     assert!(!merged.db.query_row("SELECT active FROM group_member_projection WHERE group_id='membership' AND member_id='peer'",[],|r|r.get::<_,bool>(0))?);
     assert!(merged.db.query_row("SELECT active FROM group_member_projection WHERE group_id='new-membership' AND member_id='peer'",[],|r|r.get::<_,bool>(0))?);
+    assert!(merged.db.query_row(
+        "SELECT blocked FROM friend_link_projection WHERE link_id='tie-link'",
+        [],
+        |r| r.get::<_, bool>(0)
+    )?);
     merged.check_integrity()?;
     drop(merged);
     drop(source);
     drop(local);
     drop(index);
+    drop(local_index);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() -> TestResult {
+    let root = std::env::temp_dir().join(format!(
+        "rf-backup-merge-deletion-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let local_index = AccountIndex::open(root.join("local"))?;
+    source_index.create_account("account", "root")?;
+    local_index.create_account("account", "root")?;
+    let source_key = AccountDbKey::generate()?;
+    let local_key = AccountDbKey::generate()?;
+    let source = AccountDb::open(&source_index, "account", &source_key)?;
+    let local = AccountDb::open(&local_index, "account", &local_key)?;
+    for db in [&source, &local] {
+        for id in ["source-deleted", "local-deleted", "last"] {
+            db.import_direct_message_projection(crate::DirectMessageWrite {
+                conversation_id: "thread",
+                message_id: id,
+                sender_id: "sender",
+                encrypted_body: b"ciphertext",
+                metadata: &crate::MessageMetadata::default(),
+                created_at: 1,
+            })?;
+            db.store_message_content("thread", id, b"historical plaintext")?;
+        }
+    }
+    source.delete_direct_message("thread", "source-deleted", "me", "source-tombstone")?;
+    local.delete_direct_message("thread", "local-deleted", "me", "local-tombstone")?;
+    source.connection.execute_batch(
+        "INSERT INTO conversation_read_state VALUES('thread','reader','last',20);",
+    )?;
+    local.connection.execute_batch(
+        "INSERT INTO conversation_read_state VALUES('thread','reader','last',10);",
+    )?;
+    let incoming = root.join("incoming.db");
+    let snapshot = source.write_backup_snapshot(&incoming)?;
+    let path = root.join("merged.db");
+    let target = local.write_backup_snapshot(&path)?;
+    let mut merged = BackupDatabase::open(&path, &target.key)?;
+    merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
+    assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND deleted=1",[],|r|r.get::<_,u64>(0))?,2);
+    assert_eq!(merged.db.query_row("SELECT count(*) FROM runtime_message_content WHERE message_id IN ('source-deleted','local-deleted')",[],|r|r.get::<_,u64>(0))?,0);
+    assert_eq!(
+        merged.db.query_row(
+            "SELECT read_at FROM conversation_read_state WHERE reader_id='reader'",
+            [],
+            |r| r.get::<_, u64>(0)
+        )?,
+        20
+    );
+    assert!(
+        local.message_content("source-deleted")?.is_some(),
+        "merging a private generation must not mutate the live account"
+    );
+    drop(merged);
+    drop(source);
+    drop(local);
+    drop(source_index);
     drop(local_index);
     std::fs::remove_dir_all(root)?;
     Ok(())
