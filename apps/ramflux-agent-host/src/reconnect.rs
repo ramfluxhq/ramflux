@@ -27,9 +27,9 @@ mod tests {
     #[test]
     fn repeated_reconnect_failures_back_off_from_one_to_sixty_seconds() {
         let mut backoff = ReconnectBackoff::default();
-        for (index, seconds) in [1, 2, 4, 8, 16, 32, 60, 60, 60].into_iter().enumerate() {
+        for (failures, seconds) in (1..).zip([1, 2, 4, 8, 16, 32, 60, 60, 60]) {
             assert_eq!(backoff.failed(Duration::ZERO), Duration::from_secs(seconds));
-            assert_eq!(backoff.failures(), u32::try_from(index + 1).expect("small fixture"));
+            assert_eq!(backoff.failures(), failures);
         }
     }
     #[test]
