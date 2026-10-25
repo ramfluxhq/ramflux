@@ -19,6 +19,7 @@ pub(crate) struct LiveCall {
     pub allocation: Option<VoiceAllocation>,
     pub next_lease_refresh: i64,
     pub media_taken: bool,
+    pub media_leased: bool,
     pub media_counter: u64,
     pub pending: Vec<CallControl>,
     offer_keys: BTreeMap<CallEndpoint, Zeroizing<[u8; 32]>>,
@@ -36,6 +37,9 @@ pub(super) fn decode_key(text: &str) -> Result<Zeroizing<[u8; 32]>, SdkError> {
     Ok(Zeroizing::new(bytes.as_slice().try_into().map_err(|_| invalid("media key length"))?))
 }
 impl LiveCall {
+    pub(super) fn has_seen(&self, sender: &CallEndpoint, seq: u64) -> bool {
+        self.seen.get(sender).is_some_and(|old| seq <= *old)
+    }
     pub fn outgoing(
         id: String,
         conversation: String,
@@ -125,6 +129,7 @@ impl LiveCall {
             allocation: None,
             next_lease_refresh: 0,
             media_taken: false,
+            media_leased: false,
             media_counter: 0,
             pending: Vec::new(),
             offer_keys: BTreeMap::new(),

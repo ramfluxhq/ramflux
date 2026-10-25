@@ -164,6 +164,7 @@ async fn restore_local_bus_account_impl(
     let mut account =
         LocalBusAccountState::disconnected(client, gateway, manifest.principal_commitment.clone());
     account.activation_pending = manifest.activation_pending;
+    super::dispatch::call::recover(&mut account)?;
     hydrate_local_bot_records(&mut account)?;
     hydrate_local_mcp_state(&mut account)?;
     hydrate_local_object_state(&mut account)?;

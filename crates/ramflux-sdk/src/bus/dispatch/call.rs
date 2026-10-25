@@ -18,14 +18,25 @@ pub(crate) async fn dispatch(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let account = local_bus_account_mut(state, request_account_id(request)?)?;
+    let account_id = request_account_id(request)?;
+    if request.method != "call.list" {
+        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
+            &state.config.data_root,
+            account_id,
+        ))?;
+        if manifest.client_mode != LocalBusClientMode::AttendedCli
+            || manifest.kind.as_deref().unwrap_or("human") != "human"
+        {
+            return Err(SdkError::CapabilityDenied(
+                "voice calls require an attended human account".into(),
+            ));
+        }
+    }
+    let account = local_bus_account_mut(state, account_id)?;
     recover(account)?;
     let now = now_unix_timestamp();
     if request.method == "call.list" {
-        let mut rows = account.client.account_db()?.voice_call_rows(false)?;
-        rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.call_id.clone())));
-        rows.truncate(128);
-        return Ok(local_bus_ok(json!({"calls":rows})));
+        return Ok(local_bus_ok(list(&account.client)?));
     }
     if request.method == "call.invite" {
         if account.client.voice_calls.values().any(|c| c.row.state != "ended") {
@@ -100,16 +111,12 @@ pub(crate) async fn dispatch(
     drive(account).await?;
     Ok(local_bus_ok(serde_json::to_value(row)?))
 }
-fn recover(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+pub(crate) fn recover(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
     // Media keys are never recovered from storage: restarting cannot reset an old key's nonce.
     let db = account.client.account_db()?;
-    for mut row in db.voice_call_rows(true)? {
-        if row.state != "ended" && !account.client.voice_calls.contains_key(&row.call_id) {
-            row.state = "ended".into();
-            row.end_reason = Some("failed".into());
-            row.ended_at = Some(now_unix_timestamp());
-            row.seq = row.seq.checked_add(1).ok_or_else(|| invalid("sequence exhausted"))?;
-            db.write_transaction(|| account.client.persist_call_row(&row))?;
+    for row in db.voice_call_rows(true)? {
+        if !account.client.voice_calls.contains_key(&row.call_id) {
+            account.client.retire_call_without_keys(&row.call_id)?;
         }
     }
     Ok(())
@@ -121,7 +128,7 @@ fn media(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let c =
         account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("media keys unavailable"))?;
-    if c.row.state != "active" || (c.media_taken && !supports_counter_lease) {
+    if c.row.state != "active" || (c.media_taken && (!supports_counter_lease || !c.media_leased)) {
         return Err(invalid(
             "media session unavailable; start a fresh call before restarting the media engine",
         ));
@@ -138,6 +145,7 @@ fn media(
         "receive":{"kid":u64::from(outgoing),"base_key":ramflux_protocol::encode_base64url(receive.as_ref())}}});
     // This contract's client always restarts at counter zero. Never return a used key twice.
     c.media_taken = true;
+    c.media_leased = supports_counter_lease;
     c.media_counter = next_counter;
     Ok(local_bus_ok(value))
 }
@@ -251,3 +259,13 @@ async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, Sd
     account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("call vanished"))?.pending.clear();
     Ok(n)
 }
+
+pub(crate) fn list(client: &RamfluxClient) -> Result<Value, SdkError> {
+    let mut rows = client.account_db()?.voice_call_rows(false)?;
+    rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.call_id.clone())));
+    Ok(json!({"calls":rows}))
+}
+
+#[cfg(test)]
+#[path = "call_tests.rs"]
+mod tests;

@@ -124,17 +124,14 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
-    fn plan_call(&self, c: &CallControl, now: i64, committed: bool) -> Result<LiveCall, SdkError> {
+    fn plan_call(&self, c: &CallControl, now: i64) -> Result<LiveCall, SdkError> {
         if let Some(old) = self.voice_calls.get(&c.call_id) {
             let mut next = old.clone();
             next.apply(c, now)?;
             Ok(next)
         } else {
             if self.voice_calls.values().filter(|c| c.row.state != "ended").count() >= 2
-                || (!committed
-                    && self
-                        .account_db()?
-                        .actor_state_exists(&format!("voice/public/{}", c.call_id))?)
+                || self.account_db()?.actor_state_exists(&format!("voice/public/{}", c.call_id))?
             {
                 return Err(invalid("call capacity or retired id"));
             }
@@ -150,19 +147,49 @@ impl RamfluxClient {
         let Some(c) = decode(body)? else {
             return Ok(false);
         };
+        self.voice_transition.borrow_mut().take();
         self.verify_call(&c, entry, conversation)?;
-        let next = self.plan_call(&c, crate::time::now_unix_timestamp(), false)?;
+        let next = self.plan_call(&c, crate::time::now_unix_timestamp())?;
         self.persist_call_row(&next.row)?;
+        self.voice_transition.replace(Some((transition_key(body), next)));
         Ok(true)
+    }
+    pub(crate) fn retire_call_without_keys(&self, id: &str) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        if let Some(mut row) = db.load_actor_state::<CallRow>(&format!("voice/public/{id}"))?
+            && row.state != "ended"
+        {
+            row.state = "ended".into();
+            row.end_reason = Some("failed".into());
+            row.ended_at = Some(crate::time::now_unix_timestamp());
+            row.seq = row.seq.checked_add(1).ok_or_else(|| invalid("sequence exhausted"))?;
+            db.write_transaction(|| self.persist_call_row(&row))?;
+        }
+        Ok(())
     }
     pub(crate) fn refresh_call_control(&mut self, body: &[u8]) -> Result<bool, SdkError> {
         let Some(c) = decode(body)? else {
             return Ok(false);
         };
-        let next = self.plan_call(&c, crate::time::now_unix_timestamp(), true)?;
-        self.voice_calls.insert(c.call_id, next);
+        if let Some((key, next)) = self.voice_transition.take()
+            && key == transition_key(body)
+        {
+            self.voice_calls.insert(c.call_id, next);
+            return Ok(true);
+        }
+        // An already committed delivery can be retried after an ACK failure. Its cache refresh
+        // must neither apply the signed sequence twice nor recreate lost media keys after restart.
+        if self.voice_calls.get(&c.call_id).is_some_and(|old| old.has_seen(&c.sender, c.seq)) {
+            return Ok(true);
+        }
+        self.retire_call_without_keys(&c.call_id)?;
+        self.voice_calls.remove(&c.call_id);
         Ok(true)
     }
+}
+
+pub(crate) fn transition_key(body: &[u8]) -> String {
+    ramflux_protocol::hash_base64url("ramflux.call.transition.v1", body)
 }
 
 #[cfg(test)]

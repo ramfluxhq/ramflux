@@ -41,8 +41,11 @@ pub(super) async fn execute(
     {
         return Err(SdkError::LocalBus("operation_id must contain 1 to 256 bytes".to_owned()));
     }
-    // Fetch owns retryable receipts, but generic header validation above still applies.
-    let key = key.filter(|_| command.request.method != "object.fetch");
+    // Fetch owns retryable receipts; media keys must never be replayed from a cached response.
+    // Generic header validation above still applies to both methods.
+    let key = key.filter(|_| {
+        !matches!(command.request.method.as_str(), "object.fetch" | "call.media.session")
+    });
     let fingerprint = if key.is_some() {
         let intent = ramflux_protocol::canonical_json_bytes(&(
             &command.request.method,

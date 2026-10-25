@@ -116,6 +116,7 @@ pub(super) fn is_reader_request(method: &str) -> bool {
                 | "surface.list"
                 | "task.get"
                 | "task.list"
+                | "call.list"
         )
 }
 
@@ -125,6 +126,9 @@ pub(super) fn read(
 ) -> Result<serde_json::Value, SdkError> {
     if super::read_model::handles(&request.method) {
         return super::read_model::read(client, request);
+    }
+    if request.method == "call.list" {
+        return super::dispatch::call::list(client);
     }
     if request.method == "sync.status.get" {
         return super::sync_status::read(client.account_db()?);

@@ -48,6 +48,9 @@ use crate::prelude::*;
 
 pub struct RamfluxClient {
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
+    // One account-owned plan crosses the synchronous receive transaction's commit boundary.
+    // It is never shared across accounts, held over an await, or serialized with media secrets.
+    pub(crate) voice_transition: std::cell::RefCell<Option<(String, call::state::LiveCall)>>,
     pub(crate) node_relay_options: Option<crate::object::RelayTransferOptions>,
     pub(crate) identity_root: Option<IdentityRoot>,
     pub(crate) reader_device_identity: Option<ramflux_crypto::RootQualifiedDeviceRef>,
@@ -65,6 +68,7 @@ impl Default for RamfluxClient {
     fn default() -> Self {
         Self {
             voice_calls: BTreeMap::new(),
+            voice_transition: std::cell::RefCell::new(None),
             node_relay_options: None,
             identity_root: None,
             reader_device_identity: None,
