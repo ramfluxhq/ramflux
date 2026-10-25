@@ -32,6 +32,32 @@ fn empty(source: &SdkOwnDeviceHistoryBundle, n: usize) -> SdkOwnDeviceHistoryBun
         sender_key_distributions_base64: Vec::new(),
     }
 }
+pub(super) fn validate(bundle: &SdkOwnDeviceHistoryBundle) -> Result<(), SdkError> {
+    if bundle.version == 1 && (bundle.authority_only || bundle.next_page.is_some()) {
+        return Err(SdkError::InboundRejected("continuations require history bundle v2".into()));
+    }
+    if bundle.authority_only
+        && (!bundle.messages.is_empty()
+            || !bundle.groups.is_empty()
+            || !bundle.contents.is_empty()
+            || !bundle.dm_sessions.is_empty()
+            || !bundle.sender_key_distributions_base64.is_empty()
+            || !bundle.task_packets.is_empty()
+            || !bundle.surface_pages.is_empty()
+            || !bundle.surface_controls.is_empty()
+            || !bundle.surface_checkpoints.is_empty()
+            || !bundle.surface_message_epochs.is_empty()
+            || serde_json::to_value(&bundle.task_export_metadata)?
+                != serde_json::to_value(super::task::own_history::TaskExportMetadata::default())?
+            || serde_json::to_value(&bundle.surface_export_metadata)?
+                != serde_json::to_value(super::surface::SurfaceExportMetadata::default())?)
+    {
+        return Err(SdkError::InboundRejected(
+            "authority continuation contains ordinary history".into(),
+        ));
+    }
+    Ok(())
+}
 pub(super) fn pages(
     mut bundle: SdkOwnDeviceHistoryBundle,
 ) -> Result<Vec<SdkOwnDeviceHistoryBundle>, SdkError> {

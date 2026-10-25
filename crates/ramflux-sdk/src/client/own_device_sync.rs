@@ -682,6 +682,7 @@ impl RamfluxClient {
         if bundle.target_device_id != local_device_id {
             return Err(SdkError::LocalBus("own-device sync bundle target mismatch".to_owned()));
         }
+        super::own_device_history_pages::validate(bundle)?;
         self.restore_own_history_authority(bundle)?;
         if bundle.authority_only {
             return Ok(SdkOwnDeviceSyncImportResponse {
@@ -1327,6 +1328,28 @@ mod backup_contact_paging_tests {
         drop(target);
         std::fs::remove_dir_all(source_root)?;
         std::fs::remove_dir_all(target_root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backup_page_shape_tests {
+    use super::*;
+    #[test]
+    fn authority_only_pages_refuse_ordinary_history_instead_of_silently_discarding_it()
+    -> Result<(), SdkError> {
+        let mut bundle = super::tests::bundle("source", "target", Vec::new(), Vec::new());
+        bundle.version = 2;
+        bundle.schema = "ramflux.sdk.own_device_history_bundle.v2".into();
+        bundle.authority_only = true;
+        crate::client::own_device_history_pages::validate(&bundle)?;
+        bundle
+            .contents
+            .insert("message".into(), zeroize::Zeroizing::new(b"must not disappear".to_vec()));
+        assert!(crate::client::own_device_history_pages::validate(&bundle).is_err());
+        bundle.contents.clear();
+        bundle.version = 1;
+        assert!(crate::client::own_device_history_pages::validate(&bundle).is_err());
         Ok(())
     }
 }
