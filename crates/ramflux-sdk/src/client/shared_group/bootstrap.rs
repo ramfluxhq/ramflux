@@ -9,7 +9,7 @@ use ramflux_protocol::group_state::GroupStateSnapshot;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub(crate) const PACKET_SCHEMA: &str = "ramflux.sdk.group_state.v1";
+pub(crate) const PACKET_SCHEMA: &str = "ramflux.sdk.group_state.v2";
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SharedGroupPacket {
@@ -18,7 +18,12 @@ struct SharedGroupPacket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distribution_base64: Option<Zeroizing<String>>,
 }
-pub(crate) struct PreparedSharedGroup {
+pub(crate) enum PreparedSharedGroup {
+    Snapshot(SnapshotPrepared),
+    Invitation { state: VerifiedGroupState, body: Zeroizing<Vec<u8>> },
+    Control(super::GroupControlPacket),
+}
+pub(crate) struct SnapshotPrepared {
     state: VerifiedGroupState,
     distribution: Option<Zeroizing<Vec<u8>>>,
 }
@@ -40,14 +45,18 @@ struct PacketHeader<'a> {
     schema: Option<&'a str>,
 }
 pub(crate) fn is_packet(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<PacketHeader<'_>>(bytes)
-        .is_ok_and(|header| header.schema == Some(PACKET_SCHEMA))
+    serde_json::from_slice::<PacketHeader<'_>>(bytes).is_ok_and(|header| {
+        header.schema == Some(PACKET_SCHEMA)
+            || header.schema == Some(super::controls::CONTROL_SCHEMA)
+    })
 }
 pub(crate) fn decode_packet(bytes: &[u8]) -> Result<Option<VerifiedGroupState>, SdkError> {
     if bytes.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES * 2 {
         return Err(invalid("group state packet exceeds its byte budget"));
     }
-    if !is_packet(bytes) {
+    if !serde_json::from_slice::<PacketHeader<'_>>(bytes)
+        .is_ok_and(|header| header.schema == Some(PACKET_SCHEMA))
+    {
         return Ok(None);
     }
     let packet: SharedGroupPacket = ramflux_protocol::parse_i_json(bytes)?;
@@ -89,6 +98,16 @@ impl RamfluxClient {
         if opened.routing.kind != crate::client::routed::Kind::GroupControl {
             return Ok(None);
         }
+        if serde_json::from_slice::<PacketHeader<'_>>(body)
+            .is_ok_and(|header| header.schema == Some(super::controls::CONTROL_SCHEMA))
+        {
+            if body.len() > 16384 {
+                return Err(invalid("group control byte budget exceeded"));
+            }
+            let packet: super::GroupControlPacket = ramflux_protocol::parse_i_json(body)?;
+            self.prepare_group_control(engine, entry, &opened.routing, &packet).await?;
+            return Ok(Some(PreparedSharedGroup::Control(packet)));
+        }
         let Some(state) = decode_packet(body)? else { return Ok(None) };
         if opened.routing.group_id.as_deref() != Some(state.view().group_id.as_str())
             || opened.routing.conversation_id != state.view().conversation_id
@@ -97,6 +116,12 @@ impl RamfluxClient {
         }
         self.verify_shared_group_source(&engine.config, &state, entry).await?;
         self.authenticated_envelope_sender(entry)?;
+        if self.group_snapshot_requires_consent(&state)? {
+            return Ok(Some(PreparedSharedGroup::Invitation {
+                state,
+                body: Zeroizing::new(body.to_vec()),
+            }));
+        }
         self.prepare_shared_group_payload(state, body).map(Some)
     }
     pub(super) fn prepare_shared_group_payload(
@@ -139,13 +164,21 @@ impl RamfluxClient {
                 Ok(bytes)
             })
             .transpose()?;
-        Ok(PreparedSharedGroup { state, distribution })
+        Ok(PreparedSharedGroup::Snapshot(SnapshotPrepared { state, distribution }))
     }
     pub(crate) fn apply_prepared_shared_group(
         &self,
         prepared: &PreparedSharedGroup,
         local_target: &str,
     ) -> Result<bool, SdkError> {
+        let prepared = match prepared {
+            PreparedSharedGroup::Snapshot(snapshot) => snapshot,
+            PreparedSharedGroup::Invitation { state, body } => {
+                self.hold_group_invitation(state, body)?;
+                return Ok(false);
+            }
+            PreparedSharedGroup::Control(packet) => return self.apply_group_control(packet),
+        };
         let state = &prepared.state;
         self.account_db()?.write_transaction(|| {
             let changed = self.accept_shared_group_state(state, local_target)?;

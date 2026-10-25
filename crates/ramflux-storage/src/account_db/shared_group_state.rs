@@ -49,12 +49,6 @@ impl AccountDb {
             let previous = self.shared_group_state(&state.group_id)?;
             let changed = previous.as_ref().is_none_or(|old| state != old.view());
             if let Some(previous) = previous {
-                if verified.snapshot().checkpoint.as_ref().is_some_and(|checkpoint|
-                    checkpoint.owner.identity.root_commitment != checkpoint.genesis.actor.identity.root_commitment
-                    && checkpoint.authority.as_ref().map_or(0, |authority| authority.epoch)
-                        < previous.snapshot().checkpoint.as_ref().and_then(|old| old.authority.as_ref()).map_or(0, |authority| authority.epoch)) {
-                    return Err(StorageError::GroupPermissionDenied);
-                }
                 match verified.relation_to(&previous)? {
                     GroupStateRelation::Ancestor | GroupStateRelation::ExistingPreferred => return Ok(false),
                     GroupStateRelation::Same | GroupStateRelation::Extension | GroupStateRelation::IncomingPreferred => {}
@@ -84,6 +78,7 @@ impl AccountDb {
             self.persist_client_record("group-local", &state.group_id, &json!(local.identity))?;
             self.project_shared_group_link(verified)?;
             self.persist_actor_state(&state_key(&state.group_id), verified.snapshot())?;
+            self.remember_shared_group_head(verified)?;
             self.persist_client_record("group-name", &state.group_id,
                 &json!({"name":state.name,"name_epoch":state.name_epoch}))?;
             Ok(changed)

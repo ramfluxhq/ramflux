@@ -89,6 +89,7 @@ struct RecipientCursor {
 struct TerminalSnapshot {
     root: String,
     device: Option<String>,
+    devices: BTreeSet<String>,
     snapshot: StatePointer,
     expires_at: i64,
 }
@@ -135,12 +136,14 @@ fn freeze_removals(
     previous: &VerifiedGroupState,
     state: &VerifiedGroupState,
 ) -> Result<(), SdkError> {
+    let previous_devices = client.shared_group_selected_devices(previous)?;
     for root in eligibility(previous).keys() {
         if !eligibility(state).contains_key(root) {
             intent.terminal.retain(|entry| entry.root != *root || entry.device.is_some());
             intent.terminal.push(TerminalSnapshot {
                 root: root.clone(),
                 device: None,
+                devices: previous_devices.get(root).cloned().unwrap_or_default(),
                 snapshot: StatePointer::from_state(state),
                 expires_at: now_unix_timestamp().saturating_add(BOUNDARY_SECONDS),
             });
@@ -157,6 +160,7 @@ fn freeze_removals(
             intent.terminal.push(TerminalSnapshot {
                 root: excluded.root_commitment.clone(),
                 device: Some(excluded.device_id.clone()),
+                devices: BTreeSet::from([excluded.device_id.clone()]),
                 snapshot: StatePointer::from_state(state),
                 expires_at: now_unix_timestamp().saturating_add(BOUNDARY_SECONDS),
             });
@@ -326,8 +330,8 @@ async fn drive_one(
         return Ok(0);
     }
     if now >= intent.expires_at || (!intent.round_active && intent.attempt >= 8) {
-        account.client.account_db()?.append_journal(&id,"group.state.delivery_failed",
-                &serde_json::json!({"group_id":intent.snapshot.group_id,"epoch":intent.snapshot.epoch,"reason":"retry_budget_exhausted"}),now,None)?;
+        account.client.account_db()?.append_group_journal(&format!("{id}/{now}"),"group.state.delivery_failed",
+                &serde_json::json!({"group_id":intent.snapshot.group_id,"epoch":intent.snapshot.epoch,"reason":"retry_budget_exhausted"}),now,&id)?;
         if intent.terminal.iter().any(|boundary| boundary.expires_at > now) {
             intent.attempt = 0;
             intent.round_active = false;

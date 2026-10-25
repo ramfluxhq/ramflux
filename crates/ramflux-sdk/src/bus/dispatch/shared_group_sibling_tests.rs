@@ -104,17 +104,7 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     let sibling_config = configure(&mut sibling, &config, "device-sibling")?;
     prepare_group(&owner, &sibling, &peer)?;
     if collision {
-        owner.client.send_direct_message(
-            "other-thread",
-            logical,
-            "device-owner",
-            b"original ciphertext",
-        )?;
-        owner.client.account_db()?.store_message_content(
-            "other-thread",
-            logical,
-            b"original content",
-        )?;
+        seed_existing_message(&owner.client, logical)?;
     }
     let captured = Arc::new(Mutex::new(Vec::new()));
     sibling.put_engine(GatewaySessionEngine::with_test_transport(
@@ -155,12 +145,16 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     let rows = owner.client.direct_messages("group-thread")?;
     assert_eq!(rows.len(), 1, "first group message must be present exactly once");
     let row = &rows[0];
-    if collision || logical.starts_with("routed:") {
-        assert_ne!(row.message_id, logical);
-        assert!(row.message_id.starts_with("routed:"));
-    } else {
-        assert_eq!(row.message_id, logical);
-    }
+    let sender = sibling.client.owned_device_identity()?;
+    assert_eq!(
+        row.message_id,
+        ramflux_protocol::group_message_id(
+            "group",
+            sender.root_commitment(),
+            sender.device_id(),
+            logical
+        )?
+    );
     if collision {
         assert_eq!(
             owner.client.account_db()?.message_content(logical)?,
@@ -178,5 +172,11 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     directory.abort();
     drop((owner, sibling, peer));
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn seed_existing_message(client: &RamfluxClient, logical: &str) -> Result<(), SdkError> {
+    client.send_direct_message("other-thread", logical, "device-owner", b"original ciphertext")?;
+    client.account_db()?.store_message_content("other-thread", logical, b"original content")?;
     Ok(())
 }

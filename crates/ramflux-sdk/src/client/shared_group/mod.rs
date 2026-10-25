@@ -4,19 +4,25 @@
 //! Full authenticated group state, local actor certificates and root-qualified projections.
 use crate::prelude::*;
 use ramflux_crypto::{
-    VerifiedGroupState, advance_group_state, certify_group_state_actor, sign_group_state_operation,
-    sign_group_state_snapshot,
+    VerifiedGroupState, advance_group_state, certify_group_state_actor, create_group_state,
 };
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupStateChange};
 use serde_json::{Value, json};
 
 mod bootstrap;
+mod controls;
+mod creator_conflicts;
+mod devices;
 mod federation;
-mod reconciliation;
+mod invitations;
+mod message_ids;
+mod requests;
 mod routes;
 pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 #[cfg(test)]
 use bootstrap::{decode_packet, packet_bytes};
+pub(crate) use controls::{BeaconRecord, GroupControlBody, GroupControlPacket};
+pub(crate) use requests::request_key as request_record_key;
 fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(reason.into())
 }
@@ -61,23 +67,19 @@ impl RamfluxClient {
         }
         let actor = self.owned_group_actor(target)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let operation = sign_group_state_operation(
+        let verified = create_group_state(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             branch,
             &actor,
-            ramflux_crypto::GroupStateOperationInput {
+            ramflux_crypto::GroupStateCreateInput {
                 group_id: group,
-                epoch: 1,
-                previous_hash: None,
-                change: GroupStateChange::Create {
-                    conversation_id: conversation.into(),
-                    max_members: 200,
-                    new_member_history: "no_history".into(),
-                    name,
-                },
+                conversation_id: conversation,
+                max_members: 200,
+                new_member_history: "no_history",
+                name,
+                now: now_unix_timestamp(),
             },
         )?;
-        let verified = sign_group_state_snapshot(branch, &actor, vec![operation])?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&verified, &actor)?;
             crate::bus::enqueue_shared_group(self, &verified, None)
@@ -124,6 +126,20 @@ impl RamfluxClient {
                 return Ok(false);
             };
             let changed = self.account_db()?.commit_shared_group_state(&reconciled, &actor)?;
+            for record in self.group_change_records()?.into_iter().filter(|record| {
+                !record.incoming && record.request.group_id == reconciled.view().group_id
+            }) {
+                if let (GroupStateChange::Add { member, .. }, Some(federation)) =
+                    (&record.request.change, record.federation)
+                    && reconciled.view().members.iter().any(|current| current.identity == *member)
+                {
+                    self.persist_shared_group_federation_route(
+                        &reconciled.view().group_id,
+                        &member.root_commitment,
+                        &federation,
+                    )?;
+                }
+            }
             if reconciled.snapshot().state_hash != verified.snapshot().state_hash {
                 crate::bus::enqueue_shared_group(self, &reconciled, previous.as_ref())?;
             }
@@ -136,7 +152,15 @@ impl RamfluxClient {
         state: &VerifiedGroupState,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        let issuer = &state.snapshot().issuer;
+        self.verify_group_actor_source(gateway, &state.snapshot().issuer, entry).await?;
+        self.ensure_shared_group_device(state, &self.authenticated_device_identity(entry)?)
+    }
+    pub(crate) async fn verify_group_actor_source(
+        &self,
+        gateway: &GatewaySessionConfig,
+        issuer: &GroupStateActor,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(entry)?;
         if issuer.identity.root_commitment != source.root_commitment()
             || issuer.identity.device_id != source.device_id()
@@ -171,35 +195,12 @@ impl RamfluxClient {
         let state = verified.view();
         let mut members = BTreeSet::new();
         let mut roles = BTreeMap::new();
-        for member in &state.members {
-            members.insert(member.identity.device_id.clone());
-            roles.insert(member.identity.device_id.clone(), member.role.as_str().into());
-        }
-        // Signed device-set membership expands each account's implicit sibling devices.
-        let roots = state
-            .members
-            .iter()
-            .map(|member| member.identity.root_commitment.as_str())
-            .collect::<BTreeSet<_>>();
-        for root in roots {
-            if let Some(set) = self.observed_device_set(root)? {
-                for device in set
-                    .devices
-                    .iter()
-                    .filter(|d| d.status == ramflux_protocol::DeviceSetStatus::Active)
-                {
-                    if let Some(role) = state.effective_role(root, &device.device_id) {
-                        members.insert(device.device_id.clone());
-                        roles.insert(device.device_id.clone(), role.as_str().into());
-                    }
+        for (root, names) in self.shared_group_selected_devices(&verified)? {
+            for device in names {
+                if let Some(role) = state.effective_role(&root, &device) {
+                    members.insert(device.clone());
+                    roles.insert(device, role.as_str().into());
                 }
-            }
-        }
-        if let Some(local) = self.account_db()?.client_record("group-local", group)? {
-            let local: GroupMemberIdentity = serde_json::from_value(local)?;
-            if let Some(role) = state.effective_role(&local.root_commitment, &local.device_id) {
-                members.insert(local.device_id.clone());
-                roles.insert(local.device_id, role.as_str().into());
             }
         }
         Ok(Some(GroupState {

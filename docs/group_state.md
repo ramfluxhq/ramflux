@@ -1,127 +1,148 @@
 # Signed group state
 
-New `group.create` bus calls create an authenticated shared group. Membership,
-roles and the group name advance together through root-authorized operations.
-Each operation binds the previous state hash and next epoch; full snapshots carry
-its verified history or a root-signed checkpoint with creator-certified delegation. A transport issuer must also
-match its current root-bound device manifest. Group declarations alone never grant
-device-key authority.
+A shared group has one writer: its creator account root. Any current verified
+creator device can sign a complete state snapshot with the root master key. The
+snapshot binds the group, epoch, previous hash, root-qualified roster and roles,
+name/name epoch, exclusions and creator. A separate device signature authenticates
+the transport issuer, who must match the authenticated transport source and a
+fresh signed device manifest. A forwarding member cannot alter creator authority.
+
+Receivers accept a higher creator-certified epoch, including an arbitrary gap.
+There is no operation history, delegated checkpoint or cross-root state writer.
+Conflicting snapshots at the same epoch can only be creator-device writes; the
+lowest content hash wins, and the losing creator device reapplies its own pending
+intents. Requests from other roots are always revalidated against the winning
+current roster. This is an honest same-user concurrency rule, not multi-writer
+consensus. A newly joining member cannot discover a creator snapshot withheld by
+its inviter; the signature authenticates authority rather than global freshness.
 
 ## Bus contract
 
-All calls select an unlocked account through the bus frame. The actual local
-account/device signs mutations; an optional `actor_id` must name that device.
+All calls select an unlocked account. The local device signs the operation or
+request; an optional `actor_id` must equal that device.
 
 ```json
 {"method":"group.create","body":{"group_id":"g","conversation_id":"thread","creator_id":"owner-device","name":"Checklist"}}
-{"method":"group.member.add","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT_COMMITMENT","role":"member"}}
-{"method":"group.role.set","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT_COMMITMENT","role":"admin"}}
-{"method":"group.name.set","body":{"group_id":"g","name":"Reviewed checklist"}}
-{"method":"group.member.remove","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT_COMMITMENT"}}
+{"method":"group.member.add","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT","role":"member"}}
+{"method":"group.role.set","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT","role":"admin"}}
+{"method":"group.name.set","body":{"group_id":"g","name":"Reviewed checklist","request_id":"optional-retry-id"}}
+{"method":"group.member.remove","body":{"group_id":"g","member_id":"peer-device","member_principal_commitment":"ROOT"}}
+{"method":"group.requests.list","body":{"group_id":"g"}}
+{"method":"group.invitations.list","body":{}}
+{"method":"group.invitation.accept","body":{"group_id":"g"}}
+{"method":"group.invitation.decline","body":{"group_id":"g"}}
 ```
 
-An explicit root makes `member_id` a literal name, including names shaped like
-qualified addresses. Without a root, a selector must be unambiguous. Existing
-owner/admin role rules apply; creator ownership cannot be removed or transferred. Names
-are at most 256 UTF-8 bytes and must pass the protocol's single-line text-safety
-rule. The initial `title` field remains an alias for `name`.
+An explicit root makes `member_id` literal, including address-shaped names.
+Otherwise the selector must be unambiguous. Existing owner/admin role rules apply;
+a member cannot grant itself an administrative role. Names must pass the protocol
+single-line text rule and fit 256 UTF-8 bytes. Initial `title` aliases `name`.
 
-Shared entries in `group.list` include `name` and `name_epoch`. `group.members`
-also includes `member_roster` and `excluded_devices`; its signed roster contains
-root-qualified member identities and roles. The legacy `members`/`roles` fields are display views;
-they cannot identify an authorization principal when device names collide.
-Delivery routes expand verified root membership through current usable device
-manifests, so active siblings follow their account's membership without an
-explicit join. Explicit exclusions still deny that device.
+Creator mutations commit immediately. Authorized non-creator mutations return
+`pending: true`, `status: waiting_for_owner` and `request_id`. The signed request
+binds actor root/device, group genesis, creator root, base epoch, intent, id and
+expiry. A request is revalidated against current roles, even when based on an
+older epoch. Duplicate ids with identical intent reuse the retained request;
+different intent is refused. Results are creator-root signed and bound to the
+original request hash. Statuses include `applied`, `already_applied`,
+`permission_denied`, `capacity` and local `expired`.
 
-A signed name projects into the linked conversation title. Ordinary group sends,
-reads and directory refreshes preserve that title. Caller-selected local display
-metadata cannot replace the signed name or membership.
+**When the creator is offline, changes wait for the group owner.** No admin or
+member device signs replacement group state. There are at most 8 pending requests
+per requester root/group and 64 per group, with seven-day expiry. The account
+retains at most 4096 request/result records, including short-lived replay receipts.
+A refusal of a removal is returned as a typed signed result, not a silent success.
 
-## Delivery and recovery
+Only the creator may call `group.owner.transfer`. Its body contains `group_id`,
+the selected `member_id`/`member_principal_commitment`, and `creator_actor` (the
+new creator's root-certified device actor). The new creator must already be an
+explicit verified member. A creator-signed transfer certificate permits the new
+root to sign future snapshots; the old root loses write authority. The bounded
+transfer chain supports at most 32 transfers. Transfer is a creator command,
+not an admin request.
 
-Mutations atomically persist state and a durable delivery intent, then return.
-Every current device receives the complete proof. Removed recipients receive their
-frozen removal boundary without a new epoch's sender key; an earlier device
-removal remains frozen even if the whole root is removed later. A first bootstrap
-packet supplies the issuer's sender key. Idempotent replays cannot reset a receive
-ratchet, and changing a seed within the same content head is rejected. Sender keys and message AEAD bind the full content head, in addition to the root-qualified sender and epoch. Other senders distribute
-their own keys through the ordinary group-send path.
+## Consent, membership and names
 
-The account actor drains one group per tick, with at most four member roots and
-four undelivered recipient attempts per drain. Partial drains retain a cursor and
-share one retry round. The 1024-device work window yields and resumes rather than
-rejecting a large account roster. Successful recipients remain recorded across
-failed rounds and same-head coalescing. Local removals run first; local mutation
-pointers have no recovery queue cap. Recovery has its own 32-group admission
-budget, so recovery saturation cannot roll back a committed removal.
+An unknown group is adopted automatically only if its creator or inviter is an
+accepted contact (or the local root). Otherwise its verified snapshot is held as
+an invitation, outside joined group/conversation/message projections. Explicit
+acceptance adopts the signed state; decline retains a replay fence. Blocked
+creators or inviters are rejected. A joined member need not be a contact to send
+group messages; individual source blocks still apply.
 
-An intent contains the group/epoch/content-head pointer and delivery progress;
-the current proof is read from storage. Frozen removal boundaries contain only
-root/device/head references, with each immutable proof stored once. Boundaries
-survive the normal eight-round, one-hour retry window and remain durable for seven
-days. A failed boundary window resumes after a five-minute backoff. A recipient
-removed earlier gets its original boundary, never a later roster/name or sender
-seed. Network operations have bounded deadlines, and one group's preparation
-failure does not prevent another group's turn.
+Invitations have a receiver-chosen seven-day lifetime, unchanged by replays or
+newer snapshots. Limits are four live invitations per inviter, 32 live per account
+and 128 total including declined fences. Authentication precedes quota charging.
 
-Own-device activation restages up to four groups per tick when the authenticated
-own-device-set epoch changes. Idle ticks never resend full state. A verified stale
-or competing peer head is an explicit detected gap and can restage the current
-head; same-head receives do not echo it. First-send key distribution also carries
-the current signed proof so a peer that missed controls can catch up before data.
-Encrypted own history retains signed names and membership. Legacy wrapper roles
-cannot replace them.
+`group.members` includes the signed `member_roster`, `excluded_devices`, `name`
+and `name_epoch`. Legacy `members`/`roles` are display fields; duplicate literal
+device names cannot identify an authorization principal. Signed names project
+into the linked conversation title; ordinary traffic cannot replace them.
 
-Authorized forks resolve at their first divergent epoch: the lowest raw operation
-hash wins, independent of branch length. A losing device re-signs its own durable
-local writes on the winner before publishing the repaired state; removals are
-preserved. A device does not impersonate another writer. Proofs that cannot be
-related within retained ancestry, and local writes that cannot be reauthorized,
-produce a typed `group.state.conflict` journal event rather than a retry loop.
-The last 64 contiguous operation heads survive checkpoints; unrelated older heads
-require an explicit conflict decision rather than an invented ancestry claim.
+Current signed device sets expand root membership into implicit siblings. Explicit
+active devices have priority, then device selection proceeds fairly across roots.
+There are at most 200 member roots, 1024 selected devices total and 16 devices per
+root. Excess devices receive typed capacity refusals; one root's excess devices
+do not stop other roots' delivery. Account device revocation is checked separately.
+Group-only device exclusions expire after their seven-day boundary window and
+are pruned on the next creator mutation. If the root remains a member, an active,
+unrevoked device may then follow its root again. Permanent removal uses signed
+account device revocation.
 
-A locally configured federation hint remains scoped to its verified member root.
-It is checked during member addition, retained atomically with the mutation and
-shared by that root's implicit sibling routes. Manifest refresh and state forwarding
-use the configured federation transport; the hint itself grants no membership.
+## Delivery, recovery and identity
 
-## Limits and compatibility
+Snapshots and pointer delivery intents commit atomically; the account actor drains
+them later. Local removals have priority and cannot be refused by the 32-group
+recovery admission cap. A drain visits at most four roots and attempts four devices;
+partial drains keep a cursor. The 1024-device work window yields and resumes.
+Successful recipients stay recorded across retries and same-head coalescing.
 
-A gateway frame is 1 MiB. The shared proof budget is
-`floor((1 MiB - 64 KiB) / 10) = 98,304 bytes`, reserving transport/key metadata and
-a conservative factor of ten for JSON/base64 and sealing expansion. A native
-regression seals and submits a 200-member state through the ordinary envelope
-path and checks the resulting submit frame (64,953 proof bytes and approximately 558,000 submit bytes in the native fixture). The explicit member cap is 200;
-long identifiers, many privileged members, or exclusions can reach the independent
-byte limit sooner. Capacity refusals are typed `GroupStateLimit::Members` or
-`GroupStateLimit::Bytes`, surfaced on the bus as `GroupStateCapacity`. Larger groups
-and object/chunk state transport are deferred.
+Frozen removal boundaries store root/device/head pointers and one immutable proof
+per head. They remain durable for seven days, even beyond the normal eight-round,
+one-hour retry window. Failed boundary windows resume after five minutes. Removed
+recipients receive their original boundary without a new sender key or later
+roster/name. Boundaries freeze the eligible devices rather than expanding removals
+into newly enrolled devices.
 
-Proofs retain at most 512 operations, with automatic checkpoints after 32 operations
-or earlier when the byte budget requires it. The creator root certifies a compact
-checkpoint authority: genesis, epoch/head and the complete owner/admin root roster,
-including lower-role overrides and exclusions for those privileged roots. A
-delegated admin can checkpoint ordinary member and name changes while preserving
-that certified privileged roster exactly. Admins cannot invent ownership, promote
-admins, remove privileged root overrides, or rewrite the creator's signature.
-Creator changes to privileges immediately publish refreshed authority. Existing
-members reject a delegated checkpoint older than their known authority floor.
-Old proofs without delegation remain verifiable; the creator must publish an
-updated checkpoint before admins can compact that old history.
+Own-device-set epoch changes trigger bounded activation backfill and a small
+authenticated device-set beacon to existing members. Receiving a beacon refreshes
+the sender root's verified device directory without advancing the group epoch.
+This exposes implicit siblings to existing peers. Idle ticks never resend full
+snapshots. First-send controls still carry the current signed snapshot and sender
+key, so missed state does not lose the first application message.
 
-New members accept a delegated checkpoint under the creator-root certificate and
-the issuer's freshly authenticated device manifest. This authenticates delegation
-and current membership in the supplied state, not a global freshness oracle: a
-new member cannot discover a withheld newer group head from the proof alone.
-Known members enforce their retained authority and fork history. Names and roster
-changes continue to require the existing owner/admin permissions. Device-set
-revocation checks remain independent of group checkpoint delegation.
+Requests, results and beacons use the existing pair/federation control transport.
+Each queued control retains its own sealed attempt before submit, a bounded
+network deadline and fair retry rotation. An offline recipient cannot hold other
+groups' controls. Federation hints are routing metadata, not membership authority;
+recipient manifests and branch keys remain verified.
 
-Unsigned legacy storage mutators cannot alter shared-group projections.
+`group.send` returns a sender-qualified `message_id` and the caller's original
+`client_message_id`. The canonical id hashes group, authenticated root, device and
+logical caller id. Authenticated routing carries the original logical id so every
+recipient derives the same canonical id, independently of arrival order. Retries
+may use the returned id. Another member cannot reserve that sender's id by sending
+first. Callers should use returned ids for message references.
 
-Existing legacy groups remain on their previous path; there is no automatic
-migration of an unsigned group into a new signed group. All participants need
-support for the shared-group packet to receive the new state protocol. Group
-name and state delivery use the existing account actor and transport architecture.
+Sender keys and message AEAD bind the complete content hash, sender root/device
+and epoch. Only locally committed verified heads may allocate key scopes. At most
+64 known heads per group and 64 active checkpoints per group/sender/direction are
+retained; historical event bodies follow normal account history retention. Replay
+of a bootstrap cannot reset an advanced ratchet or substitute a different seed.
+Diagnostic delivery failures retain per-device attribution; conflict/delivery rows
+are bounded to eight per subject and 4096 combined, with a seven-day age bound.
+
+## Budgets and compatibility
+
+The independent full-snapshot budget is 98,304 bytes:
+`floor((1 MiB gateway frame - 64 KiB metadata reserve) / 10)`. Typed refusals cover
+member roots, devices, bytes, requests and transfers, surfaced as
+`GroupStateCapacity`. Long identifiers or exclusions can reach the byte limit
+before the roster limit. A native regression seals and submits a 200-root snapshot
+through the ordinary gateway frame path.
+
+Shared packets use `ramflux.sdk.group_state.v2` and creator snapshots use
+`ramflux.group_state.snapshot.v2`. Older experimental multi-writer shared proofs
+are not accepted as v2. Unsigned legacy groups remain on their existing path;
+legacy storage mutators cannot modify a shared-group projection. All participants
+need v2 support. Large-group multi-writer consensus is outside this protocol.

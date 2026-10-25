@@ -19,6 +19,10 @@ impl RamfluxClient {
                 "local group membership not yet available".to_owned(),
             ));
         }
+        if let Some(state) = self.account_db()?.shared_group_state(group)? {
+            self.ensure_shared_group_device(&state, &self.authenticated_device_identity(entry)?)?;
+            self.ensure_shared_group_device(&state, &self.owned_device_identity()?)?;
+        }
         self.pin_local_group_member(group)?;
         self.require_group_sender_pin(
             group,

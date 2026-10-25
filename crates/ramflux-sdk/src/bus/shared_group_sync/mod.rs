@@ -4,11 +4,13 @@
 //! Shared group mutations and bounded state distribution on the existing account actor.
 mod outbox;
 mod recovery;
+mod requests;
 use crate::prelude::*;
 pub(crate) use outbox::enqueue;
 pub(super) use outbox::flush;
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateChange};
 pub(super) use recovery::stage;
+pub(super) use requests::flush as flush_requests;
 use serde_json::{Value, json};
 
 fn required<'a>(body: &'a Value, key: &str) -> Result<&'a str, SdkError> {
@@ -23,11 +25,18 @@ pub(super) async fn dispatch(
 ) -> Result<Option<Value>, SdkError> {
     let method = request.method.as_str();
     let body = &request.body;
+    if let Some(response) = consent_dispatch(method, body, account)? {
+        return Ok(Some(response));
+    }
     if method != "group.create"
         && method != "group.name.set"
         && !matches!(
             method,
-            "group.member.add" | "group.member.remove" | "group.member.kick" | "group.role.set"
+            "group.member.add"
+                | "group.member.remove"
+                | "group.member.kick"
+                | "group.role.set"
+                | "group.owner.transfer"
         )
     {
         return Ok(None);
@@ -49,6 +58,8 @@ pub(super) async fn dispatch(
     } else if method == "group.member.add" {
         let member = verified_member(account, body).await?;
         Some(GroupStateChange::Add { member, role: required(body, "role")?.parse()? })
+    } else if method == "group.owner.transfer" {
+        Some(ownership_transfer(account, body).await?)
     } else if method == "group.name.set" {
         Some(GroupStateChange::SetName { name: required(body, "name")?.into() })
     } else {
@@ -58,22 +69,26 @@ pub(super) async fn dispatch(
             method,
         )?
     };
-    let route = if let Some(GroupStateChange::Add { member, .. }) = &change {
-        let federation: Option<LocalBusFederationRoute> = body
-            .get("federation")
-            .filter(|value| !value.is_null())
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()?;
-        federation.map(|federation| LocalBusGroupMemberRoute {
-            member_id: member.device_id.clone(),
-            member_principal_commitment: Some(member.root_commitment.clone()),
-            device_signing_public_key: Some(member.signing_public_key.clone()),
-            target_delivery_id: Some(member.target_delivery_id.clone()),
-            federation: Some(federation),
-        })
-    } else {
-        None
-    };
+    let route = federation_route(body, change.as_ref())?;
+    if let (Some(previous), Some(change)) = (&previous, &change)
+        && account.client.owned_device_identity()?.root_commitment()
+            != previous.creator().identity.root_commitment
+    {
+        let request = account.client.stage_group_change_request(
+            group,
+            &target,
+            change.clone(),
+            body["request_id"].as_str(),
+        )?;
+        if let Some(route) = &route
+            && let Some(mut record) = account.client.group_change_record(&request, false)?
+        {
+            record.federation.clone_from(&route.federation);
+            account.client.persist_group_request(&record)?;
+        }
+        let result = pending_metadata(&account.client, group, &request)?;
+        return Ok(Some(result));
+    }
     account.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
         if let Some(change) = change {
             account.client.shared_group_change(group, &target, change)?
@@ -209,4 +224,84 @@ async fn verified_member(
     };
     account.client.persist_identity_directory(&manifest)?;
     Ok(identity)
+}
+
+fn federation_route(
+    body: &Value,
+    change: Option<&GroupStateChange>,
+) -> Result<Option<LocalBusGroupMemberRoute>, SdkError> {
+    let route = if let Some(GroupStateChange::Add { member, .. }) = change {
+        let federation: Option<LocalBusFederationRoute> = body
+            .get("federation")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?;
+        federation.map(|federation| LocalBusGroupMemberRoute {
+            member_id: member.device_id.clone(),
+            member_principal_commitment: Some(member.root_commitment.clone()),
+            device_signing_public_key: Some(member.signing_public_key.clone()),
+            target_delivery_id: Some(member.target_delivery_id.clone()),
+            federation: Some(federation),
+        })
+    } else {
+        None
+    };
+    Ok(route)
+}
+
+fn consent_dispatch(
+    method: &str,
+    body: &Value,
+    account: &LocalBusAccountState,
+) -> Result<Option<Value>, SdkError> {
+    if method == "group.requests.list" {
+        return account.client.group_change_statuses(body["group_id"].as_str()).map(Some);
+    }
+    if method == "group.invitations.list" {
+        return account.client.group_invitations().map(Some);
+    }
+    if matches!(method, "group.invitation.accept" | "group.invitation.decline") {
+        return account
+            .client
+            .decide_group_invitation(
+                required(body, "group_id")?,
+                method == "group.invitation.accept",
+                &account.target_delivery_id,
+            )
+            .map(Some);
+    }
+    Ok(None)
+}
+
+async fn ownership_transfer(
+    account: &LocalBusAccountState,
+    body: &Value,
+) -> Result<GroupStateChange, SdkError> {
+    let identity = verified_member(account, body).await?;
+    let actor = body
+        .get("creator_actor")
+        .cloned()
+        .map(serde_json::from_value::<ramflux_protocol::GroupStateActor>)
+        .transpose()?
+        .ok_or_else(|| SdkError::LocalBus("creator_actor certificate is required".into()))?;
+    ramflux_crypto::verify_group_state_actor(&actor)?;
+    if actor.identity != identity {
+        return Err(StorageError::GroupPermissionDenied.into());
+    }
+    Ok(GroupStateChange::TransferOwnership { creator: actor })
+}
+
+fn pending_metadata(
+    client: &RamfluxClient,
+    group: &str,
+    request: &ramflux_protocol::GroupChangeRequest,
+) -> Result<Value, SdkError> {
+    let mut result =
+        client.shared_group_metadata(group)?.ok_or(StorageError::GroupPermissionDenied)?;
+    let live = request.expires_at > now_unix_timestamp();
+    result["accepted"] = json!(live);
+    result["pending"] = json!(live);
+    result["status"] = json!(if live { "waiting_for_owner" } else { "expired" });
+    result["request_id"] = json!(request.request_id);
+    Ok(result)
 }

@@ -107,6 +107,22 @@ impl RamfluxClient {
         body: &[u8],
     ) -> Result<(), SdkError> {
         use crate::client::routed::Kind;
+        if matches!(route.kind, Kind::GroupControl | Kind::GroupMessage) {
+            let source = self.authenticated_device_identity(entry)?;
+            if self.friend_rejection_reason(source.root_commitment())?.is_some()
+                || self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some()
+            {
+                return Err(invalid("group sender is blocked"));
+            }
+            if route.kind == Kind::GroupMessage
+                && !self.local_is_group_member(
+                    route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?,
+                )?
+            {
+                return Err(invalid("group has not been joined"));
+            }
+            return Ok(());
+        }
         if !matches!(route.kind, Kind::Direct | Kind::Control) {
             return Ok(());
         }

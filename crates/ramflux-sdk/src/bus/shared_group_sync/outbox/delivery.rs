@@ -38,8 +38,7 @@ pub(super) async fn deliver(
                 Some(RecipientCursor { root: root.clone(), after_device: None, complete: false });
             persist_intent(client, intent)?;
         }
-        let mut devices = manifest.devices;
-        devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        let devices = selected_devices(client, intent, state, &root, manifest)?;
         if devices.is_empty() {
             intent.round_failed = true;
         }
@@ -86,16 +85,16 @@ pub(super) async fn deliver(
             attempts += 1;
             intent.round_devices += 1;
             let name = device.device_id.clone();
-            match tokio::time::timeout(
+            if let Ok(Ok(())) = tokio::time::timeout(
                 Duration::from_secs(3),
                 deliver_one(client, engine, intent, &selected, &root, device),
             )
             .await
             {
-                Ok(Ok(())) => delivered += 1,
-                _ => {
-                    intent.round_failed = true;
-                }
+                delivered += 1;
+            } else {
+                intent.round_failed = true;
+                journal_failure(client, state, &root, &name)?;
             }
             intent.cursor = Some(RecipientCursor {
                 root: root.clone(),
@@ -164,17 +163,7 @@ async fn deliver_one(
         )
     );
     let mut message = GatewayDirectMessage {
-        conversation_id: state
-            .operations
-            .first()
-            .and_then(|op| match &op.change {
-                ramflux_protocol::group_state::GroupStateChange::Create {
-                    conversation_id, ..
-                } => Some(conversation_id.clone()),
-                _ => None,
-            })
-            .or_else(|| state.checkpoint.as_ref().map(|c| c.state.conversation_id.clone()))
-            .ok_or_else(|| SdkError::LocalBus("group state conversation is absent".into()))?,
+        conversation_id: state.state.conversation_id.clone(),
         message_id: envelope.clone(),
         envelope_id: format!("group_state_{}", crate::new_surface_message_id()?),
         source_principal_id: engine.config.principal_id.clone(),
@@ -215,4 +204,46 @@ async fn deliver_one(
     persist_intent(client, intent)?;
     submit_staged(client, engine, intent).await?;
     Ok(())
+}
+
+fn selected_boundary(intent: &Intent, root: &str, device: &str) -> bool {
+    intent
+        .terminal
+        .iter()
+        .any(|boundary| boundary.root == root && boundary.devices.contains(device))
+}
+
+fn journal_failure(
+    client: &RamfluxClient,
+    state: &VerifiedGroupState,
+    root: &str,
+    name: &str,
+) -> Result<(), SdkError> {
+    let subject = ramflux_protocol::hash_base64url(
+        "ramflux.group.delivery.subject.v1",
+        &ramflux_protocol::canonical_json_bytes(&(&state.view().group_id, &root, &name))?,
+    );
+    let now = now_unix_timestamp();
+    client.account_db()?.append_group_journal(&format!("group-device/{subject}/{}",now/300),"group.state.delivery_failed",&serde_json::json!({"group_id":state.view().group_id,"root_commitment":root,"device_id":name,"epoch":state.view().epoch,"reason":"submit_failed"}),now,&subject)?;
+    Ok(())
+}
+
+fn selected_devices(
+    client: &RamfluxClient,
+    intent: &Intent,
+    state: &VerifiedGroupState,
+    root: &str,
+    manifest: crate::prekey::SdkDeviceManifestResponse,
+) -> Result<Vec<crate::prekey::SdkDeviceManifestEntry>, SdkError> {
+    let allowed = client.shared_group_selected_devices(state)?.remove(root).unwrap_or_default();
+    let mut devices = manifest
+        .devices
+        .into_iter()
+        .filter(|device| {
+            allowed.contains(&device.device_id)
+                || selected_boundary(intent, root, &device.device_id)
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    Ok(devices)
 }

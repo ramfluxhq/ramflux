@@ -6,8 +6,7 @@ use super::test_db;
 use crate::StorageError;
 use ramflux_crypto::{
     DeviceBranch, VerifiedGroupState, advance_group_state, certify_group_state_actor,
-    create_device_branch, create_identity_root, sign_group_state_operation,
-    sign_group_state_snapshot,
+    create_device_branch, create_group_state, create_identity_root,
 };
 use ramflux_protocol::group_state::{GroupStateActor, GroupStateChange, SharedGroupRole};
 use serde_json::json;
@@ -37,23 +36,19 @@ fn create(
     branch: &DeviceBranch,
     actor: &GroupStateActor,
 ) -> Result<VerifiedGroupState, StorageError> {
-    let operation = sign_group_state_operation(
+    Ok(create_group_state(
         root,
         branch,
         actor,
-        ramflux_crypto::GroupStateOperationInput {
+        ramflux_crypto::GroupStateCreateInput {
             group_id: "group",
-            epoch: 1,
-            previous_hash: None,
-            change: GroupStateChange::Create {
-                conversation_id: "thread".into(),
-                max_members: 200,
-                new_member_history: "no_history".into(),
-                name: Some("Checklist".into()),
-            },
+            conversation_id: "thread",
+            max_members: 200,
+            new_member_history: "no_history",
+            name: Some("Checklist".into()),
+            now: 1000,
         },
-    )?;
-    Ok(sign_group_state_snapshot(branch, actor, vec![operation])?)
+    )?)
 }
 #[test]
 fn full_state_projects_all_three_members_and_the_same_epoch_and_name() -> Result<(), StorageError> {
@@ -224,6 +219,46 @@ fn shared_legacy_retirement_cannot_retire_a_signed_member() -> Result<(), Storag
         db.group_member_role("group", &owned_device("owner", "owner", 10)?)?.as_deref(),
         Some("owner")
     );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn active_group_key_scopes_and_device_diagnostics_have_hard_bounds() -> Result<(), StorageError> {
+    use crate::ProjectionStore;
+    let (root, db) = test_db("group-retention")?;
+    for index in 0..80 {
+        let checkpoint = format!("group_sender_key:v3/{index}");
+        db.set_projection_checkpoint(&checkpoint, "event")?;
+        db.retain_group_key_checkpoint("group-root-device-recv", &checkpoint)?;
+    }
+    assert!(db.projection_checkpoint("group_sender_key:v3/0")?.is_none());
+    assert!(db.projection_checkpoint("group_sender_key:v3/15")?.is_none());
+    assert!(db.projection_checkpoint("group_sender_key:v3/16")?.is_some());
+    assert!(db.projection_checkpoint("group_sender_key:v3/79")?.is_some());
+    assert!(db.retain_group_key_checkpoint("scope", "dm_session:private").is_err());
+    for index in 0..30 {
+        db.append_group_journal(
+            &format!("group-device/{index}"),
+            "group.state.delivery_failed",
+            &json!({"root_commitment":"root","device_id":"phone"}),
+            1000 + index,
+            "group/root/phone",
+        )?;
+    }
+    let retained: u64 = db.connection.query_row(
+        "SELECT count(*) FROM runtime_journal WHERE topic='group.state.delivery_failed'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(retained, 8);
+    let pruned: u64 = db.connection.query_row(
+        "SELECT pruned_through FROM runtime_journal_bounds WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(pruned > 0);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

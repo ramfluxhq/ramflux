@@ -204,6 +204,12 @@ impl RamfluxClient {
         let wire_remote =
             crate::client::identity_authority::device_namespace::wire_device_id(&remote)?;
         let mut route = routing(message, route);
+        if route.kind == Kind::GroupMessage {
+            route.group_message_id = Some(
+                self.outgoing_group_logical_id(&message.message_id)?
+                    .unwrap_or_else(|| message.message_id.clone()),
+            );
+        }
         if route.kind == Kind::GroupControl
             && let Some(group) = route.group_id.as_deref()
             && let Some(link) = self.account_db()?.client_record("group", group)?

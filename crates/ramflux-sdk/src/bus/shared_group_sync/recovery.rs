@@ -45,6 +45,11 @@ pub(in crate::bus) fn stage(account: &LocalBusAccountState) -> Result<usize, Sdk
                 if !super::outbox::enqueue_recovery(client, &state)? {
                     return Ok(());
                 }
+                client.stage_group_device_beacon(
+                    group,
+                    &account.gateway_config.target_delivery_id,
+                    set.device_set_epoch,
+                )?;
                 staged += 1;
             }
             progress.after.clone_from(group);

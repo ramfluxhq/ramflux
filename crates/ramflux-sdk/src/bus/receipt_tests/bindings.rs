@@ -58,6 +58,14 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     let pool = receiver.relay_quic_pool()?;
     let mut engine = receiver.take_live_engine().await?;
     receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    let sender = a.identity()?;
+    let logical = ramflux_protocol::group_message_id(
+        "group",
+        sender.root_commitment(),
+        sender.device_id(),
+        "held",
+    )?;
+    assert!(receiver.client.direct_message_by_id(&logical)?.is_none());
     assert!(receiver.client.direct_message_by_id("held")?.is_none());
     assert!(receiver.client.direct_message_by_id("held:device-bob")?.is_none());
     assert_eq!(
@@ -70,7 +78,7 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     );
     receiver.client.import_group_sender_key_distribution(&distribution)?;
     assert_eq!(
-        receiver.client.account_db()?.message_content("held")?,
+        receiver.client.account_db()?.message_content(&logical)?,
         Some(b"held group body".to_vec())
     );
     let keys = receiver

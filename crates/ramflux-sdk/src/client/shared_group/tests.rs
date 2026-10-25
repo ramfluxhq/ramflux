@@ -4,13 +4,13 @@
 //! Full-state convergence, first-message keys, names and removal through SDK group APIs.
 use super::*;
 use std::path::{Path, PathBuf};
-fn temp_root(label: &str) -> Result<PathBuf, SdkError> {
+pub(super) fn temp_root(label: &str) -> Result<PathBuf, SdkError> {
     Ok(std::env::temp_dir().join(format!(
         "ramflux-group-{label}-{}",
         ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
     )))
 }
-fn person(
+pub(super) fn person(
     root: &Path,
     principal: &str,
     device: &str,

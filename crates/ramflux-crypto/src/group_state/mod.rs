@@ -1,44 +1,132 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Root-authenticated group writers, signed history and monotonic snapshot proofs.
-mod authority;
-mod checkpoint;
-mod lineage;
-pub use lineage::GroupStateRelation;
+//! Creator-root full snapshots with independent transport issuer authentication.
+mod requests;
+mod snapshot;
 mod transition;
 use crate::{CryptoError, DeviceBranch, IdentityRoot};
-pub use checkpoint::{advance_group_state, compact_group_state};
 use ed25519_dalek::Signer;
 use ramflux_protocol::{
     canonical_json_bytes, encode_base64url,
     group_state::{
-        GROUP_STATE_ACTOR_DOMAIN, GROUP_STATE_OPERATION_DOMAIN, GROUP_STATE_SNAPSHOT_DOMAIN,
+        GROUP_CHANGE_REQUEST_DOMAIN, GROUP_CHANGE_RESULT_DOMAIN, GROUP_REQUEST_TTL_SECONDS,
+        GROUP_STATE_ACTOR_DOMAIN, GROUP_STATE_SNAPSHOT_DOMAIN, GroupCreatorTransfer,
         GroupDeviceExclusion, GroupMemberIdentity, GroupStateActor, GroupStateChange,
-        GroupStateOperation, GroupStateSnapshot, MAX_GROUP_NAME_BYTES, MAX_GROUP_STATE_BYTES,
-        MAX_GROUP_STATE_EXCLUSIONS, MAX_GROUP_STATE_MEMBERS, MAX_GROUP_STATE_STEPS,
-        SharedGroupMember, SharedGroupRole, SharedGroupState,
+        GroupStateGenesis, GroupStateLimit, GroupStateSnapshot, MAX_GROUP_CREATOR_TRANSFERS,
+        MAX_GROUP_DEVICES, MAX_GROUP_DEVICES_PER_ROOT, MAX_GROUP_NAME_BYTES, MAX_GROUP_STATE_BYTES,
+        MAX_GROUP_STATE_EXCLUSIONS, MAX_GROUP_STATE_MEMBERS, SharedGroupMember, SharedGroupRole,
+        SharedGroupState,
     },
 };
+pub use requests::*;
 use serde_json::{Value, json};
+pub use snapshot::{GroupStateCreateInput, advance_group_state, create_group_state};
 #[derive(Clone)]
 pub struct VerifiedGroupState {
     snapshot: GroupStateSnapshot,
-    view: SharedGroupState,
-    heads: std::collections::BTreeMap<u64, String>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupStateRelation {
+    Same,
+    Extension,
+    Ancestor,
+    IncomingPreferred,
+    ExistingPreferred,
+    Unrelated,
 }
 impl VerifiedGroupState {
     #[must_use]
     pub const fn view(&self) -> &SharedGroupState {
-        &self.view
+        &self.snapshot.state
     }
     #[must_use]
     pub const fn snapshot(&self) -> &GroupStateSnapshot {
         &self.snapshot
     }
     #[must_use]
+    pub const fn genesis(&self) -> &GroupStateGenesis {
+        &self.snapshot.genesis
+    }
+    #[must_use]
+    pub const fn creator(&self) -> &GroupStateActor {
+        &self.snapshot.creator
+    }
+    /// # Errors
+    /// Returns canonical encoding errors.
+    pub fn genesis_hash(&self) -> Result<String, CryptoError> {
+        snapshot::genesis_hash(self.genesis())
+    }
+    /// # Errors
+    /// Rejects invalid identities or a principal conflicting with the creator-signed roster.
+    pub fn member_storage_key(
+        &self,
+        identity: &GroupMemberIdentity,
+    ) -> Result<Option<String>, CryptoError> {
+        identity_valid(identity)?;
+        if self.view().members.iter().any(|member| {
+            member.identity.root_commitment == identity.root_commitment
+                && member.identity.principal_id != identity.principal_id
+        }) {
+            return Err(invalid("identity conflicts with group membership"));
+        }
+        if self.view().effective_role(&identity.root_commitment, &identity.device_id).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "root~{}",
+            encode_base64url(canonical_json_bytes(&(
+                &identity.root_commitment,
+                &identity.device_id
+            ))?)
+        )))
+    }
+    #[must_use]
+    pub fn extends(&self, previous: &Self) -> bool {
+        self.relation_to(previous).is_ok_and(|relation| {
+            matches!(relation, GroupStateRelation::Same | GroupStateRelation::Extension)
+        })
+    }
+    #[must_use]
     pub fn contains_head(&self, epoch: u64, hash: &str) -> bool {
-        self.heads.get(&epoch).is_some_and(|known| known == hash)
+        self.view().epoch == epoch && self.view().head_hash == hash
+    }
+    /// Compare only creator-certified full snapshots; no cross-root operation fork choice exists.
+    /// # Errors
+    /// Returns canonical encoding errors.
+    pub fn relation_to(&self, previous: &Self) -> Result<GroupStateRelation, CryptoError> {
+        use GroupStateRelation::{
+            Ancestor, ExistingPreferred, Extension, IncomingPreferred, Same, Unrelated,
+        };
+        if self.genesis() != previous.genesis() {
+            return Ok(Unrelated);
+        }
+        if self.view().epoch < previous.view().epoch {
+            return Ok(Ancestor);
+        }
+        if self.view().epoch > previous.view().epoch {
+            // A former creator cannot erase a transfer already accepted by this member.
+            return Ok(if self.snapshot.transfers.starts_with(&previous.snapshot.transfers) {
+                Extension
+            } else {
+                Unrelated
+            });
+        }
+        if self.snapshot.state_hash == previous.snapshot.state_hash {
+            return Ok(Same);
+        }
+        if snapshot::signer_key(self.snapshot())? != snapshot::signer_key(previous.snapshot())? {
+            return Ok(Unrelated);
+        }
+        Ok(
+            if ramflux_protocol::decode_base64url(&self.snapshot.state_hash)?
+                < ramflux_protocol::decode_base64url(&previous.snapshot.state_hash)?
+            {
+                IncomingPreferred
+            } else {
+                ExistingPreferred
+            },
+        )
     }
 }
 pub(super) fn invalid(reason: &'static str) -> CryptoError {
@@ -60,38 +148,28 @@ pub(super) fn identity_valid(identity: &GroupMemberIdentity) -> Result<(), Crypt
     }
     let key = crate::verifying_key_from_base64url(&identity.signing_public_key)?;
     if key.is_weak() || encode_base64url(key.to_bytes()) != identity.signing_public_key {
-        return Err(invalid("invalid member signing key"));
+        return Err(invalid("invalid member key"));
     }
     Ok(())
 }
 fn actor_body(actor: &GroupStateActor) -> Value {
     json!({"domain":GROUP_STATE_ACTOR_DOMAIN,"identity":actor.identity,"root_public_key":actor.root_public_key})
 }
-fn operation_body(operation: &GroupStateOperation) -> Value {
-    json!({"domain":GROUP_STATE_OPERATION_DOMAIN,"schema":operation.schema,"group_id":operation.group_id,"epoch":operation.epoch,"previous_hash":operation.previous_hash,"actor":operation.actor,"change":operation.change})
-}
-fn snapshot_body(snapshot: &GroupStateSnapshot) -> Value {
-    json!({"domain":GROUP_STATE_SNAPSHOT_DOMAIN,"schema":snapshot.schema,"group_id":snapshot.group_id,"epoch":snapshot.epoch,"state_hash":snapshot.state_hash,"checkpoint":snapshot.checkpoint,"operations":snapshot.operations,"issuer":snapshot.issuer})
-}
-/// Root-sign an exact local branch key for group state. Roles are never part of this certificate.
 /// # Errors
-/// Rejects root/branch identity mismatch, invalid identifiers, keys or canonical data.
+/// Rejects an invalid actor or mismatched root and branch.
 pub fn certify_group_state_actor(
     root: &IdentityRoot,
     branch: &DeviceBranch,
     target: &str,
 ) -> Result<GroupStateActor, CryptoError> {
     if root.principal_id != branch.principal_id {
-        return Err(invalid("actor root principal mismatch"));
+        return Err(invalid("actor principal mismatch"));
     }
     let public = root.signing_key.verifying_key();
     let mut actor = GroupStateActor {
         identity: GroupMemberIdentity {
             principal_id: branch.principal_id.clone(),
-            root_commitment: crate::blake3_256_base64url(
-                "ramflux.identity.root_public_key.commitment.v1",
-                &public.to_bytes(),
-            ),
+            root_commitment: crate::identity_root_commitment(&public),
             device_id: branch.device_id.clone(),
             signing_public_key: encode_base64url(branch.signing_key.verifying_key().to_bytes()),
             target_delivery_id: target.into(),
@@ -106,16 +184,13 @@ pub fn certify_group_state_actor(
     Ok(actor)
 }
 /// # Errors
-/// Rejects malformed identities or a certificate not signed by the claimed root.
+/// Rejects malformed identities or certificates not signed by the claimed root.
 pub fn verify_group_state_actor(actor: &GroupStateActor) -> Result<(), CryptoError> {
     identity_valid(&actor.identity)?;
     let public = crate::verifying_key_from_base64url(&actor.root_public_key)?;
     if public.is_weak()
         || encode_base64url(public.to_bytes()) != actor.root_public_key
-        || crate::blake3_256_base64url(
-            "ramflux.identity.root_public_key.commitment.v1",
-            &public.to_bytes(),
-        ) != actor.identity.root_commitment
+        || crate::identity_root_commitment(&public) != actor.identity.root_commitment
     {
         return Err(invalid("actor root mismatch"));
     }
@@ -140,116 +215,29 @@ fn root_matches(root: &IdentityRoot, actor: &GroupStateActor) -> Result<(), Cryp
     if root.principal_id != actor.identity.principal_id
         || encode_base64url(root.signing_key.verifying_key().to_bytes()) != actor.root_public_key
     {
-        return Err(invalid("group writer root mismatch"));
+        return Err(invalid("creator root mismatch"));
     }
     Ok(())
-}
-pub(super) fn root_operation_body(operation: &GroupStateOperation) -> Value {
-    json!({"domain":"ramflux.group_state.root_operation.v1","operation":operation_body(operation)})
-}
-/// Header and exact transition authenticated by both the account root and its local branch.
-pub struct GroupStateOperationInput<'a> {
-    pub group_id: &'a str,
-    pub epoch: u64,
-    pub previous_hash: Option<String>,
-    pub change: GroupStateChange,
-}
-/// # Errors
-/// Rejects an invalid actor or canonical serialization. History authority is checked by snapshot verification.
-pub fn sign_group_state_operation(
-    root: &IdentityRoot,
-    branch: &DeviceBranch,
-    actor: &GroupStateActor,
-    input: GroupStateOperationInput<'_>,
-) -> Result<GroupStateOperation, CryptoError> {
-    let GroupStateOperationInput { group_id, epoch, previous_hash, change } = input;
-    branch_matches(branch, actor)?;
-    root_matches(root, actor)?;
-    let mut operation = GroupStateOperation {
-        schema: GROUP_STATE_OPERATION_DOMAIN.into(),
-        group_id: group_id.into(),
-        epoch,
-        previous_hash,
-        actor: actor.clone(),
-        change,
-        root_signature: String::new(),
-        signature: String::new(),
-    };
-    operation.root_signature = encode_base64url(
-        root.signing_key.sign(&canonical_json_bytes(&root_operation_body(&operation))?).to_bytes(),
-    );
-    operation.signature = crate::sign_with_device_branch(branch, &operation_body(&operation))?;
-    Ok(operation)
-}
-/// # Errors
-/// Rejects noncanonical operation data.
-pub fn group_state_head_hash(operation: &GroupStateOperation) -> Result<String, CryptoError> {
-    Ok(crate::blake3_256_base64url(
-        "ramflux.group_state.head.v1",
-        &canonical_json_bytes(operation)?,
-    ))
 }
 fn check_issuer(view: &SharedGroupState, issuer: &GroupStateActor) -> Result<(), CryptoError> {
-    let identity = &issuer.identity;
-    let role = view.effective_role(&identity.root_commitment, &identity.device_id);
-    // Transport admission verifies the issuer's current root-signed device set. Group history
-    // retains the original declaration and must not pin a retired branch key forever.
-    if role.is_none() {
+    if view.effective_role(&issuer.identity.root_commitment, &issuer.identity.device_id).is_none()
+        || view.members.iter().any(|m| {
+            m.identity.root_commitment == issuer.identity.root_commitment
+                && m.identity.principal_id != issuer.identity.principal_id
+        })
+    {
         return Err(invalid("snapshot issuer is not an authorized member"));
-    }
-    if view.members.iter().any(|m| {
-        m.identity.root_commitment == identity.root_commitment
-            && m.identity.principal_id != identity.principal_id
-    }) {
-        return Err(invalid("issuer principal mismatch"));
     }
     Ok(())
 }
-/// # Errors
-/// Rejects invalid history, an unauthorized snapshot issuer or byte-budget overflow.
-pub fn sign_group_state_snapshot(
-    branch: &DeviceBranch,
-    actor: &GroupStateActor,
-    operations: Vec<GroupStateOperation>,
-) -> Result<VerifiedGroupState, CryptoError> {
-    branch_matches(branch, actor)?;
-    sign_snapshot_parts(branch, actor, operations, None)
+fn transport_body(snapshot: &GroupStateSnapshot) -> Result<Value, CryptoError> {
+    let mut value = serde_json::to_value(snapshot).map_err(|_| invalid("group JSON encoding"))?;
+    value.as_object_mut().ok_or_else(|| invalid("snapshot object"))?.remove("signature");
+    Ok(value)
 }
-fn sign_snapshot_parts(
-    branch: &DeviceBranch,
-    actor: &GroupStateActor,
-    operations: Vec<GroupStateOperation>,
-    checkpoint: Option<ramflux_protocol::group_state::GroupStateCheckpoint>,
-) -> Result<VerifiedGroupState, CryptoError> {
-    branch_matches(branch, actor)?;
-    let (view, mut heads) = transition::derive(&operations, checkpoint.as_ref())?;
-    lineage::merge(&mut heads, checkpoint.as_ref())?;
-    check_issuer(&view, actor)?;
-    let mut snapshot = GroupStateSnapshot {
-        schema: GROUP_STATE_SNAPSHOT_DOMAIN.into(),
-        group_id: view.group_id.clone(),
-        epoch: view.epoch,
-        state_hash: crate::blake3_256_base64url(
-            "ramflux.group_state.content.v1",
-            &canonical_json_bytes(&view)?,
-        ),
-        checkpoint,
-        operations,
-        issuer: actor.clone(),
-        signature: String::new(),
-    };
-    snapshot.signature = crate::sign_with_device_branch(branch, &snapshot_body(&snapshot))?;
-    if canonical_json_bytes(&snapshot)?.len() > MAX_GROUP_STATE_BYTES {
-        return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
-            ramflux_protocol::group_state::GroupStateLimit::Bytes,
-        )
-        .into());
-    }
-    Ok(VerifiedGroupState { snapshot, view, heads })
-}
-/// Re-sign an already verified snapshot for delivery without rewriting its history or checkpoint.
+/// Re-sign transport provenance without altering the creator's full snapshot.
 /// # Errors
-/// Rejects an actor outside the verified membership or a mismatched private branch.
+/// Rejects an invalid or unauthorized issuer.
 pub fn resign_group_state_snapshot(
     branch: &DeviceBranch,
     actor: &GroupStateActor,
@@ -257,48 +245,25 @@ pub fn resign_group_state_snapshot(
 ) -> Result<VerifiedGroupState, CryptoError> {
     branch_matches(branch, actor)?;
     check_issuer(state.view(), actor)?;
-    let mut snapshot = state.snapshot().clone();
+    let mut snapshot = state.snapshot.clone();
     snapshot.issuer = actor.clone();
-    snapshot.signature = crate::sign_with_device_branch(branch, &snapshot_body(&snapshot))?;
+    snapshot.signature = crate::sign_with_device_branch(branch, &transport_body(&snapshot)?)?;
     verify_group_state_snapshot(snapshot)
 }
-
-/// Verify the entire root-authorized role history before a snapshot can mutate local state.
 /// # Errors
-/// Rejects invalid signatures, roles, epochs, hashes, identities, names or budgets.
+/// Rejects invalid creator signatures, roster structure, transport issuers, hashes or budgets.
 pub fn verify_group_state_snapshot(
     snapshot: GroupStateSnapshot,
 ) -> Result<VerifiedGroupState, CryptoError> {
-    if canonical_json_bytes(&snapshot)?.len() > MAX_GROUP_STATE_BYTES {
-        return Err(ramflux_protocol::ProtocolError::GroupStateLimit(
-            ramflux_protocol::group_state::GroupStateLimit::Bytes,
-        )
-        .into());
-    }
-    if snapshot.schema != GROUP_STATE_SNAPSHOT_DOMAIN {
-        return Err(invalid("invalid snapshot header"));
-    }
+    snapshot::verify(&snapshot)?;
     verify_group_state_actor(&snapshot.issuer)?;
-    let (view, mut heads) = transition::derive(&snapshot.operations, snapshot.checkpoint.as_ref())?;
-    lineage::merge(&mut heads, snapshot.checkpoint.as_ref())?;
-    if snapshot.group_id != view.group_id
-        || snapshot.epoch != view.epoch
-        || snapshot.state_hash
-            != crate::blake3_256_base64url(
-                "ramflux.group_state.content.v1",
-                &canonical_json_bytes(&view)?,
-            )
-    {
-        return Err(invalid("snapshot state hash mismatch"));
-    }
-    check_issuer(&view, &snapshot.issuer)?;
+    check_issuer(&snapshot.state, &snapshot.issuer)?;
     crate::verify_device_branch_signature(
         &snapshot.issuer.identity.signing_public_key,
-        &snapshot_body(&snapshot),
+        &transport_body(&snapshot)?,
         &snapshot.signature,
     )?;
-    Ok(VerifiedGroupState { snapshot, view, heads })
+    Ok(VerifiedGroupState { snapshot })
 }
-
 #[cfg(test)]
 mod tests;

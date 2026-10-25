@@ -345,21 +345,17 @@ fn other_root_snapshot(
         ramflux_crypto::create_device_branch(&config.principal_id, &config.device_id, 1, [8; 32]);
     let actor =
         ramflux_crypto::certify_group_state_actor(&root, &branch, &config.target_delivery_id)?;
-    let operation = ramflux_crypto::sign_group_state_operation(
+    Ok(ramflux_crypto::create_group_state(
         &root,
         &branch,
         &actor,
-        ramflux_crypto::GroupStateOperationInput {
+        ramflux_crypto::GroupStateCreateInput {
             group_id: "group",
-            epoch: 1,
-            previous_hash: None,
-            change: ramflux_protocol::group_state::GroupStateChange::Create {
-                conversation_id: "group-thread".into(),
-                max_members: 200,
-                new_member_history: "no_history".into(),
-                name: None,
-            },
+            conversation_id: "thread",
+            max_members: 200,
+            new_member_history: "no_history",
+            name: None,
+            now: now_unix_timestamp(),
         },
-    )?;
-    Ok(ramflux_crypto::sign_group_state_snapshot(&branch, &actor, vec![operation])?)
+    )?)
 }

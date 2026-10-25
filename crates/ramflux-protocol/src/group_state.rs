@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Bounded signed group state, complete bootstrap history and account-root membership.
+//! Creator-root snapshots, bounded signed requests and root-qualified group membership.
 use serde::{Deserialize, Serialize};
-pub const GROUP_STATE_OPERATION_DOMAIN: &str = "ramflux.group_state.operation.v1";
-pub const GROUP_STATE_SNAPSHOT_DOMAIN: &str = "ramflux.group_state.snapshot.v1";
-pub const GROUP_STATE_CHECKPOINT_DOMAIN: &str = "ramflux.group_state.checkpoint.v1";
+pub const GROUP_STATE_SNAPSHOT_DOMAIN: &str = "ramflux.group_state.snapshot.v2";
+pub const GROUP_CHANGE_REQUEST_DOMAIN: &str = "ramflux.group_state.request.v1";
+pub const GROUP_CHANGE_RESULT_DOMAIN: &str = "ramflux.group_state.result.v1";
 pub const GROUP_STATE_ACTOR_DOMAIN: &str = "ramflux.group_state.actor.v1";
-pub const MAX_GROUP_STATE_STEPS: usize = 512;
+pub const MAX_GROUP_CREATOR_TRANSFERS: usize = 32;
+pub const MAX_GROUP_DEVICES: usize = 1024;
+pub const MAX_GROUP_DEVICES_PER_ROOT: usize = 16;
+pub const GROUP_REQUEST_TTL_SECONDS: i64 = 7 * 24 * 3600;
+pub const MAX_GROUP_PENDING_REQUESTS: usize = 64;
+pub const MAX_GROUP_REQUESTS_PER_ROOT: usize = 8;
 // Reserve 64 KiB of the 1 MiB gateway frame; the sealed path expands state by at most 10x.
 pub const MAX_GROUP_STATE_BYTES: usize = (1024 * 1024 - 64 * 1024) / 10;
 pub const MAX_GROUP_STATE_MEMBERS: usize = 200;
 pub const MAX_GROUP_STATE_EXCLUSIONS: usize = 2048;
 pub const MAX_GROUP_NAME_BYTES: usize = 256;
-pub const MAX_GROUP_STATE_LINEAGE: usize = 64;
 
 /// A deterministic group capacity refusal, distinct from an authentication failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -22,6 +26,12 @@ pub enum GroupStateLimit {
     Members,
     #[error("snapshot byte budget exceeded")]
     Bytes,
+    #[error("device limit exceeded")]
+    Devices,
+    #[error("pending request limit exceeded")]
+    Requests,
+    #[error("ownership transfer limit exceeded")]
+    Transfers,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -75,39 +85,31 @@ pub struct GroupStateActor {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GroupStateChange {
-    Create {
-        conversation_id: String,
-        max_members: u32,
-        new_member_history: String,
-        name: Option<String>,
-    },
-    Add {
-        member: GroupMemberIdentity,
-        role: SharedGroupRole,
-    },
-    Remove {
-        root_commitment: String,
-        device_id: String,
-    },
-    SetRole {
-        root_commitment: String,
-        device_id: String,
-        role: SharedGroupRole,
-    },
-    SetName {
-        name: String,
-    },
+    Add { member: GroupMemberIdentity, role: SharedGroupRole },
+    Remove { root_commitment: String, device_id: String },
+    SetRole { root_commitment: String, device_id: String, role: SharedGroupRole },
+    SetName { name: String },
+    TransferOwnership { creator: GroupStateActor },
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GroupStateOperation {
-    pub schema: String,
+pub struct GroupStateGenesis {
     pub group_id: String,
-    pub epoch: u64,
-    pub previous_hash: Option<String>,
+    pub conversation_id: String,
     pub actor: GroupStateActor,
-    pub change: GroupStateChange,
-    pub root_signature: String,
+    pub max_members: u32,
+    pub new_member_history: String,
+    pub signature: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupCreatorTransfer {
+    pub group_id: String,
+    pub genesis_hash: String,
+    pub from_public_key: String,
+    pub creator: GroupStateActor,
+    pub epoch: u64,
+    pub previous_hash: String,
     pub signature: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -117,16 +119,61 @@ pub struct GroupStateSnapshot {
     pub group_id: String,
     pub epoch: u64,
     pub state_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<GroupStateCheckpoint>,
-    pub operations: Vec<GroupStateOperation>,
+    pub previous_hash: Option<String>,
+    pub genesis: GroupStateGenesis,
+    pub creator: GroupStateActor,
+    pub transfers: Vec<GroupCreatorTransfer>,
+    pub state: SharedGroupState,
+    pub issued_at: i64,
+    pub root_signature: String,
     pub issuer: GroupStateActor,
+    pub signature: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupChangeRequest {
+    pub schema: String,
+    pub group_id: String,
+    pub genesis_hash: String,
+    pub base_epoch: u64,
+    pub creator_root: String,
+    pub request_id: String,
+    pub actor: GroupStateActor,
+    pub change: GroupStateChange,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub signature: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupChangeStatus {
+    Applied,
+    AlreadyApplied,
+    PermissionDenied,
+    Capacity,
+    Expired,
+    Invalid,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupChangeResult {
+    pub schema: String,
+    pub group_id: String,
+    pub request_id: String,
+    pub request_hash: String,
+    pub requester: GroupMemberIdentity,
+    pub creator: GroupStateActor,
+    pub status: GroupChangeStatus,
+    pub epoch: u64,
+    pub state_hash: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
     pub signature: String,
 }
 impl GroupStateSnapshot {
     /// # Errors
     /// Rejects oversized input, duplicate keys, invalid I-JSON or malformed typed fields.
-    /// Cryptographic history verification is mandatory after decoding.
+    /// Creator and transport signature verification is mandatory after decoding.
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
         if bytes.len() > MAX_GROUP_STATE_BYTES {
             return Err(crate::ProtocolError::GroupStateLimit(GroupStateLimit::Bytes));
@@ -147,6 +194,7 @@ pub struct GroupDeviceExclusion {
     pub root_commitment: String,
     pub device_id: String,
     pub removed_epoch: u64,
+    pub expires_at: i64,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -189,37 +237,20 @@ impl SharedGroupState {
     }
 }
 
-/// An authenticated operation head retained across bounded history compaction.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GroupStateHead {
-    pub epoch: u64,
-    pub head_hash: String,
-}
-
-/// Creator-root delegation binds the privileged roster independently of delegated checkpoints.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GroupCheckpointAuthority {
-    pub genesis_hash: String,
-    pub epoch: u64,
-    pub head_hash: String,
-    pub members: Vec<SharedGroupMember>,
-    pub excluded: Vec<GroupDeviceExclusion>,
-    pub signature: String,
-}
-
-/// A root-signed checkpoint; delegated writers must preserve the creator-certified privileged roster.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GroupStateCheckpoint {
-    pub schema: String,
-    pub genesis: GroupStateOperation,
-    pub state: SharedGroupState,
-    pub owner: GroupStateActor,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lineage: Vec<GroupStateHead>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authority: Option<GroupCheckpointAuthority>,
-    pub signature: String,
+/// Stable group projection id bound to authenticated sender identity, never arrival order.
+/// # Errors
+/// Returns canonical encoding errors.
+pub fn group_message_id(
+    group: &str,
+    root: &str,
+    device: &str,
+    logical: &str,
+) -> Result<String, crate::ProtocolError> {
+    Ok(format!(
+        "groupmsg:{}",
+        crate::hash_base64url(
+            "ramflux.group.message-id.v1",
+            &crate::canonical_json_bytes(&(group, root, device, logical))?
+        )
+    ))
 }

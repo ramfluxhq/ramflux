@@ -8,28 +8,32 @@ impl RamfluxClient {
         &self,
         state: &ramflux_crypto::VerifiedGroupState,
     ) -> Result<Vec<LocalBusGroupMemberRoute>, SdkError> {
-        let db = self.account_db()?;
         let mut routes = Vec::new();
-        let roots = state
-            .view()
-            .members
-            .iter()
-            .map(|member| member.identity.root_commitment.as_str())
-            .collect::<BTreeSet<_>>();
-        for root in roots {
+        let selected = self.shared_group_selected_devices(state)?;
+        for (root, names) in selected {
+            if names.is_empty() {
+                continue;
+            }
+            let root = root.as_str();
             let before = routes.len();
-            let manifest = db.load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(
-                &format!("identity/manifest-root/{root}"),
-            )?;
-            let names = manifest
-                .map(|manifest| {
-                    manifest
-                        .devices
-                        .into_iter()
-                        .map(|device| device.device_id)
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
+            if self.observed_device_set(root)?.is_none() {
+                for member in state
+                    .view()
+                    .members
+                    .iter()
+                    .filter(|member| member.identity.root_commitment == root)
+                {
+                    routes.push(LocalBusGroupMemberRoute {
+                        member_id: member.identity.device_id.clone(),
+                        member_principal_commitment: Some(root.into()),
+                        device_signing_public_key: None,
+                        target_delivery_id: None,
+                        federation: self
+                            .shared_group_federation_route(&state.view().group_id, root)?,
+                    });
+                }
+                continue;
+            }
             for name in names {
                 if state.view().effective_role(root, &name).is_none() {
                     continue;
@@ -81,9 +85,6 @@ impl RamfluxClient {
                     target_delivery_id: None,
                     federation: None,
                 });
-            }
-            if routes.len() > 1024 {
-                return Err(SdkError::LocalBus("group device fanout budget exceeded".into()));
             }
         }
         Ok(routes)

@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Replay receipts retain authenticated attribution and are scoped by sender device and envelope.
-use super::{Deserialize, GatewayInboxEntry, RamfluxClient, Routing, SdkError, Serialize};
+use super::{
+    Deserialize, GatewayInboxEntry, Kind, RamfluxClient, Routing, SdkError, Serialize, invalid,
+};
 #[derive(Serialize, Deserialize)]
 pub(super) struct Committed {
     pub routing: Routing,
@@ -140,6 +142,18 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         route: &Routing,
     ) -> Result<String, SdkError> {
+        if route.kind == Kind::GroupMessage {
+            let source = self.authenticated_device_identity(entry)?;
+            return Ok(ramflux_protocol::group_message_id(
+                route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?,
+                source.root_commitment(),
+                source.device_id(),
+                route
+                    .group_message_id
+                    .as_deref()
+                    .ok_or_else(|| invalid("group logical id missing"))?,
+            )?);
+        }
         self.projection_id_for(
             entry,
             route.group_message_id.as_deref().unwrap_or(&entry.envelope.envelope_id),

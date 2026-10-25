@@ -37,15 +37,15 @@ impl RamfluxClient {
                 "group key head does not match its group mode".into(),
             ));
         }
-        if let Some(state) = shared
-            && (epoch > state.view().epoch
-                || (epoch == state.view().epoch
-                    && head != Some(state.snapshot().state_hash.as_str()))
-                || (epoch != state.view().epoch
-                    && head == Some(state.snapshot().state_hash.as_str())))
+        if shared.is_some()
+            && !self.account_db()?.knows_shared_group_head(
+                group,
+                epoch,
+                head.ok_or_else(|| SdkError::InboundRejected("group key head missing".into()))?,
+            )?
         {
             return Err(SdkError::InboundPending(
-                "shared group state head is not available".into(),
+                "shared group state head is not verified locally".into(),
             ));
         }
         Ok(())
@@ -132,7 +132,19 @@ impl RamfluxClient {
             &format!("{checkpoint}/chain/{}", state.session_snapshot.session_id()),
             &event_id,
         )?;
-        self.set_projection_checkpoint(&checkpoint, &event_id)
+        self.set_projection_checkpoint(&checkpoint, &event_id)?;
+        if state.group_state_hash.is_some() {
+            let scope = ramflux_protocol::hash_base64url(
+                "ramflux.group.key-scope.v1",
+                &ramflux_protocol::canonical_json_bytes(&(
+                    &state.group_id,
+                    sender.storage_key(),
+                    direction,
+                ))?,
+            );
+            self.account_db()?.retain_group_key_checkpoint(&scope, &checkpoint)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn ensure_own_group_sender_key(
@@ -198,6 +210,7 @@ impl RamfluxClient {
         group_id: &str,
         sender_id: &str,
     ) -> Result<Vec<u8>, SdkError> {
+        self.assert_shared_group_send_capacity(group_id, sender_id)?;
         let group = self.group_state(group_id)?;
         if !group.members.contains(sender_id) {
             return Err(SdkError::from(StorageError::GroupPermissionDenied));
@@ -548,6 +561,7 @@ impl RamfluxClient {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, SdkError> {
         self.require_backup_outbound_ready()?;
+        self.assert_shared_group_send_capacity(group_id, sender_id)?;
         let group = self.group_state(group_id)?;
         if !group.members.contains(sender_id) {
             return Err(SdkError::from(StorageError::GroupPermissionDenied));

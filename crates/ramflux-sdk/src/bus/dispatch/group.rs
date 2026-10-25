@@ -667,7 +667,8 @@ pub(crate) async fn dispatch_group_send_request(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let body: LocalBusGroupSendRequest = serde_json::from_value(request.body.clone())?;
+    let mut body: LocalBusGroupSendRequest = serde_json::from_value(request.body.clone())?;
+    account.client.assert_shared_group_send_capacity(&body.group_id, &body.sender_id)?;
     let mut fanout_routes = if body.envelope_id.is_some()
         && body.source_principal_id.is_some()
         && body.target_delivery_id.is_some()
@@ -680,6 +681,9 @@ pub(crate) async fn dispatch_group_send_request(
     if !group_state.members.contains(&body.sender_id) {
         return Err(StorageError::GroupPermissionDenied.into());
     }
+    let (qualified, client_message_id) =
+        account.client.qualify_outgoing_group_message(&body.group_id, &body.message_id)?;
+    body.message_id = qualified;
     let plaintext_body_base64 =
         body.plaintext_body_base64.as_deref().unwrap_or(&body.encrypted_body_base64);
     let plaintext_body = ramflux_protocol::decode_base64url(plaintext_body_base64)
@@ -768,6 +772,7 @@ pub(crate) async fn dispatch_group_send_request(
         "group_id": body.group_id,
         "conversation_id": body.conversation_id,
         "message_id": body.message_id,
+        "client_message_id":client_message_id,
     });
     if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
         if existing.encrypted_body.is_empty() {

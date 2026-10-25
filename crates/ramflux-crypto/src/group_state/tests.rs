@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Native signed-state authority, sibling convergence and bounded recovery regressions.
+//! Single-writer authority, arbitrary lag, transfer and stale requester regressions.
 use super::*;
+use ramflux_protocol::GroupChangeStatus;
 struct Person {
     root: IdentityRoot,
     branch: DeviceBranch,
@@ -20,411 +21,292 @@ fn person(
     Ok(Person { root, branch, actor })
 }
 fn create(owner: &Person) -> Result<VerifiedGroupState, CryptoError> {
-    let operation = sign_group_state_operation(
+    create_group_state(
         &owner.root,
         &owner.branch,
         &owner.actor,
-        crate::group_state::GroupStateOperationInput {
+        GroupStateCreateInput {
             group_id: "group",
-            epoch: 1,
-            previous_hash: None,
-            change: GroupStateChange::Create {
-                conversation_id: "group-thread".into(),
-                max_members: 200,
-                new_member_history: "no_history".into(),
-                name: Some("Checklist".into()),
-            },
+            conversation_id: "thread",
+            max_members: 200,
+            new_member_history: "no_history",
+            name: Some("Checklist".into()),
+            now: 1000,
         },
-    )?;
-    sign_group_state_snapshot(&owner.branch, &owner.actor, vec![operation])
+    )
 }
 fn step(
     state: &VerifiedGroupState,
-    author: &Person,
+    owner: &Person,
     change: GroupStateChange,
 ) -> Result<VerifiedGroupState, CryptoError> {
-    let mut operations = state.snapshot().operations.clone();
-    operations.push(sign_group_state_operation(
-        &author.root,
-        &author.branch,
-        &author.actor,
-        crate::group_state::GroupStateOperationInput {
-            group_id: "group",
-            epoch: state.view().epoch + 1,
-            previous_hash: Some(state.view().head_hash.clone()),
-            change,
-        },
-    )?);
-    sign_group_state_snapshot(&author.branch, &author.actor, operations)
+    advance_group_state(&owner.root, &owner.branch, &owner.actor, state, change)
+}
+fn add(
+    state: &VerifiedGroupState,
+    owner: &Person,
+    peer: &Person,
+    role: SharedGroupRole,
+) -> Result<VerifiedGroupState, CryptoError> {
+    step(state, owner, GroupStateChange::Add { member: peer.actor.identity.clone(), role })
 }
 #[test]
-fn complete_state_bootstraps_existing_peer_and_owner_sibling_at_epoch_three()
--> Result<(), CryptoError> {
-    let owner = person("owner", "owner-phone", 11, 12)?;
-    let peer = person("agent", "agent-phone", 21, 22)?;
-    let sibling = person("owner", "owner-laptop", 11, 42)?;
-    let initial = create(&owner)?;
-    let joined = step(
-        &initial,
-        &owner,
-        GroupStateChange::Add {
-            member: peer.actor.identity.clone(),
-            role: SharedGroupRole::Member,
-        },
-    )?;
-    // An owned device follows its root before an explicit branch entry is added.
+fn full_snapshot_bootstraps_peer_and_implicit_owner_sibling() -> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let peer = person("peer", "phone", 21, 22)?;
+    let sibling = person("owner", "laptop", 11, 32)?;
+    let second = add(&create(&owner)?, &owner, &peer, SharedGroupRole::Member)?;
     assert_eq!(
-        joined.view().effective_role(
-            &sibling.actor.identity.root_commitment,
-            &sibling.actor.identity.device_id
-        ),
+        second.view().effective_role(&sibling.actor.identity.root_commitment, "laptop"),
         Some(SharedGroupRole::Owner)
     );
-    let current = step(
-        &joined,
-        &owner,
-        GroupStateChange::Add {
-            member: sibling.actor.identity.clone(),
-            role: SharedGroupRole::Member,
-        },
-    )?;
-    let peer_copy = verify_group_state_snapshot(current.snapshot().clone())?;
-    let sibling_copy = verify_group_state_snapshot(current.snapshot().clone())?;
-    assert_eq!(current.view().epoch, 3);
-    assert_eq!(current.view().members.len(), 3);
-    assert_eq!(peer_copy.view(), current.view());
-    assert_eq!(sibling_copy.view(), current.view());
-    assert!(current.contains_head(1, &initial.view().head_hash));
-    assert!(current.contains_head(2, &joined.view().head_hash));
+    let third = add(&second, &owner, &sibling, SharedGroupRole::Member)?;
+    assert_eq!(verify_group_state_snapshot(third.snapshot().clone())?.view(), third.view());
+    assert_eq!(third.view().epoch, 3);
+    assert_eq!(third.view().members.len(), 3);
+    assert_ne!(
+        third.member_storage_key(&owner.actor.identity)?,
+        third.member_storage_key(&peer.actor.identity)?
+    );
     Ok(())
 }
 #[test]
-fn a_root_certificate_never_self_declares_an_admin_role() -> Result<(), CryptoError> {
-    let owner = person("owner", "owner", 11, 12)?;
-    let peer = person("peer", "peer", 21, 22)?;
-    let stranger = person("stranger", "stranger", 31, 32)?;
+fn more_than_sixty_four_epochs_fast_forward_in_one_snapshot() -> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
     let first = create(&owner)?;
-    assert!(step(&first, &stranger, GroupStateChange::SetName { name: "forged".into() }).is_err());
-    let joined = step(
-        &first,
+    let mut state = first.clone();
+    for epoch in 2..=132 {
+        state = step(&state, &owner, GroupStateChange::SetName { name: format!("Name {epoch}") })?;
+    }
+    assert_eq!(state.relation_to(&first)?, GroupStateRelation::Extension);
+    assert_eq!(state.view().epoch, 132);
+    assert!(canonical_json_bytes(state.snapshot())?.len() < 5000, "no operation history growth");
+    Ok(())
+}
+#[test]
+fn admins_request_but_never_sign_state_and_demoted_requests_cannot_undo_removal()
+-> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let admin = person("admin", "phone", 21, 22)?;
+    let victim = person("victim", "phone", 31, 32)?;
+    let base = add(
+        &add(&create(&owner)?, &owner, &admin, SharedGroupRole::Admin)?,
         &owner,
-        GroupStateChange::Add {
-            member: peer.actor.identity.clone(),
-            role: SharedGroupRole::Member,
+        &victim,
+        SharedGroupRole::Member,
+    )?;
+    let change = GroupStateChange::Remove {
+        root_commitment: victim.actor.identity.root_commitment.clone(),
+        device_id: "phone".into(),
+    };
+    let request = sign_group_change_request(
+        &admin.branch,
+        &admin.actor,
+        &base,
+        GroupChangeRequestInput {
+            request_id: "remove-offline".into(),
+            change: change.clone(),
+            now: 1000,
         },
     )?;
-    assert!(step(&joined, &peer, GroupStateChange::SetName { name: "forged".into() }).is_err());
-    assert!(
-        step(
-            &joined,
-            &peer,
-            GroupStateChange::SetRole {
-                root_commitment: peer.actor.identity.root_commitment.clone(),
-                device_id: peer.actor.identity.device_id.clone(),
-                role: SharedGroupRole::Owner
-            }
-        )
-        .is_err()
-    );
-    let promoted = step(
-        &joined,
+    assert!(step(&base, &admin, GroupStateChange::SetName { name: "forged".into() }).is_err());
+    let demoted = step(
+        &base,
         &owner,
         GroupStateChange::SetRole {
-            root_commitment: peer.actor.identity.root_commitment.clone(),
-            device_id: peer.actor.identity.device_id.clone(),
-            role: SharedGroupRole::Admin,
-        },
-    )?;
-    let renamed = step(&promoted, &peer, GroupStateChange::SetName { name: "Équipe".into() })?;
-    assert_eq!(renamed.view().name.as_deref(), Some("Équipe"));
-    assert_eq!(renamed.view().name_epoch, 4);
-    Ok(())
-}
-#[test]
-fn copied_device_names_stay_separate_and_root_substitution_fails() -> Result<(), CryptoError> {
-    let owner = person("owner", "owner", 11, 12)?;
-    let bob = person("bob", "phone", 21, 22)?;
-    let mallory = person("mallory", "phone", 31, 32)?;
-    let first = step(
-        &create(&owner)?,
-        &owner,
-        GroupStateChange::Add { member: bob.actor.identity.clone(), role: SharedGroupRole::Admin },
-    )?;
-    let second = step(
-        &first,
-        &owner,
-        GroupStateChange::Add {
-            member: mallory.actor.identity.clone(),
+            root_commitment: admin.actor.identity.root_commitment.clone(),
+            device_id: "phone".into(),
             role: SharedGroupRole::Member,
         },
     )?;
-    assert_eq!(second.view().members.len(), 3);
-    assert_eq!(
-        second.view().effective_role(&bob.actor.identity.root_commitment, "phone"),
-        Some(SharedGroupRole::Admin)
-    );
-    assert_eq!(
-        second.view().effective_role(&mallory.actor.identity.root_commitment, "phone"),
-        Some(SharedGroupRole::Member)
-    );
-    let mut forged = mallory.actor.clone();
-    forged.identity.root_commitment.clone_from(&bob.actor.identity.root_commitment);
-    assert!(verify_group_state_actor(&forged).is_err());
-    let mut corrupt = second.snapshot().clone();
-    corrupt.operations[1]
-        .actor
-        .identity
-        .signing_public_key
-        .clone_from(&mallory.actor.identity.signing_public_key);
-    assert!(verify_group_state_snapshot(corrupt).is_err());
-    Ok(())
-}
-#[test]
-fn removals_exclude_an_owned_device_and_remove_the_last_peer_root_grant() -> Result<(), CryptoError>
-{
-    let owner = person("owner", "owner", 11, 12)?;
-    let sibling = person("owner", "laptop", 11, 42)?;
-    let peer = person("peer", "phone", 21, 22)?;
-    let joined = step(
-        &create(&owner)?,
-        &owner,
-        GroupStateChange::Add {
-            member: peer.actor.identity.clone(),
-            role: SharedGroupRole::Member,
-        },
-    )?;
-    let with_sibling = step(
-        &joined,
-        &owner,
-        GroupStateChange::Add {
-            member: sibling.actor.identity.clone(),
-            role: SharedGroupRole::Member,
-        },
-    )?;
-    let without_sibling = step(
-        &with_sibling,
-        &owner,
-        GroupStateChange::Remove {
-            root_commitment: sibling.actor.identity.root_commitment.clone(),
-            device_id: sibling.actor.identity.device_id.clone(),
-        },
-    )?;
-    assert_eq!(
-        without_sibling.view().effective_role(&sibling.actor.identity.root_commitment, "laptop"),
-        None
-    );
-    let removed = step(
-        &without_sibling,
-        &owner,
-        GroupStateChange::Remove {
-            root_commitment: peer.actor.identity.root_commitment.clone(),
-            device_id: peer.actor.identity.device_id.clone(),
-        },
-    )?;
-    assert_eq!(
-        removed.view().effective_role(&peer.actor.identity.root_commitment, "another-sibling"),
-        None
-    );
     assert!(
-        sign_group_state_snapshot(&peer.branch, &peer.actor, removed.snapshot().operations.clone())
-            .is_err()
-    );
-    Ok(())
-}
-#[test]
-fn forks_tampered_snapshots_and_unsafe_names_do_not_advance_a_known_head() -> Result<(), CryptoError>
-{
-    let owner = person("owner", "owner", 11, 12)?;
-    let first = create(&owner)?;
-    let a = step(&first, &owner, GroupStateChange::SetName { name: "A".into() })?;
-    let b = step(&first, &owner, GroupStateChange::SetName { name: "B".into() })?;
-    assert!(!b.contains_head(a.view().epoch, &a.view().head_hash));
-    let mut corrupt = a.snapshot().clone();
-    corrupt.state_hash.clone_from(&b.snapshot().state_hash);
-    assert!(verify_group_state_snapshot(corrupt).is_err());
-    for name in ["", " ", "fake\nname", "fake\u{202e}name"] {
-        assert!(step(&first, &owner, GroupStateChange::SetName { name: name.into() }).is_err());
-    }
-    let too_long = "x".repeat(MAX_GROUP_NAME_BYTES + 1);
-    assert!(step(&first, &owner, GroupStateChange::SetName { name: too_long }).is_err());
-    let bytes = vec![b' '; MAX_GROUP_STATE_BYTES + 1];
-    assert!(GroupStateSnapshot::from_wire_bytes(&bytes).is_err());
-    assert!(GroupStateSnapshot::from_wire_bytes(br#"{"schema":"a","schema":"b"}"#).is_err());
-    Ok(())
-}
-
-#[test]
-fn creator_checkpoints_bound_replay_without_resetting_epochs_or_names() -> Result<(), CryptoError> {
-    let owner = person("owner", "owner", 11, 12)?;
-    let initial = create(&owner)?;
-    let mut current = initial.clone();
-    for index in 0..70 {
-        current = advance_group_state(
+        apply_group_change_request(
             &owner.root,
             &owner.branch,
             &owner.actor,
-            &current,
-            GroupStateChange::SetName { name: format!("name-{index}") },
-        )?;
-    }
-    assert_eq!(current.view().epoch, 71);
-    assert_eq!(current.view().name.as_deref(), Some("name-69"));
-    assert!(current.snapshot().operations.len() < 32);
-    assert!(current.extends(&initial));
-    let restored = verify_group_state_snapshot(GroupStateSnapshot::from_wire_bytes(
-        &canonical_json_bytes(current.snapshot())?,
-    )?)?;
-    assert_eq!(restored.view(), current.view());
-    let compact = compact_group_state(&owner.root, &owner.branch, &owner.actor, &current)?;
-    assert_eq!(compact.snapshot().operations, Vec::<GroupStateOperation>::new());
-    assert!(compact.extends(&current));
-    assert_eq!(compact.view(), current.view());
-    let advanced = advance_group_state(
+            &demoted,
+            &request,
+            1001
+        )
+        .is_err()
+    );
+    let refused = sign_group_change_result(
+        &owner.root,
+        &owner.actor,
+        &request,
+        &demoted,
+        GroupChangeStatus::PermissionDenied,
+        1001,
+    )?;
+    verify_group_change_result(&refused, &request, &demoted, 1001)?;
+    assert_eq!(refused.status, GroupChangeStatus::PermissionDenied);
+    // An honest offline admin's intent is valid when the creator returns, even at a newer base.
+    let renamed = step(&base, &owner, GroupStateChange::SetName { name: "newer".into() })?;
+    let applied = apply_group_change_request(
         &owner.root,
         &owner.branch,
         &owner.actor,
-        &compact,
-        GroupStateChange::SetName { name: "next".into() },
+        &renamed,
+        &request,
+        1001,
     )?;
-    assert_eq!(advanced.view().epoch, 72);
-    assert!(advanced.extends(&compact));
-    let mut tampered = advanced.snapshot().clone();
-    tampered.checkpoint.as_mut().ok_or_else(|| invalid("missing checkpoint"))?.state.name =
-        Some("forged".into());
-    assert!(verify_group_state_snapshot(tampered).is_err());
+    assert!(
+        applied.view().effective_role(&victim.actor.identity.root_commitment, "phone").is_none()
+    );
+    let duplicate = apply_group_change_request(
+        &owner.root,
+        &owner.branch,
+        &owner.actor,
+        &applied,
+        &request,
+        1002,
+    )?;
+    assert_eq!(duplicate.snapshot().state_hash, applied.snapshot().state_hash);
+    assert!(verify_group_change_request(&request, request.expires_at).is_err());
     Ok(())
 }
-
 #[test]
-fn delegated_admin_can_compact_but_cannot_rewrite_privileges() -> Result<(), CryptoError> {
-    let owner = person("owner", "owner", 11, 12)?;
-    let peer = person("peer", "peer", 21, 22)?;
-    let initial = create(&owner)?;
-    let joined = advance_group_state(
-        &owner.root,
-        &owner.branch,
-        &owner.actor,
-        &initial,
-        GroupStateChange::Add { member: peer.actor.identity.clone(), role: SharedGroupRole::Admin },
-    )?;
-    let delegated = compact_group_state(&peer.root, &peer.branch, &peer.actor, &joined)?;
-    assert_eq!(delegated.view(), joined.view());
-    let mut offline = delegated;
-    for index in 0..80 {
-        offline = advance_group_state(
-            &peer.root,
-            &peer.branch,
-            &peer.actor,
-            &offline,
-            GroupStateChange::SetName { name: format!("offline-admin-{index}") },
-        )?;
-    }
-    assert_eq!(offline.view().epoch, joined.view().epoch + 80);
-    assert!(offline.snapshot().operations.len() <= 32);
-    assert_eq!(verify_group_state_snapshot(offline.snapshot().clone())?.view(), offline.view());
-    let mut forged_privilege = offline.snapshot().clone();
-    let checkpoint = forged_privilege.checkpoint.as_mut().ok_or_else(|| invalid("checkpoint"))?;
-    checkpoint
-        .state
-        .members
-        .iter_mut()
-        .find(|member| member.identity == peer.actor.identity)
-        .ok_or_else(|| invalid("admin missing"))?
-        .role = SharedGroupRole::Owner;
-    checkpoint.signature = crate::sign_canonical_bytes_with_seed(
-        &canonical_json_bytes(&super::checkpoint::body(checkpoint))?,
-        peer.root.signing_key.to_bytes(),
+fn creator_devices_choose_the_same_snapshot_and_other_roots_cannot_forge_it()
+-> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let sibling = person("owner", "laptop", 11, 32)?;
+    let other = person("other", "phone", 21, 22)?;
+    let base = create(&owner)?;
+    let a = step(&base, &owner, GroupStateChange::SetName { name: "a".into() })?;
+    let b = step(&base, &sibling, GroupStateChange::SetName { name: "b".into() })?;
+    let (winner, loser) = if a.relation_to(&b)? == GroupStateRelation::IncomingPreferred {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    assert_eq!(winner.relation_to(loser)?, GroupStateRelation::IncomingPreferred);
+    assert_eq!(loser.relation_to(winner)?, GroupStateRelation::ExistingPreferred);
+    let mut forged = a.snapshot().clone();
+    forged.state.name = Some("attacker".into());
+    assert!(verify_group_state_snapshot(forged).is_err());
+    assert!(resign_group_state_snapshot(&other.branch, &other.actor, &a).is_err());
+    let mut copied = a.snapshot().clone();
+    copied.creator = other.actor;
+    assert!(verify_group_state_snapshot(copied).is_err());
+    Ok(())
+}
+#[test]
+fn ownership_transfer_certifies_new_root_and_old_root_loses_writes() -> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let next = person("next", "phone", 21, 22)?;
+    let base = add(&create(&owner)?, &owner, &next, SharedGroupRole::Member)?;
+    let transferred =
+        step(&base, &owner, GroupStateChange::TransferOwnership { creator: next.actor.clone() })?;
+    let state = step(&transferred, &next, GroupStateChange::SetName { name: "new owner".into() })?;
+    assert_eq!(state.relation_to(&base)?, GroupStateRelation::Extension);
+    assert!(
+        step(&transferred, &owner, GroupStateChange::SetName { name: "former owner".into() })
+            .is_err()
     );
-    forged_privilege.signature =
-        crate::sign_with_device_branch(&peer.branch, &snapshot_body(&forged_privilege))?;
-    assert!(verify_group_state_snapshot(forged_privilege).is_err());
-    let compact = compact_group_state(&owner.root, &owner.branch, &owner.actor, &joined)?;
-    let renamed = advance_group_state(
-        &peer.root,
-        &peer.branch,
-        &peer.actor,
-        &compact,
-        GroupStateChange::SetName { name: "admin rename".into() },
+    let former = step(&base, &owner, GroupStateChange::SetName { name: "stale fork".into() })?;
+    let former = step(&former, &owner, GroupStateChange::SetName { name: "old root".into() })?;
+    assert_eq!(former.relation_to(&transferred)?, GroupStateRelation::Unrelated);
+    let mut forged = state.snapshot().clone();
+    forged.transfers[0].creator = owner.actor.clone();
+    assert!(verify_group_state_snapshot(forged).is_err());
+    Ok(())
+}
+#[test]
+fn member_roots_and_explicit_devices_have_distinct_typed_caps() -> Result<(), CryptoError> {
+    let owner = person("owner", "d0", 11, 12)?;
+    let mut state = create(&owner)?;
+    for index in 1..16 {
+        let sibling = person("owner", &format!("d{index}"), 11, 20 + index)?;
+        state = add(&state, &owner, &sibling, SharedGroupRole::Member)?;
+    }
+    let excess = person("owner", "overflow", 11, 90)?;
+    assert!(matches!(
+        add(&state, &owner, &excess, SharedGroupRole::Member),
+        Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
+            GroupStateLimit::Devices
+        )))
+    ));
+    let peer = person("peer", "phone", 21, 22)?;
+    assert!(
+        add(&state, &owner, &peer, SharedGroupRole::Member).is_ok(),
+        "one root cannot wedge another"
+    );
+    assert!(
+        step(&state, &owner, GroupStateChange::SetName { name: "bad\u{202e}text".into() }).is_err()
+    );
+    Ok(())
+}
+#[test]
+fn removal_excludes_siblings_and_transport_certificates_never_sign_creator_state()
+-> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let sibling = person("owner", "laptop", 11, 32)?;
+    let peer = person("peer", "phone", 21, 22)?;
+    let base = add(
+        &add(&create(&owner)?, &owner, &sibling, SharedGroupRole::Member)?,
+        &owner,
+        &peer,
+        SharedGroupRole::Admin,
     )?;
-    assert!(renamed.extends(&joined));
-    let mut forged = compact.snapshot().clone();
-    let checkpoint = forged.checkpoint.as_mut().ok_or_else(|| invalid("checkpoint"))?;
-    checkpoint.owner = peer.actor.clone();
-    checkpoint.signature =
-        crate::sign_with_device_branch(&peer.branch, &super::checkpoint::body(checkpoint))?;
+    let removed = step(
+        &base,
+        &owner,
+        GroupStateChange::Remove {
+            root_commitment: owner.actor.identity.root_commitment.clone(),
+            device_id: "laptop".into(),
+        },
+    )?;
+    assert!(
+        removed.view().effective_role(&owner.actor.identity.root_commitment, "laptop").is_none()
+    );
+    assert!(resign_group_state_snapshot(&sibling.branch, &sibling.actor, &removed).is_err());
+    let forwarded = resign_group_state_snapshot(&peer.branch, &peer.actor, &removed)?;
+    assert_eq!(forwarded.snapshot().root_signature, removed.snapshot().root_signature);
+    let mut forged = forwarded.snapshot().clone();
+    forged.epoch += 1;
+    forged.state.epoch += 1;
+    forged.signature = crate::sign_with_device_branch(&peer.branch, &transport_body(&forged)?)?;
     assert!(verify_group_state_snapshot(forged).is_err());
     Ok(())
 }
 
 #[test]
-fn a_device_certificate_cannot_forge_new_controls_or_owner_checkpoints() -> Result<(), CryptoError>
-{
-    let owner = person("owner", "owner", 71, 72)?;
-    let peer = person("peer", "peer", 81, 82)?;
-    let joined = step(
-        &create(&owner)?,
-        &owner,
-        GroupStateChange::Add {
-            member: peer.actor.identity.clone(),
-            role: SharedGroupRole::Member,
-        },
-    )?;
-    let mut forged = sign_group_state_operation(
+fn group_only_exclusions_expire_after_the_boundary_window() -> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    let sibling = person("owner", "laptop", 11, 32)?;
+    let base = add(&create(&owner)?, &owner, &sibling, SharedGroupRole::Member)?;
+    let removed = snapshot::advance_as(
         &owner.root,
         &owner.branch,
         &owner.actor,
-        crate::group_state::GroupStateOperationInput {
-            group_id: "group",
-            epoch: 3,
-            previous_hash: Some(joined.view().head_hash.clone()),
-            change: GroupStateChange::SetName { name: "approved".into() },
+        &base,
+        snapshot::Apply {
+            requester: &owner.actor,
+            change: GroupStateChange::Remove {
+                root_commitment: owner.actor.identity.root_commitment.clone(),
+                device_id: "laptop".into(),
+            },
+            now: 1000,
         },
     )?;
-    forged.change = GroupStateChange::SetName { name: "forged with only a branch key".into() };
-    forged.signature = crate::sign_with_device_branch(&owner.branch, &operation_body(&forged))?;
-    let mut operations = joined.snapshot().operations.clone();
-    operations.push(forged);
     assert!(
-        sign_group_state_snapshot(&peer.branch, &peer.actor, operations).is_err(),
-        "an active peer cannot launder a control made with a retained device certificate"
+        removed.view().effective_role(&owner.actor.identity.root_commitment, "laptop").is_none()
     );
-    let compact = compact_group_state(&owner.root, &owner.branch, &owner.actor, &joined)?;
-    let mut snapshot = compact.snapshot().clone();
-    let checkpoint = snapshot.checkpoint.as_mut().ok_or_else(|| invalid("checkpoint"))?;
-    checkpoint.state.name = Some("forged checkpoint".into());
-    checkpoint.signature =
-        crate::sign_with_device_branch(&owner.branch, &super::checkpoint::body(checkpoint))?;
-    snapshot.signature = crate::sign_with_device_branch(&owner.branch, &snapshot_body(&snapshot))?;
-    assert!(
-        verify_group_state_snapshot(snapshot).is_err(),
-        "checkpoint authority requires the immutable owner root key"
-    );
-    Ok(())
-}
-
-#[test]
-fn group_state_root_authorized_branch_rotation_keeps_membership_and_checkpoint_authority()
--> Result<(), CryptoError> {
-    let owner = person("owner", "phone", 41, 42)?;
-    let initial = create(&owner)?;
-    let replacement = person("owner", "phone", 41, 43)?;
-    let changed = advance_group_state(
-        &replacement.root,
-        &replacement.branch,
-        &replacement.actor,
-        &initial,
-        GroupStateChange::SetName { name: "After rotation".into() },
+    let pruned = snapshot::advance_as(
+        &owner.root,
+        &owner.branch,
+        &owner.actor,
+        &removed,
+        snapshot::Apply {
+            requester: &owner.actor,
+            change: GroupStateChange::SetName { name: "After boundary".into() },
+            now: 1000 + GROUP_REQUEST_TTL_SECONDS,
+        },
     )?;
-    assert_eq!(changed.view().name.as_deref(), Some("After rotation"));
-    assert_eq!(
-        changed.member_storage_key(&replacement.actor.identity)?,
-        initial.member_storage_key(&owner.actor.identity)?
+    assert_eq!(pruned.view().excluded.len(), 0);
+    assert!(
+        pruned.view().effective_role(&owner.actor.identity.root_commitment, "laptop").is_some(),
+        "permanent removal requires signed account revocation"
     );
-    let checkpoint =
-        compact_group_state(&replacement.root, &replacement.branch, &replacement.actor, &changed)?;
-    assert_eq!(verify_group_state_snapshot(checkpoint.snapshot().clone())?.view(), changed.view());
     Ok(())
 }
-
-#[path = "lineage_tests.rs"]
-mod lineage_tests;

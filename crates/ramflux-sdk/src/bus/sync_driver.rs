@@ -68,6 +68,13 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
+    let group_controls = match Box::pin(super::shared_group_sync::flush_requests(account)).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error,"group request courier deferred");
+            0
+        }
+    };
     let group_sent = match Box::pin(super::shared_group_sync::flush(account)).await {
         Ok(count) => count,
         Err(error) => {
@@ -112,7 +119,8 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
         + voice
         + contacts
         + group_staged
-        + group_sent)
+        + group_sent
+        + group_controls)
 }
 
 /// Projection is best-effort; the durable message remains available when its claim cannot be written.
