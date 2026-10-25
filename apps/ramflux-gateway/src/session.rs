@@ -208,7 +208,7 @@ pub(crate) async fn handle_gateway_session_transport(
         return Ok(());
     }
 
-    let runtime = establish_gateway_session(
+    let Some(runtime) = establish_gateway_session_or_reject(
         &mut *send,
         &context,
         &open,
@@ -216,7 +216,10 @@ pub(crate) async fn handle_gateway_session_transport(
         registered_auth_key,
         auth_result?,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
     let target_delivery_id = runtime.target_delivery_id.clone();
     let session_id = runtime.session_id.clone();
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
@@ -224,6 +227,42 @@ pub(crate) async fn handle_gateway_session_transport(
     let result = run_gateway_session_loop(send, recv, context.clone(), runtime).await;
     context.hub.unregister(&target_delivery_id, &session_id).await;
     result
+}
+
+async fn establish_gateway_session_or_reject(
+    send: &mut (impl ramflux_transport::GatewaySessionFrameSink + ?Sized),
+    context: &GatewayQuicContext,
+    open: &ramflux_node_core::GatewayOpenFrame,
+    auth_frame: &ramflux_node_core::GatewayAuthFrame,
+    registered_auth_key: ramflux_node_core::DeviceAuthKeyResponse,
+    source_identity: ramflux_crypto::RootQualifiedDeviceRef,
+) -> anyhow::Result<Option<GatewaySessionRuntime>> {
+    match establish_gateway_session(
+        send,
+        context,
+        open,
+        auth_frame,
+        registered_auth_key,
+        source_identity,
+    )
+    .await
+    {
+        Ok(runtime) => Ok(Some(runtime)),
+        Err(error) => {
+            if error.downcast_ref::<super::session_response::ClientWriteFailure>().is_some() {
+                return Err(error);
+            }
+            tracing::warn!(%error,request_kind="open","gateway session establishment failed");
+            write_gateway_frame(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: "gateway_session_unavailable".into(),
+                },
+            )
+            .await?;
+            Ok(None)
+        }
+    }
 }
 
 async fn lookup_gateway_auth_source(

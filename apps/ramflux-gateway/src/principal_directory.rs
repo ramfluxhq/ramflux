@@ -39,7 +39,7 @@ pub(crate) async fn fetch(
 pub(crate) fn registration_forwarding_failure(
     error: &dyn std::fmt::Display,
 ) -> ramflux_transport::GatewayQuicResponse {
-    tracing::warn!(%error, stage="identity_registration_forward", "gateway registration forwarding failed");
+    tracing::warn!(%error, stage="identity_registration_forward", request_kind="identity_register", "gateway registration forwarding failed");
     ramflux_transport::GatewayQuicResponse {
         status: 503,
         body: serde_json::json!(ramflux_protocol::IdentityRegistrationFailure {
