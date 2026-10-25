@@ -55,6 +55,12 @@ pub(crate) fn conversation(requester: &str, target: &str) -> Result<String, SdkE
         )
     ))
 }
+pub(super) fn request_id(requester: &str, nonce: &str) -> Result<String, SdkError> {
+    Ok(ramflux_protocol::hash_base64url(
+        "ramflux.contact_request.id.v1",
+        &ramflux_protocol::canonical_json_bytes(&(requester, nonce))?,
+    ))
+}
 pub(super) fn sign(root: &ramflux_crypto::IdentityRoot, body: Body) -> Result<Control, SdkError> {
     if body.actor_root
         != ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())
@@ -101,6 +107,7 @@ impl RamfluxClient {
             ]
             .into_iter()
             .all(|id| valid_hash(id))
+            || body.request_id != request_id(&body.requester_root, &body.nonce)?
             || body.requester_root == body.target_root
             || actor != &body.actor_root
             || target != own.root_commitment()
@@ -111,8 +118,7 @@ impl RamfluxClient {
             || route.conversation_id != conversation(&body.requester_root, &body.target_root)?
             || body.issued_at > now.saturating_add(60)
             || body.expires_at <= now
-            || body.expires_at <= body.issued_at
-            || body.expires_at.saturating_sub(body.issued_at) > TTL
+            || body.issued_at.checked_add(TTL) != Some(body.expires_at)
             || body.note.as_ref().is_some_and(|note| {
                 note.chars().count() > 140
                     || !ramflux_protocol::text_safety::single_line_is_safe(note)

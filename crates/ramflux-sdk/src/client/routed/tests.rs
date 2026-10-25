@@ -276,7 +276,11 @@ async fn fresh_receiver_commits_first_dm_and_replays_without_ratchet_advance()
 -> Result<(), SdkError> {
     let a = Fixture::new("alice", 81)?;
     let mut b = Fixture::new("bob", 91)?;
-    b.client.account_db()?.establish_friend_link("link", "bob", "alice")?;
+    b.client.establish_friend_link(
+        "link",
+        a.client.owned_device_identity()?.root_commitment(),
+        b.client.owned_device_identity()?.root_commitment(),
+    )?;
     let entry =
         seal(&a, &b, message("first-committed", "unseen-conversation"), b"private message body")?;
     assert_eq!(b.client.conversation_list()?.len(), 0);
@@ -592,7 +596,11 @@ async fn compatibility_receive_acks_after_commit_and_returns_cached_plaintext()
 -> Result<(), SdkError> {
     let a = Fixture::new("alice", 161)?;
     let mut b = Fixture::new("bob", 171)?;
-    b.client.account_db()?.establish_friend_link("link", "bob", "alice")?;
+    b.client.establish_friend_link(
+        "link",
+        a.client.owned_device_identity()?.root_commitment(),
+        b.client.owned_device_identity()?.root_commitment(),
+    )?;
     let entry =
         seal(&a, &b, message("compat-first", "compat-conversation"), b"compatibility plaintext")?;
     let acks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

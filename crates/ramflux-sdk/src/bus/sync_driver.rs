@@ -127,28 +127,75 @@ async fn receive(
     let mut entries = engine.resume_after(cursor, 64).await?;
     append_pending_entries(account, &mut entries, now)?;
     entries.sort_by_key(|entry| entry.inbox_seq);
+    let mut backpressure = super::contact_backpressure::Backpressure::load(&account.client, now)?;
+    let (mut applied, mut replies) = receive_page(
+        account,
+        engine,
+        &pool,
+        entries,
+        &mut backpressure,
+        PageContext { replay: false, now },
+    )
+    .await?;
+    let walk = account.client.gateway_receive_cursor(engine.target_delivery_id())?;
+    if let Some((cursor, until)) = backpressure.scan_cursor(&account.client, walk, now)? {
+        let mut page = engine.resume_after(cursor, 64).await?;
+        let count = page.len();
+        page.retain(|entry| entry.inbox_seq <= until);
+        let last = page.iter().map(|entry| entry.inbox_seq).max();
+        let (more, reply) = receive_page(
+            account,
+            engine,
+            &pool,
+            page,
+            &mut backpressure,
+            PageContext { replay: true, now },
+        )
+        .await?;
+        applied += more;
+        replies.extend(reply);
+        backpressure.scanned(&account.client, last, count, now)?;
+    }
+    account.client.retry_pair_resets(engine, now).await?;
+    Ok((applied, replies))
+}
+fn advance_cursor(client: &RamfluxClient, target: &str, sequence: u64) -> Result<(), SdkError> {
+    client.persist_gateway_receive_cursor(
+        target,
+        client.gateway_receive_cursor(target)?.max(sequence),
+    )
+}
+struct PageContext {
+    replay: bool,
+    now: i64,
+}
+async fn receive_page(
+    account: &mut LocalBusAccountState,
+    engine: &mut GatewaySessionEngine,
+    pool: &ramflux_transport::RelayQuicPool,
+    entries: Vec<GatewayInboxEntry>,
+    backpressure: &mut super::contact_backpressure::Backpressure,
+    context: PageContext,
+) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
+    let PageContext { replay, now } = context;
     let mut applied = 0;
     let mut replies = Vec::new();
     for entry in entries {
         let key = account.client.inbox_admission_key(&entry)?;
         if !account.client.account_db()?.inbox_retry_ready(&key, now)? {
-            account
-                .client
-                .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+            advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
             continue;
         }
         let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
         let outcome = if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
             Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
         } else {
-            process(account, engine, &pool, &entry).await
+            process(account, engine, pool, &entry).await
         };
         let mut project_message = false;
         let accepted = match outcome {
             Ok(Processed { consumed: false, .. }) => {
-                account
-                    .client
-                    .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
             }
             Ok(Processed { reply, publish, .. }) => {
@@ -157,6 +204,17 @@ async fn receive(
                 true
             }
             Err(error) => {
+                if super::contact_backpressure::deferred(&entry, &error) {
+                    backpressure.record(&account.client, &entry, replay, now)?;
+                    if !replay {
+                        advance_cursor(
+                            &account.client,
+                            engine.target_delivery_id(),
+                            entry.inbox_seq,
+                        )?;
+                    }
+                    continue;
+                }
                 if !quarantine_failure(
                     &account.client,
                     &engine.config.device_id,
@@ -165,10 +223,7 @@ async fn receive(
                     &error,
                     now,
                 )? {
-                    account.client.persist_gateway_receive_cursor(
-                        engine.target_delivery_id(),
-                        entry.inbox_seq,
-                    )?;
+                    advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
                     continue;
                 }
 
@@ -184,23 +239,18 @@ async fn receive(
             if bytes.len() <= 1024 * 1024 {
                 account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)?;
             }
-            account
-                .client
-                .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+            advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
             continue;
         }
         let db = account.client.account_db()?;
         db.remove_inbox_retry(&key)?;
         db.remove_unrouted(&key)?;
         db.remove_unrouted(&entry.envelope.envelope_id)?;
-        account
-            .client
-            .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+        advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
         if accepted {
             applied += 1;
         }
     }
-    account.client.retry_pair_resets(engine, now).await?;
     Ok((applied, replies))
 }
 

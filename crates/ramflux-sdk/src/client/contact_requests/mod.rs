@@ -8,11 +8,15 @@ use serde_json::{Value, json};
 mod delivery;
 mod ingress;
 mod messages;
+mod metadata;
+mod retention;
+use metadata::Metadata;
+pub(crate) use retention::authority_digest;
 mod wire;
 pub(crate) use delivery::{flush, status as delivery_status};
 pub(crate) use wire::{Control, Decision, ENVELOPE_SCHEMA, conversation};
 use wire::{TTL, invalid};
-pub(super) const DECLINE_COOLDOWN_SECONDS: i64 = 60;
+pub(super) const DECLINE_COOLDOWN_SECONDS: i64 = 24 * 3600;
 
 impl RamfluxClient {
     pub(crate) fn contact_request_policy(&self) -> Result<String, SdkError> {
@@ -34,18 +38,53 @@ impl RamfluxClient {
         Ok(())
     }
     pub(crate) fn contact_request_retryable(&self, selector: &str) -> Result<bool, SdkError> {
-        self.account_db()?.expire_contact_requests(now_unix_timestamp())?;
+        self.maintain_contact_requests()?;
         let root = self
             .account_db()?
             .client_record("identity", selector)?
             .and_then(|row| row["contact_identity_commitment"].as_str().map(str::to_owned))
             .unwrap_or_else(|| selector.into());
-        Ok(self.account_db()?.contact_request(&root, "outbound")?.is_some_and(|row| {
-            row.state == "expired"
-                || (row.state == "declined"
-                    && now_unix_timestamp()
-                        >= row.updated_at.saturating_add(DECLINE_COOLDOWN_SECONDS))
-        }))
+        let db = self.account_db()?;
+        let (state, at) = if let Some(row) = db.contact_request(&root, "outbound")? {
+            (row.state, row.updated_at)
+        } else if let Some(status) = db.client_record("contact_request_status", &root)? {
+            (
+                status["state"].as_str().unwrap_or_default().to_owned(),
+                status["updated_at"].as_i64().unwrap_or(0),
+            )
+        } else {
+            return Ok(false);
+        };
+        Ok(matches!(state.as_str(), "pending" | "expired")
+            || (state == "declined"
+                && now_unix_timestamp() >= at.saturating_add(DECLINE_COOLDOWN_SECONDS)))
+    }
+    pub(crate) fn accepted_contact_source(
+        &self,
+        root: &str,
+        principal: &str,
+    ) -> Result<bool, SdkError> {
+        let own = self.owned_device_identity()?;
+        if own.root_commitment() == root {
+            return Ok(true);
+        }
+        let db = self.account_db()?;
+        // Migrate existing consent only through its saved root pin, never a packet's name.
+        if !self.friend_link_peer_is_accepted(root)?
+            && db
+                .client_record("identity", principal)?
+                .is_some_and(|row| row["contact_identity_commitment"] == root)
+            && self.friend_link_peer_is_accepted(principal)?
+        {
+            let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+            db.replace_contact_link_root(
+                &branch.principal_id,
+                own.root_commitment(),
+                principal,
+                root,
+            )?;
+        }
+        self.friend_link_peer_is_accepted(root)
     }
     pub(crate) fn pending_contact_root(&self, root: &str) -> Result<bool, SdkError> {
         Ok(self
@@ -102,7 +141,7 @@ impl RamfluxClient {
             return self.apply_contact_response(control);
         }
         let root = &body.requester_root;
-        if self.friend_rejection_reason(&body.manifest.principal_id)?.is_some() {
+        if self.friend_rejection_reason(&body.actor_root)?.is_some() {
             return Ok(());
         }
         if let Some(old) = db.contact_request(root, "inbound")? {
@@ -119,20 +158,23 @@ impl RamfluxClient {
                 }
                 return Ok(());
             }
-            if !matches!(old.state.as_str(), "expired" | "declined" | "accepted") {
+            let legacy_pending = old.state == "pending"
+                && !Metadata::read(&old)?.valid_for(root, &old.request_id)?;
+            if legacy_pending {
+                db.decide_contact_request(root, "inbound", &old.request_id, "expired", now)?;
+            }
+            if !legacy_pending && !matches!(old.state.as_str(), "expired" | "declined" | "accepted")
+            {
                 return Err(invalid("another contact request is already pending"));
             }
         }
         if !db.charge_contact_request(&format!("inbound:{root}"), 4, 3600, now)?
             || !db.charge_contact_request("inbound-account", 64, 3600, now)?
         {
-            return Err(invalid("contact request rate limit exceeded"));
+            return Err(SdkError::InboundPending("contact request rate limit exceeded".into()));
         }
-        let prior = db
-            .friend_link_for_peer(root)?
-            .or(db.friend_link_for_peer(&body.manifest.principal_id)?);
-        let reciprocal = self.friend_link_peer_is_accepted(root)?
-            || self.friend_link_peer_is_accepted(&body.manifest.principal_id)?;
+        let prior = db.friend_link_for_peer(root)?;
+        let reciprocal = self.friend_link_peer_is_accepted(root)?;
         let request = ContactRequestRecord {
             contact_identity_commitment: root.clone(),
             direction: "inbound".into(),
@@ -143,11 +185,16 @@ impl RamfluxClient {
                 |link| Ok(link.link_id),
             )?,
             state: "pending".into(),
-            request_json: serde_json::to_vec(control)?,
+            request_json: Metadata::from_control(control).bytes()?,
             expires_at: body.expires_at,
             updated_at: now,
         };
-        if !db.persist_contact_request(&request)? {
+        if !db.persist_contact_request(&request).map_err(|error| match error {
+            StorageError::AuthorizationRejected => {
+                SdkError::InboundPending("pending contact capacity exhausted".into())
+            }
+            other => other.into(),
+        })? {
             return Ok(());
         }
         self.record_pending_friend_link(&request.link_id, root, &body.target_root)?;
@@ -170,7 +217,7 @@ impl RamfluxClient {
         if request.state != state && request.state != "pending" {
             return Err(invalid("contact response cannot reactivate a terminal request"));
         }
-        if self.friend_rejection_reason(&body.manifest.principal_id)?.is_some() {
+        if self.friend_rejection_reason(&body.actor_root)?.is_some() {
             return Ok(());
         }
         db.decide_contact_request(
@@ -180,9 +227,11 @@ impl RamfluxClient {
             state,
             now_unix_timestamp(),
         )?;
+        self.record_outbound_contact_state(&body.target_root, state, now_unix_timestamp())?;
         if body.kind == Decision::Accept {
             self.establish_friend_link(&request.link_id, &body.requester_root, &body.target_root)?;
             self.replicate_contact_acceptance(&request)?;
+            self.promote_contact_request_cache(&request.contact_identity_commitment)?;
         }
         Ok(())
     }
@@ -205,6 +254,17 @@ impl RamfluxClient {
             )? {
                 return Err(crate::ContactReason::RequestClosed.into());
             }
+            if matches!(state, "blocked" | "declined") {
+                db.fence_contact_request(
+                    &request.contact_identity_commitment,
+                    state,
+                    if state == "blocked" {
+                        0
+                    } else {
+                        now_unix_timestamp().saturating_add(DECLINE_COOLDOWN_SECONDS)
+                    },
+                )?;
+            }
             let own = self.owned_device_identity()?;
             if state == "accepted" {
                 if !self.friend_link_peer_is_accepted(&request.contact_identity_commitment)? {
@@ -219,6 +279,7 @@ impl RamfluxClient {
                     now_unix_timestamp(),
                 )?;
                 self.replicate_contact_acceptance(request)?;
+                self.promote_contact_request_cache(&request.contact_identity_commitment)?;
                 self.stage_contact_response(request, Decision::Accept)?;
                 self.release_contact_messages(&request.contact_identity_commitment)?;
             } else {
@@ -246,7 +307,7 @@ impl RamfluxClient {
         self.stage_own_contact(&manifest, &request.link_id)
     }
     pub(crate) fn contact_requests_list(&self) -> Result<Value, SdkError> {
-        self.account_db()?.expire_contact_requests(now_unix_timestamp())?;
+        self.maintain_contact_requests()?;
         let db = self.account_db()?;
         let mut records = db.pending_contact_requests()?;
         records.extend(db.outgoing_contact_requests()?);
@@ -260,10 +321,9 @@ impl RamfluxClient {
         &self,
         record: &ContactRequestRecord,
     ) -> Result<Value, SdkError> {
-        let wire: Value = serde_json::from_slice(&record.request_json)?;
-        let raw_note =
-            if record.direction == "inbound" { &wire["body"]["note"] } else { &wire["note"] };
-        let note = raw_note.as_str().map(ramflux_protocol::text_safety::quote_fallback_field);
+        let metadata = Metadata::read(record)?;
+        let note =
+            metadata.note.as_deref().map(ramflux_protocol::text_safety::quote_fallback_field);
         let held = if record.direction == "inbound" {
             self.account_db()?.held_contact_messages(&record.contact_identity_commitment)?
         } else {

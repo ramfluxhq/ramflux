@@ -133,7 +133,10 @@ impl RamfluxClient {
         let source = self.authenticated_device_identity(entry)?;
         let held = opened.routing.kind == Kind::Direct
             && self.pending_contact_root(source.root_commitment())?
-            && !self.friend_link_peer_is_accepted(source.root_commitment())?;
+            && !self.accepted_contact_source(
+                source.root_commitment(),
+                &entry.envelope.source_principal_id,
+            )?;
         for attachment in refs.iter().filter(|_| accepted) {
             let prepared = if attachment.key_slot.version == 2 {
                 self.decrypt_pair_object_slot(&attachment.key_slot, Some(&mut opened.session)).ok()
@@ -338,6 +341,7 @@ impl RamfluxClient {
         self.account_db()?.write_transaction(|| {
             // A malformed request cannot leave a cached root or device, pair state, consent,
             // or message projection behind. Candidate authentication preceded this transaction.
+            self.remember_contact_request_cache(manifest)?;
             self.persist_root_verified_directory(manifest)?;
             let receipt = self.authenticated_committed_key(entry)?;
             if let Some(committed) = self.account_db()?.load_actor_state::<Committed>(&receipt)? {
@@ -377,9 +381,16 @@ impl RamfluxClient {
                 )?;
             }
             let source=self.authenticated_device_identity(entry)?;
+            if opened.routing.kind == Kind::Direct
+                && self.friend_rejection_reason(source.root_commitment())?.is_none()
+                && !self.pending_contact_root(source.root_commitment())?
+                && !self.accepted_contact_source(source.root_commitment(), &entry.envelope.source_principal_id)?
+            {
+                return Err(invalid("direct message requires current root consent at commit"));
+            }
             let pending=opened.routing.kind==Kind::Direct
                 && self.pending_contact_root(source.root_commitment())?
-                && !self.friend_link_peer_is_accepted(source.root_commitment())?;
+                && !self.accepted_contact_source(source.root_commitment(), &entry.envelope.source_principal_id)?;
             let plaintext=if pending {
                 self.hold_contact_routed_message(&opened.routing,entry,body,metadata,references)?;
                 None

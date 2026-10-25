@@ -13,6 +13,8 @@ use std::sync::{
 
 struct Directory {
     captured: Arc<std::sync::Mutex<Vec<ramflux_protocol::Envelope>>>,
+    incoming: Arc<std::sync::Mutex<Vec<GatewayInboxEntry>>>,
+    acknowledged: Arc<std::sync::Mutex<Option<crate::GatewayCursor>>>,
     addr: std::net::SocketAddr,
     ca: PathBuf,
     records: Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>,
@@ -76,7 +78,16 @@ impl Directory {
             }
             Ok(())
         });
-        Ok(Self { captured: Arc::default(), addr, ca, records, unavailable, server })
+        Ok(Self {
+            captured: Arc::default(),
+            incoming: Arc::default(),
+            acknowledged: Arc::default(),
+            addr,
+            ca,
+            records,
+            unavailable,
+            server,
+        })
     }
     fn config(&self, f: &Fixture) -> Result<GatewaySessionConfig, SdkError> {
         let mut c = f.config()?;
@@ -92,9 +103,41 @@ impl Directory {
 // remain available only for hash-addressed manifests, never for name lookup.
 struct DirectorySession {
     captured: Arc<std::sync::Mutex<Vec<ramflux_protocol::Envelope>>>,
+    incoming: Arc<std::sync::Mutex<Vec<GatewayInboxEntry>>>,
+    acknowledged: Arc<std::sync::Mutex<Option<crate::GatewayCursor>>>,
     records: Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>,
     unavailable: Arc<AtomicBool>,
     responses: VecDeque<Vec<u8>>,
+}
+impl DirectorySession {
+    fn prekey_response(
+        &self,
+        device_id: &str,
+    ) -> Result<GatewayServerFrame, ramflux_transport::TransportError> {
+        let address = ramflux_protocol::parse_qualified_device_id(device_id)
+            .map_err(|error| ramflux_transport::TransportError::Quic(error.to_string()))?;
+        let raw = address.as_ref().map_or(device_id, |(_, raw)| raw.as_str());
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| ramflux_transport::TransportError::Quic("directory mutex".into()))?;
+        let entry = records
+            .iter()
+            .filter(|m| address.as_ref().is_none_or(|(root, _)| *root == m.principal_commitment))
+            .flat_map(|m| m.devices.iter())
+            .find(|d| d.device_id == raw)
+            .ok_or_else(|| {
+                ramflux_transport::TransportError::Quic("prekey fixture missing".into())
+            })?;
+        Ok(GatewayServerFrame::Prekey {
+            response: crate::prekey::SdkPrekeyResponse {
+                device_id: raw.into(),
+                principal_commitment: entry.principal_commitment.clone(),
+                bundle: Some(entry.prekey_bundle.clone()),
+                target_delivery_id: Some(entry.target_delivery_id.clone()),
+            },
+        })
+    }
 }
 impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
     fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
@@ -148,31 +191,7 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
                     }
                 }
                 GatewayClientFrame::PrekeyFetch { device_id } => {
-                    let address = ramflux_protocol::parse_qualified_device_id(&device_id).map_err(
-                        |error| ramflux_transport::TransportError::Quic(error.to_string()),
-                    )?;
-                    let raw = address.as_ref().map_or(device_id.as_str(), |(_, raw)| raw.as_str());
-                    let records = self.records.lock().map_err(|_| {
-                        ramflux_transport::TransportError::Quic("directory mutex".into())
-                    })?;
-                    let entry = records
-                        .iter()
-                        .filter(|m| {
-                            address.as_ref().is_none_or(|(root, _)| *root == m.principal_commitment)
-                        })
-                        .flat_map(|m| m.devices.iter())
-                        .find(|d| d.device_id == raw)
-                        .ok_or_else(|| {
-                            ramflux_transport::TransportError::Quic("prekey fixture missing".into())
-                        })?;
-                    GatewayServerFrame::Prekey {
-                        response: crate::prekey::SdkPrekeyResponse {
-                            device_id: raw.into(),
-                            principal_commitment: entry.principal_commitment.clone(),
-                            bundle: Some(entry.prekey_bundle.clone()),
-                            target_delivery_id: Some(entry.target_delivery_id.clone()),
-                        },
-                    }
+                    self.prekey_response(&device_id)?
                 }
                 GatewayClientFrame::IdentityRegister { .. } => {
                     GatewayServerFrame::IdentityRegistrationRejected {
@@ -180,9 +199,47 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
                     }
                 }
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
-                GatewayClientFrame::Resume { .. } => {
-                    GatewayServerFrame::Resume { entries: Vec::new() }
+                GatewayClientFrame::Resume { resume } => {
+                    let entries = self
+                        .incoming
+                        .lock()
+                        .map_err(|_| ramflux_transport::TransportError::Quic("inbox lock".into()))?
+                        .iter()
+                        .filter(|entry| entry.inbox_seq > resume.after_inbox_seq)
+                        .take(resume.limit)
+                        .cloned()
+                        .collect();
+                    GatewayServerFrame::Resume { entries }
                 }
+                GatewayClientFrame::Ack { ack } => {
+                    let mut incoming = self.incoming.lock().map_err(|_| {
+                        ramflux_transport::TransportError::Quic("inbox lock".into())
+                    })?;
+                    let seq = incoming
+                        .iter()
+                        .find(|entry| entry.envelope.envelope_id == ack.envelope_id)
+                        .map_or(0, |entry| entry.inbox_seq);
+                    incoming.retain(|entry| entry.envelope.envelope_id != ack.envelope_id);
+                    let mut saved = self.acknowledged.lock().map_err(|_| {
+                        ramflux_transport::TransportError::Quic("cursor lock".into())
+                    })?;
+                    let cursor = crate::GatewayCursor {
+                        target_delivery_id: "bob".into(),
+                        inbox_seq: seq.max(saved.as_ref().map_or(0, |cursor| cursor.inbox_seq)),
+                        last_envelope_id: Some(ack.envelope_id.clone()),
+                        acked_envelope_ids: vec![ack.envelope_id],
+                        nacked_envelope_ids: BTreeMap::new(),
+                    };
+                    *saved = Some(cursor.clone());
+                    GatewayServerFrame::Ack { cursor }
+                }
+                GatewayClientFrame::Cursor { .. } => GatewayServerFrame::Cursor {
+                    cursor: self
+                        .acknowledged
+                        .lock()
+                        .map_err(|_| ramflux_transport::TransportError::Quic("cursor lock".into()))?
+                        .clone(),
+                },
                 _ => {
                     return Err(ramflux_transport::TransportError::Quic(
                         "unexpected directory frame".into(),
@@ -214,6 +271,8 @@ fn state(a: &mut Fixture, b: &mut Fixture, d: &Directory) -> Result<LocalBusDaem
             d.config(f)?,
             Box::new(DirectorySession {
                 captured: d.captured.clone(),
+                incoming: d.incoming.clone(),
+                acknowledged: d.acknowledged.clone(),
                 records: d.records.clone(),
                 unavailable: d.unavailable.clone(),
                 responses: VecDeque::new(),
@@ -391,11 +450,13 @@ async fn failed_directory_resolution_preserves_contacts_and_returns_retryable_or
     );
     d.unavailable.store(false, Ordering::SeqCst);
     call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
-    let duplicate = call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"}))
-        .await
-        .err()
-        .ok_or_else(|| invalid("duplicate"))?;
-    assert!(matches!(duplicate, SdkError::ContactInput(crate::ContactReason::AlreadyContact)));
+    let first = call(&mut s, "alice", "contact.list", json!({})).await?;
+    let retry = call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
+    assert_eq!(retry["contact"]["request_id"], first["contacts"][0]["request_id"]);
+    assert_eq!(
+        s.accounts.get("alice").ok_or_else(|| invalid("account"))?.client.friend_links()?.len(),
+        1
+    );
     Ok(())
 }
 

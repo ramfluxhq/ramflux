@@ -131,8 +131,11 @@ async fn relationship_end(block: bool) -> Result<(), SdkError> {
     let stale = gap(&alice, &bob, "relationship-gap")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
     assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
-    let link =
-        bob.client.account_db()?.friend_link_for_peer("alice")?.ok_or_else(|| invalid("friend"))?;
+    let link = bob
+        .client
+        .account_db()?
+        .friend_link_for_peer(alice.client.owned_device_identity()?.root_commitment())?
+        .ok_or_else(|| invalid("friend"))?;
     if block {
         bob.client.block_friend_link(&link.link_id)?;
     } else {

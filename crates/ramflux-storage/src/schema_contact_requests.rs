@@ -39,6 +39,17 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
         );
         CREATE INDEX IF NOT EXISTS contact_message_request_owner
             ON contact_message_request(contact_identity_commitment,created_at,message_id);
+        CREATE TABLE IF NOT EXISTS contact_request_authority_floor (
+            root TEXT PRIMARY KEY,
+            epoch INTEGER NOT NULL,
+            record_hash TEXT NOT NULL,
+            until INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS contact_request_fence (
+            root TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK(state IN ('blocked','declined')),
+            until INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS contact_request_rate (
             bucket TEXT PRIMARY KEY,
             window_end INTEGER NOT NULL,

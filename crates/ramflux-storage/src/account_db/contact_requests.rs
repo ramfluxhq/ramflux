@@ -11,7 +11,7 @@ const MAX_MESSAGES: u64 = 256;
 const MAX_BYTES_PER_ROOT: u64 = 1_048_576;
 const MAX_BYTES: u64 = 8_388_608;
 
-fn request_row(row: &crate::database::Row) -> rusqlite::Result<ContactRequestRecord> {
+pub(super) fn request_row(row: &crate::database::Row) -> rusqlite::Result<ContactRequestRecord> {
     Ok(ContactRequestRecord {
         contact_identity_commitment: row.get(0)?,
         direction: row.get(1)?,
@@ -56,9 +56,20 @@ impl AccountDb {
     /// Refuses ambiguous selectors and returns SQL errors. Selection grants no identity authority.
     pub fn select_inbound_contact_request(
         &self,
+        field: &str,
         selector: &str,
     ) -> Result<Option<ContactRequestRecord>, StorageError> {
-        let mut query=self.connection.prepare("SELECT contact_identity_commitment,direction,request_id,principal_id,link_id,state,request_json,expires_at,updated_at FROM contact_request_projection WHERE direction='inbound' AND (request_id=?1 OR link_id=?1 OR principal_id=?1 OR contact_identity_commitment=?1) LIMIT 2")?;
+        let column = match field {
+            "request_id" => "request_id",
+            "link_id" => "link_id",
+            "principal_id" => "principal_id",
+            "root_commitment" => "contact_identity_commitment",
+            _ => return Err(StorageError::AuthorizationRejected),
+        };
+        let sql = format!(
+            "SELECT contact_identity_commitment,direction,request_id,principal_id,link_id,state,request_json,expires_at,updated_at FROM contact_request_projection WHERE direction='inbound' AND {column}=?1 LIMIT 2"
+        );
+        let mut query = self.connection.prepare(&sql)?;
         let rows = query
             .query_map(params![selector], request_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -171,6 +182,16 @@ impl AccountDb {
             if counts.0>=MAX_MESSAGES || counts.2>=MAX_MESSAGES_PER_ROOT || counts.1.saturating_add(bytes)>MAX_BYTES || counts.3.saturating_add(bytes)>MAX_BYTES_PER_ROOT { return Ok(false); }
             Ok(self.connection.execute("INSERT OR IGNORE INTO contact_message_request VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![message.sender.root_commitment(),message.sender.storage_key(),message.message_id,message.conversation_id,message.message_json,bytes,message.expires_at,message.created_at])?>0)
         })
+    }
+    /// Read the bounded queue size without loading private message bodies.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn contact_message_count(&self, root: &str) -> Result<u64, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM contact_message_request WHERE contact_identity_commitment=?1",
+            params![root],
+            |row| row.get(0),
+        )?)
     }
     /// # Errors
     /// Returns SQL errors; private held contents remain capped to eight MiB account-wide.

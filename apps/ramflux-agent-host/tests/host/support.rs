@@ -121,12 +121,6 @@ impl Fake {
                 }
                 json!({"accepted":true})
             }
-            "contact.requests.policy.set" => {
-                if body["contact_requests"] != "auto_accept" {
-                    return Err(Error::State);
-                }
-                json!({"contact_requests":"auto_accept"})
-            }
             "message.receive" => json!({}),
             _ => return Err(Error::Unauthorized),
         })

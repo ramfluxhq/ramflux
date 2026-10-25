@@ -659,6 +659,11 @@ async fn transient_sender_lookup_retries_with_backoff_while_later_messages_progr
     let carol_address = ramflux_protocol::qualified_device_id(&carol_root, "carol")?;
     bob.client.account_db()?.remove_actor_state(&format!("directory/device/{carol_address}"))?;
     bob.client.establish_friend_link("carol-friend", "bob", &carol_root)?;
+    bob.client.establish_friend_link(
+        "alice-friend",
+        "bob",
+        alice.client.owned_device_identity()?.root_commitment(),
+    )?;
     let mut good = seal(&alice, &bob, message("later-good", "thread"), b"works")?;
     good.inbox_seq = 2;
     let (engine, _) = Inbox::engine(bob.config()?, vec![pending.clone(), good])?;
@@ -692,10 +697,16 @@ async fn direct_message_json_cannot_apply_a_friend_control_side_effect() -> Resu
     let mut bob = Fixture::new("bob", 33)?;
     let body =
         br#"{"type":"friend.accepted","link_id":"text-only","requester":"bob","target":"carol"}"#;
+    bob.client.establish_friend_link(
+        "consented",
+        "bob",
+        alice.client.owned_device_identity()?.root_commitment(),
+    )?;
+    let before = bob.client.friend_links()?;
     let entry = seal(&alice, &bob, message("json-friend-text", "thread"), body)?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
-    assert_eq!(bob.client.friend_links()?.len(), 0);
+    assert_eq!(bob.client.friend_links()?, before);
     assert_eq!(
         bob.client.account_db()?.message_content("json-friend-text")?.as_deref(),
         Some(body.as_slice())
@@ -878,6 +889,11 @@ async fn attachment_shaped_json_text_is_not_interpreted_as_an_attachment_wrapper
     let mut bob = Fixture::new("bob", 36)?;
     let body = serde_json::to_vec(
         &serde_json::json!({"schema":"ramflux.sdk.dm_attachment_envelope.v1","version":1,"body_base64":ramflux_protocol::encode_base64url(b"different bytes"),"attachments":[]}),
+    )?;
+    bob.client.establish_friend_link(
+        "consented",
+        "bob",
+        alice.client.owned_device_identity()?.root_commitment(),
     )?;
     let plain = seal(&alice, &bob, message("attachment-looking-text", "thread"), &body)?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));

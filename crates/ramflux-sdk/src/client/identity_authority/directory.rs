@@ -72,6 +72,15 @@ impl RamfluxClient {
         Ok(())
     }
     pub(crate) fn check_observed_set(&self, next: &SignedDeviceSetRecord) -> Result<(), SdkError> {
+        if let Some((epoch, hash)) = self.account_db()?.contact_request_authority_floor(
+            &next.principal_commitment,
+            crate::time::now_unix_timestamp(),
+        )? && (next.device_set_epoch < epoch
+            || (next.device_set_epoch == epoch
+                && crate::client::contact_requests::authority_digest(next)? != hash))
+        {
+            return Err(invalid("requester authority is below its compact rollback floor"));
+        }
         if let Some(old) = self
             .account_db()?
             .load_actor_state::<SignedDeviceSetRecord>(&record_key(&next.principal_commitment))?

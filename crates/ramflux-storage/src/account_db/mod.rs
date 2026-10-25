@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod bot;
+mod contact_request_retention;
 mod contact_requests;
 pub mod conversation_list;
 pub mod conversation_projection;

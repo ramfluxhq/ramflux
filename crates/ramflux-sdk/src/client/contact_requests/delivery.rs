@@ -15,6 +15,10 @@ struct Intent {
     peer_root: String,
     note: Option<String>,
     expires_at: i64,
+    #[serde(default)]
+    issued_at: i64,
+    #[serde(default)]
+    nonce: String,
     attempts: u8,
     next_at: i64,
     delivered: BTreeSet<(String, String)>,
@@ -28,14 +32,43 @@ fn key(intent: &Intent) -> String {
         )
     )
 }
+fn queue(client: &RamfluxClient) -> Result<Vec<Intent>, SdkError> {
+    let db = client.account_db()?;
+    let now = now_unix_timestamp();
+    let mut retained = Vec::new();
+    for intent in db.list_actor_states::<Intent>(PREFIX)? {
+        let closed = if intent.kind == Decision::Request {
+            db.contact_request(&intent.peer_root, "outbound")?
+                .is_none_or(|row| row.request_id != intent.request_id || row.state != "pending")
+        } else {
+            db.contact_request(&intent.peer_root, "inbound")?.is_none_or(|row| {
+                row.request_id != intent.request_id
+                    || row.state
+                        != if intent.kind == Decision::Accept { "accepted" } else { "declined" }
+            })
+        };
+        if intent.expires_at <= now
+            || closed
+            || (intent.kind != Decision::Request && intent.attempts >= 8)
+        {
+            db.remove_actor_state(&key(&intent))?;
+        } else {
+            retained.push(intent);
+        }
+    }
+    Ok(retained)
+}
 fn enqueue(client: &RamfluxClient, intent: &Intent) -> Result<(), SdkError> {
     let db = client.account_db()?;
+    let pending = queue(client)?;
     let id = key(intent);
     if db.actor_state_exists(&id)? {
         return Ok(());
     }
-    if db.list_actor_states::<Intent>(PREFIX)?.len() >= 128 {
-        return Err(invalid("contact request delivery queue is full"));
+    if pending.iter().filter(|row| row.attempts < 8).count() >= 128
+        || pending.iter().filter(|row| row.peer_root == intent.peer_root).count() >= 4
+    {
+        return Err(SdkError::InboundPending("contact delivery capacity exhausted".into()));
     }
     db.persist_actor_state(&id, intent)?;
     Ok(())
@@ -64,6 +97,15 @@ impl RamfluxClient {
         let (root, raw) = ramflux_protocol::parse_qualified_device_id(&reference)?
             .ok_or_else(|| invalid("recipient root required"))?;
         let Some(request) = self.account_db()?.contact_request(&root, "outbound")? else {
+            if self
+                .account_db()?
+                .client_record("contact_request_status", &root)?
+                .is_some_and(|row| row["state"] != "accepted")
+            {
+                return Err(SdkError::InboundPending(
+                    "contact request must be explicitly retried".into(),
+                ));
+            }
             return Ok(());
         };
         if request.state == "accepted" {
@@ -89,21 +131,27 @@ impl RamfluxClient {
         )? {
             return Ok(());
         }
-        let note: serde_json::Value = serde_json::from_slice(&request.request_json)?;
+        let metadata = super::Metadata::read(&request)?;
         let selector = Intent {
             kind: Decision::Request,
             request_id: request.request_id.clone(),
             requester_root: self.owned_device_identity()?.root_commitment().into(),
             target_root: root.clone(),
             peer_root: root,
-            note: note["note"].as_str().map(str::to_owned),
+            note: metadata.note,
+            issued_at: metadata.issued_at,
+            nonce: metadata.nonce,
             expires_at: request.expires_at,
             attempts: 0,
             next_at: now_unix_timestamp(),
             delivered: BTreeSet::new(),
         };
         let id = key(&selector);
-        let mut intent = self.account_db()?.load_actor_state::<Intent>(&id)?.unwrap_or(selector);
+        let stored = self.account_db()?.load_actor_state::<Intent>(&id)?;
+        if stored.is_none() {
+            enqueue(self, &selector)?;
+        }
+        let mut intent = stored.unwrap_or(selector);
         let now = now_unix_timestamp();
         if intent.attempts >= 8 || now < intent.next_at {
             return Err(SdkError::InboundPending(
@@ -143,14 +191,15 @@ impl RamfluxClient {
             return Err(crate::ContactReason::InvalidRequestNote.into());
         }
         let db = self.account_db()?;
-        if let Some(old) = db.contact_request(&peer.principal_commitment, "outbound")? {
-            if matches!(old.state.as_str(), "accepted" | "pending") {
+        let old = db.contact_request(&peer.principal_commitment, "outbound")?;
+        if let Some(old) = &old {
+            if old.state == "accepted" {
                 return Ok(());
             }
-            if old.state != "expired"
-                && !(old.state == "declined"
+            if !(matches!(old.state.as_str(), "expired" | "pending")
+                || (old.state == "declined"
                     && now_unix_timestamp()
-                        >= old.updated_at.saturating_add(super::DECLINE_COOLDOWN_SECONDS))
+                        >= old.updated_at.saturating_add(super::DECLINE_COOLDOWN_SECONDS)))
             {
                 return Err(invalid("contact request is closed or cooling down"));
             }
@@ -167,15 +216,45 @@ impl RamfluxClient {
             return Err(crate::ContactReason::LookupRateLimited.into());
         }
         let own = self.owned_device_identity()?;
-        let id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+        let previous = old
+            .as_ref()
+            .filter(|row| row.state == "pending")
+            .map(super::Metadata::read)
+            .transpose()?;
+        let metadata = if let Some(previous) = previous.filter(|m| !m.nonce.is_empty()) {
+            previous
+        } else {
+            super::Metadata {
+                nonce: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+                issued_at: now,
+                note: note.map(str::to_owned),
+                needs_reply: None,
+            }
+        };
+        let id = super::wire::request_id(own.root_commitment(), &metadata.nonce)?;
+        if let Some(old) = &old
+            && old.state == "pending"
+            && old.request_id != id
+        {
+            db.decide_contact_request(
+                &peer.principal_commitment,
+                "outbound",
+                &old.request_id,
+                "expired",
+                now,
+            )?;
+        }
+        self.restart_contact_request_pair(peer, old.as_ref(), &id)?;
         let intent = Intent {
             kind: Decision::Request,
             request_id: id.clone(),
             requester_root: own.root_commitment().into(),
             target_root: peer.principal_commitment.clone(),
             peer_root: peer.principal_commitment.clone(),
-            note: note.map(str::to_owned),
-            expires_at: now.saturating_add(TTL),
+            note: metadata.note.clone(),
+            expires_at: metadata.issued_at.saturating_add(TTL),
+            issued_at: metadata.issued_at,
+            nonce: metadata.nonce.clone(),
             attempts: 0,
             next_at: now,
             delivered: BTreeSet::new(),
@@ -187,12 +266,41 @@ impl RamfluxClient {
             principal_id: peer.principal_id.clone(),
             link_id: link_id.into(),
             state: "pending".into(),
-            request_json: serde_json::to_vec(&serde_json::json!({"note":note}))?,
+            request_json: metadata.bytes()?,
             expires_at: intent.expires_at,
             updated_at: now,
         };
-        db.persist_contact_request(&record)?;
+        db.persist_contact_request(&record).map_err(|error| match error {
+            StorageError::AuthorizationRejected => {
+                SdkError::InboundPending("pending contact capacity exhausted".into())
+            }
+            other => other.into(),
+        })?;
+        self.record_outbound_contact_state(&peer.principal_commitment, "pending", now)?;
+        db.remove_actor_state(&key(&intent))?;
         enqueue(self, &intent)
+    }
+    fn restart_contact_request_pair(
+        &self,
+        peer: &crate::prekey::SdkDeviceManifestResponse,
+        old: Option<&ContactRequestRecord>,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let retained_status =
+            db.client_record("contact_request_status", &peer.principal_commitment)?;
+        let fresh_pair = old.is_some_and(|row| row.request_id != id)
+            || retained_status
+                .as_ref()
+                .is_some_and(|row| matches!(row["state"].as_str(), Some("expired" | "declined")));
+        if fresh_pair {
+            for device in &peer.devices {
+                let identity =
+                    self.device_identity_for_root(&peer.principal_commitment, &device.device_id)?;
+                self.remove_device_pair(&identity, "contact_request_restarted")?;
+            }
+        }
+        Ok(())
     }
     pub(super) fn stage_contact_response(
         &self,
@@ -200,7 +308,17 @@ impl RamfluxClient {
         kind: Decision,
     ) -> Result<(), SdkError> {
         let own = self.owned_device_identity()?;
-        enqueue(
+        let metadata = super::Metadata::read(request)?;
+        let issued_at = now_unix_timestamp();
+        let mut deferred = super::Metadata::read(request)?;
+        deferred.needs_reply = Some(kind);
+        self.account_db()?.update_contact_request_metadata(
+            &request.contact_identity_commitment,
+            "inbound",
+            &request.request_id,
+            &deferred.bytes()?,
+        )?;
+        let queued = enqueue(
             self,
             &Intent {
                 kind,
@@ -209,18 +327,44 @@ impl RamfluxClient {
                 target_root: own.root_commitment().into(),
                 peer_root: request.contact_identity_commitment.clone(),
                 note: None,
-                expires_at: request.expires_at,
+                expires_at: issued_at.saturating_add(TTL),
+                issued_at,
+                nonce: metadata.nonce,
                 attempts: 0,
                 next_at: now_unix_timestamp(),
                 delivered: BTreeSet::new(),
             },
-        )
+        );
+        match queued {
+            Ok(()) => {
+                deferred.needs_reply = None;
+                self.account_db()?.update_contact_request_metadata(
+                    &request.contact_identity_commitment,
+                    "inbound",
+                    &request.request_id,
+                    &deferred.bytes()?,
+                )?;
+                Ok(())
+            }
+            Err(SdkError::InboundPending(reason)) => {
+                tracing::debug!(%reason,"contact reply waits for delivery capacity");
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    account.client.maintain_contact_requests()?;
     let db = account.client.account_db()?;
+    db.prune_contact_request_fences_and_previews(now_unix_timestamp())?;
+    for request in db.deferred_contact_replies(now_unix_timestamp())? {
+        if let Some(kind) = super::Metadata::read(&request)?.needs_reply {
+            account.client.stage_contact_response(&request, kind)?;
+        }
+    }
     db.expire_contact_requests(now_unix_timestamp())?;
-    let pending = db.list_actor_states::<Intent>(PREFIX)?;
+    let pending = queue(&account.client)?;
     let mut sent = 0;
     let mut attempted = 0;
     for mut intent in pending {
@@ -255,6 +399,9 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
             continue;
         }
         if intent.attempts >= 8 {
+            if intent.kind != Decision::Request {
+                account.client.account_db()?.remove_actor_state(&id)?;
+            }
             continue;
         }
         if intent.next_at > now {
@@ -298,7 +445,6 @@ async fn deliver(
             .await?;
     client.persist_identity_directory(&own_manifest)?;
     client.persist_identity_directory(&peer)?;
-    let now = now_unix_timestamp();
     let control = super::wire::sign(
         client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         super::wire::Body {
@@ -308,9 +454,9 @@ async fn deliver(
             requester_root: intent.requester_root.clone(),
             target_root: intent.target_root.clone(),
             actor_root: own.root_commitment().into(),
-            issued_at: now,
+            issued_at: intent.issued_at,
             expires_at: intent.expires_at,
-            nonce: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            nonce: intent.nonce.clone(),
             note: intent.note.clone(),
             manifest: own_manifest,
         },
@@ -379,7 +525,8 @@ async fn send_one(
         target_delivery_id: device.target_delivery_id.clone(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: 3600,
+        ttl: u32::try_from(intent.expires_at.saturating_sub(now_unix_timestamp()).clamp(1, TTL))
+            .map_err(|_| invalid("contact carrier lifetime is invalid"))?,
     };
     let mut packet = client
         .seal_routed_as(engine, &message, body, crate::client::routed::Route::control())

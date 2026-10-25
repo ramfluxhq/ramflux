@@ -35,12 +35,12 @@ pub(super) async fn dispatch(
         "contact.accept" | "contact.decline" | "contact.block" => {}
         _ => return Ok(None),
     }
-    account.client.account_db()?.expire_contact_requests(now_unix_timestamp())?;
+    account.client.maintain_contact_requests()?;
     let selector = ["request_id", "link_id", "root_commitment", "principal_id"]
         .iter()
-        .find_map(|key| request.body[*key].as_str());
-    let selected = if let Some(selector) = selector {
-        account.client.account_db()?.select_inbound_contact_request(selector)?
+        .find_map(|key| request.body[*key].as_str().map(|value| (*key, value)));
+    let selected = if let Some((field, selector)) = selector {
+        account.client.account_db()?.select_inbound_contact_request(field, selector)?
     } else {
         None
     };

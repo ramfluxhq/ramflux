@@ -102,11 +102,12 @@ impl RamfluxClient {
                         prepared,
                     )?;
                 }
-                self.project_accepted_contact_message(
+                self.project_accepted_contact_message_at(
                     &held.route,
                     &held.entry,
                     &held.body,
                     held.metadata.as_ref(),
+                    now_unix_timestamp(),
                 )?;
                 Ok(())
             });

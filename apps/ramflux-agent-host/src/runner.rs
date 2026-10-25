@@ -50,8 +50,6 @@ impl<E: EngineProvider> AgentHost<E> {
     /// Rejects revoked/human accounts, unavailable snapshots, stream gaps and state I/O failures.
     pub async fn start(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        bus.request("contact.requests.policy.set", json!({"contact_requests":"auto_accept"}), None)
-            .await?;
         self.normalize_deferred()?;
         let topics = json!([
             "message.received",

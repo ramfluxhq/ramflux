@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Retire unaccepted requester material while preserving compact rollback and consent fences.
+use super::{TTL, invalid};
+use crate::prelude::*;
+use serde_json::json;
+const CACHE_PREFIX: &str = "contact-request/cache/";
+pub(crate) fn authority_digest(
+    record: &ramflux_protocol::SignedDeviceSetRecord,
+) -> Result<String, SdkError> {
+    Ok(ramflux_protocol::hash_base64url(
+        "ramflux.contact_request.authority_floor.v1",
+        &ramflux_protocol::canonical_json_bytes(record)?,
+    ))
+}
+impl RamfluxClient {
+    pub(crate) fn remember_contact_request_cache(
+        &self,
+        manifest: &crate::prekey::SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let root = &manifest.principal_commitment;
+        let key = format!("{CACHE_PREFIX}{root}");
+        if !db.actor_state_exists(&key)?
+            && (self.observed_device_set(root)?.is_some()
+                || db.actor_state_exists(&format!("identity/manifest-root/{root}"))?)
+        {
+            return Ok(());
+        }
+        let record = manifest
+            .signed_device_set
+            .as_ref()
+            .ok_or_else(|| invalid("requester authority is absent"))?;
+        self.check_observed_set(record)?;
+        self.retain_request_floor(record)?;
+        db.persist_actor_state(&key, &json!({"principal_id":manifest.principal_id}))?;
+        Ok(())
+    }
+    fn retain_request_floor(
+        &self,
+        record: &ramflux_protocol::SignedDeviceSetRecord,
+    ) -> Result<(), SdkError> {
+        let now = now_unix_timestamp();
+        if !self.account_db()?.retain_contact_request_authority_floor(
+            &record.principal_commitment,
+            record.device_set_epoch,
+            &authority_digest(record)?,
+            now.saturating_add(2 * TTL),
+            now,
+        )? {
+            return Err(SdkError::InboundPending(
+                "contact requester cache capacity exhausted".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn promote_contact_request_cache(&self, root: &str) -> Result<(), SdkError> {
+        // A durable accepted relationship retains the normal complete monotonic authority record.
+        self.account_db()?.remove_actor_state(&format!("{CACHE_PREFIX}{root}"))?;
+        self.account_db()?.release_contact_request_authority_floor(root)?;
+        Ok(())
+    }
+    fn retire_contact_request_cache(
+        &self,
+        row: &ramflux_storage::ContactRequestRecord,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let root = &row.contact_identity_commitment;
+        let key = format!("{CACHE_PREFIX}{root}");
+        if !db.actor_state_exists(&key)? {
+            return Ok(());
+        }
+        if self.friend_link_peer_is_accepted(root)? || db.contact_verification(root)?.is_some() {
+            return self.promote_contact_request_cache(root);
+        }
+        let Some(set) = self.observed_device_set(root)? else {
+            db.remove_actor_state(&key)?;
+            return Ok(());
+        };
+        for entry in &set.devices {
+            if db
+                .pinned_group_root_metadata(&set.principal_id, &entry.device_id)?
+                .iter()
+                .any(|known| known == root)
+            {
+                return self.promote_contact_request_cache(root);
+            }
+        }
+        self.retain_request_floor(&set)?;
+        for entry in &set.devices {
+            if entry.status == ramflux_protocol::DeviceSetStatus::Active {
+                let device = self.device_identity_for_root(root, &entry.device_id)?;
+                self.remove_device_pair(&device, "contact_request_closed")?;
+            }
+        }
+        db.purge_contact_request_identity_metadata(root, &set.principal_id, &row.link_id)?;
+        db.remove_actor_state(&key)?;
+        Ok(())
+    }
+    pub(crate) fn maintain_contact_requests(&self) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let now = now_unix_timestamp();
+        db.write_transaction(|| -> Result<(), SdkError> {
+            db.expire_contact_requests(now)?;
+            db.prune_contact_request_fences_and_previews(now)?;
+            for row in db.closed_contact_requests(now)? {
+                if row.direction == "inbound" {
+                    self.retire_contact_request_cache(&row)?;
+                } else {
+                    self.record_outbound_contact_state(
+                        &row.contact_identity_commitment,
+                        &row.state,
+                        row.updated_at,
+                    )?;
+                }
+                db.remove_contact_request(
+                    &row.contact_identity_commitment,
+                    &row.direction,
+                    &row.request_id,
+                )?;
+            }
+            Ok(())
+        })
+    }
+    pub(super) fn record_outbound_contact_state(
+        &self,
+        root: &str,
+        state: &str,
+        at: i64,
+    ) -> Result<(), SdkError> {
+        self.account_db()?.persist_client_record(
+            "contact_request_status",
+            root,
+            &json!({"state":state,"updated_at":at}),
+        )?;
+        Ok(())
+    }
+}

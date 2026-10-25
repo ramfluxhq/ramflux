@@ -323,7 +323,7 @@ async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block()
             account(&state, "alice")?.owned_device_identity()?.root_commitment().to_owned();
         let b_root = account(&state, "bob")?.owned_device_identity()?.root_commitment().to_owned();
         // Advance the persisted decision age, without sleeping or changing the signed request clock.
-        let past = now_unix_timestamp().saturating_sub(120);
+        let past = now_unix_timestamp().saturating_sub(2 * 24 * 3600);
         let decision = if action == "contact.block" { "blocked" } else { "declined" };
         account(&state, "bob")?
             .account_db()?
@@ -331,6 +331,13 @@ async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block()
         account(&state, "alice")?
             .account_db()?
             .decide_contact_request(&b_root, "outbound", &old_id, "declined", past)?;
+        if action == "contact.decline" {
+            account(&state, "bob")?.account_db()?.fence_contact_request(
+                &a_root,
+                "declined",
+                past + 24 * 3600,
+            )?;
+        }
         let _ = flush(&mut state, "bob").await?;
         let _ = frames(&directory)?;
         contact(&mut state, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
@@ -530,3 +537,6 @@ async fn contact02_expired_request_can_recover_a_lost_acceptance_without_reopeni
     assert_ne!(outgoing["requests"][0]["request_id"], id);
     Ok(())
 }
+
+#[path = "contact_request_r2_tests.rs"]
+mod r2;

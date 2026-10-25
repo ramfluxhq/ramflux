@@ -50,7 +50,24 @@ impl RamfluxClient {
         body: &[u8],
         metadata: Option<&MessageMetadata>,
     ) -> Result<Option<Vec<u8>>, SdkError> {
-        if let Some(reason) = self.friend_rejection_reason(&entry.envelope.source_principal_id)? {
+        self.project_accepted_contact_message_at(
+            route,
+            entry,
+            body,
+            metadata,
+            entry.envelope.created_at,
+        )
+    }
+    pub(crate) fn project_accepted_contact_message_at(
+        &self,
+        route: &super::Routing,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+        metadata: Option<&MessageMetadata>,
+        released_at: i64,
+    ) -> Result<Option<Vec<u8>>, SdkError> {
+        let source = self.authenticated_device_identity(entry)?;
+        if let Some(reason) = self.friend_rejection_reason(source.root_commitment())? {
             self.account_db()?.reject_inbox_message(
                 &route.conversation_id,
                 &route.message_id,
@@ -60,6 +77,12 @@ impl RamfluxClient {
             )?;
             return Ok(None);
         }
+        if !self.accepted_contact_source(
+            source.root_commitment(),
+            &entry.envelope.source_principal_id,
+        )? {
+            return Err(invalid("direct message projection requires accepted source root"));
+        }
         let surface = self.project_surface_message(
             &route.conversation_id,
             &route.message_id,
@@ -67,9 +90,7 @@ impl RamfluxClient {
                 principal: &entry.envelope.source_principal_id,
                 device: &entry.envelope.source_device_id,
                 envelope_id: &entry.envelope.envelope_id,
-                expires_at: Some(
-                    entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
-                ),
+                expires_at: Some(released_at.saturating_add(i64::from(entry.envelope.ttl))),
                 group_epoch: None,
             },
             body,

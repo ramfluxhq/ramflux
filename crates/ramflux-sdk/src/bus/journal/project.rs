@@ -233,12 +233,11 @@ fn project_contact(
                     ("expired", _) => "contact.request.expired",
                     _ => continue,
                 };
-                let body = if direction == "inbound" {
-                    client.contact_request_preview(&request)?
-                } else {
-                    json!({"request_id":request.request_id,"principal_id":request.principal_id,
-                        "root_commitment":root,"state":request.state,"direction":direction})
-                };
+                let body = json!({"request_id":request.request_id,"principal_id":request.principal_id,
+                    "root_commitment":root,"state":request.state,"direction":direction,
+                    "message_count":if direction=="inbound" && request.state=="pending" {
+                        db.contact_message_count(root)?
+                    } else { 0 }});
                 events.push((topic.into(), body, Some(root.into())));
             }
         }

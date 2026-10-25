@@ -220,3 +220,60 @@ async fn transient_identity_recheck_refusals_after_an_authentication_race_remain
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_policy()
+-> TestResult {
+    let f = Fixture::new()?;
+    let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        for method in [
+            "account.status",
+            "device.list",
+            "identity.directory",
+            "bus.subscribe",
+            "conversation.directory",
+            "group.list",
+        ] {
+            let length = socket.read_u32().await?;
+            let mut bytes = vec![0; usize::try_from(length)?];
+            socket.read_exact(&mut bytes).await?;
+            let mut frame: LocalBusFrame = serde_json::from_slice(&bytes)?;
+            assert_eq!(frame.method, method, "startup may not overwrite operator policy");
+            frame.kind = LocalBusFrameKind::Response;
+            frame.ok = Some(true);
+            frame.body = match method {
+                "account.status" => {
+                    json!({"client_mode":"headless_ai","local_device_authorized":true,"principal_id":"agent"})
+                }
+                "device.list" => {
+                    json!({"principal_id":"agent","local_device_id":"device","devices":[{"device_id":"device"}]})
+                }
+                "identity.directory" => {
+                    json!({"identities":[{"principal_id":"agent","is_self":true,"kind":"headless_ai"}],"next_cursor":null})
+                }
+                "bus.subscribe" => json!({"head_seq":1}),
+                "conversation.directory" => json!({"conversations":[],"next_cursor":null}),
+                _ => json!({"groups":[],"next_cursor":null}),
+            };
+            let bytes = serde_json::to_vec(&frame)?;
+            socket.write_u32(u32::try_from(bytes.len())?).await?;
+            socket.write_all(&bytes).await?;
+        }
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let mut bus = RfdBus::connect(&f.config.socket, "agent").await?;
+    let mut host = ramflux_agent_host::AgentHost::new(
+        f.config.clone(),
+        ramflux_agent_host::RuleEngine::new(&f.config)?,
+    )?;
+    let result = host.start(&mut bus).await;
+    if result.is_err() {
+        server.abort();
+    }
+    result?;
+    server.await?.map_err(|error| error.to_string())?;
+    assert_eq!(host.checkpoint().cursor, Some(1));
+    Ok(())
+}
