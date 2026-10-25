@@ -88,6 +88,22 @@ impl AgentBus for RfdBus {
             {
                 return Err(Error::SurfaceRefused(reason));
             }
+            if error.code == "Unauthenticated"
+                && !matches!(method, "account.status" | "device.list" | "identity.directory")
+            {
+                // A gateway authentication race is retryable while the local account is valid.
+                // Do not resend the original operation here; its caller owns retry/idempotency.
+                let mut identity = crate::Checkpoint::default();
+                let account = self.account.clone();
+                return if Box::pin(crate::participant::identity(self, &mut identity, &account))
+                    .await
+                    .is_ok()
+                {
+                    Err(Error::Bus)
+                } else {
+                    Err(Error::IdentityLost)
+                };
+            }
             return Err(match error.code.as_str() {
                 "Unavailable" | "Busy" | "DeadlineExceeded" => Error::Bus,
                 "Unauthenticated" | "AccountLocked" => Error::IdentityLost,
