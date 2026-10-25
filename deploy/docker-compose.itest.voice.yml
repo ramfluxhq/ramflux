@@ -1,0 +1,15 @@
+# Selected only by the explicit RAMFLUX_ITEST_VOICE=1 acceptance mode.
+services:
+  ramflux-gateway:
+    environment:
+      RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT: "ramflux-relay:17450"
+  ramflux-gateway-b:
+    environment:
+      RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT: "ramflux-relay:17450"
+  ramflux-relay:
+    environment:
+      RAMFLUX_RELAY_VOICE_UDP_ADDR: "0.0.0.0:19001"
+      RAMFLUX_RELAY_VOICE_CONTROL_ADDR: "0.0.0.0:17450"
+      RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT: "${RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT:-127.0.0.1:19001}"
+    ports:
+      - "${RAMFLUX_ITEST_VOICE_UDP_PORT:-19001}:19001/udp"

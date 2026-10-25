@@ -9,14 +9,7 @@ pub(crate) async fn handle_call(socket: PathBuf, command: CallCommand) -> Result
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         CallAction::Invite(invite) => {
-            let request = LocalBusCallInviteRequest {
-                call_id: invite.call,
-                target_id: invite.to,
-                opaque_offer_base64: ramflux_protocol::encode_base64url(invite.offer.as_bytes()),
-                srtp_media_key_base64: invite
-                    .srtp_key
-                    .map(|key| ramflux_protocol::encode_base64url(key.as_bytes())),
-            };
+            let request = LocalBusCallInviteRequest { conversation_id: invite.conversation };
             print_json(
                 &bus.request(
                     Some(invite.account),
@@ -28,10 +21,7 @@ pub(crate) async fn handle_call(socket: PathBuf, command: CallCommand) -> Result
             )
         }
         CallAction::Answer(answer) => {
-            let request = LocalBusCallAnswerRequest {
-                call_id: answer.call,
-                opaque_answer_base64: ramflux_protocol::encode_base64url(answer.answer.as_bytes()),
-            };
+            let request = LocalBusCallAnswerRequest { call_id: answer.call };
             print_json(
                 &bus.request(
                     Some(answer.account),
@@ -42,6 +32,19 @@ pub(crate) async fn handle_call(socket: PathBuf, command: CallCommand) -> Result
                 .await?,
             )
         }
+        CallAction::Reject(selector) => print_json(
+            &bus.request(
+                Some(selector.account),
+                "call",
+                "call.reject",
+                serde_json::json!({"call_id":selector.call}),
+            )
+            .await?,
+        ),
+        CallAction::List(selector) => print_json(
+            &bus.request(Some(selector.account), "call", "call.list", serde_json::json!({}))
+                .await?,
+        ),
         CallAction::Hangup(hangup) => {
             let request = LocalBusCallHangupRequest { call_id: hangup.call };
             print_json(

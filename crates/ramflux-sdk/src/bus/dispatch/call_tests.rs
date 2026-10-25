@@ -4,6 +4,7 @@
 //! Real account storage and mutation-boundary regressions for public rows and secret media replies.
 use super::*;
 use crate::bus::actor::AccountCommand;
+use crate::client::call;
 use std::sync::{Arc, atomic::AtomicBool};
 fn fixture(name: &str) -> Result<(PathBuf, LocalBusDaemonState, String), SdkError> {
     let root = crate::bus::runtime_tests::root(name);
@@ -202,7 +203,9 @@ fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call
     let after = &account.client.voice_calls[&control.call_id];
     assert_eq!(after.row, before.row);
     assert_eq!(after.pending.len(), before.pending.len());
-    assert!(after.receive_key == before.receive_key);
+    if after.receive_key != before.receive_key {
+        return Err(SdkError::LocalBus("committed refresh changed the media key".into()));
+    }
     account.client.voice_calls.clear();
     recover(account)?;
     assert!(account.client.refresh_call_control(&body)?);

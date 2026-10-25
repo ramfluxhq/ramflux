@@ -18,11 +18,15 @@ pub(crate) struct LiveCall {
     pub receive_key: Option<Zeroizing<[u8; 32]>>,
     pub allocation: Option<VoiceAllocation>,
     pub next_lease_refresh: i64,
+    pub retry_at: i64,
+    pub retry_attempts: u32,
+    pub release_until: u64,
     pub media_taken: bool,
     pub media_leased: bool,
     pub media_counter: u64,
     pub pending: Vec<CallControl>,
     offer_keys: BTreeMap<CallEndpoint, Zeroizing<[u8; 32]>>,
+    peer_keys: BTreeMap<CallEndpoint, String>,
     next_seq: u64,
     ring_deadline: i64,
     seen: BTreeMap<CallEndpoint, u64>,
@@ -38,6 +42,18 @@ pub(super) fn decode_key(text: &str) -> Result<Zeroizing<[u8; 32]>, SdkError> {
     Ok(Zeroizing::new(bytes.as_slice().try_into().map_err(|_| invalid("media key length"))?))
 }
 impl LiveCall {
+    pub(crate) fn pin_peer(&mut self, peer: CallEndpoint, key: String) -> Result<(), SdkError> {
+        if !ramflux_protocol::decode_base64url(&key).is_ok_and(|k| k.len() == 32)
+            || self.peer_keys.get(&peer).is_some_and(|old| *old != key)
+        {
+            return Err(invalid("call device key changed; start a fresh call"));
+        }
+        self.peer_keys.insert(peer, key);
+        Ok(())
+    }
+    pub(crate) fn peer_key_matches(&self, peer: &CallEndpoint, key: &str) -> bool {
+        self.peer_keys.get(peer).is_some_and(|old| old == key)
+    }
     pub(super) fn has_seen(&self, sender: &CallEndpoint, seq: u64) -> bool {
         self.seen.get(sender).is_some_and(|old| seq <= *old)
     }
@@ -134,11 +150,15 @@ impl LiveCall {
             receive_key: None,
             allocation: None,
             next_lease_refresh: 0,
+            retry_at: 0,
+            retry_attempts: 0,
+            release_until: 0,
             media_taken: false,
             media_leased: false,
             media_counter: 0,
             pending: Vec::new(),
             offer_keys: BTreeMap::new(),
+            peer_keys: BTreeMap::new(),
             next_seq: 1,
             ring_deadline: now.saturating_add(45),
             seen: BTreeMap::new(),
@@ -232,10 +252,10 @@ impl LiveCall {
                 return Ok(true);
             }
             CallAction::Ack { allocation }
-                if self.local == self.callee && self.row.state == "connecting" =>
+                if self.local == self.callee
+                    && matches!(self.row.state.as_str(), "connecting" | "active") =>
             {
-                self.allocation = Some(allocation.as_ref().clone());
-                self.set_state("active", now)?;
+                self.acknowledge(allocation, now)?;
             }
             CallAction::AnsweredElsewhere if self.local == self.callee => {
                 self.finish("answered_elsewhere", now)?;
@@ -250,22 +270,51 @@ impl LiveCall {
                     )?;
                 }
             }
+            CallAction::Failed => {
+                self.finish("failed", now)?;
+            }
             CallAction::Hangup | CallAction::Timeout => {
                 if self.local == self.caller && c.callee != self.callee {
                     return Ok(false);
                 }
-                let reason = if self.row.answered_at.is_some() {
+                let reason = if matches!(c.body, CallAction::Timeout) {
+                    if self.local == self.caller { "timeout" } else { "missed" }
+                } else if self.row.answered_at.is_some() {
                     "completed"
                 } else if self.local == self.callee {
                     "missed"
                 } else {
-                    "cancelled"
+                    "declined"
                 };
                 self.finish(reason, now)?;
             }
             _ => return Err(invalid("control invalid for current state")),
         }
         Ok(false)
+    }
+    fn acknowledge(&mut self, allocation: &VoiceAllocation, now: i64) -> Result<(), SdkError> {
+        if allocation.expires_at <= now.unsigned_abs()
+            || allocation.expires_at > now.unsigned_abs().saturating_add(120)
+            || allocation.endpoint.is_empty()
+            || [&allocation.caller_token, &allocation.callee_token].into_iter().any(|t| {
+                !ramflux_protocol::decode_base64url(t).is_ok_and(|token| token.len() == 32)
+            })
+        {
+            return Err(invalid("invalid relay allocation"));
+        }
+        if let Some(old) = &self.allocation
+            && (old.endpoint != allocation.endpoint
+                || old.caller_token != allocation.caller_token
+                || old.callee_token != allocation.callee_token
+                || old.expires_at > allocation.expires_at)
+        {
+            return Err(invalid("relay allocation changed"));
+        }
+        self.allocation = Some(allocation.clone());
+        if self.row.state == "connecting" {
+            self.set_state("active", now)?;
+        }
+        Ok(())
     }
     pub fn activate(&mut self, allocation: VoiceAllocation, now: i64) -> Result<(), SdkError> {
         if self.local != self.caller || self.row.state != "connecting" {
@@ -286,6 +335,8 @@ impl LiveCall {
             return Err(invalid("only a ringing callee can reject a call"));
         }
         self.pending.clear();
+        self.retry_at = 0;
+        self.retry_attempts = 0;
         let action = if reject { CallAction::Reject } else { CallAction::Hangup };
         if self.local == self.caller && self.row.state == "outgoing_ringing" {
             for target in self.invited.clone() {
@@ -324,9 +375,32 @@ impl LiveCall {
             return Ok(false);
         }
         self.end(false, now)?;
+        for control in &mut self.pending {
+            control.body = CallAction::Timeout;
+        }
         self.row.end_reason =
             Some(if self.local == self.caller { "timeout" } else { "missed" }.into());
         Ok(true)
+    }
+    pub fn fail(&mut self, now: i64) -> Result<(), SdkError> {
+        if self.row.state == "ended" {
+            return Ok(());
+        }
+        self.end(false, now)?;
+        for control in &mut self.pending {
+            control.body = CallAction::Failed;
+        }
+        self.row.end_reason = Some("failed".into());
+        Ok(())
+    }
+    pub fn expire_media(&mut self, now: i64) -> Result<bool, SdkError> {
+        if self.row.state == "active"
+            && self.allocation.as_ref().is_some_and(|a| a.expires_at <= now.unsigned_abs())
+        {
+            self.fail(now)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
     fn expired(&self, now: i64) -> bool {
         matches!(self.row.state.as_str(), "outgoing_ringing" | "incoming_ringing" | "connecting")
@@ -346,9 +420,24 @@ impl LiveCall {
         self.set_state("ended", now)?;
         self.row.end_reason = Some(reason.into());
         self.row.ended_at = Some(now);
+        self.pending.retain(|c| {
+            matches!(
+                c.body,
+                CallAction::Reject
+                    | CallAction::Busy
+                    | CallAction::Hangup
+                    | CallAction::Timeout
+                    | CallAction::Failed
+                    | CallAction::AnsweredElsewhere
+            )
+        });
+        self.next_lease_refresh = 0;
         self.offer_keys.clear();
         self.send_key = Zeroizing::new([0; 32]);
         self.receive_key = None;
+        if self.local == self.caller {
+            self.release_until = self.allocation.as_ref().map_or(0, |a| a.expires_at);
+        }
         self.allocation = None;
         Ok(())
     }

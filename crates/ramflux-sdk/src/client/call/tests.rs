@@ -24,8 +24,8 @@ fn outgoing() -> Result<LiveCall, SdkError> {
 fn allocation() -> VoiceAllocation {
     VoiceAllocation {
         endpoint: "relay.example:17449".into(),
-        caller_token: "one".into(),
-        callee_token: "two".into(),
+        caller_token: ramflux_protocol::encode_base64url([9; 32]),
+        callee_token: ramflux_protocol::encode_base64url([10; 32]),
         expires_at: 200,
     }
 }
@@ -117,13 +117,13 @@ fn a_siblings_rejection_does_not_cancel_another_ringing_device() -> Result<(), S
 
 #[test]
 fn a_future_dated_invite_cannot_extend_the_local_ring_timer() -> Result<(), SdkError> {
-    let caller = outgoing()?;
-    let mut invite = caller.pending[0].clone();
+    let origin = outgoing()?;
+    let mut invite = origin.pending[0].clone();
     invite.created_at = 130;
-    let mut callee = LiveCall::incoming(&invite, endpoint("bob", "b1"), 100)?;
-    assert!(!callee.expire(144)?);
-    assert!(callee.expire(145)?);
-    assert_eq!(callee.row.end_reason.as_deref(), Some("missed"));
+    let mut recipient = LiveCall::incoming(&invite, endpoint("bob", "b1"), 100)?;
+    assert!(!recipient.expire(144)?);
+    assert!(recipient.expire(145)?);
+    assert_eq!(recipient.row.end_reason.as_deref(), Some("missed"));
     invite.created_at = 161;
     assert!(LiveCall::incoming(&invite, endpoint("bob", "b1"), 100).is_err());
     Ok(())
@@ -131,39 +131,39 @@ fn a_future_dated_invite_cannot_extend_the_local_ring_timer() -> Result<(), SdkE
 #[test]
 fn a_late_answer_times_out_instead_of_selecting_a_key_or_claiming_another_winner()
 -> Result<(), SdkError> {
-    let mut caller = outgoing()?;
-    let mut callee = LiveCall::incoming(&caller.pending[0], endpoint("bob", "b1"), 100)?;
-    callee.pending.clear();
-    callee.answer(144)?;
-    assert!(!caller.apply(&callee.pending[0], 145)?);
-    assert_eq!(caller.row.end_reason.as_deref(), Some("timeout"));
-    assert!(caller.receive_key.is_none());
-    assert!(!caller.pending.iter().any(|c| matches!(c.body, CallAction::AnsweredElsewhere)));
+    let mut origin = outgoing()?;
+    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    recipient.pending.clear();
+    recipient.answer(144)?;
+    assert!(!origin.apply(&recipient.pending[0], 145)?);
+    assert_eq!(origin.row.end_reason.as_deref(), Some("timeout"));
+    assert!(origin.receive_key.is_none());
+    assert!(!origin.pending.iter().any(|c| matches!(c.body, CallAction::AnsweredElsewhere)));
     Ok(())
 }
 #[test]
 fn a_selected_device_cannot_replace_an_active_key_with_a_second_answer() -> Result<(), SdkError> {
-    let mut caller = outgoing()?;
-    let mut callee = LiveCall::incoming(&caller.pending[0], endpoint("bob", "b1"), 100)?;
-    callee.pending.clear();
-    callee.answer(101)?;
-    let mut answer = callee.pending[0].clone();
-    caller.apply(&answer, 101)?;
-    caller.activate(allocation(), 102)?;
+    let mut origin = outgoing()?;
+    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    recipient.pending.clear();
+    recipient.answer(101)?;
+    let mut answer = recipient.pending[0].clone();
+    origin.apply(&answer, 101)?;
+    origin.activate(allocation(), 102)?;
     answer.seq += 1;
-    assert!(caller.apply(&answer, 103).is_err());
-    assert_eq!(caller.row.state, "active");
+    assert!(origin.apply(&answer, 103).is_err());
+    assert_eq!(origin.row.state, "active");
     Ok(())
 }
 #[test]
 fn a_busy_callee_sends_a_terminal_control_and_never_keeps_media_keys() -> Result<(), SdkError> {
-    let caller = outgoing()?;
-    let mut callee = LiveCall::incoming(&caller.pending[0], endpoint("bob", "b1"), 100)?;
-    callee.busy(101)?;
-    assert_eq!(callee.row.end_reason.as_deref(), Some("busy"));
-    assert_eq!(callee.pending.len(), 1);
-    assert!(matches!(callee.pending[0].body, CallAction::Busy));
-    assert!(callee.receive_key.is_none());
-    assert_eq!(callee.send_key.as_ref(), &[0; 32]);
+    let origin = outgoing()?;
+    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    recipient.busy(101)?;
+    assert_eq!(recipient.row.end_reason.as_deref(), Some("busy"));
+    assert_eq!(recipient.pending.len(), 1);
+    assert!(matches!(recipient.pending[0].body, CallAction::Busy));
+    assert!(recipient.receive_key.is_none());
+    assert_eq!(recipient.send_key.as_ref(), &[0; 32]);
     Ok(())
 }

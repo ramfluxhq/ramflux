@@ -32,6 +32,7 @@ impl Schedule {
 }
 
 pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
+    super::dispatch::call::expire_due(account)?;
     let mut engine = account.take_live_engine().await?;
     let result = receive(account, &mut engine).await;
     account.put_engine(engine);

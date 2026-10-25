@@ -818,20 +818,19 @@ pub struct LocalBusObjectTransferResumeRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalBusCallInviteRequest {
-    pub call_id: String,
-    pub target_id: String,
-    pub opaque_offer_base64: String,
-    pub srtp_media_key_base64: Option<String>,
+    pub conversation_id: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalBusCallAnswerRequest {
     pub call_id: String,
-    pub opaque_answer_base64: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalBusCallHangupRequest {
     pub call_id: String,
 }

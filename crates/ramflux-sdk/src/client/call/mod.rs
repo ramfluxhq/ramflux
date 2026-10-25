@@ -9,8 +9,8 @@ use serde_json::json;
 use state::{LiveCall, invalid};
 pub(crate) const PREFIX: &[u8] = b"ramflux.call.control.v1\n";
 
-pub(crate) fn signing_bytes(c: &CallControl) -> Result<Vec<u8>, SdkError> {
-    Ok(ramflux_protocol::canonical_json_bytes(&(
+pub(crate) fn signing_bytes(c: &CallControl) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+    Ok(zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(&(
         "ramflux.call.control.signature.v1",
         &c.schema,
         &c.call_id,
@@ -21,7 +21,7 @@ pub(crate) fn signing_bytes(c: &CallControl) -> Result<Vec<u8>, SdkError> {
         c.seq,
         c.created_at,
         &c.body,
-    ))?)
+    ))?))
 }
 pub(crate) fn bytes(c: &CallControl) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
     let mut bytes = zeroize::Zeroizing::new(PREFIX.to_vec());
@@ -137,6 +137,11 @@ impl RamfluxClient {
         let key =
             record["signing_public_key"].as_str().ok_or_else(|| invalid("sender key missing"))?;
         ramflux_crypto::verify_canonical_signature(&signing_bytes(c)?, &c.signature, key)?;
+        if let Some(old) = self.voice_calls.get(&c.call_id)
+            && !old.peer_key_matches(&c.sender, key)
+        {
+            return Err(invalid("call peer device key changed"));
+        }
         let root = crate::identity_root_public_key_commitment(&c.sender.root_public_key)?;
         let own = crate::identity_root_public_key_commitment(&local.root_public_key)?;
         self.require_accepted_friend_link_for_dm_send(
@@ -159,6 +164,11 @@ impl RamfluxClient {
                 return Err(invalid("call capacity or retired id"));
             }
             let mut incoming = LiveCall::incoming(c, self.call_local_endpoint()?, now)?;
+            let key = self.trusted_device(&c.sender.device_id)?["signing_public_key"]
+                .as_str()
+                .ok_or_else(|| invalid("peer signing key missing"))?
+                .to_owned();
+            incoming.pin_peer(c.sender.clone(), key)?;
             if self.voice_calls.values().any(|call| call.row.state != "ended") {
                 incoming.busy(now)?;
             }
@@ -180,12 +190,29 @@ impl RamfluxClient {
             return Err(invalid("group calls are unsupported"));
         }
         self.verify_call(&c, entry, conversation)?;
+        let receipt = format!(
+            "voice/control/{}/{}",
+            c.call_id,
+            ramflux_protocol::hash_base64url(
+                "ramflux.call.sequence.v1",
+                &ramflux_protocol::canonical_json_bytes(&(&c.sender, c.seq))?
+            )
+        );
+        let hash =
+            ramflux_protocol::hash_base64url("ramflux.call.signed-control.v1", &signing_bytes(&c)?);
+        if let Some(old) = self.account_db()?.load_actor_state::<String>(&receipt)? {
+            if old != hash {
+                return Err(invalid("signed sequence equivocation"));
+            }
+            return Ok(true);
+        }
         let next = self.plan_call(&c, crate::time::now_unix_timestamp())?;
         let db = self.account_db()?;
         if db.client_record("conversation", conversation)?.is_none() {
             db.persist_client_record("conversation", conversation, &json!({"kind":"direct","group_id":null,"participants":[c.caller.principal_id,c.callee.principal_id]}))?;
         }
         self.persist_call_row(&next.row)?;
+        db.persist_actor_state(&receipt, &hash)?;
         self.voice_transition.replace(Some((transition_key(body), next)));
         Ok(true)
     }

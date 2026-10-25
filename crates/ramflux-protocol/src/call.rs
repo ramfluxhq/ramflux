@@ -24,6 +24,7 @@ pub enum CallAction {
     Busy,
     Hangup,
     Timeout,
+    Failed,
     AnsweredElsewhere,
     Rekey { generation: u64, base_key: String },
     RekeyAck { generation: u64, base_key: String },
@@ -110,4 +111,24 @@ pub struct VoiceLeaseFrame {
 pub enum VoiceLeaseResponse {
     Allocation { allocation: VoiceAllocation },
     Status { status: VoiceLeaseStatus },
+}
+
+impl Drop for VoiceAllocation {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.caller_token.zeroize();
+        self.callee_token.zeroize();
+    }
+}
+impl Drop for CallAction {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        match self {
+            Self::Invite { base_key }
+            | Self::Answer { base_key }
+            | Self::Rekey { base_key, .. }
+            | Self::RekeyAck { base_key, .. } => base_key.zeroize(),
+            _ => {}
+        }
+    }
 }

@@ -18,6 +18,8 @@ pub(crate) enum CallAction {
     Invite(CallInvite),
     Answer(CallAnswer),
     Hangup(CallHangup),
+    Reject(CallHangup),
+    List(AccountSelector),
 }
 
 #[derive(Args)]
@@ -25,13 +27,7 @@ pub(crate) struct CallInvite {
     #[arg(long)]
     pub(crate) account: String,
     #[arg(long)]
-    pub(crate) call: String,
-    #[arg(long)]
-    pub(crate) to: String,
-    #[arg(long)]
-    pub(crate) offer: String,
-    #[arg(long)]
-    pub(crate) srtp_key: Option<String>,
+    pub(crate) conversation: String,
 }
 
 #[derive(Args)]
@@ -40,8 +36,6 @@ pub(crate) struct CallAnswer {
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) call: String,
-    #[arg(long)]
-    pub(crate) answer: String,
 }
 
 #[derive(Args)]

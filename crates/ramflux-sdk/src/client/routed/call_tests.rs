@@ -24,13 +24,18 @@ fn contacts(a: &Fixture, b: &Fixture) -> Result<(), SdkError> {
     Ok(())
 }
 fn control(a: &Fixture, b: &Fixture, id: u8, thread: &str) -> Result<LiveCall, SdkError> {
-    LiveCall::outgoing(
+    let mut call = LiveCall::outgoing(
         ramflux_protocol::encode_base64url([id; 16]),
         thread.into(),
         a.client.call_local_endpoint()?,
         vec![b.client.call_local_endpoint()?],
         now_unix_timestamp(),
-    )
+    )?;
+    call.pin_peer(
+        b.client.call_local_endpoint()?,
+        r9::manifest(b)?.devices[0].branch_public_key.clone(),
+    )?;
+    Ok(call)
 }
 fn signed(sender: &Fixture, mut c: CallControl) -> Result<CallControl, SdkError> {
     c.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
@@ -77,8 +82,8 @@ async fn first_call_invite_creates_a_bound_direct_thread_and_committed_retries_d
     let alice = Fixture::new("alice", 21)?;
     let mut bob = Fixture::new("bob", 31)?;
     contacts(&alice, &bob)?;
-    let caller = control(&alice, &bob, 1, "private-first-call-thread")?;
-    let invite = signed(&alice, caller.pending[0].clone())?;
+    let origin = control(&alice, &bob, 1, "private-first-call-thread")?;
+    let invite = signed(&alice, origin.pending[0].clone())?;
     let entry = entry(&alice, &bob, &invite, "call-invite", "private-first-call-thread")?;
     let outer = serde_json::to_string(&entry)?;
     assert!(!outer.contains("private-first-call-thread"));
@@ -91,6 +96,17 @@ async fn first_call_invite_creates_a_bound_direct_thread_and_committed_retries_d
     apply(&mut bob, &entry).await?;
     assert_eq!(bob.client.account_db()?.journal_bounds()?.head_seq, head);
     assert_eq!(bob.client.voice_calls[&invite.call_id].pending.len(), 1);
+    let redrive =
+        self::entry(&alice, &bob, &invite, "call-invite-redrive", "private-first-call-thread")?;
+    apply(&mut bob, &redrive).await?;
+    assert_eq!(bob.client.account_db()?.journal_bounds()?.head_seq, head);
+    assert_eq!(bob.client.voice_calls[&invite.call_id].pending.len(), 1);
+    let mut changed = invite.clone();
+    changed.created_at += 1;
+    let changed = signed(&alice, changed)?;
+    let equivocation =
+        self::entry(&alice, &bob, &changed, "call-equivocation", "private-first-call-thread")?;
+    assert!(apply(&mut bob, &equivocation).await.is_err());
     let thread = bob
         .client
         .account_db()?
@@ -106,8 +122,8 @@ async fn forged_call_signatures_and_cross_conversation_controls_publish_no_call(
     let alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 51)?;
     contacts(&alice, &bob)?;
-    let caller = control(&alice, &bob, 2, "thread")?;
-    let mut forged = signed(&alice, caller.pending[0].clone())?;
+    let origin = control(&alice, &bob, 2, "thread")?;
+    let mut forged = signed(&alice, origin.pending[0].clone())?;
     forged.created_at += 1;
     let forged_entry = entry(&alice, &bob, &forged, "forged-call", "thread")?;
     assert!(apply(&mut bob, &forged_entry).await.is_err());
@@ -117,7 +133,7 @@ async fn forged_call_signatures_and_cross_conversation_controls_publish_no_call(
         "thread",
         &json!({"kind":"direct","participants":["bob","carol"]}),
     )?;
-    let genuine = signed(&alice, caller.pending[0].clone())?;
+    let genuine = signed(&alice, origin.pending[0].clone())?;
     let cross = entry(&alice, &bob, &genuine, "cross-thread-call", "thread")?;
     assert!(apply(&mut bob, &cross).await.is_err());
     assert_eq!(bob.client.account_db()?.voice_call_rows(false)?.len(), 0);
@@ -130,16 +146,17 @@ async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media
     let mut alice = Fixture::new("alice", 61)?;
     let mut bob = Fixture::new("bob", 71)?;
     contacts(&alice, &bob)?;
-    let caller = control(&alice, &bob, 3, "voice-thread")?;
-    let id = caller.row.call_id.clone();
-    let invite = signed(&alice, caller.pending[0].clone())?;
-    alice.client.persist_call_row(&caller.row)?;
-    alice.client.voice_calls.insert(id.clone(), caller);
+    let origin = control(&alice, &bob, 3, "voice-thread")?;
+    let id = origin.row.call_id.clone();
+    let invite = signed(&alice, origin.pending[0].clone())?;
+    alice.client.persist_call_row(&origin.row)?;
+    alice.client.voice_calls.insert(id.clone(), origin);
     let invite = entry(&alice, &bob, &invite, "invite", "voice-thread")?;
     apply(&mut bob, &invite).await?;
-    let callee = bob.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("callee missing"))?;
-    callee.answer(now_unix_timestamp())?;
-    let answer = callee
+    let recipient =
+        bob.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("recipient missing"))?;
+    recipient.answer(now_unix_timestamp())?;
+    let answer = recipient
         .pending
         .iter()
         .find(|c| matches!(c.body, CallAction::Answer { .. }))
@@ -149,8 +166,8 @@ async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media
     let answer = entry(&bob, &alice, &answer, "answer", "voice-thread")?;
     apply(&mut alice, &answer).await?;
     assert_eq!(alice.client.voice_calls[&id].row.state, "connecting");
-    let caller = alice.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("caller missing"))?;
-    caller.activate(
+    let origin = alice.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("origin missing"))?;
+    origin.activate(
         VoiceAllocation {
             endpoint: "relay.example:9000".into(),
             caller_token: ramflux_protocol::encode_base64url([9; 32]),
@@ -159,7 +176,7 @@ async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media
         },
         now_unix_timestamp(),
     )?;
-    let ack = caller
+    let ack = origin
         .pending
         .iter()
         .find(|c| matches!(c.body, CallAction::Ack { .. }))
@@ -173,7 +190,7 @@ async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media
         .client
         .voice_calls
         .get_mut(&id)
-        .ok_or_else(|| invalid("caller missing"))?
+        .ok_or_else(|| invalid("origin missing"))?
         .end(false, now_unix_timestamp())?;
     let hangup = alice.client.voice_calls[&id].pending[0].clone();
     let hangup = signed(&alice, hangup)?;

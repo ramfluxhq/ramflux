@@ -1,0 +1,12 @@
+# Production voice is opt-in; publish only UDP, keeping lease control on the node mesh.
+services:
+  ramflux-gateway:
+    environment:
+      RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT: "ramflux-relay:17450"
+  ramflux-relay:
+    environment:
+      RAMFLUX_RELAY_VOICE_UDP_ADDR: "0.0.0.0:17449"
+      RAMFLUX_RELAY_VOICE_CONTROL_ADDR: "0.0.0.0:17450"
+      RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT: "${RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT:?public voice host:port is required}"
+    ports:
+      - "${RAMFLUX_RELAY_VOICE_UDP_PORT:-17449}:17449/udp"

@@ -2539,6 +2539,7 @@ dependencies = [
  "serde_json_canonicalizer",
  "thiserror 2.0.18",
  "unicode-general-category",
+ "zeroize",
 ]
 
 [[package]]

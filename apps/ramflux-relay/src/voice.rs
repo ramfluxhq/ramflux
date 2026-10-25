@@ -136,7 +136,8 @@ pub(crate) async fn run_udp(
                     let mut state=state.lock().map_err(|_|anyhow::anyhow!("voice state poisoned"))?;
                     state.route(&buffer[..len],source,crate::config::now_unix_seconds(),allow_private)
                 };
-                if let Ok(Some((target,packet)))=route { socket.send_to(packet,target).await?; }
+                if let Ok(Some((target,packet)))=route
+                    && socket.send_to(packet,target).await.is_err() { tracing::debug!("voice datagram forwarding failed"); }
             }
             _=sweep.tick() => { state.lock().map_err(|_|anyhow::anyhow!("voice state poisoned"))?.expire(crate::config::now_unix_seconds()); }
         }
