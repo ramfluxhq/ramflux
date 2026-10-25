@@ -134,13 +134,22 @@ impl VoiceRelayState {
         now: u64,
         allow_private: bool,
     ) -> Result<Option<(SocketAddr, &'a [u8])>, NodeCoreError> {
-        self.expire(now);
         let (token, payload) = decode_voice_datagram(packet)?;
         if !allow_private && !crate::relay_socket_target_allowed(source, &[]) {
             return Err(refused("voice source forbidden"));
         }
         let (key, i) =
             self.tokens.get(&token).ok_or_else(|| refused("voice credential unavailable"))?.clone();
+        // Packet admission touches only its own lease. General expiry runs in the periodic sweep
+        // and allocation path, so unauthenticated UDP traffic cannot scan all active calls.
+        if self.leases.get(&key).is_some_and(|lease| now >= lease.expires_at) {
+            if let Some(lease) = self.leases.remove(&key) {
+                for side in lease.sides {
+                    self.tokens.remove(&side.token);
+                }
+            }
+            return Err(refused("voice lease unavailable"));
+        }
         let lease = self.leases.get_mut(&key).ok_or_else(|| refused("voice lease unavailable"))?;
         let side = &mut lease.sides[i];
         if now < side.second {
