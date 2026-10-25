@@ -808,8 +808,15 @@ async fn receive_first_bootstrap(
     incoming: GatewayInboxEntry,
 ) -> Result<(LocalBusAccountState, GatewaySessionEngine), Box<dyn std::error::Error>> {
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+    let admission = sibling.client.inbox_admission_key(&incoming)?;
+    let target = incoming.target_delivery_id.clone();
+    let sequence = incoming.inbox_seq;
     gateway.inbox.push(incoming);
-    sibling.put_engine(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    let rejected = Arc::new(AtomicBool::new(false));
+    sibling.put_engine(GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(RejectFirstAck { inner: gateway, pending: false, rejected: rejected.clone() }),
+    ));
     let mut state = receiving_state(root, sibling);
     let (outbound, _) = tokio::sync::mpsc::channel(16);
     let request = LocalBusFrame::request(
@@ -825,6 +832,23 @@ async fn receive_first_bootstrap(
         &LocalBusConnectionState::new(1, outbound),
     )
     .await?;
+    assert!(rejected.load(std::sync::atomic::Ordering::SeqCst), "ACK fault was not reached");
+    let client = &state.accounts["sender"].client;
+    let committed = client.direct_messages("new-after-restore")?;
+    assert_eq!(committed.len(), 1, "plaintext committed before ACK failure");
+    assert_eq!(
+        client.account_db()?.message_content(&committed[0].message_id)?,
+        Some(b"peer to restored device".to_vec())
+    );
+    assert!(client.account_db()?.has_inbox_retry(&admission)?, "ACK failure remains retryable");
+    assert!(
+        !client.account_db()?.has_gateway_ack(
+            &client.owned_device_identity()?,
+            &target,
+            sequence
+        )?,
+        "visibility must not fabricate a successful ACK"
+    );
     let rows = response.response_body["decrypted_messages"].as_array().ok_or("rows")?;
     assert_eq!(rows.len(), 1, "first fresh bootstrap response: {}", response.response_body);
     assert_eq!(
@@ -836,4 +860,42 @@ async fn receive_first_bootstrap(
     let mut sibling = state.accounts.remove("sender").ok_or("account")?;
     let engine = sibling.take_live_engine().await?;
     Ok((sibling, engine))
+}
+
+struct RejectFirstAck {
+    inner: super::fixture::RecordingGateway,
+    pending: bool,
+    rejected: Arc<AtomicBool>,
+}
+type AckFrameFuture<'a, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, ramflux_transport::TransportError>> + Send + 'a>,
+>;
+impl ramflux_transport::GatewaySessionFrameSink for RejectFirstAck {
+    fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
+        ramflux_transport::GatewaySessionFrameSink::finish(&mut self.inner)
+    }
+    fn send_frame<'a>(&'a mut self, body: &'a [u8]) -> AckFrameFuture<'a, ()> {
+        if matches!(
+            serde_json::from_slice::<GatewayClientFrame>(body),
+            Ok(GatewayClientFrame::Ack { .. })
+        ) && !self.rejected.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.pending = true;
+            return Box::pin(async { Ok(()) });
+        }
+        ramflux_transport::GatewaySessionFrameSink::send_frame(&mut self.inner, body)
+    }
+}
+impl ramflux_transport::GatewaySessionFrameSource for RejectFirstAck {
+    fn recv_frame(&mut self) -> AckFrameFuture<'_, Vec<u8>> {
+        if std::mem::take(&mut self.pending) {
+            return Box::pin(async {
+                serde_json::to_vec(&GatewayServerFrame::Nack {
+                    reason: "injected acknowledgement failure".into(),
+                })
+                .map_err(|error| ramflux_transport::TransportError::Quic(error.to_string()))
+            });
+        }
+        ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut self.inner)
+    }
 }

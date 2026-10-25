@@ -132,6 +132,20 @@ async fn receive(
                 false
             }
         };
+        // Keep committed messages visible while acknowledgement retries remain pending.
+        if project_message {
+            let pending_keys = account
+                .pending_deliveries
+                .iter()
+                .map(|item| account.client.inbox_admission_key(item))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if !pending_keys.contains(&account.client.inbox_admission_key(&entry)?) {
+                account.pending_deliveries.push(entry.clone());
+                if account.pending_deliveries.len() > 64 {
+                    account.pending_deliveries.remove(0);
+                }
+            }
+        }
         if account.client.ack_gateway_entry(engine, &entry, now).await.is_err() {
             let bytes = serde_json::to_vec(&entry)?;
             if bytes.len() <= 1024 * 1024 {
@@ -151,19 +165,6 @@ async fn receive(
             .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
         if accepted {
             applied += 1;
-        }
-        if project_message {
-            let pending_keys = account
-                .pending_deliveries
-                .iter()
-                .map(|item| account.client.inbox_admission_key(item))
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            if !pending_keys.contains(&account.client.inbox_admission_key(&entry)?) {
-                account.pending_deliveries.push(entry);
-                if account.pending_deliveries.len() > 64 {
-                    account.pending_deliveries.remove(0);
-                }
-            }
         }
     }
     account.client.retry_pair_resets(engine, now).await?;
