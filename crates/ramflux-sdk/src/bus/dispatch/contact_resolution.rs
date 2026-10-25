@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Add {
+    note: Option<String>,
     principal_id: Option<String>,
     card: Option<String>,
     replace_provisional_root: Option<String>,
@@ -37,6 +38,7 @@ pub(super) async fn add(
     }
     if legacy.is_none()
         && card.is_none()
+        && !account.client.contact_request_retryable(&selector)?
         && (account.client.friend_link_peer_is_accepted(&selector)?
             || account
                 .client
@@ -50,6 +52,7 @@ pub(super) async fn add(
         return Err(ContactReason::AlreadyContact.into());
     }
     if let Some(card) = &card
+        && !account.client.contact_request_retryable(&selector)?
         && let Some(old) = account.client.account_db()?.client_record("identity", &selector)?
         && old["contact_identity_commitment"].as_str() == Some(&card.root_commitment)
         && account.client.contact_root_source(&old)? != crate::ContactRootSource::Lookup
@@ -76,6 +79,8 @@ pub(super) async fn add(
             &gateway,
             &own,
             ContactResolution {
+                send_request: true,
+                request_note: request.body["note"].as_str(),
                 selector: &selector,
                 expected_root: card.as_ref().map(|c| c.root_commitment.as_str()),
                 card: card.as_ref(),
@@ -90,10 +95,17 @@ pub(super) async fn add(
         .await;
     account.put_engine(engine);
     let contact = result?;
+    if let Err(error) = Box::pin(crate::client::contact_requests::flush(account)).await {
+        tracing::debug!(%error,"contact request queued for retry");
+    }
+    let request_delivery = crate::client::contact_requests::delivery_status(
+        &account.client,
+        contact["root_commitment"].as_str().ok_or(ContactReason::ManifestInvalid)?,
+    )?;
     if let Err(error) = super::super::own_device_copy::flush(account).await {
         tracing::warn!(%error, "accepted contact copy deferred to account sync");
     }
-    let mut response = json!({"contact":contact});
+    let mut response = json!({"contact":contact,"request_delivery":request_delivery});
     if legacy.is_some() {
         let record = account
             .client
@@ -227,6 +239,11 @@ fn parse_selector(
     } else {
         None
     };
+    if parsed.as_ref().and_then(|add| add.note.as_ref()).is_some_and(|note| {
+        note.chars().count() > 140 || !ramflux_protocol::text_safety::single_line_is_safe(note)
+    }) {
+        return Err(ContactReason::InvalidRequestNote.into());
+    }
     let card = parsed
         .as_ref()
         .and_then(|a| a.card.as_deref())
@@ -234,7 +251,9 @@ fn parse_selector(
         .transpose()?;
     let selector = match (&parsed, &legacy, &card) {
         (
-            Some(Add { principal_id: Some(id), card: None, replace_provisional_root: None }),
+            Some(Add {
+                principal_id: Some(id), card: None, replace_provisional_root: None, ..
+            }),
             _,
             _,
         ) => id.clone(),

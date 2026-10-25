@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod bot;
+mod contact_requests;
 pub mod conversation_list;
 pub mod conversation_projection;
 pub mod conversation_state;
@@ -80,6 +81,7 @@ impl AccountDb {
             volatile_typing: RefCell::new(BTreeMap::new()),
             volatile_presence: RefCell::new(BTreeMap::new()),
         };
+        crate::schema_contact_requests::upgrade(&db.connection)?;
         db.enable_runtime()?;
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;

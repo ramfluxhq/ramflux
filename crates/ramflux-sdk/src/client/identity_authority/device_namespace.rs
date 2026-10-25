@@ -135,7 +135,7 @@ impl RamfluxClient {
                 ramflux_crypto::identity_root_commitment(&own.signing_key.verifying_key()) == root
             );
         }
-        if self.friend_link_peer_is_accepted(root)? {
+        if self.friend_link_peer_is_accepted(root)? || self.pending_contact_root(root)? {
             return Ok(true);
         }
         let pinned = self

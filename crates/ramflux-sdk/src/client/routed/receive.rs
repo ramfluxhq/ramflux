@@ -87,6 +87,14 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
+        if decode(&entry.envelope)?.schema == crate::client::contact_requests::ENVELOPE_SCHEMA {
+            let manifest = self.contact_request_candidate(&engine.config, entry).await?;
+            return self.commit_contact_request_bootstrap(
+                entry,
+                &manifest,
+                &engine.config.device_id,
+            );
+        }
         self.ensure_inbound_device(&engine.config, entry).await?;
         self.upgrade_replay_identity(&self.authenticated_device_identity(entry)?)?;
         let commit = self.authenticated_committed_key(entry)?;
@@ -98,6 +106,7 @@ impl RamfluxClient {
             return Ok(Delivery { routing: receipt.routing, plaintext });
         }
         let mut opened = self.open_routed_with_recovery(engine, entry).await?;
+        self.contact_route_gate(entry, &opened.routing, &opened.body)?;
         if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
             opened.routing.message_id = self.projection_id(entry)?;
         }
@@ -117,20 +126,14 @@ impl RamfluxClient {
             &opened.bundle_hash,
         )?;
         self.import_routed_own_history(engine, pool, entry, &opened, &body).await?;
-        let metadata = if opened.routing.kind == Kind::Direct {
-            franking_report_metadata_for_delivery(
-                &opened.routing.conversation_id,
-                entry,
-                &envelope,
-                &opened.decrypted,
-                Some(&aad),
-            )?
-        } else {
-            None
-        };
+        let metadata = routed_message_metadata(&opened, entry, &envelope, &aad)?;
         let mut consumed_slots = Vec::new();
         let mut references = Vec::new();
         let accepted = self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none();
+        let source = self.authenticated_device_identity(entry)?;
+        let held = opened.routing.kind == Kind::Direct
+            && self.pending_contact_root(source.root_commitment())?
+            && !self.friend_link_peer_is_accepted(source.root_commitment())?;
         for attachment in refs.iter().filter(|_| accepted) {
             let prepared = if attachment.key_slot.version == 2 {
                 self.decrypt_pair_object_slot(&attachment.key_slot, Some(&mut opened.session)).ok()
@@ -159,17 +162,11 @@ impl RamfluxClient {
         })?;
         self.finish_pair_retirement()?;
         self.reply_pair_reset(engine, &opened, &body).await;
-        let mut imported = Vec::new();
-        if attachments && opened.routing.kind == Kind::Direct && accepted {
-            for attachment in &refs {
-                imported.push(
-                    self.import_dm_attachment_from_relay_via_gateway(
-                        engine, pool, attachment, None,
-                    )
-                    .await?,
-                );
-            }
-        }
+        let imported = if attachments && opened.routing.kind == Kind::Direct && accepted && !held {
+            self.import_accepted_attachments(engine, pool, &refs).await?
+        } else {
+            Vec::new()
+        };
         self.refresh_routed_control_cache(&opened, &body)?;
         let plaintext = plaintext.map(|plaintext| {
             let plaintext = zeroize::Zeroizing::new(plaintext);
@@ -185,6 +182,22 @@ impl RamfluxClient {
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmRecv).await?;
         Ok(Delivery { routing: opened.routing, plaintext })
+    }
+
+    async fn import_accepted_attachments(
+        &mut self,
+        engine: &mut GatewaySessionEngine,
+        pool: &ramflux_transport::RelayQuicPool,
+        refs: &[crate::dm::SdkDmAttachmentRef],
+    ) -> Result<Vec<crate::dm::SdkDmAttachmentImportResult>, SdkError> {
+        let mut imported = Vec::new();
+        for attachment in refs {
+            imported.push(
+                self.import_dm_attachment_from_relay_via_gateway(engine, pool, attachment, None)
+                    .await?,
+            );
+        }
+        Ok(imported)
     }
 
     fn routed_committed_content(
@@ -316,6 +329,42 @@ impl RamfluxClient {
         Ok(membership)
     }
 
+    fn commit_contact_request_bootstrap(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: &crate::prekey::SdkDeviceManifestResponse,
+        local: &str,
+    ) -> Result<Delivery, SdkError> {
+        self.account_db()?.write_transaction(|| {
+            // A malformed request cannot leave a cached root or device, pair state, consent,
+            // or message projection behind. Candidate authentication preceded this transaction.
+            self.persist_root_verified_directory(manifest)?;
+            let receipt = self.authenticated_committed_key(entry)?;
+            if let Some(committed) = self.account_db()?.load_actor_state::<Committed>(&receipt)? {
+                if committed.entry.envelope.payload_hash != entry.envelope.payload_hash {
+                    return Err(invalid("contact envelope id reused with another payload"));
+                }
+                return Ok(Delivery { routing: committed.routing, plaintext: None });
+            }
+            let opened = self.open_routed(entry, local)?;
+            let control = self.verify_contact_control(entry, &opened.routing, &opened.body)?;
+            if control.body.kind != crate::client::contact_requests::Decision::Request {
+                return Err(invalid("stranger envelope can only carry a contact request"));
+            }
+            self.confirm_routed_context(&opened.routing, entry)?;
+            self.commit_routed_projection(Commit {
+                opened: &opened,
+                entry,
+                body: &opened.body,
+                metadata: None,
+                membership: None,
+                slots: &[],
+                references: Vec::new(),
+                receipt: &receipt,
+            })?;
+            Ok(Delivery { routing: opened.routing, plaintext: None })
+        })
+    }
     fn commit_routed_projection(&self, context: Commit<'_>) -> Result<Option<Vec<u8>>, SdkError> {
         let Commit { opened, entry, body, metadata, membership, slots, receipt, references } =
             context;
@@ -327,6 +376,14 @@ impl RamfluxClient {
                     key,
                 )?;
             }
+            let source=self.authenticated_device_identity(entry)?;
+            let pending=opened.routing.kind==Kind::Direct
+                && self.pending_contact_root(source.root_commitment())?
+                && !self.friend_link_peer_is_accepted(source.root_commitment())?;
+            let plaintext=if pending {
+                self.hold_contact_routed_message(&opened.routing,entry,body,metadata,references)?;
+                None
+            } else {
             for (reference, prepared) in references {
                 self.persist_sender_attachment_reference(
                     reference,
@@ -339,7 +396,8 @@ impl RamfluxClient {
                     prepared,
                 )?;
             }
-            let plaintext = self.project_routed(opened, entry, body, metadata)?;
+            self.project_routed(opened, entry, body, metadata)?
+            };
             if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
                 || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
             {
@@ -399,5 +457,24 @@ impl RamfluxClient {
             )?;
             Ok(plaintext)
         })
+    }
+}
+
+fn routed_message_metadata(
+    opened: &Opened,
+    entry: &GatewayInboxEntry,
+    envelope: &crate::dm::SdkDmEncryptedEnvelope,
+    aad: &[u8],
+) -> Result<Option<MessageMetadata>, SdkError> {
+    if opened.routing.kind == Kind::Direct {
+        franking_report_metadata_for_delivery(
+            &opened.routing.conversation_id,
+            entry,
+            envelope,
+            &opened.decrypted,
+            Some(aad),
+        )
+    } else {
+        Ok(None)
     }
 }

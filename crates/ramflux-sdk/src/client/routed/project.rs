@@ -41,7 +41,15 @@ impl RamfluxClient {
         metadata: Option<&MessageMetadata>,
     ) -> Result<Option<Vec<u8>>, SdkError> {
         let route = &opened.routing;
-
+        self.project_accepted_contact_message(route, entry, body, metadata)
+    }
+    pub(crate) fn project_accepted_contact_message(
+        &self,
+        route: &super::Routing,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+        metadata: Option<&MessageMetadata>,
+    ) -> Result<Option<Vec<u8>>, SdkError> {
         if let Some(reason) = self.friend_rejection_reason(&entry.envelope.source_principal_id)? {
             self.account_db()?.reject_inbox_message(
                 &route.conversation_id,

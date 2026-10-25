@@ -11,6 +11,9 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, SdkError> {
+        if self.receive_contact_control(entry, &opened.routing, body)? {
+            return Ok(None);
+        }
         if self.project_call_control(
             entry,
             &opened.routing.conversation_id,

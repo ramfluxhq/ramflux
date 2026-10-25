@@ -14,6 +14,7 @@ flags remain supported, and also resolve the contact before returning accepted.
 
 Successful add/accept responses contain a `contact` object with `principal_id`,
 `display_name`, `reachable`, `verified`, `kind_asserted`, `root_commitment` and `node`.
+Contact rows also expose outgoing `request_id` and `request_state` (null when absent).
 `kind_asserted` is a root-signed self assertion: `human`, `headless_ai`, `bot`, `workflow`,
 or null. It does not change safety verification. `verified` uses the same verification
 record and device-set comparison as `identity.directory`. The directory exposes these
@@ -184,3 +185,99 @@ Registration quota rejections preserve `Unavailable`, `reason_code:"rate_limited
 and the default-window `retry_after_ms:60000` hint across both authenticated
 session frames and the gateway request/response adapter. Name/device ownership
 refusals remain distinct from admission limits.
+
+## Contact consent and message requests
+
+Adding a principal or card now also stages a root-signed, pair-encrypted contact
+request. `contact.add` accepts an optional single-line `note` (at most 140 Unicode scalar
+values). Its existing `contact` result describes local consent; the additive
+`contact.request_state` describes remote consent, and `request_delivery` is
+`submitted`, `queued`, or `failed`. A repeated pending add remains `already_contact`
+and creates no second logical request. Delivery retries retain the logical request
+ID. An immediate first message waits for the request's gateway acknowledgement
+before using the next pair-ratchet counter. Local submission is not remote acceptance.
+
+All methods below require an unlocked account selected by the bus frame's account ID:
+
+| Method | Body | Result |
+| --- | --- | --- |
+| `contact.requests.list` | `{}` | `{requests:[...],contact_requests:"manual"}` |
+| `contact.requests.policy.get` | `{}` | `{contact_requests:"manual"}` or `"auto_accept"` |
+| `contact.requests.policy.set` | `{contact_requests:"manual"}` or `"auto_accept"` | persisted policy |
+| `contact.accept` | `{request_id:"..."}` | `{request_id,principal_id,direction,root_commitment,state:"accepted",contact}` |
+| `contact.decline` | `{request_id:"..."}` | `{request_id,principal_id,direction,root_commitment,state:"declined"}` |
+| `contact.block` | `{request_id:"..."}` | `{request_id,principal_id,direction,root_commitment,state:"blocked"}` |
+
+Decision selectors may instead be a stored `link_id`, `root_commitment`, or
+`principal_id`; ambiguous selectors fail. Existing card/principal accept and legacy
+link APIs remain available. Accepting a matching inbound request by card/principal
+also releases its messages and sends an accept control. Safety verification remains
+an independent action.
+
+List results contain pending inbound requests and up to 128 outgoing rows (pending
+first, followed by the newest accepted/declined/expired rows). Contact rows retain
+their own outgoing state even when that bounded history page omits them.
+
+Request rows include `request_id`, `link_id`, `principal_id`, `root_commitment`,
+`direction`, `state`, `expires_at`, `note`, `message_count`, `preview`, and
+`safety_number` (12 numeric strings). Note and preview are delimited, sanitized quoted
+fields; display them as untrusted text. `preview` covers at most 256 characters of
+the first held message. Subscribe through `bus.subscribe` to `contact.requested`,
+`contact.accepted`, `contact.declined`, `contact.blocked`, and
+`contact.request.expired`. Requested events use the same preview fields; neither
+these events nor list results expose the signed manifest, private keys or raw wire
+control. Message arrivals can refresh a requested event's preview. Acceptance events
+on the requester include the peer principal and root.
+
+Humans default to `manual`; new headless accounts default to `auto_accept`.
+Opening an existing account initializes a missing policy from its client mode and
+preserves an explicit choice. Agent-host startup explicitly enables `auto_accept`.
+Changing policy affects future requests; it does not silently accept existing ones.
+
+A pending sender's direct messages stay outside conversation/message/object directory
+projection until acceptance, including attachment references and object keys. No
+attachment is fetched during this hold. Acceptance rechecks sender authority and
+projects valid messages once; revoked or invalid messages are discarded. Decline and
+block delete held content. Decline permits an explicitly added fresh request after a
+60-second cooldown; a local block remains a terminal fence. Expired requests can be
+explicitly added again. Old request IDs cannot reopen consent. Strangers without a
+verified request still fail the existing unsolicited-message gate.
+
+Requests and held messages expire after at most seven days. Each direction has 128
+pending slots. Held messages are capped at 20 / 1 MiB per requester root and 256 /
+8 MiB per account. A full queue drops the new authenticated item while consuming its
+pair counter; it creates no conversation content. Each root pair admits four new
+requests per hour, with 64 new requests per account per hour and 120 incoming
+bootstrap authentication attempts per hour. Rate state has at most 1024 live buckets.
+Delivery attempts are bounded to eight with backoff capped at 60 seconds, at most
+four intents per drain and 64 target devices per manifest. Request controls are at
+most 128 KiB. Local durable delivery survives restart; finite retry exhaustion is
+reported as `failed` and does not continuously reset its attempt budget.
+
+The control binds both roots, target, request ID, nonce and validity interval under
+`ramflux.contact_request.v1`. The SDK independently verifies the embedded root-signed
+manifest and fetches current authority from the configured gateway, preserving device
+set floors. The special `ramflux.sdk.contact_request.envelope.v1` schema only admits a
+verified request control: relabeling a direct packet cannot publish a stranger's
+identity or contact. It does not authorize unrelated controls, calls or group actions.
+Both peers need the request-aware SDK; older peers reject the new request schema.
+Automatic routing retains the same-home limitation documented above.
+
+The aliases `contact.request.accept`, `contact.request.decline`, and
+`contact.request.block` accept the same selectors and return the same decision row.
+`contact.card.import {card,note?}` aliases `contact.add {card,note?}`. A repeated
+identical decision succeeds; an incompatible terminal decision returns
+`ValidationFailed` with `reason_code:request_closed`. A missing request ID returns
+`ValidationFailed` with `reason_code:request_not_found`. Invalid note text returns
+`ValidationFailed` with `reason_code:invalid_request_note`. Outbound admission rate
+refusal returns `Unavailable`, `reason_code:rate_limited`, `retry_after_ms:60000`;
+this is a retry hint, and the hourly quota may still be exhausted at that time.
+
+Verified pending peers already have identity-directory metadata, including their
+signed principal and asserted kind, without an accepted relationship. Acceptance
+projects held messages through ordinary message storage and `message.received`
+events, preserving original send times. The existing authenticated own-contact path
+replicates acceptance to active siblings and releases their matching pending queues.
+Locked accounts cannot list requests or subscribe/replay their account stream; lock
+stops its actor and readers. Clients must discard previews already received when
+processing the account lock, as they do other private message content.

@@ -24,3 +24,5 @@ pub use mcp::*;
 pub use message::*;
 pub use object::*;
 pub use recovery::*;
+mod contact_requests;
+pub use contact_requests::{ContactMessageRequestWrite, ContactRequestRecord};

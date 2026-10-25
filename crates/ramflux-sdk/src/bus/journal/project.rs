@@ -215,6 +215,34 @@ fn project_contact(
 ) -> Result<(), SdkError> {
     let db = client.account_db()?;
     let keys = &entry.keys;
+    if matches!(entry.table_name.as_str(), "contact_request_projection" | "contact_message_request")
+        && let Some(root) = field(keys, "contact_identity_commitment")
+    {
+        for direction in ["inbound", "outbound"] {
+            if let Some(request) = db.contact_request(root, direction)? {
+                if entry.table_name == "contact_message_request"
+                    && (direction != "inbound" || request.state != "pending")
+                {
+                    continue;
+                }
+                let topic = match (request.state.as_str(), direction) {
+                    ("pending", "inbound") => "contact.requested",
+                    ("accepted", _) => "contact.accepted",
+                    ("declined", _) => "contact.declined",
+                    ("blocked", _) => "contact.blocked",
+                    ("expired", _) => "contact.request.expired",
+                    _ => continue,
+                };
+                let body = if direction == "inbound" {
+                    client.contact_request_preview(&request)?
+                } else {
+                    json!({"request_id":request.request_id,"principal_id":request.principal_id,
+                        "root_commitment":root,"state":request.state,"direction":direction})
+                };
+                events.push((topic.into(), body, Some(root.into())));
+            }
+        }
+    }
     if entry.table_name == "contact_verification_projection"
         && let Some(commitment) = field(keys, "contact_identity_commitment")
     {

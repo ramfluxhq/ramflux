@@ -17,6 +17,7 @@ mod history_hash;
 mod records;
 mod row_mappers;
 mod schema;
+mod schema_contact_requests;
 mod schema_device_namespace;
 mod schema_group_control_identity;
 mod schema_group_sender_identity;
@@ -40,5 +41,7 @@ pub use error::StorageError;
 pub use event_store::{EventStore, ProjectionStore};
 pub use records::*;
 
+#[cfg(test)]
+mod contact_request_tests;
 #[cfg(test)]
 mod tests;

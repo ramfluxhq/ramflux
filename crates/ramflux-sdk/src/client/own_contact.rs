@@ -281,8 +281,13 @@ impl RamfluxClient {
             .account_db()?
             .friend_link_for_peer(peer)?
             .or(self.account_db()?.friend_link_for_peer(&contact.manifest.principal_id)?);
+        let pending = self.account_db()?.contact_request(peer, "inbound")?.filter(|request| {
+            request.state == "pending" && request.expires_at > crate::prelude::now_unix_timestamp()
+        });
         if existing.is_some_and(|link| {
-            link.state != "accepted" || link.blocked || link.capability_revoked_at.is_some()
+            (link.state != "accepted" && !(link.state == "pending" && pending.is_some()))
+                || link.blocked
+                || link.capability_revoked_at.is_some()
         }) {
             return Ok(true);
         }
@@ -290,6 +295,9 @@ impl RamfluxClient {
         // An existing local block/revocation always wins over a delayed sibling acceptance.
         if self.friend_rejection_reason(&contact.manifest.principal_id)?.is_none() {
             self.establish_friend_link(&link.link_id, &link.requester_id, &link.target_id)?;
+            if let Some(request) = pending {
+                self.decide_inbound_contact(&request, "accepted")?;
+            }
         }
         Ok(true)
     }

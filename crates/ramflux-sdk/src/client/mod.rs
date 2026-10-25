@@ -7,6 +7,7 @@ pub mod account;
 mod backup_contacts;
 pub(crate) mod call;
 pub mod contact;
+pub(crate) mod contact_requests;
 pub(crate) mod contact_resolution;
 pub(crate) mod contact_roots;
 mod contact_safety_preview;

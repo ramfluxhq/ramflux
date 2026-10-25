@@ -12,6 +12,7 @@ use std::sync::{
 };
 
 struct Directory {
+    captured: Arc<std::sync::Mutex<Vec<ramflux_protocol::Envelope>>>,
     addr: std::net::SocketAddr,
     ca: PathBuf,
     records: Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>,
@@ -75,7 +76,7 @@ impl Directory {
             }
             Ok(())
         });
-        Ok(Self { addr, ca, records, unavailable, server })
+        Ok(Self { captured: Arc::default(), addr, ca, records, unavailable, server })
     }
     fn config(&self, f: &Fixture) -> Result<GatewaySessionConfig, SdkError> {
         let mut c = f.config()?;
@@ -90,6 +91,7 @@ impl Directory {
 // The bus account already owns an authenticated session. Raw TLS requests below
 // remain available only for hash-addressed manifests, never for name lookup.
 struct DirectorySession {
+    captured: Arc<std::sync::Mutex<Vec<ramflux_protocol::Envelope>>>,
     records: Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>,
     unavailable: Arc<AtomicBool>,
     responses: VecDeque<Vec<u8>>,
@@ -127,6 +129,48 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
                         response: ramflux_protocol::PrincipalLookupResponse {
                             manifest,
                             reason_code: None,
+                        },
+                    }
+                }
+                GatewayClientFrame::Submit { submit } => {
+                    self.captured
+                        .lock()
+                        .map_err(|_| {
+                            ramflux_transport::TransportError::Quic("capture mutex".into())
+                        })?
+                        .push(submit.envelope.clone());
+                    GatewayServerFrame::Deliver {
+                        entry: GatewayInboxEntry {
+                            inbox_seq: 1,
+                            target_delivery_id: submit.envelope.target_delivery_id.clone(),
+                            envelope: submit.envelope,
+                        },
+                    }
+                }
+                GatewayClientFrame::PrekeyFetch { device_id } => {
+                    let address = ramflux_protocol::parse_qualified_device_id(&device_id).map_err(
+                        |error| ramflux_transport::TransportError::Quic(error.to_string()),
+                    )?;
+                    let raw = address.as_ref().map_or(device_id.as_str(), |(_, raw)| raw.as_str());
+                    let records = self.records.lock().map_err(|_| {
+                        ramflux_transport::TransportError::Quic("directory mutex".into())
+                    })?;
+                    let entry = records
+                        .iter()
+                        .filter(|m| {
+                            address.as_ref().is_none_or(|(root, _)| *root == m.principal_commitment)
+                        })
+                        .flat_map(|m| m.devices.iter())
+                        .find(|d| d.device_id == raw)
+                        .ok_or_else(|| {
+                            ramflux_transport::TransportError::Quic("prekey fixture missing".into())
+                        })?;
+                    GatewayServerFrame::Prekey {
+                        response: crate::prekey::SdkPrekeyResponse {
+                            device_id: raw.into(),
+                            principal_commitment: entry.principal_commitment.clone(),
+                            bundle: Some(entry.prekey_bundle.clone()),
+                            target_delivery_id: Some(entry.target_delivery_id.clone()),
                         },
                     }
                 }
@@ -169,6 +213,7 @@ fn state(a: &mut Fixture, b: &mut Fixture, d: &Directory) -> Result<LocalBusDaem
         let engine = GatewaySessionEngine::with_test_transport(
             d.config(f)?,
             Box::new(DirectorySession {
+                captured: d.captured.clone(),
                 records: d.records.clone(),
                 unavailable: d.unavailable.clone(),
                 responses: VecDeque::new(),
@@ -484,3 +529,6 @@ async fn two_hour_old_accounts_resolve_add_contacts_and_authorize_new_prekeys()
     }
     Ok(())
 }
+
+#[path = "contact_request_tests.rs"]
+mod requests;

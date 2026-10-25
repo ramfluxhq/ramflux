@@ -57,6 +57,8 @@ impl RamfluxClient {
             requester_is_peer,
             replace_provisional_root,
             verification,
+            send_request,
+            request_note,
         } = input;
         if !crate::contact_card::valid_principal(selector) {
             return Err(ContactReason::UnknownPrincipal.into());
@@ -108,14 +110,7 @@ impl RamfluxClient {
             }
             self.persist_root_verified_directory(&own_manifest)?;
             self.persist_root_verified_directory(&manifest)?;
-            for device in &manifest.devices {
-                db.upsert_device_directory_entry(
-                    &device.device_id,
-                    &manifest.principal_commitment,
-                    if card.is_some() { "contact_card" } else { "contact_lookup" },
-                    now_unix_timestamp(),
-                )?;
-            }
+            self.record_contact_device_origin(&manifest, card.is_some())?;
             let mut identity =
                 db.client_record("identity", principal)?.ok_or(ContactReason::UnknownPrincipal)?;
             self.decorate_contact_identity(&old, &mut identity, card, replacement.is_some())?;
@@ -144,10 +139,45 @@ impl RamfluxClient {
 
             db.persist_client_record("identity", principal, &identity)?;
             self.stage_own_contact(&manifest, &link_id)?;
+            if send_request {
+                self.resolve_contact_consent(&manifest, &link_id, request_note)?;
+            }
             self.contact_entry(principal)
         })?;
         self.finish_pair_retirement()?;
         Ok(contact)
+    }
+
+    fn record_contact_device_origin(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+        card: bool,
+    ) -> Result<(), SdkError> {
+        for device in &manifest.devices {
+            self.account_db()?.upsert_device_directory_entry(
+                &device.device_id,
+                &manifest.principal_commitment,
+                if card { "contact_card" } else { "contact_lookup" },
+                now_unix_timestamp(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn resolve_contact_consent(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+        link_id: &str,
+        note: Option<&str>,
+    ) -> Result<(), SdkError> {
+        if let Some(pending) =
+            self.account_db()?.contact_request(&manifest.principal_commitment, "inbound")?
+            && pending.state == "pending"
+        {
+            self.decide_inbound_contact(&pending, "accepted")
+        } else {
+            self.stage_contact_request(manifest, link_id, note)
+        }
     }
 
     pub(crate) fn contact_entry(&self, principal: &str) -> Result<Value, SdkError> {
@@ -171,13 +201,19 @@ impl RamfluxClient {
                 })
             })
             && commitment.is_some();
+        let outgoing_request =
+            commitment.map(|root| db.contact_request(root, "outbound")).transpose()?.flatten();
+        let request_state = outgoing_request.as_ref().map(|request| &request.state);
+        let request_id = outgoing_request.as_ref().map(|request| &request.request_id);
         Ok(
-            json!({"principal_id":principal,"display_name":identity["display_name"],"reachable":reachable,"verified":verified,"kind_asserted":identity["kind_asserted"],"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"]}),
+            json!({"principal_id":principal,"display_name":identity["display_name"],"reachable":reachable,"verified":verified,"kind_asserted":identity["kind_asserted"],"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"],"request_state":request_state,"request_id":request_id}),
         )
     }
 }
 
 pub(crate) struct ContactResolution<'a> {
+    pub send_request: bool,
+    pub request_note: Option<&'a str>,
     pub selector: &'a str,
     pub expected_root: Option<&'a str>,
     pub card: Option<&'a crate::ContactCardBody>,

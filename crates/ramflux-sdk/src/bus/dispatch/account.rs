@@ -165,6 +165,11 @@ pub(crate) async fn local_bus_account_create(
         client.set_active_account(&body.local_account_id)?;
     }
     client.unlock_account(&body.local_account_id, body.account_secret.as_bytes())?;
+    client.set_contact_request_policy(if body.client_mode == LocalBusClientMode::HeadlessAi {
+        "auto_accept"
+    } else {
+        "manual"
+    })?;
     let mode = body.client_mode.clone();
     let device_state = serde_json::json!({
         "device_kind": "cli",

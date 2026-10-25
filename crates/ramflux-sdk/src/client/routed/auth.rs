@@ -136,7 +136,10 @@ impl RamfluxClient {
     }
 }
 
-fn verify_sender_record(entry: &GatewayInboxEntry, record: &Value) -> Result<String, SdkError> {
+pub(crate) fn verify_sender_record(
+    entry: &GatewayInboxEntry,
+    record: &Value,
+) -> Result<String, SdkError> {
     let envelope = &entry.envelope;
     let principal = record
         .get("principal_id")

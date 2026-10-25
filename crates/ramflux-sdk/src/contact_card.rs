@@ -53,6 +53,12 @@ pub enum ContactReason {
     /// The requested contact is the current account.
     #[error("self_contact")]
     SelfContact,
+    #[error("request_not_found")]
+    RequestNotFound,
+    #[error("request_closed")]
+    RequestClosed,
+    #[error("invalid_request_note")]
+    InvalidRequestNote,
     /// An accepted contact already exists.
     #[error("already_contact")]
     AlreadyContact,

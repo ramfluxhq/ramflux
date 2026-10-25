@@ -10,8 +10,13 @@ pub(crate) async fn dispatch_contact_bus_request(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
+    if let Some(response) = super::contact_requests::dispatch(request, state, account_id).await? {
+        return Ok(response);
+    }
     match request.method.as_str() {
-        "contact.add" => Box::pin(super::contact_resolution::add(request, state, account_id)).await,
+        "contact.add" | "contact.card.import" => {
+            Box::pin(super::contact_resolution::add(request, state, account_id)).await
+        }
         "contact.card.export" => super::contact_resolution::export(state, account_id),
         "contact.accept" => {
             if let Ok(body) =
@@ -241,6 +246,8 @@ async fn provisional_safety(
                     &gateway,
                     &account.gateway_config,
                     crate::client::contact_resolution::ContactResolution {
+                        send_request: false,
+                        request_note: None,
                         selector: &body.principal_id,
                         expected_root: Some(&body.contact_identity_commitment),
                         card: None,

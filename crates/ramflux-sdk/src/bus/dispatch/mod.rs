@@ -28,6 +28,7 @@ pub(crate) use group::*;
 pub(crate) use message::*;
 pub(crate) use object::*;
 
+mod contact_requests;
 mod identity_authority;
 pub(crate) mod surface_transport;
 pub(crate) mod task;

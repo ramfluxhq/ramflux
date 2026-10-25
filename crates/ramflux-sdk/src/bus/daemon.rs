@@ -143,6 +143,15 @@ async fn restore_local_bus_account_impl(
     }
     let account_secret = passphrase_override.unwrap_or(&manifest.account_secret);
     client.unlock_account(&manifest.local_account_id, account_secret.as_bytes())?;
+    if client.account_db()?.client_record("settings", "contact_requests")?.is_none() {
+        client.set_contact_request_policy(
+            if manifest.client_mode == LocalBusClientMode::HeadlessAi {
+                "auto_accept"
+            } else {
+                "manual"
+            },
+        )?;
+    }
     if let (Some(id), Some(relay)) = (&manifest.node_id, &manifest.node_relay) {
         client.node_relay_options = Some(
             crate::node::profile_relay_options(

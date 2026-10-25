@@ -7,6 +7,7 @@ use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 mod archive;
 mod auth;
+pub(crate) use auth::verify_sender_record;
 pub(crate) mod bootstrap_sequence;
 mod committed;
 mod context;
@@ -128,6 +129,9 @@ impl RamfluxClient {
         body: &[u8],
         route: Route,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
+        if route.kind == Kind::Direct {
+            Box::pin(self.ensure_contact_request_before_direct(engine, message)).await?;
+        }
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
         self.bind_outgoing_delivery(
@@ -288,7 +292,12 @@ pub(crate) fn decode(
     let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
         .map_err(|_| invalid("invalid encrypted payload"))?;
     let decoded: SdkDmEncryptedEnvelope = serde_json::from_slice(&bytes)?;
-    if decoded.version != 2 || decoded.schema != "ramflux.sdk.dm_x3dh_envelope.v2" {
+    if decoded.version != 2
+        || !matches!(
+            decoded.schema.as_str(),
+            "ramflux.sdk.dm_x3dh_envelope.v2" | crate::client::contact_requests::ENVELOPE_SCHEMA
+        )
+    {
         return Err(invalid("unrouted legacy envelope"));
     }
     Ok(decoded)

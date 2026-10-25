@@ -47,6 +47,13 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
     if let Err(error) = super::own_device_copy::flush(account).await {
         tracing::warn!(%error, "own-device message copy deferred");
     }
+    let contacts = match Box::pin(crate::client::contact_requests::flush(account)).await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error,"contact control delivery deferred");
+            0
+        }
+    };
     let approvals = match super::dispatch::task_approval::drive(account).await {
         Ok(n) => n,
         Err(error) => {
@@ -76,7 +83,7 @@ pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, Sdk
             0
         }
     };
-    Ok(received + tasks_applied + task_sent + approvals + receipts + voice)
+    Ok(received + tasks_applied + task_sent + approvals + receipts + voice + contacts)
 }
 
 /// Projection is best-effort; the durable message remains available when its claim cannot be written.
