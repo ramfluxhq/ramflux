@@ -3,6 +3,7 @@
 
 //! Rust core SDK facade and stable C-ABI boundary substrate.
 
+pub mod backup;
 mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;

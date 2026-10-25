@@ -54,7 +54,7 @@ Failure requires discarding the entire staging area. Never decrypt directly into
 a live account database or overwrite a final attachment as chunks arrive.
 
 SQLite account snapshots use the SQLite backup API in bounded 128-page steps,
-with the same SQLCipher key and a separately encrypted destination. This copies
+with a fresh random SQLCipher key for the encrypted destination. This copies
 all tables and BLOBs, including current WAL content, without materializing each
 row or attachment in Rust. The destination must be a new file in a private staging
 directory. Snapshot key material is secret and may enter only the authenticated

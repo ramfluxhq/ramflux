@@ -14,6 +14,8 @@ pub struct BackupCounts {
     pub conversations: u64,
     pub messages: u64,
     pub groups: u64,
+    pub surfaces: u64,
+    pub tasks: u64,
     pub attachments: u64,
     pub attachment_bytes: u64,
 }
@@ -44,8 +46,9 @@ impl AccountDb {
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
         drop(file);
-        let key = self.current_key.clone();
+        let key = AccountDbKey::generate()?;
         let key_hex = key.sqlcipher_hex();
+        let fingerprint = key.fingerprint();
         let path = destination.to_owned();
         let counts = self.connection.call(move |source| {
             if !source.is_autocommit() {
@@ -66,12 +69,15 @@ impl AccountDb {
                     }
                 }
             }
+            target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
             // All domain tables, keys and object payloads were copied by SQLite itself.
             let counts = BackupCounts {
                 contacts: target.query_row("SELECT count(*) FROM friend_link_projection", [], |row| row.get(0))?,
                 conversations: target.query_row("SELECT count(*) FROM conversation_projection", [], |row| row.get(0))?,
                 messages: target.query_row("SELECT count(*) FROM message_projection", [], |row| row.get(0))?,
                 groups: target.query_row("SELECT count(*) FROM group_projection", [], |row| row.get(0))?,
+                surfaces: target.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'surface/state/%'", [], |row| row.get(0))?,
+                tasks: target.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'task/view/%'", [], |row| row.get(0))?,
                 attachments: target.query_row("SELECT count(*) FROM object_index", [], |row| row.get(0))?,
                 attachment_bytes: target.query_row("SELECT coalesce(sum(length(ciphertext)),0) FROM object_index", [], |row| row.get(0))?,
             };
@@ -106,9 +112,22 @@ mod tests {
         for number in 0..1100 {
             db.persist_actor_state(&format!("backup-fixture/{number}"), &number)?;
         }
+        db.persist_actor_state("surface/state/fixture", &serde_json::json!({"surface_id":"s"}))?;
+        db.persist_actor_state("task/view/fixture", &serde_json::json!({"task_id":"t"}))?;
         let target = path.join("snapshot.db");
         let snapshot = db.write_backup_snapshot(&target)?;
-        assert_eq!(snapshot.key, key);
+        assert_ne!(snapshot.key, key);
+        assert_eq!(snapshot.counts.surfaces, 1);
+        assert_eq!(snapshot.counts.tasks, 1);
+        let old_key_reader = rusqlite::Connection::open(&target)?;
+        old_key_reader.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key.sqlcipher_hex()))?;
+        assert!(
+            old_key_reader
+                .query_row("SELECT count(*) FROM backup_blob_fixture", [], |row| row
+                    .get::<_, u64>(0))
+                .is_err()
+        );
+        old_key_reader.close().map_err(|(_, error)| error)?;
         assert!(db.write_backup_snapshot(&target).is_err());
         let raw = rusqlite::Connection::open(&target)?;
         assert!(
@@ -116,7 +135,7 @@ mod tests {
                 .get::<_, u64>(0))
                 .is_err()
         );
-        raw.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key.sqlcipher_hex()))?;
+        raw.execute_batch(&format!("PRAGMA key = \"x'{}'\";", snapshot.key.sqlcipher_hex()))?;
         assert_eq!(
             raw.query_row("SELECT length(payload) FROM backup_blob_fixture", [], |row| row
                 .get::<_, u64>(0))?,

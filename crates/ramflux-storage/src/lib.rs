@@ -4,6 +4,7 @@
 //! Client-local storage primitives for MVP-1 multi-account tests.
 
 mod account_db;
+pub use account_db::backup::{AccountBackupSnapshot, BackupCounts};
 mod account_index;
 mod clock;
 mod constants;
