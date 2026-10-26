@@ -210,7 +210,14 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
         let origin = client
             .message_origin(conversation, &message.message_id)?
             .unwrap_or(serde_json::Value::Null);
-        for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
+        for field in [
+            "sender_device_id",
+            "sender_root_commitment",
+            "sender_device_display",
+            "direction",
+            "original_message_id",
+            "envelope_id",
+        ] {
             value[field] = origin[field].clone();
         }
         if !message.deleted

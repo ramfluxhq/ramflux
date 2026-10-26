@@ -32,7 +32,7 @@ pub(crate) fn id(
         &ramflux_protocol::canonical_json_bytes(&(conversation, message, receiver.storage_key()))?,
     ))
 }
-fn origin_key(conversation: &str, message: &str) -> Result<String, SdkError> {
+pub(super) fn origin_key(conversation: &str, message: &str) -> Result<String, SdkError> {
     Ok(format!(
         "message/origin/{}",
         ramflux_crypto::blake3_256_base64url(

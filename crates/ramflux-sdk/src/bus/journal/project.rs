@@ -24,11 +24,7 @@ pub(crate) fn project(
                 let mut row = db.client_message_metadata(message)?.unwrap_or_else(
                     || json!({"id":message,"conversation_id":conversation,"removed":true}),
                 );
-                let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
-                for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"]
-                {
-                    row[field] = origin[field].clone();
-                }
+                message_provenance(client, conversation, message, &mut row)?;
                 let route = client.routed_message_metadata(message)?;
                 let topic = if entry.change_kind == "insert" && route.is_some() {
                     if route.as_ref().is_some_and(|route| {
@@ -266,6 +262,31 @@ fn project_contact(
             metadata(keys, &["link_id", "requester_id", "target_id"]),
             None,
         ));
+    }
+    Ok(())
+}
+
+fn message_provenance(
+    client: &RamfluxClient,
+    conversation: &str,
+    message: &str,
+    row: &mut Value,
+) -> Result<(), SdkError> {
+    let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
+    for field in [
+        "sender_device_id",
+        "sender_root_commitment",
+        "sender_device_display",
+        "direction",
+        "original_message_id",
+        "envelope_id",
+    ] {
+        row[field] = origin[field].clone();
+    }
+    if let Some(task) = client.task_message_metadata(conversation, message)? {
+        for field in ["content_type", "task_id", "actor_kind_verified"] {
+            row[field] = task[field].clone();
+        }
     }
     Ok(())
 }
