@@ -7,6 +7,8 @@ use crate::{AgentBus, AgentHost, EngineProvider, Error, OutputRefusal, Result, p
 use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
 use serde_json::json;
 const MAX_DEFERRED: usize = 64;
+// Reserve eight slots for already persisted work while bounding new admissions.
+const MAX_NEW_DEFERRED: usize = 56;
 const MAX_DEFERRED_BYTES: usize = 32 * 1024;
 // Eight busy conversations consume at most half of the shared queue and byte budget.
 const MAX_PER_CONVERSATION: usize = 4;
@@ -41,7 +43,9 @@ impl<E: EngineProvider> AgentHost<E> {
             action,
             ready_at,
         });
-        if is_new && !conversation_fits(&queued, &conversation_id) {
+        if is_new
+            && (queued.len() > MAX_NEW_DEFERRED || !conversation_fits(&queued, &conversation_id))
+        {
             return Err(Error::Limit);
         }
         if queued.len() > MAX_DEFERRED

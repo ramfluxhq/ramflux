@@ -249,3 +249,27 @@ async fn eight_busy_conversations_leave_durable_headroom_for_a_new_conversation(
     assert_eq!(host.checkpoint().cursor, Some(90));
     Ok(())
 }
+
+#[tokio::test]
+async fn new_deferred_work_above_fifty_six_rows_is_refused_without_losing_stored_work() -> TestResult
+{
+    let (f, mut bus, host) = setup().await?;
+    let mut state = serde_json::to_value(host.checkpoint())?;
+    drop(host);
+    let mut rows = serde_json::Map::new();
+    for n in 0..56 {
+        rows.insert(format!("busy-{n}"), json!({"seq":20+n,"conversation":format!("busy-{n}"),"reference":"ref-busy","action":"choice","ready_at":3000}));
+    }
+    state["deferred_surfaces"] = json!(rows);
+    state["cursor"] = json!(83);
+    std::fs::write(&f.config.state_file, serde_json::to_vec(&state)?)?;
+    bus.head = 83;
+    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
+    host.start(&mut bus).await?;
+    host.apply(&mut bus, notification(90, true, "decision"), 2001).await?;
+    let after = serde_json::to_value(host.checkpoint())?;
+    assert_eq!(after["deferred_surfaces"], state["deferred_surfaces"]);
+    assert_eq!(host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason, Code::TooLarge);
+    assert_eq!(host.checkpoint().cursor, Some(90));
+    Ok(())
+}

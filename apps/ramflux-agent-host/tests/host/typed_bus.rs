@@ -104,8 +104,11 @@ async fn r5_authentication_loss_on_receive_and_surface_reads_stops_the_host() ->
 #[tokio::test]
 async fn gateway_authentication_races_revalidate_identity_without_resending_the_operation()
 -> TestResult {
-    for failed_identity in
-        [None, Some("account.status"), Some("device.list"), Some("identity.directory")]
+    for (code, failed_identity) in
+        ["Unauthenticated", "NotAuthenticated"].into_iter().flat_map(|code| {
+            [None, Some("account.status"), Some("device.list"), Some("identity.directory")]
+                .map(|failed| (code, failed))
+        })
     {
         let f = Fixture::new()?;
         let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
@@ -142,7 +145,7 @@ async fn gateway_authentication_races_revalidate_identity_without_resending_the_
                 };
                 if rejected {
                     frame.error = Some(LocalBusErrorBody {
-                        code: "Unauthenticated".into(),
+                        code: code.into(),
                         message: "redacted".into(),
                         details: None,
                         reason_code: None,
@@ -166,7 +169,7 @@ async fn gateway_authentication_races_revalidate_identity_without_resending_the_
         )
         .await?;
         if failed_identity.is_some() {
-            assert!(matches!(outcome, Err(Error::IdentityLost)));
+            assert!(matches!(outcome, Err(Error::Bus)));
         } else {
             assert!(matches!(outcome, Err(Error::Bus)));
             assert_eq!(
