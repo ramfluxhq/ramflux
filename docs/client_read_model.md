@@ -48,6 +48,15 @@ would replace the account actor's live gateway registration.
 
 ## Pagination
 
+Paged `mcp.approval.list` reads local pending approvals first, then remote task
+approvals by durable packet key. Each request examines at most 101 local directory
+keys and 101 remote packet keys. Expired or decided rows can produce an empty array
+with a non-null `next_cursor`; continue until that cursor is null. Cursors remain
+account/method scoped; version-1 approval cursors retain their public-ID lower bound.
+Legacy unpaged remote approval scans stop at 1024 keys with cursor/limit guidance.
+Response budgets count encoded row bytes incrementally, including frame overhead.
+
+
 `conversation.directory`, `identity.directory`, and `object.directory` accept:
 
 ```json
@@ -66,7 +75,8 @@ A shorter page may still have a next cursor. No directory silently truncates a r
 
 Existing `group.list`, `mcp.server.list`, and `mcp.approval.list` support the same optional paging.
 With neither pagination field supplied they retain complete legacy list semantics, with an explicit
-error if the response would exceed the frame limit; use paging for large accounts.
+error if the response exceeds the frame limit or the remote approval scan exceeds 1024 keys;
+use paging for large accounts.
 
 ## Conversation directory
 

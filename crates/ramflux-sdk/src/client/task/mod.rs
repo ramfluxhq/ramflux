@@ -4,6 +4,7 @@
 //! Signed task carriers and account-owned task projections in encrypted conversations.
 pub(crate) mod approval;
 mod approval_decision;
+mod approval_directory;
 pub(crate) mod approval_retention;
 mod authority;
 pub(crate) mod carrier;

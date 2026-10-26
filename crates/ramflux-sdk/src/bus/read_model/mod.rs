@@ -5,6 +5,8 @@
 
 use crate::prelude::*;
 use serde_json::{Value, json};
+mod approvals;
+mod budget;
 mod capture;
 mod rows;
 pub(super) use capture::{capture, capture_mcp_event, initialize};
@@ -55,34 +57,17 @@ fn read_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, 
     }
     let account =
         request.account_id.as_deref().ok_or_else(|| invalid("directory requires account_id"))?;
+    if directory == "approval" {
+        return approvals::page(client, request, &page, limit, account);
+    }
     let after = decode_cursor(page.cursor.as_deref(), account, directory)?;
-    let db = client.account_db()?;
-    let remote = if directory == "approval" {
-        client
-            .task_remote_approvals()?
-            .into_iter()
-            .filter_map(|row| row["approval_id"].as_str().map(str::to_owned).map(|id| (id, row)))
-            .collect::<BTreeMap<_, _>>()
-    } else {
-        BTreeMap::new()
-    };
-    let mut ids = db.client_directory_ids(directory, &after, limit + 1)?;
-    ids.extend(remote.keys().filter(|id| *id > &after).cloned());
-    ids.sort();
-    ids.dedup();
-    ids.truncate(limit as usize + 1);
-    let mut result = Vec::new();
+    let ids = client.account_db()?.client_directory_ids(directory, &after, limit + 1)?;
+    let mut result: Vec<Value> = Vec::new();
     let mut next = None;
+    let mut budget = budget::Budget::new(request, field, 512 * 1024, 4096)?;
     for id in ids.iter().take(limit as usize) {
-        let row = if let Some(remote) = remote.get(id) {
-            remote.clone()
-        } else {
-            rows::row(client, directory, id)?
-        };
-        result.push(row);
-        let candidate = body(field, &result, None);
-        if serde_json::to_vec(&local_bus_response(request, candidate))?.len() > 512 * 1024 {
-            result.pop();
+        let row = rows::row(client, directory, id)?;
+        if !budget.admit(&row)? {
             let Some(last) = result
                 .last()
                 .and_then(|row| {
@@ -95,6 +80,7 @@ fn read_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, 
             next = Some(encode_cursor(account, directory, last)?);
             break;
         }
+        result.push(row);
     }
     if next.is_none() && ids.len() > limit as usize {
         next = Some(encode_cursor(account, directory, &ids[limit as usize - 1])?);
@@ -163,19 +149,19 @@ fn legacy_list(
 ) -> Result<Value, SdkError> {
     let db = client.account_db()?;
     let mut after = String::new();
-    let mut result = Vec::new();
+    let mut result: Vec<Value> = Vec::new();
+    let mut budget = budget::Budget::new(request, field, super::io::MAX_LOCAL_BUS_FRAME_BYTES, 0)?;
     loop {
         let ids = db.client_directory_ids(directory, &after, 100)?;
         if ids.is_empty() {
             break;
         }
         for id in &ids {
-            result.push(rows::row(client, directory, id)?);
-            if serde_json::to_vec(&local_bus_response(request, body(field, &result, None)))?.len()
-                > super::io::MAX_LOCAL_BUS_FRAME_BYTES
-            {
+            let row = rows::row(client, directory, id)?;
+            if !budget.admit(&row)? {
                 return Err(invalid("legacy list exceeds frame limit; use cursor/limit"));
             }
+            result.push(row);
         }
         if let Some(last) = ids.last() {
             after.clone_from(last);
@@ -185,26 +171,7 @@ fn legacy_list(
         }
     }
     if directory == "approval" {
-        let existing = result
-            .iter()
-            .filter_map(|row| row["approval_id"].as_str().or_else(|| row["id"].as_str()))
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
-        for row in client
-            .task_remote_approvals()?
-            .into_iter()
-            .filter(|row| row["approval_id"].as_str().is_some_and(|id| !existing.contains(id)))
-        {
-            let mut candidate = result.clone();
-            candidate.push(row);
-            if serde_json::to_vec(&local_bus_response(request, body(field, &candidate, None)))?
-                .len()
-                > super::io::MAX_LOCAL_BUS_FRAME_BYTES
-            {
-                return Err(invalid("legacy list exceeds frame limit; use cursor/limit"));
-            }
-            result = candidate;
-        }
+        approvals::append_legacy(client, &mut result, &mut budget)?;
     }
     let response = body(field, &result, None);
     super::io::encode_local_bus_frame(&local_bus_response(request, response.clone()))?;

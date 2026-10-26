@@ -319,3 +319,97 @@ fn remote_approvals_respect_legacy_frame_limits_and_page_without_losing_rows() -
     assert_eq!(seen.len(), 60);
     Ok(())
 }
+
+#[test]
+fn approval_pages_advance_over_expired_keys_without_reading_the_entire_backlog() -> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let original = request(&f)?;
+    let mut packets = std::collections::BTreeMap::new();
+    for n in 0..130 {
+        let mut request = original.request().clone();
+        request.approval.approval_id = format!("bounded-approval-{n}");
+        request.grant_body.approval_id = request.approval.approval_id.clone();
+        let packet = f.agent.sign_task_approval(Payload::Request { request: Box::new(request) })?;
+        packets.insert(key("approval_in", &packet.id()?), packet);
+    }
+    let (last, live) = packets.last_key_value().ok_or("packet")?;
+    let last = last.clone();
+    let live = live.clone();
+    let expected = format!("task_approval_{}", live.id()?);
+    for (key, mut packet) in packets {
+        packet.local_expires_at = Some(1);
+        f.human.account_db()?.persist_actor_state(&key, &packet)?;
+    }
+    // Data beyond this page is deliberately undecodable. A bounded page must not read it.
+    f.human.account_db()?.persist_actor_state(&last, &json!({"not_a_packet":true}))?;
+    let mut request = crate::LocalBusFrame::request(
+        "bounded",
+        Some("human".into()),
+        "test",
+        "mcp.approval.list",
+        json!({"limit":100}),
+    );
+    let first = crate::bus::read_model::read(&f.human, &request)?;
+    assert_eq!(first["approvals"], json!([]));
+    let cursor = first["next_cursor"].as_str().ok_or("progress cursor")?;
+    f.human.account_db()?.persist_actor_state(&last, &live)?;
+    request.body = json!({"limit":100,"cursor":cursor});
+    let second = crate::bus::read_model::read(&f.human, &request)?;
+    let rows = second["approvals"].as_array().ok_or("approvals")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["approval_id"], expected);
+    assert!(second["next_cursor"].is_null());
+    request.account_id = Some("different-account".into());
+    assert!(
+        crate::bus::read_model::read(&f.human, &request).is_err(),
+        "cursor must remain account scoped"
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_approval_scans_are_capped_and_cursor_pages_still_reach_the_final_live_row() -> TestResult
+{
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let live = request(&f)?;
+    let mut expired = live.clone();
+    expired.local_expires_at = Some(1);
+    let db = f.human.account_db()?;
+    db.write_transaction(|| -> TestResult {
+        for n in 0..1050 {
+            db.persist_actor_state(&format!("task/approval_in/{n:04}"), &expired)?;
+        }
+        db.persist_actor_state("task/approval_in/zz-final", &live)?;
+        Ok(())
+    })?;
+    let mut request = crate::LocalBusFrame::request(
+        "capped",
+        Some("human".into()),
+        "test",
+        "mcp.approval.list",
+        json!({}),
+    );
+    let error =
+        crate::bus::read_model::read(&f.human, &request).err().ok_or("uncapped legacy scan")?;
+    assert!(error.to_string().contains("use cursor/limit"));
+    let mut cursor = Value::Null;
+    let mut pages = 0;
+    let mut seen = Vec::new();
+    loop {
+        pages += 1;
+        assert!(pages < 20, "cursor must advance over skipped keys");
+        request.body = json!({"limit":100,"cursor":cursor});
+        let page = crate::bus::read_model::read(&f.human, &request)?;
+        seen.extend(page["approvals"].as_array().ok_or("rows")?.clone());
+        cursor = page["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(pages, 11);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["approval_id"], format!("task_approval_{}", live.id()?));
+    Ok(())
+}
