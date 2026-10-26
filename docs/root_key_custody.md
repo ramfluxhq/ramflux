@@ -200,7 +200,7 @@ also includes device/lineage state, so v3 uses an explicitly versioned stable
 anchor comparison and keeps device-change verification state separate. Master
 compromise requires a new identity/anchor, not a binding to a new master.
 
-**Epoch-range proposal (approval pending):**
+**Epoch ranges (controller-approved policy; wire review pending):**
 `epoch = range_index * 2^32 + revision`, with `range_index` in
 `[1, 2^21 - 1]` and `revision` in `[1, 2^32 - 1]`; all values remain safe JSON
 integers. Each master certificate authorizes exactly one range and one
@@ -570,7 +570,7 @@ incomplete migration plainly rather than silently creating another account.
    binding semantics, review SAS/HPKE implementations and vault classes, and
    publish cross-client vectors. Stage 1 exits only after independent approval
    of both this design and `root_key_custody_wire.md`, owner disposition of the
-   binding/range proposals, the pinned SAS provider/audit delta, vault providers
+   legacy-binding proposal, reviewed epoch-range encoding, the pinned SAS provider/audit delta, vault providers
    and full-flow minimum-machine benchmark plan. Reviewed golden wire vectors
    must be published before stage 2b begins. No account activates custody yet.
 2. **2a: public identity and typed signer separation.** Preserve current wire and

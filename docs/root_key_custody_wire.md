@@ -5,9 +5,10 @@
 Design revision 3, proposed normative stage-1 specification. This document and
 [root key custody](root_key_custody.md) describe future behaviour, not executable
 support. Independent wire review and published interoperability vectors are
-required before stage 2b. The legacy binding and epoch-range policy remain
-proposals awaiting the decisions recorded in the design review. No migration
-writer may ship on the assumption that those decisions have been approved.
+required before stage 2b. The legacy binding remains a proposal awaiting owner confirmation. The controller
+has approved epoch ranges with the r3 amendments below; exact wire formats and
+vectors still require independent review. No migration writer may ship on the
+assumption that the legacy-binding proposal has been approved.
 
 ## Encoding, signatures and limits
 
