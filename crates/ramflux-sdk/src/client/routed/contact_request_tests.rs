@@ -585,3 +585,6 @@ async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_prove
     assert_eq!(account(&state, "alice")?.contact_entry("bob")?["root_source"], "lookup");
     Ok(())
 }
+
+#[path = "contact_followup_tests.rs"]
+mod followups;

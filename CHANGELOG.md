@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Repeating `contact.accept` for an accepted root and key returns the existing
+  contact, including after auto-accept; conflicting cards still fail.
+
 ### Changed
 
 - **BREAKING (operators):** Compose inputs use `RF_COMPOSE_*` names listed in

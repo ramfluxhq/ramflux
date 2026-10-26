@@ -41,6 +41,34 @@ fn manifest_failure(error: SdkError) -> SdkError {
     }
 }
 impl RamfluxClient {
+    pub(crate) fn accepted_contact_retry(
+        &self,
+        selector: &str,
+        card: Option<&crate::ContactCardBody>,
+    ) -> Result<Option<Value>, SdkError> {
+        let db = self.account_db()?;
+        let principal = db
+            .client_record("commitment", selector)?
+            .and_then(|row| row["principal_id"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| selector.to_owned());
+        let Some(identity) = db.client_record("identity", &principal)? else {
+            return Ok(None);
+        };
+        let Some(root) = identity["contact_identity_commitment"].as_str() else {
+            return Ok(None);
+        };
+        if !self.friend_link_peer_is_accepted(root)? {
+            return Ok(None);
+        }
+        if let Some(card) = card
+            && (card.root_commitment != root
+                || crate::identity_root_public_key_commitment(&card.root_public_key)? != root)
+        {
+            return Err(ContactReason::RootConflict.into());
+        }
+        self.contact_entry(&principal).map(Some)
+    }
+
     pub(crate) async fn resolve_contact(
         &self,
         gateway: &GatewaySessionConfig,

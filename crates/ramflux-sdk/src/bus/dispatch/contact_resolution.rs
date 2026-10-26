@@ -36,6 +36,13 @@ pub(super) async fn add(
     {
         return Err(ContactReason::InvalidCard.into());
     }
+    if request.method == "contact.accept"
+        && replace_provisional_root.is_none()
+        && let Some(contact) = account.client.accepted_contact_retry(&selector, card.as_ref())?
+    {
+        return Ok(local_bus_ok(contact_response(account, &contact, legacy.as_ref())?));
+    }
+
     if legacy.is_none()
         && card.is_none()
         && !account.client.contact_request_retryable(&selector)?
@@ -98,26 +105,33 @@ pub(super) async fn add(
     if let Err(error) = Box::pin(crate::client::contact_requests::flush(account)).await {
         tracing::debug!(%error,"contact request queued for retry");
     }
-    let request_delivery = crate::client::contact_requests::delivery_status(
-        &account.client,
-        contact["root_commitment"].as_str().ok_or(ContactReason::ManifestInvalid)?,
-    )?;
     if let Err(error) = super::super::own_device_copy::flush(account).await {
         tracing::warn!(%error, "accepted contact copy deferred to account sync");
     }
-    let mut response = json!({"contact":contact,"request_delivery":request_delivery});
-    if legacy.is_some() {
-        let record = account
-            .client
-            .friend_links()?
-            .into_iter()
-            .find(|r| r.link_id == link)
-            .ok_or(ContactReason::UnknownPrincipal)?;
-        if let Value::Object(fields) = serde_json::to_value(record)? {
-            response.as_object_mut().ok_or(ContactReason::InvalidCard)?.extend(fields);
-        }
+    Ok(local_bus_ok(contact_response(account, &contact, legacy.as_ref())?))
+}
+
+fn contact_response(
+    account: &LocalBusAccountState,
+    contact: &Value,
+    legacy: Option<&LocalBusContactAddRequest>,
+) -> Result<Value, SdkError> {
+    let root =
+        contact["root_commitment"].as_str().ok_or(ContactReason::ManifestInvalid)?.to_owned();
+    let delivery = crate::client::contact_requests::delivery_status(&account.client, &root)?;
+    let mut response = json!({"contact":contact,"request_delivery":delivery});
+    if legacy.is_some()
+        && let Value::Object(fields) = serde_json::to_value(
+            account
+                .client
+                .account_db()?
+                .friend_link_for_peer(&root)?
+                .ok_or(ContactReason::UnknownPrincipal)?,
+        )?
+    {
+        response.as_object_mut().ok_or(ContactReason::InvalidCard)?.extend(fields);
     }
-    Ok(local_bus_ok(response))
+    Ok(response)
 }
 
 async fn card_gateway(
