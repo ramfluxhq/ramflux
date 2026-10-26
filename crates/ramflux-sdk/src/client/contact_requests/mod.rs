@@ -281,7 +281,13 @@ impl RamfluxClient {
             )? {
                 return Err(crate::ContactReason::RequestClosed.into());
             }
-            if matches!(state, "blocked" | "declined") {
+            let outbound_pending = state == "declined"
+                && db
+                    .contact_request(&request.contact_identity_commitment, "outbound")?
+                    .is_some_and(|row| {
+                        row.state == "pending" && row.expires_at > now_unix_timestamp()
+                    });
+            if state == "blocked" || (state == "declined" && !outbound_pending) {
                 db.fence_contact_request(
                     &request.contact_identity_commitment,
                     state,
@@ -316,7 +322,8 @@ impl RamfluxClient {
             } else {
                 if state == "blocked" {
                     self.block_friend_link(&request.link_id)?;
-                } else if db.friend_link(&request.link_id)?.state == "pending" {
+                } else if !outbound_pending && db.friend_link(&request.link_id)?.state == "pending"
+                {
                     self.reject_friend_link(&request.link_id)?;
                 }
                 db.discard_contact_messages(&request.contact_identity_commitment)?;

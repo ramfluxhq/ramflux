@@ -274,7 +274,10 @@ manifest fetch. A deferred slot expires no later than the retained state.
 Decline/block fences apply to both request envelopes and authenticated pair controls
 from roots that are not accepted contacts. `contact.unblock` clears the root fence; a
 local `contact.add` or accept clears this side's decline fence, and a local outbound
-request admits the peer's response. An accepted contact link is never fenced.
+request admits the peer's response. Declining a crossed inbound request does not
+cancel an unexpired pending outbound request to that root or fence its response.
+A failed local add leaves the decline fence intact; staging and fence clearing
+commit together. An accepted contact link is never fenced.
 A compact declined fence retains its original decision timestamp through the wire
 replay lifetime after cooldown; older signed requests cannot reopen consent. Outbound
 retained status also enforces cooldown after a closed row is pruned.

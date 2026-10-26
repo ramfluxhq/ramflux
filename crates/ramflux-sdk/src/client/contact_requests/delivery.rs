@@ -185,6 +185,15 @@ impl RamfluxClient {
         link_id: &str,
         note: Option<&str>,
     ) -> Result<(), SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.stage_contact_request_inner(peer, link_id, note))
+    }
+    fn stage_contact_request_inner(
+        &self,
+        peer: &crate::prekey::SdkDeviceManifestResponse,
+        link_id: &str,
+        note: Option<&str>,
+    ) -> Result<(), SdkError> {
         if note.is_some_and(|n| {
             n.chars().count() > 140 || !ramflux_protocol::text_safety::single_line_is_safe(n)
         }) {
@@ -219,8 +228,6 @@ impl RamfluxClient {
         {
             return Err(crate::ContactReason::LookupRateLimited.into());
         }
-        // A local re-add restores this side's consent; an explicit block still needs unblock.
-        db.clear_contact_request_fence(&peer.principal_commitment, Some("declined"))?;
         let own = self.owned_device_identity()?;
         let previous = old
             .as_ref()
@@ -284,7 +291,10 @@ impl RamfluxClient {
         })?;
         self.record_outbound_contact_state(&peer.principal_commitment, "pending", now)?;
         db.remove_actor_state(&key(&intent))?;
-        enqueue(self, &intent)
+        enqueue(self, &intent)?;
+        // A successful local re-add restores decline consent; blocks still require local unblock.
+        db.clear_contact_request_fence(&peer.principal_commitment, Some("declined"))?;
+        Ok(())
     }
     fn restart_contact_request_pair(
         &self,

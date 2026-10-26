@@ -104,3 +104,117 @@ async fn peer_unblock_preserves_local_fences_and_local_unblock_lifts_them() -> R
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn declining_a_crossed_request_preserves_the_pending_outbound_acceptance()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 71)?;
+    let mut b = Fixture::new("bob", 81)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    pending(&mut state, &directory).await?;
+    let root = r2::root(&state, "alice")?;
+    let client = account(&state, "bob")?;
+    let db = client.account_db()?;
+    let inbound = db.contact_request(&root, "inbound")?.ok_or_else(|| invalid("inbound"))?;
+    let manifest = db
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{root}"
+        ))?
+        .ok_or_else(|| invalid("manifest"))?;
+    // Model the crossed outbound intent before the inbound decision is applied.
+    client.stage_contact_request(&manifest, &inbound.link_id, None)?;
+    contact(&mut state, "bob", "contact.decline", json!({"request_id":inbound.request_id})).await?;
+    let client = account(&state, "bob")?;
+    assert!(client.account_db()?.retained_contact_request_fence(&root)?.is_none());
+    assert!(client.friend_rejection_reason(&root)?.is_none());
+    assert_eq!(
+        client
+            .account_db()?
+            .contact_request(&root, "outbound")?
+            .ok_or_else(|| invalid("outbound"))?
+            .state,
+        "pending"
+    );
+    flush(&mut state, "bob").await?;
+    let mut outbound = frames(&directory)?;
+    // The peer sees the decline before accepting the independent crossed request.
+    outbound.sort_by_key(|frame| {
+        crate::client::routed::decode(&frame.envelope)
+            .is_ok_and(|packet| packet.schema == contact_requests::ENVELOPE_SCHEMA)
+    });
+    for frame in outbound {
+        deliver(&mut state, "alice", &frame)
+            .await
+            .map_err(|e| invalid(&format!("crossed request at alice: {e}")))?;
+    }
+    flush(&mut state, "alice").await?;
+    let responses = frames(&directory)?;
+    assert!(!responses.is_empty(), "peer must accept the independent crossed outbound request");
+    for frame in responses {
+        deliver(&mut state, "bob", &frame)
+            .await
+            .map_err(|e| invalid(&format!("crossed accept at bob: {e}")))?;
+    }
+    let client = account(&state, "bob")?;
+    assert_eq!(
+        client
+            .account_db()?
+            .contact_request(&root, "outbound")?
+            .ok_or_else(|| invalid("outbound"))?
+            .state,
+        "accepted"
+    );
+    assert!(client.friend_link_peer_is_accepted(&root)?);
+    assert_eq!(
+        client
+            .account_db()?
+            .contact_request(&root, "inbound")?
+            .ok_or_else(|| invalid("inbound"))?
+            .state,
+        "declined"
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn failed_outbound_staging_keeps_the_decline_fence_and_rolls_back_new_intent()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 91)?;
+    let mut b = Fixture::new("bob", 101)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    pending(&mut state, &directory).await?;
+    let root = r2::root(&state, "alice")?;
+    let client = account(&state, "bob")?;
+    let db = client.account_db()?;
+    for i in 0..128 {
+        let record = ramflux_storage::ContactRequestRecord {
+            contact_identity_commitment: format!("full-{i}"),
+            direction: "outbound".into(),
+            request_id: format!("full-{i}"),
+            principal_id: format!("full-{i}"),
+            link_id: format!("full-{i}"),
+            state: "pending".into(),
+            request_json: b"{}".to_vec(),
+            expires_at: now_unix_timestamp() + 3600,
+            updated_at: now_unix_timestamp(),
+        };
+        match db.persist_contact_request(&record) {
+            Ok(true) => {}
+            Err(StorageError::AuthorizationRejected) => break,
+            other => return Err(invalid(&format!("unexpected capacity result: {other:?}"))),
+        }
+    }
+    db.fence_contact_request(&root, "declined", now_unix_timestamp() + 3600)?;
+    let fence = db.retained_contact_request_fence(&root)?;
+    let manifest = db
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{root}"
+        ))?
+        .ok_or_else(|| invalid("manifest"))?;
+    assert!(client.stage_contact_request(&manifest, "failed-add", None).is_err());
+    assert_eq!(db.retained_contact_request_fence(&root)?, fence);
+    assert!(db.contact_request(&root, "outbound")?.is_none());
+    assert!(db.client_record("contact_request_status", &root)?.is_none());
+    Ok(())
+}

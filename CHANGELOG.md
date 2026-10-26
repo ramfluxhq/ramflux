@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Declining a crossed inbound request preserves valid pending outbound consent.
+  Failed outbound staging retains the decline fence and rolls back the intent.
+
 - Only local contact unblock restores local request consent; peer unblock controls
   retain local decline and block fences.
 
