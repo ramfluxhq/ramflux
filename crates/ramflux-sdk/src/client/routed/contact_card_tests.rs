@@ -276,3 +276,34 @@ async fn node_add_confirm_and_card_export_use_origins_from_discovery_urls_with_p
 
 #[path = "contact_locator_tests.rs"]
 mod locator;
+
+#[tokio::test]
+async fn legacy_card_origin_case_and_trailing_slash_still_resolve_the_pinned_home()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 21)?;
+    let mut b = Fixture::new("bob", 31)?;
+    let directory = Directory::new(&a, &b).await?;
+    let origin =
+        Origin::bound(&directory, "contact.test", "127.0.0.1:0", Some("localhost")).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    origin.configure(&mut state, "alice")?;
+    origin.configure(&mut state, "bob")?;
+    let exported = call(&mut state, "alice", "contact.card.export", json!({})).await?;
+    let mut card = crate::parse_contact_card(
+        exported["card"].as_str().ok_or_else(|| invalid("card"))?,
+        now_unix_timestamp(),
+    )?;
+    card.node.url = format!("{}/", origin.url.to_uppercase());
+    let seed = state.accounts["alice"]
+        .client
+        .identity_root
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .signing_key
+        .to_bytes();
+    let (legacy, _) = crate::contact_card::encode_contact_card(card, seed, now_unix_timestamp())?;
+    let added = call(&mut state, "bob", "contact.add", json!({"card":legacy})).await?;
+    assert_eq!(added["contact"]["principal_id"], "alice");
+    assert_eq!(added["contact"]["reachable"], true);
+    Ok(())
+}
