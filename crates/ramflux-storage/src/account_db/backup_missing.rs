@@ -5,7 +5,7 @@
 use super::{AccountDb, backup_database::BackupDatabase};
 use crate::StorageError;
 use rusqlite::{Connection, params};
-pub(super) const MISSING: &str = "r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE CAST(o.manifest_hash AS TEXT)=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))";
+pub(super) const MISSING: &str = "r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.manifest_hash IN (CAST(json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AS BLOB),json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash')) AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))";
 fn page(db: &Connection, after: &str) -> rusqlite::Result<Vec<String>> {
     let mut q=db.prepare(&format!("SELECT substr(r.state_kind,length('attachment/reference/')+1) FROM runtime_actor_state r WHERE {MISSING} AND r.state_kind>?1 ORDER BY r.state_kind LIMIT 64"))?;
     q.query_map(params![format!("attachment/reference/{after}")], |r| r.get(0))?
@@ -54,7 +54,7 @@ impl AccountDb {
 }
 impl BackupDatabase {
     pub(super) fn ensure_missing_manifest(&self) -> Result<(), StorageError> {
-        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_missing_attachment(selector TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,plaintext_hash TEXT NOT NULL); CREATE INDEX IF NOT EXISTS backup_object_plaintext_hash ON object_index(plaintext_hash);")?;
+        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_missing_attachment(selector TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,plaintext_hash TEXT NOT NULL); CREATE INDEX IF NOT EXISTS backup_object_reference_hashes ON object_index(manifest_hash,plaintext_hash);")?;
         Ok(())
     }
     /// Lists a bounded page of unavailable payload selectors in the private snapshot.
