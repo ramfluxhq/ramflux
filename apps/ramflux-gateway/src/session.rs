@@ -1065,7 +1065,9 @@ pub(crate) async fn handle_gateway_submit(
     );
     let response: ramflux_node_core::EnvelopeSubmitResponse =
         router_post_json_async(&context.router, "/mvp0/envelope", &envelope).await?;
-    if response.outcome.starts_with("rejected_") {
+    if response.outcome.starts_with("rejected_")
+        || response.outcome == "forwarded_home_node_migrated"
+    {
         write_gateway_handle(
             send,
             &ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() },

@@ -35,24 +35,25 @@ fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<GatewayServerFrame>>>) {
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_succeeds_when_the_inbox_is_empty()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(false, false).await
+    submit_after_recipient_ack(false, false, "online").await
 }
 
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_never_confirms_a_later_envelope()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(true, false).await
+    submit_after_recipient_ack(true, false, "online").await
 }
 
 #[tokio::test]
 async fn replacing_a_registration_during_submit_finishes_its_reply_and_keeps_the_new_sink()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(false, true).await
+    submit_after_recipient_ack(false, true, "online").await
 }
 
 async fn submit_after_recipient_ack(
     later_message: bool,
     replace_during_reply: bool,
+    outcome: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
     let root = temp_cert_root("submit-ack-race")?;
@@ -78,56 +79,21 @@ async fn submit_after_recipient_ack(
     };
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     let runtime = test_runtime()?;
-    let mut envelope = test_envelope(now)?;
-    envelope.ext.ext.insert(
-        "source_root_commitment".into(),
-        serde_json::json!(runtime.source_identity.root_commitment()),
-    );
-    envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-        &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
-        [4; 32],
-    );
-    let mut signed_request: ramflux_protocol::SignedRequest = serde_json::from_value(
-        serde_json::json!({
-            "schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1",
-            "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
-            "source_device_id":"agent-device","request_id":"submit-once","method":"POST","path":"/gateway/session/submit",
-            "device_proof_hash":"already_authed","body_hash":"opaque-hash","nonce":"submit-nonce","created_at":now,"expires_at":now+60
-        }),
-    )?;
-    signed_request.body_hash = ramflux_crypto::blake3_256_base64url(
-        ramflux_protocol::domain::ENVELOPE,
-        &ramflux_protocol::canonical_json_bytes(&envelope)?,
-    );
-    signed_request.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-        &ramflux_protocol::signed_bytes(&signed_request)?,
-        [4; 32],
-    );
+    let submit = signed_submit(&runtime, now)?;
+    let envelope = submit.envelope.clone();
     let (finished, done) = tokio::sync::oneshot::channel();
-    let serving = tokio::spawn(ack_before_response(server, done, later_message));
+    let serving = tokio::spawn(ack_before_response(server, done, later_message, outcome));
     let (send, frames) = sink();
     let (recipient, received) = sink();
     context.hub.register("alice-target".into(), "alice-session".into(), recipient).await?;
     let result = if replace_during_reply {
-        submit_while_replacing(
-            context.clone(),
-            runtime,
-            ramflux_node_core::GatewaySubmitFrame { signed_request, envelope: envelope.clone() },
-            frames.clone(),
-        )
-        .await
+        submit_while_replacing(context.clone(), runtime, submit.clone(), frames.clone()).await
+    } else if outcome == "forwarded_home_node_migrated" {
+        submit_then_heartbeat(&context, runtime, submit, frames.clone()).await
     } else {
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            super::handle_gateway_submit(
-                &send,
-                &context,
-                &runtime,
-                &ramflux_node_core::GatewaySubmitFrame {
-                    signed_request,
-                    envelope: envelope.clone(),
-                },
-            ),
+            super::handle_gateway_submit(&send, &context, &runtime, &submit),
         )
         .await?
     };
@@ -135,6 +101,14 @@ async fn submit_after_recipient_ack(
     serving.await??;
     result?;
     let frames = frames.lock().map_err(|_| anyhow::anyhow!("sender mutex"))?;
+    if outcome == "forwarded_home_node_migrated" {
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(&frames[0],GatewayServerFrame::Nack {reason} if reason==outcome));
+        assert!(matches!(&frames[1], GatewayServerFrame::Heartbeat { now: 7 }));
+        assert!(received.lock().map_err(|_| anyhow::anyhow!("recipient mutex"))?.is_empty());
+        std::fs::remove_dir_all(root)?;
+        return Ok(());
+    }
     assert_eq!(frames.len(), 1);
     let GatewayServerFrame::Deliver { entry } = &frames[0] else {
         return Err("submit did not confirm acceptance".into());
@@ -190,13 +164,14 @@ async fn ack_before_response(
     server: MeshQuicServer,
     mut done: tokio::sync::oneshot::Receiver<()>,
     later_message: bool,
+    outcome: &'static str,
 ) -> anyhow::Result<()> {
     let inbox = Arc::new(Mutex::new(OpaqueDeviceInbox::new()));
     let mut tasks = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             result = server.accept_connection() => {
-                tasks.spawn(serve_connection(result?, inbox.clone(), later_message));
+                tasks.spawn(serve_connection(result?, inbox.clone(), later_message, outcome));
             }
             result = tasks.join_next(), if !tasks.is_empty() => {
                 if let Some(result) = result { result??; }
@@ -210,6 +185,7 @@ async fn serve_connection(
     connection: ramflux_transport::MeshQuicConnection,
     inbox: Arc<Mutex<OpaqueDeviceInbox>>,
     later_message: bool,
+    outcome: &'static str,
 ) -> anyhow::Result<()> {
     loop {
         let accepted =
@@ -221,6 +197,21 @@ async fn serve_connection(
                     "unexpected submit"
                 );
                 let envelope: ramflux_protocol::Envelope = serde_json::from_slice(&accepted.body)?;
+                if outcome == "forwarded_home_node_migrated" {
+                    accepted
+                        .write_postcard_response(
+                            200,
+                            &EnvelopeSubmitResponse {
+                                outcome: outcome.into(),
+                                target_delivery_id: envelope.target_delivery_id,
+                                inbox_seq: None,
+                                cursor: None,
+                                nack: None,
+                            },
+                        )
+                        .await?;
+                    continue;
+                }
                 let entry = {
                     let mut pending = inbox.lock().map_err(|_| anyhow::anyhow!("inbox mutex"))?;
                     let entry = pending.append(envelope.clone());
@@ -429,5 +420,76 @@ impl GatewaySessionFrameSink for DelayedReply {
                 .push(serde_json::from_slice(body)?);
             Ok(())
         })
+    }
+}
+
+fn signed_submit(
+    runtime: &super::GatewaySessionRuntime,
+    now: i64,
+) -> anyhow::Result<ramflux_node_core::GatewaySubmitFrame> {
+    let mut envelope = test_envelope(now)?;
+    envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(runtime.source_identity.root_commitment()),
+    );
+    envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+        [4; 32],
+    );
+    let mut signed_request: ramflux_protocol::SignedRequest = serde_json::from_value(
+        serde_json::json!({
+            "schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1",
+            "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
+            "source_device_id":"agent-device","request_id":"submit-once","method":"POST","path":"/gateway/session/submit",
+            "device_proof_hash":"already_authed","body_hash":"opaque-hash","nonce":"submit-nonce","created_at":now,"expires_at":now+60
+        }),
+    )?;
+    signed_request.body_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        &ramflux_protocol::canonical_json_bytes(&envelope)?,
+    );
+    signed_request.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::signed_bytes(&signed_request)?,
+        [4; 32],
+    );
+    Ok(ramflux_node_core::GatewaySubmitFrame { signed_request, envelope })
+}
+#[tokio::test]
+async fn migrated_home_forward_returns_an_explicit_nack_and_keeps_heartbeat_on_the_same_stream()
+-> Result<(), Box<dyn std::error::Error>> {
+    submit_after_recipient_ack(false, false, "forwarded_home_node_migrated").await
+}
+async fn submit_then_heartbeat(
+    context: &crate::GatewayQuicContext,
+    runtime: super::GatewaySessionRuntime,
+    submit: ramflux_node_core::GatewaySubmitFrame,
+    frames: Arc<Mutex<Vec<GatewayServerFrame>>>,
+) -> anyhow::Result<()> {
+    let source = FrameSequence(std::collections::VecDeque::from([
+        serde_json::to_vec(&ramflux_node_core::GatewayClientFrame::Submit { submit })?,
+        serde_json::to_vec(&ramflux_node_core::GatewayClientFrame::Heartbeat { now: 7 })?,
+    ]));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        super::run_registered_gateway_session(
+            Box::new(Sink(frames)),
+            Box::new(source),
+            context.clone(),
+            runtime,
+        ),
+    )
+    .await?
+}
+struct FrameSequence(std::collections::VecDeque<Vec<u8>>);
+impl ramflux_transport::GatewaySessionFrameSource for FrameSequence {
+    fn recv_frame(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>,
+    > {
+        let frame = self.0.pop_front();
+        Box::pin(
+            async move { frame.ok_or_else(|| TransportError::Quic("test source ended".into())) },
+        )
     }
 }
