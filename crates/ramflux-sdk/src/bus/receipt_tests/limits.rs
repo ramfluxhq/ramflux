@@ -456,3 +456,98 @@ async fn an_empty_receipt_queue_never_allocates_journal_events_or_requires_a_liv
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_receipt_deadline_retires_the_session_and_throttles_other_queue_entries() -> TestResult {
+    let mut p = Box::pin(pending("receipt-deadline-retire")).await?;
+    p.mail.lock().map_err(|_| "mailbox")?.stall_receipts = true;
+    let mut work = ready(&p)?;
+    work.packet = None;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+    assert_eq!(flush(&mut p.receiver).await?, 0);
+    assert!(p.receiver.engine.is_none(), "deadline must explicitly retire the uncertain session");
+    let attempts =
+        p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?.attempts;
+    ready(&p)?;
+    assert_eq!(flush(&mut p.receiver).await?, 0);
+    assert!(p.receiver.engine.is_none());
+    assert_eq!(
+        p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?.attempts,
+        attempts,
+        "cooldown prevents another connect attempt"
+    );
+    drop(p.receiver);
+    std::fs::remove_dir_all(p.root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delivers_it() -> TestResult
+{
+    for legacy in [false, true] {
+        let mut p = Box::pin(pending(if legacy {
+            "receipt-explicit-retry-legacy"
+        } else {
+            "receipt-explicit-retry"
+        }))
+        .await?;
+        let mut work = ready(&p)?;
+        work.attempts = 8;
+        p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+        assert_eq!(flush(&mut p.receiver).await?, 0);
+        assert!(!p.receiver.client.account_db()?.actor_state_exists(&p.key)?);
+        if legacy {
+            let status_key = format!("delivery-receipt/status/{}", work.status_id);
+            let mut status: serde_json::Value =
+                p.receiver.client.account_db()?.load_actor_state(&status_key)?.ok_or("status")?;
+            status.as_object_mut().ok_or("status object")?.remove("retry_work");
+            p.receiver.client.account_db()?.persist_actor_state(&status_key, &status)?;
+        }
+        // Dispatch the real explicit method, without a manual target route.
+        let mut state = LocalBusDaemonState {
+            account_index: None,
+            nodes: crate::node::NodeStore::load(&p.root, &[])?,
+            config: LocalBusConfig::new(p.root.join("socket"), &p.root),
+            accounts: BTreeMap::new(),
+            active_account_id: None,
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        };
+        state.accounts.insert(p.b.principal.clone(), p.receiver);
+        let (outbound, _) = mpsc::channel(1);
+        let connection = LocalBusConnectionState::new(1, outbound);
+        let request = LocalBusFrame::request(
+            "retry",
+            Some(p.b.principal.clone()),
+            "test",
+            "message.receipt.delivered",
+            json!({"conversation_id":"thread","message_id":"first","receiver_device_id":p.b.device}),
+        );
+        let response =
+            crate::bus::dispatch::dispatch_message_bus_request(&request, &mut state, &connection)
+                .await?;
+        assert_eq!(response.response_body["delivery_receipt_state"], "pending");
+        assert!(response.response_body["delivered_at"].as_i64().is_some());
+        assert_eq!(response.response_body["ttl_seconds"], 300);
+        p.mail.lock().map_err(|_| "mailbox")?.reject_id = None;
+        let receiver = state.accounts.get_mut(&p.b.principal).ok_or("receiver")?;
+        let retry = receiver
+            .client
+            .account_db()?
+            .load_actor_state::<Work>(&p.key)?
+            .ok_or("restaged work")?;
+        assert_eq!(retry.attempts, 0);
+        assert!(retry.packet.is_none());
+        assert_eq!(flush(receiver).await?, 1);
+        assert_eq!(
+            receiver
+                .client
+                .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                .ok_or("status")?["state"],
+            "sent"
+        );
+        drop(state);
+        std::fs::remove_dir_all(p.root)?;
+    }
+    Ok(())
+}

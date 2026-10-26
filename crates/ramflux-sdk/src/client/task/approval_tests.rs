@@ -245,3 +245,77 @@ fn remote_task_approvals_are_paged_with_local_mcp_rows_on_keyless_readers_and_di
     assert_eq!(remaining["approvals"].as_array().ok_or("rows")?.len(), 1);
     Ok(())
 }
+
+#[test]
+fn pending_approvals_after_one_hundred_twenty_nine_expired_rows_remain_visible() -> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let original = request(&f)?;
+    let mut packets = std::collections::BTreeMap::new();
+    for n in 0..130 {
+        let mut request = original.request().clone();
+        request.approval.approval_id = format!("approval-{n}");
+        request.grant_body.approval_id = request.approval.approval_id.clone();
+        let packet = f.agent.sign_task_approval(Payload::Request { request: Box::new(request) })?;
+        packets.insert(key("approval_in", &packet.id()?), packet);
+    }
+    let last = packets.keys().next_back().ok_or("packet")?.clone();
+    let last_id = packets.get(&last).ok_or("last packet")?.id()?;
+    for (id, mut packet) in packets {
+        if id != last {
+            packet.local_expires_at = Some(1);
+        }
+        f.human.account_db()?.persist_actor_state(&id, &packet)?;
+    }
+    let rows = f.human.task_remote_approvals()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["approval_id"], format!("task_approval_{last_id}"));
+    Ok(())
+}
+
+#[test]
+fn remote_approvals_respect_legacy_frame_limits_and_page_without_losing_rows() -> TestResult {
+    let f = Fixture::new()?;
+    open(&f, "task")?;
+    let original = request(&f)?;
+    for n in 0..60 {
+        let mut request = original.request().clone();
+        request.approval.approval_id = format!("approval-{n}");
+        request.grant_body.approval_id = request.approval.approval_id.clone();
+        request.approval.details["arguments"] = json!({"text":"x".repeat(20_000)});
+        request.grant_body.arguments_hash = Some(ramflux_protocol::hash_base64url(
+            ramflux_protocol::domain::MCP_GRANT,
+            &ramflux_protocol::canonical_json_bytes(&request.approval.details["arguments"])?,
+        ));
+        let packet = f.agent.sign_task_approval(Payload::Request { request: Box::new(request) })?;
+        f.human.account_db()?.persist_actor_state(&key("approval_in", &packet.id()?), &packet)?;
+    }
+    let mut request = crate::LocalBusFrame::request(
+        "approvals",
+        Some("human".into()),
+        "test",
+        "mcp.approval.list",
+        json!({}),
+    );
+    let error =
+        crate::bus::read_model::read(&f.human, &request).err().ok_or("unbounded list accepted")?;
+    assert!(error.to_string().contains("use cursor/limit"), "{error}");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cursor = Value::Null;
+    loop {
+        request.body = json!({"limit":100,"cursor":cursor});
+        let page = crate::bus::read_model::read(&f.human, &request)?;
+        assert!(serde_json::to_vec(&page)?.len() < 512 * 1024);
+        let rows = page["approvals"].as_array().ok_or("rows")?;
+        assert_ne!(rows.len(), 0);
+        for row in rows {
+            assert!(seen.insert(row["approval_id"].as_str().ok_or("id")?.to_owned()));
+        }
+        cursor = page["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 60);
+    Ok(())
+}

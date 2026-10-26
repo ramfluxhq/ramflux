@@ -190,12 +190,21 @@ fn legacy_list(
             .filter_map(|row| row["approval_id"].as_str().or_else(|| row["id"].as_str()))
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
-        result.extend(
-            client
-                .task_remote_approvals()?
-                .into_iter()
-                .filter(|row| row["approval_id"].as_str().is_some_and(|id| !existing.contains(id))),
-        );
+        for row in client
+            .task_remote_approvals()?
+            .into_iter()
+            .filter(|row| row["approval_id"].as_str().is_some_and(|id| !existing.contains(id)))
+        {
+            let mut candidate = result.clone();
+            candidate.push(row);
+            if serde_json::to_vec(&local_bus_response(request, body(field, &candidate, None)))?
+                .len()
+                > super::io::MAX_LOCAL_BUS_FRAME_BYTES
+            {
+                return Err(invalid("legacy list exceeds frame limit; use cursor/limit"));
+            }
+            result = candidate;
+        }
     }
     let response = body(field, &result, None);
     super::io::encode_local_bus_frame(&local_bus_response(request, response.clone()))?;

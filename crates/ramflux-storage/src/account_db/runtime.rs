@@ -9,6 +9,7 @@ mod control;
 mod operations;
 mod outbox;
 mod ratchet_metadata;
+mod receipt_retention;
 mod recovery;
 mod retention;
 mod schema;

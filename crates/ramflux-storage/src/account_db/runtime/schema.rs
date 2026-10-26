@@ -37,10 +37,11 @@ impl AccountDb {
             self.connection
                 .execute_batch("ALTER TABLE runtime_outbox ADD COLUMN keys_json TEXT")?;
         }
+        self.install_receipt_retention_schema()?;
         self.remove_consent_bookkeeping_triggers()?;
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('runtime_outbox','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
+             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?

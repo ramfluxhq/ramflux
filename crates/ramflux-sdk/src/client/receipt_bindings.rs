@@ -52,13 +52,14 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("outbound receipt binding conflict".into()));
         }
-        db.persist_actor_state(
+        db.persist_receipt_state(
             &storage,
             &Binding {
                 conversation: message.conversation_id.clone(),
                 message: message.message_id.clone(),
                 recipient_root: root.or_else(|| old.and_then(|old| old.recipient_root)),
             },
+            now_unix_timestamp(),
         )?;
         Ok(())
     }

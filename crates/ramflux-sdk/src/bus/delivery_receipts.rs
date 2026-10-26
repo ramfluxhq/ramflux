@@ -9,9 +9,13 @@ const SCAN: u32 = 256;
 const SCAN_CURSOR: &str = "delivery-receipt/scan-cursor";
 const ATTEMPTS: u32 = 8;
 const LIFETIME: i64 = 600;
+const GATEWAY_RETRY_AT: &str = "delivery-receipt/gateway-retry-at";
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let now = now_unix_timestamp();
     let db = account.client.account_db()?;
+    if db.load_actor_state::<i64>(GATEWAY_RETRY_AT)?.is_some_and(|at| at > now) {
+        return Ok(0);
+    }
     let after = db.load_actor_state::<String>(SCAN_CURSOR)?.unwrap_or_default();
     let mut keys = db.actor_state_key_page_after(PREFIX, &after, SCAN)?;
     if keys.is_empty() && !after.is_empty() {
@@ -47,13 +51,20 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
         // A crash during connection/send must not create a hot retry loop.
         work.next_at = attempt_at.saturating_add(30).saturating_add(backoff);
         account.client.account_db()?.persist_actor_state(&key, &work)?;
-        let attempt = async {
-            let mut engine = account.take_live_engine().await?;
-            let outcome = send(account, &mut engine, &key, &mut work).await;
-            account.put_engine(engine);
-            outcome
+        // Ownership stays outside the cancellable send future. A deadline cannot silently
+        // drop a borrowed live engine and reconnect for every remaining queue entry.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let result = match tokio::time::timeout_at(deadline, account.take_live_engine()).await {
+            Ok(Ok(mut engine)) => {
+                let outcome =
+                    tokio::time::timeout_at(deadline, send(account, &mut engine, &key, &mut work))
+                        .await;
+                account.put_engine(engine);
+                outcome
+            }
+            Ok(Err(error)) => Ok(Err(error)),
+            Err(elapsed) => Err(elapsed),
         };
-        let result = tokio::time::timeout(Duration::from_secs(3), Box::pin(attempt)).await;
         match result {
             Ok(Ok(())) => {
                 finish(&account.client, &key, &work, "sent")?;
@@ -68,7 +79,16 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
             }
             Err(_) => {
                 tracing::warn!("delivery receipt deadline exceeded");
+                // The stream may have an outstanding request. Retire it explicitly and
+                // bound receipt-driven reconnects across all queue entries and sync passes.
+                account.persist_push_route_seq();
+                account.engine = None;
+                account.client.account_db()?.persist_actor_state(
+                    GATEWAY_RETRY_AT,
+                    &now_unix_timestamp().saturating_add(30),
+                )?;
                 postpone(&account.client, &key, &mut work, backoff)?;
+                break;
             }
         }
     }
@@ -163,11 +183,13 @@ fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result
         } else {
             work.status_id.as_str()
         };
-        db.persist_actor_state(
+        db.persist_receipt_state(
             &format!("delivery-receipt/status/{id}"),
             &json!({
                 "state": state, "delivered_at": work.at, "attempts": work.attempts,
+                "retry_work": if state == "failed" { Some(work) } else { None },
             }),
+            now_unix_timestamp(),
         )?;
         db.remove_actor_state(key)?;
         if state == "failed" {

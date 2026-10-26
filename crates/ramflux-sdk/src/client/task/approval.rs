@@ -311,45 +311,55 @@ impl RamfluxClient {
                 .client_record("self", "account")?
                 .and_then(|row| row["principal_id"].as_str().map(str::to_owned)))
             .ok_or(SdkError::IdentityRootMissing)?;
-        let rows = db.task_record_page::<Packet>("task/approval_in/", "task/approval_in/", 129)?;
         let mut result = Vec::new();
-        for (_, packet) in rows {
-            let id = packet.id()?;
-            let request = packet.request();
-            if request.binding.requester != local
-                || packet.deadline() <= crate::time::now_unix_timestamp()
-                || db.actor_state_exists(&key("approval_decision_in", &id))?
-            {
-                continue;
+        let mut after = "task/approval_in/".to_owned();
+        loop {
+            let page = db.task_record_page::<Packet>("task/approval_in/", &after, 128)?;
+            if page.is_empty() {
+                break;
             }
-            let target = NeedsMe::Approval { grant_id: request.grant_body.grant_id.clone() };
-            if self
-                .task_approval_binding(
-                    &request.binding.conversation_id,
-                    &request.binding.task_id,
-                    &request.binding.step_id,
-                    &target,
-                )
-                .ok()
-                .as_ref()
-                != Some(&request.binding)
-            {
-                continue;
+            after = page
+                .last()
+                .map(|(key, _)| key.clone())
+                .ok_or_else(|| invalid("approval page empty"))?;
+            for (_, packet) in page {
+                let id = packet.id()?;
+                let request = packet.request();
+                if request.binding.requester != local
+                    || packet.deadline() <= crate::time::now_unix_timestamp()
+                    || db.actor_state_exists(&key("approval_decision_in", &id))?
+                {
+                    continue;
+                }
+                let target = NeedsMe::Approval { grant_id: request.grant_body.grant_id.clone() };
+                if self
+                    .task_approval_binding(
+                        &request.binding.conversation_id,
+                        &request.binding.task_id,
+                        &request.binding.step_id,
+                        &target,
+                    )
+                    .ok()
+                    .as_ref()
+                    != Some(&request.binding)
+                {
+                    continue;
+                }
+                let mut value = serde_json::to_value(&request.approval)?;
+                value["confirmation_mode"] = json!("task_requester");
+                value["risk_level"] =
+                    serde_json::to_value(request.grant_body.capability.default_risk())?;
+                value["expires_at"] = json!(packet.deadline());
+                value["details"] = json!({"arguments":request.approval.details["arguments"],"arguments_hash":request.grant_body.arguments_hash,"single_use":request.grant_body.single_use,"full_delegation":request.grant_body.full_delegation,"task_binding":request.binding});
+                value["approval_id"] = json!(format!("task_approval_{id}"));
+                value["id"] = value["approval_id"].clone();
+                value["conversation_id"] = json!(request.binding.conversation_id);
+                value["decision_id"] = json!(request.approval.approval_id);
+                value["task_binding"] = serde_json::to_value(&request.binding)?;
+                value["grant_id"] = json!(request.grant_body.grant_id);
+                value["details"]["requested_grant_id"] = json!(request.grant_body.grant_id);
+                result.push(value);
             }
-            let mut value = serde_json::to_value(&request.approval)?;
-            value["confirmation_mode"] = json!("task_requester");
-            value["risk_level"] =
-                serde_json::to_value(request.grant_body.capability.default_risk())?;
-            value["expires_at"] = json!(packet.deadline());
-            value["details"] = json!({"arguments":request.approval.details["arguments"],"arguments_hash":request.grant_body.arguments_hash,"single_use":request.grant_body.single_use,"full_delegation":request.grant_body.full_delegation,"task_binding":request.binding});
-            value["approval_id"] = json!(format!("task_approval_{id}"));
-            value["id"] = value["approval_id"].clone();
-            value["conversation_id"] = json!(request.binding.conversation_id);
-            value["decision_id"] = json!(request.approval.approval_id);
-            value["task_binding"] = serde_json::to_value(&request.binding)?;
-            value["grant_id"] = json!(request.grant_body.grant_id);
-            value["details"]["requested_grant_id"] = json!(request.grant_body.grant_id);
-            result.push(value);
         }
         Ok(result)
     }

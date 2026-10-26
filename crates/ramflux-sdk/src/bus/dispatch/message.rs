@@ -377,10 +377,19 @@ async fn dispatch_message_receipt_delivered(
         &body.conversation_id,
         &body.message_id,
         &account.client.local_device_identity(&body.receiver_device_id)?,
-    )? && matches!(status["state"].as_str(), Some("pending" | "sent" | "failed"))
+    )? && matches!(status["state"].as_str(), Some("pending" | "sent"))
     {
         return Ok(local_bus_ok(
             serde_json::json!({"conversation_id":body.conversation_id,"receiver_device_id":body.receiver_device_id,"delivered_through_message_id":body.message_id,"delivered_at":status["delivered_at"],"ttl_seconds":300,"scope":if status["state"]=="sent" {"network_e2ee"} else {"daemon_queue"},"already_sent":status["state"]=="sent","delivery_receipt_state":status["state"]}),
+        ));
+    }
+    if let Some(delivered_at) = account.client.restage_failed_delivery_receipt(
+        &body.conversation_id,
+        &body.message_id,
+        &account.client.local_device_identity(&body.receiver_device_id)?,
+    )? {
+        return Ok(local_bus_ok(
+            serde_json::json!({"conversation_id":body.conversation_id,"receiver_device_id":body.receiver_device_id,"delivered_through_message_id":body.message_id,"delivered_at":delivered_at,"ttl_seconds":300,"scope":"daemon_queue","already_sent":false,"delivery_receipt_state":"pending"}),
         ));
     }
     let delivered_at = body.delivered_at.unwrap_or_else(now_unix_timestamp);
