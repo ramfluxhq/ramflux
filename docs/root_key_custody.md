@@ -27,6 +27,12 @@ The inspected baseline is product commit
 - [Identity types](../crates/ramflux-protocol/src/identity_keys.rs) bind principal
   kind, root-qualified device keys and device epochs. The existing signed-set
   format has no primary/custody fields and rejects unknown fields.
+- [CLI account creation](../apps/rf/src/handlers/account.rs) draws independent
+  root/device seeds through [the seed resolver](../apps/rf/src/utils.rs) by
+  default. The account unlock secret wraps the database key in
+  [account storage](../crates/ramflux-sdk/src/client/account.rs); it is not the
+  root signing seed. Explicit deterministic seed flags are fixture tooling,
+  never a custody recovery mechanism.
 - [Recovery KDF](../crates/ramflux-crypto/src/kdf.rs) uses Argon2id v19,
   262144 KiB, three passes, one lane and a 32-byte output.
   [Key backup](../crates/ramflux-sdk/src/bus/dispatch/account.rs) encrypts the
@@ -61,6 +67,9 @@ Invariants after migration:
 2. Secondaries contain their own branch signing/agreement secrets, public root
    certificates and data keys. Neither root seed nor a locally decryptable root
    wrapper travels through pairing, sibling sync, exports or agent provisioning.
+   No master entropy, deterministic seed input or data-unlock credential placed
+   on a secondary may reconstruct the root; root and branch generation remain
+   independent. Audit imported accounts and every client creation path too.
 3. A single logical recovery capsule contains an encrypted copy of the root seed;
    offline replicas of that same ciphertext are allowed. The recovery key is kept
    separately and is never sent to servers or synchronized to secondaries.
@@ -420,8 +429,9 @@ both retain read access to restored history while activation awaits approval.
    reject downgrade/unknown critical versions and preserve exact ACK behavior.
 3. Add primary enrollment, revocation, pairing, promotion and crash journals.
    Implement recovery capsule and both backup sanitizers before enabling setup.
-4. Add creator delegation for actor certificates, full snapshots and results;
-   retain root-only genesis/transfer and existing single-creator convergence.
+4. Provision root-issued actor certificates and creator delegations for full
+   snapshots and results; retain root-only certificate issuance, genesis/transfer
+   and existing single-creator convergence.
 5. Ship desktop/TUI ceremonies, headless provisioning and legacy migration;
    migrate opt-in accounts only after complete end-to-end compatibility checks.
    Release notes must identify legacy backups and untrusted-secondary limits.
