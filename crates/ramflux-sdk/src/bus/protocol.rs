@@ -112,6 +112,32 @@ pub struct LocalBusAccountCreateResponse {
     pub client_mode: LocalBusClientMode,
     pub session_id: String,
     pub active_transport_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_restore: Option<LocalBusBackupContactRestoreReport>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalBusBackupContactSkipReason {
+    StaleAuthority,
+    PinnedConflict,
+    Equivocation,
+    LinkCollision,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusBackupContactSkip {
+    pub principal_id: String,
+    pub reason: LocalBusBackupContactSkipReason,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusBackupContactRestoreReport {
+    pub restored: usize,
+    pub tombstones_applied: usize,
+    pub tombstones_skipped_older: usize,
+    pub already_present: usize,
+    pub skipped: Vec<LocalBusBackupContactSkip>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

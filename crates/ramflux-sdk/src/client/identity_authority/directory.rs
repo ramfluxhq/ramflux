@@ -57,7 +57,10 @@ impl RamfluxClient {
         })?;
         self.finish_pair_retirement()
     }
-    fn record_authority_rejection(&self, record: &SignedDeviceSetRecord) -> Result<(), SdkError> {
+    pub(crate) fn record_authority_rejection(
+        &self,
+        record: &SignedDeviceSetRecord,
+    ) -> Result<(), SdkError> {
         let known = self.observed_device_set(&record.principal_commitment)?.is_some()
             || self.account_db()?.client_record("identity", &record.principal_id)?.is_some();
         if !known {

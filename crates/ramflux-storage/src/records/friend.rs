@@ -17,6 +17,12 @@ pub struct FriendLinkRecord {
     pub capability_revoked_at: Option<i64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContactLinkDecision {
+    pub state: String,
+    pub decided_at: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RejectedInboxRecord {
     pub conversation_id: String,

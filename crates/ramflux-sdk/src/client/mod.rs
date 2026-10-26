@@ -6,7 +6,6 @@ mod a2i_identity;
 pub mod account;
 mod backup_activation;
 mod backup_contacts;
-pub(crate) use backup_contacts::BackupContactRestoreReport;
 pub(crate) mod call;
 pub mod contact;
 pub(crate) mod contact_requests;

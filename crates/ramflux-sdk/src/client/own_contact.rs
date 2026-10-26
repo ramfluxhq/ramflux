@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Accepted root relationships replicated only inside authenticated own-device packets.
+use crate::bus::protocol::{LocalBusBackupContactSkip, LocalBusBackupContactSkipReason};
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
@@ -31,13 +32,20 @@ struct MissingManifest {
     attempts: u32,
     next_at: i64,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OwnContactReceiveOutcome {
+    NotPacket,
+    Restored,
+    TombstoneApplied,
+    TombstoneSkippedOlder,
+    AlreadyPresent,
+}
 impl RamfluxClient {
-    pub(super) fn backup_contact_skip_reason(
+    pub(super) fn backup_contact_skip(
         &self,
         body: &[u8],
-    ) -> Result<Option<crate::client::backup_contacts::BackupContactSkipReason>, SdkError> {
-        use crate::client::backup_contacts::BackupContactSkipReason;
-
+    ) -> Result<Option<LocalBusBackupContactSkip>, SdkError> {
         if tombstone::is_packet(body) {
             return Ok(None);
         }
@@ -59,23 +67,54 @@ impl RamfluxClient {
         }
         crate::client::contact::verify_device_manifest(&contact.manifest, peer)?;
         let db = self.account_db()?;
+        let skip = |reason| {
+            Some(LocalBusBackupContactSkip {
+                principal_id: contact.manifest.principal_id.clone(),
+                reason,
+            })
+        };
         if db.find_friend_link(&link.link_id)?.is_some_and(|existing| {
             existing.requester_id != link.requester_id || existing.target_id != link.target_id
-        }) || db.client_record("identity", &contact.manifest.principal_id)?.is_some_and(|old| {
+        }) {
+            return Ok(skip(LocalBusBackupContactSkipReason::LinkCollision));
+        }
+        if db.client_record("identity", &contact.manifest.principal_id)?.is_some_and(|old| {
             old["contact_identity_commitment"].as_str().is_some_and(|root| root != peer)
         }) {
-            return Ok(Some(BackupContactSkipReason::PinnedConflict));
+            return Ok(skip(LocalBusBackupContactSkipReason::PinnedConflict));
         }
         let record = contact
             .manifest
             .signed_device_set
             .as_ref()
             .ok_or_else(|| SdkError::InboundRejected("missing signed set".into()))?;
-        match self.check_observed_set(record) {
-            Ok(()) => Ok(None),
-            Err(SdkError::Storage(error)) => Err(SdkError::Storage(error)),
-            Err(_) => Ok(Some(BackupContactSkipReason::StaleAuthority)),
+        if let Some((epoch, hash)) = db.contact_request_authority_floor(
+            &record.principal_commitment,
+            crate::time::now_unix_timestamp(),
+        )? {
+            if record.device_set_epoch < epoch {
+                return Ok(skip(LocalBusBackupContactSkipReason::StaleAuthority));
+            }
+            if record.device_set_epoch == epoch
+                && crate::client::contact_requests::authority_digest(record)? != hash
+            {
+                self.record_authority_rejection(record)?;
+                tracing::warn!(principal_id = %record.principal_id, "backup contact authority equivocation skipped");
+                return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
+            }
         }
+        if let Some(old) = self.observed_device_set(&record.principal_commitment)? {
+            if record.device_set_epoch < old.device_set_epoch {
+                return Ok(skip(LocalBusBackupContactSkipReason::StaleAuthority));
+            }
+            if record.device_set_epoch == old.device_set_epoch && record != &old {
+                self.record_authority_rejection(record)?;
+                tracing::warn!(principal_id = %record.principal_id, "backup contact authority equivocation skipped");
+                return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
+            }
+        }
+        self.check_observed_set(record)?;
+        Ok(None)
     }
 
     pub(crate) fn stage_own_contact(
@@ -135,7 +174,7 @@ impl RamfluxClient {
                         continue;
                     }
                     let body = if restrictions {
-                        tombstone::encode(link)?
+                        tombstone::encode(self, link)?
                     } else if link.state == "accepted" {
                         let Some(manifest) = db.load_actor_state::<SdkDeviceManifestResponse>(
                             &format!("identity/manifest-root/{peer}"),
@@ -192,7 +231,7 @@ impl RamfluxClient {
         for link in &links {
             if let Some(peer) = contact_peer(link, own.root_commitment()) {
                 if !progress.restrictions_done && tombstone::is_restricted(link) {
-                    self.stage_own_contact_body(&tombstone::encode(link)?)?;
+                    self.stage_own_contact_body(&tombstone::encode(self, link)?)?;
                     count += 1;
                 } else if progress.restrictions_done
                     && link.state == "accepted"
@@ -291,11 +330,17 @@ impl RamfluxClient {
     /// The caller must authenticate the containing owned-root payload first: either an active
     /// sibling packet or the account backup AEAD. This decoder never establishes that authority.
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
-        if self.receive_own_contact_tombstone(body)? {
-            return Ok(true);
+        Ok(self.receive_own_contact_outcome(body)? != OwnContactReceiveOutcome::NotPacket)
+    }
+    pub(super) fn receive_own_contact_outcome(
+        &self,
+        body: &[u8],
+    ) -> Result<OwnContactReceiveOutcome, SdkError> {
+        if let Some(outcome) = self.receive_own_contact_tombstone(body)? {
+            return Ok(outcome);
         }
         let Some(raw) = body.strip_prefix(PREFIX) else {
-            return Ok(false);
+            return Ok(OwnContactReceiveOutcome::NotPacket);
         };
         let contact: Contact = ramflux_protocol::parse_i_json(raw)?;
         let own = self.owned_device_identity()?;
@@ -310,7 +355,8 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("own contact relationship root mismatch".into()));
         }
-        if self.account_db()?.find_friend_link(&link.link_id)?.is_some_and(|existing| {
+        let link_by_id = self.account_db()?.find_friend_link(&link.link_id)?;
+        if link_by_id.as_ref().is_some_and(|existing| {
             existing.requester_id != link.requester_id || existing.target_id != link.target_id
         }) {
             return Err(SdkError::InboundRejected(
@@ -330,17 +376,21 @@ impl RamfluxClient {
                 || link.blocked
                 || link.capability_revoked_at.is_some()
         }) {
-            return Ok(true);
+            return Ok(OwnContactReceiveOutcome::AlreadyPresent);
         }
         self.persist_identity_directory(&contact.manifest)?;
+        if link_by_id.as_ref().is_some_and(|link| link.state == "accepted") {
+            return Ok(OwnContactReceiveOutcome::AlreadyPresent);
+        }
         // An existing local block/revocation always wins over a delayed sibling acceptance.
         if self.friend_rejection_reason(&contact.manifest.principal_id)?.is_none() {
             self.establish_friend_link(&link.link_id, &link.requester_id, &link.target_id)?;
             if let Some(request) = pending {
                 self.decide_inbound_contact(&request, "accepted")?;
             }
+            return Ok(OwnContactReceiveOutcome::Restored);
         }
-        Ok(true)
+        Ok(OwnContactReceiveOutcome::AlreadyPresent)
     }
 }
 

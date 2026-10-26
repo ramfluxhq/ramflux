@@ -38,14 +38,9 @@ impl AccountDb {
         if !matches!(scope, "me" | "own_devices" | "both") {
             return Err(StorageError::AuthorizationRejected);
         }
-        self.connection.execute(
-            "UPDATE friend_link_projection
-                SET state = 'removed',
-                    remove_scope = ?2,
-                    capability_revoked_at = COALESCE(capability_revoked_at, ?3),
-                    updated_at = ?4
-              WHERE link_id = ?1",
-            params![link_id, scope, removed_at, removed_at],
+        self.persist_link_consent(
+            link_id,
+            LinkConsentChange::Remove { scope: scope.to_owned(), at: removed_at },
         )?;
         self.friend_link(link_id)
     }

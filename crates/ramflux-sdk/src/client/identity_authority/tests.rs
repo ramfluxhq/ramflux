@@ -533,7 +533,10 @@ fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions(
     );
     assert!(restored.client.restore_backup_contacts(&vec![String::new(); 513]).is_err());
     assert!(restored.client.restore_backup_contacts(&["x".repeat(3 * 1024 * 1024 + 1)]).is_err());
-    restored.client.restore_backup_contacts(&accepted)?;
+    let first = restored.client.restore_backup_contacts(&accepted)?;
+    assert_eq!(first.restored, 1);
+    let repeated = restored.client.restore_backup_contacts(&accepted)?;
+    assert_eq!(repeated.already_present, 1);
     assert!(restored.client.friend_link_peer_is_accepted(&remote.principal_commitment)?);
     owner.client.block_friend_link("accepted")?;
     let restricted = owner.client.backup_contacts()?;
@@ -541,6 +544,66 @@ fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions(
     restored.client.restore_backup_contacts(&accepted)?;
     assert!(restored.client.account_db()?.friend_link("accepted")?.blocked);
     assert!(!restored.client.friend_link_peer_is_accepted(&remote.principal_commitment)?);
+    Ok(())
+}
+
+#[test]
+fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_legacy_is_safe()
+-> TestResult {
+    const TOMBSTONE_PREFIX: &[u8] = b"ramflux.own_contact_tombstone.v1\n";
+    let owner = Actor::new("owner", "original", 178, 179, 1)?;
+    let restored = Actor::new("owner", "restored", 178, 180, 1)?;
+    let peer = Actor::new("peer", "peer", 181, 182, 1)?;
+    let own = owner.manifest()?;
+    let remote = peer.manifest()?;
+    observe(&owner.client, &remote)?;
+    owner.client.establish_friend_link(
+        "ordered-link",
+        &own.principal_commitment,
+        &remote.principal_commitment,
+    )?;
+
+    owner.client.block_friend_link("ordered-link")?;
+    let blocked = owner.client.backup_contacts()?;
+    let current = owner.client.restore_backup_contacts(&blocked)?;
+    assert_eq!(current.already_present, 1);
+    owner.client.unblock_friend_link("ordered-link")?;
+    for _ in 0..2 {
+        let report = owner.client.restore_backup_contacts(&blocked)?;
+        assert_eq!(report.tombstones_skipped_older, 1);
+        assert_eq!(owner.client.account_db()?.friend_link("ordered-link")?.state, "accepted");
+    }
+
+    owner.client.remove_friend_link("ordered-link", "own_devices")?;
+    let removed = owner.client.backup_contacts()?;
+    owner.client.establish_friend_link(
+        "ordered-link",
+        &own.principal_commitment,
+        &remote.principal_commitment,
+    )?;
+    for _ in 0..2 {
+        let report = owner.client.restore_backup_contacts(&removed)?;
+        assert_eq!(report.tombstones_skipped_older, 1);
+        assert_eq!(owner.client.account_db()?.friend_link("ordered-link")?.state, "accepted");
+    }
+
+    let mut legacy_bytes = ramflux_protocol::decode_base64url(&blocked[0])?;
+    let raw = legacy_bytes.strip_prefix(TOMBSTONE_PREFIX).ok_or("tombstone prefix")?;
+    let mut legacy: serde_json::Value = serde_json::from_slice(raw)?;
+    legacy.as_object_mut().ok_or("tombstone object")?.remove("decided_at");
+    legacy_bytes = TOMBSTONE_PREFIX.to_vec();
+    legacy_bytes.extend(serde_json::to_vec(&legacy)?);
+    let legacy = vec![ramflux_protocol::encode_base64url(legacy_bytes)];
+
+    let with_local_decision = owner.client.restore_backup_contacts(&legacy)?;
+    assert_eq!(with_local_decision.tombstones_skipped_older, 1);
+    assert_eq!(owner.client.account_db()?.friend_link("ordered-link")?.state, "accepted");
+
+    let without_local_decision = restored.client.restore_backup_contacts(&legacy)?;
+    assert_eq!(without_local_decision.tombstones_applied, 1);
+    assert!(restored.client.account_db()?.friend_link("ordered-link")?.blocked);
+    let repeated = restored.client.restore_backup_contacts(&legacy)?;
+    assert_eq!(repeated.tombstones_skipped_older, 1);
     Ok(())
 }
 
@@ -576,9 +639,12 @@ fn backup_contact_restore_skips_stale_and_pinned_conflicts_but_imports_valid_pee
         serde_json::to_value(report)?,
         serde_json::json!({
             "restored": 1,
+            "tombstones_applied": 0,
+            "tombstones_skipped_older": 0,
+            "already_present": 0,
             "skipped": [
-                {"reason": "pinned_conflict", "count": 1},
-                {"reason": "stale_authority", "count": 1}
+                {"principal_id": "pinned-peer", "reason": "pinned_conflict"},
+                {"principal_id": "stale-peer", "reason": "stale_authority"}
             ]
         })
     );
@@ -596,6 +662,81 @@ fn backup_contact_restore_skips_stale_and_pinned_conflicts_but_imports_valid_pee
             .ok_or("stale peer record")?
             .device_set_epoch,
         2
+    );
+    Ok(())
+}
+
+#[test]
+fn backup_contact_restore_reports_equivocation_and_link_collision_and_aborts_on_corruption()
+-> TestResult {
+    let owner = Actor::new("owner", "original", 192, 193, 1)?;
+    let restored = Actor::new("owner", "restored", 192, 194, 1)?;
+    let equivocal = Actor::new("equivocal", "first", 195, 196, 1)?;
+    let fork = Actor::new("equivocal", "second", 195, 197, 1)?;
+    let collision = Actor::new("collision", "collision", 198, 199, 1)?;
+    let other = Actor::new("other", "other", 200, 201, 1)?;
+    let own = owner.manifest()?;
+    let equivocal_manifest = equivocal.manifest()?;
+    let collision_manifest = collision.manifest()?;
+    for (link, manifest) in
+        [("equivocation", &equivocal_manifest), ("link-collision", &collision_manifest)]
+    {
+        observe(&owner.client, manifest)?;
+        owner.client.establish_friend_link(
+            link,
+            &own.principal_commitment,
+            &manifest.principal_commitment,
+        )?;
+    }
+    let contacts = owner.client.backup_contacts()?;
+    observe(&restored.client, &fork.manifest()?)?;
+    restored.client.establish_friend_link(
+        "link-collision",
+        &restored.manifest()?.principal_commitment,
+        &other.manifest()?.principal_commitment,
+    )?;
+    let report = restored.client.restore_backup_contacts(&contacts)?;
+    assert_eq!(
+        report.skipped,
+        vec![
+            crate::LocalBusBackupContactSkip {
+                principal_id: "equivocal".into(),
+                reason: crate::LocalBusBackupContactSkipReason::Equivocation,
+            },
+            crate::LocalBusBackupContactSkip {
+                principal_id: "collision".into(),
+                reason: crate::LocalBusBackupContactSkipReason::LinkCollision,
+            },
+        ]
+    );
+
+    let corrupt_owner = Actor::new("corrupt-owner", "original", 202, 203, 1)?;
+    let corrupt_restore = Actor::new("corrupt-owner", "restored", 202, 204, 1)?;
+    let corrupt_peer = Actor::new("corrupt-peer", "peer", 205, 206, 1)?;
+    let corrupt_own = corrupt_owner.manifest()?;
+    let corrupt_manifest = corrupt_peer.manifest()?;
+    observe(&corrupt_owner.client, &corrupt_manifest)?;
+    corrupt_owner.client.establish_friend_link(
+        "corrupt",
+        &corrupt_own.principal_commitment,
+        &corrupt_manifest.principal_commitment,
+    )?;
+    corrupt_restore.client.account_db()?.persist_actor_state(
+        &format!("identity/signed_set/{}", corrupt_manifest.principal_commitment),
+        &serde_json::json!({"corrupt": true}),
+    )?;
+    assert!(
+        corrupt_restore
+            .client
+            .restore_backup_contacts(&corrupt_owner.client.backup_contacts()?)
+            .is_err()
+    );
+    assert!(
+        corrupt_restore
+            .client
+            .account_db()?
+            .friend_link_for_peer(&corrupt_manifest.principal_commitment)?
+            .is_none()
     );
     Ok(())
 }
