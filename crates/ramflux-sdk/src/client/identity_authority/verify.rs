@@ -14,13 +14,18 @@ pub(crate) fn verify_manifest(
     let record =
         manifest.signed_device_set.as_ref().ok_or_else(|| invalid("missing signed set"))?;
     let mut seen = std::collections::BTreeSet::new();
-    let public = ramflux_crypto::verifying_key_from_base64url(&manifest.root_public_key)?;
     for device in &manifest.devices {
-        if !seen.insert(ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
-            &public,
-            record,
-            &device.device_id,
-        )?) {
+        // Authority above authenticates this complete immutable set once. Keep root-scoped
+        // duplicate detection here; active membership and exact keys are still checked below.
+        if !record.devices.iter().any(|entry| entry.device_id == device.device_id) {
+            return Err(ramflux_crypto::CryptoError::IdentityAuthority(
+                "device absent from signed set",
+            )
+            .into());
+        }
+        let address = ramflux_protocol::qualified_device_id(expected, &device.device_id)
+            .map_err(ramflux_crypto::CryptoError::from)?;
+        if !seen.insert(address) {
             return Err(invalid("duplicate manifest device"));
         }
         let bundle = &device.prekey_bundle;

@@ -168,3 +168,28 @@ fn a_valid_long_principal_remains_publishable_with_a_bounded_safe_default_name()
     )?;
     Ok(())
 }
+
+#[test]
+fn profile_manifest_requires_root_authentication_and_unique_authorized_devices() -> TestResult {
+    let phone = Actor::new("alice", "phone", 221, 222, 1)?;
+    let laptop = Actor::new("alice", "laptop", 221, 223, 1)?;
+    let foreign = Actor::new("mallory", "phone", 231, 232, 1)?;
+    let mut node = ramflux_node_core::IdentityRegistry::new();
+    let first = enroll(&mut node, &phone, None)?;
+    let full = enroll(&mut node, &laptop, Some(&first))?;
+    verify_manifest(&full, &full.principal_commitment)?;
+    let mut duplicate = full.clone();
+    duplicate.devices.push(duplicate.devices[0].clone());
+    assert!(verify_manifest(&duplicate, &full.principal_commitment).is_err());
+    let mut unsigned_empty = full.clone();
+    unsigned_empty.devices.clear();
+    unsigned_empty.signed_device_set.as_mut().ok_or("set")?.signature.clear();
+    assert!(verify_manifest(&unsigned_empty, &full.principal_commitment).is_err());
+    let mut unbound = full.clone();
+    unbound.devices[0] = foreign.manifest()?.devices.remove(0);
+    unbound.devices[0].principal_id.clone_from(&full.principal_id);
+    unbound.devices[0].principal_commitment.clone_from(&full.principal_commitment);
+    unbound.devices[0].branch_proof.principal_id.clone_from(&full.principal_id);
+    assert!(verify_manifest(&unbound, &full.principal_commitment).is_err());
+    Ok(())
+}
