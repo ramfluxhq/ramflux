@@ -89,14 +89,16 @@ impl RamfluxClient {
             }
             (None, None)
         };
+        let message = super::timeline_id(c)?;
+        let delivery = Delivery {
+            conversation: &c.conversation_id,
+            message: &message,
+            principal: &c.principal_id,
+            device: &c.device_id,
+            at: accepted.received_at,
+        };
         let outcome = self.record_task_applied(
-            &Delivery {
-                conversation: &c.conversation_id,
-                message: &super::timeline_id(c)?,
-                principal: &c.principal_id,
-                device: &c.device_id,
-                at: accepted.received_at,
-            },
+            &delivery,
             c.clone(),
             Applied {
                 history,
@@ -109,6 +111,7 @@ impl RamfluxClient {
             },
             false,
         )?;
+        self.store_task_message_metadata(&delivery, &outcome, c)?;
         Ok(outcome.fallback_text)
     }
     fn check_task_historical_membership(

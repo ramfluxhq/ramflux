@@ -40,6 +40,15 @@ fn own_device_task_history_replays_verified_carriers_and_committed_decisions_ide
     sibling.import_own_task_packets(&packets, "agent-device")?;
     assert_eq!(sibling.task_get(Some("thread"), "task")?["version"], 3);
     assert_eq!(sibling.task_history("thread", "task")?.events.len(), 3);
+    for accepted in &sibling.task_history("thread", "task")?.events {
+        let message = super::super::timeline_id(&accepted.carrier)?;
+        let metadata =
+            sibling.task_message_metadata("thread", &message)?.ok_or("task row metadata")?;
+        assert_eq!(metadata["content_type"], "task");
+        assert_eq!(metadata["task_id"], "task");
+        assert!(sibling.direct_message_by_id(&message)?.is_some());
+    }
+
     sibling.import_own_task_packets(&packets, "agent-device")?;
     assert_eq!(sibling.task_history("thread", "task")?.events.len(), 3);
     let key = f
