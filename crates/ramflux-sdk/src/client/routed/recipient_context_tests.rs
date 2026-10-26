@@ -50,3 +50,58 @@ async fn a_second_account_device_accepts_the_peer_only_after_an_authenticated_co
     assert_eq!(&*receiver.client.open_routed(&entry, &receiver.id)?.body, b"hello both devices");
     Ok(())
 }
+
+#[test]
+fn a_peer_cannot_preclaim_a_future_own_copy_row_id() -> Result<(), SdkError> {
+    let primary = Fixture::owned("alice-primary", "alice", 51, 52)?;
+    let reference = Fixture::owned("alice-sibling", "alice", 51, 53)?;
+    let receiver = Fixture::owned("alice-sibling", "alice", 51, 53)?;
+    let peer = Fixture::new("mallory", 61)?;
+    let source = primary.client.owned_device_identity()?;
+    let mut bytes = b"ramflux.own_sent_message.v1\n".to_vec();
+    bytes.extend(serde_json::to_vec(&serde_json::json!({
+        "envelope_id":"own-envelope","message_id":"own-authored","sender_id":"alice-primary",
+        "context":{"conversation_id":"own-thread","participants":["alice","mallory"],"group":null,"friend":null},
+        "body_base64":ramflux_protocol::encode_base64url(b"genuine outgoing text")
+    }))?);
+    let apply = |client: &RamfluxClient| {
+        client.receive_own_sent_message(
+            &source,
+            crate::client::own_device_copy::OwnMessageInput {
+                id: "own-envelope",
+                conversation: "own-thread",
+                group: None,
+                created_at: 1,
+                body: &bytes,
+            },
+        )
+    };
+    assert!(apply(&reference.client)?);
+    let expected = reference.client.direct_messages("own-thread")?[0].message_id.clone();
+    // The peer knows the exact future id before the own-device packet reaches this receiver.
+    let mut outgoing = message(&expected, "peer-thread");
+    outgoing.source_principal_id = "mallory".into();
+    outgoing.sender_id = peer.id.clone();
+    outgoing.recipient_device_id = Some(receiver.id.clone());
+    outgoing.target_delivery_id = receiver.id.clone();
+    let entry = seal(&peer, &receiver, outgoing, b"peer preclaim")?;
+    let peer_id = receiver.client.projection_id(&entry)?;
+    assert_ne!(peer_id, expected, "a peer must not reserve a future own-copy identifier");
+    receiver.client.send_direct_message("peer-thread", &peer_id, &peer.reference()?, &[])?;
+    receiver.client.account_db()?.store_message_content(
+        "peer-thread",
+        &peer_id,
+        b"peer preclaim",
+    )?;
+    assert!(apply(&receiver.client)?);
+    assert_eq!(receiver.client.direct_messages("own-thread")?.len(), 1);
+    assert_eq!(
+        receiver.client.account_db()?.message_content(&expected)?.as_deref(),
+        Some(b"genuine outgoing text".as_slice())
+    );
+    assert_eq!(
+        receiver.client.account_db()?.message_content(&peer_id)?.as_deref(),
+        Some(b"peer preclaim".as_slice())
+    );
+    Ok(())
+}
