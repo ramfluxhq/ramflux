@@ -52,12 +52,12 @@ pub(crate) fn submit_envelope(
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);
-    if !matches!(
-        outcome,
-        ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
-            | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
-    ) && let Err(error) =
-        store.record_submission_increment(&replay_key, replay_expires_at, persistent_entry.as_ref())
+    if should_persist_submission(&outcome)
+        && let Err(error) = store.record_submission_increment(
+            &replay_key,
+            replay_expires_at,
+            persistent_entry.as_ref(),
+        )
     {
         tracing::error!(
             error = %error,
@@ -130,17 +130,14 @@ pub(crate) async fn submit_envelope_async(
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);
-    if !matches!(
-        outcome,
-        ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
-            | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_)
-    ) && let Err(error) = store
-        .record_submission_increment_async(
-            &replay_key,
-            replay_expires_at,
-            persistent_entry.as_ref(),
-        )
-        .await
+    if should_persist_submission(&outcome)
+        && let Err(error) = store
+            .record_submission_increment_async(
+                &replay_key,
+                replay_expires_at,
+                persistent_entry.as_ref(),
+            )
+            .await
     {
         tracing::error!(
             error = %error,
@@ -272,6 +269,17 @@ pub(crate) fn persistent_entry_from_outcome(
     }
 }
 
+fn should_persist_submission(outcome: &ramflux_node_core::RouterSubmitOutcome) -> bool {
+    match outcome {
+        ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { .. }
+        | ramflux_node_core::RouterSubmitOutcome::RejectedHomeNodeMigrated(_) => false,
+        ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(delivery) => {
+            !delivery.replayed
+        }
+        _ => true,
+    }
+}
+
 pub(crate) fn submit_response_from_outcome(
     state: &ramflux_node_core::RouterCore,
     outcome: ramflux_node_core::RouterSubmitOutcome,
@@ -344,5 +352,42 @@ pub(crate) fn submit_response_from_outcome(
                 nack: None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_persist_submission;
+
+    #[test]
+    fn replayed_forward_ack_does_not_rewrite_the_router_wal() {
+        let outcome = ramflux_node_core::RouterSubmitOutcome::ForwardedHomeNodeMigrated(Box::new(
+            ramflux_node_core::HomeNodeMigrationForwardDelivery {
+                target_delivery_id: "target".into(),
+                proof_hash: "proof".into(),
+                new_home_node_hint: "node-new".into(),
+                route: ramflux_node_core::HomeNodeRouteRecord {
+                    identity_commitment: "identity".into(),
+                    home_node: "node-new".into(),
+                    home_node_key_hash: "key-hash".into(),
+                    node_public_key: "node-key".into(),
+                    node_endpoint: "node-new.example:7443".into(),
+                    route_record_hash: "route-hash".into(),
+                    migration_proof_hash: "proof".into(),
+                    route_update_proof_hash: "route-update".into(),
+                    updated_at: 1,
+                    expires_at: 2,
+                },
+                delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                    outcome: "duplicate_federated_forward".into(),
+                    target_delivery_id: "target".into(),
+                    inbox_seq: None,
+                    cursor: None,
+                    nack: None,
+                },
+                replayed: true,
+            },
+        ));
+        assert!(!should_persist_submission(&outcome));
     }
 }

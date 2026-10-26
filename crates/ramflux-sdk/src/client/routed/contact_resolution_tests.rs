@@ -187,13 +187,7 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
                             ramflux_transport::TransportError::Quic("capture mutex".into())
                         })?
                         .push(submit.envelope.clone());
-                    GatewayServerFrame::Deliver {
-                        entry: GatewayInboxEntry {
-                            inbox_seq: 1,
-                            target_delivery_id: submit.envelope.target_delivery_id.clone(),
-                            envelope: submit.envelope,
-                        },
-                    }
+                    GatewayServerFrame::Deliver { entry: delivered_entry(submit.envelope) }
                 }
                 GatewayClientFrame::PrekeyFetch { device_id } => {
                     self.prekey_response(&device_id)?
@@ -254,6 +248,15 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
             self.responses.push_back(serde_json::to_vec(&response)?);
             Ok(())
         })
+    }
+}
+
+fn delivered_entry(envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
+    GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        envelope,
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for DirectorySession {

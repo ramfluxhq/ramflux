@@ -22,6 +22,7 @@ fn frames(directory: &Directory) -> Result<Vec<GatewayInboxEntry>, SdkError> {
         .into_iter()
         .enumerate()
         .map(|(index, envelope)| GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: u64::try_from(index + 1).unwrap_or(u64::MAX),
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,

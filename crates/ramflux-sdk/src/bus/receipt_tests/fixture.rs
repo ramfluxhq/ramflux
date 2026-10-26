@@ -288,6 +288,7 @@ impl GatewaySessionFrameSource for Gateway {
                         existing.clone()
                     } else {
                         let entry = GatewayInboxEntry {
+                            forwarded: false,
                             inbox_seq: u64::try_from(mail.messages.len() + 1)
                                 .map_err(|e| TransportError::Quic(e.to_string()))?,
                             target_delivery_id: envelope.target_delivery_id.clone(),

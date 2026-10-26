@@ -91,6 +91,7 @@ impl Group {
                 .ok_or("delivery")?
                 .clone();
             let entry = GatewayInboxEntry {
+                forwarded: false,
                 inbox_seq: 2,
                 target_delivery_id: envelope.target_delivery_id.clone(),
                 envelope,
@@ -169,6 +170,7 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         .into_iter()
         .enumerate()
         .map(|(i, envelope)| GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: u64::try_from(i + 1).unwrap_or(0),
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
@@ -198,6 +200,7 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         );
         let peer = &mut group.peers[index];
         let entry = GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: 3,
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
@@ -219,6 +222,7 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
     let duplicate = group.request(0).await?;
     let mut gateway = super::fixture::RecordingGateway::new(Arc::clone(&replies));
     gateway.inbox.push(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 3,
         target_delivery_id: duplicate.target_delivery_id.clone(),
         envelope: duplicate,

@@ -392,6 +392,7 @@ fn member_packet(
         ttl: 3600,
     };
     Ok(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "target_device_sync".into(),
         envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,

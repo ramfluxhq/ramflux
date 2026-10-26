@@ -53,6 +53,28 @@ impl NodeReplayGuardState {
         envelope: &ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<(), NodeCoreError> {
+        if self.accept_envelope_once(source, envelope, now_unix_seconds)? {
+            return Ok(());
+        }
+        Err(NodeCoreError::ReplayGuard(format!(
+            "replay: {}",
+            envelope_replay_tuple_key(source, envelope)
+        )))
+    }
+
+    /// Validates an envelope and records its replay identity if it is new.
+    ///
+    /// Returns `false` for an already-recorded identity. Callers may use that result only when
+    /// their downstream operation has its own durable idempotency receipt.
+    ///
+    /// # Errors
+    /// Returns an error when identity binding, TTL, or timestamp validation fails.
+    pub fn accept_envelope_once(
+        &mut self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: &ramflux_protocol::Envelope,
+        now_unix_seconds: i64,
+    ) -> Result<bool, NodeCoreError> {
         if envelope.source_device_id != source.device_id()
             && envelope.source_device_id != source.storage_key()
         {
@@ -88,10 +110,11 @@ impl NodeReplayGuardState {
         }
         self.prune(now_unix_seconds);
         let key = envelope_replay_tuple_key(source, envelope);
-        if self.accepted_by_key.insert(key.clone(), expires_at).is_some() {
-            return Err(NodeCoreError::ReplayGuard(format!("replay: {key}")));
+        if self.accepted_by_key.contains_key(&key) {
+            return Ok(false);
         }
-        Ok(())
+        self.accepted_by_key.insert(key, expires_at);
+        Ok(true)
     }
 
     #[must_use]

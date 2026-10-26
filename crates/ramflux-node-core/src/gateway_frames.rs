@@ -168,6 +168,14 @@ pub struct GatewaySessionEstablishedFrame {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GatewayForwardAck {
+    pub envelope_id: String,
+    pub target_delivery_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
     PushRouteRegister { request: Box<crate::PushRouteRegistrationFrame> },
@@ -219,6 +227,9 @@ pub enum GatewayServerFrame {
     },
     Deliver {
         entry: InboxEntry,
+    },
+    ForwardAck {
+        ack: GatewayForwardAck,
     },
     OwnDeviceFanout {
         response: GatewayOwnDeviceFanoutResponse,

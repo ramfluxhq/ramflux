@@ -14,6 +14,7 @@ fn missing_local_root_does_not_roll_back_an_incoming_message_transaction() -> Te
     let sender = a.client(None)?;
     let config = a.config(&sender)?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: b.device.clone(),
         envelope: gateway_direct_message_envelope(&config, &a.message(&b, "incoming"), None)?,
@@ -149,6 +150,7 @@ fn message_attribution_survives_receipt_expiry_and_is_removed_only_with_its_mess
     let sender = a.client(None)?;
     let receiver = b.client(None)?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: b.device.clone(),
         envelope: gateway_direct_message_envelope(

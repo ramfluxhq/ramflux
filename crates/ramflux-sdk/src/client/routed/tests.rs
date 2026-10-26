@@ -195,7 +195,12 @@ fn seal_as(
         sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &envelope,
     )?;
-    Ok(GatewayInboxEntry { inbox_seq: 1, target_delivery_id: receiver.id.clone(), envelope })
+    Ok(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: receiver.id.clone(),
+        envelope,
+    })
 }
 
 #[test]
@@ -428,6 +433,7 @@ fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(
         ciphertext,
     })?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".to_owned(),
         envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,

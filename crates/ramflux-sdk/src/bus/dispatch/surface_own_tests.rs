@@ -117,7 +117,12 @@ fn entry(envelope: ramflux_protocol::Envelope, sequence: u64) -> GatewayInboxEnt
     let mut envelope = envelope;
     envelope.envelope_id = format!("node-own-copy-{sequence}");
     envelope.target_delivery_id = "sibling".into();
-    GatewayInboxEntry { inbox_seq: sequence, target_delivery_id: "sibling".into(), envelope }
+    GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: sequence,
+        target_delivery_id: "sibling".into(),
+        envelope,
+    }
 }
 pub(super) fn append(
     client: &RamfluxClient,
@@ -316,6 +321,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
     send(&mut source, &create).await?;
     let first = initial.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
     let incoming = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: first.target_delivery_id.clone(),
         envelope: first,
@@ -353,6 +359,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
     let replies = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(replies.clone());
     gateway.inbox.push(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: request.target_delivery_id.clone(),
         envelope: request,
@@ -367,6 +374,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         .cloned()
         .ok_or("resync answer")?;
     let incoming = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 2,
         target_delivery_id: reply.target_delivery_id.clone(),
         envelope: reply,
@@ -805,6 +813,7 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
     )
     .await?;
     let incoming = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 2,
         target_delivery_id: sealed.envelope.target_delivery_id.clone(),
         envelope: sealed.envelope,

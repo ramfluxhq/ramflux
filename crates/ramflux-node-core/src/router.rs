@@ -890,15 +890,35 @@ impl RouterCore {
             &HomeNodeMigrationForwardPlan,
         ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError>,
     {
-        if let Err(error) = self.check_envelope_replay_once(source, &envelope, now_unix_seconds) {
+        let accepted_once =
+            match self.accept_envelope_replay_once(source, &envelope, now_unix_seconds) {
+                Ok(accepted_once) => accepted_once,
+                Err(error) => {
+                    return RouterSubmitOutcome::RejectedSecurity {
+                        target_delivery_id: envelope.target_delivery_id,
+                        reason: error.to_string(),
+                    };
+                }
+            };
+        if !accepted_once
+            && (self.indexed_target_for_envelope(&envelope.envelope_id).is_some()
+                || self
+                    .effective_home_node_migration_for_target(
+                        &envelope.target_delivery_id,
+                        now_unix_seconds,
+                    )
+                    .is_none())
+        {
+            let replay_key = envelope_replay_tuple_key(source, &envelope);
             return RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
-                reason: error.to_string(),
+                reason: NodeCoreError::ReplayGuard(format!("replay: {replay_key}")).to_string(),
             };
         }
         self.submit_envelope_after_replay_check_with_home_node_forward(
             envelope,
             now_unix_seconds,
+            !accepted_once,
             forward,
         )
     }
@@ -926,6 +946,7 @@ impl RouterCore {
         &self,
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
+        replayed: bool,
         forward: F,
     ) -> RouterSubmitOutcome
     where
@@ -951,6 +972,7 @@ impl RouterCore {
                         new_home_node_hint: migration.new_home_node,
                         route: plan.route,
                         delivery: response.delivery,
+                        replayed,
                     },
                 ));
             }
@@ -1364,6 +1386,22 @@ impl RouterCore {
         let replay_check =
             lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
                 .check_envelope(source, envelope, now_unix_seconds);
+        crate::record_router_replay_guard_check_us(elapsed_us(replay_check_started));
+        replay_check
+    }
+
+    fn accept_envelope_replay_once(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: &ramflux_protocol::Envelope,
+        now_unix_seconds: i64,
+    ) -> Result<bool, NodeCoreError> {
+        crate::record_router_replay_guard_check();
+        let replay_check_started = Instant::now();
+        let replay_key = envelope_replay_tuple_key(source, envelope);
+        let replay_check =
+            lock_unpoisoned(&self.replay_guard_shards[replay_guard_shard_index(&replay_key)])
+                .accept_envelope_once(source, envelope, now_unix_seconds);
         crate::record_router_replay_guard_check_us(elapsed_us(replay_check_started));
         replay_check
     }

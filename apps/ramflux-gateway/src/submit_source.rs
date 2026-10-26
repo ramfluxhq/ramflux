@@ -90,6 +90,7 @@ pub(crate) mod tests {
             target_delivery_id: "source-delivery".into(),
             branch_public_key: authority.branch_public_key.clone(),
             device_epoch: 1,
+            supports_forward_ack: false,
         };
         let mut envelope = ramflux_protocol::Envelope {
             schema: "ramflux.envelope.v1".into(),

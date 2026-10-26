@@ -97,6 +97,7 @@ fn runtime(
         session_id: "session".into(),
         resume_token: "resume".into(),
         target_delivery_id: endpoint.principal_id.clone(),
+        supports_forward_ack: false,
     })
 }
 #[test]

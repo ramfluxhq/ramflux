@@ -751,6 +751,18 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
     assert_eq!(delivery.proof_hash, migration.migration_proof_hash);
     assert_eq!(delivery.new_home_node_hint, "node_new_forward.example");
     assert_eq!(delivery.delivery.outcome, "offline_queued");
+    assert!(!delivery.replayed);
+    let mut legacy = serde_json::to_value(&delivery)?;
+    legacy.as_object_mut().ok_or("forward delivery object")?.remove("replayed");
+    let restored: HomeNodeMigrationForwardDelivery = serde_json::from_value(legacy)?;
+    assert!(!restored.replayed);
+
+    assert_forwarded_retry_is_idempotent(
+        &router,
+        &source_identity,
+        migrated_envelope,
+        request.now + 4,
+    )?;
 
     let mut expired_window =
         envelope("env_forward_expired", &request.target_delivery_id, DeliveryClass::OpaqueEvent);
@@ -762,6 +774,100 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
         |_plan| Err(NodeCoreError::ItestHttp("must not forward after window".to_owned())),
     );
     assert!(matches!(outcome, RouterSubmitOutcome::RejectedHomeNodeMigrated(_)));
+    Ok(())
+}
+
+fn assert_forwarded_retry_is_idempotent(
+    router: &RouterCore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: ramflux_protocol::Envelope,
+    now: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let retry = router.submit_envelope_with_home_node_forward_at(source, envelope, now, |plan| {
+        Ok(FederatedEnvelopeForwardResponse {
+            accepted: false,
+            source_node_id: "node_old.example".into(),
+            target_node_id: plan.route.home_node.clone(),
+            delivery: EnvelopeSubmitResponse {
+                outcome: "duplicate_federated_forward".into(),
+                target_delivery_id: plan.envelope.target_delivery_id.clone(),
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            },
+        })
+    });
+    let RouterSubmitOutcome::ForwardedHomeNodeMigrated(retry) = retry else {
+        return Err(format!("expected idempotent migrated retry, got {retry:?}").into());
+    };
+    assert!(retry.replayed);
+    assert_eq!(retry.delivery.outcome, "duplicate_federated_forward");
+    assert_eq!(retry.delivery.inbox_seq, None, "retry created no second inbox entry");
+    Ok(())
+}
+
+#[test]
+fn production_forward_path_rejects_local_duplicate_with_or_without_later_migration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = replay_source("alice_device")?;
+    let router = RouterCore::new();
+    let request = registration_request(
+        &router,
+        "principal_local_duplicate",
+        "device_local_duplicate",
+        847,
+        None,
+        "ip_local_duplicate",
+    )?;
+    router.mvp1_register_identity(&request)?;
+    let mut submitted = envelope(
+        "env_local_before_migration",
+        &request.target_delivery_id,
+        DeliveryClass::OpaqueEvent,
+    );
+    submitted.created_at = request.now;
+    let first = router.submit_envelope_with_home_node_forward_at(
+        &source,
+        submitted.clone(),
+        request.now,
+        |_| Err(NodeCoreError::ItestHttp("no migration must not forward".into())),
+    );
+    assert!(matches!(
+        first,
+        RouterSubmitOutcome::Online(_) | RouterSubmitOutcome::OfflineQueued(_)
+    ));
+    let duplicate = router.submit_envelope_with_home_node_forward_at(
+        &source,
+        submitted.clone(),
+        request.now + 1,
+        |_| Err(NodeCoreError::ItestHttp("duplicate must not forward".into())),
+    );
+    assert!(matches!(duplicate, RouterSubmitOutcome::RejectedSecurity { .. }));
+
+    let signer = NodeServiceSigningKey::from_seed([0x98; 32]);
+    let (migration_proof, route_update) = route_update_fixture(
+        &request,
+        847,
+        "mig_local_duplicate",
+        "node_new_local_duplicate.example",
+        "node-new-local-duplicate.example:7443",
+        &signer,
+    )?;
+    router.apply_home_node_migration(&migration_proof, &request.proof, request.now + 2)?;
+    router.apply_home_node_route_update_proof(&route_update, request.now + 3)?;
+    let mut forwarded = false;
+    let after_migration = router.submit_envelope_with_home_node_forward_at(
+        &source,
+        submitted,
+        request.now + 4,
+        |_| {
+            forwarded = true;
+            Err(NodeCoreError::ItestHttp("local duplicate must not forward after migration".into()))
+        },
+    );
+    assert!(matches!(after_migration, RouterSubmitOutcome::RejectedSecurity { .. }));
+    assert!(!forwarded);
+    assert_eq!(router.resume(&request.target_delivery_id, 0, 10).len(), 1);
     Ok(())
 }
 

@@ -138,6 +138,7 @@ fn legacy_group_fixture_with_pin(
         ttl: 3600,
     };
     let good = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 2,
         target_delivery_id: "target".into(),
         envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,

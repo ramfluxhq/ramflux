@@ -10,3 +10,7 @@ pub use engine::*;
 pub(crate) use helpers::*;
 pub use protocol::*;
 pub use push_route::*;
+
+#[cfg(test)]
+#[path = "submit_tests.rs"]
+mod submit_tests;

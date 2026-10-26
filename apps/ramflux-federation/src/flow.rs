@@ -441,17 +441,6 @@ pub(crate) fn handle_s8_receive_envelope(
     verify_inbound_federated_forward(request, state, now, observability)?;
     let (_, source) =
         ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
-    let accepted_once = store.accept_inbound_forward_once(&source, request, now)?;
-    if !accepted_once {
-        tracing::info!(
-            source_node_id = %request.source_node_id,
-            target_node_id = %request.target_node_id,
-            envelope_id = %request.envelope.envelope_id,
-            target_delivery_id = %request.envelope.target_delivery_id,
-            "deduplicated replayed federated envelope before local router delivery"
-        );
-        return Ok(duplicate_forward_response(request));
-    }
     tracing::info!(
         source_node_id = request.source_node_id,
         target_node_id = request.target_node_id,
@@ -462,8 +451,19 @@ pub(crate) fn handle_s8_receive_envelope(
         "accepted federated envelope proof and delivering to local router"
     );
     let step_started = std::time::Instant::now();
-    let delivery: ramflux_node_core::EnvelopeSubmitResponse =
-        router_post_json(router, "/mvp0/envelope", &request.envelope)?;
+    let delivery = store.deliver_inbound_forward_once(&source, request, now, || {
+        router_post_json(router, "/mvp0/envelope", &request.envelope)
+    })?;
+    let Some(delivery) = delivery else {
+        tracing::info!(
+            source_node_id = %request.source_node_id,
+            target_node_id = %request.target_node_id,
+            envelope_id = %request.envelope.envelope_id,
+            target_delivery_id = %request.envelope.target_delivery_id,
+            "deduplicated replayed federated envelope before local router delivery"
+        );
+        return Ok(duplicate_forward_response(request));
+    };
     if let Some(observability) = observability {
         observability.record_receive_router_post(step_started.elapsed());
     }
@@ -476,7 +476,7 @@ pub(crate) fn handle_s8_receive_envelope(
         "delivered inbound federated envelope to local router"
     );
     let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
-        accepted: true,
+        accepted: matches!(delivery.outcome.as_str(), "online" | "offline_queued"),
         source_node_id: request.source_node_id.clone(),
         target_node_id: request.target_node_id.clone(),
         delivery,

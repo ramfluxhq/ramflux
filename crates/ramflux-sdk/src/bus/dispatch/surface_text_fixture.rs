@@ -121,6 +121,7 @@ impl GatewaySessionFrameSource for RecordingGateway {
                         .push(submit.envelope.clone());
                     GatewayServerFrame::Deliver {
                         entry: GatewayInboxEntry {
+                            forwarded: false,
                             inbox_seq: 1,
                             target_delivery_id: submit.envelope.target_delivery_id.clone(),
                             envelope: submit.envelope,

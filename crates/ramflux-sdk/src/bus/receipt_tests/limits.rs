@@ -293,6 +293,7 @@ async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> T
         .await?;
     message.encrypted_body = serde_json::to_vec(&sealed)?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: b.device.clone(),
         envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
@@ -343,6 +344,7 @@ async fn own_principal_messages_never_stage_a_peer_delivery_receipt() -> TestRes
     let mut message = a.message(&a, "own-message");
     message.recipient_device_id = Some("own-sibling".into());
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "own-sibling".into(),
         envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,

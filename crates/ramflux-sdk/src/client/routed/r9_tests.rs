@@ -286,6 +286,7 @@ fn old_bootstrap(
     let mut msg = msg;
     msg.encrypted_body = serde_json::to_vec(&envelope)?;
     Ok(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: receiver.id.clone(),
         envelope: gateway_direct_message_envelope(&sender.config()?, &msg, None)?,

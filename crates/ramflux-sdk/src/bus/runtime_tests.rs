@@ -95,6 +95,7 @@ impl GatewaySessionFrameSource for Gateway {
                 }
                 Some(GatewayClientFrame::Submit { submit }) => GatewayServerFrame::Deliver {
                     entry: GatewayInboxEntry {
+                        forwarded: false,
                         inbox_seq: 1,
                         target_delivery_id: "target".to_owned(),
                         envelope: submit.envelope,

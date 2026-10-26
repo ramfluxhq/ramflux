@@ -35,28 +35,35 @@ fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<GatewayServerFrame>>>) {
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_succeeds_when_the_inbox_is_empty()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(false, false, "online").await
+    submit_after_recipient_ack("empty-inbox", false, false, "online", true).await
 }
 
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_never_confirms_a_later_envelope()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(true, false, "online").await
+    submit_after_recipient_ack("later-envelope", true, false, "online", true).await
 }
 
 #[tokio::test]
 async fn replacing_a_registration_during_submit_finishes_its_reply_and_keeps_the_new_sink()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(false, true, "online").await
+    submit_after_recipient_ack("replacement", false, true, "online", true).await
 }
 
 async fn submit_after_recipient_ack(
+    fixture_label: &str,
     later_message: bool,
     replace_during_reply: bool,
     outcome: &'static str,
+    supports_forward_ack: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
-    let root = temp_cert_root("submit-ack-race")?;
+    let fixture_name = if supports_forward_ack {
+        format!("submit-ack-race-typed-{fixture_label}")
+    } else {
+        format!("submit-ack-race-legacy-{fixture_label}")
+    };
+    let root = temp_cert_root(&fixture_name)?;
     let gateway = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-gateway")?;
     let router = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-router")?;
     let server = MeshQuicServer::bind_with_pem_roots_provider(
@@ -78,7 +85,8 @@ async fn submit_after_recipient_ack(
         }),
     };
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let runtime = test_runtime()?;
+    let mut runtime = test_runtime()?;
+    runtime.supports_forward_ack = supports_forward_ack;
     let submit = signed_submit(&runtime, now)?;
     let envelope = submit.envelope.clone();
     let (finished, done) = tokio::sync::oneshot::channel();
@@ -103,7 +111,17 @@ async fn submit_after_recipient_ack(
     let frames = frames.lock().map_err(|_| anyhow::anyhow!("sender mutex"))?;
     if outcome == "forwarded_home_node_migrated" {
         assert_eq!(frames.len(), 2);
-        assert!(matches!(&frames[0],GatewayServerFrame::Nack {reason} if reason==outcome));
+        if supports_forward_ack {
+            assert!(matches!(
+                &frames[0],
+                GatewayServerFrame::ForwardAck { ack }
+                    if ack.envelope_id == envelope.envelope_id
+                        && ack.target_delivery_id == envelope.target_delivery_id
+                        && ack.inbox_seq == Some(9)
+            ));
+        } else {
+            assert!(matches!(&frames[0],GatewayServerFrame::Nack {reason} if reason==outcome));
+        }
         assert!(matches!(&frames[1], GatewayServerFrame::Heartbeat { now: 7 }));
         assert!(received.lock().map_err(|_| anyhow::anyhow!("recipient mutex"))?.is_empty());
         std::fs::remove_dir_all(root)?;
@@ -204,7 +222,7 @@ async fn serve_connection(
                             &EnvelopeSubmitResponse {
                                 outcome: outcome.into(),
                                 target_delivery_id: envelope.target_delivery_id,
-                                inbox_seq: None,
+                                inbox_seq: Some(9),
                                 cursor: None,
                                 nack: None,
                             },
@@ -321,6 +339,7 @@ fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
         branch_public_key: ramflux_protocol::encode_base64url(
             branch.signing_key.verifying_key().to_bytes(),
         ),
+        supports_forward_ack: true,
     })
 }
 #[tokio::test]
@@ -455,9 +474,23 @@ fn signed_submit(
     Ok(ramflux_node_core::GatewaySubmitFrame { signed_request, envelope })
 }
 #[tokio::test]
-async fn migrated_home_forward_returns_an_explicit_nack_and_keeps_heartbeat_on_the_same_stream()
+async fn migrated_home_forward_returns_a_typed_ack_and_keeps_heartbeat_on_the_same_stream()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(false, false, "forwarded_home_node_migrated").await
+    submit_after_recipient_ack("migrated-typed", false, false, "forwarded_home_node_migrated", true)
+        .await
+}
+
+#[tokio::test]
+async fn migrated_home_forward_keeps_the_legacy_nack_for_an_older_client()
+-> Result<(), Box<dyn std::error::Error>> {
+    submit_after_recipient_ack(
+        "migrated-legacy",
+        false,
+        false,
+        "forwarded_home_node_migrated",
+        false,
+    )
+    .await
 }
 async fn submit_then_heartbeat(
     context: &crate::GatewayQuicContext,

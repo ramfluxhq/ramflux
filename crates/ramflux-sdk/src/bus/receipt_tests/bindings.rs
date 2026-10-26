@@ -49,6 +49,7 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
         .await?;
     message.encrypted_body = serde_json::to_vec(&sealed)?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: b.device.clone(),
         envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,

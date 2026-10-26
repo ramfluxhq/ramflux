@@ -275,6 +275,8 @@ impl GatewaySessionEngine {
             envelope,
         };
         let expected_envelope_id = submit.envelope.envelope_id.clone();
+        let expected_target_delivery_id = submit.envelope.target_delivery_id.clone();
+        let submitted_envelope = submit.envelope.clone();
         write_gateway_client_frame(&mut *self.stream, &GatewayClientFrame::Submit { submit })
             .await?;
         loop {
@@ -288,7 +290,32 @@ impl GatewaySessionEngine {
                     self.pending_deliveries.push_back(entry);
                 }
                 GatewayServerFrame::InBandWake { .. } => {}
+                GatewayServerFrame::ForwardAck { ack }
+                    if ack.envelope_id == expected_envelope_id
+                        && ack.target_delivery_id == expected_target_delivery_id =>
+                {
+                    return Ok(GatewayInboxEntry {
+                        forwarded: true,
+                        inbox_seq: ack.inbox_seq.unwrap_or(0),
+                        target_delivery_id: ack.target_delivery_id,
+                        envelope: submitted_envelope,
+                    });
+                }
+                GatewayServerFrame::ForwardAck { ack } => {
+                    return Err(SdkError::GatewaySessionRejected(format!(
+                        "forward acknowledgement mismatch for envelope {} target {}",
+                        ack.envelope_id, ack.target_delivery_id
+                    )));
+                }
                 GatewayServerFrame::Nack { reason } => {
+                    if reason == ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON {
+                        return Ok(GatewayInboxEntry {
+                            forwarded: true,
+                            inbox_seq: 0,
+                            target_delivery_id: expected_target_delivery_id,
+                            envelope: submitted_envelope,
+                        });
+                    }
                     return Err(SdkError::GatewaySessionRejected(reason));
                 }
                 other => {

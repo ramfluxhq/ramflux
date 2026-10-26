@@ -280,6 +280,7 @@ async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_be
             ciphertext,
         })?;
         let entry = GatewayInboxEntry {
+            forwarded: false,
             inbox_seq: 1,
             target_delivery_id: "bob".into(),
             envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
@@ -355,6 +356,7 @@ async fn valid_delivery_after_rejected_control(
         ciphertext: session.encrypt(b"after rejected control", dm_associated_data("history"))?,
     })?;
     let next = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 2,
         target_delivery_id: "bob".into(),
         envelope: gateway_direct_message_envelope(&a.config()?, &next, None)?,
@@ -403,6 +405,7 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
         ciphertext,
     })?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".into(),
         envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,

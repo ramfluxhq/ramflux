@@ -235,6 +235,7 @@ impl RamfluxClient {
                 // same-root source, target and encrypted snapshot. It forwards that authenticated
                 // provenance into the normal surface control guard; it grants no peer authority.
                 let entry = GatewayInboxEntry {
+                    forwarded: false,
                     inbox_seq: 0,
                     target_delivery_id: envelope.target_device_id.clone(),
                     envelope: ramflux_protocol::Envelope {

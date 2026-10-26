@@ -51,6 +51,7 @@ fn bootstrap(
     )?;
     msg.encrypted_body = serde_json::to_vec(&sealed)?;
     Ok(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: receiver.id.clone(),
         envelope: gateway_direct_message_envelope(&sender.config()?, &msg, None)?,
@@ -311,6 +312,7 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
             .encrypt(&serde_json::to_vec(&event)?, dm_associated_data(&conversation))?,
     })?;
     let entry = GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".to_owned(),
         envelope: gateway_direct_message_envelope(&alice.config()?, &msg, None)?,

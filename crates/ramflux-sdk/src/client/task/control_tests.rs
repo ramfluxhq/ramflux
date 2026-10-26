@@ -5,6 +5,7 @@
 use super::*;
 fn entry(principal: &str, device: &str) -> crate::GatewayInboxEntry {
     crate::GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "target".into(),
         envelope: ramflux_protocol::Envelope {

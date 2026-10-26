@@ -48,6 +48,7 @@ fn runtime() -> anyhow::Result<GatewaySessionRuntime> {
         target_delivery_id: "target".into(),
         branch_public_key: ramflux_crypto::public_key_base64url_from_seed([2; 32]),
         device_epoch: 1,
+        supports_forward_ack: false,
     })
 }
 #[tokio::test]

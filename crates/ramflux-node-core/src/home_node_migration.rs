@@ -73,6 +73,9 @@ pub struct HomeNodeMigrationForwardDelivery {
     pub new_home_node_hint: String,
     pub route: HomeNodeRouteRecord,
     pub delivery: crate::EnvelopeSubmitResponse,
+    /// True when this result acknowledges a retry whose replay key was already present.
+    #[serde(default)]
+    pub replayed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

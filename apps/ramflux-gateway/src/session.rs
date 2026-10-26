@@ -464,7 +464,16 @@ pub(crate) async fn establish_gateway_session(
         target_delivery_id: open.target_delivery_id.clone(),
         branch_public_key: registered_auth_key.branch_public_key,
         device_epoch: registered_auth_key.device_epoch,
+        supports_forward_ack: auth_supports_forward_ack(auth_frame),
     })
+}
+
+fn auth_supports_forward_ack(auth_frame: &ramflux_node_core::GatewayAuthFrame) -> bool {
+    auth_frame
+        .device_proof
+        .capability_scope
+        .iter()
+        .any(|capability| capability == ramflux_protocol::GATEWAY_FORWARD_ACK_CAPABILITY)
 }
 
 fn gateway_session_id_for_open(
@@ -1069,14 +1078,31 @@ pub(crate) async fn handle_gateway_submit(
     );
     let response: ramflux_node_core::EnvelopeSubmitResponse =
         router_post_json_async(&context.router, "/mvp0/envelope", &envelope).await?;
-    if response.outcome.starts_with("rejected_")
-        || response.outcome == "forwarded_home_node_migrated"
-    {
+    if response.outcome.starts_with("rejected_") {
         write_gateway_handle(
             send,
             &ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() },
         )
         .await?;
+        return Ok(());
+    }
+    if response.outcome == ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON {
+        anyhow::ensure!(
+            response.target_delivery_id == envelope.target_delivery_id,
+            "forward acknowledgement target does not match submitted envelope"
+        );
+        let frame = if runtime.supports_forward_ack {
+            ramflux_node_core::GatewayServerFrame::ForwardAck {
+                ack: ramflux_node_core::GatewayForwardAck {
+                    envelope_id: envelope.envelope_id.clone(),
+                    target_delivery_id: response.target_delivery_id.clone(),
+                    inbox_seq: response.inbox_seq,
+                },
+            }
+        } else {
+            ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() }
+        };
+        write_gateway_handle(send, &frame).await?;
         return Ok(());
     }
     // The router response confirms the durable submit. A recipient can ACK and remove its
@@ -1619,7 +1645,8 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_franking_node_tag, fresh_gateway_session_id, own_device_fanout_session_rejection,
+        attach_franking_node_tag, auth_supports_forward_ack, fresh_gateway_session_id,
+        own_device_fanout_session_rejection,
     };
     // T22-A1 / RQ-04: v2 relay-token issuance test helpers, compiled only under itest-local-mint.
     #[cfg(feature = "itest-local-mint")]
@@ -1638,6 +1665,32 @@ mod tests {
         assert!(second.starts_with("s1_device_test_"));
         assert_ne!(first, second);
         assert!(first.rsplit_once('_').is_some_and(|(_prefix, nonce)| !nonce.is_empty()));
+        Ok(())
+    }
+
+    #[test]
+    fn forward_ack_capability_comes_from_the_signed_device_proof() -> anyhow::Result<()> {
+        let mut auth: ramflux_node_core::GatewayAuthFrame = serde_json::from_value(
+            serde_json::json!({
+                "signed_request": {
+                    "schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1",
+                    "signing_key_id":"device","signature_alg":"ed25519","signature":"fixture",
+                    "source_device_id":"device","request_id":"open","method":"POST","path":"/gateway/open",
+                    "device_proof_hash":"hash","body_hash":"hash","nonce":"nonce","created_at":1,"expires_at":2
+                },
+                "device_proof": {
+                    "schema":"ramflux.device_proof.v1","version":1,"domain":"ramflux.device_proof.v1",
+                    "signing_key_id":"device","signature_alg":"ed25519","signature":"fixture",
+                    "principal_id":"principal","device_id":"device","device_epoch":1,
+                    "branch_proof_hash":"hash","capability_scope":[],"nonce":"nonce","expires_at":2
+                }
+            }),
+        )?;
+        assert!(!auth_supports_forward_ack(&auth));
+        auth.device_proof
+            .capability_scope
+            .push(ramflux_protocol::GATEWAY_FORWARD_ACK_CAPABILITY.into());
+        assert!(auth_supports_forward_ack(&auth));
         Ok(())
     }
 
@@ -1710,6 +1763,7 @@ mod tests {
             target_delivery_id: "target_a".to_owned(),
             branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
             device_epoch: 1,
+            supports_forward_ack: false,
         };
         let mut fanout = ramflux_node_core::GatewayOwnDeviceFanoutFrame {
             signed_request: test_signed_request("device_a"),
@@ -1999,6 +2053,7 @@ mod tests {
             branch_public_key: ramflux_protocol::encode_base64url(
                 branch.signing_key.verifying_key().to_bytes(),
             ),
+            supports_forward_ack: false,
         })
     }
 

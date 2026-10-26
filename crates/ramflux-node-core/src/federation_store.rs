@@ -469,6 +469,61 @@ impl FederationRedbStore {
         Ok(accepted)
     }
 
+    /// Removes a provisional inbound replay record after local delivery did not commit.
+    ///
+    /// # Errors
+    /// Returns an error when the replay projection cannot be updated.
+    pub fn release_inbound_forward(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        request: &crate::FederatedEnvelopeForwardRequest,
+    ) -> Result<(), NodeCoreError> {
+        let seen_key = federated_forward_replay_key(source, request);
+        let write_txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        {
+            let mut table = write_txn
+                .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            table
+                .remove(seen_key.as_str())
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        }
+        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))
+    }
+
+    /// Delivers an inbound forward once and retains its replay record only after router commit.
+    ///
+    /// `Ok(None)` means a previously committed forward was deduplicated.
+    ///
+    /// # Errors
+    /// Returns an error when replay state or local router delivery fails.
+    pub fn deliver_inbound_forward_once<F>(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        request: &crate::FederatedEnvelopeForwardRequest,
+        now: u64,
+        deliver: F,
+    ) -> Result<Option<crate::EnvelopeSubmitResponse>, NodeCoreError>
+    where
+        F: FnOnce() -> Result<crate::EnvelopeSubmitResponse, NodeCoreError>,
+    {
+        if !self.accept_inbound_forward_once(source, request, now)? {
+            return Ok(None);
+        }
+        let delivery = match deliver() {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                self.release_inbound_forward(source, request)?;
+                return Err(error);
+            }
+        };
+        if !matches!(delivery.outcome.as_str(), "online" | "offline_queued") {
+            self.release_inbound_forward(source, request)?;
+        }
+        Ok(Some(delivery))
+    }
+
     fn expired_inbound_forward_keys(&self, now: u64) -> Result<Vec<String>, NodeCoreError> {
         let read_txn =
             self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;

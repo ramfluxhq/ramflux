@@ -184,7 +184,10 @@ impl GatewaySessionConfig {
             device_branch: None,
             source_identity: None,
             target_delivery_id: parts.target_delivery_id,
-            capability_scope: vec!["gateway.session".to_owned()],
+            capability_scope: vec![
+                "gateway.session".to_owned(),
+                ramflux_protocol::GATEWAY_FORWARD_ACK_CAPABILITY.to_owned(),
+            ],
             auth_expires_at: now.saturating_add(GATEWAY_SESSION_AUTH_TTL_SECONDS),
             now,
             timeout: Duration::from_secs(10),
@@ -398,6 +401,14 @@ pub struct GatewaySessionEstablishedFrame {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayForwardAck {
+    pub envelope_id: String,
+    pub target_delivery_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
     PushRouteRegister { request: Box<super::GatewayPushRouteFrame> },
@@ -447,6 +458,9 @@ pub enum GatewayServerFrame {
     },
     Deliver {
         entry: GatewayInboxEntry,
+    },
+    ForwardAck {
+        ack: GatewayForwardAck,
     },
     OwnDeviceFanout {
         response: GatewayOwnDeviceFanoutResponse,
@@ -502,9 +516,17 @@ pub enum GatewayServerFrame {
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct GatewayInboxEntry {
+    /// True when the old home accepted this submit by forwarding it to the new home.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forwarded: bool,
     pub inbox_seq: u64,
     pub target_delivery_id: String,
     pub envelope: ramflux_protocol::Envelope,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]

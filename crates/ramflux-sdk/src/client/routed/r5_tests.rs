@@ -51,6 +51,7 @@ pub(super) fn fresh(
     )?;
     msg.encrypted_body = serde_json::to_vec(&encrypted)?;
     Ok(GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: receiver.id.clone(),
         envelope: gateway_direct_message_envelope(&sender.config()?, &msg, None)?,
@@ -164,6 +165,7 @@ impl ramflux_transport::GatewaySessionFrameSink for ResetWire {
                 },
                 GatewayClientFrame::Submit { submit } => {
                     let entry = GatewayInboxEntry {
+                        forwarded: false,
                         inbox_seq: 2,
                         target_delivery_id: "alice".to_owned(),
                         envelope: submit.envelope,

@@ -101,6 +101,7 @@ pub(super) fn entry(
         ttl: 600,
     };
     Ok(crate::GatewayInboxEntry {
+        forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "test-target".into(),
         envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,

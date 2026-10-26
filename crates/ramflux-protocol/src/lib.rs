@@ -103,6 +103,10 @@ pub const fn crate_name() -> &'static str {
 
 /// Existing gateway rejection used by read-only pre-account probes.
 pub const GATEWAY_FIRST_FRAME_NACK_REASON: &str = "first gateway frame must be open";
+/// Device-proof capability requesting a typed acknowledgement for a submit forwarded to a new home.
+pub const GATEWAY_FORWARD_ACK_CAPABILITY: &str = "gateway.forward_ack";
+/// Legacy submit response emitted to clients that do not request typed forward acknowledgements.
+pub const GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON: &str = "forwarded_home_node_migrated";
 
 pub mod principal_directory;
 pub use principal_directory::{

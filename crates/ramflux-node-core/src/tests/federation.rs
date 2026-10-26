@@ -128,6 +128,65 @@ fn federation_redb_store_dedups_inbound_forward_replay_persistently()
 }
 
 #[test]
+fn inbound_forward_seen_record_survives_only_a_real_router_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("inbound_forward_seen_record_survives_only_a_real_router_commit")?;
+    let store = FederationRedbStore::open(&path)?;
+    let mut forward = federation_forward_request("env_inbound_commit", "target_inbound_commit");
+    forward.envelope = forwarded_source_envelope(forward.envelope)?;
+    let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
+    let now = 1_760_000_010;
+
+    let failed = store.deliver_inbound_forward_once(&source, &forward, now, || {
+        Err(NodeCoreError::ItestHttp("router unavailable".into()))
+    });
+    assert!(failed.is_err());
+    let rejected = store
+        .deliver_inbound_forward_once(&source, &forward, now + 1, || {
+            Ok(EnvelopeSubmitResponse {
+                outcome: "rejected_capacity".into(),
+                target_delivery_id: forward.envelope.target_delivery_id.clone(),
+                inbox_seq: None,
+                cursor: None,
+                nack: None,
+            })
+        })?
+        .ok_or("rejected delivery was incorrectly deduplicated")?;
+    assert_eq!(rejected.outcome, "rejected_capacity");
+
+    let router = RouterCore::new();
+    let committed = store
+        .deliver_inbound_forward_once(&source, &forward, now + 2, || {
+            match router.submit_envelope_at(
+                &source,
+                forward.envelope.clone(),
+                i64::try_from(now + 2).unwrap_or(i64::MAX),
+            ) {
+                RouterSubmitOutcome::OfflineQueued(queued) => Ok(EnvelopeSubmitResponse {
+                    outcome: "offline_queued".into(),
+                    target_delivery_id: queued.entry.target_delivery_id,
+                    inbox_seq: Some(queued.entry.inbox_seq),
+                    cursor: None,
+                    nack: None,
+                }),
+                other => {
+                    Err(NodeCoreError::ItestHttp(format!("unexpected router outcome: {other:?}")))
+                }
+            }
+        })?
+        .ok_or("committed delivery was incorrectly deduplicated")?;
+    assert_eq!(committed.outcome, "offline_queued");
+    assert_eq!(router.resume("target_inbound_commit", 0, 10).len(), 1);
+
+    let duplicate = store.deliver_inbound_forward_once(&source, &forward, now + 3, || {
+        Err(NodeCoreError::ItestHttp("duplicate must not reach router".into()))
+    })?;
+    assert!(duplicate.is_none());
+    assert_eq!(router.resume("target_inbound_commit", 0, 10).len(), 1);
+    Ok(())
+}
+
+#[test]
 fn federation_discovery_verifies_well_known_and_rejects_pin_hijack()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut state = FederationTrustState::new();

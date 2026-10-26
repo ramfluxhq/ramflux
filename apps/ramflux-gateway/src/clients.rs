@@ -1201,7 +1201,7 @@ pub(crate) mod tests {
     }
 
     fn temp_cert_root_at(name: &str, nanos: u128) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        for _ in 0..16 {
+        for _ in 0..32 {
             let sequence =
                 TEMP_CERT_ROOT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
