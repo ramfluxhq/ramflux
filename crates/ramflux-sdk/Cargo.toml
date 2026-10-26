@@ -74,6 +74,7 @@ zeroize = { version = "1.8", features = ["serde"] }
 [dev-dependencies]
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
+tokio = { version = "1.42", features = ["test-util"] }
 
 [build-dependencies]
 cbindgen = "0.29.3"

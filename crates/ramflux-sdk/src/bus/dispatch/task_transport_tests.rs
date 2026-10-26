@@ -9,6 +9,20 @@ use super::super::surface_transport::{
 use super::*;
 use crate::bus::runtime_tests;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+
+#[tokio::test(start_paused = true)]
+async fn confirmation_preparation_allows_slow_verified_directory_refresh() {
+    let result = super::await_preparation(
+        async {
+            tokio::time::sleep(Duration::from_millis(1_250)).await;
+            Ok::<_, SdkError>(())
+        },
+        "task confirmation preparation deferred",
+    )
+    .await;
+    assert!(result.is_ok(), "a slow verified directory refresh must remain deliverable");
+}
+
 #[tokio::test]
 async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
 -> Result<(), Box<dyn std::error::Error>> {

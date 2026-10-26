@@ -6,6 +6,21 @@ use crate::bus::task_delivery::{Delivery as SealedDelivery, Destination};
 use crate::client::task::{Delivery, carrier::Carrier, invalid};
 use crate::prelude::*;
 use serde_json::{Value, json};
+use std::future::Future;
+
+// Preparation refreshes verified own and peer directories before sealing. Keep
+// task couriers bounded while allowing normal latency on CPU-constrained hosts.
+const TASK_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(super) async fn await_preparation<T>(
+    future: impl Future<Output = Result<T, SdkError>>,
+    deferred: &'static str,
+) -> Result<T, SdkError> {
+    tokio::time::timeout(TASK_PREPARATION_TIMEOUT, future)
+        .await
+        .map_err(|_| SdkError::InboundPending(deferred.into()))?
+}
+
 #[derive(Clone)]
 pub(super) struct Target {
     pub device: String,
@@ -363,14 +378,13 @@ pub(super) async fn send_control(
         .client_record("conversation", &c.conversation_id)?
         .ok_or_else(|| invalid("task conversation missing"))?;
     let mut engine = account.take_live_engine().await?;
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
+    let result = await_preparation(
         prepare(account, &mut engine, c, &thread, mode),
+        "task confirmation preparation deferred",
     )
     .await;
     account.put_engine(engine);
-    let deliveries = result
-        .map_err(|_| SdkError::InboundPending("task confirmation preparation deferred".into()))??;
+    let deliveries = result?;
     super::super::task_delivery::submit_until(
         account,
         deliveries,
