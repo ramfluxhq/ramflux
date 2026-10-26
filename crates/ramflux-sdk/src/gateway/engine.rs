@@ -15,6 +15,8 @@ pub struct GatewaySessionEngine {
     pub(crate) pending_deliveries: VecDeque<GatewayInboxEntry>,
     pub(crate) push_route_expires_at: Option<u64>,
     pub(crate) pending_push_route: Option<super::push_route::PendingPushRoute>,
+    /// Frames read while waiting for a push route answer, returned to the next reader.
+    pub(crate) deferred_frames: VecDeque<GatewayServerFrame>,
 }
 
 enum GatewaySessionClientTransport {
@@ -171,6 +173,7 @@ impl GatewaySessionEngine {
             pending_deliveries: VecDeque::new(),
             push_route_expires_at: None,
             pending_push_route: None,
+            deferred_frames: VecDeque::new(),
         };
         engine.remember_session_for_resume();
         Ok(engine)
@@ -196,6 +199,7 @@ impl GatewaySessionEngine {
             pending_deliveries: VecDeque::new(),
             push_route_expires_at: None,
             pending_push_route: None,
+            deferred_frames: VecDeque::new(),
         }
     }
 
@@ -670,6 +674,9 @@ impl GatewaySessionEngine {
         &mut self,
         operation: &'static str,
     ) -> Result<GatewayServerFrame, SdkError> {
+        if let Some(frame) = self.deferred_frames.pop_front() {
+            return Ok(frame);
+        }
         gateway_session_timeout(operation, async {
             read_gateway_server_frame(&mut *self.stream).await
         })

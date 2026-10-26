@@ -94,6 +94,10 @@ pub struct GatewaySessionConfig {
     pub max_inflight_upstream: u32,
     /// Push route registered on every authenticated (re)connect; `None` disables push.
     pub push_route: Option<super::GatewayPushRouteRegistration>,
+    /// A cleared route whose deregistration the node has not yet confirmed.
+    pub push_route_clear_pending: bool,
+    /// Push route retry and backoff state; survives reconnects with the config.
+    pub push_route_retry: super::PushRouteRetry,
 }
 
 impl GatewaySessionConfig {
@@ -190,6 +194,8 @@ impl GatewaySessionConfig {
             max_inflight_downstream: 64,
             max_inflight_upstream: 64,
             push_route: None,
+            push_route_clear_pending: false,
+            push_route_retry: super::PushRouteRetry::default(),
         }
     }
 
@@ -407,6 +413,8 @@ pub enum GatewayServerFrame {
     PushRouteRefused {
         request_id: String,
         reason: String,
+        #[serde(default)]
+        code: super::GatewayPushRouteRefusal,
     },
     PushRouteDeregistered {
         request_id: String,

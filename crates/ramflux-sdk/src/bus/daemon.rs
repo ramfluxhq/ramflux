@@ -170,7 +170,9 @@ async fn restore_local_bus_account_impl(
     if let Some(addr) = manifest.node_tcp_addr {
         gateway = gateway.with_tcp_gateway_addr(addr);
     }
-    gateway.push_route = crate::bus::dispatch::device::stored_push_route(&client)?;
+    let stored_push = crate::bus::dispatch::device::stored_push_route(&client)?;
+    gateway.push_route = stored_push.registration;
+    gateway.push_route_clear_pending = stored_push.clear_pending;
     let mut account =
         LocalBusAccountState::disconnected(client, gateway, manifest.principal_commitment.clone());
     account.activation_pending = manifest.activation_pending;

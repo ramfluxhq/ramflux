@@ -47,18 +47,33 @@ struct LocalBusPushRouteSetRequest {
     registration: Option<GatewayPushRouteRegistration>,
 }
 
-/// Restores the persisted push route so every reconnect re-registers it.
-pub(crate) fn stored_push_route(
-    client: &RamfluxClient,
-) -> Result<Option<GatewayPushRouteRegistration>, SdkError> {
+/// Checkpoint value for a cleared route whose deregistration is not yet confirmed.
+const PUSH_ROUTE_CLEAR_PENDING: &str = "{\"deregister_pending\":true}";
+
+/// Persisted push route state restored into the gateway config at startup.
+pub(crate) struct StoredPushRoute {
+    pub(crate) registration: Option<GatewayPushRouteRegistration>,
+    pub(crate) clear_pending: bool,
+}
+
+/// Restores the persisted push route so every reconnect re-registers it, or so an
+/// unconfirmed deregistration is retried.
+pub(crate) fn stored_push_route(client: &RamfluxClient) -> Result<StoredPushRoute, SdkError> {
     Ok(match client.projection_checkpoint(PUSH_ROUTE_CHECKPOINT)? {
-        Some(value) if !value.is_empty() => Some(serde_json::from_str(&value)?),
-        _ => None,
+        Some(value) if value == PUSH_ROUTE_CLEAR_PENDING => {
+            StoredPushRoute { registration: None, clear_pending: true }
+        }
+        Some(value) if !value.is_empty() => StoredPushRoute {
+            registration: Some(serde_json::from_str(&value)?),
+            clear_pending: false,
+        },
+        _ => StoredPushRoute { registration: None, clear_pending: false },
     })
 }
 
 /// Sets the push route after a token change and registers it now, or clears it and deletes
-/// the node route; reconnects and liveness checks re-register and renew a set route.
+/// the node route; reconnects and liveness checks re-register and renew a set route, and keep
+/// retrying an unconfirmed deregistration with backoff.
 async fn dispatch_push_route_set(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -66,16 +81,26 @@ async fn dispatch_push_route_set(
     let body: LocalBusPushRouteSetRequest = serde_json::from_value(request.body.clone())?;
     let account_id = request_account_id(request)?.to_owned();
     let account = local_bus_account_mut(state, &account_id)?;
-    let stored = body.registration.as_ref().map(serde_json::to_string).transpose()?;
-    account
-        .client
-        .set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, stored.as_deref().unwrap_or(""))?;
-    account.gateway_config.push_route.clone_from(&body.registration);
-    account.ensure_gateway_live().await?;
     let cleared = body.registration.is_none();
+    let stored = match &body.registration {
+        Some(registration) => serde_json::to_string(registration)?,
+        None => PUSH_ROUTE_CLEAR_PENDING.to_owned(),
+    };
+    account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, &stored)?;
+    // Update the live engine before any liveness check, so it can never re-send the old route.
+    for config in std::iter::once(&mut account.gateway_config)
+        .chain(account.engine.as_mut().map(|engine| &mut engine.config))
+    {
+        config.push_route.clone_from(&body.registration);
+        config.push_route_clear_pending = cleared;
+    }
+    account.ensure_gateway_live().await?;
     let engine = account.engine.as_mut().ok_or(SdkError::GatewaySessionNotEstablished)?;
     // A null route sends an explicit deregistration, so the node stops waking the old token.
     let expires_at = engine.set_push_route(body.registration).await?;
+    if cleared {
+        account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, "")?;
+    }
     Ok(local_bus_ok(serde_json::json!({
         "registered": expires_at.is_some(),
         "deregistered": cleared,

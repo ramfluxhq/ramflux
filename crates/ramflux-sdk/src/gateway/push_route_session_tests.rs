@@ -21,6 +21,10 @@ struct SlowPushGateway {
     outbox: VecDeque<serde_json::Value>,
     held_reply: Option<serde_json::Value>,
     blackhole: bool,
+    /// Answer every registration at once with this refusal code.
+    refuse: Option<&'static str>,
+    /// Send a drain frame before answering a registration.
+    drain_first: bool,
     registrations: Arc<Mutex<usize>>,
     waker: Option<std::task::Waker>,
 }
@@ -31,9 +35,23 @@ impl GatewaySessionFrameSink for SlowPushGateway {
             let frame: serde_json::Value = serde_json::from_slice(frame)
                 .map_err(|error| TransportError::Quic(error.to_string()))?;
             match frame["frame_type"].as_str() {
-                Some("push_route_register") => {
+                Some("push_route_register" | "push_route_deregister") => {
                     *self.registrations.lock().expect("lock") += 1;
-                    if !self.blackhole {
+                    let id = frame["request"]["signed_request"]["request_id"].clone();
+                    if let Some(code) = self.refuse {
+                        self.outbox.push_back(serde_json::json!({
+                            "frame_type": "push_route_refused", "request_id": id,
+                            "reason": "refused", "code": code,
+                        }));
+                    } else if self.drain_first {
+                        self.outbox.push_back(serde_json::json!({
+                            "frame_type": "drain", "session_id": "test-session", "reason": "restart",
+                        }));
+                        self.outbox.push_back(serde_json::json!({
+                            "frame_type": "push_route_registered", "expires_at": 4_000_000_000_u64,
+                            "request_id": id,
+                        }));
+                    } else if !self.blackhole {
                         self.held_reply = Some(serde_json::json!({
                             "frame_type": "push_route_registered",
                             "expires_at": 4_000_000_000_u64,
@@ -78,6 +96,14 @@ impl GatewaySessionFrameSource for SlowPushGateway {
 }
 
 fn engine(blackhole: bool) -> (GatewaySessionEngine, Arc<Mutex<usize>>) {
+    engine_with(blackhole, None, false)
+}
+
+pub(super) fn engine_with(
+    blackhole: bool,
+    refuse: Option<&'static str>,
+    drain_first: bool,
+) -> (GatewaySessionEngine, Arc<Mutex<usize>>) {
     let root = ramflux_crypto::create_identity_root("principal_slow_push", [0x95; 32]);
     let branch =
         ramflux_crypto::create_device_branch("principal_slow_push", "device_slow", 1, [11_u8; 32]);
@@ -105,6 +131,8 @@ fn engine(blackhole: bool) -> (GatewaySessionEngine, Arc<Mutex<usize>>) {
         outbox: VecDeque::new(),
         held_reply: None,
         blackhole,
+        refuse,
+        drain_first,
         registrations: Arc::clone(&registrations),
         waker: None,
     };
@@ -136,4 +164,26 @@ async fn late_registration_reply_is_matched_and_never_read_as_a_heartbeat() {
     // The gateway answers the registration only now, just before the heartbeat reply.
     engine.heartbeat().await.expect("a late registration reply must not fail the heartbeat");
     assert_eq!(engine.push_route_expires_at, Some(4_000_000_000));
+}
+
+#[tokio::test]
+async fn refused_registration_is_not_resent_on_every_liveness_check() {
+    let (mut engine, registrations) = engine_with(false, Some("unavailable"), false);
+    for _ in 0..20 {
+        engine.ensure_live(0).await.expect("liveness check succeeds");
+    }
+    assert_eq!(
+        *registrations.lock().expect("lock"),
+        1,
+        "a refused registration must back off instead of retrying on every sync tick"
+    );
+}
+
+#[tokio::test]
+async fn a_drain_during_push_route_set_is_kept_for_the_next_reader() {
+    let (mut engine, _registrations) = engine_with(false, None, true);
+    let registration = engine.config.push_route.clone();
+    assert!(engine.set_push_route(registration).await.is_err(), "the drain must end the wait");
+    let error = engine.heartbeat().await.expect_err("the drain is delivered, not dropped");
+    assert!(format!("{error:?}").contains("Drain"), "{error:?}");
 }
