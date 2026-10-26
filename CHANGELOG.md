@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first read when the active-device hash is unchanged; contacts without signed
   authority can still verify synthetic safety material without authenticating a
   kind. Hash or later stamped-authority changes require explicit re-verification.
+- Refine the proposed root-custody design with proxy exporter receipts, bounded
+  revocation deltas, pre-recovery time pins and inherited private group restrictions.
+  These specifications do not enable custody support.
+
 - Newly created group sender-key chains use seed-bound v3 distributions. Upgrade
   every group participant together: older clients cannot import v3 distributions,
   so mixed-version groups can lose delivery after sender-key rotation. Existing

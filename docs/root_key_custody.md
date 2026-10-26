@@ -1,6 +1,6 @@
 # Root key custody
 
-Design revision 4, phase 1. This proposal changes no executable behavior. The
+Design revision 5, phase 1. This proposal changes no executable behavior. The
 inspected product baseline is `eae12fbb197f8bbea21b682686c8548fc1a27958`.
 Current accounts still keep the root seed on each device. Activation requires
 coordinated protocol, verifier, vault, backup and client changes; the guarantees
@@ -248,7 +248,11 @@ and index the committed list: the digest/count alone proves no membership or
 absence. All enrolled ids are checked against recent and compacted revocations,
 which persist across higher ranges, backups and restart; an old device id is
 never reusable. Missing list evidence blocks affected authorization, never means
-"not revoked". The wire spec defines page bounds, retention and supersets.
+"not revoked". The wire spec caps the cumulative list at 65,536 ids / 4 MiB of canonical JCS.
+Existing verifiers fetch predecessor-linked additions and re-hash locally against
+the verified index; first observers fetch the bounded full list. Overflow requires
+fresh user-started master re-attestation, never truncation, a cap bypass or denial
+reset; if no bounded replacement exists, affected authority changes stay blocked.
 
 For new online operations, refresh verified authority at most five minutes apart;
 no older cached fallback after a required refresh fails. Pins dominate cache
@@ -265,7 +269,11 @@ Backdating alone does not authorize a new send; current revocation still applies
 For a clock rollback, re-establish logical trusted time using fresh authenticated,
 challenge-bound samples from at least two independent sources: the own home node
 and an independently operated federated node or relay time-probe receipt, agreeing
-within ±300 seconds. Different hostnames of one operator do not count twice.
+within ±300 seconds. The second node must have an independent federation/contact
+pin or authenticated shipped-bootstrap pin from before recovery started. Freeze
+pin provenance in the recovery journal; a home-introduced node in that recovery
+is ineligible, including after a restart that merely reuses its learned key.
+Different hostnames of one operator do not count twice.
 Alternatively the user explicitly confirms the displayed/corrected time with a
 visible expiry-risk warning. A journaled new local time generation may replace a
 wrongly future time floor; it never lowers identity/mode/epoch/revocation pins.
@@ -411,7 +419,9 @@ Base mode without a signed sender binding would allow anyone to encrypt a forged
 handover. The wire spec fixes `info`, `aad`, the 1 MiB payload and replay journal.
 Use one Seal/Open at sequence zero, then destroy the context. Require RFC 9180
 suite vectors and application binding vectors before implementation acceptance.
-The payload carries pending invitations/journal, delegation state, pending erasure
+The payload carries pending invitations/journal, delegation state, an encrypted
+summary of every known group restriction/revocation (including old-primary floors
+from earlier ranges), pending erasure
 state and explicitly selected optional data keys; no phrase, master, self-signing
 secret or vault unlock credential travels. The destination creates its certificate
 locally. HPKE does not itself approve enrollment or prevent replay.
@@ -538,8 +548,13 @@ The grant count scales with secondaries, not groups × secondaries.
 
 Any narrower group-specific delegation/restriction and its revocation travel only
 inside that group's authenticated encrypted control channel. They cannot widen
-or outlive the current account grant. A delegate cannot remove a primary-signed
-restriction from group state to regain broader permissions. No subdelegation.
+or outlive the current account grant as positive authority. Old-primary signed
+restrictions and revocations remain binding denial floors across range changes
+and grant expiry until the current primary explicitly replaces them, referencing
+the old control hash. Retained historical certificates authenticate these floors
+without granting old keys current powers. A delegate cannot remove a restriction
+from group state to regain broader permissions. Handover lists the floors; absent
+private evidence blocks affected group mutations until reconciliation. No subdelegation.
 Ownership transfer remains primary-only and retains the existing fresh creator-head check, transferee
 countersign and sticky removals. A new group wire version verifies the account
 chain and encrypted restrictions, independent source authentication, complete-state
@@ -613,14 +628,21 @@ crash/uncertain ACK; an unavailable phrase leaves that agent waiting, not silent
 rebound to the human master. Fresh same-root branch recertification and revocation
 of old service authority follow each new range. Service daemons cannot bypass it.
 
-Direct TLS exporter binding requires TLS/QUIC termination at the verifying service.
-Behind a TLS-terminating proxy, use only an authenticated receiving-home relay
-receipt for channel evidence, with the same branch signature, nonce, audience and
-current-authority checks. Receipt keys are published/rotated with overlap in the
-node's signed identity record, verified against its existing node/federation pin;
-ordinary rotation preserves historical queued receipts, compromise revocation
-fences unconsumed evidence. A sender-selected relay or forwarded TLS header is
-not a trust anchor. The wire spec defines record/key retention and proxy mode.
+The client always signs the hash of its own TLS exporter into the branch proof.
+With direct TLS/QUIC termination the verifier compares its own exporter hash.
+Behind a TLS-terminating proxy, that proxy must be operated by the receiving node
+and use a dedicated node-authorized proxy key published in the signed node record.
+It observes the client-facing exporter itself and countersigns a receipt containing
+its hash; the verifier requires equality with the proof binding, exact proof hash,
+nonce and audience. A receipt that merely repeats signed proof fields is insufficient.
+Proxy keys rotate through the signed node record with overlap and historical key
+retention; current compromise revocations dominate unconsumed evidence. A sender
+relay or forwarded header cannot establish channel evidence. Deployments unable
+to provide this require explicit, off-by-default `no_channel_binding` in the node
+record and separate client opt-in, with visible status and a persistent client
+security-log entry per connection. The client still supplies its own exporter hash,
+but this mode lacks verified channel binding; no failure silently enables it.
+The wire spec defines the exact fields, key roles and planned negative vectors.
 
 Desktop security shows account fingerprint, primary/custodian, vault class,
 verified devices, pending erasures, phrase setup, branch/delegation expiry and
@@ -725,3 +747,8 @@ Reserve realnet slices `custody01_pairing_and_primary_offline`,
 Run them with existing identity/proof-renewal, sibling restore, group convergence,
 agent, call and full-backup slices. These are implementation acceptance plans;
 phase 1 supplies only this design and its review report.
+
+Revision 5 keeps the legacy public binding **pending owner confirmation**. Channel
+binding, bounded revocation deltas, pre-recovery time pins and inherited private
+group floors above are design requirements; their future vectors do not imply
+implemented or audited custody support.

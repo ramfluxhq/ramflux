@@ -2,11 +2,10 @@
 
 # Root key custody wire specification
 
-Design revision 4, proposed normative stage-1 specification. This document and
+Design revision 5, proposed normative stage-1 specification. This document and
 [root key custody](root_key_custody.md) describe future behaviour, not executable
 support. Independent wire review and published interoperability vectors are
-required before stage 2b. The legacy binding remains a proposal awaiting owner
-confirmation. The controller has approved epoch ranges with the r3 amendments below; exact wire formats and
+required before stage 2b. The legacy binding remains a proposal **pending owner confirmation**. The controller has approved epoch ranges with the r3 amendments below; exact wire formats and
 vectors still require independent review. No migration writer may ship on the
 assumption that the legacy-binding proposal has been approved.
 
@@ -105,7 +104,7 @@ one constant and spelling: `ramflux.identity.pairing_transcript.v1`.
 | `CUSTODY_TRANSFER_HPKE` | `ramflux.identity.transfer.hpke.v1` | schema: HPKE transfer envelope |
 | `CUSTODY_TRANSFER_PAYLOAD` | `ramflux.identity.transfer.payload.v1` | schema: handover payload |
 | `CUSTODY_TRANSFER_HPKE_SUITE` | `ramflux.identity.transfer.hpke_suite.v1` | suite tag: Auth/X25519/HKDF-SHA256/AES-256-GCM |
-| `CUSTODY_BRANCH_EXPORTER` | `ramflux.identity.branch_proof.exporter.v3` | TLS exporter label: direct connections only |
+| `CUSTODY_BRANCH_EXPORTER` | `ramflux.identity.branch_proof.exporter.v3` | TLS exporter label: client-facing connection in every mode |
 | `CUSTODY_REVOKED_LIST` | `ramflux.identity.revoked_devices.list.v1` | BLAKE3: sorted compacted revoked-id list |
 | `CUSTODY_TIME_PROBE` | `ramflux.identity.time_probe.v1` | schema: restricted time-recovery probe |
 
@@ -124,7 +123,9 @@ roster may need renewal/ACK batches, never partial-roster publication. Revocatio
 older than 90 days move into the signed checkpoint below; compacted entries do
 not consume the 1024 roster slots. Revocation knowledge is never discarded to
 make room. Streaming checkpoint-list pages are individually bounded at 64 KiB;
-list verification is resumable with bounded memory and disk-backed membership.
+The cumulative canonical list is capped at 65,536 ids and 4,194,304 bytes;
+predecessor-linked deltas and full reconstruction obey both bounds. List
+verification is resumable with bounded memory and disk-backed membership.
 Reaching an active/recent capacity or byte limit is a typed refusal, not authority
 to erase revocations.
 
@@ -354,23 +355,47 @@ never be reused at a different epoch. The inline removed tombstones must all be
 in the new list, and all previously checkpointed ids must remain. The count is the
 exact array length, never an estimate or a substitute for membership evidence.
 
-A flat sorted-list hash + count is not a membership/non-membership proof. Serve
-the canonical list by hash in bounded resumable pages; the verifier streams the
-whole committed list, checks ordering/uniqueness/count/hash, and builds or updates
-a local disk-backed index. Only then can it deny a member or prove an enrolled id
-absent. Cached verified list bytes/index may be reused by list hash. Missing,
-truncated or budget-interrupted evidence blocks the affected authorization until
-verification resumes; it cannot mean "not revoked". Check both inline tombstones
-and the checkpoint for enrollment, re-enrollment, proofs and operations.
+The cumulative list is capped at **65,536 ids and 4 MiB (4,194,304 bytes)** of
+canonical JCS, including brackets, commas and UTF-8 string encoding. Enforce both
+limits before accepting a checkpoint and during bounded fetch/decoding, with pages
+at most 64 KiB. The 1024 inline-roster cap separately counts active devices and
+recent tombstones; neither budget can be bypassed by moving entries between them.
 
-Retained previous checkpoints/lists let existing verifiers prove the cumulative
-superset; a first observer authenticates the current primary's complete committed
-list but still cannot prove a globally latest head. A certificate/range replacement
-re-signs the checkpoint under the new primary while retaining the cumulative list
-hash/count (and predecessor link). It cannot clear or shrink it. The 1024 roster
-cap counts only active devices and recent tombstones; the external list is not
-subject to that roster-entry cap. No compaction of active or recent entries is
-allowed. Full backup/restore preserves checkpoint/list pins and revocation denial.
+A flat sorted-list hash + count is not a membership/non-membership proof. A first
+observer fetches the bounded complete list, verifies order, uniqueness, count and
+hash, and builds a disk-backed membership index. Existing verifiers fetch only
+additions since their last fully verified checkpoint, following
+`previous_checkpoint_hash`. A delta response has exactly `checkpoint_hash: Hash`,
+`previous_checkpoint_hash: Hash`, `additions: Id[]`; it is a transport hint, not
+independently authoritative. Additions are sorted, unique and disjoint from the
+verified predecessor index. Merge them locally with that index, re-hash the full
+canonical sorted array, and require the signed successor's exact count/list hash.
+Only then atomically advance the verified checkpoint/index. No removals are
+allowed. Empty additions are valid for unchanged-list re-signing. Every successor
+must authenticate under the retained certificate chain and anchor. Delta bytes,
+entries and reconstructed list obey the same caps; interrupted fetches cannot
+advance pins. A skipped link requires its intervening authenticated checkpoints
+and deltas; absent local predecessor evidence requires a bounded full fetch.
+
+Cached verified bytes/index may be reused by list hash. Missing, truncated or
+budget-interrupted evidence blocks affected authorization, never means "not
+revoked". Check inline tombstones and the verified index for enrollment,
+re-enrollment, proofs and operations. Retain previous checkpoints/lists/deltas for
+superset verification. A fresh observer still cannot prove globally latest state.
+Certificate/range replacement re-signs the same cumulative list/hash/count with a
+predecessor link; it cannot clear or shrink it. Backups preserve pins and denials.
+
+A candidate exceeding either cap is rejected with
+`revocation_capacity_requires_master_reattestation`; the account requires a fresh,
+user-started master re-attestation (a master-signed higher-range certificate and
+its authenticated v3 head). Never truncate the list, reuse ids, raise limits
+locally or clear existing denial pins to recover capacity. Re-attestation is
+necessary, not permission to bypass the caps: the replacement must preserve all
+known revocations within the same bounds. If no bounded valid replacement exists,
+authority changes needing that state remain blocked pending protocol review;
+re-attestation alone cannot make an oversized list valid. Last verified history
+remains readable. This finite capacity is an explicit design limit, not an
+unbounded allocation or an automatic identity reset.
 
 `MigrationV3` has exactly `migration_id: B32`, `started_at: Time`,
 `erase_deadline: Time`, `erasure_acks: Envelope<ErasureAck>[]` sorted by device id.
@@ -410,29 +435,51 @@ needs the primary; session proof renewal during a valid lease does not.
 | `certificate_hash`, `record_hash` | `Hash`, exact supplied verified certificate/head |
 | `proof_id`, `challenge_nonce` | Fresh `B32`, one-use challenge issued by the receiving verifier |
 | `audience` | `Id`, exact recipient service identity, never a wildcard |
-| `binding_mode` | `"direct_exporter"` or `"home_relay_receipt"`, as allowed by the receiving deployment |
-| `transport_binding` | `B32` in direct mode; `null` only in authenticated home-relay receipt mode |
+| `binding_mode` | `"direct_exporter"`, `"home_relay_receipt"` or explicit `"no_channel_binding"`; challenge and node record must allow the exact mode |
+| `transport_binding` | `B32`, SHA-256 of the client-facing TLS exporter in every mode; never null |
 | `issued_at`, `expires_at` | `Time`, `0 < expires_at - issued_at <= 300` |
 
 Proof is signed by the certified branch, checked against current authority per
 request, and consumed atomically in the receiver's replay cache through expiry
-plus skew. A retry uses a new challenge and proof id. Direct mode requires TLS
-1.3/QUIC to terminate at the verifying service. Use 32 exporter bytes with label
-`"ramflux.identity.branch_proof.exporter.v3"` and raw challenge nonce as context,
-then SHA-256 those exporter bytes. A WebSocket uses its underlying direct TLS
-connection exporter. Do not use 0-RTT exporters or an exporter from another hop.
+plus skew. A retry uses a new challenge and proof id. In **every mode**, the client
+exports 32 bytes from its own TLS 1.3 connection using label
+`"ramflux.identity.branch_proof.exporter.v3"` and the decoded 32-byte challenge
+nonce as context, then SHA-256 hashes those bytes into `transport_binding`.
+Use the [TLS 1.3 exporter](https://www.rfc-editor.org/rfc/rfc8446.html#section-7.5),
+including for [QUIC](https://www.rfc-editor.org/rfc/rfc9001.html#section-8.1);
+a WebSocket uses its underlying TLS connection. No 0-RTT exporter, null, constant,
+client-supplied substitute or exporter from another hop is allowed. Clients without
+access to their own exporter cannot create this proof, including in the opt-in mode.
 
-With a TLS-terminating proxy, the client/proxy exporter is **not** the proxy/service
-exporter. Use `home_relay_receipt`: the signed proof sets transport_binding null
-and travels with a `RelayAcceptance` for the exact signed proof hash, source,
-challenge and service audience, signed by the receiving service's trusted home
-relay. The proof itself contains no receipt hash, avoiding a circular commitment.
-The signed receipt is the sole channel-evidence mechanism in this proxy mode;
-forwarded TLS headers, network addresses and an arbitrary sender relay cannot
-replace it. Current branch authority, one-use challenge and proof signature are
-still required. The verifier chooses allowed modes; absence of a supported direct
-exporter or trusted receipt fails closed, never falls back to a constant binding.
-Neither TLS nor a receipt freezes authorization for a session's duration.
+In `direct_exporter`, TLS terminates at the verifying service, which independently
+computes the same exporter hash and requires exact equality. The receiver's one-use challenge state
+binds its nonce, audience and selected binding mode; a proof cannot change modes.
+
+In `home_relay_receipt`, the TLS-terminating proxy is operated by the receiving
+node. It holds a dedicated proxy signing key authorized in that node's signed
+identity record. It independently computes the exporter hash on the **client-facing
+connection**, checks equality with the signed proof's `transport_binding`, and
+countersigns a proof-purpose `RelayAcceptance` containing `client_exporter_hash`.
+The verifier checks the node-authorized proxy key, exact signed proof hash, source,
+challenge and service audience, and requires receipt `client_exporter_hash` equal
+to proof `transport_binding`. The proxy-to-service exporter is never substituted.
+Receipt issuance must use the actual live TLS connection context; a forwarded
+header or client-asserted hash cannot supply the proxy's observation. Internal
+transport of that context to a signing service must be authenticated and bind the
+connection, nonce and exact proof. The proof contains no receipt hash, avoiding a
+circular commitment. This model trusts the node-operated proxy to report its TLS
+observation honestly; arbitrary relays and sender-selected proxy keys are ineligible.
+
+`no_channel_binding` is an explicit reduced-protection deployment mode, off by
+default. Enabling it requires an operator opt-in published in the signed node
+record and a separate explicit client opt-in. The challenge and signed proof must
+name this mode. The client still includes its exporter hash, but the verifier
+cannot independently associate it with the receiving connection: phishing/relay
+resistance from channel binding is absent. Display this state and persist it in
+the client security log on every connection. Never negotiate it automatically on
+missing exporters, receipt failure or an unsupported proxy. A client policy
+requiring channel binding rejects it. No mode bypasses current branch authority,
+one-use challenge, audience, proof signature or per-request authorization checks.
 
 ## Account delegation and private group restriction
 
@@ -470,11 +517,20 @@ An optional narrower group-specific `Envelope<GroupDelegation>` uses
 account grant), `not_before: Time`, `expires_at: Time` (inside the account lease),
 `subdelegation: false`. It and any per-group revocation travel only in that group's
 authenticated encrypted control channel. Group state applies the restriction
-and its revocations; it never widens or outlives the current public account grant.
+and its revocations; positive authority never widens or outlives the current
+public account grant. The retained denial floor has the separate lifetime below.
 Only primary-signed group control may change/remove such restrictions or their
 revocations; a delegated snapshot preserves the authenticated restriction floor
 and cannot omit it to regain a wider account grant. Do not publish even a
-per-group delegation id/count in the identity record or its section index. No subdelegation or account/device management; existing creator
+per-group delegation id/count in the identity record or its section index.
+Old-primary signed restrictions and revocations remain binding denial floors across
+certificate/range changes and positive-grant expiry. Authenticate their original
+signatures against retained historical certificates; they grant no current positive
+authority. Only an explicit replacement signed by the current primary, referencing
+the prior restriction/control hash and current authority, may replace a floor. A
+new account grant or missing encrypted state never removes it. Include every known
+floor in the encrypted handover summary below; missing control evidence blocks
+affected group mutations until reconciled. No subdelegation or account/device management; existing creator
 fresh-head, transferee countersign and sticky-removal rules remain mandatory.
 
 ## Erasure ACK and proposed legacy binding bodies
@@ -592,11 +648,20 @@ pinned node/federation identity key (see [server data](server-data.md)).
 `Envelope<NodeIdentityRecord>` uses `CUSTODY_NODE_RECORD`, signed by that existing
 pinned node identity key, with exactly `schema`, `version: 1`, `node_id: Id`,
 `node_signing_public_key: Key`, `epoch: U53` (positive),
-`previous_record_hash: Hash|null`, `issued_at: Time`, `receipt_keys: ReceiptKey[]`
-and `revoked_receipt_key_ids: B32[]` (sorted, cumulative). Each ReceiptKey has
+`previous_record_hash: Hash|null`, `issued_at: Time`, `receipt_keys: ReceiptKey[]`,
+`revoked_receipt_key_ids: B32[]`, `proxy_keys: ProxyKey[]`,
+`revoked_proxy_key_ids: B32[]` (both revocation arrays sorted and cumulative), and
+`channel_binding_modes: string[]` (sorted unique allowed proof modes above;
+`no_channel_binding` absent by default). Each ReceiptKey has
 exactly `key_id: B32`, `public_key: Key` (Ed25519), `not_before: Time`,
 `sign_until: Time`, `overlap_until: Time`, `status: "active"|"retiring"`.
-Node record budget is 512 KiB; at most 16 active/overlap descriptors. Its epoch and
+Each ProxyKey has exactly the ReceiptKey fields plus `proxy_id: Id` and
+`audiences: Id[]` (sorted unique, at most 64). Publication under the node signature
+authorizes that node-operated proxy only for branch-proof receipts to those
+audiences. Proxy and relay key ids and key material are distinct. The proxy key
+is not authorized by its TLS certificate alone.
+Node record budget is 512 KiB; at most 16 active/overlap descriptors across both
+key arrays. Its epoch and
 revocation pins persist monotonically; a node-identity-key replacement still
 requires existing explicit node trust/pin procedures, never a supplied receipt key.
 
@@ -604,8 +669,9 @@ Publish/lookup the record through authenticated node/federation discovery and
 verify it against the already trusted node identity. The existing v1 federation
 handshake alone does not yet convey this new profile; capability rollout must
 add authenticated discovery before custody receipt mode is enabled. For message
-or branch-proof authority, a peer trusts only its **receiving account/service's
-own home relay**, selected through that
+authority, a peer trusts only its **receiving account/service's
+own home relay**. For proxied branch proofs it trusts only that receiving node's
+authorized, node-operated proxy key. Both are selected through that
 pinned home-node relationship, not the sender's home, an arbitrary forwarding
 relay or a TLS-terminating proxy certificate. A remote sender may carry the public
 record by hash, but cannot establish the receiver's trust anchor. A time-probe
@@ -613,7 +679,7 @@ receipt is not account authority: the separate clock-recovery flow may authentic
 an independently pinned node/relay as its second time source, never as a signer
 for ordinary inbox or registration evidence.
 
-Rotate receipt keys by publishing a higher signed node-record epoch containing
+Rotate receipt and proxy keys by publishing a higher signed node-record epoch containing
 both the new active key and the old retiring key. Stop old-key signing at
 `sign_until`; retain its descriptor in current records through `overlap_until`,
 at least 604800 + 600 seconds after the replacement starts. This overlap permits
@@ -624,15 +690,21 @@ by hash; node records and receipt verification keys are retained permanently for
 queued evidence. Current cumulative revocations always dominate historical keys:
 a compromised receipt key is refused for any unconsumed proof/message, even with
 a backdated timestamp; already authenticated local history remains readable.
-Key ids/public keys cannot be silently rebound or recycled.
+The same overlap, historical resolution and compromise-revocation rules apply
+to proxy keys using `revoked_proxy_key_ids`; a revoked proxy key cannot authenticate
+an unconsumed proof. Key ids/public keys cannot be silently rebound or recycled.
 
 `Envelope<RelayAcceptance>` uses `CUSTODY_RELAY_ACCEPTANCE`, signed by one of those
-home-relay keys. The exact body is:
+home-relay keys for messages/time probes, or an authorized proxy key for branch
+proofs. All use the existing receipt domain; purpose and issuer role are checked
+before granting any authority. The exact body is:
 
 | Field | Type / requirement |
 | --- | --- |
 | `schema`, `version` | Exact receipt domain, `1` |
-| `relay_id`, `relay_key_id`, `node_identity_record_hash` | `Id`, `B32`, `Hash`; pinned receiver-home issuer for message/proof, independently pinned clock source for time probe |
+| `issuer_kind` | `"home_relay"` for message/time probe; `"node_proxy"` for branch proof |
+| `relay_id`, `relay_key_id`, `node_identity_record_hash` | `Id`, `B32`, `Hash`; home-relay identity/key for message/time probe, authorized proxy id/key for branch proof |
+| `client_exporter_hash` | `B32` for branch proof, equal to the observed client-facing exporter hash and signed proof binding; `null` for message/time probe |
 | `receipt_id`, `message_hash` | Fresh `B32`, `Hash` of the exact accepted object |
 | `purpose` | `"message"`, `"branch_proof"` or `"time_probe"` |
 | `audience` | `Id`, exact receiving service |
@@ -645,7 +717,10 @@ Receipt budget is 8 KiB. For a message, the relay attests durable acceptance of
 that exact signed JSON message under the source certificate and checks live
 branch authority at acceptance. It may not backdate receipt issuance to bypass a
 lease. For proxy-mode branch proof, it binds the exact signed proof, source,
-challenge and audience; it does not independently grant operation authority.
+challenge, audience and observed client exporter hash as specified above. Require
+`home_relay_receipt` in the proof and a matching proxy descriptor/audience in the
+receiver node record, never a message/time-probe key. It does not independently
+grant operation authority.
 `message_hash` uses the object hash above, including signatures when present.
 A repeated receipt is idempotent only for the same object/source/target/purpose.
 A compromised trusted relay can lie about time: signatures authenticate a clock
@@ -697,8 +772,16 @@ nonce-bound authenticated times from at least two independent sources: the own
 home node plus a separately operated federated node, or that node/relay's fresh
 time-probe receipt. Different hostnames behind one operator/key are not independent.
 An old inbox receipt or a bare directory timestamp is not a fresh sample.
-The second source is selected from independently trusted/pinned federation nodes,
-not an attacker-supplied key. A signed node `Envelope<TimeAttestation>` uses
+The second source must have been independently pinned **before recovery began**,
+through existing federation/contact pins or the shipped authenticated bootstrap
+list installed before that attempt. Freeze eligible node identities, pin provenance
+and the start marker in the recovery journal. A node first learned through the
+home node during this recovery is ineligible, even if it signs a valid sample.
+Restarting the attempt cannot launder that provenance: it needs separate independent
+authentication outside recovery before becoming eligible. An authenticated record
+rotation rooted in an eligible existing node pin does not introduce a new trust
+anchor. If no eligible second source exists, stay paused or use the explicit warned
+user-confirmation path; do not enroll a home-supplied source to satisfy the count. A signed node `Envelope<TimeAttestation>` uses
 `CUSTODY_TIME_ATTESTATION` and exactly `schema`, `version: 1`, `node_id: Id`,
 `node_identity_record_hash: Hash`, `sample_id: B32`, `challenge_nonce: B32`,
 `observed_at: Time`; it is signed by that node's pinned identity key (8 KiB limit).
@@ -763,7 +846,10 @@ Every verifier (SDK, router, gateway/directory, federation, peers) performs:
    and exact head. Only delayed consent may use its authenticated historical
    same-range head under the receive-time rule; verify the self-signing approval
    and live current sending branch separately. Proxy-mode proofs require the
-   receiver-home signed receipt, not an exporter from another TLS hop.
+   node-authorized proxy receipt and equality of its observed client exporter hash
+   with the proof binding, never an exporter from another TLS hop. Verify the exact
+   challenged mode; `no_channel_binding` requires both explicit opt-ins, signed node
+   advertisement and a persistent client security-log entry.
    No session, delegation or erasure ACK overrides a higher retained floor.
 8. Generate persistent alerts from authenticated state changes, including roster
    additions, new delegation scopes or operation widening, display-name changes
@@ -870,11 +956,20 @@ The decrypted JCS handover body has exactly:
 | `pending_invitations` | Array of `{invitation_id: B32, expires_at: Time, proposal_hash: Hash|null}`; public metadata only, cancel/restart incomplete handshakes |
 | `journal` | Array of `{operation_id: B32, intent_hash: Hash, state: "pending"|"acknowledged", acknowledgement_hash: Hash|null}`; acknowledged requires hash |
 | `delegation_state` | Array of signed delegation envelopes currently in the head |
+| `group_restriction_summary` | Array of `{group_id: Id, group_genesis_hash: Hash, control_head_hash: Hash, restriction_hashes: Hash[], revocation_hashes: Hash[]}`; sorted by group id, nested hash arrays sorted unique and at most 1024 each |
 | `pending_erasure` | Sorted array of `Ref`, equal to pending head entries |
 | `optional_data_keys` | Array of `{key_id: Id, purpose: "history"|"attachment", key: B32}`, empty unless user explicitly selects data transfer |
 
 Each array is bounded by 1024 entries; total plaintext at most 1 MiB. No phrase,
 master/self-signing seed, branch seed, vault secret or live SAS secret is allowed.
+The summary lists every known old-primary restriction and revocation, including
+those from earlier ranges. References resolve to authenticated encrypted group
+control state; verify historical signatures and preserve denial floors before
+granting group mutation authority. A missing/incomplete summary or unavailable
+referenced control state leaves affected groups blocked for reconciliation, never
+unrestricted. It cannot be silently discarded on promotion. Group ids and hashes
+stay only in this encrypted payload and group channels, never public identity
+metadata. Total plaintext and array limits apply to the summary too.
 Validate the decrypted contents against current state before staging. Journal a
 transfer id and ciphertext hash once; an exact retry returns the saved result,
 a different ciphertext under that id fails. Accepted/expired/cancelled transfer
@@ -910,3 +1005,25 @@ accounts retain one-hour branch proofs and current group/contact behaviour until
 opt-in migration. Capability negotiation (`custody_v3`, `contact_consent_v2`,
 `group_delegation_v1`) never strips v3 evidence for old federation/group peers;
 unsupported combinations block with update-required, as described in the design.
+
+## Revision 5 review vectors (required before implementation)
+
+These are planned acceptance vectors, not executed implementation tests:
+
+- Direct and proxy successes; another TLS session/exporter, altered receipt hash,
+  client-supplied proxy observation, null binding, wrong audience/mode, replay,
+  sender-selected proxy, wrong signer role and revoked proxy key all fail. Test
+  proxy key rotation/overlap and explicit opt-in visibility; no automatic downgrade.
+- Full list versus predecessor/additions reconstruction yields identical hashes.
+  Reject duplicate/removal deltas, wrong predecessor/count/hash, 65,537 ids and
+  4,194,305 canonical bytes. Interrupted evidence cannot advance the index. Test
+  empty re-sign deltas, retained denials and required master re-attestation without
+  truncation or cap bypass.
+- A pre-existing independently pinned contact/federation/bootstrap source works;
+  a source introduced by the home during recovery, including after restart, cannot
+  become the second source. No eligible source preserves the send block unless
+  the separate explicit warned confirmation succeeds.
+- Old-primary restrictions survive a higher range, grant renewal/expiry, restore
+  and HPKE handover. Omitted/unavailable private control evidence blocks affected
+  mutations; only an authenticated explicit current-primary replacement changes
+  the floor. Public records contain no group summary.
