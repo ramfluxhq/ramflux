@@ -300,7 +300,12 @@ impl RamfluxClient {
                         &plaintext,
                     )?;
                     self.account_db()?.remove_group_pending_undecrypted(message_id)?;
-                    self.stage_delivery_receipt(conversation_id, message_id, entry)?;
+                    self.stage_delivery_receipt_for_ciphertext(
+                        conversation_id,
+                        message_id,
+                        entry,
+                        encrypted_body,
+                    )?;
                     Ok(plaintext)
                 }),
                 Err(error) if is_missing_group_sender_key_error(&error) => {

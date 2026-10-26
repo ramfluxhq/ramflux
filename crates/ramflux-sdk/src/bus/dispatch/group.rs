@@ -827,6 +827,7 @@ pub(crate) async fn dispatch_group_send_request(
                     group: Some(&body.group_id),
                     peer: None,
                     body: &plaintext_body,
+                    ciphertext: &encrypted_body,
                     at: now_unix_timestamp(),
                 },
             )?;

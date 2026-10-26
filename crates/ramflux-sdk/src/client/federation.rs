@@ -91,6 +91,7 @@ impl RamfluxClient {
                     group: None,
                     peer: Some(&peer),
                     body: &content,
+                    ciphertext: &message.encrypted_body,
                     at: message.created_at,
                 })?;
             }
