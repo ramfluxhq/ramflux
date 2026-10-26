@@ -179,3 +179,26 @@ fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_v
     assert_eq!(journal.body["actor_kind_verified"], false);
     Ok(())
 }
+
+#[test]
+fn confusable_name_lookup_includes_contacts_after_the_storage_page_limit() -> TestResult {
+    let owner = Actor::new("owner", "phone", 61, 62, 1)?;
+    let reader = Actor::new("reader", "phone", 63, 64, 1)?;
+    let db = reader.client.account_db()?;
+    for index in 0..110 {
+        let id = format!("a-{index:03}");
+        db.persist_client_record(
+            "identity",
+            &id,
+            &json!({"principal_id":id,"display_name":format!("Other {index}")}),
+        )?;
+    }
+    db.persist_client_record(
+        "identity",
+        "z-alice",
+        &json!({"principal_id":"z-alice","display_name":"Alice"}),
+    )?;
+    observe(&reader.client, &with_profile(&owner, owner.manifest()?, "Alіce", 1, 1)?)?;
+    assert_eq!(reader.client.contact_entry("owner")?["display_name_confusable_with"], "z-alice");
+    Ok(())
+}

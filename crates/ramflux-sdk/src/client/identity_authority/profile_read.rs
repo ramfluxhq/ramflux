@@ -186,8 +186,8 @@ impl RamfluxClient {
         let mut names = BTreeMap::<String, Vec<String>>::new();
         let mut after = String::new();
         loop {
-            let ids = db.client_directory_ids("identity", &after, 256)?;
-            let done = ids.len() < 256;
+            let ids = db.client_directory_ids("identity", &after, 101)?;
+            let done = ids.len() < 101;
             for id in ids {
                 after.clone_from(&id);
                 // These cached/local labels only cause warnings; they never grant verification.
