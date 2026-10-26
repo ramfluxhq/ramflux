@@ -367,6 +367,66 @@ fn merge_clamps_link_projection_to_restrictive_decision_despite_projection_clock
 }
 
 #[test]
+fn merge_clamps_a_newer_archive_block_without_a_link_projection() -> TestResult {
+    let (blocked_root, blocked_index, blocked) = account("decision-only-block")?;
+    let (accepted_root, accepted_index, accepted) = account("decision-only-accepted")?;
+    blocked.establish_friend_link("link", "own", "peer")?;
+    blocked.block_friend_link("link", 7)?;
+    blocked.connection.execute_batch(
+        "UPDATE contact_link_decision SET decided_at=7001 WHERE link_id='link';
+         DELETE FROM friend_link_projection WHERE link_id='link';",
+    )?;
+    accepted.establish_friend_link("link", "own", "peer")?;
+    accepted
+        .connection
+        .execute_batch("UPDATE contact_link_decision SET decided_at=7000 WHERE link_id='link'")?;
+
+    for reverse in [false, true] {
+        let (incoming, live) = if reverse { (&accepted, &blocked) } else { (&blocked, &accepted) };
+        let archive = blocked_root.join(format!("decision-only-incoming-{reverse}.db"));
+        let saved = incoming.write_backup_snapshot(&archive)?;
+        let target = accepted_root.join(format!("decision-only-live-{reverse}.db"));
+        let local = live.write_backup_snapshot(&target)?;
+        let mut merged = BackupDatabase::open(&target, &local.key)?;
+        for round in 0..2 {
+            merged.merge_backup(&archive, &saved.key, || Ok(()))?;
+            assert_eq!(
+                merged.db.query_row(
+                    "SELECT state FROM contact_link_decision WHERE link_id='link'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )?,
+                "blocked",
+                "reverse={reverse}, round={round}"
+            );
+            assert_eq!(
+                merged.db.query_row(
+                    "SELECT state,blocked,capability_revoked_at
+                     FROM friend_link_projection WHERE link_id='link'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    }
+                )?,
+                ("blocked".into(), true, Some(7)),
+                "reverse={reverse}, round={round}"
+            );
+        }
+    }
+    drop(blocked);
+    drop(accepted);
+    drop(blocked_index);
+    drop(accepted_index);
+    std::fs::remove_dir_all(blocked_root)?;
+    std::fs::remove_dir_all(accepted_root)?;
+    Ok(())
+}
+
+#[test]
 fn merge_preserves_removed_links_for_block_and_decline_in_both_directions() -> TestResult {
     for denied in ["blocked", "declined"] {
         let (removed_root, removed_index, removed) = account("removed-link")?;
