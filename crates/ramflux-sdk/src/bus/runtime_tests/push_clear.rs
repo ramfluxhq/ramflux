@@ -22,3 +22,22 @@ async fn confirmed_background_deregistration_clears_the_persisted_marker() -> Re
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn the_push_route_sequence_is_persisted_and_never_reused() -> Result<(), SdkError> {
+    let root = root("push-seq-persisted");
+    let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+    let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    // A control was signed while the device clock was far ahead.
+    let ahead = 4_000_000_000_000_u64;
+    engine.config.push_route_last_seq = ahead;
+    account.put_engine(engine);
+    let saved = account
+        .client
+        .projection_checkpoint(crate::bus::dispatch::device::PUSH_ROUTE_SEQ_CHECKPOINT)?;
+    assert_eq!(saved.as_deref(), Some("4000000000000"));
+    assert_eq!(crate::bus::dispatch::device::stored_push_route_seq(&account.client)?, ahead);
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

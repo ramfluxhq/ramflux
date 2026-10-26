@@ -47,6 +47,17 @@ struct LocalBusPushRouteSetRequest {
     registration: Option<GatewayPushRouteRegistration>,
 }
 
+/// Checkpoint holding the last push route control sequence, so a restart never reuses one.
+pub(crate) const PUSH_ROUTE_SEQ_CHECKPOINT: &str = "gateway.push_route_seq.v1";
+
+/// Last persisted push route control sequence (0 when none was saved).
+pub(crate) fn stored_push_route_seq(client: &RamfluxClient) -> Result<u64, SdkError> {
+    Ok(client
+        .projection_checkpoint(PUSH_ROUTE_SEQ_CHECKPOINT)?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0))
+}
+
 /// Checkpoint value for a cleared route whose deregistration is not yet confirmed.
 const PUSH_ROUTE_CLEAR_PENDING: &str = "{\"deregister_pending\":true}";
 
@@ -97,7 +108,9 @@ async fn dispatch_push_route_set(
     account.ensure_gateway_live().await?;
     let engine = account.engine.as_mut().ok_or(SdkError::GatewaySessionNotEstablished)?;
     // A null route sends an explicit deregistration, so the node stops waking the old token.
-    let expires_at = engine.set_push_route(body.registration).await?;
+    let outcome = engine.set_push_route(body.registration).await;
+    account.persist_push_route_seq();
+    let expires_at = outcome?;
     if cleared {
         account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, "")?;
     }

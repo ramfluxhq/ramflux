@@ -83,6 +83,8 @@ pub enum GatewayPushRouteRefusal {
     Rejected,
     Unavailable,
     Superseded,
+    /// Verifiably not the routes' bound owner: retrying cannot succeed.
+    RejectedOwner,
     /// A code from a newer node; retried like `unavailable` so it never breaks the session.
     #[serde(other)]
     Unknown,
@@ -109,6 +111,9 @@ const PUSH_ROUTE_RETRY_AFTER_SECONDS: u64 = 60;
 const PUSH_ROUTE_BACKOFF_BASE_SECONDS: u64 = 30;
 /// Ceiling for the transient-failure backoff.
 const PUSH_ROUTE_BACKOFF_MAX_SECONDS: u64 = 6 * 3_600;
+/// Ceiling for retries after `superseded` (a deregistration fence): the node lets a fence
+/// lapse after ten minutes, so waiting longer would only delay recovery.
+const PUSH_ROUTE_SUPERSEDED_MAX_SECONDS: u64 = 120;
 /// Wait after a permanent refusal (no provider credential, request rejected) unless the
 /// token changes first.
 const PUSH_ROUTE_PERMANENT_RETRY_SECONDS: u64 = 24 * 3_600;
@@ -141,8 +146,19 @@ impl PushRouteRetry {
 
     fn record(&mut self, code: GatewayPushRouteRefusal, sent_at: u64) {
         match code {
-            GatewayPushRouteRefusal::Superseded => {}
-            GatewayPushRouteRefusal::ProviderUnavailable | GatewayPushRouteRefusal::Rejected => {
+            GatewayPushRouteRefusal::Superseded => {
+                // Fenced by a recent deregistration: transient, bounded by the fence lifetime.
+                self.failures = self.failures.saturating_add(1);
+                let jitter = ramflux_crypto::random_32().map_or(0, |bytes| bytes[0]);
+                let delay =
+                    Self::transient_delay(self.failures, 0).min(PUSH_ROUTE_SUPERSEDED_MAX_SECONDS);
+                self.not_before = sent_at
+                    .saturating_add(delay)
+                    .saturating_add(delay.saturating_mul(u64::from(jitter % 21)) / 100);
+            }
+            GatewayPushRouteRefusal::ProviderUnavailable
+            | GatewayPushRouteRefusal::Rejected
+            | GatewayPushRouteRefusal::RejectedOwner => {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
             }
@@ -357,8 +373,8 @@ impl GatewaySessionEngine {
             }
             GatewayServerFrame::PushRouteRefused { reason, code, .. } => {
                 if let Some(pending) = pending {
-                    if pending.deregister && code == GatewayPushRouteRefusal::Rejected {
-                        // Not the routes' owner (or not allowed): retrying cannot succeed.
+                    if pending.deregister && code == GatewayPushRouteRefusal::RejectedOwner {
+                        // Verifiably not the routes' owner: retrying cannot succeed.
                         tracing::warn!(
                             "push route deregistration refused; dropping the pending clear"
                         );
@@ -602,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn a_deregistration_refused_as_not_the_owner_is_not_retried() {
         let (mut engine, attempts) =
-            super::session_tests::engine_with(false, Some("rejected"), false);
+            super::session_tests::engine_with(false, Some("rejected_owner"), false);
         assert!(engine.set_push_route(None).await.is_err());
         assert!(!engine.config.push_route_clear_pending, "the pending clear is dropped");
         let start = now_unix_timestamp().unsigned_abs();
@@ -611,6 +627,38 @@ mod tests {
             let _ = engine.heartbeat().await;
         }
         assert_eq!(*attempts.lock().expect("lock"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_skew_refused_deregistration_stays_pending_and_backs_off() {
+        let (mut engine, attempts) =
+            super::session_tests::engine_with(false, Some("unavailable"), false);
+        assert!(engine.set_push_route(None).await.is_err());
+        assert!(engine.config.push_route_clear_pending, "an expired control is not permanent");
+        assert_eq!(*attempts.lock().expect("lock"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_fenced_registration_backs_off_but_retries_within_two_minutes() {
+        let (mut engine, attempts) =
+            super::session_tests::engine_with(false, Some("superseded"), false);
+        let start = 2_000_000_000;
+        let (mut last_count, mut last_at, mut max_gap) = (0, start, 0);
+        for tick in 0..720 {
+            let now = start + tick * 5;
+            engine.refresh_push_route_at(now).await;
+            let _ = engine.heartbeat().await;
+            let count = *attempts.lock().expect("lock");
+            if count != last_count {
+                if last_count > 0 {
+                    max_gap = max_gap.max(now - last_at);
+                }
+                (last_count, last_at) = (count, now);
+            }
+        }
+        // Not a storm (the r5 code sent 720), yet a lapsed ten-minute fence is retried soon.
+        assert!((20..=45).contains(&last_count), "{last_count} registrations in an hour");
+        assert!(max_gap <= 150, "longest wait {max_gap}s");
     }
 
     #[tokio::test]

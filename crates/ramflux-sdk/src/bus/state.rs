@@ -293,6 +293,7 @@ impl LocalBusAccountState {
                 Ok(())
             };
             connected?;
+            self.persist_push_route_seq();
             if self.gateway_config.push_route_clear_pending {
                 self.forget_confirmed_push_clear();
             }
@@ -313,11 +314,30 @@ impl LocalBusAccountState {
 
     pub(crate) fn put_engine(&mut self, engine: GatewaySessionEngine) {
         let was_pending = self.gateway_config.push_route_clear_pending;
+        let saved_seq = self.gateway_config.push_route_last_seq;
         self.gateway_config = engine.config.clone();
         engine.target_delivery_id().clone_into(&mut self.target_delivery_id);
         self.engine = Some(engine);
+        self.gateway_config.push_route_last_seq = saved_seq;
+        self.persist_push_route_seq();
         if was_pending {
             self.forget_confirmed_push_clear();
+        }
+    }
+
+    /// Saves the engine's push route control sequence when it advanced, so the next
+    /// sequence after a restart is `max(saved + 1, now_ms)`.
+    pub(crate) fn persist_push_route_seq(&mut self) {
+        let Some(seq) = self.engine.as_ref().map(|engine| engine.config.push_route_last_seq) else {
+            return;
+        };
+        if seq <= self.gateway_config.push_route_last_seq {
+            return;
+        }
+        let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_SEQ_CHECKPOINT;
+        match self.client.set_projection_checkpoint(checkpoint, &seq.to_string()) {
+            Ok(()) => self.gateway_config.push_route_last_seq = seq,
+            Err(error) => tracing::warn!(%error, "push route sequence not persisted"),
         }
     }
 
