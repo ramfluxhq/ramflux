@@ -169,6 +169,8 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let group = &state.view().group_id;
         if accepted {
+            // The authenticated, ordered account decision supersedes its older fence.
+            db.remove_actor_state(&key(group))?;
             let own = self.owned_device_identity()?;
             if state.view().effective_role(own.root_commitment(), own.device_id()).is_some() {
                 let local = self.trusted_device(&own)?;

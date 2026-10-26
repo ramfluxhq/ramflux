@@ -84,7 +84,7 @@ async fn seal_and_send(
         GroupControlBody::Request { request, .. } => request.expires_at,
         GroupControlBody::Result { result } => result.expires_at,
         GroupControlBody::DeviceSet { .. } => now.saturating_add(7 * 86400),
-        GroupControlBody::Transfer { control } => control.expires_at(),
+        GroupControlBody::Transfer { control } => control.expires_at().saturating_add(300),
     };
     let mut message = GatewayDirectMessage {
         conversation_id: state.view().conversation_id.clone(),
@@ -260,13 +260,15 @@ fn pending_packets(
         ));
     }
     for id in client.account_db()?.actor_state_key_page(TRANSFER_SEND_PREFIX, 512)? {
-        if let Some(record) = client.account_db()?.load_actor_state::<TransferDelivery>(&id)?
+        if let Some(mut record) = client.account_db()?.load_actor_state::<TransferDelivery>(&id)?
             && record.next_at <= now
             && record.expires_at > now
             && record.control.targets().iter().any(|target| {
                 !record.delivered.contains(&(target.root.clone(), target.device.clone()))
             })
         {
+            client.refresh_group_transfer_cancellation(&mut record)?;
+            client.account_db()?.persist_actor_state(&id, &record)?;
             pending.push((
                 id,
                 GroupControlPacket::new(GroupControlBody::Transfer {
@@ -368,7 +370,13 @@ async fn send(
                     client.account_db()?.load_actor_state::<TransferDelivery>(&attempt.id)?
                 {
                     record.delivered.insert((attempt.root.clone(), attempt.device.clone()));
-                    client.account_db()?.persist_actor_state(&attempt.id, &record)?;
+                    let all=record.control.targets().iter().all(|d|record.delivered.contains(&(d.root.clone(),d.device.clone())));
+                    if matches!(&record.control.body,crate::client::shared_group::TransferBody::Head{reply} if reply.cancelled) {
+                        record.next_at=if all {now_unix_timestamp().saturating_add(30)} else {0};
+                        if all {record.delivered.clone_from(&record.acknowledged);}
+                        client.account_db()?.persist_actor_state(&attempt.id,&record)?;
+                    } else if all {client.account_db()?.remove_actor_state(&attempt.id)?;}
+                    else {client.account_db()?.persist_actor_state(&attempt.id,&record)?;}
                 }
             }
             GroupControlBody::DeviceSet { .. } => {
@@ -384,7 +392,9 @@ async fn send(
                 }
             }
         }
-        defer(client, &attempt.id, &attempt.packet, 0)?;
+        if !matches!(&attempt.packet.body,GroupControlBody::Transfer{control} if matches!(&control.body,crate::client::shared_group::TransferBody::Head{reply} if reply.cancelled)) {
+            defer(client, &attempt.id, &attempt.packet, 0)?;
+        }
         client.account_db()?.remove_actor_state(&active_key(&attempt.id))?;
         Ok(())
     })?;

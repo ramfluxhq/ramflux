@@ -104,6 +104,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
                 Some("root_replacement_confirmation_required".into())
             }
             SdkError::ContactHomeNodeUnsupported => Some("invalid_card".into()),
+            _ if local_bus_error_code(error) == "transfer_requires_sync" => {
+                Some("head_or_removal_floor_mismatch".into())
+            }
             _ => None,
         },
         code: local_bus_error_code(error).to_owned(),
@@ -121,6 +124,9 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 }
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+    if matches!(error,SdkError::LocalBusRefused{code,..} if code == "transfer_requires_sync") {
+        return "transfer_requires_sync";
+    }
     if let Some(code) = crate::error_policy::security_code(error) {
         return code;
     }

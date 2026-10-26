@@ -27,7 +27,9 @@ struct RowSelection<'a> {
 fn skip_merge_table(table: &str) -> bool {
     matches!(
         table,
-        "shared_group_member_projection"
+        "shared_group_removal_floor"
+            | "shared_group_floor_generation"
+            | "shared_group_member_projection"
             | "contact_request_fence"
             | "contact_request_authority_floor"
             | "contact_message_request_fence"

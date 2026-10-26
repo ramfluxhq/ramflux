@@ -64,6 +64,15 @@ impl BackupDatabase {
         state: Option<&VerifiedGroupState>,
         key: &str,
     ) -> Result<Floors, StorageError> {
+        if let Some(state) = state
+            && let Some(floors) = Floors::load_index(
+                &self.db,
+                if incoming { "incoming" } else { "main" },
+                &state.view().group_id,
+            )?
+        {
+            return Ok(floors);
+        }
         if let Some(floors) = self.group_backup_value(incoming, key)? {
             return Ok(floors);
         }
@@ -123,12 +132,12 @@ impl BackupDatabase {
             let floor_key = format!("group-state/removal-floors/{encoded}");
             let mut floors = Floors::default();
             for (source, state) in [(false, a), (true, b)] {
-                floors.merge(self.backup_group_floors(source, state, &floor_key)?)?;
+                floors.merge(self.backup_group_floors(source, state, &floor_key)?);
             }
             for state in [a, b].into_iter().flatten() {
                 floors.observe(state.view());
             }
-            floors.merge(Floors::default())?;
+            floors.prune();
             floors.check(chosen.view())?;
             let head_key = format!("group-state/known-heads/{encoded}");
             let mut heads: Vec<serde_json::Value> = Vec::new();
@@ -207,7 +216,7 @@ impl BackupDatabase {
             }
             let encoded = ramflux_protocol::encode_base64url(id);
             self.put_state(&format!("group-state/{encoded}"), group.state.snapshot())?;
-            self.put_state(&format!("group-state/removal-floors/{encoded}"), &group.floors)?;
+            group.floors.store_index(&self.db, id)?;
             self.put_state(&format!("group-state/known-heads/{encoded}"), &group.heads)?;
             self.put_state(&format!("directory/group-local/{id}"), &local.identity)?;
             self.put_state(

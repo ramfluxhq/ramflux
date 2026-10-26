@@ -100,10 +100,12 @@ impl RamfluxClient {
                         return Err(StorageError::GroupPermissionDenied.into());
                     }
                 }
-                super::TransferBody::Head { reply } => {
+                super::TransferBody::Head { .. } => {
                     let own = self.owned_device_identity()?;
-                    if reply.target.root != own.root_commitment()
-                        || reply.target.device != own.device_id()
+                    if !control
+                        .targets()
+                        .iter()
+                        .any(|d| d.root == own.root_commitment() && d.device == own.device_id())
                     {
                         return Err(StorageError::GroupPermissionDenied.into());
                     }

@@ -50,6 +50,7 @@ pub mod read_model;
 pub mod recovery;
 pub mod runtime;
 mod shared_group_delivery;
+mod shared_group_floor_index;
 mod shared_group_heads;
 mod shared_group_members;
 mod shared_group_removals;

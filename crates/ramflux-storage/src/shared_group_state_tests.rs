@@ -325,6 +325,9 @@ fn r6_receiver_removal_floor_survives_a_snapshot_without_exclusions_and_allows_l
     let active:u64=db.connection.query_row("SELECT count(*) FROM shared_group_member_projection WHERE group_id='group' AND root_commitment=?1 AND active=1",rusqlite::params![member.identity.root_commitment],|row|row.get(0))?;
     assert_eq!(active, 0);
     // Upgrading an r5 store can recover the floor from its inactive verified projection.
+    db.connection.execute_batch(
+        "DELETE FROM shared_group_removal_floor; DELETE FROM shared_group_floor_generation;",
+    )?;
     db.remove_actor_state(&format!(
         "group-state/removal-floors/{}",
         ramflux_protocol::encode_base64url("group")
@@ -384,6 +387,9 @@ fn backup_merge_selects_signed_group_state_and_preserves_removal_floors_in_both_
         newer.commit_shared_group_state(&removed, &actor)?;
         newer.commit_shared_group_state(&pruned, &actor)?;
         // Exercise the upgrade path: the old inactive verified projection still fences re-admission.
+        newer.connection.execute_batch(
+            "DELETE FROM shared_group_removal_floor; DELETE FROM shared_group_floor_generation;",
+        )?;
         newer.remove_actor_state(&format!(
             "group-state/removal-floors/{}",
             ramflux_protocol::encode_base64url("group")
@@ -535,4 +541,66 @@ fn renamed_branch(
         )?;
     }
     Ok(state)
+}
+
+#[test]
+fn r7_indexed_removal_capacity_rejects_only_the_new_fence_and_prunes_departed_devices()
+-> Result<(), StorageError> {
+    let (root_key, branch, owner) = person("owner", "owner", 10)?;
+    let (_, _, peer) = person("peer", "peer", 20)?;
+    let base = create(&root_key, &branch, &owner)?;
+    let joined = advance_group_state(
+        &root_key,
+        &branch,
+        &owner,
+        &base,
+        GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
+    )?;
+    let (path, db) = test_db("floor-cap")?;
+    db.commit_shared_group_state(&joined, &owner)?;
+    // Model a long-lived store at its irreducible-fence limit, not thousands of crypto writes.
+    db.connection.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<4096) INSERT INTO shared_group_removal_floor(group_id,root_commitment,device_id,epoch) SELECT 'group','departed-'||i,'',1 FROM n;")?;
+    let named = advance_group_state(
+        &root_key,
+        &branch,
+        &owner,
+        &joined,
+        GroupStateChange::SetName { name: "still mutable".into() },
+    )?;
+    assert!(db.commit_shared_group_state(&named, &owner)?);
+    let removed = advance_group_state(
+        &root_key,
+        &branch,
+        &owner,
+        &named,
+        GroupStateChange::Remove {
+            root_commitment: peer.identity.root_commitment.clone(),
+            device_id: peer.identity.device_id.clone(),
+        },
+    )?;
+    assert!(matches!(
+        db.commit_shared_group_state(&removed, &owner),
+        Err(StorageError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
+            ramflux_protocol::GroupStateLimit::RemovalFences
+        )))
+    ));
+    assert_eq!(
+        db.shared_group_state("group")?
+            .ok_or(StorageError::AuthorizationRejected)?
+            .snapshot()
+            .state_hash,
+        named.snapshot().state_hash
+    );
+    // Redundant device fences for a departed root do not consume the operation's budget.
+    db.connection.execute("DELETE FROM shared_group_removal_floor WHERE group_id='group' AND root_commitment='departed-1'",[])?;
+    db.connection.execute(
+        "INSERT INTO shared_group_removal_floor VALUES('group',?1,'old-device',1)",
+        rusqlite::params![peer.identity.root_commitment],
+    )?;
+    assert!(db.commit_shared_group_state(&removed, &owner)?);
+    let count:u64=db.connection.query_row("SELECT count(*) FROM shared_group_removal_floor WHERE group_id='group' AND root_commitment=?1 AND device_id<>''",rusqlite::params![peer.identity.root_commitment],|r|r.get(0))?;
+    assert_eq!(count, 0);
+    drop(db);
+    std::fs::remove_dir_all(path)?;
+    Ok(())
 }

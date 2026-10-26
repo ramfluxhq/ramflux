@@ -375,3 +375,168 @@ fn creator_conflict_rechecks_device_revocation_before_replaying_a_foreign_reques
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn r7_owner_forks_repair_durable_removals_without_pending_intent() -> Result<(), SdkError> {
+    for expired in [false, true] {
+        let root = temp_root("durable-repair")?;
+        let phone = person(&root.join("phone"), "owner", "phone", 11, 12)?;
+        let laptop = person(&root.join("laptop"), "owner", "laptop", 11, 32)?;
+        let peer = person(&root.join("peer"), "peer", "peer", 21, 22)?;
+        phone.shared_group_create("group", "thread", None, "target-phone")?;
+        let base = phone.shared_group_change(
+            "group",
+            "target-phone",
+            GroupStateChange::Add {
+                member: peer.owned_group_actor("target-peer")?.identity,
+                role: SharedGroupRole::Member,
+            },
+        )?;
+        laptop.accept_shared_group_state(&base, "target-laptop")?;
+        phone.shared_group_change(
+            "group",
+            "target-phone",
+            GroupStateChange::Remove {
+                root_commitment: peer.owned_device_identity()?.root_commitment().into(),
+                device_id: "peer".into(),
+            },
+        )?;
+        let pending =
+            format!("group-state/creator-pending/{}", ramflux_protocol::encode_base64url("group"));
+        if expired {
+            let mut entries: Vec<serde_json::Value> = phone
+                .account_db()?
+                .load_actor_state(&pending)?
+                .ok_or(StorageError::GroupPermissionDenied)?;
+            for entry in &mut entries {
+                entry["expires_at"] = json!(0);
+            }
+            phone.account_db()?.persist_actor_state(&pending, &entries)?;
+        } else {
+            phone.account_db()?.remove_actor_state(&pending)?;
+        }
+        for name in ["laptop first", "laptop latest"] {
+            laptop.shared_group_change(
+                "group",
+                "target-laptop",
+                GroupStateChange::SetName { name: name.into() },
+            )?;
+        }
+        let incoming = laptop
+            .account_db()?
+            .shared_group_state("group")?
+            .ok_or(StorageError::GroupPermissionDenied)?;
+        assert!(phone.accept_shared_group_state(&incoming, "target-phone")?);
+        let repaired = phone
+            .account_db()?
+            .shared_group_state("group")?
+            .ok_or(StorageError::GroupPermissionDenied)?;
+        assert!(laptop.accept_shared_group_state(&repaired, "target-laptop")?);
+        assert_eq!(
+            laptop
+                .account_db()?
+                .shared_group_state("group")?
+                .ok_or(StorageError::GroupPermissionDenied)?
+                .snapshot()
+                .state_hash,
+            repaired.snapshot().state_hash
+        );
+        assert_eq!(repaired.view().name.as_deref(), Some("laptop latest"));
+        assert!(
+            repaired
+                .view()
+                .effective_role(peer.owned_device_identity()?.root_commitment(), "peer")
+                .is_none()
+        );
+        drop((phone, laptop, peer));
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn r7_pruned_wire_exclusions_still_repair_from_indexed_receiver_floors() -> Result<(), SdkError> {
+    let path = temp_root("pruned-wire-repair")?;
+    let phone = person(&path.join("phone"), "owner", "phone", 11, 12)?;
+    let laptop = person(&path.join("laptop"), "owner", "laptop", 11, 32)?;
+    let peer = person(&path.join("peer"), "peer", "peer", 21, 22)?;
+    let initial = phone.shared_group_create("group", "thread", None, "target-phone")?;
+    let joined = phone.shared_group_change(
+        "group",
+        "target-phone",
+        GroupStateChange::Add {
+            member: peer.owned_group_actor("target-peer")?.identity,
+            role: SharedGroupRole::Member,
+        },
+    )?;
+    laptop.accept_shared_group_state(&joined, "target-laptop")?;
+    phone.shared_group_change(
+        "group",
+        "target-phone",
+        GroupStateChange::Remove {
+            root_commitment: peer.owned_device_identity()?.root_commitment().into(),
+            device_id: "peer".into(),
+        },
+    )?;
+    // Model a later full snapshot after departed-root exclusions are pruned.
+    let mut pruned = initial;
+    for name in ["one", "two", "three"] {
+        pruned = advance_group_state(
+            phone.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            phone.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &phone.owned_group_actor("target-phone")?,
+            &pruned,
+            GroupStateChange::SetName { name: name.into() },
+        )?;
+    }
+    phone.accept_shared_group_state(&pruned, "target-phone")?;
+    assert_eq!(
+        phone
+            .account_db()?
+            .shared_group_state("group")?
+            .ok_or(StorageError::AuthorizationRejected)?
+            .view()
+            .excluded,
+        []
+    );
+    phone.account_db()?.remove_actor_state(&format!(
+        "group-state/creator-pending/{}",
+        ramflux_protocol::encode_base64url("group")
+    ))?;
+    for name in ["laptop one", "laptop two", "laptop three"] {
+        laptop.shared_group_change(
+            "group",
+            "target-laptop",
+            GroupStateChange::SetName { name: name.into() },
+        )?;
+    }
+    let incoming = laptop
+        .account_db()?
+        .shared_group_state("group")?
+        .ok_or(StorageError::AuthorizationRejected)?;
+    assert_eq!(incoming.relation_to(&pruned)?, ramflux_crypto::GroupStateRelation::Extension);
+    phone.accept_shared_group_state(&incoming, "target-phone")?;
+    let repaired = phone
+        .account_db()?
+        .shared_group_state("group")?
+        .ok_or(StorageError::AuthorizationRejected)?;
+    laptop.accept_shared_group_state(&repaired, "target-laptop")?;
+    assert_eq!(
+        laptop
+            .account_db()?
+            .shared_group_state("group")?
+            .ok_or(StorageError::AuthorizationRejected)?
+            .snapshot()
+            .state_hash,
+        repaired.snapshot().state_hash
+    );
+    assert!(
+        repaired
+            .view()
+            .effective_role(peer.owned_device_identity()?.root_commitment(), "peer")
+            .is_none()
+    );
+    drop((phone, laptop, peer));
+    std::fs::remove_dir_all(path)?;
+    Ok(())
+}

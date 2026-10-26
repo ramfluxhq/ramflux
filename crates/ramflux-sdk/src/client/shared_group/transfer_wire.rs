@@ -33,6 +33,12 @@ pub(crate) struct TransferHead {
     pub acceptance: Option<Box<GroupTransferAcceptance>>,
     pub requires_sync: bool,
     pub target: TransferDevice,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_targets: Vec<TransferDevice>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_ack: bool,
     pub issued_at: i64,
     pub expires_at: i64,
 }
@@ -76,7 +82,9 @@ impl TransferControl {
     pub(crate) fn targets(&self) -> Vec<TransferDevice> {
         match &self.body {
             TransferBody::Probe { probe } => probe.required.clone(),
-            TransferBody::Head { reply } => vec![reply.target.clone()],
+            TransferBody::Head { reply } => std::iter::once(reply.target.clone())
+                .chain(reply.additional_targets.iter().cloned())
+                .collect(),
         }
     }
     pub(crate) fn signing(&self) -> serde_json::Value {
@@ -95,13 +103,18 @@ impl TransferControl {
             TransferBody::Probe { probe } => (probe.issued_at, probe.expires_at),
             TransferBody::Head { reply } => (reply.issued_at, reply.expires_at),
         };
-        if at < 0
-            || at > now.saturating_add(5)
-            || until < now
+        let cancelled = matches!(&self.body, TransferBody::Head { reply } if reply.cancelled);
+        let lifetime = if cancelled { 7 * 86400 } else { 60 };
+        if matches!(&self.body,TransferBody::Head{reply} if reply.cancel_ack && (reply.cancelled || reply.requires_sync || reply.acceptance.is_some() || !reply.additional_targets.is_empty()))
+            || self.targets().len() > ramflux_protocol::group_state::MAX_GROUP_DEVICES_PER_ROOT + 1
+            || matches!(&self.body, TransferBody::Head { reply } if (!reply.requires_sync || reply.acceptance.is_some()) && !reply.additional_targets.is_empty())
+            || at < 0
+            || at > now.saturating_add(300)
+            || until < now.saturating_sub(300)
             || until <= at
-            || until > at.saturating_add(60)
+            || until > at.saturating_add(lifetime)
         {
-            return Err(ramflux_protocol::ProtocolError::GroupTransferRequiresSync.into());
+            return Err(super::transfer::requires_sync_reason("clock_skew_or_expired_control"));
         }
         ramflux_crypto::verify_group_state_actor(self.actor())?;
         ramflux_crypto::verify_device_branch_signature(

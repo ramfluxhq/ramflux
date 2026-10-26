@@ -12,8 +12,10 @@ There is no operation history, delegated checkpoint or cross-root state writer.
 A verified ownership transfer must bind the issuing device's current base hash
 and a transferee countersignature. It wins a sibling edit at the transfer's epoch;
 it cannot roll back a receiver more than one epoch beyond its base. Such a stale
-transfer returns `transfer_requires_sync` and a signed current-head refusal so the
-issuer can synchronize and reissue. A fresh transfer from the newer head still
+transfer returns `transfer_requires_sync` and a signed current-head refusal. The
+issuer records `group.state.conflict` with reason `transfer_refused_stale` and the
+rejected `base_hash`. Pre-commit refusal lets the issuer synchronize and reissue;
+a refusal cannot reverse an already committed handover. A fresh transfer from the newer head still
 wins the higher-epoch case. This freshness rule supersedes unconditional transfer
 chain dominance. Once a fresh transfer at epoch E is known, old-owner snapshots
 at E or later are rejected. Reusing a certificate cannot replace known handover
@@ -22,7 +24,9 @@ Receiver-owned root-removal and device-exclusion floors survive branch changes,
 wire exclusion pruning and restarts. A winning branch may restore a root/device
 only through an explicit joined epoch later than its accepted removal. Missing
 exclusions in a different signed snapshot never silently restore access. The
-floor store is capped at 4096 entries per group; exhaustion returns a typed
+floor store uses indexed rows capped at 4096 irreducible fences per group.
+Device fences subsumed by a departed-root fence are pruned. Only an operation
+adding a new irreducible fence beyond that cap returns a typed
 `GroupStateCapacity` refusal for `RemovalFences` rather than discarding safety state.
 Conflicting snapshots within the same transfer chain can only be creator-device
 writes; the lowest content hash wins, and the losing creator device reapplies its own pending
@@ -91,14 +95,28 @@ The SDK fails closed when an active device cannot be reached; it never guesses
 that a silent device is offline. Revoke an unavailable device through the account's
 normal device-set flow before retrying. This is deliberately stricter than a
 best-effort reachability check. Honest creator devices reserve that head for the
-short proposal lease: local mutations and admin requests wait, and another
-transfer cannot obtain approval during the lease. The transferee signs the group,
+proposal until its signed outcome is observed: local mutations and admin requests
+wait, and another transfer cannot obtain approval during the reservation. The
+60-second bound limits issuing, not the reservation. A changed unrelated head or
+elapsed wall-clock time does not release it. Only the matching committed transfer
+or a nonce/base-bound cancellation signed by the proposing device releases it.
+After timeout the issuer cancels durably; retry waits for cancellation delivery
+before beginning another proposal. An unavailable issuer therefore requires its
+return to release an unfinished reservation; timeouts never assume consent.
+Devices need synchronized clocks within ±5 minutes. Probe/reply validation permits
+that skew; transferee acceptance uses the issuer's probe timestamp so skew cannot
+extend the issuer's strict 60-second completion window. Typed
+`transfer_requires_sync` errors carry a reason (such as `transfer_outcome_pending`,
+`clock_skew_or_expired_control`, or `head_check_pending`). The transferee signs the group,
 genesis, previous creator, exact base hash/epoch, target actor, nonce and expiry.
 Snapshots retain this acceptance and the root-signed transfer certificate so
 receivers can verify it offline after the handshake expires. Head probes and
 signed refusals use the existing bounded group-control pair courier, with 60-second
-expiry, at most 8 retained controls per group and 512 per account. Completed
-deliveries are skipped; retries neither renew the lease nor consume another slot.
+issue lifetime plus the five-minute transport skew allowance, at most 8 retained
+controls per group and 512 per account. Signed cancellations remain durable until the participants acknowledge observation;
+their seven-day signed transport lifetime is renewed while outstanding. Gateway
+submission alone does not count as a cancellation acknowledgement. Other completed
+deliveries are retired; retries never renew a reservation.
 
 A malicious former creator can still equivocate and seek countersignatures from
 two different transferees. Receivers keep their first accepted transfer chain,
@@ -106,7 +124,11 @@ so such double transfers can split a group. Freshness checks, exclusive creator
 leases and transferee countersigning prevent an ordinary honest SDK transfer
 from doing this; they do not provide a global sequencer or consensus against a
 malicious former owner. Resolving this limitation belongs to the future group
-protocol. Withheld snapshots remain an explicit limitation as described above.
+protocol. A malicious former owner can also keep signing its old line without a
+second transfer: unaware members can advance beyond the transfer base, reject the
+handover as stale, and remain split. This is the accepted availability limit of
+sticky removals and transfer freshness, not global consensus. Withheld snapshots
+remain an explicit limitation as described above.
 
 ## Consent, membership and names
 
@@ -206,7 +228,10 @@ Shared packets use `ramflux.sdk.group_state.v2` and creator snapshots use
 `ramflux.group_state.snapshot.v2`. Older experimental multi-writer shared proofs
 are not accepted as v2. Unsigned legacy groups remain on their existing path;
 legacy storage mutators cannot modify a shared-group projection. All participants
-need v2 support. Large-group multi-writer consensus is outside this protocol.
+need v2 support. Transfer participants must also support the r7 signed cancellation
+and observation acknowledgement fields; finish any outstanding experimental
+handover before upgrading devices piecemeal. Large-group multi-writer consensus
+is outside this protocol.
 
 ## Message identifier upgrade and retention
 
@@ -248,3 +273,11 @@ transfer cannot displace a later live head. If neither selected line preserves
 the combined removal fences, merge refuses before the private generation can be
 installed; it never repairs a signature by editing its snapshot. Existing contact,
 object, message-erasure, profile and kind merge policies remain independent.
+
+Own-account invitation decisions are ordered by their branch-signed `issued_at`:
+the latest explicit decision wins, and decline wins an exact timestamp tie.
+Replays never renew decision expiry. An older decline cannot undo a later
+acceptance; account blocks, group exclusions and genesis checks remain mandatory.
+Creator devices repair losing branches from the durable receiver removal floors,
+even after the seven-day pending-intent log expires, then re-sign the removals
+before replaying other pending edits.

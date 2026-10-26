@@ -5,27 +5,34 @@
 use super::AccountDb;
 use crate::StorageError;
 use ramflux_crypto::VerifiedGroupState;
-use ramflux_protocol::{GroupStateLimit, ProtocolError, SharedGroupState};
+use ramflux_protocol::{ProtocolError, SharedGroupState};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub(super) struct Floors {
-    roots: BTreeMap<String, u64>,
-    devices: Vec<DeviceFloor>,
+    pub(super) roots: BTreeMap<String, u64>,
+    pub(super) devices: Vec<DeviceFloor>,
 }
-#[derive(Deserialize, Serialize)]
-struct DeviceFloor {
-    root: String,
-    device: String,
-    epoch: u64,
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct DeviceFloor {
+    pub(super) root: String,
+    pub(super) device: String,
+    pub(super) epoch: u64,
 }
 fn key(group: &str) -> String {
     format!("group-state/removal-floors/{}", ramflux_protocol::encode_base64url(group))
 }
 impl AccountDb {
     fn shared_group_removal_floors(&self, group: &str) -> Result<Floors, StorageError> {
-        if let Some(floors) = self.load_actor_state(&key(group))? {
+        let owned_group = group.to_owned();
+        if let Some(floors) =
+            self.connection.call(move |db| Floors::load_index(db, "main", &owned_group))?
+        {
+            return Ok(floors);
+        }
+        if let Some(mut floors) = self.load_actor_state::<Floors>(&key(group))? {
+            floors.prune();
             return Ok(floors);
         }
         let mut floors = Floors::default();
@@ -48,6 +55,36 @@ impl AccountDb {
         }
         Ok(floors)
     }
+    fn shared_group_candidate_floors(
+        &self,
+        state: &SharedGroupState,
+    ) -> Result<Floors, StorageError> {
+        let group = state.group_id.clone();
+        let roots = serde_json::to_string(
+            &state
+                .members
+                .iter()
+                .map(|m| &m.identity.root_commitment)
+                .collect::<std::collections::BTreeSet<_>>(),
+        )?;
+        if let Some(floors) = self
+            .connection
+            .call(move |db| Floors::load_matching_index(db, "main", &group, Some(&roots)))?
+        {
+            return Ok(floors);
+        }
+        self.shared_group_removal_floors(&state.group_id)
+    }
+    /// Reconstruct creator-authorized removals which a replacement branch would lose.
+    /// # Errors
+    /// Returns database or decoding failures; callers must separately verify creator authority.
+    pub fn shared_group_removal_repairs(
+        &self,
+        candidate: &VerifiedGroupState,
+    ) -> Result<Vec<ramflux_protocol::GroupStateChange>, StorageError> {
+        let floors = self.shared_group_candidate_floors(candidate.view())?;
+        Ok(floors.repairs(candidate.view()))
+    }
     /// Check receiver-pinned exclusions before allowing any replacement snapshot.
     /// # Errors
     /// Refuses implicit re-admission, or returns database/decoding failures.
@@ -55,7 +92,7 @@ impl AccountDb {
         &self,
         candidate: &VerifiedGroupState,
     ) -> Result<(), StorageError> {
-        let floors = self.shared_group_removal_floors(&candidate.view().group_id)?;
+        let floors = self.shared_group_candidate_floors(candidate.view())?;
         floors.check(candidate.view())
     }
     pub(super) fn record_shared_group_removal_continuity(
@@ -64,6 +101,7 @@ impl AccountDb {
     ) -> Result<(), StorageError> {
         let state = candidate.view();
         let mut floors = self.shared_group_removal_floors(&state.group_id)?;
+        let previous_floors = floors.clone();
         floors.check(state)?;
         if let Some(previous) = self.shared_group_state(&state.group_id)? {
             for member in &previous.view().members {
@@ -85,12 +123,12 @@ impl AccountDb {
             }
         }
         floors.observe(state);
-        if floors.roots.len() + floors.devices.len()
-            > ramflux_protocol::group_state::MAX_GROUP_STATE_EXCLUSIONS * 2
-        {
-            return Err(ProtocolError::GroupStateLimit(GroupStateLimit::RemovalFences).into());
-        }
-        self.persist_actor_state(&key(&state.group_id), &floors)?;
+        floors.prune();
+        // A legacy over-cap store can still rename or update existing fences.
+        floors.check_capacity(previous_floors.len())?;
+        let group = state.group_id.clone();
+        self.connection.call(move |db| floors.store_index_delta(db, &group, &previous_floors))?;
+        self.remove_actor_state(&key(&state.group_id))?;
         Ok(())
     }
 }
@@ -101,7 +139,7 @@ impl Floors {
     pub(super) fn remember_root(&mut self, root: String, epoch: u64) {
         self.roots.entry(root).and_modify(|old| *old = (*old).max(epoch)).or_insert(epoch);
     }
-    pub(super) fn merge(&mut self, other: Self) -> Result<(), StorageError> {
+    pub(super) fn merge(&mut self, other: Self) {
         for (root, epoch) in other.roots {
             self.roots.entry(root).and_modify(|old| *old = (*old).max(epoch)).or_insert(epoch);
         }
@@ -116,12 +154,7 @@ impl Floors {
                 self.devices.push(floor);
             }
         }
-        if self.roots.len() + self.devices.len()
-            > ramflux_protocol::group_state::MAX_GROUP_STATE_EXCLUSIONS * 2
-        {
-            return Err(ProtocolError::GroupStateLimit(GroupStateLimit::RemovalFences).into());
-        }
-        Ok(())
+        self.prune();
     }
 
     pub(super) fn observe(&mut self, state: &SharedGroupState) {
@@ -148,29 +181,43 @@ impl Floors {
         }
     }
     pub(super) fn check(&self, state: &SharedGroupState) -> Result<(), StorageError> {
+        if !self.repairs(state).is_empty() {
+            return Err(ProtocolError::GroupTransferRequiresSync.into());
+        }
+        Ok(())
+    }
+    fn repairs(&self, state: &SharedGroupState) -> Vec<ramflux_protocol::GroupStateChange> {
+        let mut missing = std::collections::BTreeSet::new();
         for (root, epoch) in &self.roots {
+            // A root fence can only be superseded by an explicit later re-add.
             if state
                 .members
                 .iter()
                 .any(|m| m.identity.root_commitment == *root && m.joined_epoch <= *epoch)
             {
-                return Err(ProtocolError::GroupTransferRequiresSync.into());
+                for member in state.members.iter().filter(|m| m.identity.root_commitment == *root) {
+                    missing.insert((root.clone(), member.identity.device_id.clone()));
+                }
             }
         }
         for floor in &self.devices {
-            if state.effective_role(&floor.root, &floor.device).is_none() {
-                continue;
-            }
             let members: Vec<_> =
                 state.members.iter().filter(|m| m.identity.root_commitment == floor.root).collect();
-            if !members
-                .iter()
-                .any(|m| m.identity.device_id == floor.device && m.joined_epoch > floor.epoch)
+            if state.effective_role(&floor.root, &floor.device).is_some()
+                && !members
+                    .iter()
+                    .any(|m| m.identity.device_id == floor.device && m.joined_epoch > floor.epoch)
                 && !members.iter().all(|m| m.joined_epoch > floor.epoch)
             {
-                return Err(ProtocolError::GroupTransferRequiresSync.into());
+                missing.insert((floor.root.clone(), floor.device.clone()));
             }
         }
-        Ok(())
+        missing
+            .into_iter()
+            .map(|(root_commitment, device_id)| ramflux_protocol::GroupStateChange::Remove {
+                root_commitment,
+                device_id,
+            })
+            .collect()
     }
 }

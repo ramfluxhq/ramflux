@@ -19,6 +19,12 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
         active INTEGER NOT NULL,
         PRIMARY KEY(group_id,root_commitment,device_id)
     );
+    CREATE TABLE IF NOT EXISTS shared_group_removal_floor (
+        group_id TEXT NOT NULL, root_commitment TEXT NOT NULL,
+        device_id TEXT NOT NULL, epoch INTEGER NOT NULL,
+        PRIMARY KEY(group_id,root_commitment,device_id)
+    );
+    CREATE TABLE IF NOT EXISTS shared_group_floor_generation (group_id TEXT PRIMARY KEY NOT NULL);
     CREATE INDEX IF NOT EXISTS shared_group_member_discovery
         ON shared_group_member_projection(principal_id,device_id,root_commitment) WHERE active=1;",
     )?;

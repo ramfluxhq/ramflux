@@ -62,8 +62,20 @@ impl RamfluxClient {
         &self,
         consent: &Consent,
         state: &VerifiedGroupState,
-    ) -> Result<(), SdkError> {
+    ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
+        if let Some(old) = db.load_actor_state::<Decision>(&key(&state.view().group_id))?
+            && old.expires_at > now_unix_timestamp()
+        {
+            if old.genesis_hash != state.genesis_hash()? {
+                return Err(super::invalid("group consent genesis mismatch"));
+            }
+            if consent.issued_at < old.issued_at
+                || (consent.issued_at == old.issued_at && (!old.accepted || consent.accepted))
+            {
+                return Ok(false);
+            }
+        }
         db.retain_expiring_actor_states(STORED, now_unix_timestamp(), 4096)?;
         let id = key(&state.view().group_id);
         if !db.actor_state_exists(&id)? && db.actor_state_usage(STORED)?.0 >= 4096 {
@@ -78,7 +90,7 @@ impl RamfluxClient {
                 expires_at: consent.expires_at,
             },
         )?;
-        Ok(())
+        Ok(true)
     }
     pub(super) fn publish_own_group_decision(
         &self,
@@ -100,7 +112,9 @@ impl RamfluxClient {
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             &signing(&consent)?,
         )?;
-        self.save_own_group_decision(&consent, state)?;
+        if !self.save_own_group_decision(&consent, state)? {
+            return Ok(());
+        }
         let mut body = PREFIX.to_vec();
         body.extend(serde_json::to_vec(&consent)?);
         let id = ramflux_protocol::hash_base64url(DOMAIN, &body);
@@ -136,19 +150,20 @@ impl RamfluxClient {
         {
             return Err(super::invalid("group consent genesis mismatch"));
         }
-        if consent.accepted
-            && (self.group_invitation_declined(group)?
-                || self.group_parties_blocked(state.snapshot())?)
-        {
-            // A delayed acceptance cannot override a newer restriction or wedge later own copies.
+        if consent.accepted && self.group_parties_blocked(state.snapshot())? {
             return Ok(true);
         }
-        if !consent.accepted && self.group_invitation_declined(group)? {
-            // Replays never renew or shorten the first decline's fixed window.
+        // An undated legacy decline cannot be overridden by a delayed signed copy.
+        if consent.accepted
+            && self.group_invitation_declined(group)?
+            && self.account_db()?.load_actor_state::<Decision>(&key(group))?.is_none()
+        {
             return Ok(true);
         }
         self.account_db()?.write_transaction(|| -> Result<bool, SdkError> {
-            self.save_own_group_decision(&consent, &state)?;
+            if !self.save_own_group_decision(&consent, &state)? {
+                return Ok(true);
+            }
             self.apply_own_group_invitation_decision(&state, consent.accepted, consent.expires_at)?;
             Ok(true)
         })
@@ -188,5 +203,79 @@ impl RamfluxClient {
             return Err(StorageError::GroupPermissionDenied.into());
         }
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn r7_signed_account_decisions_follow_time_and_decline_wins_ties() -> Result<(), SdkError> {
+        use crate::client::identity_authority::test_support::{public_manifest, sign_manifest};
+        let path = super::super::tests::temp_root("ordered-consent")?;
+        let phone = super::super::tests::person(&path.join("phone"), "owner", "phone", 11, 12)?;
+        let laptop = super::super::tests::person(&path.join("laptop"), "owner", "laptop", 11, 32)?;
+        let stranger =
+            super::super::tests::person(&path.join("stranger"), "stranger", "stranger", 21, 22)?;
+        let mut own = public_manifest(&phone)?;
+        own.devices.extend(public_manifest(&laptop)?.devices);
+        sign_manifest(
+            phone.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &mut own,
+            2,
+        )?;
+        for client in [&phone, &laptop] {
+            client.persist_identity_directory(&own)?;
+        }
+        stranger.shared_group_create("group", "thread", None, "target-stranger")?;
+        let state = stranger.shared_group_change(
+            "group",
+            "target-stranger",
+            ramflux_protocol::GroupStateChange::Add {
+                member: phone.owned_group_actor("target-phone")?.identity,
+                role: ramflux_protocol::SharedGroupRole::Member,
+            },
+        )?;
+        let now = now_unix_timestamp();
+        let make = |client: &RamfluxClient, accepted, at| -> Result<Vec<u8>, SdkError> {
+            let own = client.owned_device_identity()?;
+            let mut consent = Consent {
+                schema: DOMAIN.into(),
+                actor: client.owned_group_actor(&format!("target-{}", own.device_id()))?,
+                snapshot: state.snapshot().clone(),
+                accepted,
+                issued_at: at,
+                expires_at: at + 7 * 86400,
+                signature: String::new(),
+            };
+            consent.signature = ramflux_crypto::sign_with_device_branch(
+                client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+                &signing(&consent)?,
+            )?;
+            let mut bytes = PREFIX.to_vec();
+            bytes.extend(serde_json::to_vec(&consent)?);
+            Ok(bytes)
+        };
+        // Two independently signed devices disagree; delivery order must not choose the winner.
+        let decline = make(&phone, false, now - 20)?;
+        let accept = make(&laptop, true, now - 10)?;
+        for client in [&phone, &laptop] {
+            client.receive_own_group_consent(&phone.owned_device_identity()?, &decline)?;
+            client.receive_own_group_consent(&laptop.owned_device_identity()?, &accept)?;
+            client.receive_own_group_consent(&phone.owned_device_identity()?, &decline)?;
+            assert!(client.local_is_group_member("group")?);
+            let tie = make(&phone, false, now - 10)?;
+            client.receive_own_group_consent(&phone.owned_device_identity()?, &tie)?;
+            client.receive_own_group_consent(&laptop.owned_device_identity()?, &accept)?;
+            assert!(!client.local_is_group_member("group")?);
+            let saved: Decision = client
+                .account_db()?
+                .load_actor_state(&key("group"))?
+                .ok_or(StorageError::AuthorizationRejected)?;
+            assert_eq!(saved.expires_at, now - 10 + 7 * 86400);
+        }
+        drop((phone, laptop, stranger));
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 }

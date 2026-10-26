@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Only same-epoch creator-device conflicts replay this device's pending change.
+//! Creator-device fork repair preserves durable removals before replaying pending intent.
 use super::{
     GroupStateChange, RamfluxClient, SdkError, VerifiedGroupState, advance_group_state, json,
     now_unix_timestamp,
@@ -30,7 +30,14 @@ impl RamfluxClient {
         };
         Ok(self.owned_device_identity()?.root_commitment()
             == incoming.creator().identity.root_commitment
-            && incoming.relation_to(&previous)? == GroupStateRelation::RemovalConflict)
+            && previous.creator().identity.root_commitment
+                == incoming.creator().identity.root_commitment
+            && matches!(
+                incoming.relation_to(&previous)?,
+                GroupStateRelation::Extension
+                    | GroupStateRelation::IncomingPreferred
+                    | GroupStateRelation::RemovalConflict
+            ))
     }
     pub(super) fn record_group_write(
         &self,
@@ -84,9 +91,10 @@ impl RamfluxClient {
         else {
             return Ok(Some(incoming.clone()));
         };
+        let repairs = self.account_db()?.shared_group_removal_repairs(incoming)?;
         match incoming.relation_to(&previous)? {
             GroupStateRelation::Same => Ok(Some(incoming.clone())),
-            GroupStateRelation::Extension => {
+            GroupStateRelation::Extension if repairs.is_empty() => {
                 self.account_db()?.remove_actor_state(&key(&incoming.view().group_id))?;
                 Ok(Some(incoming.clone()))
             }
@@ -95,7 +103,9 @@ impl RamfluxClient {
                 self.group_conflict_event(incoming, "creator_authority_mismatch")?;
                 Ok(None)
             }
-            GroupStateRelation::IncomingPreferred | GroupStateRelation::RemovalConflict => {
+            GroupStateRelation::Extension
+            | GroupStateRelation::IncomingPreferred
+            | GroupStateRelation::RemovalConflict => {
                 let local = self.owned_device_identity()?;
                 if incoming.creator().identity.root_commitment != local.root_commitment()
                     || previous.creator().identity.root_commitment != local.root_commitment()
@@ -111,7 +121,7 @@ impl RamfluxClient {
                     .load_actor_state(&key(&incoming.view().group_id))?
                     .unwrap_or_default();
                 let actor = self.owned_group_actor(target)?;
-                let mut state = incoming.clone();
+                let mut state = self.repair_group_removals(incoming, &actor, repairs)?;
                 for change in pending.into_iter().filter(|item| {
                     item.epoch <= previous.view().epoch && item.expires_at > now_unix_timestamp()
                 }) {
@@ -171,6 +181,28 @@ impl RamfluxClient {
                 Ok(Some(state))
             }
         }
+    }
+    fn repair_group_removals(
+        &self,
+        incoming: &VerifiedGroupState,
+        actor: &ramflux_protocol::GroupStateActor,
+        repairs: Vec<GroupStateChange>,
+    ) -> Result<VerifiedGroupState, SdkError> {
+        let mut state = incoming.clone();
+        for removal in repairs {
+            if ramflux_crypto::change_already_applied(state.view(), &removal) {
+                continue;
+            }
+            state = advance_group_state(
+                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+                self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+                actor,
+                &state,
+                removal.clone(),
+            )?;
+            self.record_group_write(&state, removal)?;
+        }
+        Ok(state)
     }
     fn group_conflict_event(
         &self,

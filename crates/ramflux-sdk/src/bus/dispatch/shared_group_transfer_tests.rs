@@ -271,7 +271,7 @@ async fn check_handover(stale: bool) -> TestResult {
             .ok_or("creator changed reserved head")?;
         assert_eq!(crate::bus::io::local_bus_error_code(&blocked), "transfer_requires_sync");
     }
-    rig.deliver_replies().await?;
+    Box::pin(rig.deliver_replies()).await?;
     if stale {
         assert_eq!(rig.laptop.client.group_state("group")?.group_epoch, 5);
         assert!(
@@ -284,9 +284,26 @@ async fn check_handover(stale: bool) -> TestResult {
                 .effective_role(&rig.removed_root, "device-mallory")
                 .is_none()
         );
+        let blocked = rig.authorize().await.err().ok_or("cancellation must finish first")?;
+        assert_eq!(
+            crate::bus::io::local_bus_error_body(&blocked).reason_code.as_deref(),
+            Some("cancellation_delivery_pending")
+        );
+        // Refusal durably cancels the old reservation on every participant before a new probe.
+        for _ in 0..2 {
+            assert_eq!(crate::bus::shared_group_sync::flush_requests(&mut rig.laptop).await?, 1);
+        }
+        for envelope in take_submitted(&rig.captures[1])? {
+            if envelope.target_delivery_id == rig.phone.target_delivery_id {
+                deliver(&mut rig.phone, envelope).await?;
+            } else {
+                deliver(&mut rig.next, envelope).await?;
+            }
+        }
+        Box::pin(rig.deliver_replies()).await?; // Authenticated cancellation acknowledgements.
         assert!(rig.authorize().await.is_err());
         Box::pin(rig.deliver_probes()).await?;
-        rig.deliver_replies().await?;
+        Box::pin(rig.deliver_replies()).await?;
     }
     let acceptance = rig.authorize().await?;
     let old = rig.laptop.client.account_db()?.shared_group_state("group")?.ok_or("old head")?;
@@ -340,6 +357,8 @@ async fn stale_snapshot() -> TestResult {
             acceptance: Box::new(acceptance),
         },
     )?;
+    // The issuing device has committed the handover before a lagging peer refuses it.
+    rig.laptop.client.accept_shared_group_state(&stale, &rig.laptop.target_delivery_id)?;
     rig.phone.client.shared_group_change(
         "group",
         &rig.phone.target_delivery_id,
@@ -395,6 +414,20 @@ async fn stale_snapshot() -> TestResult {
             .state_hash,
         head.snapshot().state_hash
     );
+    assert_stale_refusal(&mut rig, &base, &head, &stale).await?;
+    rig.directory.abort();
+    let root = rig.root.clone();
+    drop(rig);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+async fn assert_stale_refusal(
+    rig: &mut Rig,
+    base: &ramflux_crypto::VerifiedGroupState,
+    head: &ramflux_crypto::VerifiedGroupState,
+    stale: &ramflux_crypto::VerifiedGroupState,
+) -> TestResult {
     let rows = rig
         .phone
         .client
@@ -405,9 +438,24 @@ async fn stale_snapshot() -> TestResult {
     assert_eq!(crate::bus::shared_group_sync::flush_requests(&mut rig.phone).await?, 1);
     let envelope = take_submitted(&rig.captures[0])?.pop().ok_or("refusal not routed")?;
     deliver(&mut rig.laptop, envelope).await?;
-    rig.directory.abort();
-    let root = rig.root.clone();
-    drop(rig);
-    std::fs::remove_dir_all(root)?;
+    let event = rig
+        .laptop
+        .client
+        .account_db()?
+        .latest_journal_event("group.state.conflict")?
+        .ok_or("stale refusal event missing")?;
+    assert_eq!(event.body["reason"], "transfer_refused_stale");
+    assert_eq!(event.body["base_hash"], base.snapshot().state_hash);
+    assert_eq!(
+        rig.laptop
+            .client
+            .account_db()?
+            .shared_group_state("group")?
+            .ok_or("head")?
+            .snapshot()
+            .state_hash,
+        stale.snapshot().state_hash,
+        "a post-commit refusal must not silently reverse ownership"
+    );
     Ok(())
 }
