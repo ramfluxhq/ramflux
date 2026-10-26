@@ -74,7 +74,9 @@ impl GatewaySessionFrameSink for RecordingGateway {
         Box::pin(async move {
             assert!(
                 bytes.len() + 64 * 1024 < ramflux_transport::MAX_GATEWAY_FRAME_BYTES,
-                "actual encoded gateway frame exceeds transport limit"
+                "actual encoded gateway frame {} plus reserved overhead exceeds transport limit {}",
+                bytes.len(),
+                ramflux_transport::MAX_GATEWAY_FRAME_BYTES
             );
             if self.fail_after.is_some_and(|limit| {
                 matches!(

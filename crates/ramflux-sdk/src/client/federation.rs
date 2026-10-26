@@ -62,6 +62,7 @@ impl RamfluxClient {
         let franking =
             options.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
         message.encrypted_body = serde_json::to_vec(&sealed)?;
+        let mut own_copy = None;
         self.account_db()?.write_transaction(|| {
             self.send_direct_message(
                 &message.conversation_id,
@@ -80,37 +81,27 @@ impl RamfluxClient {
                 &content,
             )?;
             if copy_plain {
-                let peer = self.own_sent_peer(&message)?;
-                let original_recipients = self.own_original_recipient(&message)?;
-                self.stage_own_sent_message(super::own_sent_message::OwnSentInput {
-                    envelope: &message.envelope_id,
-                    conversation: &message.conversation_id,
-                    message: &message.message_id,
-                    sender: &message.sender_id,
-                    original_recipients: &original_recipients,
-                    group: None,
-                    peer: Some(&peer),
-                    body: &content,
-                    ciphertext: &message.encrypted_body,
-                    at: message.created_at,
-                })?;
+                own_copy = self.queue_own_sent_dm(&message, &content);
             }
             Ok::<_, SdkError>(())
         })?;
-        let envelope =
-            gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
-        tracing::info!(
-            source_node_id = %federation.source_node_id,
-            target_node_id = %federation.target_node_id,
-            federation_url = %federation.federation_url,
-            envelope_id = %envelope.envelope_id,
-            target_delivery_id = %envelope.target_delivery_id,
-            route_decision = "remote_federation_forward",
-            "submitting federated direct message to source node federation surface"
-        );
+        let result = (|| {
+            let envelope =
+                gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
+            tracing::info!(
+                source_node_id = %federation.source_node_id,
+                target_node_id = %federation.target_node_id,
+                federation_url = %federation.federation_url,
+                envelope_id = %envelope.envelope_id,
+                target_delivery_id = %envelope.target_delivery_id,
+                route_decision = "remote_federation_forward",
+                "submitting federated direct message to source node federation surface"
+            );
 
-        let response = post_federated_envelope_forward(federation, envelope)?;
-        Ok(response)
+            post_federated_envelope_forward(federation, envelope)
+        })();
+        self.finish_own_sent_copy(&message.message_id, own_copy.as_deref(), result.is_ok());
+        result
     }
 
     /// # Errors

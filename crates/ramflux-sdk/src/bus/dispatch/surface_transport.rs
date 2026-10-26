@@ -252,3 +252,7 @@ mod membership_tests;
 #[cfg(test)]
 #[path = "own_sent_message_tests.rs"]
 mod own_sent_message_tests;
+
+#[cfg(test)]
+#[path = "own_sent_availability_tests.rs"]
+mod own_sent_availability_tests;

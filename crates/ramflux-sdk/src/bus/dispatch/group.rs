@@ -740,39 +740,15 @@ pub(crate) async fn dispatch_group_send_request(
         "conversation_id": body.conversation_id,
         "message_id": body.message_id,
     });
-    let original_recipients = if let Some(routes) = &fanout_routes {
-        routes
-            .iter()
-            .filter(|route| {
-                route.member_principal_commitment.as_deref()
-                    == Some(account.principal_commitment.as_str())
-            })
-            .map(|route| {
-                Ok::<_, SdkError>(
-                    ramflux_protocol::parse_qualified_device_id(&route.member_id)?
-                        .map_or_else(|| route.member_id.clone(), |(_, device)| device),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        account
-            .client
-            .group_member_routes(&body.group_id)?
-            .into_iter()
-            .filter(|route| {
-                route.target_delivery_id == body.target_delivery_id
-                    && route.member_principal_commitment.as_deref()
-                        == Some(account.principal_commitment.as_str())
-            })
-            .map(|route| {
-                Ok::<_, SdkError>(
-                    ramflux_protocol::parse_qualified_device_id(&route.member_id)?
-                        .map_or(route.member_id, |(_, device)| device),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    account.client.account_db()?.write_transaction(|| {
+    let own_copy = account.client.account_db()?.write_transaction(|| {
+        // Acquire the writer before reading the existing projection (WAL snapshot upgrades
+        // can fail immediately after a concurrent commit, regardless of busy_timeout).
+        account.client.account_db()?.fill_pending_message_body(
+            &body.conversation_id,
+            &body.message_id,
+            &body.sender_id,
+            &encrypted_body,
+        )?;
         if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
             if existing.encrypted_body.is_empty() {
                 account.client.account_db()?.fill_pending_message_body(
@@ -810,208 +786,255 @@ pub(crate) async fn dispatch_group_send_request(
                 &plaintext_body,
             )?;
         }
-        if surface.is_none() {
-            let envelope = account.client.own_group_copy_envelope(
-                &body.group_id,
-                &body.conversation_id,
-                &body.message_id,
-                body.envelope_id.as_deref(),
-            )?;
-            account.client.stage_own_sent_message(
-                crate::client::own_sent_message::OwnSentInput {
-                    envelope: &envelope,
-                    conversation: &body.conversation_id,
-                    message: &body.message_id,
-                    sender: &body.sender_id,
-                    original_recipients: &original_recipients,
-                    group: Some(&body.group_id),
-                    peer: None,
-                    body: &plaintext_body,
-                    ciphertext: &encrypted_body,
-                    at: now_unix_timestamp(),
-                },
-            )?;
-        }
-        Ok::<_, SdkError>(())
-    })?;
-    if let (Some(envelope_id), Some(source_principal_id), Some(target_delivery_id)) = (
-        body.envelope_id.clone(),
-        body.source_principal_id.clone(),
-        body.target_delivery_id.clone(),
-    ) {
-        let created_at = now_unix_timestamp();
-        let recipients = super::super::group_delivery::directory(&account.client, &body.group_id)?;
-        let recipient = recipients
-            .iter()
-            .filter(|row| {
-                row.get("target_delivery_id").and_then(serde_json::Value::as_str)
-                    == Some(target_delivery_id.as_str())
+        let ticket = if surface.is_none() {
+            account.client.queue_own_sent_copy(&body.message_id, || {
+                let original_recipients = if let Some(routes) = &fanout_routes {
+                    routes
+                        .iter()
+                        .filter(|route| {
+                            route.member_principal_commitment.as_deref()
+                                == Some(account.principal_commitment.as_str())
+                        })
+                        .map(|route| {
+                            Ok::<_, SdkError>(
+                                ramflux_protocol::parse_qualified_device_id(&route.member_id)?
+                                    .map_or_else(|| route.member_id.clone(), |(_, device)| device),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    account
+                        .client
+                        .group_member_routes(&body.group_id)?
+                        .into_iter()
+                        .filter(|route| {
+                            route.target_delivery_id == body.target_delivery_id
+                                && route.member_principal_commitment.as_deref()
+                                    == Some(account.principal_commitment.as_str())
+                        })
+                        .map(|route| {
+                            Ok::<_, SdkError>(
+                                ramflux_protocol::parse_qualified_device_id(&route.member_id)?
+                                    .map_or(route.member_id, |(_, device)| device),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+
+                let envelope = account.client.own_group_copy_envelope(
+                    &body.group_id,
+                    &body.conversation_id,
+                    &body.message_id,
+                    body.envelope_id.as_deref(),
+                )?;
+                account.client.stage_own_sent_message(
+                    crate::client::own_sent_message::OwnSentInput {
+                        envelope: &envelope,
+                        conversation: &body.conversation_id,
+                        message: &body.message_id,
+                        sender: &body.sender_id,
+                        original_recipients: &original_recipients,
+                        group: Some(&body.group_id),
+                        peer: None,
+                        body: &plaintext_body,
+                        ciphertext: &encrypted_body,
+                        at: now_unix_timestamp(),
+                    },
+                )?;
+                Ok(envelope)
             })
-            .collect::<Vec<_>>();
-        if recipient.len() != 1 {
-            return Err(SdkError::LocalBus(
-                "group override requires one verified recipient device route".to_owned(),
-            ));
-        }
-        if surface.as_ref().is_some_and(|carrier| {
-            carrier.payload_kind == crate::client::surface::PayloadKind::Action
-                && recipient[0]["principal_id"] != carrier.author_principal_id
-        }) {
-            return Err(SdkError::LocalBus(
-                "surface action override is not an author route".into(),
-            ));
-        }
-        let recipient_device = recipient[0]
-            .get("member_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| SdkError::LocalBus("group recipient device missing".to_owned()))?
-            .to_owned();
-        let mut message = GatewayDirectMessage {
-            conversation_id: body.conversation_id,
-            message_id: body.message_id,
-            envelope_id,
-            source_principal_id,
-            sender_id: body.sender_id,
-            recipient_device_id: Some(recipient_device),
-            recipient_principal_commitment: recipient[0]["member_principal_commitment"]
-                .as_str()
-                .map(str::to_owned),
-            target_delivery_id,
-            encrypted_body: Vec::new(),
-            created_at,
-            ttl: body.ttl.unwrap_or(3_600),
-        };
-        if let Some(federation) = body.federation.as_ref() {
-            let engine = account.take_live_engine().await?;
-            message.encrypted_body =
-                serde_json::to_vec(&account.client.seal_routed_federated_as(
-                    &engine,
-                    &message,
-                    &encrypted_body,
-                    federation.recipient_prekey_url.as_deref(),
-                    crate::client::routed::Route::group_message(&body.group_id),
-                )?)?;
-            let forwarded =
-                account.client.forward_federated_gateway_message(&engine, &message, federation);
-            account.put_engine(engine);
-            response["federated_submitted"] = serde_json::to_value(forwarded?)?;
         } else {
-            let mut engine = account.take_live_engine().await?;
-            let entry = async {
-                message.encrypted_body = serde_json::to_vec(
-                    &account
+            None
+        };
+        Ok::<_, SdkError>(ticket)
+    })?;
+    let message_id = body.message_id.clone();
+    let result = async {
+        if let (Some(envelope_id), Some(source_principal_id), Some(target_delivery_id)) = (
+            body.envelope_id.clone(),
+            body.source_principal_id.clone(),
+            body.target_delivery_id.clone(),
+        ) {
+            let created_at = now_unix_timestamp();
+            let recipients =
+                super::super::group_delivery::directory(&account.client, &body.group_id)?;
+            let recipient = recipients
+                .iter()
+                .filter(|row| {
+                    row.get("target_delivery_id").and_then(serde_json::Value::as_str)
+                        == Some(target_delivery_id.as_str())
+                })
+                .collect::<Vec<_>>();
+            if recipient.len() != 1 {
+                return Err(SdkError::LocalBus(
+                    "group override requires one verified recipient device route".to_owned(),
+                ));
+            }
+            if surface.as_ref().is_some_and(|carrier| {
+                carrier.payload_kind == crate::client::surface::PayloadKind::Action
+                    && recipient[0]["principal_id"] != carrier.author_principal_id
+            }) {
+                return Err(SdkError::LocalBus(
+                    "surface action override is not an author route".into(),
+                ));
+            }
+            let recipient_device = recipient[0]
+                .get("member_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SdkError::LocalBus("group recipient device missing".to_owned()))?
+                .to_owned();
+            let mut message = GatewayDirectMessage {
+                conversation_id: body.conversation_id,
+                message_id: body.message_id,
+                envelope_id,
+                source_principal_id,
+                sender_id: body.sender_id,
+                recipient_device_id: Some(recipient_device),
+                recipient_principal_commitment: recipient[0]["member_principal_commitment"]
+                    .as_str()
+                    .map(str::to_owned),
+                target_delivery_id,
+                encrypted_body: Vec::new(),
+                created_at,
+                ttl: body.ttl.unwrap_or(3_600),
+            };
+            if let Some(federation) = body.federation.as_ref() {
+                let engine = account.take_live_engine().await?;
+                message.encrypted_body =
+                    serde_json::to_vec(&account.client.seal_routed_federated_as(
+                        &engine,
+                        &message,
+                        &encrypted_body,
+                        federation.recipient_prekey_url.as_deref(),
+                        crate::client::routed::Route::group_message(&body.group_id),
+                    )?)?;
+                let forwarded =
+                    account.client.forward_federated_gateway_message(&engine, &message, federation);
+                account.put_engine(engine);
+                response["federated_submitted"] = serde_json::to_value(forwarded?)?;
+            } else {
+                let mut engine = account.take_live_engine().await?;
+                let entry = async {
+                    message.encrypted_body = serde_json::to_vec(
+                        &account
+                            .client
+                            .seal_routed_as(
+                                &mut engine,
+                                &message,
+                                &encrypted_body,
+                                crate::client::routed::Route::group_message(&body.group_id),
+                            )
+                            .await?,
+                    )?;
+                    engine
+                        .submit_envelope(gateway_direct_message_envelope(
+                            &engine.config,
+                            &message,
+                            None,
+                        )?)
+                        .await
+                }
+                .await;
+                account.put_engine(engine);
+                response["submitted"] = serde_json::to_value(entry?)?;
+            }
+        } else {
+            let routes = fanout_routes.unwrap_or_default();
+            let mut sender_key_distribution = Vec::new();
+            for route in routes.iter().cloned() {
+                if route.member_id == body.sender_id {
+                    continue;
+                }
+                if let Some(distribution) =
+                    dispatch_group_sender_key_distribution(account, &body.group_id, route, None)
+                        .await?
+                {
+                    sender_key_distribution.push(distribution);
+                }
+            }
+            let mut local = Vec::new();
+            let mut federated = Vec::new();
+            for route in routes {
+                if route.member_id == body.sender_id {
+                    continue;
+                }
+                let target_delivery_id = route.target_delivery_id.clone().ok_or_else(|| {
+                    SdkError::LocalBus(format!("group route lost for member {}", route.member_id))
+                })?;
+                let created_at = now_unix_timestamp();
+                let mut message = GatewayDirectMessage {
+                    conversation_id: body.conversation_id.clone(),
+                    message_id: body.message_id.clone(),
+                    envelope_id: format!(
+                        "envelope_{}",
+                        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+                    ),
+                    source_principal_id: body
+                        .source_principal_id
+                        .clone()
+                        .unwrap_or_else(|| account.gateway_config.principal_id.clone()),
+                    sender_id: body.sender_id.clone(),
+                    recipient_device_id: Some(route.member_id.clone()),
+                    recipient_principal_commitment: route.member_principal_commitment.clone(),
+                    target_delivery_id,
+                    encrypted_body: encrypted_body.clone(),
+                    created_at,
+                    ttl: body.ttl.unwrap_or(3_600),
+                };
+                if let Some(federation) = route.federation.as_ref() {
+                    let engine = account.take_live_engine().await?;
+                    let sealed = account.client.seal_routed_federated_as(
+                        &engine,
+                        &message,
+                        &message.encrypted_body,
+                        federation.recipient_prekey_url.as_deref(),
+                        crate::client::routed::Route::group_message(&body.group_id),
+                    );
+                    account.put_engine(engine);
+                    message.encrypted_body = serde_json::to_vec(&sealed?)?;
+                    let engine = account.take_live_engine().await?;
+                    let forwarded = account
+                        .client
+                        .forward_federated_gateway_message(&engine, &message, federation);
+                    account.put_engine(engine);
+                    federated.push(serde_json::to_value(forwarded?)?);
+                } else {
+                    let mut engine = account.take_live_engine().await?;
+                    let sealed = account
                         .client
                         .seal_routed_as(
                             &mut engine,
                             &message,
-                            &encrypted_body,
+                            &message.encrypted_body,
                             crate::client::routed::Route::group_message(&body.group_id),
                         )
-                        .await?,
-                )?;
-                engine
-                    .submit_envelope(gateway_direct_message_envelope(
-                        &engine.config,
-                        &message,
-                        None,
-                    )?)
-                    .await
+                        .await;
+                    let entry = match sealed {
+                        Ok(sealed) => {
+                            message.encrypted_body = serde_json::to_vec(&sealed)?;
+                            engine
+                                .submit_envelope(gateway_direct_message_envelope(
+                                    &engine.config,
+                                    &message,
+                                    None,
+                                )?)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    account.put_engine(engine);
+                    local.push(serde_json::to_value(entry?)?);
+                }
             }
-            .await;
-            account.put_engine(engine);
-            response["submitted"] = serde_json::to_value(entry?)?;
+            response["submitted"] = serde_json::Value::Array(local);
+            response["federated_submitted"] = serde_json::Value::Array(federated);
+            response["sender_key_distribution"] = serde_json::Value::Array(sender_key_distribution);
         }
-    } else {
-        let routes = fanout_routes.unwrap_or_default();
-        let mut sender_key_distribution = Vec::new();
-        for route in routes.iter().cloned() {
-            if route.member_id == body.sender_id {
-                continue;
-            }
-            if let Some(distribution) =
-                dispatch_group_sender_key_distribution(account, &body.group_id, route, None).await?
-            {
-                sender_key_distribution.push(distribution);
-            }
-        }
-        let mut local = Vec::new();
-        let mut federated = Vec::new();
-        for route in routes {
-            if route.member_id == body.sender_id {
-                continue;
-            }
-            let target_delivery_id = route.target_delivery_id.clone().ok_or_else(|| {
-                SdkError::LocalBus(format!("group route lost for member {}", route.member_id))
-            })?;
-            let created_at = now_unix_timestamp();
-            let mut message = GatewayDirectMessage {
-                conversation_id: body.conversation_id.clone(),
-                message_id: body.message_id.clone(),
-                envelope_id: format!(
-                    "envelope_{}",
-                    ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-                ),
-                source_principal_id: body
-                    .source_principal_id
-                    .clone()
-                    .unwrap_or_else(|| account.gateway_config.principal_id.clone()),
-                sender_id: body.sender_id.clone(),
-                recipient_device_id: Some(route.member_id.clone()),
-                recipient_principal_commitment: route.member_principal_commitment.clone(),
-                target_delivery_id,
-                encrypted_body: encrypted_body.clone(),
-                created_at,
-                ttl: body.ttl.unwrap_or(3_600),
-            };
-            if let Some(federation) = route.federation.as_ref() {
-                let engine = account.take_live_engine().await?;
-                let sealed = account.client.seal_routed_federated_as(
-                    &engine,
-                    &message,
-                    &message.encrypted_body,
-                    federation.recipient_prekey_url.as_deref(),
-                    crate::client::routed::Route::group_message(&body.group_id),
-                );
-                account.put_engine(engine);
-                message.encrypted_body = serde_json::to_vec(&sealed?)?;
-                let engine = account.take_live_engine().await?;
-                let forwarded =
-                    account.client.forward_federated_gateway_message(&engine, &message, federation);
-                account.put_engine(engine);
-                federated.push(serde_json::to_value(forwarded?)?);
-            } else {
-                let mut engine = account.take_live_engine().await?;
-                let sealed = account
-                    .client
-                    .seal_routed_as(
-                        &mut engine,
-                        &message,
-                        &message.encrypted_body,
-                        crate::client::routed::Route::group_message(&body.group_id),
-                    )
-                    .await;
-                let entry = match sealed {
-                    Ok(sealed) => {
-                        message.encrypted_body = serde_json::to_vec(&sealed)?;
-                        engine
-                            .submit_envelope(gateway_direct_message_envelope(
-                                &engine.config,
-                                &message,
-                                None,
-                            )?)
-                            .await
-                    }
-                    Err(error) => Err(error),
-                };
-                account.put_engine(engine);
-                local.push(serde_json::to_value(entry?)?);
-            }
-        }
-        response["submitted"] = serde_json::Value::Array(local);
-        response["federated_submitted"] = serde_json::Value::Array(federated);
-        response["sender_key_distribution"] = serde_json::Value::Array(sender_key_distribution);
+        Ok(local_bus_ok(response))
     }
-    Ok(local_bus_ok(response))
+    .await;
+    account.client.finish_own_sent_copy(&message_id, own_copy.as_deref(), result.is_ok());
+    result
 }
 
 pub(crate) async fn dispatch_group_sender_key_distribution(

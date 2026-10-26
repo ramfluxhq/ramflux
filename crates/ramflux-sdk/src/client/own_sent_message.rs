@@ -20,6 +20,8 @@ struct SentMessage {
     #[serde(default)]
     ciphertext_hash: Option<String>,
     context: OwnContext,
+    #[serde(default)]
+    authored_at: Option<i64>,
     body_base64: zeroize::Zeroizing<String>,
 }
 impl SentMessage {
@@ -105,6 +107,7 @@ impl RamfluxClient {
             .flatten();
         let ciphertext_hash = own_sent_ciphertext_hash(input.ciphertext);
         let packet = SentMessage {
+            authored_at: Some(input.at),
             envelope_id: input.envelope.into(),
             message_id: input.message.into(),
             sender_id: input.sender.into(),
@@ -120,16 +123,16 @@ impl RamfluxClient {
         };
         let mut bytes = zeroize::Zeroizing::new(PREFIX.to_vec());
         bytes.extend(serde_json::to_vec(&packet)?);
-        crate::bus::own_device_copy::stage(
+        crate::bus::own_device_copy::stage_held(
             self,
             super::own_device_copy::OwnMessageInput {
                 id: input.envelope,
-                created_at: input.at,
+                created_at: now_unix_timestamp(),
                 conversation: input.conversation,
                 group: input.group,
                 body: &bytes,
             },
-            Some(("message", input.message)),
+            input.message,
         )?;
         self.record_own_sent_projection(
             &self.owned_device_identity()?,
@@ -207,6 +210,26 @@ impl RamfluxClient {
             };
             db.persist_actor_state(&key, &value)?;
         }
+        Ok(())
+    }
+    pub(super) fn index_imported_own_sent_ciphertext(
+        &self,
+        message: &DirectMessageRecord,
+    ) -> Result<(), SdkError> {
+        if message.encrypted_body.is_empty() {
+            return Ok(());
+        }
+        let db = self.account_db()?;
+        let key = imported_ciphertext_key(&own_sent_ciphertext_hash(&message.encrypted_body));
+        let old = db.load_actor_state::<serde_json::Value>(&key)?;
+        let record = if old.as_ref().is_some_and(|row| {
+            row["id"] != message.message_id || row["conversation"] != message.conversation_id
+        }) {
+            json!({"ambiguous":true})
+        } else {
+            json!({"id":message.message_id,"conversation":message.conversation_id})
+        };
+        db.persist_actor_state(&key, &record)?;
         Ok(())
     }
     pub(crate) fn already_projected_own_sent_message(
@@ -287,16 +310,25 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         let known = db.load_actor_state::<String>(&alias_key(&own_row_id(source, envelope)?))?;
-        let candidate =
-            self.direct_message_by_id(known.as_deref().unwrap_or(&packet.message_id))?;
+        let imported = packet
+            .ciphertext_hash
+            .as_deref()
+            .map(|hash| db.load_actor_state::<serde_json::Value>(&imported_ciphertext_key(hash)))
+            .transpose()?
+            .flatten()
+            .filter(|record| record["conversation"] == conversation);
+        let imported_id = imported.as_ref().and_then(|record| record["id"].as_str());
+        let candidate = self
+            .direct_message_by_id(known.as_deref().or(imported_id).unwrap_or(&packet.message_id))?;
         let history = if let Some(row) = candidate.as_ref() {
             let origin = self.message_origin(conversation, &row.message_id)?;
             row.conversation_id == conversation
                 && origin.as_ref().map_or_else(
                     || {
-                        !row.encrypted_body.is_empty()
-                            && packet.ciphertext_hash.as_deref()
-                                == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str())
+                        imported_id == Some(row.message_id.as_str())
+                            || (!row.encrypted_body.is_empty()
+                                && packet.ciphertext_hash.as_deref()
+                                    == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str()))
                     },
                     |v| {
                         v["sender_root_commitment"] == source.root_commitment()
@@ -323,7 +355,7 @@ impl RamfluxClient {
                 sender_id: source.device_id(),
                 encrypted_body: &[],
                 metadata: &MessageMetadata::default(),
-                created_at: at,
+                created_at: packet.authored_at.unwrap_or(at),
             })?;
         }
         if !history || candidate.as_ref().is_none_or(|row| !row.deleted) {
@@ -371,4 +403,8 @@ fn own_row_id(
 }
 fn alias_key(message: &str) -> String {
     format!("own-device/sent-alias/{message}")
+}
+
+fn imported_ciphertext_key(hash: &str) -> String {
+    format!("own-device/imported-ciphertext/{hash}")
 }

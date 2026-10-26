@@ -28,6 +28,10 @@ struct Work {
     packet: Option<serde_json::Value>,
     attempts: u32,
     next_at: i64,
+    #[serde(default)]
+    held: bool,
+    #[serde(default)]
+    local_manifest: bool,
 }
 pub(crate) fn copy_id(client: &RamfluxClient, id: &str) -> Result<String, SdkError> {
     let source = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -52,6 +56,21 @@ pub(crate) fn stage(
     input: OwnMessageInput<'_>,
     owner_record: Option<(&str, &str)>,
 ) -> Result<(), SdkError> {
+    stage_inner(client, input, owner_record, false)
+}
+pub(crate) fn stage_held(
+    client: &RamfluxClient,
+    input: OwnMessageInput<'_>,
+    message: &str,
+) -> Result<(), SdkError> {
+    stage_inner(client, input, Some(("message", message)), true)
+}
+fn stage_inner(
+    client: &RamfluxClient,
+    input: OwnMessageInput<'_>,
+    owner_record: Option<(&str, &str)>,
+    held: bool,
+) -> Result<(), SdkError> {
     let id = copy_id(client, input.id)?;
     let key = format!("{PREFIX}{id}");
     let db = client.account_db()?;
@@ -74,6 +93,8 @@ pub(crate) fn stage(
         packet: None,
         attempts: 0,
         next_at: input.created_at,
+        held,
+        local_manifest: held,
     };
     db.write_transaction(|| {
         let (rows, bytes) = db.actor_state_usage(PREFIX)?;
@@ -120,12 +141,24 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
         if started.elapsed() >= Duration::from_millis(250) {
             break;
         }
+        // Pre-confirmation plain intents from older versions have no submit receipt. Do not
+        // infer success on upgrade; surfaces and other legacy controls keep their lifecycle.
+        if !work.local_manifest
+            && work.intent.owner_record.as_ref().is_some_and(|(kind, _)| kind == "message")
+        {
+            account.client.account_db()?.remove_actor_state(&id)?;
+            state(&account.client, &work, "failed", false)?;
+            continue;
+        }
         if work.intent.created_at.saturating_add(600) <= now
             || work.attempts >= 10
             || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
         {
             account.client.account_db()?.remove_actor_state(&id)?;
             state(&account.client, &work, "failed", false)?;
+            continue;
+        }
+        if work.held {
             continue;
         }
         if work.next_at > now {
@@ -136,7 +169,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
         work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
         account.client.account_db()?.persist_actor_state(&id, &work)?;
         if work.packet.is_none() {
-            match prepare(account, &work.intent).await {
+            match prepare(account, &work.intent, work.local_manifest).await {
                 Ok(Some(packet)) => {
                     let old_bytes = work_bytes(&work)?;
                     work.packet = Some(serde_json::to_value(packet)?);
@@ -203,6 +236,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
 async fn prepare(
     account: &mut LocalBusAccountState,
     intent: &Intent,
+    local_manifest: bool,
 ) -> Result<Option<OwnDeviceMessage>, SdkError> {
     let body = zeroize::Zeroizing::new(
         ramflux_protocol::decode_base64url(&intent.body)
@@ -211,7 +245,7 @@ async fn prepare(
     let mut engine = account.take_live_engine().await?;
     let prepared = account
         .client
-        .prepare_own_device_message(
+        .prepare_own_device_message_with_source(
             &mut engine,
             OwnMessageInput {
                 id: &intent.id,
@@ -220,6 +254,7 @@ async fn prepare(
                 group: intent.group.as_deref(),
                 body: &body,
             },
+            local_manifest,
         )
         .await;
     account.put_engine(engine);
@@ -296,4 +331,29 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
 fn work_bytes(work: &Work) -> Result<u64, SdkError> {
     u64::try_from(serde_json::to_vec(work)?.len())
         .map_err(|_| SdkError::LocalBus("own-device record size overflow".into()))
+}
+
+/// Release only a held plain-message copy; legacy/surface retries keep their existing lifecycle.
+pub(crate) fn finish_held(
+    client: &RamfluxClient,
+    envelope: &str,
+    confirmed: bool,
+) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    let key = format!("{PREFIX}{}", copy_id(client, envelope)?);
+    db.write_transaction(|| {
+        let Some(mut work) = db.load_actor_state::<Work>(&key)? else { return Ok(()) };
+        if !work.held {
+            return Ok(());
+        }
+        if confirmed {
+            work.held = false;
+            db.persist_actor_state(&key, &work)?;
+            state(client, &work, "pending", false)?;
+        } else {
+            db.remove_actor_state(&key)?;
+            state(client, &work, "failed", false)?;
+        }
+        Ok(())
+    })
 }

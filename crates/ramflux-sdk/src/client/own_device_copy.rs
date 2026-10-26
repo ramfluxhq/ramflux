@@ -201,18 +201,24 @@ pub(crate) struct OwnMessageInput<'a> {
     pub body: &'a [u8],
 }
 impl RamfluxClient {
-    pub(crate) async fn prepare_own_device_message(
+    pub(crate) async fn prepare_own_device_message_with_source(
         &self,
         engine: &mut GatewaySessionEngine,
         input: OwnMessageInput<'_>,
+        local_manifest: bool,
     ) -> Result<Option<OwnDeviceMessage>, SdkError> {
         if input.body.len() > MAX_PACKET_BYTES {
             return Err(invalid(TOO_LARGE));
         }
+        if local_manifest && !self.own_sent_has_siblings()? {
+            return Ok(None);
+        }
         let root = self.surface_local_root_commitment()?;
-        let manifest = self
-            .cache_verified_device_manifest(&engine.config, &root, "own_device_message")
-            .await?;
+        let manifest = if local_manifest {
+            self.refreshed_own_copy_manifest(&engine.config).await?
+        } else {
+            self.cache_verified_device_manifest(&engine.config, &root, "own_device_message").await?
+        };
         let source = engine.config.device_id.clone();
         if !manifest.devices.iter().any(|d| d.device_id == source) {
             return Err(invalid("own-device source is not active"));
