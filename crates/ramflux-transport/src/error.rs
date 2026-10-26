@@ -68,7 +68,11 @@ pub(crate) fn tls_source(error: &(dyn std::error::Error + 'static)) -> bool {
                 rustls::Error::AlertReceived(alert) => {
                     crate::quic_errors::trust_alert(0x100 + u64::from(u8::from(*alert)))
                 }
-                _ => true,
+                rustls::Error::InvalidCertificate(_)
+                | rustls::Error::InvalidCertRevocationList(_)
+                | rustls::Error::NoCertificatesPresented
+                | rustls::Error::UnsupportedNameType => true,
+                _ => false,
             };
         }
         // Some I/O wrappers expose their custom payload separately from Error::source.

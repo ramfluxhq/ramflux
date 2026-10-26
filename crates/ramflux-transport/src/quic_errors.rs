@@ -94,5 +94,12 @@ mod tests {
         assert!(crate::error::tls_source(&rustls::Error::AlertReceived(
             rustls::AlertDescription::UnknownCA
         )));
+        assert!(crate::error::tls_source(&rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer
+        )));
+        assert!(crate::error::tls_source(&rustls::Error::NoCertificatesPresented));
+        assert!(!crate::error::tls_source(&rustls::Error::General(
+            "temporary mesh root provider failure".to_owned()
+        )));
     }
 }
