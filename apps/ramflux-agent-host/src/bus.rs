@@ -105,7 +105,7 @@ impl AgentBus for RfdBus {
             return Err(match error.code.as_str() {
                 "Unavailable" | "Busy" | "DeadlineExceeded" | "Unauthenticated"
                 | "NotAuthenticated" => Error::Bus,
-                "AccountLocked" | "AccountNotFound" => Error::IdentityLost,
+                "AccountNotOpen" | "AccountLocked" | "AccountNotFound" => Error::IdentityLost,
                 "Unauthorized" if matches!(method, "account.status" | "device.list") => {
                     Error::IdentityLost
                 }

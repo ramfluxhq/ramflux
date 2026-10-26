@@ -10,7 +10,8 @@ const MAX_DEFERRED: usize = 64;
 // Reserve eight slots for already persisted work while bounding new admissions.
 const MAX_NEW_DEFERRED: usize = 56;
 const MAX_DEFERRED_BYTES: usize = 32 * 1024;
-// Eight busy conversations consume at most half of the shared queue and byte budget.
+// Per-conversation limits constrain monopolization. The global admission cap still applies;
+// the eight reserved slots preserve legacy entries and updates, not new conversations.
 const MAX_PER_CONVERSATION: usize = 4;
 const MAX_CONVERSATION_BYTES: usize = MAX_DEFERRED_BYTES / 16;
 impl<E: EngineProvider> AgentHost<E> {

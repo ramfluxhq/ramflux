@@ -280,3 +280,45 @@ async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_
     assert_eq!(host.checkpoint().cursor, Some(1));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_real_rfd_missing_account_emits_a_typed_loss_that_stops_the_host() -> TestResult {
+    let f = Fixture::new()?;
+    let config = ramflux_sdk::LocalBusConfig::new(&f.config.socket, f.root.join("daemon"));
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let daemon = tokio::spawn(ramflux_sdk::serve_local_bus_until(config, receiver));
+    let flow = async {
+        let client = loop {
+            if let Ok(client) = ramflux_sdk::LocalBusClient::connect(&f.config.socket).await {
+                break client;
+            }
+            tokio::task::yield_now().await;
+        };
+        let response = client
+            .request_frame_response(LocalBusFrame::request(
+                "missing-account",
+                Some("missing".into()),
+                "test",
+                "account.status",
+                json!({}),
+            ))
+            .await?;
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("AccountNotOpen")
+        );
+        let mut bus = RfdBus::connect(&f.config.socket, "missing").await?;
+        for method in ["account.status", "device.list", "message.receive"] {
+            let error =
+                bus.request(method, json!({}), None).await.err().ok_or("missing refusal")?;
+            assert!(matches!(error, Error::IdentityLost), "{method}: {error:?}");
+            assert!(error.stops_host());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), flow).await;
+    shutdown.send_replace(true);
+    daemon.await??;
+    result??;
+    Ok(())
+}

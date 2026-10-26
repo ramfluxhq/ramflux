@@ -143,8 +143,8 @@ fallback and host-restart equivalence.
 Malformed read-model fields are permanent typed refusals, never transport retries.
 Connection failures, explicit Unavailable/Busy/DeadlineExceeded refusals and gateway
 authentication races with a valid local identity reconnect the host. Per-poll validation failures are recorded without abandoning the
-event stream; an unchanged poll refusal does not rewrite the checkpoint. Authentication
-loss on an identity method stops the host. An `Unauthenticated` refusal on another
+event stream; an unchanged poll refusal does not rewrite the checkpoint. Confirmed
+identity loss stops the host. An `Unauthenticated` refusal on another
 method rechecks `account.status`, `device.list` and the self identity directory. A
 valid identity makes the original operation retryable. Only terminal identity or
 storage errors from revalidation stop the host; other recheck errors stay retryable. This check never automatically resends the original operation. The first poll waits one interval. A connection-level
@@ -158,3 +158,9 @@ valid local identity. The counter survives socket reconnects. After four failure
 stderr includes a persistent retry-status line with the count and delay, without
 endpoint paths or response data. An attempt lasting at least 60 seconds resets
 the delay to one second; Ctrl-C interrupts both requests and backoff sleeps.
+
+The daemon's typed `AccountNotOpen` refusal confirms that the configured account
+is closed, locked or missing and stops the host. The host does not parse diagnostic
+messages to infer this condition. `Unauthenticated` (and the compatibility code
+`NotAuthenticated`) during startup or reconnect remains retryable: the host backs
+off and re-verifies its local identity before resuming work.

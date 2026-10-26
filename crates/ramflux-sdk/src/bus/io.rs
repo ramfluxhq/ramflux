@@ -125,6 +125,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         return code;
     }
     match error {
+        SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::SurfaceDeliveryTooLarge { .. } => "too_large",

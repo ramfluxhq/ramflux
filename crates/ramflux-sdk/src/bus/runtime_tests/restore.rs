@@ -190,3 +190,54 @@ async fn daemon_start_and_immediate_socket_unlock_are_race_free() -> Result<(), 
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_real_daemon_emits_account_not_open_after_lock_and_for_missing_accounts()
+-> Result<(), SdkError> {
+    let root = root("closed-account-code");
+    persisted_account(&root)?;
+    let socket = root.join("bus.sock");
+    let (shutdown, receiver) = watch::channel(false);
+    let server = serve_local_bus_until(LocalBusConfig::new(&socket, &root), receiver);
+    let flow = async {
+        let client = loop {
+            if let Ok(client) = LocalBusClient::connect(&socket).await {
+                break client;
+            }
+            tokio::task::yield_now().await;
+        };
+        client
+            .request_frame(request(
+                "unlock",
+                "alice",
+                "account.unlock",
+                serde_json::json!({"passphrase":"actor-test-secret"}),
+            ))
+            .await?;
+        client
+            .request_frame(request("lock", "alice", "account.lock", serde_json::json!({})))
+            .await?;
+        for account in ["alice", "missing"] {
+            for method in ["account.status", "device.list", "message.receive", "account.switch"] {
+                let response = client
+                    .request_frame_response(request(method, account, method, serde_json::json!({})))
+                    .await?;
+                assert_eq!(
+                    response.error.as_ref().map(|error| error.code.as_str()),
+                    Some("AccountNotOpen"),
+                    "{account}/{method}: {response:?}"
+                );
+            }
+        }
+        shutdown.send_replace(true);
+        Ok::<(), SdkError>(())
+    };
+    let (server, flow) =
+        tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(server, flow) })
+            .await
+            .map_err(|_| failure("closed-account code test timed out"))?;
+    server?;
+    flow?;
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

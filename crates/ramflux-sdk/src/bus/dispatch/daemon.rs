@@ -30,10 +30,7 @@ pub(crate) fn local_bus_account<'a>(
     state: &'a LocalBusDaemonState,
     account_id: &str,
 ) -> Result<&'a LocalBusAccountState, SdkError> {
-    state
-        .accounts
-        .get(account_id)
-        .ok_or_else(|| SdkError::LocalBus(format!("account not open: {account_id}")))
+    state.accounts.get(account_id).ok_or_else(|| SdkError::AccountNotOpen(account_id.to_owned()))
 }
 
 pub(crate) fn local_bus_account_mut<'a>(
@@ -43,5 +40,5 @@ pub(crate) fn local_bus_account_mut<'a>(
     state
         .accounts
         .get_mut(account_id)
-        .ok_or_else(|| SdkError::LocalBus(format!("account not open: {account_id}")))
+        .ok_or_else(|| SdkError::AccountNotOpen(account_id.to_owned()))
 }

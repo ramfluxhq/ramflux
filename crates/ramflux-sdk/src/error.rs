@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("account not open: {0}")]
+    AccountNotOpen(String),
     #[error("{code}: {message}")]
     LocalBusRefused { code: String, message: String, body: Box<serde_json::Value> },
     #[error("{message}")]

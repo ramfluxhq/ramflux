@@ -31,7 +31,7 @@ pub(crate) async fn dispatch_account_bus_request(
         "account.switch" => {
             let account_id = request_account_id(request)?.to_owned();
             if !state.accounts.contains_key(&account_id) {
-                return Err(SdkError::LocalBus(format!("account not open: {account_id}")));
+                return Err(SdkError::AccountNotOpen(account_id));
             }
             state.active_account_id = Some(account_id.clone());
             Ok(local_bus_ok(serde_json::json!({ "active_account_id": account_id })))
@@ -278,7 +278,7 @@ fn local_bus_account_lock(
     }
     let removed = state.accounts.remove(account_id);
     if removed.is_none() {
-        return Err(SdkError::LocalBus(format!("account not open: {account_id}")));
+        return Err(SdkError::AccountNotOpen(account_id.to_owned()));
     }
     if state.active_account_id.as_deref() == Some(account_id) {
         state.active_account_id = None;

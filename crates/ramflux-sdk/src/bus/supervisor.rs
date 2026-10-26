@@ -557,7 +557,7 @@ fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> Acco
 }
 
 fn not_open(id: &str) -> SdkError {
-    SdkError::LocalBus(format!("account not open: {id}"))
+    SdkError::AccountNotOpen(id.to_owned())
 }
 fn reply(body: serde_json::Value) -> ActorResponse {
     ActorResponse { body, events: Vec::new(), nodes: None }
