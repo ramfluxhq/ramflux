@@ -813,9 +813,15 @@ pub(crate) async fn dispatch_group_send_request(
             )?;
         }
         if surface.is_none() {
+            let envelope = account.client.own_group_copy_envelope(
+                &body.group_id,
+                &body.conversation_id,
+                &body.message_id,
+                body.envelope_id.as_deref(),
+            )?;
             account.client.stage_own_sent_message(
                 crate::client::own_sent_message::OwnSentInput {
-                    envelope: body.envelope_id.as_deref().unwrap_or(&body.message_id),
+                    envelope: &envelope,
                     conversation: &body.conversation_id,
                     message: &body.message_id,
                     sender: &body.sender_id,

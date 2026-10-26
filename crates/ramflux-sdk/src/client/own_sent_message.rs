@@ -93,6 +93,53 @@ impl RamfluxClient {
             },
             Some(("message", input.message)),
         )?;
+        self.record_own_sent_projection(&self.owned_device_identity()?, input, input.message)?;
+        Ok(())
+    }
+    pub(crate) fn own_group_copy_envelope(
+        &self,
+        group: &str,
+        conversation: &str,
+        message: &str,
+        explicit: Option<&str>,
+    ) -> Result<String, SdkError> {
+        if let Some(id) = explicit {
+            return Ok(id.into());
+        }
+        let scope = ramflux_protocol::canonical_json_bytes(&(
+            self.owned_device_identity()?.storage_key(),
+            group,
+            conversation,
+            message,
+        ))?;
+        let key = format!(
+            "own-device/group-envelope/{}",
+            ramflux_crypto::blake3_256_base64url("ramflux.own-group-envelope.v1", &scope)
+        );
+        let db = self.account_db()?;
+        if let Some(id) = db.load_actor_state::<String>(&key)? {
+            return Ok(id);
+        }
+        let id = crate::new_surface_message_id()?;
+        db.persist_actor_state(&key, &id)?;
+        Ok(id)
+    }
+    fn record_own_sent_projection(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        input: OwnSentInput<'_>,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        db.persist_actor_state(
+            &sent_history_key(input.conversation, input.message, input.sender)?,
+            &json!({"id":id,"source":source.storage_key()}),
+        )?;
+        db.persist_actor_state(&alias_key(&own_row_id(source, input.envelope)?), &id)?;
+        db.persist_actor_state(&super::delivery_receipts::origin_key(input.conversation, id)?,
+            &json!({"sender_device_id":source.device_id(),"sender_root_commitment":source.root_commitment(),
+                "sender_device_display":source.storage_key(),"direction":"outgoing",
+                "original_message_id":input.message,"envelope_id":input.envelope}))?;
         Ok(())
     }
     pub(crate) fn already_projected_own_sent_message(
@@ -101,18 +148,19 @@ impl RamfluxClient {
         content: Option<&[u8]>,
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
-        let Some(record) = db.load_actor_state::<serde_json::Value>(&sent_history_key(
+        let alias = db.load_actor_state::<String>(&alias_key(&message.message_id))?;
+        let logical = db.load_actor_state::<serde_json::Value>(&sent_history_key(
             &message.conversation_id,
             &message.message_id,
             &message.sender_id,
-        )?)?
+        )?)?;
+        let Some(id) = alias.as_deref().or_else(|| logical.as_ref().and_then(|v| v["id"].as_str()))
         else {
             return Ok(false);
         };
-        let Some(id) = record["id"].as_str() else { return Ok(false) };
         let Some(row) = self.direct_message_by_id(id)? else { return Ok(false) };
         Ok(row.conversation_id == message.conversation_id
-            && db.message_content(id)?.as_deref() == content)
+            && (row.deleted || db.message_content(id)?.as_deref() == content))
     }
     pub(crate) fn own_sent_peer(&self, message: &GatewayDirectMessage) -> Result<String, SdkError> {
         let reference = Self::qualified_recipient(message)?;
@@ -158,34 +206,52 @@ impl RamfluxClient {
         if let Some(group) = group {
             self.merge_routed_group_link(group, conversation)?;
         }
-        // Physical row ids include the authenticated source and envelope. Logical ids may be
-        // reused by another device; that must neither overwrite nor suppress its outgoing copy.
-        let id = format!(
-            "own:{}",
-            super::own_device_copy::copy_id(
-                source.root_commitment(),
-                source.device_id(),
-                envelope,
-            )?
-        );
         let db = self.account_db()?;
-        db.import_direct_message_projection(DirectMessageWrite {
-            conversation_id: conversation,
-            message_id: &id,
-            sender_id: source.device_id(),
-            encrypted_body: &[],
-            metadata: &MessageMetadata::default(),
-            created_at: at,
-        })?;
-        db.store_message_content(conversation, &id, &body)?;
-        db.persist_actor_state(
-            &sent_history_key(conversation, &packet.message_id, &packet.sender_id)?,
-            &json!({"id":id,"source":source.storage_key()}),
+        let candidate = self.direct_message_by_id(&packet.message_id)?;
+        let history = if let Some(row) = candidate.as_ref() {
+            let origin = self.message_origin(conversation, &row.message_id)?;
+            row.conversation_id == conversation
+                && row.sender_id == packet.sender_id
+                && origin.as_ref().is_none_or(|v| {
+                    v["sender_root_commitment"] == source.root_commitment()
+                        && v["sender_device_id"] == source.device_id()
+                        && v["envelope_id"] == envelope
+                })
+                && (row.deleted
+                    || db.message_content(&row.message_id)?.as_deref() == Some(body.as_slice()))
+        } else {
+            false
+        };
+        // An authenticated source/envelope gets its own id unless the exact authored row was
+        // already imported by history. Provenance prevents another device's row being merged.
+        let id = if history { packet.message_id.clone() } else { own_row_id(source, envelope)? };
+        if !history {
+            db.import_direct_message_projection(DirectMessageWrite {
+                conversation_id: conversation,
+                message_id: &id,
+                sender_id: source.device_id(),
+                encrypted_body: &[],
+                metadata: &MessageMetadata::default(),
+                created_at: at,
+            })?;
+        }
+        if !history || candidate.as_ref().is_none_or(|row| !row.deleted) {
+            db.store_message_content(conversation, &id, &body)?;
+        }
+        self.record_own_sent_projection(
+            source,
+            OwnSentInput {
+                envelope,
+                conversation,
+                message: &packet.message_id,
+                sender: &packet.sender_id,
+                group,
+                peer: None,
+                body: &body,
+                at,
+            },
+            &id,
         )?;
-        db.persist_actor_state(&super::delivery_receipts::origin_key(conversation, &id)?,
-            &json!({"sender_device_id":source.device_id(),"sender_root_commitment":source.root_commitment(),
-                "sender_device_display":source.storage_key(),"direction":"outgoing",
-                "original_message_id":packet.message_id,"envelope_id":envelope}))?;
         Ok(true)
     }
 }
@@ -201,4 +267,17 @@ fn sent_history_key(conversation: &str, message: &str, sender: &str) -> Result<S
             &ramflux_protocol::canonical_json_bytes(&(conversation, message, sender))?,
         )
     ))
+}
+
+fn own_row_id(
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &str,
+) -> Result<String, SdkError> {
+    Ok(format!(
+        "own:{}",
+        super::own_device_copy::copy_id(source.root_commitment(), source.device_id(), envelope)?
+    ))
+}
+fn alias_key(message: &str) -> String {
+    format!("own-device/sent-alias/{message}")
 }
