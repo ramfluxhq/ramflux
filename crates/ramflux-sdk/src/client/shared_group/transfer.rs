@@ -33,10 +33,10 @@ struct Lease {
 fn key(prefix: &str, group: &str) -> String {
     format!("{prefix}{}", ramflux_protocol::encode_base64url(group))
 }
-fn device_key(root: &str, device: &str) -> Result<String, SdkError> {
+fn device_key(device: &ramflux_crypto::RootQualifiedDeviceRef) -> Result<String, SdkError> {
     Ok(ramflux_protocol::hash_base64url(
         "ramflux.group.transfer.device.v1",
-        &ramflux_protocol::canonical_json_bytes(&(root, device))?,
+        &ramflux_protocol::canonical_json_bytes(&(device.root_commitment(), device.device_id()))?,
     ))
 }
 pub(crate) fn requires_sync() -> SdkError {
@@ -208,12 +208,10 @@ impl RamfluxClient {
         state: &VerifiedGroupState,
     ) -> Result<GroupTransferAcceptance, SdkError> {
         for participant in &pending.probe.required {
-            let Some(reply) =
-                pending.replies.get(&device_key(&participant.root, &participant.device)?)
-            else {
+            let identity = self.device_identity_for_root(&participant.root, &participant.device)?;
+            let Some(reply) = pending.replies.get(&device_key(&identity)?) else {
                 return Err(requires_sync());
             };
-            let identity = self.device_identity_for_root(&participant.root, &participant.device)?;
             self.require_cached_root_authority(&identity)?;
             if self.trusted_device(&identity)?["signing_public_key"]
                 != reply.actor.identity.signing_public_key
@@ -381,9 +379,8 @@ impl RamfluxClient {
             }
             return Ok(());
         }
-        pending
-            .replies
-            .insert(device_key(&actor.root_commitment, &actor.device_id)?, reply.clone());
+        let identity = self.device_identity_for_root(&actor.root_commitment, &actor.device_id)?;
+        pending.replies.insert(device_key(&identity)?, reply.clone());
         self.account_db()?.persist_actor_state(&id, &pending)?;
         Ok(())
     }
