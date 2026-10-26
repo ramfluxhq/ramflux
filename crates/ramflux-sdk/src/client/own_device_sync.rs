@@ -987,7 +987,7 @@ pub(crate) mod tests {
             at: 1,
         })?;
         let copied = format!(
-            "own:{}",
+            "routed:own:{}",
             super::super::own_device_copy::copy_id(
                 client.owned_device_identity()?.root_commitment(),
                 "target_device_sync",
