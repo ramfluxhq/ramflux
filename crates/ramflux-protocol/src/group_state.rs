@@ -30,6 +30,8 @@ pub enum GroupStateLimit {
     Devices,
     #[error("pending request limit exceeded")]
     Requests,
+    #[error("removal fence limit exceeded")]
+    RemovalFences,
     #[error("ownership transfer limit exceeded")]
     Transfers,
 }
@@ -89,7 +91,7 @@ pub enum GroupStateChange {
     Remove { root_commitment: String, device_id: String },
     SetRole { root_commitment: String, device_id: String, role: SharedGroupRole },
     SetName { name: String },
-    TransferOwnership { creator: GroupStateActor },
+    TransferOwnership { creator: GroupStateActor, acceptance: Box<GroupTransferAcceptance> },
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -101,9 +103,26 @@ pub struct GroupStateGenesis {
     pub new_member_history: String,
     pub signature: String,
 }
+/// A fresh transferee branch countersignature binds the exact creator head being handed over.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupTransferAcceptance {
+    pub group_id: String,
+    pub genesis_hash: String,
+    pub base_epoch: u64,
+    pub base_hash: String,
+    pub from_public_key: String,
+    pub creator: GroupStateActor,
+    pub nonce: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub signature: String,
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupCreatorTransfer {
+    pub acceptance: GroupTransferAcceptance,
+    pub issued_at: i64,
     pub group_id: String,
     pub genesis_hash: String,
     pub from_public_key: String,

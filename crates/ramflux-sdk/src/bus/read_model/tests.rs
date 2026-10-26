@@ -6,14 +6,12 @@ use super::*;
 struct Fixture {
     root: PathBuf,
     client: RamfluxClient,
+    _directory: tempfile::TempDir,
 }
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |time| time.as_nanos());
-        let root =
-            PathBuf::from(format!("/tmp/ramflux-read-model-{}-{unique}", std::process::id()));
+        let directory = tempfile::Builder::new().prefix("ramflux-read-model-").tempdir()?;
+        let root = directory.path().to_path_buf();
         let mut client = RamfluxClient::new();
         client.create_identity_root("alice", [0x31; 32]);
         client.create_device_branch("alice", "alice-phone", 1, [0x32; 32]);
@@ -26,18 +24,13 @@ impl Fixture {
             &json!({"principal_id":"alice","device_id":"alice-phone"}),
         )?;
         client.account_db()?.persist_client_record("identity","alice",&json!({"id":"alice","principal_id":"alice","contact_identity_commitment":"commit-alice","devices":[{"id":"alice-phone"}],"kind":"human","is_self":true}))?;
-        Ok(Self { root, client })
+        Ok(Self { root, client, _directory: directory })
     }
     fn read(&self, method: &str, body: Value) -> Result<Value, SdkError> {
         read(
             &self.client,
             &LocalBusFrame::request("read", Some("local-alice".to_owned()), "client", method, body),
         )
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

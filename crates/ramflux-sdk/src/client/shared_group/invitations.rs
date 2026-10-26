@@ -20,7 +20,7 @@ fn key(group: &str) -> String {
     format!("{PREFIX}{}", ramflux_protocol::encode_base64url(group))
 }
 impl RamfluxClient {
-    fn group_parties_blocked(
+    pub(super) fn group_parties_blocked(
         &self,
         snapshot: &ramflux_protocol::GroupStateSnapshot,
     ) -> Result<bool, SdkError> {
@@ -71,6 +71,9 @@ impl RamfluxClient {
         {
             return Ok(false);
         }
+        if self.own_group_acceptance(state)? {
+            return Ok(false);
+        }
         // A transport forwarder is never an inviter. Until a separately signed
         // invitation exists, only the creator can supply implicit contact consent.
         if self.accepted_contact_source(&creator.root_commitment, &creator.principal_id)? {
@@ -78,12 +81,15 @@ impl RamfluxClient {
         }
         Ok(true)
     }
+    pub(super) fn group_invitation_declined(&self, group: &str) -> Result<bool, SdkError> {
+        Ok(self.own_group_declined(group)?
+            || self
+                .account_db()?
+                .load_actor_state::<Invitation>(&key(group))?
+                .is_some_and(|row| row.declined && row.expires_at > now_unix_timestamp()))
+    }
     pub(crate) fn check_group_decline_fence(&self, group: &str) -> Result<(), SdkError> {
-        if self
-            .account_db()?
-            .load_actor_state::<Invitation>(&key(group))?
-            .is_some_and(|row| row.declined && row.expires_at > now_unix_timestamp())
-        {
+        if self.group_invitation_declined(group)? {
             return Err(super::invalid("group invitation was declined"));
         }
         Ok(())
@@ -154,6 +160,41 @@ impl RamfluxClient {
         }
         Ok(serde_json::json!({"invitations":rows}))
     }
+    pub(super) fn apply_own_group_invitation_decision(
+        &self,
+        state: &VerifiedGroupState,
+        accepted: bool,
+        expires_at: i64,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let group = &state.view().group_id;
+        if accepted {
+            let own = self.owned_device_identity()?;
+            if state.view().effective_role(own.root_commitment(), own.device_id()).is_some() {
+                let local = self.trusted_device(&own)?;
+                let target = local["target_delivery_id"]
+                    .as_str()
+                    .ok_or_else(|| super::invalid("own group target is unavailable"))?;
+                self.accept_shared_group_state(state, target)?;
+            }
+            db.remove_actor_state(&key(group))?;
+        } else {
+            let mut snapshot = state.snapshot().clone();
+            snapshot.state.members.clear();
+            db.persist_actor_state(
+                &key(group),
+                &Invitation {
+                    snapshot,
+                    packet: zeroize::Zeroizing::new(Vec::new()),
+                    inviter: state.creator().identity.root_commitment.clone(),
+                    expires_at,
+                    declined: true,
+                    accepted: false,
+                },
+            )?;
+        }
+        Ok(())
+    }
     pub(crate) fn decide_group_invitation(
         &self,
         group: &str,
@@ -184,6 +225,7 @@ impl RamfluxClient {
                 invitation.snapshot.state.members.clear();
                 db.persist_actor_state(&key(group), &invitation)?;
             }
+            self.publish_own_group_decision(&state, accept, target)?;
             Ok(serde_json::json!({"group_id":group,"accepted":accept,"declined":!accept}))
         })
     }

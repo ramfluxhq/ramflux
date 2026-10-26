@@ -9,12 +9,21 @@ fresh signed device manifest. A forwarding member cannot alter creator authority
 
 Receivers accept a higher creator-certified epoch, including an arbitrary gap.
 There is no operation history, delegated checkpoint or cross-root state writer.
-A verified ownership-transfer chain dominates an old-owner fork even when that
-fork has a larger epoch. Once a transfer at epoch E is known, old-owner snapshots
-at E or later are rejected; the transfer also wins a same-epoch edit. Reusing
-its certificate does not let the former creator replace known handover content;
-a successor signed by the new creator can advance either observed handover. This can
-replace a higher numeric epoch with a lower one on the certified successor line.
+A verified ownership transfer must bind the issuing device's current base hash
+and a transferee countersignature. It wins a sibling edit at the transfer's epoch;
+it cannot roll back a receiver more than one epoch beyond its base. Such a stale
+transfer returns `transfer_requires_sync` and a signed current-head refusal so the
+issuer can synchronize and reissue. A fresh transfer from the newer head still
+wins the higher-epoch case. This freshness rule supersedes unconditional transfer
+chain dominance. Once a fresh transfer at epoch E is known, old-owner snapshots
+at E or later are rejected. Reusing a certificate cannot replace known handover
+content. Lagging members below the transfer base can follow its certified line.
+Receiver-owned root-removal and device-exclusion floors survive branch changes,
+wire exclusion pruning and restarts. A winning branch may restore a root/device
+only through an explicit joined epoch later than its accepted removal. Missing
+exclusions in a different signed snapshot never silently restore access. The
+floor store is capped at 4096 entries per group; exhaustion returns a typed
+`GroupStateCapacity` refusal for `RemovalFences` rather than discarding safety state.
 Conflicting snapshots within the same transfer chain can only be creator-device
 writes; the lowest content hash wins, and the losing creator device reapplies its own pending
 intents. Requests from other roots are always revalidated against the winning
@@ -74,6 +83,31 @@ root to sign future snapshots; the old root loses write authority. The bounded
 transfer chain supports at most 32 transfers. Transfer is a creator command,
 not an admin request.
 
+The first transfer call stages signed encrypted head probes and returns
+`transfer_requires_sync`. Retry the same command after delivery; a new command
+is needed if the base changed. Every currently active, group-selected creator
+sibling and the selected transferee must confirm the exact head within 60 seconds.
+The SDK fails closed when an active device cannot be reached; it never guesses
+that a silent device is offline. Revoke an unavailable device through the account's
+normal device-set flow before retrying. This is deliberately stricter than a
+best-effort reachability check. Honest creator devices reserve that head for the
+short proposal lease: local mutations and admin requests wait, and another
+transfer cannot obtain approval during the lease. The transferee signs the group,
+genesis, previous creator, exact base hash/epoch, target actor, nonce and expiry.
+Snapshots retain this acceptance and the root-signed transfer certificate so
+receivers can verify it offline after the handshake expires. Head probes and
+signed refusals use the existing bounded group-control pair courier, with 60-second
+expiry, at most 8 retained controls per group and 512 per account. Completed
+deliveries are skipped; retries neither renew the lease nor consume another slot.
+
+A malicious former creator can still equivocate and seek countersignatures from
+two different transferees. Receivers keep their first accepted transfer chain,
+so such double transfers can split a group. Freshness checks, exclusive creator
+leases and transferee countersigning prevent an ordinary honest SDK transfer
+from doing this; they do not provide a global sequencer or consensus against a
+malicious former owner. Resolving this limitation belongs to the future group
+protocol. Withheld snapshots remain an explicit limitation as described above.
+
 ## Consent, membership and names
 
 An unknown group is adopted automatically only if its creator is an
@@ -84,7 +118,13 @@ an invitation, outside joined group/conversation/message projections. A
 legacy bootstrap cannot bypass consent, even when forwarded by a contact: it is
 refused and requires a v2 invitation.
 Known legacy groups retain their existing receive path. Explicit
-acceptance adopts the signed state; decline retains a replay fence. Blocked
+acceptance adopts the signed state; decline retains a replay fence. Either decision
+also produces a root-certified branch-signed own-account control carried inside
+authenticated encrypted own-device delivery. Other active siblings adopt that
+same genesis without another prompt, or honor the decline. A delayed acceptance
+cannot override a live decline, a block, an excluded device or another genesis.
+The signed decision has a fixed seven-day lifetime and bounded retained state;
+ordinary own-device restore handles devices enrolled later. Blocked
 creators or inviters are rejected. A joined member need not be a contact to send
 group messages; individual source blocks still apply.
 
@@ -179,3 +219,11 @@ from the account's first startup on this version, and only if their signed
 creation time is no later than that startup. Their envelope id supplies the
 logical component inside the authenticated sender namespace. After that window,
 missing ids fail closed. Modern messages are unaffected.
+
+### Transfer upgrade
+
+Transfers now require the countersignature fields and the v2 transfer-certificate
+signature domain. There is no permissive decoder for an earlier unsigned
+handover. Existing groups without transfers retain their snapshot encoding;
+experimental pre-upgrade transfer chains must be migrated explicitly rather than
+accepted without the new authority proof.

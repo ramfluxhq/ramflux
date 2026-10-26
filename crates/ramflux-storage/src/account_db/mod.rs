@@ -51,6 +51,7 @@ pub mod runtime;
 mod shared_group_delivery;
 mod shared_group_heads;
 mod shared_group_members;
+mod shared_group_removals;
 mod shared_group_state;
 pub mod surface;
 mod task;

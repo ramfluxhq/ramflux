@@ -263,3 +263,89 @@ fn active_group_key_scopes_and_device_diagnostics_have_hard_bounds() -> Result<(
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn r6_receiver_removal_floor_survives_a_snapshot_without_exclusions_and_allows_later_readd()
+-> Result<(), StorageError> {
+    let (owner_root, owner, a) = person("owner", "owner-phone", 10)?;
+    let (_, _, member) = person("removed", "removed-phone", 20)?;
+    let initial = create(&owner_root, &owner, &a)?;
+    let joined = advance_group_state(
+        &owner_root,
+        &owner,
+        &a,
+        &initial,
+        GroupStateChange::Add { member: member.identity.clone(), role: SharedGroupRole::Member },
+    )?;
+    let removed = advance_group_state(
+        &owner_root,
+        &owner,
+        &a,
+        &joined,
+        GroupStateChange::Remove {
+            root_commitment: member.identity.root_commitment.clone(),
+            device_id: member.identity.device_id.clone(),
+        },
+    )?;
+    let (root, db) = test_db("sticky-group-removal")?;
+    db.commit_shared_group_state(&joined, &a)?;
+    db.commit_shared_group_state(&removed, &a)?;
+    // A full snapshot can omit a departed root's expired wire exclusions.
+    let mut pruned = initial;
+    for index in 0..3 {
+        pruned = advance_group_state(
+            &owner_root,
+            &owner,
+            &a,
+            &pruned,
+            GroupStateChange::SetName { name: format!("pruned-{index}") },
+        )?;
+    }
+    assert_eq!(pruned.view().excluded, []);
+    db.commit_shared_group_state(&pruned, &a)?;
+    let mut old_branch = joined;
+    for index in 0..3 {
+        old_branch = advance_group_state(
+            &owner_root,
+            &owner,
+            &a,
+            &old_branch,
+            GroupStateChange::SetName { name: format!("old-{index}") },
+        )?;
+    }
+    assert!(old_branch.view().epoch > pruned.view().epoch);
+    assert!(db.commit_shared_group_state(&old_branch, &a).is_err());
+    assert_eq!(
+        db.shared_group_state("group")?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .snapshot()
+            .state_hash,
+        pruned.snapshot().state_hash
+    );
+    let active:u64=db.connection.query_row("SELECT count(*) FROM shared_group_member_projection WHERE group_id='group' AND root_commitment=?1 AND active=1",rusqlite::params![member.identity.root_commitment],|row|row.get(0))?;
+    assert_eq!(active, 0);
+    // Upgrading an r5 store can recover the floor from its inactive verified projection.
+    db.remove_actor_state(&format!(
+        "group-state/removal-floors/{}",
+        ramflux_protocol::encode_base64url("group")
+    ))?;
+    assert!(db.commit_shared_group_state(&old_branch, &a).is_err());
+    let readded = advance_group_state(
+        &owner_root,
+        &owner,
+        &a,
+        &pruned,
+        GroupStateChange::Add { member: member.identity.clone(), role: SharedGroupRole::Member },
+    )?;
+    assert!(db.commit_shared_group_state(&readded, &a)?);
+    assert_eq!(
+        db.shared_group_state("group")?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .view()
+            .effective_role(&member.identity.root_commitment, &member.identity.device_id),
+        Some(SharedGroupRole::Member)
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

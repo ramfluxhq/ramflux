@@ -42,6 +42,29 @@ fn step(
 ) -> Result<VerifiedGroupState, CryptoError> {
     advance_group_state(&owner.root, &owner.branch, &owner.actor, state, change)
 }
+fn transfer(
+    state: &VerifiedGroupState,
+    owner: &Person,
+    next: &Person,
+) -> Result<VerifiedGroupState, CryptoError> {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid("test clock"))?
+            .as_secs(),
+    )
+    .map_err(|_| invalid("test clock"))?;
+    let acceptance =
+        accept_group_transfer(&next.branch, &next.actor, state, &encode_base64url([7; 32]), now)?;
+    step(
+        state,
+        owner,
+        GroupStateChange::TransferOwnership {
+            creator: next.actor.clone(),
+            acceptance: Box::new(acceptance),
+        },
+    )
+}
 fn add(
     state: &VerifiedGroupState,
     owner: &Person,
@@ -195,8 +218,7 @@ fn ownership_transfer_certifies_new_root_and_old_root_loses_writes() -> Result<(
     let owner = person("owner", "phone", 11, 12)?;
     let next = person("next", "phone", 21, 22)?;
     let base = add(&create(&owner)?, &owner, &next, SharedGroupRole::Member)?;
-    let transferred =
-        step(&base, &owner, GroupStateChange::TransferOwnership { creator: next.actor.clone() })?;
+    let transferred = transfer(&base, &owner, &next)?;
     let state = step(&transferred, &next, GroupStateChange::SetName { name: "new owner".into() })?;
     assert_eq!(state.relation_to(&base)?, GroupStateRelation::Extension);
     assert!(
@@ -316,18 +338,10 @@ fn ownership_transfer_budget_has_a_typed_capacity_refusal() -> Result<(), Crypto
     let owner = person("owner", "phone", 11, 12)?;
     let mut current = create(&owner)?;
     for _ in 0..MAX_GROUP_CREATOR_TRANSFERS {
-        current = step(
-            &current,
-            &owner,
-            GroupStateChange::TransferOwnership { creator: owner.actor.clone() },
-        )?;
+        current = transfer(&current, &owner, &owner)?;
     }
     assert!(matches!(
-        step(
-            &current,
-            &owner,
-            GroupStateChange::TransferOwnership { creator: owner.actor.clone() }
-        ),
+        transfer(&current, &owner, &owner),
         Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
             GroupStateLimit::Transfers
         )))
@@ -336,29 +350,33 @@ fn ownership_transfer_budget_has_a_typed_capacity_refusal() -> Result<(), Crypto
 }
 
 #[test]
-fn r5_transfer_dominates_same_epoch_edit_and_old_owner_higher_fork() -> Result<(), CryptoError> {
+fn r6_fresh_transfer_wins_same_epoch_edit_and_follows_the_higher_creator_head()
+-> Result<(), CryptoError> {
     let alice = person("alice", "phone", 11, 12)?;
     let laptop = person("alice", "laptop", 11, 32)?;
     let bob = person("bob", "phone", 21, 22)?;
     let base = add(&create(&alice)?, &alice, &bob, SharedGroupRole::Member)?;
-    let transfer =
-        step(&base, &alice, GroupStateChange::TransferOwnership { creator: bob.actor.clone() })?;
+    let handover = transfer(&base, &alice, &bob)?;
     // Exercise both hash orders rather than depending on one favorable golden.
     for index in 0..8 {
         let edit =
             step(&base, &laptop, GroupStateChange::SetName { name: format!("racing-{index}") })?;
-        assert_eq!(transfer.relation_to(&edit)?, GroupStateRelation::Extension);
-        assert_eq!(edit.relation_to(&transfer)?, GroupStateRelation::Unrelated);
+        assert_eq!(handover.relation_to(&edit)?, GroupStateRelation::Extension);
+        assert_eq!(edit.relation_to(&handover)?, GroupStateRelation::Unrelated);
     }
     let mut fork = base;
     for index in 0..8 {
         fork = step(&fork, &laptop, GroupStateChange::SetName { name: format!("fork-{index}") })?;
     }
-    let bob_head = step(&transfer, &bob, GroupStateChange::SetName { name: "new owner".into() })?;
-    assert!(fork.view().epoch > bob_head.view().epoch);
+    // R6: issue a fresh handover from the newer creator head instead of
+    // allowing an earlier transfer to roll that head back.
+    let fresh = transfer(&fork, &laptop, &bob)?;
+    let bob_head = step(&fresh, &bob, GroupStateChange::SetName { name: "new owner".into() })?;
+    assert!(bob_head.view().epoch > fork.view().epoch);
     assert_eq!(bob_head.relation_to(&fork)?, GroupStateRelation::Extension);
-    assert_eq!(fork.relation_to(&bob_head)?, GroupStateRelation::Unrelated);
-    assert!(step(&bob_head, &alice, GroupStateChange::SetName { name: "undo".into() }).is_err());
+    assert_eq!(fork.relation_to(&bob_head)?, GroupStateRelation::Ancestor);
+    let after_handover = step(&bob_head, &alice, GroupStateChange::SetName { name: "undo".into() });
+    assert!(after_handover.is_err());
     Ok(())
 }
 
@@ -368,26 +386,143 @@ fn r5_known_handover_rejects_replacement_content_signed_by_the_former_creator()
     let alice = person("alice", "phone", 11, 12)?;
     let bob = person("bob", "phone", 21, 22)?;
     let base = add(&create(&alice)?, &alice, &bob, SharedGroupRole::Member)?;
-    let transfer = |now| {
-        snapshot::advance_as(
-            &alice.root,
-            &alice.branch,
-            &alice.actor,
-            &base,
-            snapshot::Apply {
-                requester: &alice.actor,
-                change: GroupStateChange::TransferOwnership { creator: bob.actor.clone() },
-                now,
-            },
-        )
-    };
-    let known = transfer(1000)?;
-    let replacement = transfer(1001)?;
+    let known = transfer(&base, &alice, &bob)?;
+    let mut forged = known.snapshot().clone();
+    forged.state.name = Some("replaced handover".into());
+    let replacement = snapshot::sign(&alice.root, &alice.branch, &alice.actor, forged)?;
     assert_eq!(known.snapshot().transfers, replacement.snapshot().transfers);
     assert_ne!(known.snapshot().state_hash, replacement.snapshot().state_hash);
     assert_eq!(replacement.relation_to(&known)?, GroupStateRelation::Unrelated);
     let successor = step(&known, &bob, GroupStateChange::SetName { name: "final".into() })?;
     assert_eq!(replacement.relation_to(&successor)?, GroupStateRelation::Unrelated);
     assert_eq!(known.relation_to(&known)?, GroupStateRelation::Same);
+    Ok(())
+}
+
+#[test]
+fn r6_stale_owner_handover_cannot_reinstate_an_accepted_root_removal() -> Result<(), CryptoError> {
+    let alice = person("alice", "phone", 11, 12)?;
+    let laptop = person("alice", "laptop", 11, 32)?;
+    let bob = person("bob", "phone", 21, 22)?;
+    let mallory = person("mallory", "phone", 31, 42)?;
+    let base = add(
+        &add(&create(&alice)?, &alice, &bob, SharedGroupRole::Member)?,
+        &alice,
+        &mallory,
+        SharedGroupRole::Member,
+    )?;
+    let removed = step(
+        &base,
+        &alice,
+        GroupStateChange::Remove {
+            root_commitment: mallory.actor.identity.root_commitment.clone(),
+            device_id: "phone".into(),
+        },
+    )?;
+    let stale = transfer(&base, &laptop, &bob)?;
+    assert_eq!(removed.view().epoch, stale.view().epoch);
+    assert!(
+        removed.view().effective_role(&mallory.actor.identity.root_commitment, "phone").is_none()
+    );
+    assert!(
+        !matches!(
+            stale.relation_to(&removed),
+            Ok(GroupStateRelation::Extension | GroupStateRelation::IncomingPreferred)
+        ),
+        "a stale handover must not silently re-admit the removed root"
+    );
+    Ok(())
+}
+
+#[test]
+fn r6_stale_transfer_cannot_displace_a_newer_creator_head() -> Result<(), CryptoError> {
+    let alice = person("alice", "phone", 11, 12)?;
+    let laptop = person("alice", "laptop", 11, 32)?;
+    let bob = person("bob", "phone", 21, 22)?;
+    let base = add(&create(&alice)?, &alice, &bob, SharedGroupRole::Member)?;
+    let changed = step(
+        &step(&base, &alice, GroupStateChange::SetName { name: "current".into() })?,
+        &alice,
+        GroupStateChange::SetName { name: "newer".into() },
+    )?;
+    let stale = transfer(&base, &laptop, &bob)?;
+    let successor =
+        step(&stale, &bob, GroupStateChange::SetName { name: "stale successor".into() })?;
+    assert!(
+        matches!(
+            successor.relation_to(&changed),
+            Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync))
+        ),
+        "stale base must produce a typed sync refusal even after successor writes"
+    );
+    Ok(())
+}
+
+#[test]
+fn r6_transfer_acceptance_binds_base_target_and_sixty_second_lease() -> Result<(), CryptoError> {
+    let alice = person("alice", "phone", 11, 12)?;
+    let bob = person("bob", "phone", 21, 22)?;
+    let base = add(&create(&alice)?, &alice, &bob, SharedGroupRole::Member)?;
+    let nonce = encode_base64url([44; 32]);
+    let acceptance = accept_group_transfer(&bob.branch, &bob.actor, &base, &nonce, 1000)?;
+    let change = |acceptance| GroupStateChange::TransferOwnership {
+        creator: bob.actor.clone(),
+        acceptance: Box::new(acceptance),
+    };
+    let expired = snapshot::advance_as(
+        &alice.root,
+        &alice.branch,
+        &alice.actor,
+        &base,
+        snapshot::Apply { requester: &alice.actor, change: change(acceptance.clone()), now: 1061 },
+    );
+    assert!(matches!(
+        expired,
+        Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync))
+    ));
+    let changed = step(&base, &alice, GroupStateChange::SetName { name: "new base".into() })?;
+    assert!(
+        snapshot::advance_as(
+            &alice.root,
+            &alice.branch,
+            &alice.actor,
+            &changed,
+            snapshot::Apply {
+                requester: &alice.actor,
+                change: change(acceptance.clone()),
+                now: 1001
+            }
+        )
+        .is_err()
+    );
+    let mut forged = acceptance;
+    forged.base_hash = changed.snapshot().state_hash.clone();
+    assert!(verify_group_transfer_acceptance(&forged).is_err());
+    Ok(())
+}
+#[test]
+fn r6_device_exclusion_survives_a_transferred_sibling_fork() -> Result<(), CryptoError> {
+    let alice = person("alice", "phone", 11, 12)?;
+    let sibling = person("alice", "laptop", 11, 32)?;
+    let bob = person("bob", "phone", 21, 22)?;
+    let base = add(
+        &add(&create(&alice)?, &alice, &sibling, SharedGroupRole::Member)?,
+        &alice,
+        &bob,
+        SharedGroupRole::Member,
+    )?;
+    let removed = step(
+        &base,
+        &alice,
+        GroupStateChange::Remove {
+            root_commitment: alice.actor.identity.root_commitment.clone(),
+            device_id: "laptop".into(),
+        },
+    )?;
+    let stale = transfer(&base, &alice, &bob)?;
+    assert!(matches!(
+        stale.relation_to(&removed),
+        Err(CryptoError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync))
+    ));
     Ok(())
 }

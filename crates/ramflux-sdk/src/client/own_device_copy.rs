@@ -282,7 +282,8 @@ impl RamfluxClient {
         context: &PrivateContext,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if !self.receive_own_contact(body)?
+        if !self.receive_own_group_consent(source_identity, body)?
+            && !self.receive_own_contact(body)?
             && !self.receive_surface_control_from(
                 entry,
                 source_identity,

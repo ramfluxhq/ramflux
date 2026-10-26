@@ -997,3 +997,9 @@ impl ramflux_transport::GatewaySessionFrameSource for RejectFirstAck {
 
 #[path = "surface_own_sibling_consent_tests.rs"]
 mod sibling_consent;
+
+#[path = "shared_group_own_consent_tests.rs"]
+mod group_consent;
+
+#[path = "shared_group_transfer_tests.rs"]
+mod ownership;

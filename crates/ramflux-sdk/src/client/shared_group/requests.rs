@@ -259,6 +259,7 @@ impl RamfluxClient {
         request: &GroupChangeRequest,
         target: &str,
     ) -> Result<GroupChangeResult, SdkError> {
+        self.check_group_transfer_lease(&request.group_id, None)?;
         self.account_db()?.write_transaction(|| -> Result<GroupChangeResult, SdkError> {
             let mut record = self
                 .group_change_record(request, true)?

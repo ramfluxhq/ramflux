@@ -559,10 +559,20 @@ fn r5_successor_transfer_chain_replaces_an_offline_members_higher_epoch_projecti
         )?;
     }
     observer.accept_shared_group_state(&fork, "target-phone")?;
+    owner.accept_shared_group_state(&fork, "target-phone")?;
+    bob.accept_shared_group_state(&fork, "target-phone")?;
+    let creator = bob.owned_group_actor("target-phone")?;
+    let acceptance = ramflux_crypto::accept_group_transfer(
+        bob.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &creator,
+        &fork,
+        &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+        now_unix_timestamp(),
+    )?;
     let transfer = owner.shared_group_change(
         "g",
         "target-phone",
-        GroupStateChange::TransferOwnership { creator: bob.owned_group_actor("target-phone")? },
+        GroupStateChange::TransferOwnership { creator, acceptance: Box::new(acceptance) },
     )?;
     bob.accept_shared_group_state(&transfer, "target-phone")?;
     let successor = bob.shared_group_change(
@@ -570,7 +580,7 @@ fn r5_successor_transfer_chain_replaces_an_offline_members_higher_epoch_projecti
         "target-phone",
         GroupStateChange::SetName { name: "successor".into() },
     )?;
-    assert!(successor.view().epoch < fork.view().epoch);
+    assert!(successor.view().epoch > fork.view().epoch);
     assert!(observer.accept_shared_group_state(&successor, "target-phone")?);
     assert_eq!(
         observer

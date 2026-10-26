@@ -130,7 +130,7 @@ pub fn change_already_applied(state: &SharedGroupState, change: &GroupStateChang
             state.effective_role(root_commitment, device_id) == Some(*role)
         }
         GroupStateChange::SetName { name } => state.name.as_ref() == Some(name),
-        GroupStateChange::TransferOwnership { creator } => state.members.iter().any(|m| {
+        GroupStateChange::TransferOwnership { creator, .. } => state.members.iter().any(|m| {
             m.identity.root_commitment == creator.identity.root_commitment
                 && m.role == SharedGroupRole::Owner
         }),

@@ -127,7 +127,17 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     match error {
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
+        SdkError::Storage(StorageError::Protocol(
+            ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
+        ))
+        | SdkError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync)
+        | SdkError::Crypto(CryptoError::Protocol(
+            ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
+        )) => "transfer_requires_sync",
         SdkError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(_))
+        | SdkError::Storage(StorageError::Protocol(
+            ramflux_protocol::ProtocolError::GroupStateLimit(_),
+        ))
         | SdkError::Crypto(CryptoError::Protocol(
             ramflux_protocol::ProtocolError::GroupStateLimit(_),
         )) => "GroupStateCapacity",

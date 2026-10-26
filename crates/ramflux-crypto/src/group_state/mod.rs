@@ -4,6 +4,7 @@
 //! Creator-root full snapshots with independent transport issuer authentication.
 mod requests;
 mod snapshot;
+mod transfer;
 mod transition;
 use crate::{CryptoError, DeviceBranch, IdentityRoot};
 use ed25519_dalek::Signer;
@@ -22,6 +23,7 @@ use ramflux_protocol::{
 pub use requests::*;
 use serde_json::{Value, json};
 pub use snapshot::{GroupStateCreateInput, advance_group_state, create_group_state};
+pub use transfer::{accept_group_transfer, verify_group_transfer_acceptance};
 #[derive(Clone)]
 pub struct VerifiedGroupState {
     snapshot: GroupStateSnapshot,
@@ -34,6 +36,7 @@ pub enum GroupStateRelation {
     IncomingPreferred,
     ExistingPreferred,
     Unrelated,
+    RemovalConflict,
 }
 impl VerifiedGroupState {
     #[must_use]
@@ -95,17 +98,41 @@ impl VerifiedGroupState {
     /// # Errors
     /// Returns canonical encoding errors.
     pub fn relation_to(&self, previous: &Self) -> Result<GroupStateRelation, CryptoError> {
+        let relation = self.authority_relation_to(previous)?;
+        if matches!(relation, GroupStateRelation::Extension | GroupStateRelation::IncomingPreferred)
+            && !transfer::preserves_removals(previous.view(), self.view())
+        {
+            return if self.snapshot.transfers == previous.snapshot.transfers {
+                Ok(GroupStateRelation::RemovalConflict)
+            } else {
+                Err(ramflux_protocol::ProtocolError::GroupTransferRequiresSync.into())
+            };
+        }
+        Ok(relation)
+    }
+    fn authority_relation_to(&self, previous: &Self) -> Result<GroupStateRelation, CryptoError> {
         use GroupStateRelation::{
             Ancestor, ExistingPreferred, Extension, IncomingPreferred, Same, Unrelated,
         };
         if self.genesis() != previous.genesis() {
             return Ok(Unrelated);
         }
-        // A certified handover dominates an old-owner fork, even if that fork
-        // advanced farther while the receiver was offline. Epoch ordering and
-        // creator-device hash ties apply only within the same transfer lineage.
+        // Fresh handovers win their base and same-epoch sibling races. A
+        // predecessor with newer accepted state requires a fresh handover.
         if self.snapshot.transfers != previous.snapshot.transfers {
             return Ok(if self.snapshot.transfers.starts_with(&previous.snapshot.transfers) {
+                let handover = &self.snapshot.transfers[previous.snapshot.transfers.len()];
+                let matches_base = previous.view().epoch + 1 == handover.epoch
+                    && previous.snapshot.state_hash == handover.previous_hash;
+                let sibling = previous.view().epoch == handover.epoch
+                    && previous.snapshot.previous_hash.as_deref()
+                        == Some(handover.previous_hash.as_str());
+                if previous.view().epoch >= handover.acceptance.base_epoch
+                    && !matches_base
+                    && !sibling
+                {
+                    return Err(ramflux_protocol::ProtocolError::GroupTransferRequiresSync.into());
+                }
                 Extension
             } else if previous.snapshot.transfers.starts_with(&self.snapshot.transfers) {
                 let transfer = &previous.snapshot.transfers[self.snapshot.transfers.len()];

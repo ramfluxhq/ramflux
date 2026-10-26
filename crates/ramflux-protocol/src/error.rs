@@ -9,6 +9,8 @@ pub enum ProtocolError {
     InvalidIdentityRecord(&'static str),
     #[error("group state capacity: {0}")]
     GroupStateLimit(#[from] crate::group_state::GroupStateLimit),
+    #[error("group ownership transfer requires synchronization")]
+    GroupTransferRequiresSync,
     #[error("invalid group state: {0}")]
     InvalidGroupState(&'static str),
     #[error("core error: {0}")]

@@ -13,7 +13,7 @@ use super::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 const GENESIS_DOMAIN: &str = "ramflux.group_state.genesis.v2";
-const TRANSFER_DOMAIN: &str = "ramflux.group_state.creator_transfer.v1";
+const TRANSFER_DOMAIN: &str = "ramflux.group_state.creator_transfer.v2";
 fn without_signature<T: serde::Serialize>(value: &T, domain: &str) -> Result<Value, CryptoError> {
     let mut value = serde_json::to_value(value).map_err(|_| invalid("group JSON encoding"))?;
     let object = value.as_object_mut().ok_or_else(|| invalid("group object"))?;
@@ -47,6 +47,7 @@ pub(super) fn signer_key(snapshot: &GroupStateSnapshot) -> Result<&str, CryptoEr
         {
             return Err(invalid("invalid creator transfer chain"));
         }
+        super::transfer::verify_certificate(transfer)?;
         verify_group_state_actor(&transfer.creator)?;
         crate::verify_canonical_signature(
             &canonical_json_bytes(&without_signature(transfer, TRANSFER_DOMAIN)?)?,
@@ -233,7 +234,7 @@ pub fn create_group_state(
     };
     sign(root, branch, actor, snapshot)
 }
-fn sign(
+pub(super) fn sign(
     root: &IdentityRoot,
     branch: &DeviceBranch,
     actor: &GroupStateActor,
@@ -314,7 +315,8 @@ pub(super) fn advance_as(
                 .iter()
                 .any(|member| member.identity.root_commitment == entry.root_commitment)
     });
-    if let GroupStateChange::TransferOwnership { creator } = &change {
+    if let GroupStateChange::TransferOwnership { creator, acceptance } = &change {
+        super::transfer::validate_issue(previous, creator, acceptance, now)?;
         if requester.identity.root_commitment != previous.creator().identity.root_commitment {
             return Err(invalid("ownership transfer not authorized"));
         }
@@ -338,6 +340,8 @@ pub(super) fn advance_as(
         }
         snapshot.state.members[selected].role = SharedGroupRole::Owner;
         let mut transfer = GroupCreatorTransfer {
+            acceptance: *acceptance.clone(),
+            issued_at: now,
             group_id: snapshot.group_id.clone(),
             genesis_hash: genesis_hash(&snapshot.genesis)?,
             from_public_key: actor.root_public_key.clone(),

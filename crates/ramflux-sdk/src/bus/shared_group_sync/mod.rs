@@ -290,7 +290,18 @@ async fn ownership_transfer(
     if actor.identity != identity {
         return Err(StorageError::GroupPermissionDenied.into());
     }
-    Ok(GroupStateChange::TransferOwnership { creator: actor })
+    let group = required(body, "group_id")?;
+    let state = account
+        .client
+        .account_db()?
+        .shared_group_state(group)?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    let gateway = account.engine.as_ref().map_or(&account.gateway_config, |engine| &engine.config);
+    let acceptance = account
+        .client
+        .group_transfer_authorization(gateway, &state, &actor, &account.target_delivery_id)
+        .await?;
+    Ok(GroupStateChange::TransferOwnership { creator: actor, acceptance: Box::new(acceptance) })
 }
 
 fn pending_metadata(

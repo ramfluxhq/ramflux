@@ -20,6 +20,18 @@ fn key(group: &str) -> String {
     format!("group-state/creator-pending/{}", ramflux_protocol::encode_base64url(group))
 }
 impl RamfluxClient {
+    pub(super) fn can_repair_group_removals(
+        &self,
+        incoming: &VerifiedGroupState,
+    ) -> Result<bool, SdkError> {
+        let Some(previous) = self.account_db()?.shared_group_state(&incoming.view().group_id)?
+        else {
+            return Ok(false);
+        };
+        Ok(self.owned_device_identity()?.root_commitment()
+            == incoming.creator().identity.root_commitment
+            && incoming.relation_to(&previous)? == GroupStateRelation::RemovalConflict)
+    }
     pub(super) fn record_group_write(
         &self,
         state: &VerifiedGroupState,
@@ -83,11 +95,15 @@ impl RamfluxClient {
                 self.group_conflict_event(incoming, "creator_authority_mismatch")?;
                 Ok(None)
             }
-            GroupStateRelation::IncomingPreferred => {
+            GroupStateRelation::IncomingPreferred | GroupStateRelation::RemovalConflict => {
                 let local = self.owned_device_identity()?;
                 if incoming.creator().identity.root_commitment != local.root_commitment()
                     || previous.creator().identity.root_commitment != local.root_commitment()
                 {
+                    if incoming.relation_to(&previous)? == GroupStateRelation::RemovalConflict {
+                        self.group_conflict_event(incoming, "removal_requires_repair")?;
+                        return Ok(None);
+                    }
                     return Ok(Some(incoming.clone()));
                 }
                 let pending: Vec<PendingCreatorChange> = self

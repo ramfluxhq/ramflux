@@ -101,7 +101,7 @@ impl RamfluxClient {
         if serde_json::from_slice::<PacketHeader<'_>>(body)
             .is_ok_and(|header| header.schema == Some(super::controls::CONTROL_SCHEMA))
         {
-            if body.len() > 16384 {
+            if body.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES {
                 return Err(invalid("group control byte budget exceeded"));
             }
             let packet: super::GroupControlPacket = ramflux_protocol::parse_i_json(body)?;
@@ -114,8 +114,32 @@ impl RamfluxClient {
         {
             return Err(invalid("group state routing mismatch"));
         }
-        let needs_consent = self.group_snapshot_requires_consent(&state)?;
+        let consent = self.group_snapshot_requires_consent(&state);
+        if matches!(
+            &consent,
+            Err(SdkError::Crypto(ramflux_crypto::CryptoError::Protocol(
+                ramflux_protocol::ProtocolError::GroupTransferRequiresSync
+            )))
+        ) {
+            self.verify_shared_group_source(&engine.config, &state, entry).await?;
+            self.stage_stale_transfer_refusal(&state, &engine.config.target_delivery_id)?;
+            return Err(super::transfer::requires_sync());
+        }
+        let needs_consent = consent?;
         self.verify_shared_group_source(&engine.config, &state, entry).await?;
+        match self.account_db()?.validate_shared_group_removal_continuity(&state) {
+            Ok(()) => {}
+            Err(StorageError::Protocol(
+                ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
+            )) if self.can_repair_group_removals(&state)? => {}
+            Err(StorageError::Protocol(
+                ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
+            )) => {
+                self.stage_stale_transfer_refusal(&state, &engine.config.target_delivery_id)?;
+                return Err(super::transfer::requires_sync());
+            }
+            Err(error) => return Err(error.into()),
+        }
         self.authenticated_envelope_sender(entry)?;
         if needs_consent {
             return Ok(Some(PreparedSharedGroup::Invitation {

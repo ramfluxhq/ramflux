@@ -16,18 +16,26 @@ mod devices;
 mod federation;
 mod invitations;
 mod message_ids;
+mod own_consent;
 mod requests;
 mod routes;
+mod transfer;
+mod transfer_wire;
 pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 #[cfg(test)]
 use bootstrap::{decode_packet, packet_bytes};
 pub(crate) use controls::{BeaconRecord, GroupControlBody, GroupControlPacket};
 pub(crate) use requests::request_key as request_record_key;
+pub(crate) use transfer::{SEND_PREFIX as TRANSFER_SEND_PREFIX, TransferDelivery};
+pub(crate) use transfer_wire::{TransferBody, TransferControl};
 fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(reason.into())
 }
 impl RamfluxClient {
     pub(crate) fn local_is_group_member(&self, group: &str) -> Result<bool, SdkError> {
+        if self.group_invitation_declined(group)? {
+            return Ok(false);
+        }
         if let Some(state) = self.account_db()?.shared_group_state(group)? {
             let local = self.owned_device_identity()?;
             return Ok(state
@@ -101,6 +109,13 @@ impl RamfluxClient {
             .account_db()?
             .shared_group_state(group)?
             .ok_or_else(|| invalid("group requires an authenticated state snapshot"))?;
+        let nonce = match &change {
+            GroupStateChange::TransferOwnership { acceptance, .. } => {
+                Some(acceptance.nonce.as_str())
+            }
+            _ => None,
+        };
+        self.check_group_transfer_lease(group, nonce)?;
         let actor = self.owned_group_actor(target)?;
         let state = advance_group_state(
             self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -112,6 +127,7 @@ impl RamfluxClient {
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&state, &actor)?;
             self.record_group_write(&state, change)?;
+            self.finish_group_transfer_head_change(&state)?;
             crate::bus::enqueue_shared_group(self, &state, Some(&previous))
         })?;
         Ok(state)
@@ -131,6 +147,7 @@ impl RamfluxClient {
                 return Ok(false);
             };
             let changed = self.account_db()?.commit_shared_group_state(&reconciled, &actor)?;
+            self.finish_group_transfer_head_change(&reconciled)?;
             for record in self.group_change_records()?.into_iter().filter(|record| {
                 !record.incoming && record.request.group_id == reconciled.view().group_id
             }) {

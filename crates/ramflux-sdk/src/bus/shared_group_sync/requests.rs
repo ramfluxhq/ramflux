@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded creator request courier and device-set hints on existing encrypted pair transport.
-use crate::client::shared_group::{BeaconRecord, GroupControlBody, GroupControlPacket};
+use crate::client::shared_group::{
+    BeaconRecord, GroupControlBody, GroupControlPacket, TRANSFER_SEND_PREFIX, TransferDelivery,
+};
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 fn active_key(id: &str) -> String {
@@ -31,6 +33,7 @@ pub(in crate::bus) async fn flush_with_clock(
     let now = clock();
     let client = &account.client;
     client.account_db()?.retain_expiring_actor_states("group-beacon/", now, 4096)?;
+    client.account_db()?.retain_expiring_actor_states(TRANSFER_SEND_PREFIX, now, 512)?;
     client.account_db()?.retain_expiring_actor_states("group-courier/sealed/", now, 4096)?;
     process_incoming(account, now).await?;
     // Processing can create a result in a later clock second. Select work
@@ -81,6 +84,7 @@ async fn seal_and_send(
         GroupControlBody::Request { request, .. } => request.expires_at,
         GroupControlBody::Result { result } => result.expires_at,
         GroupControlBody::DeviceSet { .. } => now.saturating_add(7 * 86400),
+        GroupControlBody::Transfer { control } => control.expires_at(),
     };
     let mut message = GatewayDirectMessage {
         conversation_id: state.view().conversation_id.clone(),
@@ -143,6 +147,9 @@ async fn destination(
         GroupControlBody::Result { result } => {
             BTreeSet::from([result.requester.root_commitment.clone()])
         }
+        GroupControlBody::Transfer { control } => {
+            control.targets().into_iter().map(|target| target.root).collect()
+        }
         GroupControlBody::DeviceSet { .. } => state
             .view()
             .members
@@ -179,40 +186,23 @@ async fn destination(
             if root == own.root_commitment() && device.device_id == own.device_id() {
                 continue;
             }
-            let delivered = match &packet.body {
-                GroupControlBody::Request { .. } | GroupControlBody::Result { .. } => {
-                    let (request, incoming) = match &packet.body {
-                        GroupControlBody::Request { request, .. } => (request.clone(), false),
-                        GroupControlBody::Result { result } => {
-                            let Some(record) =
-                                client.group_change_records()?.into_iter().find(|record| {
-                                    record.incoming
-                                        && record.request.request_id == result.request_id
-                                        && record.request.group_id == result.group_id
-                                        && record.request.actor.identity == result.requester
-                                })
-                            else {
-                                continue;
-                            };
-                            (record.request, true)
-                        }
-                        GroupControlBody::DeviceSet { .. } => unreachable!(),
-                    };
-                    client.group_change_record(&request, incoming)?.is_some_and(|record| {
-                        record.delivered.contains(&format!("{root}/{}", device.device_id))
-                    })
-                }
-                GroupControlBody::DeviceSet { .. } => client
-                    .account_db()?
-                    .load_actor_state::<BeaconRecord>(id)?
-                    .is_some_and(|record| {
-                        record.delivered.contains(&(root.clone(), device.device_id.clone()))
-                    }),
-            };
+            let delivered = was_delivered(client, id, packet, &root, &device.device_id)?;
             if delivered {
                 continue;
             }
-            if let GroupControlBody::Result { result } = &packet.body {
+            if let GroupControlBody::Transfer { control } = &packet.body {
+                if !control
+                    .targets()
+                    .iter()
+                    .any(|target| target.root == root && target.device == device.device_id)
+                    || client
+                        .shared_group_selected_devices(state)?
+                        .get(&root)
+                        .is_none_or(|names| !names.contains(&device.device_id))
+                {
+                    continue;
+                }
+            } else if let GroupControlBody::Result { result } = &packet.body {
                 if device.device_id != result.requester.device_id {
                     continue;
                 }
@@ -269,6 +259,22 @@ fn pending_packets(
             record.packet,
         ));
     }
+    for id in client.account_db()?.actor_state_key_page(TRANSFER_SEND_PREFIX, 512)? {
+        if let Some(record) = client.account_db()?.load_actor_state::<TransferDelivery>(&id)?
+            && record.next_at <= now
+            && record.expires_at > now
+            && record.control.targets().iter().any(|target| {
+                !record.delivered.contains(&(target.root.clone(), target.device.clone()))
+            })
+        {
+            pending.push((
+                id,
+                GroupControlPacket::new(GroupControlBody::Transfer {
+                    control: Box::new(record.control),
+                }),
+            ));
+        }
+    }
     Ok(pending)
 }
 
@@ -294,6 +300,14 @@ fn defer(
             }) {
                 record.next_at = next;
                 client.persist_group_request(&record)?;
+            }
+        }
+        GroupControlBody::Transfer { .. } => {
+            if let Some(mut record) =
+                client.account_db()?.load_actor_state::<TransferDelivery>(id)?
+            {
+                record.next_at = next;
+                client.account_db()?.persist_actor_state(id, &record)?;
             }
         }
         GroupControlBody::DeviceSet { .. } => {
@@ -349,6 +363,14 @@ async fn send(
                     client.persist_group_request(&record)?;
                 }
             }
+            GroupControlBody::Transfer { .. } => {
+                if let Some(mut record) =
+                    client.account_db()?.load_actor_state::<TransferDelivery>(&attempt.id)?
+                {
+                    record.delivered.insert((attempt.root.clone(), attempt.device.clone()));
+                    client.account_db()?.persist_actor_state(&attempt.id, &record)?;
+                }
+            }
             GroupControlBody::DeviceSet { .. } => {
                 let id = format!(
                     "group-beacon/{}",
@@ -396,6 +418,14 @@ async fn retry_allowed(
                 .is_some_and(|names| names.contains(&attempt.device))),
         GroupControlBody::Result { result } => Ok(attempt.root == result.requester.root_commitment
             && attempt.device == result.requester.device_id),
+        GroupControlBody::Transfer { control } => Ok(control
+            .targets()
+            .iter()
+            .any(|target| target.root == attempt.root && target.device == attempt.device)
+            && client
+                .shared_group_selected_devices(state)?
+                .get(&attempt.root)
+                .is_some_and(|names| names.contains(&attempt.device))),
         GroupControlBody::DeviceSet { .. } => Ok(client
             .shared_group_selected_devices(state)?
             .get(&attempt.root)
@@ -461,4 +491,45 @@ async fn process_incoming(account: &LocalBusAccountState, now: i64) -> Result<()
         }
     }
     Ok(())
+}
+
+fn was_delivered(
+    client: &RamfluxClient,
+    id: &str,
+    packet: &GroupControlPacket,
+    root: &str,
+    device: &str,
+) -> Result<bool, SdkError> {
+    Ok(match &packet.body {
+        GroupControlBody::Request { .. } | GroupControlBody::Result { .. } => {
+            let (request, incoming) = match &packet.body {
+                GroupControlBody::Request { request, .. } => (request.clone(), false),
+                GroupControlBody::Result { result } => {
+                    let Some(record) = client.group_change_records()?.into_iter().find(|record| {
+                        record.incoming
+                            && record.request.request_id == result.request_id
+                            && record.request.group_id == result.group_id
+                            && record.request.actor.identity == result.requester
+                    }) else {
+                        return Ok(true);
+                    };
+                    (record.request, true)
+                }
+                GroupControlBody::DeviceSet { .. } | GroupControlBody::Transfer { .. } => {
+                    unreachable!()
+                }
+            };
+            client
+                .group_change_record(&request, incoming)?
+                .is_some_and(|record| record.delivered.contains(&format!("{root}/{device}")))
+        }
+        GroupControlBody::Transfer { .. } => client
+            .account_db()?
+            .load_actor_state::<TransferDelivery>(id)?
+            .is_some_and(|record| record.delivered.contains(&(root.into(), device.into()))),
+        GroupControlBody::DeviceSet { .. } => client
+            .account_db()?
+            .load_actor_state::<BeaconRecord>(id)?
+            .is_some_and(|record| record.delivered.contains(&(root.into(), device.into()))),
+    })
 }

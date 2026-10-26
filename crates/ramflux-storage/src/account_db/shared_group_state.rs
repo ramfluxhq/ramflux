@@ -52,12 +52,13 @@ impl AccountDb {
                 match verified.relation_to(&previous)? {
                     GroupStateRelation::Ancestor | GroupStateRelation::ExistingPreferred => return Ok(false),
                     GroupStateRelation::Same | GroupStateRelation::Extension | GroupStateRelation::IncomingPreferred => {}
-                    GroupStateRelation::Unrelated => return Err(StorageError::GroupPermissionDenied),
+                    GroupStateRelation::Unrelated | GroupStateRelation::RemovalConflict => return Err(StorageError::GroupPermissionDenied),
                 }
             } else if self.group_snapshot_epoch(&state.group_id)?.is_some() {
                 // An unsolicited full-state proof cannot take over a legacy group with the same id.
                 return Err(StorageError::GroupPermissionDenied);
             }
+            self.record_shared_group_removal_continuity(verified)?;
             let now = self.now_unix();
             let role = state.effective_role(&local.identity.root_commitment, &local.identity.device_id);
             self.connection.execute("INSERT INTO group_projection (group_id,group_epoch,role,max_members,new_member_history,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?6) ON CONFLICT(group_id) DO UPDATE SET group_epoch=excluded.group_epoch,role=excluded.role,max_members=excluded.max_members,new_member_history=excluded.new_member_history,updated_at=excluded.updated_at",params![state.group_id,state.epoch,role.map(ramflux_protocol::SharedGroupRole::as_str),state.max_members,state.new_member_history,now])?;

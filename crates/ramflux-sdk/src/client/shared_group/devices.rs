@@ -65,6 +65,7 @@ impl RamfluxClient {
         group: &str,
         sender: &str,
     ) -> Result<(), SdkError> {
+        self.check_group_decline_fence(group)?;
         let Some(state) = self.account_db()?.shared_group_state(group)? else {
             return Ok(());
         };

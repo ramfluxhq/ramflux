@@ -18,6 +18,7 @@ pub(crate) enum GroupControlBody {
     Request { request: GroupChangeRequest, federation: Option<LocalBusFederationRoute> },
     Result { result: GroupChangeResult },
     DeviceSet { group_id: String, actor: GroupStateActor, device_set_epoch: u64 },
+    Transfer { control: Box<super::TransferControl> },
 }
 impl GroupControlPacket {
     pub(crate) fn new(body: GroupControlBody) -> Self {
@@ -28,6 +29,7 @@ impl GroupControlPacket {
             GroupControlBody::Request { request, .. } => &request.group_id,
             GroupControlBody::Result { result } => &result.group_id,
             GroupControlBody::DeviceSet { group_id, .. } => group_id,
+            GroupControlBody::Transfer { control } => control.group(),
         }
     }
     pub(crate) fn actor(&self) -> &GroupStateActor {
@@ -35,6 +37,7 @@ impl GroupControlPacket {
             GroupControlBody::Request { request, .. } => &request.actor,
             GroupControlBody::Result { result } => &result.creator,
             GroupControlBody::DeviceSet { actor, .. } => actor,
+            GroupControlBody::Transfer { control } => control.actor(),
         }
     }
 }
@@ -78,6 +81,35 @@ impl RamfluxClient {
         packet: &GroupControlPacket,
     ) -> Result<(), SdkError> {
         ramflux_crypto::verify_group_state_actor(packet.actor())?;
+        if let GroupControlBody::Transfer { control } = &packet.body {
+            control.verify(now_unix_timestamp())?;
+            match &control.body {
+                super::TransferBody::Probe { probe } => {
+                    ramflux_crypto::verify_group_state_actor(&probe.creator)?;
+                    if probe.actor.identity.root_commitment
+                        != state.creator().identity.root_commitment
+                        || probe.base.genesis != *state.genesis()
+                        || probe.required.len()
+                            > ramflux_protocol::group_state::MAX_GROUP_DEVICES_PER_ROOT + 1
+                        || probe.required.iter().any(|device| {
+                            device.root != probe.actor.identity.root_commitment
+                                && (device.root != probe.creator.identity.root_commitment
+                                    || device.device != probe.creator.identity.device_id)
+                        })
+                    {
+                        return Err(StorageError::GroupPermissionDenied.into());
+                    }
+                }
+                super::TransferBody::Head { reply } => {
+                    let own = self.owned_device_identity()?;
+                    if reply.target.root != own.root_commitment()
+                        || reply.target.device != own.device_id()
+                    {
+                        return Err(StorageError::GroupPermissionDenied.into());
+                    }
+                }
+            }
+        }
         let actor = &packet.actor().identity;
         // The certified local roster is sufficient for admission; outsiders must
         // not trigger directory IO or consume persistent request/result capacity.
@@ -108,16 +140,14 @@ impl RamfluxClient {
         if packet.schema != CONTROL_SCHEMA || routing.group_id.as_deref() != Some(packet.group()) {
             return Err(super::invalid("group control routing mismatch"));
         }
-        let state = self
-            .account_db()?
-            .shared_group_state(packet.group())?
-            .ok_or(StorageError::GroupPermissionDenied)?;
+        let state = self.group_control_base(packet)?;
         if routing.conversation_id != state.view().conversation_id {
             return Err(super::invalid("group control conversation mismatch"));
         }
         self.admit_group_control(&state, entry, packet)?;
         self.verify_group_actor_source(&engine.config, packet.actor(), entry).await?;
         match &packet.body {
+            GroupControlBody::Transfer { .. } => {}
             GroupControlBody::Request { request, federation } => {
                 ramflux_crypto::verify_group_change_request(request, now_unix_timestamp())?;
                 let own = self.owned_device_identity()?;
@@ -211,7 +241,38 @@ impl RamfluxClient {
             }
             GroupControlBody::Result { result } => self.apply_group_request_result(result)?,
             GroupControlBody::DeviceSet { .. } => {}
+            GroupControlBody::Transfer { control } => {
+                let own = self.owned_device_identity()?;
+                let local = self.trusted_device(&own)?;
+                let target = local["target_delivery_id"]
+                    .as_str()
+                    .ok_or(StorageError::GroupPermissionDenied)?;
+                self.apply_group_transfer_control(control, target)?;
+            }
         }
         Ok(false)
+    }
+}
+
+impl RamfluxClient {
+    fn group_control_base(
+        &self,
+        packet: &GroupControlPacket,
+    ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
+        if let Some(state) = self.account_db()?.shared_group_state(packet.group())? {
+            Ok(state)
+        } else if let GroupControlBody::Transfer { control } = &packet.body {
+            if let super::TransferBody::Probe { probe } = &control.body {
+                let base = ramflux_crypto::verify_group_state_snapshot(probe.base.clone())?;
+                if self.group_snapshot_requires_consent(&base)? {
+                    return Err(super::invalid("group consent is pending"));
+                }
+                Ok(base)
+            } else {
+                Err(StorageError::GroupPermissionDenied.into())
+            }
+        } else {
+            Err(StorageError::GroupPermissionDenied.into())
+        }
     }
 }
