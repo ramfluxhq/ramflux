@@ -20,6 +20,7 @@ mod own_consent;
 mod requests;
 mod routes;
 mod transfer;
+mod transfer_outcome;
 mod transfer_wire;
 pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 #[cfg(test)]

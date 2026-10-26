@@ -103,6 +103,12 @@ impl TransferControl {
             TransferBody::Probe { probe } => (probe.issued_at, probe.expires_at),
             TransferBody::Head { reply } => (reply.issued_at, reply.expires_at),
         };
+        if matches!(&self.body,TransferBody::Head{reply} if reply.cancelled &&
+            (reply.actor.identity.root_commitment != reply.head.creator.identity.root_commitment
+                || reply.requested_hash != reply.head.state_hash || !reply.requires_sync || reply.acceptance.is_some()))
+        {
+            return Err(super::invalid("transfer cancellation authority or base mismatch"));
+        }
         let cancelled = matches!(&self.body, TransferBody::Head { reply } if reply.cancelled);
         let lifetime = if cancelled { 7 * 86400 } else { 60 };
         if matches!(&self.body,TransferBody::Head{reply} if reply.cancel_ack && (reply.cancelled || reply.requires_sync || reply.acceptance.is_some() || !reply.additional_targets.is_empty()))

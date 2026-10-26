@@ -101,7 +101,10 @@ wait, and another transfer cannot obtain approval during the reservation. The
 elapsed wall-clock time does not release it. Only the matching committed transfer
 or a nonce/base-bound cancellation signed by the proposing device releases it.
 After timeout the issuer cancels durably; retry waits for cancellation delivery
-before beginning another proposal. An unavailable issuer therefore requires its
+before beginning another proposal. Proposal metadata remains until that outcome;
+the issue deadline cannot garbage-collect an active reservation. A short durable
+outcome fence prevents delayed probes from recreating a completed reservation.
+An unavailable issuer therefore requires its
 return to release an unfinished reservation; timeouts never assume consent.
 Devices need synchronized clocks within ±5 minutes. Probe/reply validation permits
 that skew; transferee acceptance uses the issuer's probe timestamp so skew cannot

@@ -250,6 +250,7 @@ async fn check_handover(stale: bool) -> TestResult {
     }
     let refusal = rig.authorize().await.err().ok_or("transfer unexpectedly ready")?;
     assert_eq!(crate::bus::io::local_bus_error_code(&refusal), "transfer_requires_sync");
+    assert_proposal_survives_issue_expiry(&rig.laptop.client)?;
     Box::pin(rig.deliver_probes()).await?;
     if stale {
         let replies = rig
@@ -457,5 +458,16 @@ async fn assert_stale_refusal(
         stale.snapshot().state_hash,
         "a post-commit refusal must not silently reverse ownership"
     );
+    Ok(())
+}
+
+fn assert_proposal_survives_issue_expiry(client: &crate::RamfluxClient) -> TestResult {
+    // Pruning issue-expired metadata must not orphan a still-reserved proposal.
+    client.account_db()?.retain_expiring_actor_states(
+        "group-transfer/pending/",
+        now_unix_timestamp() + 3600,
+        128,
+    )?;
+    assert_eq!(client.account_db()?.actor_state_usage("group-transfer/pending/")?.0, 1);
     Ok(())
 }

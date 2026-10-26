@@ -219,7 +219,8 @@ impl RamfluxClient {
                 &Pending {
                     probe: probe.clone(),
                     replies: BTreeMap::new(),
-                    expires_at: probe.expires_at,
+                    // The issue deadline is probe.expires_at; cancellation/commit owns retention.
+                    expires_at: ramflux_protocol::MAX_SAFE_JSON_INTEGER.cast_signed(),
                 },
             )?;
             Ok(())
@@ -284,6 +285,7 @@ impl RamfluxClient {
         state: &VerifiedGroupState,
     ) -> Result<(), SdkError> {
         self.check_group_transfer_lease(&state.view().group_id, Some(&probe.id))?;
+        self.reserve_group_transfer_outcome(probe)?;
         self.account_db()?.persist_actor_state(
             &key("group-transfer/lease/", &state.view().group_id),
             &Lease {
@@ -441,6 +443,7 @@ impl RamfluxClient {
                 transfer.acceptance.nonce == lease.proposal && transfer.previous_hash == lease.head
             });
             if committed {
+                self.finish_group_transfer_outcome(group, &lease.proposal)?;
                 self.account_db()?.remove_actor_state(&key("group-transfer/lease/", group))?;
                 self.account_db()?.remove_actor_state(&key(PENDING, group))?;
             } else if let Some(pending) =
@@ -569,6 +572,14 @@ impl RamfluxClient {
                     TransferBody::Head { reply: Box::new(reply) },
                 )?)?;
             }
+            self.remember_group_transfer_outcome(
+                &probe.base.group_id,
+                &probe.id,
+                TransferDevice {
+                    root: probe.actor.identity.root_commitment.clone(),
+                    device: probe.actor.identity.device_id.clone(),
+                },
+            )?;
             self.account_db()?.remove_actor_state(&key(PENDING, &probe.base.group_id))?;
             self.account_db()?
                 .remove_actor_state(&key("group-transfer/lease/", &probe.base.group_id))?;
@@ -596,8 +607,17 @@ impl RamfluxClient {
             {
                 return Err(StorageError::GroupPermissionDenied.into());
             }
+            self.remember_group_transfer_outcome(group, &reply.proposal, source)?;
             self.account_db()?.remove_actor_state(&key("group-transfer/lease/", group))?;
         }
+        self.remember_group_transfer_outcome(
+            group,
+            &reply.proposal,
+            TransferDevice {
+                root: reply.actor.identity.root_commitment.clone(),
+                device: reply.actor.identity.device_id.clone(),
+            },
+        )?;
         let ack = TransferHead {
             proposal: reply.proposal.clone(),
             actor: self.owned_group_actor(target)?,
@@ -852,6 +872,17 @@ mod tests {
         committed_probe.base = unlocked.snapshot().clone();
         committed_probe.issued_at = now_unix_timestamp();
         committed_probe.expires_at = committed_probe.issued_at + 60;
+        laptop.reserve_group_transfer(&committed_probe, &unlocked)?;
+        phone.cancel_group_transfer(&committed_probe)?;
+        let rows = phone.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
+        let cancel = rows
+            .iter()
+            .find(|row| row.control.proposal() == committed_probe.id)
+            .ok_or(StorageError::AuthorizationRejected)?;
+        laptop.apply_group_transfer_control(&cancel.control, "target-laptop")?;
+        laptop.answer_group_transfer(&committed_probe, "target-laptop")?;
+        laptop.check_group_transfer_lease("group", None)?;
+        committed_probe.id = ramflux_protocol::encode_base64url([77; 32]);
         laptop.reserve_group_transfer(&committed_probe, &unlocked)?;
         let acceptance = ramflux_crypto::accept_group_transfer(
             next.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
