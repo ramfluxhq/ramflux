@@ -6,6 +6,11 @@ use super::task_transport::{Target, direct_targets, own_targets, seal};
 use crate::bus::task_delivery::Delivery;
 use crate::client::task::invalid;
 use crate::prelude::*;
+use std::future::Future;
+
+// Preparation refreshes verified own and peer directories before sealing. Keep
+// the courier bounded while allowing normal latency on CPU-constrained hosts.
+const APPROVAL_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) async fn send(
     account: &mut LocalBusAccountState,
@@ -15,14 +20,10 @@ pub(super) async fn send(
 ) -> Result<(), SdkError> {
     crate::client::task::check_delivery_size(body.len())?;
     let mut engine = account.take_live_engine().await?;
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
-        prepare(account, &mut engine, conversation, recipient, body),
-    )
-    .await;
+    let result =
+        await_preparation(prepare(account, &mut engine, conversation, recipient, body)).await;
     account.put_engine(engine);
-    let deliveries = result
-        .map_err(|_| SdkError::InboundPending("task approval preparation deferred".into()))??;
+    let deliveries = result?;
     crate::bus::task_delivery::submit_until(
         account,
         deliveries,
@@ -31,6 +32,15 @@ pub(super) async fn send(
     .await?;
     Ok(())
 }
+
+async fn await_preparation<T>(
+    future: impl Future<Output = Result<T, SdkError>>,
+) -> Result<T, SdkError> {
+    tokio::time::timeout(APPROVAL_PREPARATION_TIMEOUT, future)
+        .await
+        .map_err(|_| SdkError::InboundPending("task approval preparation deferred".into()))?
+}
+
 async fn prepare(
     account: &LocalBusAccountState,
     engine: &mut GatewaySessionEngine,
@@ -108,6 +118,17 @@ fn endpoint_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approval_preparation_allows_slow_verified_directory_refresh() {
+        let result = await_preparation(async {
+            tokio::time::sleep(Duration::from_millis(1_250)).await;
+            Ok::<_, SdkError>(())
+        })
+        .await;
+        assert!(result.is_ok(), "a slow verified directory refresh must remain deliverable");
+    }
+
     #[test]
     fn approval_endpoint_uses_root_qualified_identity_with_ambiguous_literal_names()
     -> Result<(), Box<dyn std::error::Error>> {
