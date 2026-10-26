@@ -306,6 +306,17 @@ impl RamfluxClient {
         target: &str,
     ) -> Result<(), SdkError> {
         control.verify(now_unix_timestamp())?;
+        let genesis = match &control.body {
+            TransferBody::Probe { probe } => &probe.base.genesis,
+            TransferBody::Head { reply } => &reply.head.genesis,
+        };
+        if self
+            .account_db()?
+            .shared_group_state(control.group())?
+            .is_some_and(|current| current.genesis() != genesis)
+        {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
         match &control.body {
             TransferBody::Probe { probe } => self.answer_group_transfer(probe, target),
             TransferBody::Head { reply } => self.receive_group_transfer_head(reply, target),
