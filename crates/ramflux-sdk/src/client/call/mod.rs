@@ -9,6 +9,7 @@ use ramflux_protocol::{CallControl, CallEndpoint, CallRow};
 use serde_json::json;
 use state::{LiveCall, invalid};
 pub(crate) const PREFIX: &[u8] = b"ramflux.call.control.v1\n";
+const MAX_CONTROL_RECEIPTS_PER_CALL: u64 = 128;
 
 pub(crate) fn signing_bytes(c: &CallControl) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
     Ok(zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(&(
@@ -249,6 +250,11 @@ impl RamfluxClient {
                 return Err(invalid("signed sequence equivocation"));
             }
             return Ok(true);
+        }
+        let receipt_prefix = format!("voice/control/{}/", c.call_id);
+        if self.account_db()?.actor_state_usage(&receipt_prefix)?.0 >= MAX_CONTROL_RECEIPTS_PER_CALL
+        {
+            return Err(invalid("control receipt capacity exhausted"));
         }
         let next = self.plan_call(&c, crate::time::now_unix_timestamp())?;
         let db = self.account_db()?;

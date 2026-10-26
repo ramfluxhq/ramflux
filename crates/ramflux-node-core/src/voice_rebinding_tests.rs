@@ -23,6 +23,42 @@ fn spoofed_keepalive_and_copied_tokens_cannot_redirect_a_pinned_voice_endpoint()
     Ok(())
 }
 #[test]
+fn unpinned_traffic_cannot_spend_the_pinned_sources_bandwidth() -> TestResult {
+    let mut state = VoiceRelayState::default();
+    let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
+    let pinned = "8.8.8.8:1000".parse()?;
+    let attacker = "9.9.9.9:3000".parse()?;
+    state.route(&encode_voice_datagram(&lease.caller_token, &[])?, pinned, 101, false)?;
+    let packet = encode_voice_datagram(&lease.caller_token, &[0; VOICE_PACKET_MAX_BYTES])?;
+    for _ in 0..2 {
+        state.route_with_rebinding(&packet, attacker, 101, false)?;
+    }
+    assert!(state.route_with_rebinding(&packet, attacker, 101, false).is_err());
+    for _ in 0..91 {
+        state.route(&packet, pinned, 101, false)?;
+    }
+    assert!(state.route(&packet, pinned, 101, false).is_err());
+    Ok(())
+}
+#[test]
+fn rebinding_challenges_require_a_sixty_byte_datagram() -> TestResult {
+    let mut state = VoiceRelayState::default();
+    let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
+    let old = "1.1.1.1:2000".parse()?;
+    let new = "9.9.9.9:3000".parse()?;
+    state.route(&encode_voice_datagram(&lease.callee_token, &[])?, old, 100, false)?;
+    let short = encode_voice_datagram(&lease.callee_token, &[0; 23])?;
+    assert_eq!(short.len(), 59);
+    assert_eq!(state.route_with_rebinding(&short, new, 101, false)?, VoiceRoute::Drop);
+    let minimum = encode_voice_datagram(&lease.callee_token, &[0; 24])?;
+    assert_eq!(minimum.len(), 60);
+    assert!(matches!(
+        state.route_with_rebinding(&minimum, new, 101, false)?,
+        VoiceRoute::Challenge { .. }
+    ));
+    Ok(())
+}
+#[test]
 fn nat_rebinding_requires_an_unexpired_cookie_echo_from_the_challenged_address() -> TestResult {
     let mut state = VoiceRelayState::default();
     let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
@@ -30,7 +66,7 @@ fn nat_rebinding_requires_an_unexpired_cookie_echo_from_the_challenged_address()
     let new = "9.9.9.9:3000".parse()?;
     let third = "8.8.4.4:4000".parse()?;
     let caller = "8.8.8.8:1000".parse()?;
-    let bind = encode_voice_datagram(&lease.callee_token, &[])?;
+    let bind = encode_voice_datagram(&lease.callee_token, &[0; 24])?;
     state.route(&bind, old, 100, false)?;
     let VoiceRoute::Challenge { target, packet } =
         state.route_with_rebinding(&bind, new, 101, false)?
@@ -103,6 +139,7 @@ fn a_clock_rollback_starts_a_fresh_voice_bandwidth_window() -> TestResult {
     let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
     let source = "8.8.8.8:1000".parse()?;
     let packet = encode_voice_datagram(&lease.caller_token, &[0; 1400])?;
+    state.route(&encode_voice_datagram(&lease.caller_token, &[])?, source, 101, false)?;
     for _ in 0..91 {
         state.route(&packet, source, 101, false)?;
     }
@@ -140,7 +177,7 @@ fn expired_return_routability_cookies_do_not_move_the_pinned_source() -> TestRes
     let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
     let old = "1.1.1.1:2000".parse()?;
     let new = "9.9.9.9:3000".parse()?;
-    let bind = encode_voice_datagram(&lease.callee_token, &[])?;
+    let bind = encode_voice_datagram(&lease.callee_token, &[0; 24])?;
     state.route(&bind, old, 100, false)?;
     let VoiceRoute::Challenge { packet, .. } =
         state.route_with_rebinding(&bind, new, 101, false)?
@@ -168,7 +205,7 @@ fn a_copied_token_and_return_cookie_cannot_rebind_without_the_private_side_key()
     let lease = pair(&mut state, "node", &scope(1), "relay:9000", 100)?;
     let old = "1.1.1.1:2000".parse()?;
     let thief = "9.9.9.9:3000".parse()?;
-    let bind = encode_voice_datagram(&lease.callee_token, &[])?;
+    let bind = encode_voice_datagram(&lease.callee_token, &[0; 24])?;
     state.route(&bind, old, 100, false)?;
     let VoiceRoute::Challenge { packet, .. } =
         state.route_with_rebinding(&bind, thief, 101, false)?

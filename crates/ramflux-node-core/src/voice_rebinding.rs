@@ -11,14 +11,20 @@ pub(super) struct Challenge {
     cookie: [u8; 32],
     expires_at: u64,
 }
-pub(super) fn admit<'a>(
+#[derive(Clone, Copy)]
+pub(super) struct Admission<'lease, 'packet> {
+    pub lease_id: &'lease str,
+    pub index: u8,
+    pub source: SocketAddr,
+    pub payload: &'packet [u8],
+    pub now: u64,
+    pub challenge_allowed: bool,
+}
+pub(super) fn admit<'packet>(
     side: &mut Side,
-    lease_id: &str,
-    index: u8,
-    source: SocketAddr,
-    payload: &[u8],
-    now: u64,
-) -> Result<Option<VoiceRoute<'a>>, NodeCoreError> {
+    admission: Admission<'_, 'packet>,
+) -> Result<Option<VoiceRoute<'packet>>, NodeCoreError> {
+    let Admission { lease_id, index, source, payload, now, challenge_allowed } = admission;
     if side.source.is_none() {
         if payload.starts_with(RESPONSE) {
             return Ok(Some(VoiceRoute::Drop));
@@ -48,6 +54,9 @@ pub(super) fn admit<'a>(
             side.source = Some(source);
             side.challenge = None;
         }
+        return Ok(Some(VoiceRoute::Drop));
+    }
+    if !challenge_allowed {
         return Ok(Some(VoiceRoute::Drop));
     }
     let cookie =

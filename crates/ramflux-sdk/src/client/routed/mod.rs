@@ -304,6 +304,16 @@ impl RamfluxClient {
             remote_device: self.authenticated_device_identity(entry)?,
         })
     }
+
+    pub(crate) fn is_call_control_entry(
+        &self,
+        entry: &GatewayInboxEntry,
+        local: &str,
+    ) -> Result<bool, SdkError> {
+        let opened = self.open_routed(entry, local)?;
+        Ok(opened.routing.kind == Kind::Control
+            && opened.body.starts_with(crate::client::call::PREFIX))
+    }
 }
 
 pub(crate) fn decode(

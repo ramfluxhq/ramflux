@@ -340,3 +340,77 @@ async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_mes
     assert!(bob.client.voice_calls.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_call_refuses_control_receipts_beyond_its_bounded_capacity() -> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 21)?;
+    let mut bob = Fixture::new("bob", 31)?;
+    contacts(&alice, &bob)?;
+    let first = control(&alice, &bob, 1, "direct-thread")?;
+    let invite = signed(&alice, first.pending[0].clone())?;
+    let prefix = format!("voice/control/{}/", invite.call_id);
+    for index in 0..128 {
+        bob.client.account_db()?.persist_actor_state(&format!("{prefix}{index:03}"), &"receipt")?;
+    }
+    let packet = entry(&alice, &bob, &invite, "over-cap-call", "direct-thread")?;
+    let Err(error) = apply(&mut bob, &packet).await else {
+        return Err(invalid("receipt cap accepted control"));
+    };
+    assert!(matches!(
+        error,
+        SdkError::InboundRejected(ref message)
+            if message == "voice call: control receipt capacity exhausted"
+    ));
+    assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 128);
+    assert!(!bob.client.voice_calls.contains_key(&invite.call_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn new_call_failure_rows_drop_ciphertext_while_existing_rows_still_decode()
+-> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 21)?;
+    let bob = Fixture::new("bob", 31)?;
+    contacts(&alice, &bob)?;
+    let first = control(&alice, &bob, 1, "direct-thread")?;
+    let invite = signed(&alice, first.pending[0].clone())?;
+    let packet = entry(&alice, &bob, &invite, "retained-call", "direct-thread")?;
+    assert!(bob.client.is_call_control_entry(&packet, "bob")?);
+
+    let old_bytes = serde_json::to_vec(&packet)?;
+    let now = now_unix_timestamp();
+    assert_ne!(bob.client.account_db()?.defer_inbox_entry("old-call-row", &old_bytes, now)?, 0);
+    let old: GatewayInboxEntry = serde_json::from_slice(
+        bob.client
+            .account_db()?
+            .due_inbox_retries(now.saturating_add(2))?
+            .first()
+            .ok_or_else(|| invalid("existing retry row missing"))?,
+    )?;
+    assert_eq!(old, packet, "pre-upgrade stored rows retain their original representation");
+
+    let retained = crate::bus::sync_driver::retained_inbox_entry(&packet, true);
+    assert_eq!(retained.envelope.encrypted_payload, "");
+    assert_eq!(retained.envelope.payload_hash, packet.envelope.payload_hash);
+    assert_eq!(retained.envelope.envelope_id, packet.envelope.envelope_id);
+    let decoded: GatewayInboxEntry = serde_json::from_slice(&serde_json::to_vec(&retained)?)?;
+    assert_eq!(decoded, retained);
+    assert_ne!(
+        bob.client.account_db()?.defer_inbox_entry(
+            "new-call-row",
+            &serde_json::to_vec(&retained)?,
+            now
+        )?,
+        0
+    );
+    let rows = bob.client.account_db()?.due_inbox_retries(now.saturating_add(2))?;
+    let stored = rows
+        .iter()
+        .map(|row| serde_json::from_slice::<GatewayInboxEntry>(row))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|row| row.envelope.encrypted_payload.is_empty())
+        .ok_or_else(|| invalid("new retry row missing"))?;
+    assert_eq!(stored.envelope.encrypted_payload, "");
+    Ok(())
+}

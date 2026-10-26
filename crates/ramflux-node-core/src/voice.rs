@@ -11,6 +11,8 @@ const MAX_ALLOCATIONS: usize = 4096;
 const ACCOUNT_LIMIT: usize = 2;
 const MAX_LEASE_LIFETIME: u64 = 4 * 60 * 60;
 const BYTES_PER_SECOND: usize = 128 * 1024;
+const UNPINNED_BYTES_PER_SECOND: usize = 4 * 1024;
+const MIN_REBIND_CHALLENGE_DATAGRAM_BYTES: usize = 60;
 fn refused(message: &str) -> NodeCoreError {
     NodeCoreError::Unauthorized(message.into())
 }
@@ -20,6 +22,8 @@ struct Side {
     source: Option<SocketAddr>,
     second: u64,
     bytes: usize,
+    unpinned_second: u64,
+    unpinned_bytes: usize,
     challenge: Option<rebinding::Challenge>,
 }
 struct Lease {
@@ -238,18 +242,37 @@ impl VoiceRelayState {
         }
         let lease = self.leases.get_mut(&key).ok_or_else(|| refused("voice lease unavailable"))?;
         let side = &mut lease.sides[i];
-        if now != side.second {
-            side.second = now;
-            side.bytes = 0;
+        let pinned = side.source == Some(source);
+        if pinned {
+            charge_window(
+                &mut side.second,
+                &mut side.bytes,
+                now,
+                packet.len(),
+                BYTES_PER_SECOND,
+                "voice bandwidth exhausted",
+            )?;
+        } else {
+            charge_window(
+                &mut side.unpinned_second,
+                &mut side.unpinned_bytes,
+                now,
+                packet.len(),
+                UNPINNED_BYTES_PER_SECOND,
+                "voice unpinned bandwidth exhausted",
+            )?;
         }
-        let bytes = side.bytes.saturating_add(packet.len());
-        if bytes > BYTES_PER_SECOND {
-            return Err(refused("voice bandwidth exhausted"));
-        }
-        side.bytes = bytes;
-        if let Some(result) =
-            rebinding::admit(side, &lease.id, u8::try_from(i).unwrap_or(0), source, payload, now)?
-        {
+        if let Some(result) = rebinding::admit(
+            side,
+            rebinding::Admission {
+                lease_id: &lease.id,
+                index: u8::try_from(i).unwrap_or(0),
+                source,
+                payload,
+                now,
+                challenge_allowed: packet.len() >= MIN_REBIND_CHALLENGE_DATAGRAM_BYTES,
+            },
+        )? {
             return Ok(result);
         }
         if payload.is_empty() {
@@ -291,8 +314,29 @@ fn new_side(now: u64) -> Result<Side, NodeCoreError> {
         source: None,
         second: now,
         bytes: 0,
+        unpinned_second: now,
+        unpinned_bytes: 0,
         challenge: None,
     })
+}
+fn charge_window(
+    second: &mut u64,
+    bytes: &mut usize,
+    now: u64,
+    packet_bytes: usize,
+    limit: usize,
+    exhausted: &str,
+) -> Result<(), NodeCoreError> {
+    if now != *second {
+        *second = now;
+        *bytes = 0;
+    }
+    let next = bytes.saturating_add(packet_bytes);
+    if next > limit {
+        return Err(refused(exhausted));
+    }
+    *bytes = next;
+    Ok(())
 }
 fn allocation(l: &Lease, endpoint: &str, side: usize) -> VoiceAllocation {
     VoiceAllocation {

@@ -253,14 +253,16 @@ async fn receive_page(
             Box::pin(process(account, engine, pool, &entry)).await
         };
         let mut project_message = false;
+        let mut strip_call_ciphertext = false;
         let accepted = match outcome {
             Ok(Processed { consumed: false, .. }) => {
                 advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
                 continue;
             }
-            Ok(Processed { reply, publish, .. }) => {
+            Ok(Processed { reply, publish, call_control, .. }) => {
                 replies.extend(reply);
                 project_message = publish;
+                strip_call_ciphertext = call_control;
                 true
             }
             Err(mut error) => {
@@ -301,7 +303,8 @@ async fn receive_page(
             project_committed_message(account, &entry)?;
         }
         if account.client.ack_gateway_entry(engine, &entry, now).await.is_err() {
-            let bytes = serde_json::to_vec(&entry)?;
+            let retained = retained_inbox_entry(&entry, strip_call_ciphertext);
+            let bytes = serde_json::to_vec(&retained)?;
             if bytes.len() <= 1024 * 1024 {
                 account.client.account_db()?.defer_inbox_entry(&key, &bytes, now)?;
             }
@@ -325,16 +328,17 @@ struct Processed {
     consumed: bool,
     publish: bool,
     reply: Option<crate::client::surface::ResyncReply>,
+    call_control: bool,
 }
 impl Processed {
     fn message(reply: Option<crate::client::surface::ResyncReply>) -> Self {
-        Self { consumed: true, publish: true, reply }
+        Self { consumed: true, publish: true, reply, call_control: false }
     }
     fn control() -> Self {
-        Self { consumed: true, publish: false, reply: None }
+        Self { consumed: true, publish: false, reply: None, call_control: false }
     }
     fn held() -> Self {
-        Self { consumed: false, publish: false, reply: None }
+        Self { consumed: false, publish: false, reply: None, call_control: false }
     }
 }
 
@@ -348,9 +352,11 @@ async fn process(
         return Ok(Processed::control());
     }
     if crate::client::routed::decode(&entry.envelope).is_ok() {
-        account.client.apply_routed_entry(engine, pool, entry, false).await?;
+        let delivery = account.client.apply_routed_entry(engine, pool, entry, false).await?;
         let reply = account.client.take_surface_resync_answer(entry)?;
-        return Ok(Processed::message(reply));
+        let mut processed = Processed::message(reply);
+        processed.call_control = delivery.call_control;
+        return Ok(processed);
     }
     let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .map_err(|_| SdkError::InboundRejected("invalid payload encoding".to_owned()))?;
@@ -413,19 +419,34 @@ pub(super) fn quarantine_failure(
         envelope_id = %entry.envelope.envelope_id, source_device_id = %entry.envelope.source_device_id,
         target_delivery_id = %entry.target_delivery_id, inbox_seq = entry.inbox_seq,
         "gateway receive entry handling failed");
-    let bytes = serde_json::to_vec(entry)?;
+    let retry_bytes = serde_json::to_vec(entry)?;
     let code = if let Some(code) = crate::client::inbox_failure::deterministic(error) {
         code
-    } else if bytes.len() > 1024 * 1024 {
+    } else if retry_bytes.len() > 1024 * 1024 {
         "oversized_retry"
     } else {
-        if crate::client::inbox_failure::defer_entry(client, device, entry, key, &bytes, now)? {
+        if crate::client::inbox_failure::defer_entry(client, device, entry, key, &retry_bytes, now)?
+        {
             return Ok(false);
         }
         "retry_exhausted"
     };
+    let call_control = client.is_call_control_entry(entry, device).unwrap_or(false);
+    let retained = retained_inbox_entry(entry, call_control);
+    let bytes = serde_json::to_vec(&retained)?;
     client.account_db()?.dead_letter_inbox(key,&bytes,&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"error_code":code}),now)?;
     Ok(true)
+}
+
+pub(crate) fn retained_inbox_entry(
+    entry: &GatewayInboxEntry,
+    strip_call_ciphertext: bool,
+) -> GatewayInboxEntry {
+    let mut retained = entry.clone();
+    if strip_call_ciphertext {
+        retained.envelope.encrypted_payload.clear();
+    }
+    retained
 }
 
 fn redrive_if_state_changed(client: &RamfluxClient) -> Result<(), SdkError> {

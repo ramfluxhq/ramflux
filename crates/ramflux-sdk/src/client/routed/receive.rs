@@ -13,6 +13,19 @@ use crate::client::dm::{decode_dm_attachment_body, franking_report_metadata_for_
 pub(crate) struct Delivery {
     pub routing: Routing,
     pub plaintext: Option<GatewayPlaintextDelivery>,
+    pub call_control: bool,
+}
+impl Delivery {
+    fn committed(receipt: Committed, plaintext: Option<GatewayPlaintextDelivery>) -> Self {
+        let call_control = receipt.routing.kind == Kind::Control
+            && receipt.entry.envelope.encrypted_payload.is_empty();
+        Self { routing: receipt.routing, plaintext, call_control }
+    }
+    fn opened(opened: Opened, plaintext: Option<GatewayPlaintextDelivery>, body: &[u8]) -> Self {
+        let call_control =
+            opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX);
+        Self { routing: opened.routing, plaintext, call_control }
+    }
 }
 
 struct PreparedGroupControls {
@@ -110,7 +123,7 @@ impl RamfluxClient {
                 return Err(invalid("envelope id reused with a different authenticated payload"));
             }
             let plaintext = self.routed_committed_content(&receipt.routing, &receipt.entry)?;
-            return Ok(Delivery { routing: receipt.routing, plaintext });
+            return Ok(Delivery::committed(receipt, plaintext));
         }
         let mut opened = self.open_routed_with_recovery(engine, entry).await?;
         self.contact_route_gate(entry, &opened.routing, &opened.body)?;
@@ -189,7 +202,7 @@ impl RamfluxClient {
         });
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmRecv).await?;
-        Ok(Delivery { routing: opened.routing, plaintext })
+        Ok(Delivery::opened(opened, plaintext, &body))
     }
 
     async fn import_accepted_attachments(
@@ -373,7 +386,11 @@ impl RamfluxClient {
                 if committed.entry.envelope.payload_hash != entry.envelope.payload_hash {
                     return Err(invalid("contact envelope id reused with another payload"));
                 }
-                return Ok(Delivery { routing: committed.routing, plaintext: None });
+                return Ok(Delivery {
+                    routing: committed.routing,
+                    plaintext: None,
+                    call_control: false,
+                });
             }
             // A malformed request cannot leave a cached root or device, pair state, consent,
             // or message projection behind. Candidate authentication preceded this transaction.
@@ -403,7 +420,7 @@ impl RamfluxClient {
                 references: Vec::new(),
                 receipt: &receipt,
             })?;
-            Ok(Delivery { routing: opened.routing, plaintext: None })
+            Ok(Delivery { routing: opened.routing, plaintext: None, call_control: false })
         })
     }
     fn commit_routed_pair_context(

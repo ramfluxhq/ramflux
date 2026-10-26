@@ -87,6 +87,8 @@ fn voice_framing_bandwidth_and_unknown_credentials_fail_closed() {
     let bad =
         encode_voice_datagram(&ramflux_protocol::encode_base64url([0; 32]), &[]).expect("bad");
     assert!(state.route(&bad, source, 100, false).is_err());
+    let bind = encode_voice_datagram(&a.caller_token, &[]).expect("bind");
+    state.route(&bind, source, 100, false).expect("pin source");
     let packet = encode_voice_datagram(&a.caller_token, &[0; 1400]).expect("packet");
     for _ in 0..91 {
         state.route(&packet, source, 100, false).expect("within bandwidth");
