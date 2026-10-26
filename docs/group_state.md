@@ -59,8 +59,10 @@ per requester root/group and 64 per group, with seven-day expiry. Admission chec
 removed roots cannot stage new requests. The account retains at most 4096
 request/result records, partitioned to at most 256 per group and 64 per requester
 root/group, including completed results. Pending limits remain 64 per group and
-8 per root/group. Overflow returns a transient typed refusal without adding a
-capacity-result row. One group therefore cannot fill the account pool. Controls
+8 per root/group. A valid member whose pending queue is full receives a signed
+capacity result within the retained-result limits. Exhausting the retained pool
+returns a typed refusal without adding another row. One group therefore cannot
+fill the account pool. Controls
 are limited to 32 per minute per authenticated source root before directory IO.
 A refusal of a removal is returned as a typed signed result, not a silent success.
 

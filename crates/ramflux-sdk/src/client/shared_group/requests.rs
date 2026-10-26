@@ -110,19 +110,7 @@ impl RamfluxClient {
                 .account_db()?
                 .shared_group_state(&request.group_id)?
                 .ok_or(StorageError::GroupPermissionDenied)?;
-            if state
-                .view()
-                .effective_role(
-                    &request.actor.identity.root_commitment,
-                    &request.actor.identity.device_id,
-                )
-                .is_none()
-                || (incoming
-                    && self.owned_device_identity()?.root_commitment()
-                        != state.creator().identity.root_commitment)
-            {
-                return Err(StorageError::GroupPermissionDenied.into());
-            }
+            self.admit_group_request(&state, request, incoming)?;
             if let Some(previous) = self.group_change_record(request, incoming)? {
                 if previous.request != *request {
                     return Err(SdkError::InboundRejected(
@@ -139,7 +127,8 @@ impl RamfluxClient {
             }
             // Partition retained results as well as pending work. A group can
             // occupy at most 256 of the 4096 account rows; a source root at most
-            // 64 in that group. Overflow is a transient refusal, never another row.
+            // 64 in that group. A full retained pool never adds another row;
+            // a full pending queue may still return a bounded signed result.
             let group_rows: Vec<_> =
                 rows.iter().filter(|row| row.request.group_id == request.group_id).collect();
             if group_rows.len() >= 256
@@ -163,7 +152,7 @@ impl RamfluxClient {
                         && row.local_status == "waiting_for_owner"
                 })
                 .collect();
-            if pending.len() >= MAX_GROUP_PENDING_REQUESTS
+            let full = pending.len() >= MAX_GROUP_PENDING_REQUESTS
                 || pending
                     .iter()
                     .filter(|row| {
@@ -171,21 +160,60 @@ impl RamfluxClient {
                             == request.actor.identity.root_commitment
                     })
                     .count()
-                    >= MAX_GROUP_REQUESTS_PER_ROOT
-            {
+                    >= MAX_GROUP_REQUESTS_PER_ROOT;
+            if full && !incoming {
                 return Err(capacity());
             }
+            let result =
+                if full { Some(self.group_capacity_result(request, &state, now)?) } else { None };
             self.persist_group_request(&RequestRecord {
                 request: request.clone(),
                 incoming,
-                result: None,
-                local_status: "waiting_for_owner".into(),
+                result,
+                local_status: if full { "result_ready" } else { "waiting_for_owner" }.into(),
                 expires_at: request.expires_at.saturating_add(86400),
                 next_at: now,
                 delivered: BTreeSet::new(),
                 federation: None,
             })
         })
+    }
+    fn admit_group_request(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        request: &GroupChangeRequest,
+        incoming: bool,
+    ) -> Result<(), SdkError> {
+        if state
+            .view()
+            .effective_role(
+                &request.actor.identity.root_commitment,
+                &request.actor.identity.device_id,
+            )
+            .is_none()
+            || (incoming
+                && self.owned_device_identity()?.root_commitment()
+                    != state.creator().identity.root_commitment)
+        {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
+        Ok(())
+    }
+    fn group_capacity_result(
+        &self,
+        request: &GroupChangeRequest,
+        state: &ramflux_crypto::VerifiedGroupState,
+        now: i64,
+    ) -> Result<GroupChangeResult, SdkError> {
+        let actor = self.owned_group_actor(&self.shared_group_local_target(&request.group_id)?)?;
+        Ok(ramflux_crypto::sign_group_change_result(
+            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &actor,
+            request,
+            state,
+            GroupChangeStatus::Capacity,
+            now,
+        )?)
     }
     fn prune_group_request_partitions(
         &self,

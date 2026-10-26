@@ -647,3 +647,75 @@ fn r5_legacy_nonmember_results_are_pruned_on_new_admission() -> Result<(), SdkEr
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
+-> Result<(), SdkError> {
+    let root = temp_root("r5-capacity-results")?;
+    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
+    let admin = person(&root.join("admin"), "admin", "admin", 21, 22)?;
+    owner.shared_group_create("group", "thread", None, "target-owner")?;
+    let base = owner.shared_group_change(
+        "group",
+        "target-owner",
+        GroupStateChange::Add {
+            member: admin.owned_group_actor("target-admin")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Admin,
+        },
+    )?;
+    for index in 0..65 {
+        let request = ramflux_crypto::sign_group_change_request(
+            admin.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &admin.owned_group_actor("target-admin")?,
+            &base,
+            ramflux_crypto::GroupChangeRequestInput {
+                request_id: format!("flood-{index}"),
+                change: GroupStateChange::SetName { name: "unchanged".into() },
+                now: now_unix_timestamp(),
+            },
+        )?;
+        let result = owner.insert_group_request(&request, true);
+        if index == 64 {
+            assert!(result.is_err());
+            continue;
+        }
+        result?;
+        if index >= 8 {
+            let response = owner.process_group_request(&request, "target-owner")?;
+            assert_eq!(response.status, ramflux_protocol::GroupChangeStatus::Capacity);
+            ramflux_crypto::verify_group_change_result(
+                &response,
+                &request,
+                &base,
+                now_unix_timestamp(),
+            )?;
+        }
+    }
+    assert_eq!(owner.group_change_records()?.len(), 64);
+    owner.shared_group_create("other", "other-thread", None, "target-owner")?;
+    let other = owner.shared_group_change(
+        "other",
+        "target-owner",
+        GroupStateChange::Add {
+            member: admin.owned_group_actor("target-admin")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Admin,
+        },
+    )?;
+    let request = ramflux_crypto::sign_group_change_request(
+        admin.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &admin.owned_group_actor("target-admin")?,
+        &other,
+        ramflux_crypto::GroupChangeRequestInput {
+            request_id: "other-request".into(),
+            change: GroupStateChange::SetName { name: "legitimate".into() },
+            now: now_unix_timestamp(),
+        },
+    )?;
+    owner.insert_group_request(&request, true)?;
+    assert_eq!(owner.group_change_records()?.len(), 65);
+    assert!(owner.group_change_record(&request, true)?.is_some_and(|row| row.result.is_none()));
+    assert_eq!(owner.group_state("group")?.group_epoch, base.view().epoch);
+    drop((owner, admin));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
