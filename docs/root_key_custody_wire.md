@@ -318,7 +318,14 @@ fresh-head/countersign/removal rules. It never grants account/device management.
 | `branch_certificate_hash` | `Hash`, certificate authorizing the erasure endpoint |
 | `ack_id` | Random `B32`; reuse on retransmission |
 | `erased_at` | `Time` |
-| `erased_legacy_root`, `erased_self_signing_material` | Both exactly `true` |
+| `erased_legacy_root`, `erased_unauthorized_self_signing_material` | Both exactly `true` |
+
+The primary retains only its currently authorized self-signing key; that key is
+not covered by the unauthorized-material erasure assertion. A secondary must erase
+all self-signing material. The initial migrating primary also ACKs its legacy-root
+erasure through the restricted migration endpoint; only after publication of the
+ACK may its roster state become erased. This avoids treating an existing legacy
+primary as a native device or requiring it to erase the new management key.
 
 ACK is a cooperative software claim, not attestation. Verify using the branch
 certificate/commitments at the referenced migration record and current erasure
