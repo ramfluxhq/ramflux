@@ -363,7 +363,9 @@ impl RamfluxClient {
             .iter()
             .map(|record| self.contact_request_preview(record))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(json!({"requests":requests,"contact_requests":self.contact_request_policy()?}))
+        Ok(
+            json!({"requests":requests,"contact_requests":self.contact_request_policy()?,"authority_floors":self.contact_request_floor_status()?}),
+        )
     }
     pub(crate) fn contact_request_preview(
         &self,

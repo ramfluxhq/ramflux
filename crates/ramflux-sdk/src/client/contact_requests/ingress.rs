@@ -59,6 +59,13 @@ impl RamfluxClient {
         // Global and account pressure defer before any charge, so redriving a held request never
         // spends the requester's own quota.
         if !self.contact_admission_capacity(Some(&root), now)? {
+            if db.contact_request_authority_floor_usage(now)?.0 >= 4096
+                && db.contact_request_authority_floor(&root, now)?.is_none()
+            {
+                return Err(SdkError::ContactRequestCapacity(
+                    "contact_authority_floors_exhausted".into(),
+                ));
+            }
             return Err(SdkError::ContactRequestCapacity(
                 "contact admission capacity exhausted".into(),
             ));

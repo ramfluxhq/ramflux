@@ -28,14 +28,39 @@ impl AccountDb {
         now: i64,
     ) -> Result<bool, StorageError> {
         self.write_transaction(|| {
-            self.connection.execute("DELETE FROM contact_request_authority_floor WHERE until<=?1",params![now])?;
+            self.connection.execute("DELETE FROM contact_request_authority_floor WHERE root=?1 AND until<=?2",params![root,now])?;
             let exists:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contact_request_authority_floor WHERE root=?1)",params![root],|row|row.get(0))?;
             let count:u64=self.connection.query_row("SELECT count(*) FROM contact_request_authority_floor",[],|row|row.get(0))?;
-            if !exists && count>=4096 {return Ok(false);}
+            if !exists && count >= 4096 {
+                // Expired floors no longer protect reads. Free only the oldest required slots.
+                self.connection.execute("DELETE FROM contact_request_authority_floor WHERE root IN (SELECT root FROM contact_request_authority_floor WHERE until<=?1 ORDER BY until,root LIMIT ?2)", params![now,count.saturating_sub(4095)])?;
+                let remaining:u64=self.connection.query_row("SELECT count(*) FROM contact_request_authority_floor",[],|row|row.get(0))?;
+                if remaining >= 4096 { return Ok(false); }
+            }
             self.connection.execute("INSERT INTO contact_request_authority_floor VALUES(?1,?2,?3,?4) ON CONFLICT(root) DO UPDATE SET epoch=excluded.epoch,record_hash=excluded.record_hash,until=MAX(contact_request_authority_floor.until,excluded.until) WHERE excluded.epoch>contact_request_authority_floor.epoch OR (excluded.epoch=contact_request_authority_floor.epoch AND excluded.record_hash=contact_request_authority_floor.record_hash)",params![root,epoch,hash,until])?;
             Ok(true)
         })
     }
+    /// Returns live floor count and the subset without any unexpired pending request.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn contact_request_authority_floor_usage(
+        &self,
+        now: i64,
+    ) -> Result<(u64, u64), StorageError> {
+        Ok(self.connection.query_row("SELECT count(*),count(CASE WHEN NOT EXISTS(SELECT 1 FROM contact_request_projection r WHERE r.contact_identity_commitment=f.root AND r.state='pending' AND r.expires_at>?1) THEN 1 END) FROM contact_request_authority_floor f WHERE f.until>?1",params![now],|row|Ok((row.get(0)?,row.get(1)?)))?)
+    }
+    /// Explicitly forget rollback hardening for roots without a live pending request.
+    /// Consent fences, request decisions and independently cached authority remain unchanged.
+    /// # Errors
+    /// Returns SQL failures.
+    pub fn clear_retired_contact_request_authority_floors(
+        &self,
+        now: i64,
+    ) -> Result<usize, StorageError> {
+        Ok(self.connection.execute("DELETE FROM contact_request_authority_floor WHERE NOT EXISTS(SELECT 1 FROM contact_request_projection r WHERE r.contact_identity_commitment=contact_request_authority_floor.root AND r.state='pending' AND r.expires_at>?1)",params![now])?)
+    }
+
     /// Release a compact temporary fence after normal accepted authority owns the full record.
     /// # Errors
     /// Returns SQL failures.
@@ -203,3 +228,7 @@ impl AccountDb {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "contact_request_floor_tests.rs"]
+mod floor_tests;

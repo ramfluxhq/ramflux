@@ -359,6 +359,22 @@ impl RamfluxClient {
         local: &str,
     ) -> Result<Delivery, SdkError> {
         self.account_db()?.write_transaction(|| {
+            // Candidate authentication supplies receipt scope without resurrecting requester caches.
+            let source = Self::device_identity_from_manifest(manifest,&entry.envelope.source_device_id)?;
+            let packet = decode(&entry.envelope)?;
+            if packet.source_principal_commitment.as_deref() != Some(source.root_commitment()) {
+                return Err(invalid("contact receipt root mismatch"));
+            }
+            let device = manifest.devices.iter().find(|d| d.device_id == entry.envelope.source_device_id)
+                .ok_or_else(|| invalid("contact receipt device missing"))?;
+            super::verify_sender_record(entry,&serde_json::json!({"principal_id":manifest.principal_id,"signing_public_key":device.branch_public_key}))?;
+            let receipt = super::committed::committed_key(&source,&entry.envelope.envelope_id)?;
+            if let Some(committed) = self.account_db()?.load_actor_state::<Committed>(&receipt)? {
+                if committed.entry.envelope.payload_hash != entry.envelope.payload_hash {
+                    return Err(invalid("contact envelope id reused with another payload"));
+                }
+                return Ok(Delivery { routing: committed.routing, plaintext: None });
+            }
             // A malformed request cannot leave a cached root or device, pair state, consent,
             // or message projection behind. Candidate authentication preceded this transaction.
             let first_seen =
@@ -368,13 +384,6 @@ impl RamfluxClient {
             if first_seen {
                 // A requester's root comes from the network, never from an imported card.
                 self.mark_lookup_root(&manifest.principal_id)?;
-            }
-            let receipt = self.authenticated_committed_key(entry)?;
-            if let Some(committed) = self.account_db()?.load_actor_state::<Committed>(&receipt)? {
-                if committed.entry.envelope.payload_hash != entry.envelope.payload_hash {
-                    return Err(invalid("contact envelope id reused with another payload"));
-                }
-                return Ok(Delivery { routing: committed.routing, plaintext: None });
             }
             let opened = self.open_routed(entry, local)?;
             let control = self.verify_contact_control(entry, &opened.routing, &opened.body)?;

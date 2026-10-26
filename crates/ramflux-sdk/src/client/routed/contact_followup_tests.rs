@@ -218,3 +218,6 @@ async fn failed_outbound_staging_keeps_the_decline_fence_and_rolls_back_new_inte
     assert!(db.client_record("contact_request_status", &root)?.is_none());
     Ok(())
 }
+
+#[path = "contact_capacity_followup_tests.rs"]
+mod capacity;

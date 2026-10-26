@@ -22,15 +22,34 @@ pub(super) async fn dispatch(
         }
         "contact.requests.policy.get" => {
             return Ok(Some(local_bus_ok(
-                json!({"contact_requests":account.client.contact_request_policy()?}),
+                json!({"contact_requests":account.client.contact_request_policy()?,"authority_floors":account.client.contact_request_floor_status()?}),
             )));
         }
         "contact.requests.policy.set" => {
             let policy = request.body["contact_requests"]
                 .as_str()
                 .ok_or_else(|| SdkError::LocalBus("contact_requests is required".into()))?;
-            account.client.set_contact_request_policy(policy)?;
-            return Ok(Some(local_bus_ok(json!({"contact_requests":policy}))));
+            let clear = match request.body.get("clear_retired_authority_floors") {
+                None => false,
+                Some(serde_json::Value::Bool(clear)) => *clear,
+                Some(_) => {
+                    return Err(SdkError::LocalBus(
+                        "clear_retired_authority_floors must be boolean".into(),
+                    ));
+                }
+            };
+            let db = account.client.account_db()?;
+            let removed = db.write_transaction(|| -> Result<_, SdkError> {
+                account.client.set_contact_request_policy(policy)?;
+                if clear {
+                    Ok(db.clear_retired_contact_request_authority_floors(now_unix_timestamp())?)
+                } else {
+                    Ok(0)
+                }
+            })?;
+            return Ok(Some(local_bus_ok(json!({"contact_requests":policy,
+                "authority_floors":account.client.contact_request_floor_status()?,
+                "cleared_authority_floors":removed}))));
         }
         "contact.accept" | "contact.decline" | "contact.block" => {}
         _ => return Ok(None),

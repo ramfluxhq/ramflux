@@ -263,7 +263,9 @@ before a manifest fetch. Only global/account capacity pressure retains a ciphert
 for paced retry. At most one deferred envelope per requester root is retained, with
 1024 deferred roots per account; extra envelopes from a held root are rejected and
 acknowledged. Past 1024 roots, a capacity-deferred envelope stays unacknowledged under
-the replay floor without a deduplication slot.
+the replay floor without a durable deduplication slot. A per-drain in-memory
+index still deduplicates its root, so later envelopes in that drain require no
+additional manifest fetch. The persisted backpressure format is unchanged.
 Deferred entries leave the generic retry queue and use the durable replay floor.
 Global and account capacity (bootstrap attempts, account request rate, pending slots,
 rate-bucket and authority-floor tables) is checked before any sender bucket is
@@ -318,3 +320,19 @@ replicates acceptance to active siblings and releases their matching pending que
 Locked accounts cannot list requests or subscribe/replay their account stream; lock
 stops its actor and readers. Clients must discard previews already received when
 processing the account lock, as they do other private message content.
+
+### Rollback-floor capacity controls
+
+Expired floors are evicted oldest first when a new admission needs space. Live
+floors are not silently evicted. Saturation returns the typed SDK
+`ContactRequestCapacity("contact_authority_floors_exhausted")`; envelopes remain
+held for retry. `contact.requests.policy.get`, `.set` and `contact.requests.list`
+expose `authority_floors.{retained,clearable,limit,saturated}`.
+
+To explicitly free retired floors, call the existing policy setter with
+`{contact_requests:"manual",clear_retired_authority_floors:true}` (use the
+account's current policy to preserve it). The response includes
+`cleared_authority_floors`. This forgets historical rollback hardening for roots
+without an unexpired pending request. It does not clear decline/block fences,
+request decisions, active pending floors or independently cached signed authority.
+No stored encoding or schema version changes; the optional clear action is local.

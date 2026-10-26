@@ -13,6 +13,9 @@ pub(super) struct Backpressure {
     scan: Option<Scan>,
     #[serde(default)]
     roots: BTreeMap<String, Deferred>,
+    // Bounded by the inbox pages in one drain; excluded from the existing stored format.
+    #[serde(skip)]
+    overflow: BTreeMap<String, u64>,
 }
 #[derive(Deserialize, Serialize)]
 struct Deferred {
@@ -60,12 +63,13 @@ impl Backpressure {
         if self.duplicate(entry) {
             return Ok(false);
         }
-        // Every ContactRequestCapacity is global or account pressure. Past 1024 roots the entry
-        // stays unacknowledged under the floor without a dedup slot instead of being dropped.
+        // Past 1024 durable roots, preserve the first envelope and deduplicate this drain in memory.
         if self.roots.contains_key(&root) || self.roots.len() < 1024 {
             self.roots
                 .entry(root)
                 .or_insert(Deferred { sequence: entry.inbox_seq, expires_at: expiry(entry, now) });
+        } else {
+            self.overflow.entry(root).or_insert(entry.inbox_seq);
         }
         self.hold(entry, now);
         // Persist before the normal cursor advances. The gateway retains the original ciphertext.
@@ -107,9 +111,13 @@ impl Backpressure {
         Ok(true)
     }
     pub fn duplicate(&self, entry: &GatewayInboxEntry) -> bool {
-        requester(entry)
-            .and_then(|root| self.roots.get(&root))
-            .is_some_and(|held| held.sequence != entry.inbox_seq)
+        requester(entry).is_some_and(|root| {
+            self.roots
+                .get(&root)
+                .map(|held| held.sequence)
+                .or_else(|| self.overflow.get(&root).copied())
+                .is_some_and(|sequence| sequence != entry.inbox_seq)
+        })
     }
     pub fn completed(
         &mut self,
@@ -121,6 +129,11 @@ impl Backpressure {
         {
             self.roots.remove(&root);
             self.save(client)?;
+        }
+        if let Some(root) = requester(entry)
+            && self.overflow.get(&root) == Some(&entry.inbox_seq)
+        {
+            self.overflow.remove(&root);
         }
         Ok(())
     }

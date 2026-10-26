@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Evict expired requester rollback floors oldest first and expose capacity plus
+  explicit retired-floor clearing in contact request settings, preserving consent
+  fences and pending authority. Duplicate receipts no longer resurrect requester
+  caches; overflow roots are deduplicated within each inbox drain.
+
 - Declining a crossed inbound request preserves valid pending outbound consent.
   Failed outbound staging retains the decline fence and rolls back the intent.
 

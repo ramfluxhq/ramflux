@@ -4,7 +4,7 @@
 //! Retire unaccepted requester material while preserving compact rollback and consent fences.
 use super::{TTL, invalid};
 use crate::prelude::*;
-use serde_json::json;
+use serde_json::{Value, json};
 const CACHE_PREFIX: &str = "contact-request/cache/";
 pub(crate) fn authority_digest(
     record: &ramflux_protocol::SignedDeviceSetRecord,
@@ -15,6 +15,13 @@ pub(crate) fn authority_digest(
     ))
 }
 impl RamfluxClient {
+    pub(crate) fn contact_request_floor_status(&self) -> Result<Value, SdkError> {
+        let (retained, clearable) =
+            self.account_db()?.contact_request_authority_floor_usage(now_unix_timestamp())?;
+        Ok(
+            json!({"retained":retained,"clearable":clearable,"limit":4096,"saturated":retained>=4096}),
+        )
+    }
     pub(super) fn contact_request_owns_identity_cache(&self, root: &str) -> Result<bool, SdkError> {
         Ok(self.account_db()?.actor_state_exists(&format!("{CACHE_PREFIX}{root}"))?)
     }
@@ -53,7 +60,7 @@ impl RamfluxClient {
             now,
         )? {
             return Err(SdkError::ContactRequestCapacity(
-                "contact requester cache capacity exhausted".into(),
+                "contact_authority_floors_exhausted".into(),
             ));
         }
         Ok(())
