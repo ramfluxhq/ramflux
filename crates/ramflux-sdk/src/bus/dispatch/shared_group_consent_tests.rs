@@ -83,8 +83,14 @@ async fn r5_encrypted_contact_forward_and_message_preserve_consent_and_decline()
         {
             let entry = seal(&contact.client, &mut sender, &user.client, body, route).await?;
             let result = user.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await;
-            if declined || index == 1 {
-                assert!(result.is_err());
+            if declined {
+                assert!(
+                    matches!(result, Err(SdkError::InboundRejected(reason)) if reason == "group invitation was declined")
+                );
+            } else if index == 1 {
+                assert!(
+                    matches!(result, Err(SdkError::InboundPending(reason)) if reason == "group consent or membership is pending")
+                );
             } else {
                 result?;
             }

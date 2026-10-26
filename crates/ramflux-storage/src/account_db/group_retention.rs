@@ -8,7 +8,9 @@ use rusqlite::{OptionalExtension, params};
 impl AccountDb {
     pub(super) fn install_group_message_retention_schema(&self) -> Result<(), StorageError> {
         self.connection.execute_batch("             INSERT OR IGNORE INTO runtime_actor_state(state_kind,state_json)
-                VALUES('group-message/upgrade-start',CAST(unixepoch() AS TEXT));
+                VALUES('group-message/upgrade-start',CAST(unixepoch() AS BLOB));
+             UPDATE runtime_actor_state SET state_json=CAST(state_json AS BLOB)
+                WHERE state_kind='group-message/upgrade-start' AND typeof(state_json)='text';
              CREATE TRIGGER IF NOT EXISTS group_alias_delete AFTER DELETE ON direct_message_projection
                 BEGIN DELETE FROM runtime_actor_state WHERE state_kind='group-message/alias/'||OLD.message_id; END;
              CREATE TRIGGER IF NOT EXISTS group_alias_redact AFTER UPDATE OF deleted ON direct_message_projection
@@ -73,5 +75,32 @@ impl AccountDb {
             if let Some(floor)=floor {self.connection.execute("UPDATE runtime_journal_bounds SET pruned_through=max(pruned_through,?1) WHERE singleton=1",params![floor])?;}
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn upgrade_marker_is_a_typed_blob_and_repairs_text_without_renewing_the_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-group-marker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let index = crate::AccountIndex::open(&root)?;
+        index.create_account("a", "root")?;
+        let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;
+        assert!(db.load_actor_state::<i64>("group-message/upgrade-start")?.is_some());
+        db.connection.execute("UPDATE runtime_actor_state SET state_json='12345' WHERE state_kind='group-message/upgrade-start'",[])?;
+        db.install_group_message_retention_schema()?;
+        assert_eq!(db.load_actor_state::<i64>("group-message/upgrade-start")?, Some(12345));
+        db.install_group_message_retention_schema()?;
+        assert_eq!(db.load_actor_state::<i64>("group-message/upgrade-start")?, Some(12345));
+        drop(db);
+        drop(index);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

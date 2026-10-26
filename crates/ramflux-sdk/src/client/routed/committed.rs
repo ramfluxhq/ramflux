@@ -144,18 +144,19 @@ impl RamfluxClient {
     ) -> Result<String, SdkError> {
         if route.kind == Kind::GroupMessage {
             let source = self.authenticated_device_identity(entry)?;
-            let upgrade = self
-                .account_db()?
-                .load_actor_state::<i64>("group-message/upgrade-start")?
-                .ok_or_else(|| invalid("group upgrade window unavailable"))?;
             let logical = if let Some(logical) = route.group_message_id.as_deref() {
                 logical
-            } else if crate::time::now_unix_timestamp() <= upgrade.saturating_add(7 * 86400)
-                && entry.envelope.created_at <= upgrade
-            {
-                &entry.envelope.envelope_id
             } else {
-                return Err(invalid("group logical id missing outside upgrade window"));
+                let upgrade = self
+                    .account_db()?
+                    .load_actor_state::<i64>("group-message/upgrade-start")?
+                    .ok_or_else(|| invalid("group upgrade window unavailable"))?;
+                if crate::time::now_unix_timestamp() > upgrade.saturating_add(7 * 86400)
+                    || entry.envelope.created_at > upgrade
+                {
+                    return Err(invalid("group logical id missing outside upgrade window"));
+                }
+                &entry.envelope.envelope_id
             };
             return Ok(ramflux_protocol::group_message_id(
                 route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?,

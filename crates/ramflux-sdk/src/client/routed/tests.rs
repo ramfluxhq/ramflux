@@ -797,6 +797,12 @@ fn r5_legacy_group_messages_have_a_seven_day_upgrade_window() -> Result<(), SdkE
     route.group_message_id = None;
     let legacy = entry.clone();
     let start = legacy.envelope.created_at;
+    let installed = bob
+        .client
+        .account_db()?
+        .load_actor_state::<i64>("group-message/upgrade-start")?
+        .ok_or(SdkError::IdentityRootMissing)?;
+    assert!(installed <= start);
     bob.client.account_db()?.persist_actor_state("group-message/upgrade-start", &start)?;
     let actual = bob.client.projection_id(&legacy, &route)?;
     let source = bob.client.authenticated_device_identity(&legacy)?;
