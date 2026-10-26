@@ -221,3 +221,43 @@ async fn failed_outbound_staging_keeps_the_decline_fence_and_rolls_back_new_inte
 
 #[path = "contact_capacity_followup_tests.rs"]
 mod capacity;
+
+#[tokio::test]
+async fn accepted_retry_preserves_the_requested_legacy_link_when_root_has_aliases()
+-> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 171)?;
+    let mut b = Fixture::new("bob", 181)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    pending(&mut state, &directory).await?;
+    let peer = r2::root(&state, "alice")?;
+    let own = r2::root(&state, "bob")?;
+    contact(&mut state, "bob", "contact.accept", json!({"root_commitment":peer})).await?;
+    let client = account(&state, "bob")?;
+    let db = client.account_db()?;
+    let old = db.contact_request(&peer, "inbound")?.ok_or_else(|| invalid("request"))?;
+    db.remove_contact_request(&peer, "inbound", &old.request_id)?;
+    client.establish_friend_link("zzz-new-alias", &peer, &own)?;
+    assert_eq!(
+        db.friend_link_for_peer(&peer)?.ok_or_else(|| invalid("alias"))?.link_id,
+        "zzz-new-alias"
+    );
+    let response =
+        contact(&mut state, "bob", "contact.accept", json!({"link_id":old.link_id})).await?;
+    assert_eq!(response["link_id"], old.link_id, "legacy link selectors remain stable");
+    assert_eq!(response["contact"]["root_commitment"], peer);
+    account(&state, "bob")?.establish_friend_link("wrong-link", &own, "unrelated")?;
+    assert!(matches!(
+        contact(
+            &mut state,
+            "bob",
+            "contact.accept",
+            json!({
+                "link_id":"wrong-link","requester_id":own,"target_id":peer
+            })
+        )
+        .await,
+        Err(SdkError::ContactInput(crate::ContactReason::RootConflict))
+    ));
+    Ok(())
+}

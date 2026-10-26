@@ -120,16 +120,25 @@ fn contact_response(
         contact["root_commitment"].as_str().ok_or(ContactReason::ManifestInvalid)?.to_owned();
     let delivery = crate::client::contact_requests::delivery_status(&account.client, &root)?;
     let mut response = json!({"contact":contact,"request_delivery":delivery});
-    if legacy.is_some()
-        && let Value::Object(fields) = serde_json::to_value(
-            account
-                .client
-                .account_db()?
-                .friend_link_for_peer(&root)?
-                .ok_or(ContactReason::UnknownPrincipal)?,
-        )?
-    {
-        response.as_object_mut().ok_or(ContactReason::InvalidCard)?.extend(fields);
+    if let Some(old) = legacy {
+        let db = account.client.account_db()?;
+        let record = match db.find_friend_link(&old.link_id)? {
+            Some(record) => {
+                let principal =
+                    contact["principal_id"].as_str().ok_or(ContactReason::UnknownPrincipal)?;
+                if ![record.requester_id.as_str(), record.target_id.as_str()]
+                    .iter()
+                    .any(|end| *end == root || *end == principal)
+                {
+                    return Err(ContactReason::RootConflict.into());
+                }
+                record
+            }
+            None => db.friend_link_for_peer(&root)?.ok_or(ContactReason::UnknownPrincipal)?,
+        };
+        if let Value::Object(fields) = serde_json::to_value(record)? {
+            response.as_object_mut().ok_or(ContactReason::InvalidCard)?.extend(fields);
+        }
     }
     Ok(response)
 }
