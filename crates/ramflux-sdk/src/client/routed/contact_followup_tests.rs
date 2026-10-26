@@ -66,3 +66,41 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     assert_eq!(retry["contact"], original, "retry also survives request retirement");
     Ok(())
 }
+
+#[tokio::test]
+async fn peer_unblock_preserves_local_fences_and_local_unblock_lifts_them() -> Result<(), SdkError>
+{
+    let mut a = Fixture::new("alice", 51)?;
+    let mut b = Fixture::new("bob", 61)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    let entry = pending(&mut state, &directory).await?;
+    let root = r2::root(&state, "alice")?;
+    contact(&mut state, "bob", "contact.accept", json!({"root_commitment":root})).await?;
+    let link = account(&state, "bob")?
+        .account_db()?
+        .contact_request(&root, "inbound")?
+        .ok_or_else(|| invalid("request"))?
+        .link_id;
+    for kind in ["declined", "blocked"] {
+        let client = account(&state, "bob")?;
+        let db = client.account_db()?;
+        db.fence_contact_request(
+            &root,
+            kind,
+            if kind == "blocked" { 0 } else { now_unix_timestamp() + 3600 },
+        )?;
+        let before = db.retained_contact_request_fence(&root)?;
+        // Exercise the shared peer path even in a future accepted-link/fence combination.
+        client.project_contact_control(
+            &entry,
+            &json!({"type":"friend.unblocked","link_id":link,"requester":"alice","target":"bob"}),
+        )?;
+        assert_eq!(db.retained_contact_request_fence(&root)?, before);
+        contact(&mut state, "bob", "contact.unblock", json!({"link_id":link})).await?;
+        assert!(
+            account(&state, "bob")?.account_db()?.retained_contact_request_fence(&root)?.is_none()
+        );
+    }
+    Ok(())
+}

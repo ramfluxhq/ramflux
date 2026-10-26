@@ -461,16 +461,27 @@ impl RamfluxClient {
         Ok(link)
     }
 
+    pub(crate) fn unblock_contact_locally(
+        &self,
+        link_id: &str,
+    ) -> Result<FriendLinkRecord, SdkError> {
+        let db = self.account_db()?;
+        db.write_transaction(|| -> Result<_, SdkError> {
+            let link = self.unblock_friend_link(link_id)?;
+            for root in [&link.requester_id, &link.target_id] {
+                db.clear_contact_request_fence(root, None)?;
+            }
+            Ok(link)
+        })
+    }
+
+    /// Updates the shared link without lifting local contact-request fences.
     /// # Errors
     /// Returns an error when no account DB is unlocked or the friend link cannot be updated.
     pub fn unblock_friend_link(&self, link_id: &str) -> Result<FriendLinkRecord, SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| -> Result<_, SdkError> {
             let link = db.unblock_friend_link(link_id, now_unix_timestamp())?;
-            // Explicit unblock restores consent, so neither side of the link stays fenced.
-            for root in [&link.requester_id, &link.target_id] {
-                db.clear_contact_request_fence(root, None)?;
-            }
             self.append_contact_control_event("friend.unblocked", &link)?;
             Ok(link)
         })
