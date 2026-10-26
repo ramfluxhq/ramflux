@@ -241,7 +241,9 @@ impl RamfluxClient {
         if request.state == state {
             return Ok(());
         }
-        if request.state != state && request.state != "pending" {
+        if request.expires_at <= now_unix_timestamp()
+            || (request.state != state && request.state != "pending")
+        {
             return Err(invalid("contact response cannot reactivate a terminal request"));
         }
         if self.friend_rejection_reason(&body.actor_root)?.is_some() {
@@ -287,7 +289,7 @@ impl RamfluxClient {
                     .is_some_and(|row| {
                         row.state == "pending" && row.expires_at > now_unix_timestamp()
                     });
-            if state == "blocked" || (state == "declined" && !outbound_pending) {
+            if state == "blocked" || state == "declined" {
                 db.fence_contact_request(
                     &request.contact_identity_commitment,
                     state,

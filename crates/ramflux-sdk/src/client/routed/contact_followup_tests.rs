@@ -44,18 +44,27 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
         client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.to_bytes();
     let valid = card("alice", seed)?;
     let original = account(&state, "bob")?.contact_entry("alice")?;
+    assert_eq!(original["root_source"], "lookup");
     directory.unavailable.store(true, Ordering::SeqCst);
     let before = directory.manifest_fetches.load(Ordering::SeqCst);
+    let mut upgraded = original.clone();
+    upgraded["root_source"] = json!("card");
+    upgraded["node"] = json!({
+        "url":"https://node.example",
+        "key_fingerprint": crate::contact_node_fingerprint(
+            &ramflux_crypto::public_key_base64url_from_seed([91; 32]))?
+    });
     for _ in 0..2 {
         let retry = contact(&mut state, "bob", "contact.accept", json!({"card":valid})).await?;
-        assert_eq!(retry["contact"], original);
+        assert_eq!(retry["contact"]["root_source"], "card");
+        assert_eq!(retry["contact"], upgraded);
     }
     let conflicting = card("alice", [211; 32])?;
     assert!(matches!(
         contact(&mut state, "bob", "contact.accept", json!({"card":conflicting})).await,
         Err(SdkError::ContactInput(crate::ContactReason::RootConflict))
     ));
-    assert_eq!(account(&state, "bob")?.contact_entry("alice")?, original);
+    assert_eq!(account(&state, "bob")?.contact_entry("alice")?, upgraded);
     assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);
     let root = original["root_commitment"].as_str().ok_or_else(|| invalid("root"))?;
     let db = account(&state, "bob")?.account_db()?;
@@ -63,7 +72,15 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     db.remove_contact_request(root, "inbound", &request.request_id)?;
     let retry =
         contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
-    assert_eq!(retry["contact"], original, "retry also survives request retirement");
+    assert_eq!(retry["contact"], upgraded, "retry also survives request retirement");
+    let client = account(&state, "bob")?;
+    let db = client.account_db()?;
+    let mut identity = db.client_record("identity", "alice")?.ok_or_else(|| invalid("identity"))?;
+    identity["root_source"] = json!("verified");
+    db.persist_client_record("identity", "alice", &identity)?;
+    let verified = contact(&mut state, "bob", "contact.accept", json!({"card":valid})).await?;
+    assert_eq!(verified["contact"]["root_source"], "verified");
+    assert_eq!(verified["contact"]["root_commitment"], original["root_commitment"]);
     Ok(())
 }
 
@@ -126,7 +143,10 @@ async fn declining_a_crossed_request_preserves_the_pending_outbound_acceptance()
     client.stage_contact_request(&manifest, &inbound.link_id, None)?;
     contact(&mut state, "bob", "contact.decline", json!({"request_id":inbound.request_id})).await?;
     let client = account(&state, "bob")?;
-    assert!(client.account_db()?.retained_contact_request_fence(&root)?.is_none());
+    assert_eq!(
+        client.account_db()?.retained_contact_request_fence(&root)?.map(|f| f.0),
+        Some("declined".into())
+    );
     assert!(client.friend_rejection_reason(&root)?.is_none());
     assert_eq!(
         client
@@ -176,6 +196,67 @@ async fn declining_a_crossed_request_preserves_the_pending_outbound_acceptance()
     );
     Ok(())
 }
+#[tokio::test]
+async fn crossed_decline_still_fences_new_requests_after_outbound_expires() -> Result<(), SdkError>
+{
+    let mut a = Fixture::new("alice", 111)?;
+    let mut b = Fixture::new("bob", 121)?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
+    let entry = pending(&mut state, &directory).await?;
+    let root = r2::root(&state, "alice")?;
+    let client = account(&state, "bob")?;
+    let db = client.account_db()?;
+    let inbound = db.contact_request(&root, "inbound")?.ok_or_else(|| invalid("inbound"))?;
+    let manifest = db
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{root}"
+        ))?
+        .ok_or_else(|| invalid("manifest"))?;
+    client.stage_contact_request(&manifest, &inbound.link_id, None)?;
+    contact(&mut state, "bob", "contact.decline", json!({"request_id":inbound.request_id})).await?;
+    let client = account(&state, "bob")?;
+    let db = client.account_db()?;
+    let fence = db.retained_contact_request_fence(&root)?;
+    assert_eq!(fence.as_ref().map(|f| f.0.as_str()), Some("declined"));
+    // Move just the persisted outbound deadline into the past, without waiting out the cooldown.
+    let mut outbound = db.contact_request(&root, "outbound")?.ok_or_else(|| invalid("outbound"))?;
+    db.remove_contact_request(&root, "outbound", &outbound.request_id)?;
+    outbound.expires_at = now_unix_timestamp() - 1;
+    assert!(db.persist_contact_request(&outbound)?);
+    db.expire_contact_requests(now_unix_timestamp())?;
+    assert_eq!(db.contact_request(&root, "outbound")?.map(|r| r.state), Some("expired".into()));
+    assert_eq!(db.retained_contact_request_fence(&root)?, fence);
+    assert!(client.contact_request_admission(&entry).is_err());
+    // Remove the old inbound decision: the retained fence alone must refuse a fresh request.
+    db.remove_contact_request(&root, "inbound", &inbound.request_id)?;
+    let peer = r2::root(&state, "bob")?;
+    let sender = account(&state, "alice")?;
+    let sender_db = sender.account_db()?;
+    let old =
+        sender_db.contact_request(&peer, "outbound")?.ok_or_else(|| invalid("sender request"))?;
+    sender_db.remove_contact_request(&peer, "outbound", &old.request_id)?;
+    let manifest = sender_db
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{peer}"
+        ))?
+        .ok_or_else(|| invalid("sender manifest"))?;
+    sender.stage_contact_request(&manifest, &old.link_id, None)?;
+    let fresh =
+        sender_db.contact_request(&peer, "outbound")?.ok_or_else(|| invalid("fresh request"))?;
+    assert_ne!(fresh.request_id, inbound.request_id);
+    flush(&mut state, "alice").await?;
+    let entries = frames(&directory)?;
+    assert!(!entries.is_empty());
+    let client = account(&state, "bob")?;
+    let gateway = state.accounts["bob"].gateway_config.clone();
+    for entry in entries {
+        assert!(client.contact_request_candidate(&gateway, &entry).await.is_err());
+    }
+    assert_eq!(client.account_db()?.retained_contact_request_fence(&root)?, fence);
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_outbound_staging_keeps_the_decline_fence_and_rolls_back_new_intent()
 -> Result<(), SdkError> {

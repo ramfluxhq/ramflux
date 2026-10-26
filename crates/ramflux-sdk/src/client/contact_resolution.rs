@@ -66,6 +66,11 @@ impl RamfluxClient {
         {
             return Err(ContactReason::RootConflict.into());
         }
+        if let Some(card) = card {
+            let mut upgraded = identity.clone();
+            self.decorate_contact_identity(&identity, &mut upgraded, Some(card), false)?;
+            db.persist_client_record("identity", &principal, &upgraded)?;
+        }
         self.contact_entry(&principal).map(Some)
     }
 

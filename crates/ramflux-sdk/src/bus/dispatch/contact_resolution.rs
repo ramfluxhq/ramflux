@@ -36,11 +36,18 @@ pub(super) async fn add(
     {
         return Err(ContactReason::InvalidCard.into());
     }
-    if request.method == "contact.accept"
-        && replace_provisional_root.is_none()
-        && let Some(contact) = account.client.accepted_contact_retry(&selector, card.as_ref())?
-    {
-        return Ok(local_bus_ok(contact_response(account, &contact, legacy.as_ref())?));
+    if request.method == "contact.accept" && replace_provisional_root.is_none() {
+        // Validate the requested link and persist card provenance in the same writer phase.
+        let retry = account.client.account_db()?.write_transaction(|| {
+            account
+                .client
+                .accepted_contact_retry(&selector, card.as_ref())?
+                .map(|contact| contact_response(account, &contact, legacy.as_ref()))
+                .transpose()
+        })?;
+        if let Some(response) = retry {
+            return Ok(local_bus_ok(response));
+        }
     }
 
     if legacy.is_none()

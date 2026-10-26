@@ -156,7 +156,26 @@ impl RamfluxClient {
         if !matches!(route.kind, Kind::Direct | Kind::Control) {
             return Ok(());
         }
-        self.contact_request_admission(entry)?;
+        if let Err(rejection) = self.contact_request_admission(entry) {
+            // A decline still fences every payload except the authenticated response to our
+            // independent, live outbound intent. A block is never bypassed.
+            let control = self.verify_contact_control(entry, route, body)?;
+            let db = self.account_db()?;
+            let root = &control.body.actor_root;
+            let pending_accept = control.body.kind == super::Decision::Accept
+                && db.contact_request(root, "outbound")?.is_some_and(|request| {
+                    request.state == "pending"
+                        && request.expires_at > now_unix_timestamp()
+                        && request.request_id == control.body.request_id
+                })
+                && db
+                    .contact_request_fence(root, now_unix_timestamp())?
+                    .is_some_and(|(state, _)| state == "declined")
+                && self.friend_rejection_reason(root)?.is_none();
+            if !pending_accept {
+                return Err(rejection);
+            }
+        }
         let source = self.authenticated_device_identity(entry)?;
         if self.pending_contact_root(source.root_commitment())?
             && !self.friend_link_peer_is_accepted(source.root_commitment())?

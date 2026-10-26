@@ -7,19 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
 - Evict expired requester rollback floors oldest first and expose capacity plus
   explicit retired-floor clearing in contact request settings, preserving consent
   fences and pending authority. Duplicate receipts no longer resurrect requester
   caches; overflow roots are deduplicated within each inbox drain.
 
-- Declining a crossed inbound request preserves valid pending outbound consent.
-  Failed outbound staging retains the decline fence and rolls back the intent.
+- Declining a crossed inbound request retains the decline fence while allowing
+  only the peer's Accept for the matching, unexpired outbound request. The fence
+  still blocks new requests after that outbound expires. Failed outbound staging
+  retains the decline fence and rolls back the intent.
+
+- Repeating `contact.accept` for an accepted root and key upgrades lookup
+  provenance from a signed card locally, including after auto-accept. Existing
+  card and verified pins never downgrade; conflicting cards still fail.
+
+### Security
 
 - Only local contact unblock restores local request consent; peer unblock controls
   retain local decline and block fences.
-
-- Repeating `contact.accept` for an accepted root and key returns the existing
-  contact, including after auto-accept; conflicting cards still fail.
 
 ### Changed
 
