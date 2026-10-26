@@ -9,6 +9,13 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[tokio::test]
 async fn shared_group_signed_request_and_result_round_trip_without_admin_state_authority()
 -> TestResult {
+    Box::pin(check_request_round_trip(false)).await
+}
+#[tokio::test]
+async fn r5_group_result_created_after_the_flush_start_is_sent_in_the_same_round() -> TestResult {
+    Box::pin(check_request_round_trip(true)).await
+}
+async fn check_request_round_trip(step_clock: bool) -> TestResult {
     let root = runtime_tests::root("group-request-wire");
     let mut owner = runtime_tests::account(
         &root.join("owner"),
@@ -71,13 +78,14 @@ async fn shared_group_signed_request_and_result_round_trip_without_admin_state_a
         config,
         Box::new(super::fixture::RecordingGateway::new(replies.clone())),
     ));
-    assert_eq!(crate::bus::shared_group_sync::flush_requests(&mut owner).await?, 1);
+    let sent = flush_owner_requests(&mut owner, step_clock).await?;
     let current = owner
         .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(current.view().epoch, 3);
+    assert_eq!(sent, 1, "a newly committed result is immediately eligible for delivery");
     assert_eq!(current.view().name.as_deref(), Some("Requested name"));
     let result = replies.lock().map_err(|_| "reply lock")?[0].clone();
     let incoming = GatewayInboxEntry {
@@ -106,6 +114,22 @@ async fn shared_group_signed_request_and_result_round_trip_without_admin_state_a
     drop((owner, admin, peers));
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+async fn flush_owner_requests(
+    owner: &mut LocalBusAccountState,
+    step_clock: bool,
+) -> Result<usize, SdkError> {
+    if !step_clock {
+        return crate::bus::shared_group_sync::flush_requests(owner).await;
+    }
+    let at = now_unix_timestamp();
+    let mut phase = 0;
+    crate::bus::shared_group_sync::flush_requests_with_clock(owner, || {
+        phase += 1;
+        if phase == 1 { at - 10 } else { at + 10 }
+    })
+    .await
 }
 
 fn admin_gateway(

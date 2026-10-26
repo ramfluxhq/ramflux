@@ -22,11 +22,20 @@ struct Attempt {
     expires_at: i64,
 }
 pub(in crate::bus) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
-    let now = now_unix_timestamp();
+    flush_with_clock(account, now_unix_timestamp).await
+}
+pub(in crate::bus) async fn flush_with_clock(
+    account: &mut LocalBusAccountState,
+    mut clock: impl FnMut() -> i64,
+) -> Result<usize, SdkError> {
+    let now = clock();
     let client = &account.client;
     client.account_db()?.retain_expiring_actor_states("group-beacon/", now, 4096)?;
     client.account_db()?.retain_expiring_actor_states("group-courier/sealed/", now, 4096)?;
     process_incoming(account, now).await?;
+    // Processing can create a result in a later clock second. Select work
+    // against the current time, including that freshly committed result.
+    let now = clock();
     // Fair rotation prevents one offline requester from starving other groups or refusals.
     let after = client
         .account_db()?
