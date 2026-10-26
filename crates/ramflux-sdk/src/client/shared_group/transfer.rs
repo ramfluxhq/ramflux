@@ -90,13 +90,13 @@ impl RamfluxClient {
         let db = self.account_db()?;
         db.write_transaction(|| -> Result<(), SdkError> {
             if let Some(lease) = db.load_actor_state::<Lease>(&key(LEASE, group))? {
-                let issuer_released = if let Some(issuer) = &lease.issuer {
+                let released = if lease.expires_at.saturating_add(TRANSFER_SKEW_SECONDS) < now {
+                    true
+                } else if let Some(issuer) = &lease.issuer {
                     !self.transfer_target_selected(group, issuer)?
                 } else {
                     false
                 };
-                let released =
-                    lease.expires_at.saturating_add(TRANSFER_SKEW_SECONDS) < now || issuer_released;
                 if released {
                     self.finish_group_transfer_outcome(group, &lease.proposal)?;
                     db.remove_actor_state(&key(LEASE, group))?;
@@ -106,8 +106,28 @@ impl RamfluxClient {
         })
     }
     fn release_cancel_targets(&self, row: &mut TransferDelivery) -> Result<bool, SdkError> {
+        let state = self.account_db()?.shared_group_state(row.control.group())?;
+        let selected =
+            state.as_ref().map(|state| self.shared_group_selected_devices(state)).transpose()?;
+        let mut known = BTreeMap::new();
         for target in row.control.targets() {
-            if !self.transfer_target_selected(row.control.group(), &target)? {
+            let represented = state.as_ref().is_some_and(|state| {
+                state.view().effective_role(&target.root, &target.device).is_some()
+            });
+            let has_authority = if let Some(value) = known.get(&target.root) {
+                *value
+            } else {
+                let value = self.observed_device_set(&target.root)?.is_some();
+                known.insert(target.root.clone(), value);
+                value
+            };
+            let active = represented
+                && (!has_authority
+                    || selected
+                        .as_ref()
+                        .and_then(|selected| selected.get(&target.root))
+                        .is_some_and(|devices| devices.contains(&target.device)));
+            if !active {
                 let key = (target.root.clone(), target.device.clone());
                 row.acknowledged.insert(key.clone());
                 row.delivered.insert(key);
@@ -165,9 +185,15 @@ impl RamfluxClient {
                 String::from_utf8(bytes).map_err(|_| super::invalid("transfer lease group"))?;
             self.release_group_transfer_lease_at(&group, now)?;
         }
-        for row in db.list_actor_states::<TransferDelivery>(SEND_PREFIX)? {
+        // Visit each delivery once; do not re-scan the complete queue for each group.
+        for id in db.actor_state_key_page(SEND_PREFIX, 512)? {
+            let Some(mut row) = db.load_actor_state::<TransferDelivery>(&id)? else { continue };
             if matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled) {
-                self.cancellation_delivery_pending(row.control.group())?;
+                if self.release_cancel_targets(&mut row)? {
+                    db.remove_actor_state(&id)?;
+                } else {
+                    db.persist_actor_state(&id, &row)?;
+                }
             }
         }
         Ok(())
