@@ -843,6 +843,165 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_late_live_copy_reuses_history_preserves_deletion_and_distinguishes_source_devices()
+    -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("history-first", "principal_sync", "target_device_sync")?;
+        client.send_direct_message("direct", "live-message", "source_device_sync", &[1, 2, 3])?;
+        client.account_db()?.store_message_content(
+            "direct",
+            "live-message",
+            b"outgoing live body",
+        )?;
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            "source_device_sync",
+        )?;
+        let mut bytes = b"ramflux.own_sent_message.v1\n".to_vec();
+        bytes.extend(serde_json::to_vec(&serde_json::json!({
+            "envelope_id":"live-envelope","message_id":"live-message","sender_id":"source_device_sync",
+            "context":{"conversation_id":"direct","participants":["principal_sync","peer"],"group":null,"friend":null},
+            "body_base64":ramflux_protocol::encode_base64url(b"outgoing live body")
+        }))?);
+        for _ in 0..2 {
+            client.receive_own_sent_message(
+                &source,
+                super::super::own_device_copy::OwnMessageInput {
+                    id: "live-envelope",
+                    conversation: "direct",
+                    group: None,
+                    created_at: 1,
+                    body: &bytes,
+                },
+            )?;
+        }
+        assert_eq!(client.direct_messages("direct")?.len(), 1);
+        assert_eq!(
+            client
+                .message_origin("direct", "live-message")?
+                .ok_or(SdkError::IdentityRootMissing)?["direction"],
+            "outgoing"
+        );
+        client.account_db()?.delete_direct_message(
+            "direct",
+            "live-message",
+            "self",
+            "delete-live",
+        )?;
+        client.receive_own_sent_message(
+            &source,
+            super::super::own_device_copy::OwnMessageInput {
+                id: "live-envelope",
+                conversation: "direct",
+                group: None,
+                created_at: 1,
+                body: &bytes,
+            },
+        )?;
+        assert!(
+            client
+                .direct_message_by_id("live-message")?
+                .ok_or(SdkError::IdentityRootMissing)?
+                .deleted
+        );
+        assert_eq!(client.direct_messages("direct")?.len(), 1);
+        let other = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            "other_device_sync",
+        )?;
+        client.receive_own_sent_message(
+            &other,
+            super::super::own_device_copy::OwnMessageInput {
+                id: "live-envelope",
+                conversation: "direct",
+                group: None,
+                created_at: 1,
+                body: &bytes,
+            },
+        )?;
+        assert_eq!(
+            client.direct_messages("direct")?.len(),
+            2,
+            "equal envelope ids from different devices are distinct"
+        );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_siblings_history_copy_does_not_duplicate_the_authors_local_outgoing_row()
+    -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("history-roundtrip", "principal_sync", "target_device_sync")?;
+        client.send_direct_message("direct", "authored", "target_device_sync", &[1, 2, 3])?;
+        client.account_db()?.store_message_content("direct", "authored", b"outgoing live body")?;
+        client.stage_own_sent_message(super::super::own_sent_message::OwnSentInput {
+            envelope: "authored-envelope",
+            conversation: "direct",
+            message: "authored",
+            sender: "target_device_sync",
+            group: None,
+            peer: Some("peer"),
+            body: b"outgoing live body",
+            at: 1,
+        })?;
+        let copied = format!(
+            "own:{}",
+            super::super::own_device_copy::copy_id(
+                client.owned_device_identity()?.root_commitment(),
+                "target_device_sync",
+                "authored-envelope",
+            )?
+        );
+        let message = DirectMessageRecord {
+            conversation_id: "direct".into(),
+            message_id: copied.clone(),
+            sender_id: "target_device_sync".into(),
+            encrypted_body: Vec::new(),
+            metadata: MessageMetadata::default(),
+            deleted: false,
+            created_at: 1,
+            receipts: Vec::new(),
+        };
+        let mut history =
+            bundle("source_device_sync", "target_device_sync", vec![message], Vec::new());
+        history.contents.insert(copied, zeroize::Zeroizing::new(b"outgoing live body".to_vec()));
+        client.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert_eq!(client.direct_messages("direct")?.len(), 1);
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn group_copy_envelopes_are_opaque_stable_on_retry_and_distinct_per_message()
+    -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("opaque-envelope", "principal_sync", "source_device_sync")?;
+        let first = client.own_group_copy_envelope("group", "conversation", "message", None)?;
+        assert_ne!(first, "message");
+        assert_eq!(
+            client.own_group_copy_envelope("group", "conversation", "message", None)?,
+            first
+        );
+        assert_ne!(
+            client.own_group_copy_envelope("group", "conversation", "other-message", None)?,
+            first
+        );
+        assert_eq!(
+            client.own_group_copy_envelope("group", "conversation", "message", Some("explicit"))?,
+            "explicit"
+        );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn own_device_history_ref_binds_effective_upload_lineage() -> Result<(), SdkError> {
         let source =
             ramflux_crypto::create_device_branch("own_principal", "own_device", 3, [5u8; 32]);
