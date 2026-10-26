@@ -159,7 +159,7 @@ impl RamfluxClient {
                     &p.carrier,
                 )?;
                 self.replace_task_pending_fallback(&p, &outcome)?;
-                self.account_db()?.append_journal(&format!("task-hold-expired:{key}"),"task.changed",&serde_json::json!({"conversation_id":p.conversation,"task_id":p.carrier.event()?.event().task_id(),"resync_required":true,"actor_kind_verified":super::carrier_kind_verified(self, &p.carrier)}),now,None)?;
+                self.account_db()?.append_journal(&format!("task-hold-expired:{key}"),"task.changed",&serde_json::json!({"conversation_id":p.conversation,"task_id":p.carrier.event()?.event().task_id(),"resync_required":true,"actor_kind":super::carrier_actor_kind(self, &p.carrier),"actor_kind_verified":super::carrier_kind_verified(self, &p.carrier)}),now,None)?;
                 continue;
             }
             if self.task_event_is_future(&p.carrier)? {

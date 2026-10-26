@@ -346,6 +346,7 @@ impl RamfluxClient {
             &carrier.device_id,
             super::authority::relation_role(event.event()),
         );
+        let actor_kind = super::carrier_actor_kind(self, &carrier);
         let mut fallback = event.fallback_text_with_actor_kind(kind_verified);
         if !kind_verified && !fallback.contains("(actor kind unverified)") {
             fallback.push_str(" (actor kind unverified)");
@@ -414,7 +415,7 @@ impl RamfluxClient {
         view["created_at"] = json!(history.created_at);
         view["updated_at"] = json!(history.updated_at);
         db.persist_actor_state(&scoped("view", &task.conversation_id, &task.task_id)?, &view)?;
-        db.append_journal(&format!("task:{}:{}",scoped("event",&task.conversation_id,&task.task_id)?,task.version),"task.changed",&json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state,"actor_kind_verified":kind_verified}),delivery.at,None)?;
+        db.append_journal(&format!("task:{}:{}",scoped("event",&task.conversation_id,&task.task_id)?,task.version),"task.changed",&json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"task_id":task.task_id,"conversation_id":task.conversation_id,"version":task.version,"state":task.state,"actor_kind":actor_kind,"actor_kind_verified":kind_verified}),delivery.at,None)?;
         self.record_task_lifecycle(&task, &history)?;
         if forward_owned {
             self.queue_task_owned_forward(
@@ -444,7 +445,7 @@ impl RamfluxClient {
         let task_id = outcome.task_id.clone().or(db
             .load_actor_state::<Value>(&key)?
             .and_then(|v| v["task_id"].as_str().map(str::to_owned)));
-        db.persist_actor_state(&key,&json!({"task_id":task_id,"reason_code":outcome.reason_code,"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind_verified":super::carrier_kind_verified(self, carrier)}))?;
+        db.persist_actor_state(&key,&json!({"task_id":task_id,"reason_code":outcome.reason_code,"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind":super::carrier_actor_kind(self, carrier),"actor_kind_verified":super::carrier_kind_verified(self, carrier)}))?;
         Ok(())
     }
     pub(crate) fn task_message_metadata(

@@ -116,3 +116,14 @@ pub(crate) fn carrier_kind_verified(
         )
     })
 }
+
+/// Authenticated kind is independent of whether it matches the task action's role class.
+pub(crate) fn carrier_actor_kind(
+    client: &crate::RamfluxClient,
+    carrier: &carrier::Carrier,
+) -> Option<ramflux_protocol::PrincipalKind> {
+    client
+        .read_profile_facts(&carrier.principal_id)
+        .filter(|facts| facts.matches_device(&carrier.device_id))
+        .map(|facts| facts.profile.kind)
+}

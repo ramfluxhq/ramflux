@@ -72,6 +72,13 @@ impl AccountDb {
         })
     }
 
+    /// Whether this connection enforces query-only access.
+    /// # Errors
+    /// Returns an error when the SQLite connection mode cannot be queried.
+    pub fn is_query_only(&self) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row("PRAGMA query_only", [], |row| row.get::<_, u32>(0))? != 0)
+    }
+
     /// Pins a read snapshot for an account-ordered backup capture.
     /// # Errors
     /// Returns encrypted reader or transaction errors.

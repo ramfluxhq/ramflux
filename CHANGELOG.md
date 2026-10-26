@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Public-name warnings allow Highly Restrictive Latin/CJK script combinations and
+  compare NFKC, simple case-folded, whitespace-collapsed skeletons without changing
+  signed names or identifiers. Complete the pre-1.0 check-glyph policy with U+221A
+  and U+237B; acceptance rules are frozen under the v1 profile domain.
+- Contact safety status also checks the signed-authority stamp. Actor-bearing
+  task journal/metadata rows distinguish authenticated kind from role matching.
+  Outstanding public renames survive stale restores by rebasing their epoch;
+  intents with confirmation saved locally do not overwrite later sibling renames.
+- Legacy v0.1.0 manual contact verifications acquire a signed-authority stamp on
+  first read when the active-device hash is unchanged; contacts without signed
+  authority can still verify synthetic safety material without authenticating a
+  kind. Hash or later stamped-authority changes require explicit re-verification.
 - Newly created group sender-key chains use seed-bound v3 distributions. Upgrade
   every group participant together: older clients cannot import v3 distributions,
   so mixed-version groups can lose delivery after sender-key rotation. Existing

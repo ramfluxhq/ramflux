@@ -124,7 +124,6 @@ fn group_row(client: &RamfluxClient, id: &str, saved: &Value) -> Result<Value, S
 }
 
 fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value, SdkError> {
-    let db = client.account_db()?;
     saved["id"] = json!(id);
     saved["principal_commitment"] =
         saved.get("contact_identity_commitment").cloned().unwrap_or(Value::Null);
@@ -139,22 +138,10 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
         saved["devices"] = json!([]);
     }
     let commitment = saved.get("contact_identity_commitment").and_then(Value::as_str).unwrap_or("");
-    let verification = db.contact_verification(commitment)?;
-    saved["safety_state"] = json!(verification.map_or("unverified".to_owned(), |record| {
-        if record.verification_state == "verified"
-            && saved.get("device_set_hash").and_then(Value::as_str)
-                != Some(record.verified_device_set_hash.as_str())
-        {
-            "verification_stale".to_owned()
-        } else {
-            record.verification_state
-        }
-    }));
-    if saved["safety_state"] == "verified"
-        && client.verified_principal_kind(id).ok().flatten().is_none()
-    {
-        saved["safety_state"] = json!("verification_stale");
-    }
+    saved["safety_state"] = json!(client.contact_safety_verification_state(
+        commitment,
+        saved.get("device_set_hash").and_then(Value::as_str),
+    )?);
     let profile = client.read_profile_facts(id).map(|facts| facts.profile.clone());
     saved["kind_verified"] = json!(profile.is_some());
     if let Some(profile) = &profile {

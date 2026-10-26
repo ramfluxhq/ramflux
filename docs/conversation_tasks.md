@@ -253,7 +253,9 @@ the final history. Snapshot pages can be incomplete when the budget is reached.
 `task.get` returns the task, steps, revision, timestamps and unverified-kind
 marker; `task.list` returns `tasks` plus `next_cursor`. `message.list` and
 `message.read` include task content type, escaped fallback and the same marker.
-Both message methods expose `task_id`. Reads include `result_ref` and
+Both message methods expose `task_id`, authenticated `actor_kind` (null for
+unknown or legacy metadata) and the role-aware `actor_kind_verified` boolean.
+Reads include `result_ref` and
 `result_summary` (at most 4,096 safe text characters, signed, terminal updates
 only), per-actor `actors.{requester,assignee,acceptor}.{principal_id,actor_kind_verified}`,
 and restart-durable `pending_resolution` metadata (`awaiting_executor` or

@@ -53,7 +53,7 @@ pub(crate) async fn send(
         }
         account.client.account_db()?.replace_surface_message_content(&c.conversation_id,&timeline,outcome.fallback_text.as_bytes())?;
         account.client.set_task_delivery_state(&c.conversation_id,c.event()?.event().task_id(),"sending",None)?;
-        Ok(json!({"accepted":outcome.accepted,"pending":outcome.pending,"task_id":c.event()?.event().task_id(),"message_id":c.message_id,"delivery_state":"submitted","actor_kind_verified":crate::client::task::carrier_kind_verified(&account.client, c)}))
+        Ok(json!({"accepted":outcome.accepted,"pending":outcome.pending,"task_id":c.event()?.event().task_id(),"message_id":c.message_id,"delivery_state":"submitted","actor_kind":crate::client::task::carrier_actor_kind(&account.client, c),"actor_kind_verified":crate::client::task::carrier_kind_verified(&account.client, c)}))
     })?;
     if let Err(error) = super::super::task_delivery::submit_all(account, deliveries).await {
         account.client.set_task_delivery_state(

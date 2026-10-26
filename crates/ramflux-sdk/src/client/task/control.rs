@@ -262,7 +262,7 @@ impl RamfluxClient {
             outcome.fallback_text.as_bytes(),
         )?;
         if !outcome.accepted && !outcome.pending {
-            self.account_db()?.append_journal(&format!("task-decision-rejected:{}",super::certificate::carrier_hash(c)?),"task.changed",&json!({"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"decision_rejected":true,"actor_kind_verified":super::carrier_kind_verified(self, c)}),crate::time::now_unix_timestamp(),None)?;
+            self.account_db()?.append_journal(&format!("task-decision-rejected:{}",super::certificate::carrier_hash(c)?),"task.changed",&json!({"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"decision_rejected":true,"actor_kind":super::carrier_actor_kind(self, c),"actor_kind_verified":super::carrier_kind_verified(self, c)}),crate::time::now_unix_timestamp(),None)?;
         }
         Ok(())
     }

@@ -66,6 +66,8 @@ fn unsafe_scalar(ch: char) -> bool {
                 | '\u{3164}'
                 | '\u{ffa0}'
                 | '\u{2800}'
+                | '\u{221a}'
+                | '\u{237b}'
                 | '\u{2611}'
                 | '\u{2705}'
                 | '\u{2713}'
@@ -89,9 +91,40 @@ pub fn profile_display_name_security(
 ) -> Result<DisplayNameSecurity, crate::ProtocolError> {
     let name = normalize_profile_display_name(value)?;
     Ok(DisplayNameSecurity {
-        confusable_skeleton: unicode_security::skeleton(&name).collect(),
-        mixed_script: !name.as_str().is_single_script(),
+        confusable_skeleton: warning_skeleton(&name),
+        mixed_script: exceeds_highly_restrictive_script_mix(&name),
     })
+}
+// This comparison key never changes signed/displayed names or identifier equality.
+fn warning_skeleton(name: &str) -> String {
+    let folded: String = name
+        .nfkc()
+        .map(|ch| {
+            unicode_case_mapping::case_folded(ch)
+                .and_then(|code| char::from_u32(code.get()))
+                .unwrap_or(ch)
+        })
+        .collect();
+    let collapsed = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+    unicode_security::skeleton(&collapsed).collect()
+}
+// Apply only the script-mix component of Highly Restrictive: public names may contain
+// spaces and punctuation outside the UTS #39 identifier character repertoire.
+fn exceeds_highly_restrictive_script_mix(name: &str) -> bool {
+    if !name.resolve_script_set().is_empty() {
+        return false;
+    }
+    let latin = "a".resolve_script_set();
+    let non_latin: String = name
+        .chars()
+        .filter(|&ch| {
+            let mut scripts = unicode_security::mixed_script::AugmentedScriptSet::from(ch);
+            scripts.intersect_with(latin);
+            scripts.is_empty()
+        })
+        .collect();
+    let scripts = non_latin.as_str().resolve_script_set();
+    !(scripts.jpan || scripts.kore || scripts.hanb)
 }
 fn invalid() -> crate::ProtocolError {
     crate::ProtocolError::InvalidIdentityRecord("invalid public identity profile")
@@ -100,6 +133,50 @@ fn invalid() -> crate::ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn highly_restrictive_script_combinations_do_not_warn_on_bilingual_cjk_names()
+    -> Result<(), crate::ProtocolError> {
+        for name in [
+            "John 田中",
+            "John 田中あア",
+            "John 田中한글",
+            "John 田中ㄅ",
+            "田中あア",
+            "مريم",
+            "Alice 😀",
+        ] {
+            assert!(!profile_display_name_security(name)?.mixed_script, "{name}");
+            assert_eq!(normalize_profile_display_name(name)?, name);
+        }
+        for name in ["Alіce", "Alice Ελληνικά", "John مريم", "John あ한글", "John ㄅ한글"]
+        {
+            assert!(profile_display_name_security(name)?.mixed_script, "{name}");
+        }
+        Ok(())
+    }
+    #[test]
+    fn warning_skeleton_folds_case_compatibility_and_whitespace_without_changing_names()
+    -> Result<(), crate::ProtocolError> {
+        for (left, right) in [
+            ("Alice", "ALICE"),
+            ("Alice", "alice"),
+            ("Ｊｏｈｎ", "John"),
+            ("Bob Smith", "Bob  Smith"),
+            ("Σ", "ς"),
+            ("ẞ", "ß"),
+        ] {
+            assert_ne!(
+                normalize_profile_display_name(left)?,
+                normalize_profile_display_name(right)?
+            );
+            assert_eq!(
+                profile_display_name_security(left)?.confusable_skeleton,
+                profile_display_name_security(right)?.confusable_skeleton,
+                "{left} / {right}"
+            );
+        }
+        Ok(())
+    }
     #[test]
     fn confusable_skeletons_detect_mixed_and_whole_script_impostors_without_rejecting_languages()
     -> Result<(), crate::ProtocolError> {

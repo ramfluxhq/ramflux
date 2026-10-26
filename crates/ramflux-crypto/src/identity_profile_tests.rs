@@ -102,3 +102,27 @@ fn newer_device_set_cannot_replay_erase_or_equivocate_a_verified_profile() -> Te
     assert!(verify_signed_device_set(&public, &substituted).is_err());
     Ok(())
 }
+
+#[test]
+fn validly_signed_profile_with_a_different_set_kind_is_rejected() -> TestResult {
+    let root = create_identity_root("alice", [1; 32]);
+    let public = root.signing_key.verifying_key();
+    let profile = sign_identity_profile(&root, PrincipalKind::Bot, "Alice", 1)?;
+    verify_identity_profile(&public, &profile)?;
+    let mut bot_input = input(1);
+    bot_input.principal_kind = PrincipalKind::Bot;
+    let mut record = sign_device_set_with_profile(&root, bot_input, Some(profile))?;
+    record.principal_kind = PrincipalKind::Human;
+    let bytes = ramflux_protocol::signed_device_set_signing_bytes(&record)?;
+    record.signature = sign_canonical_bytes_with_seed(&bytes, root.signing_key.to_bytes());
+    verify_canonical_signature(
+        &bytes,
+        &record.signature,
+        &ramflux_protocol::encode_base64url(public.to_bytes()),
+    )?;
+    assert!(matches!(
+        verify_signed_device_set(&public, &record),
+        Err(CryptoError::IdentityAuthority("profile and device-set owner or kind mismatch"))
+    ));
+    Ok(())
+}

@@ -92,13 +92,6 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
         .await;
         if let Err(error) = &result {
             tracing::debug!(%error, job = %storage, "task approval transport attempt deferred");
-            #[cfg(feature = "itest-local-mint")]
-            if std::env::var("RAMFLUX_TEST_TASK_APPROVAL_DIAGNOSTICS").as_deref() == Ok("1") {
-                eprintln!(
-                    "STEP: task approval attempt device={} error={error}",
-                    account.gateway_config.device_id
-                );
-            }
         }
         crate::error_policy::task_scan(
             &storage,

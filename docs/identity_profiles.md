@@ -14,12 +14,35 @@ the same epoch. A receiver persists this floor across restarts. Profile changes
 also advance the enclosing device-set epoch. Device enrollment and revocation
 retain the profile.
 
-All signature inputs use existing canonical I-JSON serialization. Local input
-normalizes to Unicode NFC and trims outer spacing. Display names must occupy one
-line, be nonempty, use at most 128 scalars and 256 UTF-8 bytes, and contain no
-Unicode control/format or line/paragraph separator characters. Verification
-requires exact normalized bytes; it does not normalize signed remote content.
-Unnormalized, unsigned, forged and oversized records fail closed.
+All signature inputs use existing canonical I-JSON serialization. The acceptance
+policy below, including its pinned Unicode validation data, is frozen under
+`ramflux.identity.profile.v1`. Because profile validation runs inside device-set
+verification, future tightening or a Unicode table update that changes accepted
+names requires a new profile domain version and coordinated rollout. It must not
+invalidate already valid v1 signatures. The two additional check-like glyphs in
+this pre-1.0 follow-up complete the freeze before deployment.
+
+Local input normalizes to Unicode NFC and trims outer spacing. Display names must
+occupy one line, be nonempty, use at most 128 scalars and 256 UTF-8 bytes, and
+contain at least one letter or number. Reject controls, format/line/paragraph
+separators, private-use/unassigned characters, default-ignorables, non-ASCII
+spacing, blank fillers and leading/lone combining marks. Reject check-like glyphs
+U+221A, U+237B, U+2611, U+2705, U+2713, U+2714, U+1F5F8 and U+1F5F9. Emoji ZWJ
+sequences and keycaps consequently fail this policy. Verification requires exact
+normalized bytes; it never normalizes signed remote content. Unnormalized,
+unsigned, forged and oversized records fail closed.
+
+Warning-only confusable comparison uses NFKC, locale-independent simple Unicode
+case folding and whitespace collapse before the pinned UTS #39 skeleton. This
+comparison key never changes displayed/signed names, identifiers, root commitments
+or authorization. `mixed_script` applies the Highly Restrictive script-mix rule:
+single resolved scripts and Latin with one of Han/Hiragana/Katakana, Han/Hangul or
+Han/Bopomofo do not warn (for example `John 田中`). Other script mixes still warn;
+whole-script lookalikes remain detectable through skeleton collisions. These are
+public-name warning heuristics, not identifier acceptance restrictions or equality.
+Their tuning must not change v1 signature validation. The name must never render
+as a verification affordance: kind/verification chips belong to authenticated
+claims, regardless of whether a lookalike glyph escapes this finite blocklist.
 
 New owned publications default the public display name to the principal ID when
 it meets the name policy; otherwise they use the fixed safe name `Account`.
@@ -27,7 +50,14 @@ A long or unsafe legacy identifier therefore remains publishable without
 weakening the display-name policy.
 Private account labels are not published. The SDK's `set_identity_display_name`
 updates a root-signed desired profile for the next normal device-set publication;
-it does not acknowledge network publication. No new bus method is introduced.
+it does not acknowledge network publication. If a stale restore encounters a newer
+acknowledged profile, an outstanding rename is re-signed at the next available
+profile epoch and persisted before retry. Exhaustion refuses publication without
+dropping the intent. Matching acknowledged intents are cleared, so a rename whose
+confirmation was saved locally does not overwrite a later sibling rename. A
+restore taken before that confirmation cannot distinguish published-but-unconfirmed
+from never published: the restored intent is reapplied and may win over a later
+sibling rename (last restore wins). No new bus method is introduced.
 Workflow principals retain legacy behavior without a verified public profile.
 
 `identity.directory` exposes the public name, kind and `kind_verified:true` after
@@ -35,13 +65,31 @@ root authentication. This flag is independent of `verified` / `safety_state`,
 which still describe manual contact verification. `kind_asserted` is an enum
 string or null. Principal lookup in `contact.add` returns the authenticated kind
 and name; a card's older asserted label does not override them. Legacy card-only
-assertions remain unverified.
+assertions remain unverified. `contact.verification.status` and contact safety
+responses use the complete signed-authority stamp as well as the active-device
+hash, matching `identity.directory` even for tombstone-only changes. Stored manual
+verification is retained for audit. A fresh manual verification without an observed
+signed set can remain `verified` for its synthetic safety material; this does not
+authenticate a kind. Legacy v0.1.0 verifications without an authority stamp are
+baselined to the current observed signed set on first writer read, only when the
+current active-device hash still matches the verified one. Reader pools perform
+this migration on their writer before opening query-only snapshots. An existing
+stamp is never replaced by migration: later authority changes are
+`verification_stale` until explicit re-verification. A mismatched active-device
+hash is stale and cannot create a migration stamp.
 
 Task actor metadata exposes the actual `actor_kind` alongside
 `actor_kind_verified`. A signed public profile and a current member device are
 required for verification. A relation-derived human role cannot attest a signed
 bot/headless-AI kind as human. Existing task relation authorization is unchanged;
 this flag authenticates metadata, not a new permission or proof of personhood.
+Actor-bearing journal events and message metadata include `actor_kind` (null if
+no current authenticated device/profile) alongside the role-aware boolean. A
+non-null kind with `actor_kind_verified:false` means an authenticated kind does
+not match the action's role class; for example a headless requester on a
+Human-class action. Actorless lifecycle compaction/removal events have neither
+claim. Legacy journal entries may omit `actor_kind`; consumers treat that as
+unknown and must not infer a kind from the role or the boolean alone.
 
 The profile code borrows the same root signer as device-set signing; it creates
 no new signing authority or root-seed storage. The planned primary/external

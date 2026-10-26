@@ -87,15 +87,7 @@ async fn prepare(
     Ok(deliveries)
 }
 fn diagnostic(account: &LocalBusAccountState, stage: &str) {
-    #[cfg(feature = "itest-local-mint")]
-    if std::env::var("RAMFLUX_TEST_TASK_APPROVAL_DIAGNOSTICS").as_deref() == Ok("1") {
-        eprintln!(
-            "STEP: task approval prepare device={} stage={stage}",
-            account.gateway_config.device_id
-        );
-    }
-    #[cfg(not(feature = "itest-local-mint"))]
-    let _ = (account, stage);
+    tracing::debug!(device = %account.gateway_config.device_id, stage, "task approval preparation");
 }
 
 fn endpoint_targets(

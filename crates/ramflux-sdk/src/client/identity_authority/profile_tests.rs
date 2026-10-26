@@ -12,6 +12,13 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
     let peer = Actor::new("peer", "peer", 234, 235, 1)?;
     let signed = with_profile(&owner, owner.manifest()?, "Owner", 1, 1)?;
     observe(&peer.client, &signed)?;
+    let own = peer.manifest()?;
+    observe(&peer.client, &own)?;
+    peer.client.establish_friend_link(
+        "contact",
+        &own.principal_commitment,
+        &signed.principal_commitment,
+    )?;
     let db = peer.client.account_db()?;
     let before = db.client_record("identity", "owner")?.ok_or("row")?;
     let hash = before["device_set_hash"].as_str().ok_or("hash")?;
@@ -31,25 +38,23 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
         crate::bus::read_model::row(&peer.client, "identity", "owner")?["safety_state"],
         "verified"
     );
-    let mut next = signed.clone();
-    let old = next.signed_device_set.take().ok_or("set")?;
-    let mut devices = old.devices;
-    let mut retired = late.manifest()?.signed_device_set.ok_or("late set")?.devices;
-    for device in &mut retired {
-        device.status = ramflux_protocol::DeviceSetStatus::Revoked;
-        device.revoked_at = Some(crate::time::now_unix_timestamp());
-    }
-    devices.extend(retired);
-    devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-    next.signed_device_set = Some(ramflux_crypto::sign_device_set_with_profile(
-        owner.client.identity_root.as_ref().ok_or("root")?,
-        ramflux_crypto::DeviceSetSigningInput {
-            principal_kind: old.principal_kind,
-            device_set_epoch: 2,
-            devices,
-        },
-        old.profile.map(|p| *p),
-    )?);
+    assert_eq!(
+        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
+        "verified"
+    );
+    let stamp_key = format!("identity/safety_verified_set/{}", signed.principal_commitment);
+    let stamp = db.load_actor_state::<String>(&stamp_key)?.ok_or("stamp")?;
+    db.remove_actor_state(&stamp_key)?;
+    assert_eq!(
+        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
+        "verified"
+    );
+    assert_eq!(
+        db.load_actor_state::<String>(&stamp_key)?,
+        Some(stamp.clone()),
+        "a missing legacy stamp is baselined on first matching read"
+    );
+    let next = with_revoked_device(&owner, &signed, &late)?;
     observe(&peer.client, &next)?;
     let row = crate::bus::read_model::row(&peer.client, "identity", "owner")?;
     assert_eq!(
@@ -57,12 +62,62 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
         "a tombstone changes authority but not active safety material"
     );
     assert!(peer.client.verified_principal_kind("owner")?.is_none());
+    assert_eq!(db.load_actor_state::<String>(&stamp_key)?, Some(stamp));
+    assert_eq!(row["verified"], false, "a stale complete-set stamp also reaches contact flags");
     assert_eq!(row["kind_verified"], true, "the public profile remains authenticated");
     assert_eq!(
         row["safety_state"], "verification_stale",
         "manual verification covers the complete signed set"
     );
+    assert_eq!(
+        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
+        "verification_stale"
+    );
+    assert_eq!(
+        peer.client
+            .contact_verification_status(&signed.principal_commitment)?
+            .ok_or("stored")?
+            .verification_state,
+        "verified",
+        "stored verification is audit history, not current authority"
+    );
+    peer.client.mark_contact_safety_verified(&signed.principal_commitment, "peer")?;
+    assert_eq!(
+        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
+        "verified"
+    );
+    assert_eq!(
+        crate::bus::read_model::row(&peer.client, "identity", "owner")?["safety_state"],
+        "verified"
+    );
     Ok(())
+}
+fn with_revoked_device(
+    owner: &Actor,
+    signed: &SdkDeviceManifestResponse,
+    late: &Actor,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let mut next = signed.clone();
+    let old = next.signed_device_set.take().ok_or_else(|| invalid("fixture set"))?;
+    let mut devices = old.devices;
+    let mut retired =
+        late.manifest()?.signed_device_set.ok_or_else(|| invalid("fixture retired set"))?.devices;
+    for device in &mut retired {
+        device.status = ramflux_protocol::DeviceSetStatus::Revoked;
+        device.revoked_at = Some(crate::time::now_unix_timestamp());
+    }
+    devices.extend(retired);
+    devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    next.signed_device_set = Some(ramflux_crypto::sign_device_set_with_profile(
+        owner.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: old.principal_kind,
+            device_set_epoch: 2,
+            devices,
+        },
+        old.profile.map(|p| *p),
+    )?);
+    Ok(next)
 }
 fn with_profile(
     owner: &Actor,
@@ -258,3 +313,9 @@ fn profile_manifest_requires_root_authentication_and_unique_authorized_devices()
 
 #[path = "profile_read_tests.rs"]
 mod read_tests;
+
+#[path = "profile_restore_tests.rs"]
+mod restore_tests;
+
+#[path = "verification_migration_tests.rs"]
+mod verification_migration;

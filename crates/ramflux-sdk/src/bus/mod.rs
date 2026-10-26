@@ -47,3 +47,6 @@ mod transport_security_tests;
 mod own_contact_backfill;
 
 mod contact_backpressure;
+
+#[cfg(test)]
+pub(crate) use readers::test_account_reader_request;

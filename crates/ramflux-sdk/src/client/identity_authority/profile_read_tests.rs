@@ -19,7 +19,19 @@ fn contact_and_identity_warn_about_confusable_names_without_rejecting_non_latin_
     let row = crate::bus::read_model::row(&reader.client, "identity", "other")?;
     assert_eq!(row["display_name_confusable_with"], "alice");
     assert_eq!(row["mixed_script"], true);
-    observe(&reader.client, &with_profile(&impostor, impostor.manifest()?, "東京", 2, 2)?)?;
+    for (index, name) in ["ALICE", "alice"].into_iter().enumerate() {
+        let epoch = u64::try_from(index)? + 2;
+        observe(
+            &reader.client,
+            &with_profile(&impostor, impostor.manifest()?, name, epoch, epoch)?,
+        )?;
+        let row = reader.client.contact_entry("other")?;
+        assert_eq!(row["display_name"], name);
+        assert_eq!(row["display_name_confusable_with"], "alice");
+    }
+    observe(&reader.client, &with_profile(&impostor, impostor.manifest()?, "John 田中", 4, 4)?)?;
+    assert_eq!(reader.client.contact_entry("other")?["mixed_script"], false);
+    observe(&reader.client, &with_profile(&impostor, impostor.manifest()?, "東京", 5, 5)?)?;
     let row = reader.client.contact_entry("other")?;
     assert_eq!(row["display_name_confusable_with"], Value::Null);
     assert_eq!(row["mixed_script"], false);
@@ -172,10 +184,24 @@ fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_v
             reader.client.task_message_metadata("thread", &c.message_id)?.ok_or("metadata")?["actor_kind_verified"],
             false
         );
+        assert_eq!(
+            reader.client.task_message_metadata("thread", &c.message_id)?.ok_or("metadata")?["actor_kind"],
+            "headless_ai"
+        );
+        let journal = db.latest_journal_event("task.changed")?.ok_or("journal")?;
+        assert_eq!(journal.body["actor_kind"], "headless_ai");
+        assert_eq!(journal.body["actor_kind_verified"], false);
     }
     reader.client.retry_pending_tasks(now + 601)?;
     let journal = db.latest_journal_event("task.changed")?.ok_or("event")?;
     assert_eq!(journal.body["resync_required"], true);
+    assert_eq!(journal.body["actor_kind"], "headless_ai");
+    let mut missing = make(
+        "unknown-device",
+        TaskEventBody::Accept(TaskAccept { task_id: "missing".into(), version: 2 }),
+    )?;
+    missing.device_id = "not-authorized".into();
+    assert_eq!(crate::client::task::carrier_actor_kind(&reader.client, &missing), None);
     assert_eq!(journal.body["actor_kind_verified"], false);
     Ok(())
 }

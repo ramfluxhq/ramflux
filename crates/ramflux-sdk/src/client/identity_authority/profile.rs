@@ -23,6 +23,7 @@ impl RamfluxClient {
             .map_or(0, |p| p.epoch)
             .max(desired.as_ref().map_or(0, |p| p.epoch))
             .checked_add(1)
+            .filter(|epoch| *epoch <= ramflux_protocol::MAX_SAFE_JSON_INTEGER)
             .ok_or_else(|| invalid("profile epoch exhausted"))?;
         let profile =
             ramflux_crypto::sign_identity_profile(root, self.local_principal_kind()?, name, epoch)?;
@@ -47,14 +48,29 @@ impl RamfluxClient {
             if profile.principal_id != root.principal_id || profile.kind != kind {
                 return Err(invalid("owned profile owner or kind mismatch"));
             }
-            if old.is_some_and(|old| profile.epoch == old.epoch && &profile != old) {
-                return Err(invalid(
-                    "owned profile epoch conflicts with an acknowledged publication",
-                ));
+            if let Some(old) = old {
+                if profile.display_name == old.display_name && profile.epoch <= old.epoch {
+                    // Equal visible intent is already fulfilled even if a sibling used a later epoch.
+                    self.account_db()?.remove_actor_state(DESIRED)?;
+                    return Ok(Some(old.clone()));
+                }
+                if profile.epoch <= old.epoch {
+                    let epoch = old
+                        .epoch
+                        .checked_add(1)
+                        .filter(|epoch| *epoch <= ramflux_protocol::MAX_SAFE_JSON_INTEGER)
+                        .ok_or_else(|| invalid("profile epoch exhausted"))?;
+                    let rebased = ramflux_crypto::sign_identity_profile(
+                        root,
+                        kind,
+                        &profile.display_name,
+                        epoch,
+                    )?;
+                    self.account_db()?.persist_actor_state(DESIRED, &rebased)?;
+                    return Ok(Some(rebased));
+                }
             }
-            if old.is_none_or(|old| profile.epoch > old.epoch) {
-                return Ok(Some(profile));
-            }
+            return Ok(Some(profile));
         }
         if let Some(old) = old {
             return Ok(Some(old.clone()));
@@ -63,12 +79,26 @@ impl RamfluxClient {
             .unwrap_or_else(|_| "Account".to_owned());
         Ok(Some(ramflux_crypto::sign_identity_profile(root, kind, &name, 1)?))
     }
+    pub(super) fn clear_acknowledged_public_profile(
+        &self,
+        record: &SignedDeviceSetRecord,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let desired = db.load_actor_state::<SignedIdentityProfile>(DESIRED)?;
+        if desired.as_ref().is_some_and(|desired| record.profile.as_deref() == Some(desired)) {
+            let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+            ramflux_crypto::verify_signed_device_set(&root.signing_key.verifying_key(), record)?;
+            db.remove_actor_state(DESIRED)?;
+        }
+        Ok(())
+    }
     pub(super) fn persist_owned_profile_metadata(
         &self,
         record: &SignedDeviceSetRecord,
     ) -> Result<(), SdkError> {
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let db = self.account_db()?;
+        self.clear_acknowledged_public_profile(record)?;
         db.persist_actor_state(
             &format!("identity/root_public/{}", record.principal_commitment),
             &ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()),

@@ -296,6 +296,10 @@ impl RamfluxClient {
         ramflux_crypto::verify_signed_device_set(&root.signing_key.verifying_key(), record)?;
         self.account_db()?.write_transaction(|| {
             self.check_observed_set(record)?;
+            // Clear intents acknowledged by older clients before adopting a sibling's newer name.
+            if let Some(previous) = self.observed_device_set(&record.principal_commitment)? {
+                self.clear_acknowledged_public_profile(&previous)?;
+            }
             self.account_db()?
                 .persist_actor_state(&record_key(&record.principal_commitment), record)?;
             self.persist_owned_profile_metadata(record)?;

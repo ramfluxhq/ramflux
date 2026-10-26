@@ -18,6 +18,17 @@ pub(super) enum ReadCommand {
     Stop(oneshot::Sender<()>),
 }
 
+#[cfg(test)]
+pub(crate) async fn test_account_reader_request(
+    db: &AccountDb,
+    request: LocalBusFrame,
+) -> Result<serde_json::Value, SdkError> {
+    let readers = AccountReaders::start(db, None)?;
+    let result = readers.request(request).await;
+    readers.stop().await;
+    result
+}
+
 #[derive(Clone)]
 pub(super) struct AccountReaders {
     identity: ReaderIdentity,
@@ -31,6 +42,7 @@ impl AccountReaders {
         device: Option<RootQualifiedDeviceRef>,
     ) -> Result<Self, SdkError> {
         super::sync_status::initialize_coordinates(db)?;
+        crate::client::contact::migrate_legacy_contact_verifications(db)?;
         let identity = Arc::new(RwLock::new(device));
         let mut senders = Vec::new();
         for _ in 0..2 {
@@ -243,6 +255,7 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
             value["content_type"] = serde_json::json!("task");
             value["task_id"] = task["task_id"].clone();
             value["actor_kind_verified"] = task["actor_kind_verified"].clone();
+            value["actor_kind"] = task["actor_kind"].clone();
             value["body_utf8"] = task["fallback_text"].clone();
         }
         messages.push(value);
@@ -268,6 +281,62 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn message_rows_preserve_actor_kind_and_leave_legacy_metadata_unknown()
+    -> Result<(), SdkError> {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos());
+        let path = std::env::temp_dir()
+            .join(format!("rf-reader-actor-kind-{}-{suffix}", std::process::id()));
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&path)?;
+        client.create_account("reader", "reader")?;
+        client.unlock_account("reader", b"secret")?;
+        let db = client.account_db()?;
+        for id in ["headless", "unknown", "legacy"] {
+            client.send_direct_message("thread", id, "peer", b"opaque")?;
+            let mut metadata = serde_json::json!({"task_id":id,"actor_kind_verified":false,"fallback_text":"[Task]"});
+            if id != "legacy" {
+                metadata["actor_kind"] = if id == "headless" {
+                    serde_json::json!("headless_ai")
+                } else {
+                    serde_json::Value::Null
+                };
+            }
+            db.persist_actor_state(
+                &crate::client::task::scoped("message", "thread", id)?,
+                &metadata,
+            )?;
+        }
+        let readers = AccountReaders::start(db, None)?;
+        let result = readers
+            .request(LocalBusFrame::request(
+                "messages",
+                Some("reader".into()),
+                "client",
+                "message.list",
+                serde_json::json!({"conversation_id":"thread"}),
+            ))
+            .await?;
+        readers.stop().await;
+        let rows = result["messages"].as_array().ok_or_else(closed)?;
+        for id in ["headless", "unknown", "legacy"] {
+            let row = rows.iter().find(|row| row["message_id"] == id).ok_or_else(closed)?;
+            assert_eq!(row["actor_kind_verified"], false);
+            assert_eq!(
+                row["actor_kind"],
+                if id == "headless" {
+                    serde_json::json!("headless_ai")
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(row["task_id"], id);
+            assert_eq!(row["body_utf8"], "[Task]");
+        }
+        drop(client);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
     #[test]
     fn failed_attachment_fetch_keeps_the_conversation_content_snapshot_unchanged()
     -> Result<(), SdkError> {

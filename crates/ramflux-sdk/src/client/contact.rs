@@ -55,10 +55,10 @@ impl RamfluxClient {
         let safety_number =
             ramflux_crypto::safety_number(&material.self_material, &material.contact_material);
         let device_set_hash = ramflux_crypto::device_set_hash(&material.contact_material.devices);
-        let status = self
-            .account_db()?
-            .contact_verification(contact_identity_commitment)?
-            .map_or_else(|| "unverified".to_owned(), |record| record.verification_state);
+        let status = self.contact_safety_verification_state(
+            contact_identity_commitment,
+            Some(&ramflux_protocol::encode_base64url(device_set_hash)),
+        )?;
         Ok(SdkContactSafetyNumber {
             contact_identity_commitment: contact_identity_commitment.to_owned(),
             self_identity_commitment: material.self_identity_commitment,
@@ -91,21 +91,10 @@ impl RamfluxClient {
         let safety_number =
             ramflux_crypto::safety_number(&material.self_material, &material.contact_material);
         let device_set_hash = ramflux_crypto::device_set_hash(&material.contact_material.devices);
-        let status =
-            self.account_db()?.contact_verification(contact_identity_commitment)?.map_or_else(
-                || "unverified".to_owned(),
-                |record| {
-                    if record.verified_device_set_hash
-                        == ramflux_protocol::encode_base64url(device_set_hash)
-                    {
-                        record.verification_state
-                    } else if record.verification_state == "verified" {
-                        "verification_stale".to_owned()
-                    } else {
-                        record.verification_state
-                    }
-                },
-            );
+        let status = self.contact_safety_verification_state(
+            contact_identity_commitment,
+            Some(&ramflux_protocol::encode_base64url(device_set_hash)),
+        )?;
         Ok(SdkContactSafetyNumber {
             contact_identity_commitment: contact_identity_commitment.to_owned(),
             self_identity_commitment: material.self_identity_commitment,
@@ -120,6 +109,14 @@ impl RamfluxClient {
             ),
             verification_state: status,
         })
+    }
+
+    pub(crate) fn contact_safety_verification_state(
+        &self,
+        commitment: &str,
+        device_set_hash: Option<&str>,
+    ) -> Result<String, SdkError> {
+        contact_safety_verification_state(self.account_db()?, commitment, device_set_hash)
     }
 
     /// # Errors
@@ -835,6 +832,82 @@ struct SdkContactSafetyMaterialPair {
     self_material: ramflux_crypto::ContactSafetyMaterial,
     contact_material: ramflux_crypto::ContactSafetyMaterial,
     self_identity_commitment: String,
+}
+
+// Legacy baselining must use the account writer before query-only readers are opened.
+pub(crate) fn migrate_legacy_contact_verifications(db: &AccountDb) -> Result<(), SdkError> {
+    let mut after = String::new();
+    loop {
+        let ids = db.client_directory_ids("identity", &after, 100)?;
+        for id in &ids {
+            if let Some(identity) = db.client_record("identity", id)?
+                && let Some(commitment) = identity["contact_identity_commitment"].as_str()
+                && db
+                    .contact_verification(commitment)?
+                    .is_some_and(|v| v.verification_state == "verified")
+            {
+                contact_safety_verification_state(
+                    db,
+                    commitment,
+                    identity["device_set_hash"].as_str(),
+                )?;
+            }
+        }
+        if ids.len() < 100 {
+            return Ok(());
+        }
+        after.clone_from(
+            ids.last().ok_or_else(|| SdkError::LocalBus("missing identity cursor".into()))?,
+        );
+    }
+}
+
+fn contact_safety_verification_state(
+    db: &AccountDb,
+    commitment: &str,
+    device_set_hash: Option<&str>,
+) -> Result<String, SdkError> {
+    let read_only = db.is_query_only()?;
+    let check = || -> Result<String, SdkError> {
+        let Some(verification) = db.contact_verification(commitment)? else {
+            return Ok("unverified".to_owned());
+        };
+        if verification.verification_state != "verified" {
+            return Ok(verification.verification_state);
+        }
+        let observed = db.load_actor_state::<ramflux_protocol::SignedDeviceSetRecord>(
+            &super::identity_authority::record_key(commitment),
+        )?;
+        let current_hash = device_set_hash.map(str::to_owned).or_else(|| {
+            observed.is_none().then(|| {
+                ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(
+                    &contact_safety_material_for(commitment).devices,
+                ))
+            })
+        });
+        if current_hash.as_deref() != Some(verification.verified_device_set_hash.as_str()) {
+            return Ok("verification_stale".to_owned());
+        }
+        let stamp_key = format!("identity/safety_verified_set/{commitment}");
+        let stamp = db.load_actor_state::<String>(&stamp_key)?;
+        let Some(observed) = observed else {
+            // No signed authority was available when synthetic safety material was verified.
+            return Ok(if stamp.is_none() { "verified" } else { "verification_stale" }.to_owned());
+        };
+        let current_stamp = super::identity_authority::set_fingerprint(&observed)?;
+        if let Some(stamp) = stamp {
+            return Ok(
+                if stamp == current_stamp { "verified" } else { "verification_stale" }.to_owned()
+            );
+        }
+        if read_only {
+            // Normal readers are prepared by the writer; never mutate their snapshot.
+            return Ok("verification_stale".to_owned());
+        }
+        db.persist_actor_state(&stamp_key, &current_stamp)?;
+        Ok("verified".to_owned())
+    };
+    if read_only { check() } else { db.write_transaction(check) }
 }
 
 fn contact_safety_material_for(identity_commitment: &str) -> ramflux_crypto::ContactSafetyMaterial {

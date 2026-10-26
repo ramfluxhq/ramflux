@@ -63,20 +63,10 @@ impl RamfluxClient {
         let Some(commitment) = identity["contact_identity_commitment"].as_str() else {
             return Ok(None);
         };
-        let verified = self.account_db()?.contact_verification(commitment)?.is_some_and(|v| {
-            v.verification_state == "verified"
-                && identity["device_set_hash"].as_str() == Some(v.verified_device_set_hash.as_str())
-        });
-        let record = self.observed_device_set(commitment)?;
-        let stamp = self
-            .account_db()?
-            .load_actor_state::<String>(&format!("identity/safety_verified_set/{commitment}"))?;
-        let authority_verified = record
-            .as_ref()
-            .map(set_fingerprint)
-            .transpose()?
-            .is_some_and(|hash| stamp.as_ref() == Some(&hash));
-        if verified && authority_verified {
+        if self
+            .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())?
+            == "verified"
+        {
             self.root_asserted_principal_kind(principal)
         } else {
             Ok(None)

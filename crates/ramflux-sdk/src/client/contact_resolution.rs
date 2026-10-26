@@ -187,11 +187,14 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let identity = db.client_record("identity", principal)?.unwrap_or_else(|| json!({}));
         let commitment = identity["contact_identity_commitment"].as_str();
-        let verification = commitment.map(|c| db.contact_verification(c)).transpose()?.flatten();
-        let verified = verification.is_some_and(|v| {
-            v.verification_state == "verified"
-                && identity["device_set_hash"].as_str() == Some(v.verified_device_set_hash.as_str())
-        });
+        let verified = if let Some(commitment) = commitment {
+            self.contact_safety_verification_state(
+                commitment,
+                identity["device_set_hash"].as_str(),
+            )? == "verified"
+        } else {
+            false
+        };
         let linked = self.friend_link_peer_is_accepted(principal)?
             || commitment
                 .map(|root| self.friend_link_peer_is_accepted(root))

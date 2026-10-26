@@ -31,7 +31,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.account_db()?.append_journal(
             &format!("task-pending:{key}:{state}"), "task.changed",
-            &serde_json::json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"pending":pending,"pending_state":state,"actor_kind_verified":super::carrier_kind_verified(self, c)}), now, None,
+            &serde_json::json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"pending":pending,"pending_state":state,"actor_kind":super::carrier_actor_kind(self, c),"actor_kind_verified":super::carrier_kind_verified(self, c)}), now, None,
         )?;
         Ok(())
     }

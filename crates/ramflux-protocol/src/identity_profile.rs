@@ -61,6 +61,8 @@ mod name_policy_tests {
             "\u{301}Alice",
             "a\u{fe0f}\u{34f}b",
             "Alice\u{a0}\u{a0}(verified human)",
+            "Alice √",
+            "Alice ⍻",
             "Alice ✓",
             "Alice ✔",
             "Alice ✅",
