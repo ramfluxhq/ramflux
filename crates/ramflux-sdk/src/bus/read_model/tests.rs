@@ -304,21 +304,76 @@ fn historical_sender_with_only_a_foreign_live_name_stays_unattributed() -> Resul
 
 #[test]
 fn r5_paginated_and_legacy_group_lists_expose_the_current_signed_name() -> Result<(), SdkError> {
-    let f = Fixture::new()?;
-    f.client.shared_group_create("g", "group-thread", Some("Initial".into()), "alice-phone")?;
-    let state = f.client.shared_group_change(
+    let fixture = Fixture::new()?;
+    let owner = signed_group_reader(&fixture.root.join("owner"), "owner", "owner-phone", 51)?;
+    let peer = signed_group_reader(&fixture.root.join("peer"), "peer", "peer-phone", 61)?;
+    for receiver in [&owner, &peer] {
+        for sender in [&owner, &peer] {
+            receiver.persist_identity_directory(
+                &crate::client::identity_authority::test_support::public_manifest(sender)?,
+            )?;
+        }
+    }
+    peer.establish_friend_link(
+        "owner-contact",
+        "peer",
+        owner.owned_device_identity()?.root_commitment(),
+    )?;
+    owner.shared_group_create("g", "group-thread", Some("Initial".into()), "owner-phone")?;
+    let initial = owner.shared_group_change(
         "g",
-        "alice-phone",
+        "owner-phone",
+        ramflux_protocol::GroupStateChange::Add {
+            member: peer.owned_group_actor("peer-phone")?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    peer.accept_shared_group_state(&initial, "peer-phone")?;
+    let state = owner.shared_group_change(
+        "g",
+        "owner-phone",
         ramflux_protocol::GroupStateChange::SetName { name: "Reviewed checklist".into() },
     )?;
-    for body in [json!({}), json!({"limit":1})] {
-        let listed = f.read("group.list", body)?;
-        assert_eq!(listed["groups"][0]["name"], "Reviewed checklist");
-        assert_eq!(listed["groups"][0]["name_epoch"], state.view().name_epoch);
+    peer.accept_shared_group_state(&state, "peer-phone")?;
+    for client in [&owner, &peer] {
+        for body in [json!({}), json!({"limit":1})] {
+            let listed = read(
+                client,
+                &LocalBusFrame::request("read", Some("acct".into()), "client", "group.list", body),
+            )?;
+            assert_eq!(listed["groups"][0]["name"], "Reviewed checklist");
+            assert_eq!(listed["groups"][0]["name_epoch"], state.view().name_epoch);
+        }
+        let directory = read(
+            client,
+            &LocalBusFrame::request(
+                "read",
+                Some("acct".into()),
+                "client",
+                "conversation.directory",
+                json!({}),
+            ),
+        )?;
+        let row = directory["conversations"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == "group-thread"))
+            .ok_or_else(|| invalid("group conversation absent"))?;
+        assert_eq!(row["title"], "Reviewed checklist");
     }
-    assert_eq!(
-        f.read("conversation.directory", json!({}))?["conversations"][0]["title"],
-        "Reviewed checklist"
-    );
     Ok(())
+}
+fn signed_group_reader(
+    root: &Path,
+    principal: &str,
+    device: &str,
+    seed: u8,
+) -> Result<RamfluxClient, SdkError> {
+    let mut client = RamfluxClient::new();
+    client.create_identity_root(principal, [seed; 32]);
+    client.create_device_branch(principal, device, 1, [seed.saturating_add(1); 32]);
+    client.open_account_index(root)?;
+    let actor = client.owned_group_actor(device)?;
+    client.create_account("acct", &actor.identity.root_commitment)?;
+    client.unlock_account("acct", b"test-secret")?;
+    Ok(client)
 }

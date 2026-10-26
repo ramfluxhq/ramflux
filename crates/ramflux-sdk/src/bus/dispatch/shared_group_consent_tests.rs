@@ -94,16 +94,7 @@ async fn r5_encrypted_contact_forward_and_message_preserve_consent_and_decline()
             } else {
                 result?;
             }
-            assert!(user.client.account_db()?.shared_group_state("stranger-group")?.is_none());
-            assert!(
-                user.client
-                    .account_db()?
-                    .client_record("conversation", "stranger-thread")?
-                    .is_none()
-            );
-            assert!(
-                user.client.account_db()?.message_content(&entry.envelope.envelope_id)?.is_none()
-            );
+            assert_not_joined(&user.client, &entry)?;
         }
     }
     directory.abort();
@@ -141,4 +132,11 @@ async fn seal(
         target_delivery_id: "sender".into(),
         envelope,
     })
+}
+
+fn assert_not_joined(user: &RamfluxClient, entry: &GatewayInboxEntry) -> TestResult {
+    assert!(user.account_db()?.shared_group_state("stranger-group")?.is_none());
+    assert!(user.account_db()?.client_record("conversation", "stranger-thread")?.is_none());
+    assert!(user.account_db()?.message_content(&entry.envelope.envelope_id)?.is_none());
+    Ok(())
 }
