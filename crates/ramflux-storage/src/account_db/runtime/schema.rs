@@ -9,7 +9,7 @@ use rusqlite::params;
 
 impl AccountDb {
     pub(super) fn install_runtime_schema(&self) -> Result<(), StorageError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.connection.immediate_transaction()?;
         self.connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS runtime_outbox (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,

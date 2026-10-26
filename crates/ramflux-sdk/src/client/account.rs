@@ -319,4 +319,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
+
+    #[test]
+    fn concurrent_account_writers_avoid_deferred_upgrade_locks_for_fifty_cycles()
+    -> Result<(), SdkError> {
+        let root = temp_root("concurrent-writers");
+        let mut actor = RamfluxClient::new();
+        actor.open_account_index(&root)?;
+        actor.create_account("acct", "principal")?;
+        actor.unlock_account("acct", b"account-secret")?;
+
+        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<usize>(1);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), SdkError>>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || -> Result<(), SdkError> {
+            let mut background = RamfluxClient::new();
+            let opened = background
+                .open_account_index(&worker_root)
+                .and_then(|()| background.unlock_account("acct", b"account-secret"));
+            ready_tx.send(opened.as_ref().map_err(ToString::to_string).copied()).ok();
+            opened?;
+            while let Ok(round) = start_rx.recv() {
+                let result =
+                    background.set_projection_checkpoint(&format!("background-{round}"), "written");
+                if done_tx.send(result).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        ready_rx
+            .recv()
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?
+            .map_err(SdkError::LocalBus)?;
+
+        for round in 0..50 {
+            actor.account_db()?.write_transaction(|| {
+                let _ = actor.projection_checkpoint("missing")?;
+                start_tx.send(round).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                actor.set_projection_checkpoint(&format!("actor-{round}"), "written")
+            })?;
+            done_rx.recv().map_err(|error| SdkError::LocalBus(error.to_string()))??;
+        }
+
+        drop(start_tx);
+        worker.join().map_err(|_| SdkError::LocalBus("writer worker panicked".to_owned()))??;
+        for round in 0..50 {
+            assert_eq!(
+                actor.projection_checkpoint(&format!("actor-{round}"))?.as_deref(),
+                Some("written")
+            );
+            assert_eq!(
+                actor.projection_checkpoint(&format!("background-{round}"))?.as_deref(),
+                Some("written")
+            );
+        }
+        drop(actor);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

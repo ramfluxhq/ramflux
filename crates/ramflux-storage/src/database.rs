@@ -5,8 +5,11 @@
 
 use rusqlite::types::{FromSql, ToSql, ToSqlOutput, Value, ValueRef};
 use rusqlite::{Error, OpenFlags, Result};
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
@@ -16,8 +19,23 @@ pub(crate) struct Connection {
     inner: std::sync::Arc<Worker>,
 }
 struct Worker {
+    id: u64,
+    path: PathBuf,
     sender: Option<SyncSender<Job>>,
-    worker: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+static NEXT_CONNECTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[derive(Clone, Copy)]
+struct WriterOwner {
+    connection_id: u64,
+    transaction_id: u64,
+}
+
+fn active_writers() -> &'static Mutex<BTreeMap<PathBuf, WriterOwner>> {
+    static WRITERS: OnceLock<Mutex<BTreeMap<PathBuf, WriterOwner>>> = OnceLock::new();
+    WRITERS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 impl Connection {
@@ -27,15 +45,18 @@ impl Connection {
 
     pub(crate) fn open_with_flags(path: impl AsRef<Path>, flags: OpenFlags) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let connection_id = NEXT_CONNECTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel::<Job>(64);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let worker_path = path.clone();
         let worker = std::thread::Builder::new()
             .name("ramflux-db".to_owned())
             .spawn(move || {
-                let opened = rusqlite::Connection::open_with_flags(path, flags).and_then(|db| {
-                    db.busy_timeout(std::time::Duration::from_secs(5))?;
-                    Ok(db)
-                });
+                let opened =
+                    rusqlite::Connection::open_with_flags(worker_path, flags).and_then(|db| {
+                        db.busy_timeout(std::time::Duration::from_secs(5))?;
+                        Ok(db)
+                    });
                 match opened {
                     Ok(mut db) => {
                         if ready_tx.send(Ok(())).is_ok() {
@@ -52,7 +73,12 @@ impl Connection {
             .map_err(|_| Error::InvalidQuery)?;
         ready_rx.recv().map_err(|_| Error::InvalidQuery)??;
         Ok(Self {
-            inner: std::sync::Arc::new(Worker { sender: Some(sender), worker: Some(worker) }),
+            inner: std::sync::Arc::new(Worker {
+                id: connection_id,
+                path,
+                sender: Some(sender),
+                handle: Some(worker),
+            }),
         })
     }
 
@@ -123,25 +149,81 @@ impl Connection {
         self.call(|db| Ok(db.is_autocommit()))
     }
 
-    pub(crate) fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub(crate) fn deferred_transaction(&self) -> Result<Transaction<'_>> {
+        self.transaction(false)
+    }
+
+    pub(crate) fn immediate_transaction(&self) -> Result<Transaction<'_>> {
+        self.transaction(true)
+    }
+
+    fn transaction(&self, immediate: bool) -> Result<Transaction<'_>> {
+        static NEXT_SAVEPOINT_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        static NEXT_TRANSACTION_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         let nested = !self.call(|db| Ok(db.is_autocommit()))?;
         let savepoint = nested.then(|| {
-            format!("runtime_nested_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            format!(
+                "runtime_nested_{}",
+                NEXT_SAVEPOINT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
         });
         if let Some(name) = &savepoint {
             self.execute_batch(&format!("SAVEPOINT {name}"))?;
         } else {
-            self.execute_batch("BEGIN DEFERRED")?;
+            let transaction_id =
+                NEXT_TRANSACTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let begin = if immediate { "BEGIN IMMEDIATE" } else { "BEGIN DEFERRED" };
+            if let Err(error) = self.execute_batch(begin) {
+                if immediate {
+                    let owner = active_writers()
+                        .lock()
+                        .ok()
+                        .and_then(|writers| writers.get(&self.inner.path).copied());
+                    tracing::warn!(
+                        connection_id = self.inner.id,
+                        holder_connection_id = owner.map(|owner| owner.connection_id),
+                        holder_transaction_id = owner.map(|owner| owner.transaction_id),
+                        %error,
+                        "database writer transaction acquisition failed"
+                    );
+                }
+                return Err(error);
+            }
+            let writer = immediate.then(|| {
+                if let Ok(mut writers) = active_writers().lock() {
+                    writers.insert(
+                        self.inner.path.clone(),
+                        WriterOwner { connection_id: self.inner.id, transaction_id },
+                    );
+                }
+                tracing::debug!(
+                    connection_id = self.inner.id,
+                    transaction_id,
+                    "database writer transaction acquired"
+                );
+                WriterRegistration {
+                    path: self.inner.path.clone(),
+                    owner: WriterOwner { connection_id: self.inner.id, transaction_id },
+                    started: std::time::Instant::now(),
+                }
+            });
+            return Ok(Transaction {
+                connection: self,
+                committed: false,
+                savepoint,
+                _writer: writer,
+            });
         }
-        Ok(Transaction { connection: self, committed: false, savepoint })
+        Ok(Transaction { connection: self, committed: false, savepoint, _writer: None })
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
         self.sender.take();
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.handle.take() {
             let _ = worker.join();
         }
     }
@@ -231,6 +313,7 @@ pub(crate) struct Transaction<'a> {
     connection: &'a Connection,
     committed: bool,
     savepoint: Option<String>,
+    _writer: Option<WriterRegistration>,
 }
 impl Transaction<'_> {
     pub(crate) fn commit(mut self) -> Result<()> {
@@ -241,6 +324,31 @@ impl Transaction<'_> {
         }
         self.committed = true;
         Ok(())
+    }
+}
+
+struct WriterRegistration {
+    path: PathBuf,
+    owner: WriterOwner,
+    started: std::time::Instant,
+}
+
+impl Drop for WriterRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut writers) = active_writers().lock()
+            && writers.get(&self.path).is_some_and(|owner| {
+                owner.connection_id == self.owner.connection_id
+                    && owner.transaction_id == self.owner.transaction_id
+            })
+        {
+            writers.remove(&self.path);
+        }
+        tracing::debug!(
+            connection_id = self.owner.connection_id,
+            transaction_id = self.owner.transaction_id,
+            elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "database writer transaction released"
+        );
     }
 }
 impl Drop for Transaction<'_> {
@@ -282,9 +390,9 @@ mod tests {
         let db = Connection::open(":memory:")?;
         db.execute_batch("CREATE TABLE state(value INTEGER)")?;
         {
-            let _outer = db.unchecked_transaction()?;
+            let _outer = db.deferred_transaction()?;
             db.execute_batch("INSERT INTO state VALUES(1)")?;
-            let inner = db.unchecked_transaction()?;
+            let inner = db.deferred_transaction()?;
             db.execute_batch("INSERT INTO state VALUES(2)")?;
             inner.commit()?;
         }

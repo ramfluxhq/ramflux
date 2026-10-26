@@ -26,7 +26,7 @@ impl AccountIndex {
         operation: &str,
         fingerprint: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.connection.immediate_transaction()?;
         let saved: Option<(String,Option<String>)> = self.connection.query_row(
             "SELECT fingerprint,response_json FROM supervisor_operation WHERE account_scope=?1 AND operation_id=?2",
             params![scope,operation], |row| Ok((row.get(0)?,row.get(1)?))

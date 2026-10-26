@@ -96,7 +96,7 @@ impl AccountDb {
     where
         E: From<StorageError>,
     {
-        let transaction = self.connection.unchecked_transaction().map_err(StorageError::from)?;
+        let transaction = self.connection.deferred_transaction().map_err(StorageError::from)?;
         let result = read()?;
         transaction.commit().map_err(StorageError::from)?;
         Ok(result)
@@ -112,7 +112,7 @@ impl AccountDb {
     where
         E: From<StorageError>,
     {
-        let transaction = self.connection.unchecked_transaction().map_err(StorageError::from)?;
+        let transaction = self.connection.immediate_transaction().map_err(StorageError::from)?;
         let value = write()?;
         transaction.commit().map_err(StorageError::from)?;
         Ok(value)

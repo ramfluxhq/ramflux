@@ -14,7 +14,7 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
     )? {
         return Ok(());
     }
-    let transaction = connection.unchecked_transaction()?;
+    let transaction = connection.immediate_transaction()?;
     let rows = {
         let mut query =
             connection.prepare("SELECT envelope_key,source FROM runtime_inbox_policy")?;

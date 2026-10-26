@@ -12,7 +12,7 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
     )? {
         return Ok(());
     }
-    let transaction = connection.unchecked_transaction()?;
+    let transaction = connection.immediate_transaction()?;
     connection.execute_batch("CREATE TABLE IF NOT EXISTS legacy_group_sender_key_counter_seen AS SELECT * FROM group_sender_key_counter_seen WHERE 0; INSERT INTO legacy_group_sender_key_counter_seen SELECT * FROM group_sender_key_counter_seen; DELETE FROM group_sender_key_counter_seen; UPDATE projection_checkpoint SET projection_name='legacy/group_sender_key/'||projection_name WHERE substr(projection_name,1,17)='group_sender_key:'; INSERT INTO group_sender_identity_upgrade VALUES(1);")?;
     transaction.commit()?;
     Ok(())

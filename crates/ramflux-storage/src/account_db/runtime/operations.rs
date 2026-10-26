@@ -17,7 +17,7 @@ impl AccountDb {
         id: &str,
         fingerprint: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.connection.immediate_transaction()?;
         let existing: Option<(String, Option<String>)> = self
             .connection
             .query_row(

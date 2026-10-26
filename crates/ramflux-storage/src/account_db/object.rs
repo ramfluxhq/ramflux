@@ -407,7 +407,7 @@ impl AccountDb {
     }
 
     /// T25-A2 (OBJ-IPC-01) P0-1: atomically commit the local object AND advance the operation
-    /// record in ONE `SQLCipher` transaction. `unchecked_transaction` opens a `BEGIN` on this
+    /// record in ONE `SQLCipher` transaction. `immediate_transaction` opens a `BEGIN IMMEDIATE` on this
     /// connection; both single-statement writes run inside it and `commit()` issues one
     /// fsync-durable `COMMIT`. A crash between "no object" and "object durable" cannot happen — the
     /// object row and the `LocalCommitted` operation state become durable together or not at all.
@@ -419,7 +419,7 @@ impl AccountDb {
     where
         T: Serialize,
     {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.connection.immediate_transaction()?;
         self.upsert_object(object)?;
         self.upsert_object_operation(operation)?;
         transaction.commit()?;

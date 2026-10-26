@@ -10,7 +10,7 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
     })? {
         return Ok(());
     }
-    let transaction = connection.unchecked_transaction()?;
+    let transaction = connection.immediate_transaction()?;
     for table in [
         "receipt_projection",
         "conversation_delivery_state",

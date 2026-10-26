@@ -55,7 +55,7 @@ fn runtime_outbox_rolls_back_with_domain_write() -> Result<(), StorageError> {
     let (root, db) = test_db("runtime-outbox-rollback")?;
     db.enable_runtime()?;
     {
-        let _transaction = db.connection.unchecked_transaction()?;
+        let _transaction = db.connection.immediate_transaction()?;
         db.append_event("rolled-back", "test", b"rolled back")?;
         assert_ne!(db.pending_outbox(256)?, Vec::new());
     }

@@ -110,7 +110,7 @@ impl AccountIndex {
             return Err(StorageError::AuthorizationRejected);
         }
         self.ensure_generation_hint(install.account_id)?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.connection.immediate_transaction()?;
         let previous = self
             .connection
             .query_row(

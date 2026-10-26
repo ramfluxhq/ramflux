@@ -39,7 +39,7 @@ impl AccountDb {
         if states.is_empty() {
             return Ok(());
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.connection.immediate_transaction()?;
         for (kind, state) in states {
             self.persist_actor_state(kind, state)?;
         }

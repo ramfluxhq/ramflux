@@ -17,7 +17,7 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
     })? {
         return Ok(());
     }
-    let transaction = connection.unchecked_transaction()?;
+    let transaction = connection.immediate_transaction()?;
     metadata(connection)?;
     directory(connection)?;
     pins(connection)?;
