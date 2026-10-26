@@ -35,6 +35,11 @@ impl RamfluxClient {
                 .effective_role(local.root_commitment(), local.device_id())
                 .is_some());
         }
+        // A pending invitation has no joined projection yet. Absence is a
+        // negative membership answer; real storage failures still propagate.
+        if self.account_db()?.group_snapshot_epoch(group)?.is_none() {
+            return Ok(false);
+        }
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         Ok(self.group_state(group)?.members.contains(&branch.device_id))
     }

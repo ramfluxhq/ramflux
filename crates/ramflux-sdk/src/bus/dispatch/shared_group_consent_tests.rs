@@ -136,6 +136,7 @@ async fn seal(
 
 fn assert_not_joined(user: &RamfluxClient, entry: &GatewayInboxEntry) -> TestResult {
     assert!(user.account_db()?.shared_group_state("stranger-group")?.is_none());
+    assert!(!user.local_is_group_member("stranger-group")?);
     assert!(user.account_db()?.client_record("conversation", "stranger-thread")?.is_none());
     assert!(user.account_db()?.message_content(&entry.envelope.envelope_id)?.is_none());
     Ok(())
