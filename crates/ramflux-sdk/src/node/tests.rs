@@ -267,3 +267,23 @@ fn bound_node_probe_does_not_open_a_replacement_account_session() -> Result<(), 
     assert!(state.accounts["bound"].engine.is_none());
     Ok(())
 }
+
+#[test]
+fn normalized_node_profiles_remain_loadable_when_migration_writeback_fails() -> Result<(), SdkError>
+{
+    let root = TestRoot::new()?;
+    let mut store = NodeStore::default();
+    let mut profile = NodeProfile::from_record(record(1)?, 1500);
+    profile.discovery_url = "https://NODE.example.com:443/".into();
+    let pin = profile.node_public_key.clone();
+    store.profiles.insert(profile.node_id.clone(), profile);
+    store.save(&root.0)?;
+    // A directory at the temporary-file path deterministically refuses write-back, even as root.
+    std::fs::create_dir(root.0.join("nodes.json.tmp"))?;
+    let loaded = NodeStore::load(&root.0, &[])?;
+    assert_eq!(loaded.profiles["node.example.com"].discovery_url, "https://node.example.com");
+    assert_eq!(loaded.profiles["node.example.com"].node_public_key, pin);
+    let saved: NodeStore = serde_json::from_slice(&std::fs::read(root.0.join("nodes.json"))?)?;
+    assert_eq!(saved.profiles["node.example.com"].discovery_url, "https://NODE.example.com:443/");
+    Ok(())
+}

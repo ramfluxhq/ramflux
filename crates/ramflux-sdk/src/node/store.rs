@@ -54,8 +54,8 @@ impl NodeStore {
                 changed = true;
             }
         }
-        if changed {
-            store.save(root)?;
+        if changed && let Err(error) = store.save(root) {
+            tracing::warn!(%error, "node URL migration write-back failed; using normalized profiles in memory");
         }
         Ok(store)
     }
