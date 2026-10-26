@@ -774,6 +774,38 @@ pub(crate) async fn dispatch_group_send_request(
         "message_id": body.message_id,
         "client_message_id":client_message_id,
     });
+    let original_recipients = if let Some(routes) = &fanout_routes {
+        routes
+            .iter()
+            .filter(|route| {
+                route.member_principal_commitment.as_deref()
+                    == Some(account.principal_commitment.as_str())
+            })
+            .map(|route| {
+                Ok::<_, SdkError>(
+                    ramflux_protocol::parse_qualified_device_id(&route.member_id)?
+                        .map_or_else(|| route.member_id.clone(), |(_, device)| device),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        account
+            .client
+            .group_member_routes(&body.group_id)?
+            .into_iter()
+            .filter(|route| {
+                route.target_delivery_id == body.target_delivery_id
+                    && route.member_principal_commitment.as_deref()
+                        == Some(account.principal_commitment.as_str())
+            })
+            .map(|route| {
+                Ok::<_, SdkError>(
+                    ramflux_protocol::parse_qualified_device_id(&route.member_id)?
+                        .map_or(route.member_id, |(_, device)| device),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
     account.client.account_db()?.write_transaction(|| {
         if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
             if existing.encrypted_body.is_empty() {
@@ -825,6 +857,7 @@ pub(crate) async fn dispatch_group_send_request(
                     conversation: &body.conversation_id,
                     message: &body.message_id,
                     sender: &body.sender_id,
+                    original_recipients: &original_recipients,
                     group: Some(&body.group_id),
                     peer: None,
                     body: &plaintext_body,
