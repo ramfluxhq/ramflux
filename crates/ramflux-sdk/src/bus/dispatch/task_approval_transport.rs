@@ -44,7 +44,10 @@ async fn prepare(
         .client_record("conversation", conversation)?
         .ok_or_else(|| invalid("task approval conversation missing"))?;
     let group = thread["group_id"].as_str();
+    diagnostic(account, "own_targets begin");
     let mut targets = own_targets(account, &engine.config).await?;
+    diagnostic(account, "own_targets complete");
+    diagnostic(account, "peer_targets begin");
     let candidates = if let Some(group) = group {
         super::task_group::plan(
             account,
@@ -58,6 +61,7 @@ async fn prepare(
     } else {
         direct_targets(account, &engine.config, &thread).await?
     };
+    diagnostic(account, "peer_targets complete");
     let peers = endpoint_targets(client, candidates, recipient)?;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     if peers.is_empty() && recipient != local.principal_id {
@@ -76,10 +80,24 @@ async fn prepare(
     };
     let mut deliveries = Vec::new();
     for target in targets {
+        diagnostic(account, "seal begin");
         deliveries.push(seal(account, engine, &target, conversation, body, route.clone()).await?);
     }
+    diagnostic(account, "seal complete");
     Ok(deliveries)
 }
+fn diagnostic(account: &LocalBusAccountState, stage: &str) {
+    #[cfg(feature = "itest-local-mint")]
+    if std::env::var("RAMFLUX_TEST_TASK_APPROVAL_DIAGNOSTICS").as_deref() == Ok("1") {
+        eprintln!(
+            "STEP: task approval prepare device={} stage={stage}",
+            account.gateway_config.device_id
+        );
+    }
+    #[cfg(not(feature = "itest-local-mint"))]
+    let _ = (account, stage);
+}
+
 fn endpoint_targets(
     client: &RamfluxClient,
     targets: Vec<Target>,
