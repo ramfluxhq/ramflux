@@ -204,6 +204,8 @@ pub enum GatewayServerFrame {
     PushRouteRefused {
         request_id: String,
         reason: String,
+        #[serde(default)]
+        code: crate::PushRouteRefusal,
     },
     PushRouteDeregistered {
         request_id: String,

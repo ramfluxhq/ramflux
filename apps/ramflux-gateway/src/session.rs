@@ -554,6 +554,8 @@ async fn run_gateway_session_loop_until_closed(
     runtime: GatewaySessionRuntime,
     mut closed: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> anyhow::Result<()> {
+    // One serial push route worker per session; dropping it with the loop cancels it.
+    let mut route_control: Option<crate::push_registration::RouteControlQueue> = None;
     loop {
         // Replacement may stop an idle reader, but never cancel an admitted request after
         // its router commit and before its reply. Finish the request before checking again.
@@ -657,10 +659,34 @@ async fn run_gateway_session_loop_until_closed(
                     }
                 }
                 ramflux_node_core::GatewayClientFrame::PushRouteRegister { request } => {
-                    crate::push_registration::spawn_register(&send, &context, &runtime, *request);
+                    let queue = route_control.get_or_insert_with(|| {
+                        crate::push_registration::RouteControlQueue::for_session(
+                            &send, &context, &runtime,
+                        )
+                    });
+                    crate::push_registration::admit(
+                        queue,
+                        &send,
+                        &context,
+                        &runtime,
+                        crate::push_registration::RouteIntent::Register(*request),
+                    )
+                    .await;
                 }
                 ramflux_node_core::GatewayClientFrame::PushRouteDeregister { request } => {
-                    crate::push_registration::spawn_deregister(&send, &context, &runtime, *request);
+                    let queue = route_control.get_or_insert_with(|| {
+                        crate::push_registration::RouteControlQueue::for_session(
+                            &send, &context, &runtime,
+                        )
+                    });
+                    crate::push_registration::admit(
+                        queue,
+                        &send,
+                        &context,
+                        &runtime,
+                        crate::push_registration::RouteIntent::Deregister(*request),
+                    )
+                    .await;
                 }
                 ramflux_node_core::GatewayClientFrame::VoiceLease { request } => {
                     crate::voice::handle(&send, &context, &runtime, &request).await?;

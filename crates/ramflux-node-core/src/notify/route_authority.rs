@@ -119,8 +119,9 @@ impl NotifyRedbStore {
         txn.commit().map_err(error)
     }
     /// Deletes the device's routes for `provider` (or all providers) on explicit deregistration.
-    /// Only the device bound as the routes' owner may delete them; a revoked device may still
-    /// remove its own routes. Returns the number of removed routes.
+    /// Only the device bound as the routes' owner may delete them, and only with current
+    /// (non-revoked) authority; a revoked device's routes are removed by the revocation
+    /// checks instead. Returns the number of removed routes.
     /// # Errors
     /// Rejects a caller that is not the bound owner and returns storage errors.
     pub fn delete_authenticated_push_routes(

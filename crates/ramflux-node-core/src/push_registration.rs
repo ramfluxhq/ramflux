@@ -173,3 +173,26 @@ pub fn push_route_owner_is_current(
             && current.target_delivery_id == owner.target_delivery_id
     })
 }
+
+/// Why push route control was refused; clients choose their retry policy from it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushRouteRefusal {
+    /// The node has no credential for the requested provider. Retry after a token or
+    /// configuration change, or after a long interval.
+    ProviderUnavailable,
+    /// The request itself was refused (credential format, binding, authority).
+    #[default]
+    Rejected,
+    /// Router or notify did not answer in time; retry with backoff.
+    Unavailable,
+    /// A newer control from the same session replaced this one before it ran.
+    Superseded,
+}
+/// Notify's answer to a registration control.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushRouteRegisterAnswer {
+    Registered { expires_at: u64 },
+    Refused { code: PushRouteRefusal },
+}

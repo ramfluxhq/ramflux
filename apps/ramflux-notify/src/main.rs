@@ -504,9 +504,14 @@ async fn handle_notify_mesh_quic_accepted_request(
         let ingress = Arc::clone(&ingress);
         tokio::task::spawn_blocking(move || {
             if register {
-                push_registration::register(&ingress, body)
+                push_registration::register(&ingress, body).and_then(|answer| {
+                    serde_json::to_value(answer).map_err(|source| {
+                        ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                    })
+                })
             } else {
                 push_registration::deregister(&ingress, body)
+                    .map(|removed| serde_json::json!(removed))
             }
         })
         .await
@@ -537,10 +542,12 @@ fn handle_notify_mesh_quic_request(
 ) -> Result<ramflux_transport::GatewayQuicResponse, ramflux_node_core::NodeCoreError> {
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", ramflux_node_core::PUSH_ROUTE_PATH) => {
-            let expires_at = push_registration::register(ingress, request.body.clone())?;
+            let answer = push_registration::register(ingress, request.body.clone())?;
             Ok(ramflux_transport::GatewayQuicResponse {
                 status: 200,
-                body: serde_json::json!(expires_at),
+                body: serde_json::to_value(answer).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
             })
         }
         ("POST", "/s13/notify/wake") => {

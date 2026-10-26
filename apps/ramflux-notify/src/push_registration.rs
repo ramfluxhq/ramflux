@@ -70,25 +70,31 @@ fn credentials() -> Result<Vec<ramflux_node_core::ProviderCredential>, NodeCoreE
     }
     serde_json::from_slice(&bytes).map_err(|_| rejected())
 }
+/// Configuration and request refusals are answered as typed refusals; only transient failures
+/// (authority lookup, storage) surface as errors.
 pub(crate) fn register(
     ingress: &super::NotifyIngressState,
     value: serde_json::Value,
-) -> Result<u64, NodeCoreError> {
+) -> Result<ramflux_node_core::PushRouteRegisterAnswer, NodeCoreError> {
+    use ramflux_node_core::{PushRouteRefusal, PushRouteRegisterAnswer as Answer};
     let control: ramflux_node_core::PushRouteControl =
         serde_json::from_value(value).map_err(|_| rejected())?;
     let now = ramflux_node_core::now_unix_seconds();
     control.verify(ingress.wake_auth.key.as_ref().ok_or_else(rejected)?, now)?;
     let registration = &control.body.registration;
     let configured = credentials()?;
-    let credential = configured
-        .iter()
-        .find(|credential| credential.provider_kind() == registration.provider)
-        .ok_or_else(rejected)?;
-    let endpoint = endpoint(credential, registration)?;
+    let Some(credential) =
+        configured.iter().find(|credential| credential.provider_kind() == registration.provider)
+    else {
+        return Ok(Answer::Refused { code: PushRouteRefusal::ProviderUnavailable });
+    };
+    let Ok(endpoint) = endpoint(credential, registration) else {
+        return Ok(Answer::Refused { code: PushRouteRefusal::Rejected });
+    };
     // Lifetimes start from this node's clock, so a skewed gateway cannot shorten or extend them.
     let registered_at = now;
     let expires_at = now.saturating_add(ramflux_node_core::PUSH_ROUTE_TTL_SECONDS);
-    ingress.store.register_authenticated_push_route(
+    let stored = ingress.store.register_authenticated_push_route(
         &control.body.authority,
         &ramflux_node_core::DevicePushRoute {
             device_delivery_id: control.body.authority.target_delivery_id.clone(),
@@ -101,8 +107,14 @@ pub(crate) fn register(
             registered_at,
             expires_at,
         },
-    )?;
-    Ok(expires_at)
+    );
+    match stored {
+        Ok(()) => Ok(Answer::Registered { expires_at }),
+        Err(NodeCoreError::Unauthorized(_)) => {
+            Ok(Answer::Refused { code: PushRouteRefusal::Rejected })
+        }
+        Err(error) => Err(error),
+    }
 }
 /// Explicit deregistration from the device's own authenticated session.
 pub(crate) fn deregister(
