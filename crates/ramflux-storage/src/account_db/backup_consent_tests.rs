@@ -288,3 +288,83 @@ fn r4_expired_held_message_erasure_fences_are_pruned_while_recent_fences_remain(
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn merge_clamps_link_projection_to_restrictive_decision_despite_projection_clock_order()
+-> TestResult {
+    for denied in ["blocked", "declined"] {
+        for (denied_at, lifted_at, expected) in
+            [(7_000, 7_000, denied), (7_001, 7_000, denied), (7_000, 7_001, "lifted")]
+        {
+            let (root, index, source) = account("link-clock-source")?;
+            let (local_root, local_index, local) = account("link-clock-local")?;
+            if denied == "blocked" {
+                source.establish_friend_link("link", "own", "peer")?;
+                source.block_friend_link("link", 1)?;
+            } else {
+                source.record_pending_friend_link("link", "own", "peer", 1)?;
+                source.reject_friend_link("link", 1)?;
+            }
+            local.establish_friend_link("link", "own", "peer")?;
+            source.connection.execute(
+                "UPDATE contact_link_decision SET decided_at=?1",
+                rusqlite::params![denied_at],
+            )?;
+            local.connection.execute(
+                "UPDATE contact_link_decision SET decided_at=?1",
+                rusqlite::params![lifted_at],
+            )?;
+            // Projection clocks may order the rows opposite to their explicit decisions.
+            local.connection.execute_batch("UPDATE friend_link_projection SET updated_at=100")?;
+            for reverse in [false, true] {
+                let (incoming, live) = if reverse { (&local, &source) } else { (&source, &local) };
+                let archive = root.join(format!("incoming-{reverse}.db"));
+                let saved = incoming.write_backup_snapshot(&archive)?;
+                let target = local_root.join(format!("merged-{reverse}.db"));
+                let snapshot = live.write_backup_snapshot(&target)?;
+                let mut merged = BackupDatabase::open(&target, &snapshot.key)?;
+                for _ in 0..2 {
+                    merged.merge_backup(&archive, &saved.key, || Ok(()))?;
+                    let case =
+                        format!("{denied}@{denied_at} vs lift@{lifted_at}, reverse={reverse}");
+                    assert_eq!(
+                        merged.db.query_row(
+                            "SELECT state FROM contact_link_decision",
+                            [],
+                            |r| r.get::<_, String>(0)
+                        )?,
+                        expected,
+                        "{case}"
+                    );
+                    let state = match expected {
+                        "lifted" => "accepted",
+                        "declined" => "rejected",
+                        other => other,
+                    };
+                    assert_eq!(
+                        merged.db.query_row(
+                            "SELECT state,blocked FROM friend_link_projection",
+                            [],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+                        )?,
+                        (state.into(), expected == "blocked"),
+                        "{case}"
+                    );
+                    if expected == "blocked" {
+                        assert!(merged.db.query_row("SELECT capability_revoked_at IS NOT NULL FROM friend_link_projection", [], |r| r.get::<_, bool>(0))?, "{case}");
+                    }
+                }
+            }
+            drop(source);
+            drop(local);
+            drop(index);
+            drop(local_index);
+            std::fs::remove_dir_all(root)?;
+            std::fs::remove_dir_all(local_root)?;
+        }
+    }
+    Ok(())
+}
+
+#[path = "backup_legacy_consent_tests.rs"]
+mod legacy;

@@ -444,7 +444,14 @@ async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> R
     let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
     let node = added["contact"]["node"].clone();
     assert!(!node.is_null());
-    let manifest = d.records.lock().map_err(|_| invalid("directory"))?[1].clone();
+    let manifest = d
+        .records
+        .lock()
+        .map_err(|_| invalid("directory"))?
+        .iter()
+        .find(|record| record.principal_id == "bob")
+        .cloned()
+        .ok_or_else(|| invalid("bob manifest"))?;
     for source in ["card", "verified"] {
         if source == "verified" {
             call(
@@ -462,5 +469,47 @@ async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> R
         assert_eq!(identity["node"], node);
         assert!(client(&s)?.contact_replacement(&identity, "bob", "different-root", None).is_err());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn directory_refresh_without_profile_preserves_card_asserted_kind() -> Result<(), SdkError> {
+    let mut a = Fixture::new("alice", 21)?;
+    let mut b = Fixture::new("bob", 31)?;
+    let d = Directory::new(&a, &b).await?;
+    let origin = Origin::new(&d).await?;
+    let mut s = state(&mut a, &mut b, &d)?;
+    origin.configure(&mut s, "alice")?;
+    origin.configure(&mut s, "bob")?;
+    let mut body = crate::parse_contact_card(&card(&mut s).await?, now_unix_timestamp())?;
+    body.kind_asserted = Some("bot".into());
+    let seed = s
+        .accounts
+        .get("bob")
+        .ok_or_else(|| invalid("bob"))?
+        .client
+        .identity_root
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .signing_key
+        .to_bytes();
+    let (signed, _) = crate::contact_card::encode_contact_card(body, seed, now_unix_timestamp())?;
+    let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
+    assert_eq!(added["contact"]["kind_asserted"], "bot");
+    assert_eq!(added["contact"]["kind_verified"], false);
+    let manifest = d
+        .records
+        .lock()
+        .map_err(|_| invalid("directory"))?
+        .iter()
+        .find(|record| record.principal_id == "bob")
+        .cloned()
+        .ok_or_else(|| invalid("bob manifest"))?;
+    assert!(manifest.signed_device_set.as_ref().is_some_and(|record| record.profile.is_none()));
+    client(&s)?.persist_root_verified_directory(&manifest)?;
+    let contact = client(&s)?.contact_entry("bob")?;
+    assert_eq!(contact["kind_asserted"], "bot");
+    assert_eq!(contact["kind_verified"], false);
+    assert_eq!(contact["root_source"], "card");
     Ok(())
 }

@@ -568,7 +568,14 @@ async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_prove
     assert_eq!(source(&state, "bob", "alice")?, "lookup", "a requester root is never a card");
     // Retry delivery and republish the peer manifest after contact.add decorated the row.
     deliver(&mut state, "bob", &entry).await?;
-    let manifest = directory.records.lock().map_err(|_| invalid("directory"))?[1].clone();
+    let manifest = directory
+        .records
+        .lock()
+        .map_err(|_| invalid("directory"))?
+        .iter()
+        .find(|record| record.principal_id == "bob")
+        .cloned()
+        .ok_or_else(|| invalid("bob manifest"))?;
     account(&state, "alice")?.persist_root_verified_directory(&manifest)?;
     assert_eq!(source(&state, "alice", "bob")?, "lookup");
     let accepted =

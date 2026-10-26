@@ -11,16 +11,39 @@ fn consent_rank(state: &str) -> String {
 }
 /// True when decision `new` supersedes decision `old`: strictly later, or tied and stricter.
 pub(super) fn consent_supersedes(new: &str, old: &str) -> String {
+    supersedes(
+        &format!("{new}.decided_at"),
+        &format!("{new}.state"),
+        &format!("{old}.decided_at"),
+        &format!("{old}.state"),
+    )
+}
+fn supersedes(new_at: &str, new_state: &str, old_at: &str, old_state: &str) -> String {
     format!(
-        "({new}.decided_at>{old}.decided_at OR ({new}.decided_at={old}.decided_at AND {}>{}))",
-        consent_rank(&format!("{new}.state")),
-        consent_rank(&format!("{old}.state"))
+        "({new_at}>{old_at} OR ({new_at}={old_at} AND {}>{}))",
+        consent_rank(new_state),
+        consent_rank(old_state)
+    )
+}
+/// Legacy projections have second-resolution decision bounds and no explicit decision row.
+pub(super) fn consent_supersedes_projection(new: &str, old: &str, state: &str) -> String {
+    supersedes(
+        &format!("{new}.decided_at"),
+        &format!("{new}.state"),
+        &format!(
+            "coalesce({old}.decided_at,min(max(coalesce(l.updated_at,0),0),9223372036854775)*1000)"
+        ),
+        &format!("coalesce({old}.state,{state})"),
     )
 }
 impl BackupDatabase {
     pub(super) fn merge_consent_decisions(&self) -> Result<(), StorageError> {
+        // Missing local decisions use the same conservative projection bounds as old archives.
         self.db.execute_batch("CREATE TABLE backup_local_consent AS SELECT * FROM contact_request_decision;
-            CREATE TABLE backup_source_consent(root TEXT PRIMARY KEY,state TEXT NOT NULL,decided_at INTEGER NOT NULL);")?;
+            CREATE TABLE backup_source_consent(root TEXT PRIMARY KEY,state TEXT NOT NULL,decided_at INTEGER NOT NULL);
+            INSERT INTO backup_local_consent SELECT f.root,f.state,coalesce((SELECT min(max(max(updated_at),0),9223372036854775)*1000 FROM contact_request_projection WHERE contact_identity_commitment=f.root),0) FROM contact_request_fence f WHERE NOT EXISTS(SELECT 1 FROM backup_local_consent l WHERE l.root=f.root);
+            INSERT INTO backup_local_consent SELECT p.contact_identity_commitment,'lifted',min(max(max(p.updated_at),0),9223372036854775)*1000 FROM contact_request_projection p WHERE p.state='accepted' AND NOT EXISTS(SELECT 1 FROM backup_local_consent l WHERE l.root=p.contact_identity_commitment) GROUP BY p.contact_identity_commitment;
+            INSERT OR IGNORE INTO contact_request_decision SELECT * FROM backup_local_consent;")?;
         let modern: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE name='contact_request_decision')", [], |r|r.get(0))?;
         if modern {
             self.db.execute_batch("INSERT INTO backup_source_consent SELECT * FROM incoming.contact_request_decision;")?;
@@ -47,8 +70,21 @@ impl BackupDatabase {
         self.merge_link_consent_decisions()?;
         Ok(())
     }
+    pub(super) fn apply_merged_link_consent(&self) -> Result<(), StorageError> {
+        // Projection timestamps come from callers and may disagree with decision order.
+        // Reapply final denials after row selection; a surviving lift never revives a removal.
+        self.db.execute_batch("UPDATE friend_link_projection AS p
+            SET state=(SELECT CASE d.state WHEN 'blocked' THEN 'blocked' ELSE 'rejected' END FROM contact_link_decision d WHERE d.link_id=p.link_id),
+                blocked=(SELECT d.state='blocked' FROM contact_link_decision d WHERE d.link_id=p.link_id),
+                capability_revoked_at=CASE WHEN EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state='blocked')
+                    THEN coalesce(p.capability_revoked_at,(SELECT max(d.decided_at,0)/1000 FROM contact_link_decision d WHERE d.link_id=p.link_id)) ELSE p.capability_revoked_at END
+            WHERE EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state IN ('blocked','declined'));")?;
+        Ok(())
+    }
     fn merge_link_consent_decisions(&self) -> Result<(), StorageError> {
-        self.db.execute_batch("CREATE TABLE backup_local_link_consent AS SELECT * FROM contact_link_decision; CREATE TABLE backup_source_link_consent(link_id TEXT PRIMARY KEY,state TEXT NOT NULL,decided_at INTEGER NOT NULL);")?;
+        self.db.execute_batch("CREATE TABLE backup_local_link_consent AS SELECT * FROM contact_link_decision; CREATE TABLE backup_source_link_consent(link_id TEXT PRIMARY KEY,state TEXT NOT NULL,decided_at INTEGER NOT NULL);
+            INSERT INTO backup_local_link_consent SELECT p.link_id,CASE WHEN p.blocked=1 THEN 'blocked' WHEN p.state='rejected' THEN 'declined' ELSE 'lifted' END,min(max(p.updated_at,0),9223372036854775)*1000 FROM friend_link_projection p WHERE p.state IN ('accepted','blocked','rejected') AND NOT EXISTS(SELECT 1 FROM backup_local_link_consent l WHERE l.link_id=p.link_id);
+            INSERT OR IGNORE INTO contact_link_decision SELECT * FROM backup_local_link_consent;")?;
         let modern: bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE name='contact_link_decision')", [], |r|r.get(0))?;
         if modern {
             self.db.execute_batch("INSERT INTO backup_source_link_consent SELECT * FROM incoming.contact_link_decision;")?;

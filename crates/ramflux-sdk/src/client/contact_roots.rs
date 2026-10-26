@@ -53,6 +53,8 @@ impl RamfluxClient {
         let Some(mut identity) = db.client_record("identity", principal)? else {
             return Ok(());
         };
+        // The first-seen caller cannot carry a node. Keep this guard for future callers
+        // so a legacy card pin cannot be relabeled as lookup.
         if identity.get("root_source").is_some_and(|v| !v.is_null())
             || identity.get("node").is_some_and(|v| !v.is_null())
         {

@@ -21,6 +21,7 @@ impl BackupDatabase {
     }
     pub(super) fn apply_merged_contact_fences(&self) -> Result<(), StorageError> {
         self.db.execute_batch("UPDATE contact_request_projection SET state=(SELECT state FROM contact_request_fence f WHERE f.root=contact_identity_commitment) WHERE EXISTS(SELECT 1 FROM contact_request_fence f WHERE f.root=contact_identity_commitment AND (f.state='blocked' OR contact_request_projection.state<>'blocked')); DELETE FROM contact_message_request WHERE EXISTS(SELECT 1 FROM contact_message_request_fence f WHERE f.sender_identity=contact_message_request.sender_identity AND f.message_id=contact_message_request.message_id) OR EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=contact_message_request.message_id AND d.conversation_id=contact_message_request.conversation_id) OR EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=contact_message_request.message_id AND t.conversation_id=contact_message_request.conversation_id) OR EXISTS(SELECT 1 FROM contact_request_fence f WHERE f.root=contact_message_request.contact_identity_commitment) OR EXISTS(SELECT 1 FROM contact_request_projection r WHERE r.contact_identity_commitment=contact_message_request.contact_identity_commitment AND r.direction='inbound' AND r.state IN ('declined','blocked'));")?;
+        self.apply_merged_link_consent()?;
         Ok(())
     }
 }
