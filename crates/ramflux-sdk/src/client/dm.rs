@@ -147,11 +147,13 @@ impl RamfluxClient {
                     )?;
                     if copy_plain {
                         let peer = self.own_sent_peer(&message)?;
+                        let original_recipients = self.own_original_recipient(&message)?;
                         self.stage_own_sent_message(super::own_sent_message::OwnSentInput {
                             envelope: &message.envelope_id,
                             conversation: &message.conversation_id,
                             message: &message.message_id,
                             sender: &message.sender_id,
+                            original_recipients: &original_recipients,
                             group: None,
                             peer: Some(&peer),
                             body: &content,

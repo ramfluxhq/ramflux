@@ -69,9 +69,15 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let device = self.trusted_device(&source)?;
         let root = Some(source.root_commitment().to_owned());
-        if entry.envelope.source_principal_id == local_branch.principal_id
-            || source.root_commitment() == local.root_commitment()
-        {
+        if source.root_commitment() == local.root_commitment() {
+            db.persist_actor_state(&origin_key(conversation, message)?, &json!({
+                "sender_device_id":source.device_id(),"sender_root_commitment":source.root_commitment(),
+                "sender_device_display":source.storage_key(),"direction":"outgoing",
+                "envelope_id":entry.envelope.envelope_id
+            }))?;
+            return Ok(());
+        }
+        if entry.envelope.source_principal_id == local_branch.principal_id {
             return Ok(());
         }
         let key = id(conversation, message, &local)?;
