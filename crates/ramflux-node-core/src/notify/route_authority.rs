@@ -10,6 +10,9 @@ use super::{DevicePushRoute, NOTIFY_ROUTE_TABLE, NotifyRedbStore, routes};
 use crate::{DeviceAuthKeyResponse, NodeCoreError};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 const OWNERS: TableDefinition<&str, &[u8]> = TableDefinition::new("notify_route_authority_v1");
+/// Per-device sequence of the last deregistration. Kept after the routes are deleted, so a
+/// registration that finishes late (older client sequence) cannot recreate a cleared route.
+const FENCES: TableDefinition<&str, u64> = TableDefinition::new("notify_route_fence_v1");
 /// Owners per authority lookup request.
 pub const PUSH_ROUTE_AUTHORITY_BATCH: usize = 256;
 /// Owners checked per revocation sweep call.
@@ -69,6 +72,19 @@ impl NotifyRedbStore {
         authority: &DeviceAuthKeyResponse,
         route: &DevicePushRoute,
     ) -> Result<(), NodeCoreError> {
+        self.register_authenticated_push_route_at(authority, route, None).map(|_| ())
+    }
+
+    /// Registers with the client's control sequence. Returns `false`, writing nothing, when a
+    /// deregistration with a newer or equal sequence was already confirmed for this device.
+    /// # Errors
+    /// Refuses unverified, revoked, substituted or unavailable device authority.
+    pub fn register_authenticated_push_route_at(
+        &self,
+        authority: &DeviceAuthKeyResponse,
+        route: &DevicePushRoute,
+        client_seq: Option<u64>,
+    ) -> Result<bool, NodeCoreError> {
         authority.authenticated_device_identity()?;
         if authority.target_delivery_id != route.device_delivery_id
             || !self
@@ -91,6 +107,16 @@ impl NotifyRedbStore {
             &serde_json::to_vec(authority).map_err(error)?,
         )?;
         let txn = self.db.begin_write().map_err(error)?;
+        let fence = txn
+            .open_table(FENCES)
+            .map_err(error)?
+            .get(route.device_delivery_id.as_str())
+            .map_err(error)?
+            .map(|value| value.value());
+        if fence.is_some_and(|fence| client_seq.unwrap_or(0) <= fence) {
+            txn.abort().map_err(error)?;
+            return Ok(false);
+        }
         let same_owner = self.same_registered_owner(&txn, authority)?;
         {
             let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
@@ -116,7 +142,8 @@ impl NotifyRedbStore {
                 .insert(route.device_delivery_id.as_str(), binding.as_slice())
                 .map_err(error)?;
         }
-        txn.commit().map_err(error)
+        txn.commit().map_err(error)?;
+        Ok(true)
     }
     /// Deletes the device's routes for `provider` (or all providers) on explicit deregistration.
     /// Only the device bound as the routes' owner may delete them, and only with current
@@ -129,15 +156,39 @@ impl NotifyRedbStore {
         authority: &DeviceAuthKeyResponse,
         provider: Option<&crate::PushProviderKind>,
     ) -> Result<usize, NodeCoreError> {
+        self.delete_authenticated_push_routes_at(authority, provider, None)
+    }
+
+    /// Deletes like [`Self::delete_authenticated_push_routes`] and raises the device's fence to
+    /// `client_seq`, so an older registration still in flight cannot recreate the route.
+    /// # Errors
+    /// Rejects a caller that is not the bound owner and returns storage errors.
+    pub fn delete_authenticated_push_routes_at(
+        &self,
+        authority: &DeviceAuthKeyResponse,
+        provider: Option<&crate::PushProviderKind>,
+        client_seq: Option<u64>,
+    ) -> Result<usize, NodeCoreError> {
         let caller = authority.authenticated_device_identity()?;
         let target = authority.target_delivery_id.as_str();
-        let Some(binding) = self.owner_binding(target)? else {
-            return Ok(0);
-        };
-        if self.open_binding(target, &binding)?.authenticated_device_identity()? != caller {
+        let binding = self.owner_binding(target)?;
+        if let Some(binding) = &binding
+            && self.open_binding(target, binding)?.authenticated_device_identity()? != caller
+        {
             return Err(NodeCoreError::Unauthorized("push route owner rejected".into()));
         }
         let txn = self.db.begin_write().map_err(error)?;
+        if let Some(seq) = client_seq {
+            let mut fences = txn.open_table(FENCES).map_err(error)?;
+            let current = fences.get(target).map_err(error)?.map(|value| value.value());
+            if current.is_none_or(|current| current < seq) {
+                fences.insert(target, seq).map_err(error)?;
+            }
+        }
+        if binding.is_none() {
+            txn.commit().map_err(error)?;
+            return Ok(0);
+        }
         let removed;
         {
             let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;

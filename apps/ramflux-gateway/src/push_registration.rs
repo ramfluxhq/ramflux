@@ -141,8 +141,14 @@ async fn execute(
     let request_id = intent.request_id().to_owned();
     let outcome = tokio::time::timeout(PUSH_ROUTE_CONTROL_TIMEOUT, async {
         match intent {
-            RouteIntent::Register(frame) => register(context, runtime, frame.body).await,
-            RouteIntent::Deregister(frame) => deregister(context, runtime, frame.body).await,
+            RouteIntent::Register(frame) => {
+                let seq = client_seq(&frame.signed_request);
+                register(context, runtime, frame.body, seq).await
+            }
+            RouteIntent::Deregister(frame) => {
+                let seq = client_seq(&frame.signed_request);
+                deregister(context, runtime, frame.body, seq).await
+            }
         }
     })
     .await;
@@ -156,7 +162,22 @@ async fn execute(
         Ok(Ok(Answer::Refused(code))) => refused(request_id, code),
         Ok(Err(error)) => {
             tracing::warn!(%error, "push route control failed");
-            refused(request_id, PushRouteRefusal::Unavailable)
+            // Notify refused the caller itself (for example not the routes' owner): permanent.
+            let unauthorized =
+                error.downcast_ref::<ramflux_transport::TransportError>().is_some_and(|error| {
+                    matches!(
+                        error,
+                        ramflux_transport::TransportError::HttpStatus { status: 401 | 403, .. }
+                    )
+                });
+            refused(
+                request_id,
+                if unauthorized {
+                    PushRouteRefusal::Rejected
+                } else {
+                    PushRouteRefusal::Unavailable
+                },
+            )
         }
         Err(_elapsed) => refused(request_id, PushRouteRefusal::Unavailable),
     }
@@ -189,6 +210,11 @@ fn bind_session<T: serde::Serialize>(
         "push route must bind the live session id"
     );
     Ok(())
+}
+
+/// The client's strictly increasing control sequence, carried in the signed request.
+fn client_seq(signed_request: &ramflux_protocol::SignedRequest) -> Option<u64> {
+    signed_request.ext.ext.get("push_route_seq").and_then(serde_json::Value::as_u64)
 }
 
 fn refused(request_id: String, code: PushRouteRefusal) -> GatewayServerFrame {
@@ -235,6 +261,7 @@ async fn register(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     registration: ramflux_node_core::PushRouteRegistration,
+    client_seq: Option<u64>,
 ) -> anyhow::Result<Answer> {
     use ramflux_node_core::{PushRouteControl, PushRouteControlBody, PushRouteRegisterAnswer};
     let Some(authority) = session_authority(context, runtime).await? else {
@@ -244,6 +271,7 @@ async fn register(
         authority,
         registration,
         issued_at: ramflux_node_core::now_unix_seconds(),
+        client_seq,
     };
     let signature = context
         .notify
@@ -261,6 +289,7 @@ async fn deregister(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     request: ramflux_node_core::PushRouteDeregistration,
+    client_seq: Option<u64>,
 ) -> anyhow::Result<Answer> {
     use ramflux_node_core::{PushRouteDeleteBody, PushRouteDeleteControl};
     let Some(authority) = session_authority(context, runtime).await? else {
@@ -270,6 +299,7 @@ async fn deregister(
         authority,
         provider: request.provider,
         issued_at: ramflux_node_core::now_unix_seconds(),
+        client_seq,
     };
     let signature = context
         .notify

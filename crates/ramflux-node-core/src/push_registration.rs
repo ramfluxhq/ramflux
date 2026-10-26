@@ -62,6 +62,9 @@ pub struct PushRouteDeleteBody {
     pub authority: DeviceAuthKeyResponse,
     pub provider: Option<PushProviderKind>,
     pub issued_at: u64,
+    /// The client's control sequence; raises the device's deregistration fence.
+    #[serde(default)]
+    pub client_seq: Option<u64>,
 }
 /// Gateway-signed deletion request; its signature domain differs from registration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,6 +98,9 @@ pub struct PushRouteControlBody {
     pub authority: DeviceAuthKeyResponse,
     pub registration: PushRouteRegistration,
     pub issued_at: u64,
+    /// The client's control sequence; must be newer than the device's deregistration fence.
+    #[serde(default)]
+    pub client_seq: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -186,8 +192,12 @@ pub enum PushRouteRefusal {
     Rejected,
     /// Router or notify did not answer in time; retry with backoff.
     Unavailable,
-    /// A newer control from the same session replaced this one before it ran.
+    /// A newer control from the same session replaced this one before it ran, or a newer
+    /// deregistration was already confirmed.
     Superseded,
+    /// A code from a newer peer; treated as transient.
+    #[serde(other)]
+    Unknown,
 }
 /// Notify's answer to a registration control.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

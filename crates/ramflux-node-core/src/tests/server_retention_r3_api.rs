@@ -55,6 +55,7 @@ fn route_deletion_controls_are_domain_separated_from_registration()
         authority: gateway_registered_key(&gateway_open_frame("phone", "stream"))?,
         provider: None,
         issued_at: 100,
+        client_seq: None,
     };
     let bytes = ramflux_protocol::canonical_json_bytes(&body)?;
     let control = PushRouteDeleteControl {

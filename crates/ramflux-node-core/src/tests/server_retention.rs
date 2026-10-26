@@ -250,6 +250,7 @@ fn server_retention_signed_push_control_rejects_forgery_expiry_and_selector_inje
             webpush_auth: None,
         },
         issued_at: 100,
+        client_seq: None,
     };
     let signature = key.sign_push_route_control(&ramflux_protocol::canonical_json_bytes(&body)?);
     let mut control = PushRouteControl { body, signature };

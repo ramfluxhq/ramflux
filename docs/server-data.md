@@ -115,7 +115,20 @@ for that provider) and `rejected` wait 24 hours or until the token changes;
 `unavailable` (timeout or backend failure) and unanswered requests back off from 30
 seconds, doubling to 6 hours, with up to 20% jitter. A cleared route stays pending
 until the node confirms the deregistration and is retried with the same backoff,
-also across daemon restarts.
+also across daemon restarts; a deregistration refused as `rejected` (the device is
+not the routes' owner) is dropped instead. Unknown refusal codes from a newer node
+are treated like `unavailable`.
+
+Every control carries a strictly increasing client sequence (`ext.push_route_seq`
+in the signed request). Notify keeps, per device, the sequence of the last confirmed
+deregistration and applies a registration only if its sequence is newer, so a
+registration that finishes late (for example behind a slow router lookup) cannot
+recreate a cleared route.
+
+The gateway-to-notify route control messages (typed registration answers, refusal
+codes and client sequences) changed with this release: upgrade the gateway and
+notify together. A mixed pair refuses route control as `unavailable` until both
+run the same version; clients back off and retry.
 
 The wire contract: send a `push_route_register` gateway session frame with `request` containing
 `signed_request` and `body`. Sign `POST /notify/v1/push-route` with the current

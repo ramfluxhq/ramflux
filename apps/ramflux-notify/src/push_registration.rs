@@ -94,7 +94,7 @@ pub(crate) fn register(
     // Lifetimes start from this node's clock, so a skewed gateway cannot shorten or extend them.
     let registered_at = now;
     let expires_at = now.saturating_add(ramflux_node_core::PUSH_ROUTE_TTL_SECONDS);
-    let stored = ingress.store.register_authenticated_push_route(
+    let stored = ingress.store.register_authenticated_push_route_at(
         &control.body.authority,
         &ramflux_node_core::DevicePushRoute {
             device_delivery_id: control.body.authority.target_delivery_id.clone(),
@@ -107,9 +107,12 @@ pub(crate) fn register(
             registered_at,
             expires_at,
         },
+        control.body.client_seq,
     );
     match stored {
-        Ok(()) => Ok(Answer::Registered { expires_at }),
+        Ok(true) => Ok(Answer::Registered { expires_at }),
+        // A newer deregistration was already confirmed for this device.
+        Ok(false) => Ok(Answer::Refused { code: PushRouteRefusal::Superseded }),
         Err(NodeCoreError::Unauthorized(_)) => {
             Ok(Answer::Refused { code: PushRouteRefusal::Rejected })
         }
@@ -125,9 +128,10 @@ pub(crate) fn deregister(
         serde_json::from_value(value).map_err(|_| rejected())?;
     let now = ramflux_node_core::now_unix_seconds();
     control.verify(ingress.wake_auth.key.as_ref().ok_or_else(rejected)?, now)?;
-    let removed = ingress.store.delete_authenticated_push_routes(
+    let removed = ingress.store.delete_authenticated_push_routes_at(
         &control.body.authority,
         control.body.provider.as_ref(),
+        control.body.client_seq,
     )?;
     Ok(u64::try_from(removed).unwrap_or(u64::MAX))
 }
