@@ -4,11 +4,22 @@ set -eu
 umask 077
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
-usage() { fail 'usage: demo-node.sh {up|down|status|logs} ENV_FILE [--purge|--remote]'; }
-[ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
+usage() { fail 'usage: demo-node.sh {up|down|status|logs} ENV_FILE [--purge|--remote] [--voice-udp-port PORT]'; }
+[ "$#" -ge 2 ] || usage
 command=$1
 env_file=$2
-flag=${3:-}
+shift 2
+flag=
+voice_cli=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --purge|--remote) [ -z "$flag" ] || usage; flag=$1; shift ;;
+    --voice-udp-port)
+      [ "$#" -ge 2 ] && [ -z "$voice_cli" ] && [ -n "$2" ] || usage
+      voice_cli=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
 case "$command:$flag" in up:|down:|down:--purge|status:|status:--remote|logs:) ;; *) usage ;; esac
 case "$env_file" in /*) ;; *) env_file="$PWD/$env_file" ;; esac
 [ -f "$env_file" ] || fail 'an existing operator env file is required'
@@ -31,6 +42,17 @@ DEMO_BIND_ADDR=${DEMO_BIND_ADDR:-0.0.0.0}
 DEMO_VERSION=${DEMO_VERSION:-$DEMO_PROJECT}
 DEMO_HEALTH_TIMEOUT_SECONDS=${DEMO_HEALTH_TIMEOUT_SECONDS:-180}
 DEMO_HEALTH_POLL_SECONDS=${DEMO_HEALTH_POLL_SECONDS:-2}
+RAMFLUX_DEMO_VOICE_UDP_PORT=${voice_cli:-${RAMFLUX_DEMO_VOICE_UDP_PORT:-}}
+if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+  case "$RAMFLUX_DEMO_VOICE_UDP_PORT" in
+    0*|*[!0-9]*) fail 'voice UDP port must be an integer between 1024 and 65535' ;;
+  esac
+  [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -ge 1024 ] && [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -le 65535 ] || fail 'voice UDP port must be between 1024 and 65535'
+  for udp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_TURN_PORT"; do
+    [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -ne "$udp_port" ] || fail 'voice UDP port conflicts with another demo UDP port'
+  done
+fi
+export RAMFLUX_DEMO_VOICE_UDP_PORT
 for seconds in "$DEMO_HEALTH_TIMEOUT_SECONDS" "$DEMO_HEALTH_POLL_SECONDS"; do
   case "$seconds" in ''|0*|*[!0-9]*) fail 'health timeout and poll interval must be positive integers' ;; esac
   [ "$seconds" -ge 1 ] && [ "$seconds" -le 3600 ] || fail 'health timeout and poll interval must be 1..3600 seconds'
@@ -55,12 +77,12 @@ if [ "$flag" = --remote ]; then
   : "${DEMO_EXPECTED_NODE_PUBLIC_KEY:?copy the public pin from the QA identity.env over a trusted channel}"
   exec "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
 fi
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 # Canonicalize before checking ownership or allowing recursive deletion.
 [ "$command" != up ] || mkdir -p "$DEMO_DATA_DIR"
 [ -d "$DEMO_DATA_DIR" ] || fail 'demo data directory does not exist'
-state=$(CDPATH= cd -- "$DEMO_DATA_DIR" && pwd -P)
+state=$(CDPATH='' cd -- "$DEMO_DATA_DIR" && pwd -P)
 [ "$state" != / ] && [ "$state" != "$HOME" ] && [ "$state" != "$repo" ] || fail 'unsafe data directory'
 mkdir "$state.lock" 2>/dev/null || fail 'demo operation already running (check adjacent .lock directory)'
 trap 'rmdir "$state.lock"' EXIT
@@ -142,8 +164,11 @@ check_resources() {
 }
 compose() (
   cd "$state"
-  set -- --env-file "$state/runtime.env" -p "$DEMO_PROJECT" \
-    -f "$state/compose.yml" -f "$state/demo-override.json" "$@"
+  set -- -f "$state/demo-override.json" "$@"
+  if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+    set -- -f "$state/compose.voice.yml" "$@"
+  fi
+  set -- --env-file "$state/runtime.env" -p "$DEMO_PROJECT" -f "$state/compose.yml" "$@"
   case "$compose_provider" in
     docker-v2|docker-wrapper) clean_env docker compose "$@" ;;
     podman-compose) clean_env podman-compose "$@" ;;
@@ -161,14 +186,14 @@ inspect_services() {
       --filter "label=com.docker.compose.service=ramflux-$service") || {
         health_problem="cannot list ramflux-$service"; return 2;
       }
-    set -- $service_ids
-    if [ "$#" -eq 0 ]; then
+    if [ -z "$service_ids" ]; then
       health_problem="ramflux-$service is missing"; return 1
     fi
-    if [ "$#" -ne 1 ]; then
-      health_problem="multiple containers for ramflux-$service"; return 2
-    fi
-    service_state=$(runtime inspect "$1" | python3 -c '
+    case "$service_ids" in
+      *[!a-zA-Z0-9_-]*)
+        health_problem="multiple or invalid containers for ramflux-$service"; return 2 ;;
+    esac
+    service_state=$(runtime inspect "$service_ids" | python3 -c '
 import json
 import sys
 item = json.load(sys.stdin)[0]
@@ -177,8 +202,27 @@ if labels.get("org.ramflux.demo.owner") != sys.argv[1]:
     sys.exit("refusing foreign container during health inspection")
 state = item["State"]
 health = state.get("Health") or state.get("Healthcheck") or {}
+if sys.argv[3] and state["Status"] == "running" and health.get("Status") == "healthy":
+    environment = dict(value.split("=", 1) for value in (item.get("Config") or {}).get("Env", []))
+    if sys.argv[2] == "gateway":
+        expected = {"RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT": "ramflux-relay:17450"}
+    elif sys.argv[2] == "relay":
+        expected = {
+            "RAMFLUX_RELAY_VOICE_UDP_ADDR": "0.0.0.0:17449",
+            "RAMFLUX_RELAY_VOICE_CONTROL_ADDR": "0.0.0.0:17450",
+            "RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT": sys.argv[4],
+        }
+        ports = (item.get("NetworkSettings") or {}).get("Ports") or {}
+        mappings = ports.get("17449/udp") or []
+        if not any(str(row.get("HostPort")) == sys.argv[3]
+                   and (row.get("HostIp") or "0.0.0.0") == sys.argv[5] for row in mappings):
+            sys.exit("relay voice UDP mapping differs from the selected demo port/bind address")
+    else:
+        expected = {}
+    if any(environment.get(key) != value for key, value in expected.items()):
+        sys.exit("voice environment differs from the selected demo configuration; run up first")
 print(state["Status"], health.get("Status", "missing"))
-' "$owner") || { health_problem="cannot inspect ramflux-$service"; return 2; }
+' "$owner" "$service" "$RAMFLUX_DEMO_VOICE_UDP_PORT" "$DEMO_HOST:$RAMFLUX_DEMO_VOICE_UDP_PORT" "$DEMO_BIND_ADDR") || { health_problem="cannot inspect ramflux-$service"; return 2; }
     case "$service_state" in
       'running healthy')
         if [ "$health_verbose" = 1 ]; then printf 'ramflux-%s: %s\n' "$service" "$service_state"; fi
@@ -188,6 +232,9 @@ print(state["Status"], health.get("Status", "missing"))
       *) health_problem="ramflux-$service: $service_state"; return 2 ;;
     esac
   done
+  if [ "$health_verbose" = 1 ] && [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+    printf 'voice UDP mapping: %s:%s (configuration check only)\n' "$DEMO_HOST" "$RAMFLUX_DEMO_VOICE_UDP_PORT"
+  fi
 }
 
 wait_for_services() {
@@ -282,6 +329,15 @@ RAMFLUX_CLIENT_RELAY_SERVER_NAME=ramflux-relay
 RAMFLUX_CLIENT_PREKEY_HTTP_URL=$origin
 RAMFLUX_CLIENT_SIGNALING_TURN_ADDR=$DEMO_HOST:$DEMO_TURN_PORT
 ENV
+    if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+      cat >> "$state/runtime.env" <<ENV
+RAMFLUX_RELAY_VOICE_UDP_ADDR=0.0.0.0:17449
+RAMFLUX_RELAY_VOICE_CONTROL_ADDR=0.0.0.0:17450
+RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT=$DEMO_HOST:$RAMFLUX_DEMO_VOICE_UDP_PORT
+RAMFLUX_RELAY_VOICE_UDP_PORT=$DEMO_BIND_ADDR:$RAMFLUX_DEMO_VOICE_UDP_PORT
+RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450
+ENV
+    fi
     sh "$script_dir/build-prod-images.sh"
     compose up -d --build
     wait_for_services

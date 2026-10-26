@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Demo node deployments can opt into the voice UDP overlay with an env setting
+  or command-line port, retaining the existing base deployment when unset.
+
 - Public-name warnings allow Highly Restrictive Latin/CJK script combinations and
   compare NFKC, simple case-folded, whitespace-collapsed skeletons without changing
   signed names or identifiers. Complete the pre-1.0 check-glyph policy with U+221A

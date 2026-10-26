@@ -39,3 +39,9 @@ compose = state / "compose.yml"
 if not compose.exists():
     compose.write_text((repo / "deploy/docker-compose.yml").read_text())
 (state / "owner.token").write_text(owner["token"] + "\n")
+
+# Freeze the opt-in overlay alongside the base without changing legacy ownership settings.
+# Selection remains explicit in the operator env/CLI for every invocation.
+voice = state / "compose.voice.yml"
+if os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT") and not voice.exists():
+    voice.write_text((repo / "deploy/docker-compose.voice.yml").read_text())

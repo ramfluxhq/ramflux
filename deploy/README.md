@@ -68,6 +68,30 @@ sh deploy/scripts/demo-node.sh down /path/to/demo.env
 sh deploy/scripts/demo-node.sh down /path/to/demo.env --purge
 ```
 
+### Optional voice UDP overlay
+
+Set `RAMFLUX_DEMO_VOICE_UDP_PORT=59449` in the operator env file, or append
+`--voice-udp-port 59449` to a command; the flag overrides the env value. The port
+must be 1024..65535 and distinct from the gateway, relay-client and TURN UDP ports.
+With this option unset, the existing base Compose invocation is unchanged.
+
+The wrapper freezes `deploy/docker-compose.voice.yml` as `compose.voice.yml` in
+its state directory and includes it between the base and ownership override.
+It writes concrete runtime values for `RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT`
+(`DEMO_HOST:PORT`) and `RAMFLUX_RELAY_VOICE_UDP_PORT` (`DEMO_BIND_ADDR:PORT`),
+plus the relay UDP/control listeners and gateway control endpoint. Only voice UDP
+17449 is published at the selected host port; control TCP 17450 stays on the mesh.
+Allow the chosen UDP port through the host/LAN firewall separately.
+
+Voice is an optional overlay outside the frozen base identity settings: enabling,
+changing or removing it with `up` preserves this project's existing data and keys.
+Use the same selection for every invocation (prefer the operator env file).
+Repeat `up` after changing it, before `status`; clearing it and repeating `up`
+removes the voice mapping. A frozen overlay file left behind is ignored when unset.
+Local `status` checks the actual gateway/relay voice env and published UDP mapping
+alongside service health. This checks configuration, not end-to-end audio delivery;
+`status --remote` retains its existing discovery/QUIC checks and does not probe voice.
+
 `up` reuses the existing CA, service certificates, random identity seeds, gateway
 v3 issuer certificate, offline-root-signed provider keyring and provider-signed
 snapshot. Signing code is shared with the s71/s72 production acceptance fixtures.
