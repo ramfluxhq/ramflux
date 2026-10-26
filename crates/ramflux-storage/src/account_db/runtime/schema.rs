@@ -37,9 +37,10 @@ impl AccountDb {
             self.connection
                 .execute_batch("ALTER TABLE runtime_outbox ADD COLUMN keys_json TEXT")?;
         }
+        self.remove_consent_bookkeeping_triggers()?;
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('runtime_outbox','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes')"
+             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('runtime_outbox','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -108,6 +109,21 @@ impl AccountDb {
         }
         self.install_inbox_recovery_schema()?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    fn remove_consent_bookkeeping_triggers(&self) -> Result<(), StorageError> {
+        // Decision clocks and expiry bookkeeping are not domain projections. Existing domain
+        // rows still generate their ordinary invalidations in the same transaction.
+        for table in
+            ["contact_request_decision", "contact_link_decision", "contact_message_fence_retention"]
+        {
+            for operation in ["insert", "update", "delete"] {
+                self.connection.execute_batch(&format!(
+                    "DROP TRIGGER IF EXISTS runtime_{table}_{operation}"
+                ))?;
+            }
+        }
         Ok(())
     }
 }
