@@ -29,6 +29,9 @@ fn skip_merge_table(table: &str) -> bool {
         "contact_request_fence"
             | "contact_request_authority_floor"
             | "contact_message_request_fence"
+            | "contact_request_decision"
+            | "contact_link_decision"
+            | "contact_message_fence_retention"
     ) || table.starts_with("backup_archived_")
         || table == "account_key_check"
         || table.starts_with("schema_")
@@ -134,6 +137,10 @@ impl BackupDatabase {
                 let newer = newer_expression(&table, &columns);
                 let filter = if table == "runtime_actor_state" {
                     "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%'"
+                } else if table == "friend_link_projection" {
+                    "NOT ((r.blocked=1 OR r.state='rejected') AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=r.link_id AND d.state='lifted'))"
+                } else if table == "contact_request_projection" {
+                    "NOT (r.state IN ('blocked','declined') AND EXISTS(SELECT 1 FROM contact_request_decision d WHERE d.root=r.contact_identity_commitment AND d.state='lifted'))"
                 } else if table == "contact_message_request" {
                     "NOT EXISTS(SELECT 1 FROM contact_message_request_fence f WHERE f.sender_identity=r.sender_identity AND f.message_id=r.message_id) AND NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.conversation_id=r.conversation_id) AND NOT EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=r.message_id AND t.conversation_id=r.conversation_id)"
                 } else if table == "runtime_message_content" {
@@ -160,8 +167,15 @@ impl BackupDatabase {
                     newer: &newer,
                     filter,
                 })?;
+                if table == "contact_message_request" {
+                    self.db
+                        .execute_batch("DROP TRIGGER IF EXISTS contact_message_erasure_fence")?;
+                }
                 let replacements=self.db.execute(&format!("DELETE FROM main.{t} AS l WHERE EXISTS(SELECT 1 FROM incoming.{t} r WHERE {join} AND {filter} AND ({newer}))",t=quoted(&table)),[])?;
                 let inserted=self.db.execute(&format!("INSERT OR IGNORE INTO main.{t}({names}) SELECT {names} FROM incoming.{t} r WHERE {filter}",t=quoted(&table)),[])?;
+                if table == "contact_message_request" {
+                    self.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
+                }
                 add_count(&mut report.restored, &table, inserted as u64);
                 add_count(&mut report.kept_newer, &table, kept);
                 let _ = replacements;
@@ -170,7 +184,7 @@ impl BackupDatabase {
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
-            self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; COMMIT;")?;
+            self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; DROP TABLE backup_local_consent; DROP TABLE backup_source_consent; DROP TABLE backup_local_link_consent; DROP TABLE backup_source_link_consent; COMMIT;")?;
             Ok(report)
         })();
         if result.is_err() {
@@ -395,7 +409,7 @@ const ORDER_FIELDS: &[&str] = &[
 ];
 fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
     if table == "friend_link_projection" {
-        return "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND (r.blocked>l.blocked OR (r.capability_revoked_at IS NOT NULL AND l.capability_revoked_at IS NULL) OR (r.state IN ('removed','rejected') AND l.state IN ('accepted','pending'))))".into();
+        return "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND (r.blocked>l.blocked OR (r.capability_revoked_at IS NOT NULL AND l.capability_revoked_at IS NULL) OR (r.state IN ('removed','rejected') AND l.state IN ('accepted','pending')))) OR EXISTS(SELECT 1 FROM backup_source_link_consent s LEFT JOIN backup_local_link_consent old USING(link_id) WHERE s.link_id=r.link_id AND s.decided_at>coalesce(old.decided_at,min(max(coalesce(l.updated_at,0),0),9223372036854775)*1000) AND ((s.state='lifted' AND r.state='accepted' AND r.blocked=0) OR (s.state='blocked' AND r.blocked=1) OR (s.state='declined' AND r.state='rejected')))".into();
     }
     if table == "direct_message_projection" {
         return "r.deleted>l.deleted OR (r.deleted=l.deleted AND r.created_at>l.created_at)".into();
@@ -410,7 +424,7 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
             )
         };
         return format!(
-            "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND ({})>({}))",
+            "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND ({})>({})) OR EXISTS(SELECT 1 FROM backup_source_consent s LEFT JOIN backup_local_consent old USING(root) WHERE s.root=r.contact_identity_commitment AND s.decided_at>coalesce(old.decided_at,min(max(coalesce(l.updated_at,0),0),9223372036854775)*1000) AND ((s.state='lifted' AND r.state='accepted') OR s.state=r.state))",
             rank("r"),
             rank("l")
         );

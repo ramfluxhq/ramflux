@@ -83,6 +83,7 @@ pub(super) fn recover_jobs_excluding(
                 Err(error) => return Err(error.into()),
             }
         }
+        super::output_ownership::recover(&path)?;
         std::fs::remove_dir_all(path)?;
     }
     Ok(())

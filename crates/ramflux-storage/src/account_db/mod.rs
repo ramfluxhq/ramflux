@@ -16,12 +16,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod backup;
+mod backup_consent_merge;
 mod backup_contact_merge;
 pub(crate) mod backup_database;
 pub(crate) mod backup_merge;
 mod backup_missing;
 mod backup_retirement;
 pub mod bot;
+mod contact_consent;
 mod contact_request_retention;
 mod contact_requests;
 pub mod conversation_list;
@@ -226,3 +228,9 @@ mod backup_attachment_tests;
 
 #[cfg(test)]
 mod backup_contact_tests;
+
+#[cfg(test)]
+mod backup_consent_tests;
+
+#[cfg(test)]
+mod backup_missing_tests;

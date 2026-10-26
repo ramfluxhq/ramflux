@@ -228,20 +228,6 @@ impl AccountRuntime {
                         let _ = reply.send(result);
                     }
                 }
-                super::actor::BackupCommand::Missing { after, reply } => {
-                    if !reply.is_closed() {
-                        let result = (|| {
-                            let db =
-                                local_bus_account(&self.state, &self.id)?.client.account_db()?;
-                            Ok(super::backup_jobs::MissingAttachmentPage {
-                                account_id: self.id.clone(),
-                                total: db.backup_missing_count()?,
-                                selectors: db.backup_missing_page(&after)?,
-                            })
-                        })();
-                        let _ = reply.send(result);
-                    }
-                }
             }
             return Ok(false);
         }

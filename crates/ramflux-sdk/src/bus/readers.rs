@@ -8,9 +8,13 @@ use ramflux_crypto::RootQualifiedDeviceRef;
 use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
 type ReaderIdentity = Arc<RwLock<Option<RootQualifiedDeviceRef>>>;
+#[cfg(test)]
+#[path = "readers_backup_tests.rs"]
+mod backup_tests;
 
 pub(super) enum ReadCommand {
     Request(Box<LocalBusFrame>, oneshot::Sender<Result<serde_json::Value, SdkError>>),
+    MissingAttachments(oneshot::Sender<Result<super::backup_jobs::MissingAttachments, SdkError>>),
     Stop(oneshot::Sender<()>),
 }
 
@@ -54,6 +58,21 @@ impl AccountReaders {
                                     let _ = reply.send(result);
                                 }
                             }
+                            ReadCommand::MissingAttachments(reply) => {
+                                if !reply.is_closed() {
+                                    let result = client.account_db().and_then(|db| {
+                                        db.read_snapshot(|| {
+                                            let selectors = db.backup_missing_selectors()?;
+                                            Ok(super::backup_jobs::MissingAttachments {
+                                                account_id: db.local_account_id.clone(),
+                                                total: selectors.len() as u64,
+                                                selectors,
+                                            })
+                                        })
+                                    });
+                                    let _ = reply.send(result);
+                                }
+                            }
                             ReadCommand::Stop(reply) => {
                                 drop(client);
                                 let _ = reply.send(());
@@ -92,6 +111,19 @@ impl AccountReaders {
             .await
             .map_err(|_| closed())?;
         receiver.await.map_err(|_| closed())?
+    }
+
+    pub(super) async fn backup_missing_references(
+        &self,
+    ) -> Result<super::backup_jobs::MissingAttachments, SdkError> {
+        let index =
+            self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.senders.len();
+        let (reply, result) = oneshot::channel();
+        self.senders[index]
+            .send(ReadCommand::MissingAttachments(reply))
+            .await
+            .map_err(|_| closed())?;
+        result.await.map_err(|_| closed())?
     }
 
     pub(super) async fn stop(&self) {

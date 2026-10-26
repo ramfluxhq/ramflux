@@ -12,27 +12,49 @@ fn page(db: &Connection, after: &str) -> rusqlite::Result<Vec<String>> {
         .collect::<rusqlite::Result<_>>()
 }
 impl AccountDb {
-    /// Counts missing references on the actor connection without retaining a reader snapshot.
+    /// Enumerates unavailable references with one hash-set build and one ordered reference scan.
+    /// Run on a reader worker, inside a short read transaction when concurrent writes are possible.
+    /// # Errors
+    /// Returns SQLite or malformed JSON errors; there is no count-based truncation.
+    pub fn backup_missing_selectors(&self) -> Result<Vec<String>, StorageError> {
+        Ok(self.connection.call(|db| {
+            let mut keys = std::collections::HashSet::new();
+            let mut objects = db.prepare("SELECT CAST(manifest_hash AS BLOB),plaintext_hash FROM object_index WHERE manifest_hash IS NOT NULL AND plaintext_hash IS NOT NULL")?;
+            for row in objects.query_map([], |r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?)))? {
+                keys.insert(row?);
+            }
+            let mut refs = db.prepare("SELECT substr(state_kind,length('attachment/reference/')+1),CASE WHEN json_type(CAST(state_json AS TEXT),'$.reference.manifest_hash')='text' THEN json_extract(CAST(state_json AS TEXT),'$.reference.manifest_hash') END,CASE WHEN json_type(CAST(state_json AS TEXT),'$.reference.plaintext_hash')='text' THEN json_extract(CAST(state_json AS TEXT),'$.reference.plaintext_hash') END FROM runtime_actor_state WHERE state_kind LIKE 'attachment/reference/%' ORDER BY state_kind")?;
+            let mut missing=Vec::new();
+            for row in refs.query_map([], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?)))? {
+                let (selector, manifest, plaintext)=row?;
+                if !manifest.zip(plaintext).is_some_and(|(m,p)|keys.contains(&(m.into_bytes(),p))) {
+                    missing.push(selector);
+                }
+            }
+            Ok(missing)
+        })?)
+    }
+    /// Counts unavailable references without a per-reference correlated object scan.
     /// # Errors
     /// Returns SQLite errors.
     pub fn backup_missing_count(&self) -> Result<u64, StorageError> {
-        Ok(self.connection.query_row(
-            &format!("SELECT count(*) FROM runtime_actor_state r WHERE {MISSING}"),
-            [],
-            |r| r.get(0),
-        )?)
+        Ok(self.backup_missing_selectors()?.len() as u64)
     }
-    /// Lists the next 64 missing payload selectors, without decoding references or grants.
+    /// Lists the next 64 unavailable selectors. Fetch preparation uses a single full enumeration.
     /// # Errors
     /// Returns SQLite errors. Continue after the last selector until an empty page.
     pub fn backup_missing_page(&self, after: &str) -> Result<Vec<String>, StorageError> {
-        let after = after.to_owned();
-        Ok(self.connection.call(move |db| page(db, &after))?)
+        Ok(self
+            .backup_missing_selectors()?
+            .into_iter()
+            .filter(|s| s.as_str() > after)
+            .take(64)
+            .collect())
     }
 }
 impl BackupDatabase {
     pub(super) fn ensure_missing_manifest(&self) -> Result<(), StorageError> {
-        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_missing_attachment(selector TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,plaintext_hash TEXT NOT NULL);")?;
+        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_missing_attachment(selector TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,plaintext_hash TEXT NOT NULL); CREATE INDEX IF NOT EXISTS backup_object_plaintext_hash ON object_index(plaintext_hash);")?;
         Ok(())
     }
     /// Lists a bounded page of unavailable payload selectors in the private snapshot.

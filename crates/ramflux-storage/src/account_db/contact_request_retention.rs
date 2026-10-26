@@ -144,8 +144,7 @@ impl AccountDb {
         if !matches!(state, "blocked" | "declined") {
             return Err(StorageError::AuthorizationRejected);
         }
-        self.connection.execute("INSERT INTO contact_request_fence VALUES(?1,?2,?3) ON CONFLICT(root) DO UPDATE SET state=excluded.state,until=excluded.until WHERE contact_request_fence.state<>'blocked' OR excluded.state='blocked'",params![root,state,until])?;
-        Ok(())
+        self.persist_contact_consent(root, Some((state, until)), None)
     }
     /// Remove a local consent fence after the local user explicitly restores consent.
     /// `None` clears any state; `Some(state)` clears only that state, so a block survives a re-add.
@@ -156,11 +155,7 @@ impl AccountDb {
         root: &str,
         state: Option<&str>,
     ) -> Result<(), StorageError> {
-        self.connection.execute(
-            "DELETE FROM contact_request_fence WHERE root=?1 AND (?2 IS NULL OR state=?2)",
-            params![root, state],
-        )?;
-        Ok(())
+        self.persist_contact_consent(root, None, state)
     }
     /// Read the retained decision, including its replay barrier after cooldown.
     /// # Errors
@@ -195,6 +190,8 @@ impl AccountDb {
             "DELETE FROM contact_request_fence WHERE root IN (SELECT root FROM contact_request_fence WHERE until>0 AND until<=?1 LIMIT 128)",
             params![now.saturating_sub(604_800)],
         )?;
+        self.connection.execute("DELETE FROM contact_message_request_fence WHERE (sender_identity,message_id) IN (SELECT sender_identity,message_id FROM contact_message_fence_retention WHERE until<=?1 LIMIT 128)", params![now])?;
+        self.connection.execute("DELETE FROM contact_message_fence_retention WHERE NOT EXISTS(SELECT 1 FROM contact_message_request_fence f WHERE f.sender_identity=contact_message_fence_retention.sender_identity AND f.message_id=contact_message_fence_retention.message_id)", [])?;
         if self.actor_state_exists(MARKER)? {
             return Ok(());
         }

@@ -6,6 +6,7 @@ mod attachments;
 mod format;
 mod generation_lock;
 mod install;
+mod output_ownership;
 mod publication;
 mod reclamation;
 mod recovery;
@@ -28,7 +29,7 @@ mod tests;
 #[cfg(test)]
 mod test_install;
 
-pub(super) struct MissingAttachmentPage {
+pub(super) struct MissingAttachments {
     pub account_id: String,
     pub total: u64,
     pub selectors: Vec<String>,

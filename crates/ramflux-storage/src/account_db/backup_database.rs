@@ -38,6 +38,7 @@ impl BackupDatabase {
         let opened = Self { db };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
+        opened.db.execute_batch(crate::schema_contact_requests::CONSENT_DECISIONS)?;
         Ok(opened)
     }
     /// Copies a quiesced generation to a fresh encrypted private generation.

@@ -222,19 +222,22 @@ impl BackupJobs {
                 return Err(failure(BackupFailureCode::Interrupted));
             }
         }
-        super::publication::publish_cancellable(temporary, output, cancel).map_err(|error| {
-            if cancel.load(Ordering::Acquire) {
-                failure(BackupFailureCode::Interrupted)
-            } else if error.kind() == std::io::ErrorKind::StorageFull {
-                BackupFailure {
-                    needed_bytes: Some(bytes),
-                    available_bytes: fs2::available_space(parent).ok(),
-                    ..failure(BackupFailureCode::InsufficientSpace)
+        let directory = self.root.join(format!("job_{}", job.job_id));
+        super::publication::publish_cancellable(temporary, output, cancel, &directory).map_err(
+            |error| {
+                if cancel.load(Ordering::Acquire) {
+                    failure(BackupFailureCode::Interrupted)
+                } else if error.kind() == std::io::ErrorKind::StorageFull {
+                    BackupFailure {
+                        needed_bytes: Some(bytes),
+                        available_bytes: fs2::available_space(parent).ok(),
+                        ..failure(BackupFailureCode::InsufficientSpace)
+                    }
+                } else {
+                    failure(BackupFailureCode::NotWritable)
                 }
-            } else {
-                failure(BackupFailureCode::NotWritable)
-            }
-        })?;
+            },
+        )?;
         let mut output_guard = PartialFile { path: output.to_owned(), published: false };
         let _ = std::fs::remove_file(temporary);
         std::fs::File::open(parent)

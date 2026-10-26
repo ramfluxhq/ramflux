@@ -3,6 +3,9 @@
 
 //! Exclusive archive publication, including bounded copy for NFS/FUSE without rename flags.
 use super::io::PartialFile;
+#[cfg(test)]
+#[path = "publication_crash_tests.rs"]
+mod crash_tests;
 use std::{
     io::{self, Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -13,6 +16,7 @@ pub(super) fn publish_cancellable(
     temporary: &Path,
     output: &Path,
     cancel: &AtomicBool,
+    stage: &Path,
 ) -> io::Result<()> {
     publish_with_operations(
         temporary,
@@ -20,6 +24,7 @@ pub(super) fn publish_cancellable(
         |from, to| std::fs::hard_link(from, to),
         exclusive_rename,
         cancel,
+        Some(stage),
     )
 }
 fn exclusive_rename(from: &Path, to: &Path) -> io::Result<()> {
@@ -38,7 +43,14 @@ fn publish_with_link(
     output: &Path,
     link: impl FnOnce(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    publish_with_operations(temporary, output, link, exclusive_rename, &AtomicBool::new(false))
+    publish_with_operations(
+        temporary,
+        output,
+        link,
+        exclusive_rename,
+        &AtomicBool::new(false),
+        None,
+    )
 }
 fn publish_with_operations(
     temporary: &Path,
@@ -46,6 +58,7 @@ fn publish_with_operations(
     link: impl FnOnce(&Path, &Path) -> io::Result<()>,
     rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
     cancel: &AtomicBool,
+    stage: Option<&Path>,
 ) -> io::Result<()> {
     if cancel.load(Ordering::Acquire) {
         return Err(io::ErrorKind::ConnectionAborted.into());
@@ -58,14 +71,22 @@ fn publish_with_operations(
     match rename(temporary, output) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
-        Err(_) => copy_exclusive(temporary, output, cancel),
+        Err(_) => copy_exclusive(temporary, output, cancel, stage),
     }
 }
-fn copy_exclusive(temporary: &Path, output: &Path, cancel: &AtomicBool) -> io::Result<()> {
+fn copy_exclusive(
+    temporary: &Path,
+    output: &Path,
+    cancel: &AtomicBool,
+    stage: Option<&Path>,
+) -> io::Result<()> {
     let mut source = std::fs::File::open(temporary)?;
     let mut destination =
         std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(output)?;
     let mut guard = PartialFile { path: output.to_owned(), published: false };
+    if let Some(stage) = stage {
+        super::output_ownership::remember(stage, output, &destination)?;
+    }
     let parent = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     if fs2::available_space(parent)? < source.metadata()?.len() {
         return Err(io::ErrorKind::StorageFull.into());
@@ -82,6 +103,10 @@ fn copy_exclusive(temporary: &Path, output: &Path, cancel: &AtomicBool) -> io::R
         destination.write_all(&buffer[..n])?;
     }
     destination.sync_all()?;
+    std::fs::File::open(parent)?.sync_all()?;
+    if let Some(stage) = stage {
+        super::output_ownership::forget(stage)?;
+    }
     guard.published = true;
     Ok(())
 }
@@ -123,21 +148,23 @@ mod fallback_tests {
         std::fs::write(&source, &bytes)?;
         let unsupported = |_: &Path, _: &Path| Err(io::ErrorKind::Unsupported.into());
         let cancel = AtomicBool::new(false);
-        publish_with_operations(&source, &output, unsupported, unsupported, &cancel)?;
+        publish_with_operations(&source, &output, unsupported, unsupported, &cancel, None)?;
         assert_eq!(std::fs::read(&output)?, bytes);
         assert!(
-            publish_with_operations(&source, &output, unsupported, unsupported, &cancel).is_err()
+            publish_with_operations(&source, &output, unsupported, unsupported, &cancel, None)
+                .is_err()
         );
         assert_eq!(std::fs::read(&output)?, bytes);
         let failed = root.join("failed");
         assert!(
-            publish_with_operations(&root, &failed, unsupported, unsupported, &cancel).is_err()
+            publish_with_operations(&root, &failed, unsupported, unsupported, &cancel, None)
+                .is_err()
         );
         assert!(!failed.exists(), "failed copy must unlink its exclusive partial final");
         let cancelled = root.join("cancelled");
         cancel.store(true, Ordering::Release);
         assert!(
-            publish_with_operations(&source, &cancelled, unsupported, unsupported, &cancel)
+            publish_with_operations(&source, &cancelled, unsupported, unsupported, &cancel, None)
                 .is_err()
         );
         assert!(!cancelled.exists());

@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use super::contact_consent::LinkConsentChange;
 use super::*;
 use crate::row_mappers::{friend_link_from_row, rejected_inbox_from_row};
 use rusqlite::OptionalExtension;
@@ -14,11 +15,13 @@ impl AccountDb {
         requester_id: &str,
         target_id: &str,
     ) -> Result<FriendLinkRecord, StorageError> {
-        self.connection.execute(
-            "INSERT OR REPLACE INTO friend_link_projection
-                (link_id, requester_id, target_id, state, remove_scope, blocked, capability_revoked_at, updated_at)
-             VALUES (?1, ?2, ?3, 'accepted', NULL, 0, NULL, ?4)",
-            params![link_id, requester_id, target_id, self.now_unix()],
+        self.persist_link_consent(
+            link_id,
+            LinkConsentChange::Establish {
+                requester: requester_id.to_owned(),
+                target: target_id.to_owned(),
+                at: self.now_unix(),
+            },
         )?;
         self.friend_link(link_id)
     }
@@ -82,14 +85,7 @@ impl AccountDb {
         link_id: &str,
         rejected_at: i64,
     ) -> Result<FriendLinkRecord, StorageError> {
-        let changed = self.connection.execute(
-            "UPDATE friend_link_projection
-                SET state = 'rejected',
-                    updated_at = ?2
-              WHERE link_id = ?1 AND state = 'pending'",
-            params![link_id, rejected_at],
-        )?;
-        if changed == 0 {
+        if !self.persist_link_consent(link_id, LinkConsentChange::Decline(rejected_at))? {
             return Err(StorageError::AuthorizationRejected);
         }
         self.friend_link(link_id)
@@ -102,15 +98,7 @@ impl AccountDb {
         link_id: &str,
         blocked_at: i64,
     ) -> Result<FriendLinkRecord, StorageError> {
-        self.connection.execute(
-            "UPDATE friend_link_projection
-                SET state = 'blocked',
-                    blocked = 1,
-                    capability_revoked_at = COALESCE(capability_revoked_at, ?2),
-                    updated_at = ?2
-              WHERE link_id = ?1",
-            params![link_id, blocked_at],
-        )?;
+        self.persist_link_consent(link_id, LinkConsentChange::Block(blocked_at))?;
         self.friend_link(link_id)
     }
 
@@ -121,15 +109,7 @@ impl AccountDb {
         link_id: &str,
         unblocked_at: i64,
     ) -> Result<FriendLinkRecord, StorageError> {
-        self.connection.execute(
-            "UPDATE friend_link_projection
-                SET state = 'accepted',
-                    blocked = 0,
-                    capability_revoked_at = NULL,
-                    updated_at = ?2
-              WHERE link_id = ?1",
-            params![link_id, unblocked_at],
-        )?;
+        self.persist_link_consent(link_id, LinkConsentChange::Unblock(unblocked_at))?;
         self.friend_link(link_id)
     }
 

@@ -86,7 +86,7 @@ live value; nonconflicting history is added. The live recovery manifest and live
 outbound crypto always win. Imported outbound state is archived, never resumed. Archive `backup/*` controls never enter the live merge.
 The report distinguishes restored and retained values per category. Verify and install strictly authenticate the archive's supplied payloads and references. Merge does not demand downloads of unchanged local references: those stay fetchable and are reported as `attachments.local_missing_kept`, outside source-omission counts. Local corruption outside the archive contribution does not grant any archive omission approval.
 
-Released/deleted held contact messages have durable per-message erasure fences, which merge unions. Direct-message projections and deletion tombstones also prevent older held copies from returning. Block/decline fences keep the stricter state and maximum expiry, request-state ties prefer restrictive states, and requester authority floors keep the maximum epoch and retention time. Unseen held history remains private; merging never executes its controls.
+Released/deleted held contact messages have per-message erasure fences retained through their seven-day request validity window; expired fences are pruned. Merge replacement is not a user erasure and does not create a fence. Direct-message projections and deletion tombstones also prevent older held copies from returning. Block/decline decisions and explicit lifts (unblock/accept) carry durable ordered decision times. Newer consent wins in either merge direction, including same-tick changes; an older backup cannot restore a lifted denial. Requester authority floors keep the maximum epoch and retention time. Unseen held history remains private; merging never executes its controls.
 
 On an empty data root, restore preserves all history, attachment keys and inbound
 or archived sessions needed for late messages. Saved outbound DM sessions are
@@ -109,7 +109,7 @@ are included; network endpoint reachability and external helper processes are
 re-established separately. The account database is the backup boundary: temporary
 upload spool files outside that database are not historical attachments. Incomplete referenced attachments require the explicit omission workflow described below.
 
-Before opening the snapshot, the actor enumerates missing references in bounded pages and attempts their fetches. Preparing-phase progress reports attempted items and an estimated total; the final attempted count is emitted before snapshot capture. No reader snapshot is held across network waits. The one coherent backup reader opens only after this phase.
+Before opening the backup snapshot, an independent account reader worker builds a hash set of stored attachment metadata and scans reference metadata once. It computes the missing total once and drops that read transaction before the actor attempts fetches. Payload bytes are never loaded by this scan. Preparing-phase progress reports attempted items and an estimated total; the final attempted count is emitted before snapshot capture. No reader snapshot is held across network waits. The one coherent backup reader opens only after this phase.
 
 ## Explicit unavailable-file workflow
 
@@ -163,3 +163,18 @@ The large fixture generator uses ordinary object creation and needs at least
 4 GiB RAM and 12 GiB free disk. Export/verify/install use bounded buffers; fixture
 generation is outside that memory guarantee. Crypto review and large-data QA are
 separate acceptance evidence from local unit tests.
+
+## Copy recovery and reclamation limits
+
+When both hard-link and exclusive-rename publication are unavailable, the final
+file is created exclusively and its device/inode ownership marker is fsynced
+before any copy bytes are written. Restart removes an owned incomplete final
+file, and never claims a pre-existing destination or a replacement inode. The
+marker is removed only after the complete copy and its parent directory are
+synced. Active jobs remain excluded from periodic job-folder cleanup.
+
+If old-generation reclamation fails and another install replaces that generation
+before a restart, an earlier encrypted database can remain orphaned after its
+reclamation marker is removed with the replaced directory. Its key is discarded;
+this accepted limitation can waste disk space but does not select or resume the
+orphaned state.

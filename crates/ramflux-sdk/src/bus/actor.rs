@@ -14,10 +14,6 @@ pub(super) type AccountInitializer =
 
 pub(super) enum BackupCommand {
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
-    Missing {
-        after: String,
-        reply: oneshot::Sender<Result<super::backup_jobs::MissingAttachmentPage, SdkError>>,
-    },
 }
 pub(super) struct AccountCommand {
     pub backup: Option<BackupCommand>,
@@ -118,13 +114,10 @@ impl AccountActor {
         self.send_backup(BackupCommand::Capture(backup)).await?;
         received.await.map_err(|_| stopped())?
     }
-    pub(super) async fn backup_missing_page(
+    pub(super) async fn backup_missing_references(
         &self,
-        after: String,
-    ) -> Result<super::backup_jobs::MissingAttachmentPage, SdkError> {
-        let (reply, received) = oneshot::channel();
-        self.send_backup(BackupCommand::Missing { after, reply }).await?;
-        received.await.map_err(|_| stopped())?
+    ) -> Result<super::backup_jobs::MissingAttachments, SdkError> {
+        self.reader_pool()?.backup_missing_references().await
     }
     async fn send_backup(&self, backup: BackupCommand) -> Result<(), SdkError> {
         let (outbound, _events) = mpsc::channel(1);

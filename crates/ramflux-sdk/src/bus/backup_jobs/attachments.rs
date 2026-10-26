@@ -27,56 +27,45 @@ impl BackupJobs {
         actor: &AccountActor,
         job: &BackupJob,
     ) -> Result<CapturedAccount, SdkError> {
-        let mut after = String::new();
+        let missing = actor.backup_missing_references().await?;
+        let account = missing.account_id;
+        let total = missing.total;
         let mut done = 0_u64;
-        let mut total = 0_u64;
-        loop {
-            let page = actor.backup_missing_page(after.clone()).await?;
-            let account = page.account_id;
-            total = total.max(page.total).max(done.saturating_add(page.selectors.len() as u64));
+        self.progress_fetch(&job.job_id, done, total);
+        for selector in missing.selectors {
+            if self.cancellation(&job.job_id)?.load(Ordering::Acquire) {
+                return Err(refused("interrupted"));
+            }
+            let operation = format!(
+                "backup-fetch:{}:{}",
+                job.job_id,
+                ramflux_protocol::hash_base64url("ramflux.backup.fetch.v1", selector.as_bytes())
+            );
+            let mut request = LocalBusFrame::request(
+                &operation,
+                Some(account.clone()),
+                "object",
+                "object.fetch",
+                serde_json::json!({"object_id":selector,"operation_id":operation}),
+            );
+            request.operation_id = Some(operation.clone());
+            let (outbound, _events) = tokio::sync::mpsc::channel(1);
+            // Each object has its normal bounded fetch deadline; a failure never skips the
+            // next reference. The final snapshot independently enumerates what is missing.
+            let _ = actor
+                .request(AccountCommand {
+                    backup: None,
+                    request,
+                    connection_id: 0,
+                    topics: std::collections::BTreeSet::default(),
+                    attended: true,
+                    nodes: None,
+                    outbound,
+                    reply: None,
+                })
+                .await;
+            done = done.saturating_add(1);
             self.progress_fetch(&job.job_id, done, total);
-            if page.selectors.is_empty() {
-                break;
-            }
-            for selector in page.selectors {
-                if self.cancellation(&job.job_id)?.load(Ordering::Acquire) {
-                    return Err(refused("interrupted"));
-                }
-                after = selector.clone();
-                let operation = format!(
-                    "backup-fetch:{}:{}",
-                    job.job_id,
-                    ramflux_protocol::hash_base64url(
-                        "ramflux.backup.fetch.v1",
-                        selector.as_bytes()
-                    )
-                );
-                let mut request = LocalBusFrame::request(
-                    &operation,
-                    Some(account.clone()),
-                    "object",
-                    "object.fetch",
-                    serde_json::json!({"object_id":selector,"operation_id":operation}),
-                );
-                request.operation_id = Some(operation.clone());
-                let (outbound, _events) = tokio::sync::mpsc::channel(1);
-                // Each object has its normal bounded fetch deadline; a failure never skips the
-                // next reference. The final snapshot independently enumerates what is missing.
-                let _ = actor
-                    .request(AccountCommand {
-                        backup: None,
-                        request,
-                        connection_id: 0,
-                        topics: std::collections::BTreeSet::default(),
-                        attended: true,
-                        nodes: None,
-                        outbound,
-                        reply: None,
-                    })
-                    .await;
-                done = done.saturating_add(1);
-                self.progress_fetch(&job.job_id, done, total);
-            }
         }
         self.progress_fetch(&job.job_id, done, done);
         actor.capture_backup().await

@@ -6,11 +6,17 @@ use super::backup_database::BackupDatabase;
 use crate::StorageError;
 impl BackupDatabase {
     pub(super) fn merge_contact_fences(&self) -> Result<(), StorageError> {
-        self.db.execute_batch("INSERT INTO contact_request_authority_floor(root,epoch,record_hash,until) SELECT root,epoch,record_hash,until FROM incoming.contact_request_authority_floor WHERE 1 ON CONFLICT(root) DO UPDATE SET epoch=MAX(contact_request_authority_floor.epoch,excluded.epoch),record_hash=CASE WHEN excluded.epoch>contact_request_authority_floor.epoch THEN excluded.record_hash ELSE contact_request_authority_floor.record_hash END,until=MAX(contact_request_authority_floor.until,excluded.until); INSERT INTO contact_request_fence(root,state,until) SELECT root,state,until FROM incoming.contact_request_fence WHERE 1 ON CONFLICT(root) DO UPDATE SET state=CASE WHEN contact_request_fence.state='blocked' OR excluded.state='blocked' THEN 'blocked' ELSE 'declined' END,until=MAX(contact_request_fence.until,excluded.until);")?;
+        self.db.execute_batch("INSERT INTO contact_request_authority_floor(root,epoch,record_hash,until) SELECT root,epoch,record_hash,until FROM incoming.contact_request_authority_floor WHERE 1 ON CONFLICT(root) DO UPDATE SET epoch=MAX(contact_request_authority_floor.epoch,excluded.epoch),record_hash=CASE WHEN excluded.epoch>contact_request_authority_floor.epoch THEN excluded.record_hash ELSE contact_request_authority_floor.record_hash END,until=MAX(contact_request_authority_floor.until,excluded.until);")?;
+        self.merge_consent_decisions()?;
         let exists:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE name='contact_message_request_fence')",[],|r|r.get(0))?;
         if exists {
             self.db.execute_batch("INSERT OR IGNORE INTO contact_message_request_fence SELECT sender_identity,message_id FROM incoming.contact_message_request_fence;")?;
         }
+        let timed: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE name='contact_message_fence_retention')", [], |r|r.get(0))?;
+        if timed {
+            self.db.execute_batch("INSERT INTO contact_message_fence_retention SELECT * FROM incoming.contact_message_fence_retention WHERE 1 ON CONFLICT(sender_identity,message_id) DO UPDATE SET until=max(contact_message_fence_retention.until,excluded.until);")?;
+        }
+        self.db.execute_batch("INSERT OR IGNORE INTO contact_message_fence_retention SELECT sender_identity,message_id,unixepoch()+604800 FROM contact_message_request_fence;")?;
         Ok(())
     }
     pub(super) fn apply_merged_contact_fences(&self) -> Result<(), StorageError> {
