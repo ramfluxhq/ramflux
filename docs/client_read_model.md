@@ -349,3 +349,9 @@ expiry and durable decisions on every read and disappear after a decision. Reade
 lookups use the persisted public self principal; private device keys are not loaded.
 `grant.list.approvals` retains its existing aggregate behavior. Listing approvals does
 not grant authority to decide them; existing requester and signature checks still apply.
+
+Accepted inbound contacts expose safety digits from the current root-authenticated local
+manifests even when no explicit `contact.safety_number` request has populated the stored
+projection. This read uses the account reader pool, does not fetch a gateway or write state,
+and does not mark the contact manually verified. Missing, forged or stale manifest material
+leaves the safety number unavailable.

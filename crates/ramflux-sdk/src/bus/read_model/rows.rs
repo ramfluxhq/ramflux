@@ -166,6 +166,16 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
     ] {
         saved[field] = contact[field].clone();
     }
+    // Inbound consent does not pass through the first-contact resolver that caches these
+    // digits. Derive the same projection from authenticated local material on a cold reader.
+    if saved["safety_number"].is_null() && contact["reachable"] == true {
+        match client.cached_contact_safety_digits(contact["root_commitment"].as_str().unwrap_or(""))
+        {
+            Ok(Some(number)) => saved["safety_number"] = json!(number),
+            Ok(None) => {}
+            Err(error) => tracing::debug!(%error, "cached contact safety material unavailable"),
+        }
+    }
     saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);
     saved["safety_number_available"] =
         json!(saved.get("safety_number").is_some_and(|number| !number.is_null()));

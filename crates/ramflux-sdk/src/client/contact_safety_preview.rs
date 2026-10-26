@@ -5,6 +5,39 @@
 use crate::ContactReason;
 use crate::prelude::*;
 impl RamfluxClient {
+    // Reader pools have no private keys or gateway access. Use only the exact cached
+    // root-authenticated sets, never the synthetic legacy safety material fallback.
+    pub(crate) fn cached_contact_safety_digits(
+        &self,
+        peer: &str,
+    ) -> Result<Option<Vec<String>>, SdkError> {
+        let Some(own) = self.read_device_identity()? else {
+            return Ok(None);
+        };
+        if peer == own.root_commitment() {
+            return Ok(None);
+        }
+        let material =
+            |root: &str| -> Result<Option<ramflux_crypto::ContactSafetyMaterial>, SdkError> {
+                let Some(manifest) =
+                    self.account_db()?.load_actor_state::<SdkDeviceManifestResponse>(&format!(
+                        "identity/manifest-root/{root}"
+                    ))?
+                else {
+                    return Ok(None);
+                };
+                super::identity_authority::verify_manifest_authority(&manifest, root)?;
+                if manifest.signed_device_set != self.observed_device_set(root)? {
+                    return Ok(None);
+                }
+                super::contact::contact_safety_material_from_manifest(&manifest).map(Some)
+            };
+        let (Some(own), Some(peer)) = (material(own.root_commitment())?, material(peer)?) else {
+            return Ok(None);
+        };
+        Ok(Some(ramflux_crypto::safety_number(&own, &peer)))
+    }
+
     pub(crate) fn commit_contact_safety(
         &self,
         safety: &SdkContactSafetyNumber,
