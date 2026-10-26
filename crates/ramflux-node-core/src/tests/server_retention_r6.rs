@@ -42,9 +42,14 @@ fn the_retention_sweep_deletes_expired_fences() -> Result<(), Box<dyn std::error
     let now = now_unix_seconds();
     store.set_route_fence_for_test("old-delivery", 7, now - PUSH_ROUTE_FENCE_SECONDS)?;
     store.delete_authenticated_push_routes_at(&owner, None, Some(9))?;
-    assert_eq!(store.sweep_retention(now)?, 1, "only the expired fence is removed");
-    assert_eq!(store.sweep_retention(now + PUSH_ROUTE_FENCE_SECONDS)?, 1);
-    assert_eq!(store.sweep_retention(now + PUSH_ROUTE_FENCE_SECONDS)?, 0);
+    // Redb I/O can cross a wall-clock second after the earlier `now` sample.
+    let (_, set_at) = store
+        .route_fence_for_test(&owner.target_delivery_id)?
+        .ok_or("clear did not persist its fence")?;
+    assert_eq!(store.sweep_retention(set_at)?, 1, "only the expired fence is removed");
+    assert_eq!(store.sweep_retention(set_at + PUSH_ROUTE_FENCE_SECONDS - 1)?, 0);
+    assert_eq!(store.sweep_retention(set_at + PUSH_ROUTE_FENCE_SECONDS)?, 1);
+    assert_eq!(store.sweep_retention(set_at + PUSH_ROUTE_FENCE_SECONDS)?, 0);
     Ok(())
 }
 

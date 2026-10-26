@@ -433,4 +433,16 @@ impl NotifyRedbStore {
         txn.open_table(FENCES).map_err(error)?.insert(target, (seq, set_at)).map_err(error)?;
         txn.commit().map_err(error)
     }
+
+    /// Reads the persisted notify clock for deterministic retention-boundary tests.
+    #[cfg(test)]
+    pub(crate) fn route_fence_for_test(
+        &self,
+        target: &str,
+    ) -> Result<Option<(u64, u64)>, NodeCoreError> {
+        let txn = self.db.begin_read().map_err(error)?;
+        let table = txn.open_table(FENCES).map_err(error)?;
+        let fence = table.get(target).map_err(error)?.map(|value| value.value());
+        Ok(fence)
+    }
 }
