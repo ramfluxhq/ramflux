@@ -52,7 +52,7 @@ pub(crate) async fn recover_alice(root: &Path) -> Result<RamfluxClient, SdkError
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    local_bus_account_backup_import(
+    let _ = local_bus_account_backup_import(
         &mut state,
         &mut LocalBusAccountBackupImportRequest {
             input_path: path.to_string_lossy().into_owned(),

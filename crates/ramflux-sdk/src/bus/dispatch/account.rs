@@ -95,10 +95,12 @@ pub(crate) async fn dispatch_account_bus_request(
         "account.backup.import" => {
             let mut body: LocalBusAccountBackupImportRequest =
                 serde_json::from_value(request.body.clone())?;
-            let response =
+            let (response, contact_restore) =
                 local_bus_account_backup_import(state, &mut body, request.account_id.as_deref())
                     .await?;
-            Ok(local_bus_ok(serde_json::to_value(response)?))
+            let mut response = serde_json::to_value(response)?;
+            response["contact_restore"] = serde_json::to_value(contact_restore)?;
+            Ok(local_bus_ok(response))
         }
         "account.passphrase.rotate" => {
             let account_id = request_account_id(request)?.to_owned();
@@ -345,7 +347,7 @@ async fn local_bus_account_backup_import(
     state: &mut LocalBusDaemonState,
     body: &mut LocalBusAccountBackupImportRequest,
     expected_account: Option<&str>,
-) -> Result<LocalBusAccountCreateResponse, SdkError> {
+) -> Result<(LocalBusAccountCreateResponse, crate::client::BackupContactRestoreReport), SdkError> {
     let bytes = std::fs::read(&body.input_path)?;
     let backup: LocalBusAccountBackupFile = serde_json::from_slice(&bytes)?;
     let restored = decrypt_account_backup_state(&backup, &mut body.passphrase)?;
@@ -363,11 +365,11 @@ async fn local_bus_account_backup_import(
     // Backup import is an offline root/account restore. Rejoining gateway and publishing a fresh
     // device prekey is a separate device-activation flow, so do not touch the network here.
     let response = restore_local_bus_account_offline(state, &manifest).await?;
-    local_bus_account(state, &manifest.local_account_id)?
+    let contact_restore = local_bus_account(state, &manifest.local_account_id)?
         .client
         .restore_backup_contacts(&restored.contacts)?;
     state.active_account_id = Some(response.local_account_id.clone());
-    Ok(response)
+    Ok((response, contact_restore))
 }
 
 fn ensure_local_bus_account_index_record(

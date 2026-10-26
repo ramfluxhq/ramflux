@@ -544,5 +544,61 @@ fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions(
     Ok(())
 }
 
+#[test]
+fn backup_contact_restore_skips_stale_and_pinned_conflicts_but_imports_valid_peers() -> TestResult {
+    let owner = Actor::new("owner", "original", 181, 182, 1)?;
+    let restored = Actor::new("owner", "restored", 181, 183, 1)?;
+    let stale_peer = Actor::new("stale-peer", "stale", 184, 185, 1)?;
+    let pinned_peer = Actor::new("pinned-peer", "pinned", 186, 187, 1)?;
+    let pinned_impostor = Actor::new("pinned-peer", "impostor", 188, 189, 1)?;
+    let valid_peer = Actor::new("valid-peer", "valid", 190, 191, 1)?;
+    let own = owner.manifest()?;
+    let stale = stale_peer.manifest()?;
+    let pinned = pinned_peer.manifest()?;
+    let valid = valid_peer.manifest()?;
+    for (link, manifest) in [("stale", &stale), ("pinned", &pinned), ("valid", &valid)] {
+        observe(&owner.client, manifest)?;
+        owner.client.establish_friend_link(
+            link,
+            &own.principal_commitment,
+            &manifest.principal_commitment,
+        )?;
+    }
+    let contacts = owner.client.backup_contacts()?;
+
+    let mut newer = stale.clone();
+    sign_set(&stale_peer, &mut newer, 2)?;
+    observe(&restored.client, &newer)?;
+    observe(&restored.client, &pinned_impostor.manifest()?)?;
+
+    let report = restored.client.restore_backup_contacts(&contacts)?;
+    assert_eq!(
+        serde_json::to_value(report)?,
+        serde_json::json!({
+            "restored": 1,
+            "skipped": [
+                {"reason": "pinned_conflict", "count": 1},
+                {"reason": "stale_authority", "count": 1}
+            ]
+        })
+    );
+    assert!(
+        restored.client.account_db()?.friend_link_for_peer(&stale.principal_commitment)?.is_none()
+    );
+    assert!(
+        restored.client.account_db()?.friend_link_for_peer(&pinned.principal_commitment)?.is_none()
+    );
+    assert!(restored.client.friend_link_peer_is_accepted(&valid.principal_commitment)?);
+    assert_eq!(
+        restored
+            .client
+            .observed_device_set(&stale.principal_commitment)?
+            .ok_or("stale peer record")?
+            .device_set_epoch,
+        2
+    );
+    Ok(())
+}
+
 #[path = "profile_tests.rs"]
 mod profile;

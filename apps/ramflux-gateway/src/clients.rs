@@ -1192,18 +1192,45 @@ pub(crate) mod tests {
         pub(crate) ca_pem: String,
     }
 
+    static TEMP_CERT_ROOT_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     pub(crate) fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ramflux_gateway_{name}_{}_{}",
-            std::process::id(),
-            nanos
-        ));
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
+        temp_cert_root_at(name, nanos)
+    }
+
+    fn temp_cert_root_at(name: &str, nanos: u128) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        for _ in 0..16 {
+            let sequence =
+                TEMP_CERT_ROOT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "ramflux_gateway_{name}_{}_{}_{}",
+                std::process::id(),
+                nanos,
+                sequence
+            ));
+            match std::fs::create_dir(&root) {
+                Ok(()) => return Ok(root),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-        std::fs::create_dir_all(&root)?;
-        Ok(root)
+        Err("could not allocate a unique gateway test certificate directory".into())
+    }
+
+    #[test]
+    fn temp_cert_roots_with_the_same_clock_tick_are_unique_and_never_replace_each_other()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let first = temp_cert_root_at("same-tick", 1)?;
+        let marker = first.join("owned-by-first-test");
+        std::fs::write(&marker, b"first")?;
+        let second = temp_cert_root_at("same-tick", 1)?;
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&marker)?, b"first");
+        std::fs::remove_dir_all(first)?;
+        std::fs::remove_dir_all(second)?;
+        Ok(())
     }
 
     pub(crate) fn issue_test_ca_and_service_cert(

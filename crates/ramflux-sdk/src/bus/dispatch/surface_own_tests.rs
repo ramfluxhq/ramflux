@@ -850,7 +850,10 @@ async fn restore_contacts_from_encrypted_backup(
         "account.backup.import",
         json!({"input_path":path,"passphrase":"restore-test-secret"}),
     );
-    super::super::account::dispatch_account_bus_request(&import, &mut restored).await?;
+    let response =
+        super::super::account::dispatch_account_bus_request(&import, &mut restored).await?;
+    assert_eq!(response.response_body["contact_restore"]["restored"], 1);
+    assert_eq!(response.response_body["contact_restore"]["skipped"], json!([]));
     sibling = restored.accounts.remove("sender").ok_or("restored account")?;
     assert!(sibling.engine.is_none(), "backup import must remain offline");
     assert!(sibling.client.friend_link_peer_is_accepted(peer_root)?);

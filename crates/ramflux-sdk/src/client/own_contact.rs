@@ -32,6 +32,52 @@ struct MissingManifest {
     next_at: i64,
 }
 impl RamfluxClient {
+    pub(super) fn backup_contact_skip_reason(
+        &self,
+        body: &[u8],
+    ) -> Result<Option<crate::client::backup_contacts::BackupContactSkipReason>, SdkError> {
+        use crate::client::backup_contacts::BackupContactSkipReason;
+
+        if tombstone::is_packet(body) {
+            return Ok(None);
+        }
+        let Some(raw) = body.strip_prefix(PREFIX) else {
+            return Ok(None);
+        };
+        let contact: Contact = ramflux_protocol::parse_i_json(raw)?;
+        let own = self.owned_device_identity()?;
+        let peer = &contact.manifest.principal_commitment;
+        let link = &contact.link;
+        if peer == own.root_commitment()
+            || link.state != "accepted"
+            || link.blocked
+            || link.capability_revoked_at.is_some()
+            || !((link.requester_id == own.root_commitment() && link.target_id == *peer)
+                || (link.target_id == own.root_commitment() && link.requester_id == *peer))
+        {
+            return Err(SdkError::InboundRejected("own contact relationship root mismatch".into()));
+        }
+        crate::client::contact::verify_device_manifest(&contact.manifest, peer)?;
+        let db = self.account_db()?;
+        if db.find_friend_link(&link.link_id)?.is_some_and(|existing| {
+            existing.requester_id != link.requester_id || existing.target_id != link.target_id
+        }) || db.client_record("identity", &contact.manifest.principal_id)?.is_some_and(|old| {
+            old["contact_identity_commitment"].as_str().is_some_and(|root| root != peer)
+        }) {
+            return Ok(Some(BackupContactSkipReason::PinnedConflict));
+        }
+        let record = contact
+            .manifest
+            .signed_device_set
+            .as_ref()
+            .ok_or_else(|| SdkError::InboundRejected("missing signed set".into()))?;
+        match self.check_observed_set(record) {
+            Ok(()) => Ok(None),
+            Err(SdkError::Storage(error)) => Err(SdkError::Storage(error)),
+            Err(_) => Ok(Some(BackupContactSkipReason::StaleAuthority)),
+        }
+    }
+
     pub(crate) fn stage_own_contact(
         &self,
         manifest: &SdkDeviceManifestResponse,
