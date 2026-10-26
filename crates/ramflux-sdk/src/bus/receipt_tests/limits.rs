@@ -551,3 +551,53 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn a_backwards_clock_step_cannot_extend_the_receipt_gateway_cooldown() -> TestResult {
+    let mut p = Box::pin(pending("receipt-clock-step")).await?;
+    ready(&p)?;
+    p.mail.lock().map_err(|_| "mailbox")?.reject_id = None;
+    p.receiver
+        .client
+        .account_db()?
+        .persist_actor_state(GATEWAY_RETRY_AT, &now_unix_timestamp().saturating_add(3600))?;
+    assert_eq!(flush(&mut p.receiver).await?, 1);
+    assert!(!p.receiver.client.account_db()?.actor_state_exists(GATEWAY_RETRY_AT)?);
+    drop(p.receiver);
+    std::fs::remove_dir_all(p.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn malformed_receipt_retention_metadata_does_not_abort_the_sync_pass() -> TestResult {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let mut p = Box::pin(pending("receipt-retention-failure")).await?;
+            ready(&p)?;
+            p.mail.lock().map_err(|_| "mailbox")?.reject_id = None;
+            p.receiver.client.account_db()?.persist_actor_state(
+                "delivery-receipt/retention-cursor",
+                &json!(["invalid legacy cursor"]),
+            )?;
+            assert!(
+                p.receiver
+                    .client
+                    .account_db()?
+                    .retain_delivery_receipts(now_unix_timestamp(), 128)
+                    .is_err()
+            );
+            assert!(crate::bus::sync_driver::run(&mut p.receiver).await? >= 1);
+            assert!(!p.receiver.client.account_db()?.actor_state_exists(&p.key)?);
+            assert_eq!(
+                p.receiver
+                    .client
+                    .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                    .ok_or("status")?["state"],
+                "sent"
+            );
+            drop(p.receiver);
+            std::fs::remove_dir_all(p.root)?;
+            Ok(())
+        }))
+        .await
+}

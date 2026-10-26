@@ -33,7 +33,11 @@ impl Schedule {
 
 pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     account.client.account_db()?.expire_backup_pairs(now_unix_timestamp())?;
-    account.client.account_db()?.retain_delivery_receipts(now_unix_timestamp(), 128)?;
+    if let Err(error) = account.client.account_db().and_then(|db| {
+        db.retain_delivery_receipts(now_unix_timestamp(), 128).map_err(SdkError::from)
+    }) {
+        tracing::warn!(%error, "receipt retention failed; continuing sync");
+    }
     account.client.finish_pair_retirement()?;
     super::dispatch::call::expire_due(account)?;
     let mut engine = account.take_live_engine().await?;

@@ -13,8 +13,13 @@ const GATEWAY_RETRY_AT: &str = "delivery-receipt/gateway-retry-at";
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     let now = now_unix_timestamp();
     let db = account.client.account_db()?;
-    if db.load_actor_state::<i64>(GATEWAY_RETRY_AT)?.is_some_and(|at| at > now) {
-        return Ok(0);
+    if let Some(at) = db.load_actor_state::<i64>(GATEWAY_RETRY_AT)? {
+        // A persisted cooldown must never extend beyond its thirty-second duration,
+        // including after a backwards wall-clock correction or a restored database.
+        if now < at && at <= now.saturating_add(30) {
+            return Ok(0);
+        }
+        db.remove_actor_state(GATEWAY_RETRY_AT)?;
     }
     let after = db.load_actor_state::<String>(SCAN_CURSOR)?.unwrap_or_default();
     let mut keys = db.actor_state_key_page_after(PREFIX, &after, SCAN)?;

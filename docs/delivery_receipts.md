@@ -43,15 +43,30 @@ next-at timestamp is committed before I/O, so interruption/restart also respects
 Connection acquisition, preparation and submission share a three-second I/O deadline. Expired/exhausted or trust-invalid
 work is retired with a durable `message.delivery_receipt.failed` metadata event containing
 conversation, message and receiving device. Failure never claims Delivered on the sender.
+A deadline explicitly retires the uncertain session. A persisted thirty-second cooldown
+prevents receipt-driven reconnects for other queued jobs; it does not delay ordinary sync.
+A timestamp more than thirty seconds in the future is discarded, so a backwards wall-clock
+step cannot extend the cooldown indefinitely.
+
+Receipt statuses, outbound wire bindings and failed-receipt journal entries expire after
+thirty days in bounded batches (at most 128 metadata rows and 128 failure events per sync
+pass). Untimestamped legacy metadata gets thirty days from first observation. Failure to
+sweep is logged and never aborts synchronization. Journal pruning preserves gap detection.
+Message origin attribution is never swept: it survives with the message and is removed
+through message deletion/tombstones, independently of receipt status. Origins enrolled
+by older receipt retention ledgers are also protected.
 
 ## Client compatibility and attribution
 
-`message.receipt.delivered` remains accepted. Once an automatic intent exists, this
-method is an idempotent no-op, including while that intent is pending. The response adds
-`delivery_receipt_state` (`pending`, `sent`, `failed`) and `already_sent`; its scope is
-`network_e2ee` after submission and `daemon_queue` otherwise. It does not bypass the retry
-budget or replace the prepared packet with client-supplied routing. The legacy explicit
-path remains available for messages without an automatic intent.
+`message.receipt.delivered` remains accepted. It is an idempotent no-op for `pending`
+and `sent` automatic work. For `failed` work, an explicit request by the owned receiving
+device re-stages the stored authenticated intent with a fresh eight-attempt/ten-minute
+budget; the courier still rechecks sender trust and root before sending. Replaying the
+inbox does not automatically re-stage failures. The response adds `delivery_receipt_state`
+(`pending`, `sent`, `failed`) and `already_sent`; its scope is `network_e2ee` after
+submission and `daemon_queue` otherwise. Client-supplied routing never replaces the saved
+intent. Once retention removes a status, the existing legacy explicit path is available
+again, using retained attribution and current authenticated routing.
 
 `message.read` / `message.list` rows and received-message journal rows add:
 

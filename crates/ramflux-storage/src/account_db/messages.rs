@@ -354,6 +354,7 @@ impl AccountDb {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![tombstone_id, conversation_id, message_id, delete_scope, self.now_unix()],
         )?;
+        self.remove_message_origin(conversation_id, message_id)?;
         Ok(MessageTombstoneRecord {
             tombstone_id: tombstone_id.to_owned(),
             conversation_id: conversation_id.to_owned(),

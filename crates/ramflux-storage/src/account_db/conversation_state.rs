@@ -106,6 +106,7 @@ impl AccountDb {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![tombstone_id, conversation_id, message_id, policy.scope, now],
             )?;
+            self.remove_message_origin(conversation_id, &message_id)?;
             tombstones.push(MessageTombstoneRecord {
                 tombstone_id,
                 conversation_id: conversation_id.to_owned(),

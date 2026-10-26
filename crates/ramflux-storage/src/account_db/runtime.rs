@@ -6,6 +6,7 @@
 mod acknowledgements;
 mod config;
 mod control;
+mod message_origin;
 mod operations;
 mod outbox;
 mod ratchet_metadata;

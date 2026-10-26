@@ -581,6 +581,7 @@ impl AccountDb {
               WHERE conversation_id = ?1 AND message_id = ?2 AND deleted = 0",
                 params![delete.group_id, delete.target_message_id],
             )?;
+            self.remove_message_origin(&delete.group_id, &delete.target_message_id)?;
             self.connection.execute(
                 "INSERT OR REPLACE INTO group_message_tombstone_projection
                 (group_id, message_id, tombstone_id, actor_device_id, delete_scope,

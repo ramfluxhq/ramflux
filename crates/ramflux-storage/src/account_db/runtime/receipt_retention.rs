@@ -6,10 +6,18 @@ use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
 const AGE: i64 = 30 * 24 * 60 * 60;
-const PREFIXES: [&str; 3] =
-    ["delivery-receipt/status/", "message/origin/", "delivery-receipt/outbound/"];
+const PREFIXES: [&str; 2] = ["delivery-receipt/status/", "delivery-receipt/outbound/"];
 const CURSOR: &str = "delivery-receipt/retention-cursor";
 impl AccountDb {
+    /// Acquires the receipt writer before any reads in a deferred transaction.
+    /// This no-op write upgrades the transaction without changing domain state or outbox rows.
+    /// # Errors
+    /// Returns database lock or schema errors.
+    pub fn reserve_receipt_write(&self) -> Result<(), StorageError> {
+        self.connection.execute("UPDATE runtime_receipt_retention SET at=at WHERE 0", [])?;
+        Ok(())
+    }
+
     pub(super) fn install_receipt_retention_schema(&self) -> Result<(), StorageError> {
         self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_receipt_retention (state_kind TEXT PRIMARY KEY, at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS runtime_receipt_retention_age ON runtime_receipt_retention(at,state_kind);")?;
         Ok(())
@@ -40,6 +48,7 @@ impl AccountDb {
             .load_actor_state::<std::collections::BTreeMap<String, String>>(CURSOR)?
             .unwrap_or_default();
         let mut cursors = old.clone();
+        cursors.remove("message/origin/");
         for prefix in PREFIXES {
             let after = cursors.get(prefix).cloned().unwrap_or_default();
             let mut keys = self.actor_state_key_page_after(prefix, &after, batch)?;
@@ -70,10 +79,13 @@ impl AccountDb {
     pub fn retain_delivery_receipts(&self, now: i64, batch: u32) -> Result<(), StorageError> {
         let batch = batch.clamp(1, 256);
         self.write_transaction(|| {
+            self.reserve_receipt_write()?;
+            // Upgrade r1 ledgers without ever deleting their durable message attribution.
+            self.connection.execute("DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT state_kind FROM runtime_receipt_retention WHERE state_kind >= 'message/origin/' AND state_kind < 'message/origin0' ORDER BY state_kind LIMIT ?1)", rusqlite::params![batch])?;
             self.enroll_legacy_receipts(now, batch)?;
             let cutoff=now.saturating_sub(AGE);
-            self.connection.execute("DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM runtime_receipt_retention WHERE at<=?1 ORDER BY at,state_kind LIMIT ?2)", params![cutoff,batch])?;
-            self.connection.execute("DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT state_kind FROM runtime_receipt_retention WHERE at<=?1 ORDER BY at,state_kind LIMIT ?2)", params![cutoff,batch])?;
+            self.connection.execute("DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM runtime_receipt_retention WHERE at<=?1 AND (state_kind >= 'delivery-receipt/status/' AND state_kind < 'delivery-receipt/status0' OR state_kind >= 'delivery-receipt/outbound/' AND state_kind < 'delivery-receipt/outbound0') ORDER BY at,state_kind LIMIT ?2)", params![cutoff,batch])?;
+            self.connection.execute("DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT state_kind FROM runtime_receipt_retention WHERE at<=?1 AND (state_kind >= 'delivery-receipt/status/' AND state_kind < 'delivery-receipt/status0' OR state_kind >= 'delivery-receipt/outbound/' AND state_kind < 'delivery-receipt/outbound0') ORDER BY at,state_kind LIMIT ?2)", params![cutoff,batch])?;
             let max_seq: Option<u64> = self.connection.query_row("SELECT max(seq) FROM (SELECT seq FROM runtime_journal WHERE topic='message.delivery_receipt.failed' AND at<=?1 ORDER BY seq LIMIT ?2)",params![cutoff,batch], |row|row.get(0))?;
             if let Some(seq)=max_seq {
                 self.connection.execute("DELETE FROM runtime_journal WHERE topic='message.delivery_receipt.failed' AND at<=?1 AND seq<=?2",params![cutoff,seq])?;
@@ -81,5 +93,37 @@ impl AccountDb {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn origins_already_enrolled_by_r1_never_expire_even_beyond_the_migration_batch()
+    -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("receipt-origin-upgrade")?;
+        let origin =
+            serde_json::json!({"sender_device_id":"original","sender_root_commitment":"root"});
+        for n in 0..5 {
+            let key = format!("message/origin/{n}");
+            db.persist_actor_state(&key, &origin)?;
+            db.connection.execute(
+                "INSERT INTO runtime_receipt_retention(state_kind,at) VALUES(?1,0)",
+                rusqlite::params![key],
+            )?;
+        }
+        for _ in 0..4 {
+            db.retain_delivery_receipts(AGE * 3, 1)?;
+            for n in 0..5 {
+                assert_eq!(
+                    db.load_actor_state::<serde_json::Value>(&format!("message/origin/{n}"))?,
+                    Some(origin.clone())
+                );
+            }
+        }
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
