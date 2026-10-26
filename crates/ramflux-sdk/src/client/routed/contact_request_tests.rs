@@ -56,8 +56,12 @@ async fn message(state: &mut LocalBusDaemonState, text: &str) -> Result<(), SdkE
     );
     let (outbound, _receiver) = tokio::sync::mpsc::channel(8);
     let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
-    crate::bus::dispatch::message::dispatch_message_bus_request(&request, state, &connection)
-        .await?;
+    Box::pin(crate::bus::dispatch::message::dispatch_message_bus_request(
+        &request,
+        state,
+        &connection,
+    ))
+    .await?;
     Ok(())
 }
 fn account<'a>(state: &'a LocalBusDaemonState, who: &str) -> Result<&'a RamfluxClient, SdkError> {
