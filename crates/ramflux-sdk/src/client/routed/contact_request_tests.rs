@@ -589,3 +589,5 @@ async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_prove
 
 #[path = "contact_followup_tests.rs"]
 mod followups;
+#[path = "contact_request_safety_tests.rs"]
+mod safety;
