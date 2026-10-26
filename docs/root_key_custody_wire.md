@@ -412,20 +412,29 @@ already supply this evidence.
 
 Use verifier-local trusted time `now`, skew `S = 300` seconds. A lease is live iff
 `not_before - S <= now <= expires_at + S`. Check original positive duration
-without skew: skew never extends the signed maximum. Fresh proof/consent must
+without skew: skew never extends the signed maximum. Before accepting live state,
+require every event timestamp (`issued_at`, `erased_at`, `accepted_at`) to be at
+most `now + S`; validity endpoints are not event timestamps. Fresh proof/consent must
 satisfy `issued_at <= now + S` and `now <= expires_at + S`, plus current branch
 lease, epoch/range, capability, revocation and replay checks. Use checked arithmetic.
 
 Queued-message exception is for previously accepted messages, not fresh
 registration, delegation mutations or new sends. The branch-signed message time
 `t` and authenticated relay acceptance time `a` must each lie in
-`[not_before - S, expires_at + S]`, and `t <= a + S`, `a <= now + S`.
+`[not_before - S, expires_at + S]`, and `t <= a + S`, `t <= now + S`, `a <= now + S`.
 Require relay acceptance evidence bound to the exact signed-message hash and
 source, authenticated by the configured relay service identity. Missing evidence
 fails the exception; a self-claimed relay timestamp is insufficient. Current
 revocations and retained authority floors still apply. Already pinned local history
-remains readable regardless of current lease. Persist authenticated-time high-water
-marks; rollback/unknown time blocks new authorization, never local history reading.
+remains readable regardless of current lease. Persist the maximum fully
+authenticated, locally plausible event time as high-water mark `H`; never use
+future validity endpoints, unverified data or a bare directory clock to advance
+it. A local clock rollback is detected when `now + S < H`. It blocks new
+authorization until trusted local time is re-established, never local history
+reading; missing/unknown trusted time has the same send-blocking behaviour. Time
+checks precede pin/high-water updates, preventing future-dated state from poisoning
+the time floor. These marks detect observed rollback; they do not establish UTC
+on a device that has no trustworthy local clock.
 
 Every verifier (SDK, router, gateway/directory, federation, peers) performs:
 
