@@ -27,7 +27,8 @@ struct RowSelection<'a> {
 fn skip_merge_table(table: &str) -> bool {
     matches!(
         table,
-        "contact_request_fence"
+        "shared_group_member_projection"
+            | "contact_request_fence"
             | "contact_request_authority_floor"
             | "contact_message_request_fence"
             | "contact_request_decision"
@@ -92,18 +93,26 @@ impl BackupDatabase {
         &mut self,
         path: &Path,
         key: &AccountDbKey,
+        progress: impl FnMut() -> Result<(), StorageError>,
+    ) -> Result<BackupMergeReport, StorageError> {
+        self.merge_backup_with_group_actor(path, key, None, progress)
+    }
+    /// Merge while rebuilding shared groups from verified snapshots and durable removal floors.
+    /// # Errors
+    /// Refuses incompatible authorities, unsafe removal rollback, or missing local certification.
+    pub fn merge_backup_with_group_actor(
+        &mut self,
+        path: &Path,
+        key: &AccountDbKey,
+        local: Option<&ramflux_protocol::GroupStateActor>,
         mut progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
         self.check_backup_pins(path, key)?;
         self.attach(path, key)?;
         let result = (|| {
-            let tables = {
-                let mut statement=self.db.prepare("SELECT name FROM incoming.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
-                statement
-                    .query_map([], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
+            let tables = self.incoming_tables()?;
             self.db.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
+            let shared_groups = self.select_backup_shared_groups(local)?;
             self.preserve_imported_archives(key)?;
             self.merge_contact_fences()?;
             self.prepare_conversation_counts()?;
@@ -182,6 +191,9 @@ impl BackupDatabase {
                 let _ = replacements;
             }
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));")?;
+            if let Some(local) = local {
+                self.project_backup_shared_groups(&shared_groups, local)?;
+            }
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
@@ -193,6 +205,12 @@ impl BackupDatabase {
         }
         self.db.execute_batch("DROP TABLE IF EXISTS main.backup_local_pair; DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
         result
+    }
+    fn incoming_tables(&self) -> Result<Vec<String>, StorageError> {
+        let mut statement = self.db.prepare("SELECT name FROM incoming.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+        Ok(statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     fn prepare_conversation_counts(&self) -> Result<(), StorageError> {
         // These scratch indexes live in the encrypted private generation, not SQLite temp files.

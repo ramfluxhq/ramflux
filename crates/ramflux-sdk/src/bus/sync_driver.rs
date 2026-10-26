@@ -234,7 +234,7 @@ async fn receive_page(
         } else if now >= expires && account.client.account_db()?.has_inbox_retry(&key)? {
             Err(SdkError::InboundRejected("gateway TTL expired".to_owned()))
         } else {
-            process(account, engine, pool, &entry).await
+            Box::pin(process(account, engine, pool, &entry)).await
         };
         let mut project_message = false;
         let accepted = match outcome {

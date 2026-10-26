@@ -32,6 +32,7 @@ fn forged_group_traffic(sender: &Fixture) -> Result<(Vec<u8>, Vec<u8>), SdkError
         group_key_epoch: epoch,
         group_state_hash: None,
         sender_key_seed: seed,
+        sender_key_signature: None,
         sender_device_signing_public_key: Some(
             manifest(sender)?.devices[0].branch_public_key.clone(),
         ),

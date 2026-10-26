@@ -16,6 +16,8 @@ pub struct SdkGroupSenderKeyDistribution {
     pub group_state_hash: Option<String>,
     pub sender_key_seed: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_key_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_device_signing_public_key: Option<String>,
 }
 

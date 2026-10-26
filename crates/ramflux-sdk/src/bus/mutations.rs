@@ -67,7 +67,8 @@ pub(super) async fn execute(
         .map(|account| super::control_state::snapshot(account, &command.request))
         .transpose()?
         .flatten();
-    let result = dispatch_local_bus_request(&command.request, state, &mut connection).await?;
+    let result =
+        Box::pin(dispatch_local_bus_request(&command.request, state, &mut connection)).await?;
     if let Some(account) = state.accounts.get(account_id) {
         super::read_model::capture(account, &command.request, &result.response_body)?;
     }

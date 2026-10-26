@@ -114,7 +114,8 @@ impl BackupJobs {
             BackupDatabase::open(&self.data_root.join(&record.db_relative_path), &key)?
                 .copy_to(&target, &installed_key)?;
             let mut merged = BackupDatabase::open(&target, &installed_key)?;
-            let report = merged.merge_backup(&incoming, &incoming_key, || Ok(()))?;
+
+            let report = merge_shared_backup(&mut merged, &incoming, &incoming_key, &local)?;
             metadata.manifest = local;
             (report.restored, report.kept_newer)
         } else {
@@ -266,4 +267,27 @@ fn wrap_installed_key(
         nonce,
         wrapped_key,
     })
+}
+
+fn backup_group_actor(
+    local: &crate::bus::LocalBusPersistedAccount,
+) -> Result<ramflux_protocol::GroupStateActor, SdkError> {
+    let root = ramflux_crypto::create_identity_root(&local.principal_id, local.root_seed);
+    let branch = ramflux_crypto::create_device_branch(
+        &local.principal_id,
+        &local.device_id,
+        1,
+        local.device_seed,
+    );
+    Ok(ramflux_crypto::certify_group_state_actor(&root, &branch, &local.target_delivery_id)?)
+}
+
+fn merge_shared_backup(
+    db: &mut BackupDatabase,
+    incoming: &Path,
+    key: &AccountDbKey,
+    local: &crate::bus::LocalBusPersistedAccount,
+) -> Result<ramflux_storage::BackupMergeReport, SdkError> {
+    let actor = backup_group_actor(local)?;
+    Ok(db.merge_backup_with_group_actor(incoming, key, Some(&actor), || Ok(()))?)
 }

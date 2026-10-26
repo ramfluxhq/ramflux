@@ -511,6 +511,7 @@ impl RamfluxClient {
                         group_key_epoch: group.group_epoch,
                         group_state_hash: None,
                         sender_key_seed: state.session_snapshot.root_key_bytes(),
+                        sender_key_signature: None,
                         sender_device_signing_public_key: self
                             .account_db()?
                             .group_member_device_key(

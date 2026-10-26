@@ -349,3 +349,190 @@ fn r6_receiver_removal_floor_survives_a_snapshot_without_exclusions_and_allows_l
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn backup_merge_selects_signed_group_state_and_preserves_removal_floors_in_both_directions()
+-> Result<(), StorageError> {
+    let (owner_root, owner, actor) = person("owner", "phone", 10)?;
+    let (_, _, member) = person("removed", "phone", 20)?;
+    let initial = create(&owner_root, &owner, &actor)?;
+    let joined = advance_group_state(
+        &owner_root,
+        &owner,
+        &actor,
+        &initial,
+        GroupStateChange::Add { member: member.identity.clone(), role: SharedGroupRole::Member },
+    )?;
+    let removed = advance_group_state(
+        &owner_root,
+        &owner,
+        &actor,
+        &joined,
+        GroupStateChange::Remove {
+            root_commitment: member.identity.root_commitment.clone(),
+            device_id: member.identity.device_id.clone(),
+        },
+    )?;
+    let pruned = renamed_branch(&owner_root, &owner, &actor, initial, "Restored", 3)?;
+    let unsafe_branch = renamed_branch(&owner_root, &owner, &actor, joined.clone(), "Unsafe", 5)?;
+    for incoming_newer in [false, true] {
+        let (root, source) = test_db(&format!("backup-shared-source-{incoming_newer}"))?;
+        let (local_root, local) = test_db(&format!("backup-shared-live-{incoming_newer}"))?;
+        let (newer, older) = if incoming_newer { (&source, &local) } else { (&local, &source) };
+        older.commit_shared_group_state(&joined, &actor)?;
+        newer.commit_shared_group_state(&joined, &actor)?;
+        newer.commit_shared_group_state(&removed, &actor)?;
+        newer.commit_shared_group_state(&pruned, &actor)?;
+        // Exercise the upgrade path: the old inactive verified projection still fences re-admission.
+        newer.remove_actor_state(&format!(
+            "group-state/removal-floors/{}",
+            ramflux_protocol::encode_base64url("group")
+        ))?;
+        let incoming = root.join("incoming.db");
+        let snapshot = source.write_backup_snapshot(&incoming)?;
+        let target = local_root.join("merged.db");
+        let saved = local.write_backup_snapshot(&target)?;
+        let mut merged = crate::BackupDatabase::open(&target, &saved.key)?;
+        merged.merge_backup_with_group_actor(&incoming, &snapshot.key, Some(&actor), || Ok(()))?;
+        let state: Vec<u8> = merged.db.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",
+            rusqlite::params![format!(
+                "group-state/{}",
+                ramflux_protocol::encode_base64url("group")
+            )],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            serde_json::from_slice::<ramflux_protocol::GroupStateSnapshot>(&state)?,
+            *pruned.snapshot()
+        );
+        let (epoch,active):(u64,u64) = merged.db.query_row("SELECT group_epoch,(SELECT count(*) FROM shared_group_member_projection WHERE group_id='group' AND active=1) FROM group_projection WHERE group_id='group'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        assert_eq!((epoch, active), (pruned.view().epoch, 1));
+        let removed_active:u64=merged.db.query_row("SELECT count(*) FROM shared_group_member_projection WHERE group_id='group' AND root_commitment=?1 AND active=1",rusqlite::params![member.identity.root_commitment],|r|r.get(0))?;
+        assert_eq!(removed_active, 0);
+        let title:Vec<u8>=merged.db.query_row("SELECT state_json FROM runtime_actor_state WHERE state_kind='directory/conversation/thread'",[],|r|r.get(0))?;
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&title)?["title"], "Restored-2");
+        // A newer archive on the removed member's stale line must fail atomically.
+        let (bad_root, bad) = test_db(&format!("backup-shared-bad-{incoming_newer}"))?;
+        bad.commit_shared_group_state(&unsafe_branch, &actor)?;
+        let bad_path = bad_root.join("bad.db");
+        let bad_snapshot = bad.write_backup_snapshot(&bad_path)?;
+        assert!(
+            merged
+                .merge_backup_with_group_actor(
+                    &bad_path,
+                    &bad_snapshot.key,
+                    Some(&actor),
+                    || Ok(())
+                )
+                .is_err()
+        );
+        let after: Vec<u8> = merged.db.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",
+            rusqlite::params![format!(
+                "group-state/{}",
+                ramflux_protocol::encode_base64url("group")
+            )],
+            |r| r.get(0),
+        )?;
+        assert_eq!(state, after);
+        merged.check_integrity()?;
+        drop((merged, source, local, bad));
+        for path in [root, local_root, bad_root] {
+            std::fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn backup_merge_cannot_replace_a_later_live_head_with_a_stale_owner_transfer()
+-> Result<(), StorageError> {
+    let (owner_root, owner, actor) = person("owner", "phone", 10)?;
+    let (_, peer_branch, peer) = person("peer", "phone", 20)?;
+    let initial = create(&owner_root, &owner, &actor)?;
+    let joined = advance_group_state(
+        &owner_root,
+        &owner,
+        &actor,
+        &initial,
+        GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
+    )?;
+    let acceptance = ramflux_crypto::accept_group_transfer(
+        &peer_branch,
+        &peer,
+        &joined,
+        &ramflux_protocol::encode_base64url([77; 32]),
+        joined.snapshot().issued_at,
+    )?;
+    let transfer = advance_group_state(
+        &owner_root,
+        &owner,
+        &actor,
+        &joined,
+        GroupStateChange::TransferOwnership {
+            creator: peer.clone(),
+            acceptance: Box::new(acceptance),
+        },
+    )?;
+    let mut live = joined;
+    for index in 0..3 {
+        live = advance_group_state(
+            &owner_root,
+            &owner,
+            &actor,
+            &live,
+            GroupStateChange::SetName { name: format!("Current-{index}") },
+        )?;
+    }
+    let (root, source) = test_db("backup-stale-transfer-source")?;
+    let (local_root, local) = test_db("backup-stale-transfer-local")?;
+    source.commit_shared_group_state(&transfer, &actor)?;
+    local.commit_shared_group_state(&live, &actor)?;
+    let incoming = root.join("incoming.db");
+    let snapshot = source.write_backup_snapshot(&incoming)?;
+    let target = local_root.join("merged.db");
+    let saved = local.write_backup_snapshot(&target)?;
+    let mut merged = crate::BackupDatabase::open(&target, &saved.key)?;
+    merged.merge_backup_with_group_actor(&incoming, &snapshot.key, Some(&actor), || Ok(()))?;
+    let selected: Vec<u8> = merged.db.query_row(
+        "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",
+        rusqlite::params![format!("group-state/{}", ramflux_protocol::encode_base64url("group"))],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_slice::<ramflux_protocol::GroupStateSnapshot>(&selected)?,
+        *live.snapshot()
+    );
+    let role: String = merged.db.query_row(
+        "SELECT role FROM group_projection WHERE group_id='group'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(role, "owner");
+    drop((merged, source, local));
+    for path in [root, local_root] {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn renamed_branch(
+    root: &ramflux_crypto::IdentityRoot,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    mut state: VerifiedGroupState,
+    prefix: &str,
+    count: usize,
+) -> Result<VerifiedGroupState, StorageError> {
+    for index in 0..count {
+        state = advance_group_state(
+            root,
+            branch,
+            actor,
+            &state,
+            GroupStateChange::SetName { name: format!("{prefix}-{index}") },
+        )?;
+    }
+    Ok(state)
+}

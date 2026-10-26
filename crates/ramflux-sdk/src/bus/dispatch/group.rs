@@ -1108,7 +1108,8 @@ fn group_distribution_envelope_id(
     }
     key.push('/');
     key.push_str(&ramflux_protocol::hash_base64url(
-        "ramflux.group.distribution.content.v3", &serde_json::to_vec(distribution)?,
+        "ramflux.group.distribution.content.v3",
+        &serde_json::to_vec(distribution)?,
     ));
     if let Some(id) = client.account_db()?.load_actor_state::<String>(&key)? {
         return Ok(id);

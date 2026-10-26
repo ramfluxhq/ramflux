@@ -162,15 +162,13 @@ impl Rig {
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        self.laptop
-            .client
-            .group_transfer_authorization(
-                &self.laptop.gateway_config,
-                &state,
-                &self.next.client.owned_group_actor(&self.next.target_delivery_id)?,
-                &self.laptop.target_delivery_id,
-            )
-            .await
+        Box::pin(self.laptop.client.group_transfer_authorization(
+            &self.laptop.gateway_config,
+            &state,
+            &self.next.client.owned_group_actor(&self.next.target_delivery_id)?,
+            &self.laptop.target_delivery_id,
+        ))
+        .await
     }
     async fn deliver_probes(&mut self) -> TestResult {
         for _ in 0..2 {
@@ -252,7 +250,7 @@ async fn check_handover(stale: bool) -> TestResult {
     }
     let refusal = rig.authorize().await.err().ok_or("transfer unexpectedly ready")?;
     assert_eq!(crate::bus::io::local_bus_error_code(&refusal), "transfer_requires_sync");
-    rig.deliver_probes().await?;
+    Box::pin(rig.deliver_probes()).await?;
     if stale {
         let replies = rig
             .phone
@@ -287,7 +285,7 @@ async fn check_handover(stale: bool) -> TestResult {
                 .is_none()
         );
         assert!(rig.authorize().await.is_err());
-        rig.deliver_probes().await?;
+        Box::pin(rig.deliver_probes()).await?;
         rig.deliver_replies().await?;
     }
     let acceptance = rig.authorize().await?;

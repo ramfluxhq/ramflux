@@ -10,7 +10,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[derive(Default, Deserialize, Serialize)]
-struct Floors {
+pub(super) struct Floors {
     roots: BTreeMap<String, u64>,
     devices: Vec<DeviceFloor>,
 }
@@ -98,7 +98,33 @@ fn has_root(state: &SharedGroupState, root: &str) -> bool {
     state.members.iter().any(|m| m.identity.root_commitment == root)
 }
 impl Floors {
-    fn observe(&mut self, state: &SharedGroupState) {
+    pub(super) fn remember_root(&mut self, root: String, epoch: u64) {
+        self.roots.entry(root).and_modify(|old| *old = (*old).max(epoch)).or_insert(epoch);
+    }
+    pub(super) fn merge(&mut self, other: Self) -> Result<(), StorageError> {
+        for (root, epoch) in other.roots {
+            self.roots.entry(root).and_modify(|old| *old = (*old).max(epoch)).or_insert(epoch);
+        }
+        for floor in other.devices {
+            if let Some(old) = self
+                .devices
+                .iter_mut()
+                .find(|old| old.root == floor.root && old.device == floor.device)
+            {
+                old.epoch = old.epoch.max(floor.epoch);
+            } else {
+                self.devices.push(floor);
+            }
+        }
+        if self.roots.len() + self.devices.len()
+            > ramflux_protocol::group_state::MAX_GROUP_STATE_EXCLUSIONS * 2
+        {
+            return Err(ProtocolError::GroupStateLimit(GroupStateLimit::RemovalFences).into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn observe(&mut self, state: &SharedGroupState) {
         for removed in &state.excluded {
             if !has_root(state, &removed.root_commitment) {
                 self.roots
@@ -121,7 +147,7 @@ impl Floors {
             }
         }
     }
-    fn check(&self, state: &SharedGroupState) -> Result<(), StorageError> {
+    pub(super) fn check(&self, state: &SharedGroupState) -> Result<(), StorageError> {
         for (root, epoch) in &self.roots {
             if state
                 .members

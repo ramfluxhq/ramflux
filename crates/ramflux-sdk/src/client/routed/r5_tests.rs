@@ -61,10 +61,10 @@ pub(super) async fn settle(alice: &mut Fixture, bob: &mut Fixture) -> Result<(),
     bob.client.establish_friend_link("friend", "bob", "alice")?;
     let entry = fresh(alice, bob, "initial")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await?;
+    Box::pin(bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false)).await?;
     let reply = seal(bob, alice, outgoing(bob, alice, "reply"), b"reply")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &reply, false).await?;
+    Box::pin(alice.client.apply_routed_entry(&mut ae, &pool()?, &reply, false)).await?;
     Ok(())
 }
 #[tokio::test]
@@ -325,7 +325,7 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
     alice.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&alice, &bob, "alice-state-loss")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await?;
+    Box::pin(bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false)).await?;
     assert_eq!(
         bob.client
             .active_pair(

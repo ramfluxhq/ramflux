@@ -43,6 +43,7 @@ fn shared_group_same_epoch_forks_cannot_exchange_ciphertext_under_a_retagged_hea
     let mut unknown: SdkGroupSenderKeyDistribution = serde_json::from_slice(&distribution)?;
     let unknown_head = ramflux_protocol::encode_base64url([99; 32]);
     unknown.group_state_hash = Some(unknown_head.clone());
+    left.sign_group_distribution(&mut unknown)?;
     assert!(
         matches!(receiver_left.import_group_sender_key_distribution(&serde_json::to_vec(&unknown)?),Err(SdkError::InboundPending(reason)) if reason=="shared group state head is not verified locally")
     );
@@ -60,6 +61,7 @@ fn shared_group_same_epoch_forks_cannot_exchange_ciphertext_under_a_retagged_hea
     // Deliberately register the same secret under the other authorized head: AEAD must still separate it.
     let mut reused: SdkGroupSenderKeyDistribution = serde_json::from_slice(&distribution)?;
     reused.group_state_hash = Some(states[1].snapshot().state_hash.clone());
+    right.sign_group_distribution(&mut reused)?;
     receiver_right.import_group_sender_key_distribution(&serde_json::to_vec(&reused)?)?;
     let encrypted = left.encrypt_group_message("group", "owner", b"first branch message")?;
     let mut envelope: SdkGroupEncryptedEnvelope = serde_json::from_slice(&encrypted)?;

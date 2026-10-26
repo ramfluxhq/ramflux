@@ -227,3 +227,24 @@ signature domain. There is no permissive decoder for an earlier unsigned
 handover. Existing groups without transfers retain their snapshot encoding;
 experimental pre-upgrade transfer chains must be migrated explicitly rather than
 accepted without the new authority proof.
+
+## Restore compatibility
+
+BACKUP restore archives outbound sender chains and starts a fresh seed-bound
+chain, even when the signed group head has not changed. Shared-group distribution
+v4 binds this fresh chain to the verified state head and authenticates its seed
+hash with the current sender device's branch signature. Receivers retain previous
+chains for historical decryption; reading an old chain or replaying a distribution
+never resets an advanced ratchet or replaces the active fresh chain. Legacy shared
+v3 distributions retain their original head-bound transcript and immutable seed;
+legacy groups' BACKUP v3 distributions retain their seed-bound transcript. These
+two v3 formats are distinguished by the presence of `group_state_hash`.
+
+A private backup merge verifies the creator-signed full snapshots before selecting
+a group head. It unions durable receiver removal floors from both generations,
+including older inactive-member projections when upgrading, and rebuilds the
+roster, local role and conversation name from the selected signed state. A stale
+transfer cannot displace a later live head. If neither selected line preserves
+the combined removal fences, merge refuses before the private generation can be
+installed; it never repairs a signature by editing its snapshot. Existing contact,
+object, message-erasure, profile and kind merge policies remain independent.

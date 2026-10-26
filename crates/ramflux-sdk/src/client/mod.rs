@@ -21,6 +21,7 @@ pub mod federation;
 pub mod group;
 mod group_control_roots;
 pub mod group_delivery;
+mod group_distribution_auth;
 mod group_identity;
 mod group_key_safety;
 mod group_pending;
