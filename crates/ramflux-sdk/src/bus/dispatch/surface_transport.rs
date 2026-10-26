@@ -276,3 +276,7 @@ mod shared_group_consent_tests;
 #[cfg(test)]
 #[path = "group/route_tests.rs"]
 mod group_route_tests;
+
+#[cfg(test)]
+#[path = "own_sent_message_tests.rs"]
+mod own_sent_message_tests;

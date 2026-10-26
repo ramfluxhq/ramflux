@@ -116,8 +116,16 @@ fn enrich_message_origin(
         return Ok(());
     }
     let origin = client.message_origin(conversation, message)?.unwrap_or(Value::Null);
-    for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
+    for field in [
+        "sender_device_id", "sender_root_commitment", "sender_device_display",
+        "direction", "original_message_id", "envelope_id",
+    ] {
         row[field] = origin[field].clone();
+    }
+    if let Some(task) = client.task_message_metadata(conversation, message)? {
+        for field in ["content_type", "task_id", "actor_kind_verified"] {
+            row[field] = task[field].clone();
+        }
     }
     Ok(())
 }

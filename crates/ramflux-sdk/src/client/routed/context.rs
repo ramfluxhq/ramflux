@@ -31,7 +31,7 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
-    pub(super) fn merge_routed_group_link(
+    pub(crate) fn merge_routed_group_link(
         &self,
         group: &str,
         conversation: &str,
