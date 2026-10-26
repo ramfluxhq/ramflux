@@ -2,11 +2,11 @@
 
 # Root key custody wire specification
 
-Design revision 3, proposed normative stage-1 specification. This document and
+Design revision 4, proposed normative stage-1 specification. This document and
 [root key custody](root_key_custody.md) describe future behaviour, not executable
 support. Independent wire review and published interoperability vectors are
-required before stage 2b. The legacy binding remains a proposal awaiting owner confirmation. The controller
-has approved epoch ranges with the r3 amendments below; exact wire formats and
+required before stage 2b. The legacy binding remains a proposal awaiting owner
+confirmation. The controller has approved epoch ranges with the r3 amendments below; exact wire formats and
 vectors still require independent review. No migration writer may ship on the
 assumption that the legacy-binding proposal has been approved.
 
@@ -16,8 +16,8 @@ All objects use UTF-8 I-JSON and [RFC 8785 JCS](https://www.rfc-editor.org/rfc/r
 Reject duplicate keys, malformed Unicode, unknown fields, non-finite/fractional
 numbers, negative counters, unsafe integers and unknown versions before checking
 signatures. Integer fields require unsigned decimal JSON tokens (`0` or
-`[1-9][0-9]*`), without decimal points or exponents. JCS does not normalize strings; only the documented phrase and
-profile input rules normalize human input before signing. Never normalize an
+`[1-9][0-9]*`), without decimal points or exponents. JCS does not normalize strings;
+only the documented phrase and profile input rules normalize human input before signing. Never normalize an
 already signed body. All fields below are mandatory; nullable fields are encoded
 as JSON `null`, never omitted. Arrays are ordered as specified; no duplicates.
 
@@ -34,7 +34,7 @@ Types used throughout:
 | `Kind` | One of `human`, `headless_ai`, `bot`, `workflow`; immutable per anchor |
 | `Ref` | Object with exactly `account_anchor: B32`, `device_id: Id`, `device_epoch: U53` (positive) |
 | `Envelope<T>` | Object with exactly `body: T`, `signature: Sig` |
-| `Hash` | `B32`, computed by `object_hash` below; not a public key |
+| `Hash` | `B32`; signed-object references use `object_hash`, section/list fields use their explicit domain below; never a public key |
 
 For each signed body `B` with domain `D`, including the v3 record, sign exactly:
 
@@ -42,35 +42,72 @@ For each signed body `B` with domain `D`, including the v3 record, sign exactly:
 signing_bytes(D, B) = JCS({"domain": D, "body": B})
 signature = Ed25519.Sign(signer_seed, signing_bytes(D, B))
 object_hash(E) = base64url(BLAKE3(
-    UTF8("ramflux.identity.custody.object_hash.v1") || JCS(E)))
+    UTF8("ramflux.identity.custody.object_hash.v1") || 0x00 || JCS(E)))
 ```
+
+For every new BLAKE3/SHA-256 label with appended input, use
+`frame(D, input) = UTF8(D) || 0x00 || input`. Labels contain no NUL; this makes
+label/input boundaries unambiguous. Existing `blake3_hash_bytes` appends its input
+to the label without framing: future custody callers supply the leading `0x00`
+in its input, rather than changing that shared helper and breaking legacy ids.
+HKDF info consisting only of a label stays its exact UTF-8 bytes; HPKE info with
+a transcript suffix uses the same explicit frame. The master-seed KDF retains
+its r2 bare-label info. Signature separation uses JCS object fields, not raw
+concatenation. Legacy commitment and rendering domains retain their old bytes.
 
 `B.schema` equals `D`; `B.version` equals the table's integer. Domain strings
 contain no trailing NUL/newline. Use strict Ed25519 verification, matching current
 crypto validation; no Ed25519ph and no generic recursive signature stripping.
 Nested envelopes, including their signatures, remain in the enclosing signed
 body. Arrays of `Ref` sort by decoded anchor bytes, then device-id UTF-8 bytes,
-then numeric device epoch. An object's hash includes its signature. Random ids/nonces use 32 bytes of
-OS CSPRNG output (`B32`), stored once for idempotent retries. Never regenerate a
+then numeric device epoch. An object's hash includes its signature. Random
+ids/nonces use 32 bytes of OS CSPRNG output (`B32`), stored once for idempotent retries. Never regenerate a
 certificate or binding on a retry in the same range.
 
-These conventions deliberately define new v3 envelopes; they do not change the
-flat v1/v2 signing bytes. Existing
-[domain constants](../crates/ramflux-protocol/src/domain.rs) remain unchanged.
-The following additions are proposed constant names, not claims of existing code:
+These conventions define future v3 envelopes; they do not change flat v1/v2
+signing bytes. All new labels below are now reserved in
+[domain.rs](../crates/ramflux-protocol/src/domain.rs), including `ALL`; reservation
+alone enables no custody decoder, signing path or verifier. Uniqueness, absence
+of NUL and prefix-freeness are tested across the entire registry. All new labels
+use `ramflux.identity.`. The transcript schema and hash label deliberately share
+one constant and spelling: `ramflux.identity.pairing_transcript.v1`.
 
-| Constant | Exact domain | Body version / signer |
+| Constant | Exact label | Purpose |
 | --- | --- | --- |
-| `CUSTODY_MASTER_CERTIFICATE` | `ramflux.identity.master_certificate.v1` | 1 / offline master |
-| `SIGNED_DEVICE_SET_V3` | `ramflux.identity.signed_device_set.v3` | 3 / certified self-signing key |
-| `CUSTODY_BRANCH_CERTIFICATE` | `ramflux.identity.branch_certificate.v1` | 1 / certified self-signing key |
-| `BRANCH_PROOF_V3` | `ramflux.branch_proof.v3` | 3 / certified device branch |
-| `CUSTODY_DELEGATION` | `ramflux.identity.delegation.v1` | 1 / certified self-signing key |
-| `CUSTODY_ERASURE_ACK` | `ramflux.identity.erasure_ack.v1` | 1 / erasing device branch |
-| `CUSTODY_LEGACY_BINDING` | `ramflux.identity.legacy_binding.v1` | 1 / legacy root |
-| `CONTACT_REQUEST_V2` | `ramflux.contact_request.v2` | 2 / certified self-signing key |
-| `CUSTODY_RELAY_ACCEPTANCE` | `ramflux.identity.relay_acceptance.v1` | 1 / configured relay service signing key |
-| `CUSTODY_TRANSFER_BINDING` | `ramflux.identity.transfer_binding.v1` | 1 / current old-primary branch |
+| `CUSTODY_MASTER_CERTIFICATE` | `ramflux.identity.master_certificate.v1` | signature: master certificate |
+| `SIGNED_DEVICE_SET_V3` | `ramflux.identity.signed_device_set.v3` | signature: complete v3 record |
+| `CUSTODY_BRANCH_CERTIFICATE` | `ramflux.identity.branch_certificate.v1` | signature: branch certificate |
+| `BRANCH_PROOF_V3` | `ramflux.identity.branch_proof.v3` | signature: branch possession proof |
+| `CUSTODY_DELEGATION` | `ramflux.identity.delegation.v1` | signature: public account-level delegation |
+| `CUSTODY_GROUP_DELEGATION` | `ramflux.identity.group_delegation.v1` | signature: private group restriction/delegation |
+| `CUSTODY_ERASURE_ACK` | `ramflux.identity.erasure_ack.v1` | signature: erasure acknowledgement |
+| `CUSTODY_LEGACY_BINDING` | `ramflux.identity.legacy_binding.v1` | signature: proposed legacy binding |
+| `CONTACT_REQUEST_V2` | `ramflux.identity.contact_request.v2` | signature: contact consent |
+| `CUSTODY_RELAY_ACCEPTANCE` | `ramflux.identity.relay_acceptance.v1` | signature: receiver-home relay evidence |
+| `CUSTODY_TRANSFER_BINDING` | `ramflux.identity.transfer_binding.v1` | signature: transfer sender binding |
+| `CUSTODY_REVOKED_CHECKPOINT` | `ramflux.identity.revoked_devices.checkpoint.v1` | signature: revoked-device checkpoint |
+| `CUSTODY_NODE_RECORD` | `ramflux.identity.node_record.v1` | signature: proposed node identity record |
+| `CUSTODY_TIME_ATTESTATION` | `ramflux.identity.time_attestation.v1` | signature: fresh node time attestation |
+| `CUSTODY_MASTER_SEED` | `ramflux.identity.master.v1` | HKDF info: master seed; unchanged r2 derivation |
+| `CUSTODY_OBJECT_HASH` | `ramflux.identity.custody.object_hash.v1` | BLAKE3: signed-object hash |
+| `CUSTODY_SECTION_HASH` | `ramflux.identity.custody.section_hash.v1` | BLAKE3: record-section hash |
+| `CUSTODY_SAFETY_NUMBER` | `ramflux.identity.safety_number.v2` | BLAKE3: anchor safety fingerprint |
+| `CUSTODY_PAIRING_TRANSCRIPT` | `ramflux.identity.pairing_transcript.v1` | schema and SHA-256: pairing transcript; one shared spelling |
+| `CUSTODY_PAIRING_COMMITMENT` | `ramflux.identity.pairing.commitment.v1` | SHA-256: SAS key commitment |
+| `CUSTODY_PAIRING_SAS` | `ramflux.identity.pairing.sas.v1` | HKDF info: SAS bytes |
+| `CUSTODY_PAIRING_CONFIRM_INITIATOR` | `ramflux.identity.pairing.confirm.initiator.v1` | HKDF info: initiator confirmation |
+| `CUSTODY_PAIRING_CONFIRM_RESPONDER` | `ramflux.identity.pairing.confirm.responder.v1` | HKDF info: responder confirmation |
+| `CUSTODY_PAIRING_CHANNEL_INITIATOR` | `ramflux.identity.pairing.channel.initiator.v1` | HKDF info: initiator channel |
+| `CUSTODY_PAIRING_CHANNEL_RESPONDER` | `ramflux.identity.pairing.channel.responder.v1` | HKDF info: responder channel |
+| `CUSTODY_PAIRING_EMOJI_SUITE` | `ramflux.identity.pairing.sas_emoji.v1` | suite tag: Matrix emoji SAS mapping |
+| `CUSTODY_TRANSFER_HPKE_INFO` | `ramflux.identity.transfer.hpke_info.v1` | HPKE info label |
+| `CUSTODY_TRANSFER_AAD` | `ramflux.identity.transfer.aad.v1` | schema: HPKE associated data |
+| `CUSTODY_TRANSFER_HPKE` | `ramflux.identity.transfer.hpke.v1` | schema: HPKE transfer envelope |
+| `CUSTODY_TRANSFER_PAYLOAD` | `ramflux.identity.transfer.payload.v1` | schema: handover payload |
+| `CUSTODY_TRANSFER_HPKE_SUITE` | `ramflux.identity.transfer.hpke_suite.v1` | suite tag: Auth/X25519/HKDF-SHA256/AES-256-GCM |
+| `CUSTODY_BRANCH_EXPORTER` | `ramflux.identity.branch_proof.exporter.v3` | TLS exporter label: direct connections only |
+| `CUSTODY_REVOKED_LIST` | `ramflux.identity.revoked_devices.list.v1` | BLAKE3: sorted compacted revoked-id list |
+| `CUSTODY_TIME_PROBE` | `ramflux.identity.time_probe.v1` | schema: restricted time-recovery probe |
 
 Reuse existing key commitment domains:
 `DEVICE_SIGNING_KEY_COMMITMENT = "ramflux.identity.device_signing_key.v1"` and
@@ -79,13 +116,17 @@ For these and the anchor, use the existing BLAKE3 `domain || raw_key_bytes`
 construction, not the new object-envelope hash.
 
 Limits are applied before allocation/crypto: v3 envelope 512 KiB; 1024 roster
-entries; 1024 delegations; 1024 erasure ACKs; depth 16. Individual master/branch
+entries (active plus recent tombstones); 1024 account delegations; 1024 erasure ACKs; depth 16. Individual master/branch
 certificates and binding/ACK/proof envelopes are at most 8 KiB, delegation 16 KiB,
 contact envelope 128 KiB, SAS frame 16 KiB, transfer envelope 2 MiB with decrypted
 handover body at most 1 MiB. Both element and enclosing byte limits apply: a large
-roster may need renewal/ACK batches, never partial-roster publication. Permanent
-tombstones count toward the limit. Reaching a limit is a typed refusal, not
-permission to discard history or weaken verification.
+roster may need renewal/ACK batches, never partial-roster publication. Revocations
+older than 90 days move into the signed checkpoint below; compacted entries do
+not consume the 1024 roster slots. Revocation knowledge is never discarded to
+make room. Streaming checkpoint-list pages are individually bounded at 64 KiB;
+list verification is resumable with bounded memory and disk-backed membership.
+Reaching an active/recent capacity or byte limit is a typed refusal, not authority
+to erase revocations.
 
 ## Anchors, identity and epochs
 
@@ -109,7 +150,7 @@ the master key must equal the binding's master. The anchor, principal id and kin
 remain unchanged. Fingerprints display the full canonical anchor (with optional
 visual grouping). For custody safety-number v2, sort the two decoded 32-byte
 anchors lexicographically and compute
-`BLAKE3(UTF8("ramflux.safety_number.v2") || first_anchor || second_anchor)`.
+`BLAKE3(frame("ramflux.identity.safety_number.v2", first_anchor || second_anchor))`.
 Render that 32-byte fingerprint using the existing `safety_number` 12-group
 rejection-sampling procedure and `"ramflux.safety_number.group.v1"` domain
 in [key verification](../crates/ramflux-crypto/src/key_verification.rs).
@@ -196,10 +237,12 @@ human authority chain; missing/unsupported evidence fails closed.
 | `master_certificate` | Complete signed master certificate envelope |
 | `legacy_binding` | Complete signed binding envelope for migrated account, else `null` |
 | `profile` | Unsigned `ProfileV3` below; never a signed v1 profile |
-| `devices` | Complete array of `DeviceV3`, sorted by `device_id` UTF-8 bytes |
-| `delegations` | Complete currently issued delegation envelopes, sorted by `body.delegation_id` |
-| `revoked_delegation_ids` | Sorted array of `B32`, permanent tombstones, disjoint from active delegation ids |
+| `devices` | Complete active/recent array of `DeviceV3`, sorted by `device_id` UTF-8 bytes; aged revocations covered by checkpoint |
+| `delegations` | One account-level delegation per verified secondary, sorted by `body.delegation_id`; no group-specific envelopes or group ids |
+| `revoked_delegation_ids` | Sorted account-level `B32` ids, disjoint from active ids; group-specific ids/revocations remain encrypted within their groups |
 | `migration` | `MigrationV3` or `null` for new accounts |
+| `revoked_device_checkpoint` | `Envelope<RevokedCheckpoint>` or `null` before first compaction |
+| `section_hashes` | Exact per-section hash object defined below |
 
 `ProfileV3` has exactly `kind: Kind`, `display_name: string`,
 `custodian: Ref|null`. Kind equals the enclosing kind. Apply current
@@ -221,13 +264,113 @@ Each `DeviceV3` has exactly:
 | `branch_certificate` | Complete signed certificate when active, `null` when revoked |
 | `migration_state` | `"native"`, `"pending_erasure"`, `"erased"` or `"revoked"` |
 
-Preserve every known device id and revoked tombstone; revoked entries are
-immutable and cannot reactivate. Key changes require a higher device epoch and
-new commitments. Lease-only renewal preserves key epochs. All active certificates
-refer to the current master certificate and match this roster entry. Higher-range
-recovery re-certifies survivors, carrying known tombstones forward. A verifier
-without intervening heads still rejects omission of its retained tombstones;
-fetch/reconcile missing state rather than silently clearing it.
+A revoked device id can never reactivate, at any device epoch. Key changes for
+active devices require a higher device epoch and new commitments; lease renewal
+preserves key epochs. Active certificates refer to the current master certificate.
+A device id moves from the recent revoked roster into the checkpoint only after
+90 days, with no gap in denial. Higher-range recovery preserves all recent and
+compacted revocations. Missing predecessor/list evidence cannot clear a retained
+revocation; fetch/reconcile it before granting authority.
+
+### Section hashes, conditional fetch and retention
+
+`section_hashes` has exactly the keys `profile`, `devices`, `delegations`,
+`revoked_delegation_ids`, `migration`, `revoked_device_checkpoint`, each a `B32`:
+
+```text
+section_hash(name, value) = base64url(BLAKE3(frame(
+    "ramflux.identity.custody.section_hash.v1",
+    JCS({"section": name, "value": value}))))
+```
+
+Hash `null` as JCS null, never omission. The logical signed record still includes
+all section bodies and these hashes, so no detached body gains authority by its
+hash alone. Conditional fetch accepts the verifier's pinned `known_head_hash`
+and cached section hashes. A `not_modified` result returns that exact head hash
+and no bodies; it is usable only with an already verified complete matching cached
+record and a retained floor no higher than it. A changed-head result returns the
+non-section body fields, signature, all section hashes and only changed/missing
+section bodies. Reconstruct the full logical record from verified cached sections
+and supplied bodies; check every section hash, full record hash and signature
+before advancing a floor. An evicted section is fetched by hash within its byte
+budget; a partial reconstruction grants no authority. Never treat a claimed new
+head hash or a section hash as an authenticated head on its own.
+
+The transport request has exactly `account_anchor: B32`,
+`known_head_hash: Hash|null`, `cached_section_hashes: object` (a subset of the six
+section names mapped to B32 hashes). The response has exactly `status:
+"modified"|"not_modified"`, `head_hash: Hash`, `header: object|null`,
+`sections: object`. In not-modified mode header is null and sections is empty;
+head_hash must equal the requested known hash, never null or an unknown head.
+In modified mode header has exactly `body_fields: object`, `signature: Sig`.
+body_fields contains every DeviceSetV3 field except the six section-valued fields,
+including the full section_hashes map. sections maps only requested missing/changed
+section names to their logical values. Unknown keys and a missing reconstruction
+component fail closed. Header.signature is the complete record signature, **not**
+a separately valid signature over body_fields; assemble the six values into the
+body and then verify. Return omitted unchanged sections by hash on request.
+The request is at most 4 KiB, the response at most 1 MiB, and the reconstructed
+logical record still obeys its 512 KiB limit; per-section parsing is bounded before
+allocation. A caller's cache claims are hints, not authentication evidence.
+
+At each 300-second freshness check request the head conditionally. Routine lease
+renewal changes the relevant device/delegation section; it must not force a peer
+to download unchanged profile, migration or checkpoint bodies. A renewal with an
+unchanged head returns `not_modified`. Authenticated transport and retained pins
+still apply; a malicious directory can withhold a newer head as before.
+
+Directories/home nodes retain and serve every superseded v3 record by full hash
+until at least 604800 + 900 seconds after supersession (or the latest known
+consent expiry plus skew, whichever is later). The extra 900 seconds cover the
+300-second current-head cache bound plus issue and receive skew, without changing
+the consent TTL or requiring a public consent-reference index. They
+retain permanently the initial migration record, its referenced last legacy head,
+legacy binding, checkpoint envelopes/lists and their verification material. Section
+blobs remain available for as long as any retained record references them. Migration
+and legacy evidence never expires with a consent TTL; all of it is public auth
+metadata, containing no recovery secret. Failure to fetch required evidence is a
+typed unavailable result, never permission to substitute a current head.
+
+### Revoked-device compaction
+
+Only tombstones with `revoked_at < now - 7776000` (strictly older than 90 days)
+may leave the inline roster. Before publishing, the primary creates
+`Envelope<RevokedCheckpoint>` under `CUSTODY_REVOKED_CHECKPOINT` with exactly:
+
+| Field | Type / requirement |
+| --- | --- |
+| `schema`, `version` | Exact checkpoint domain, `1` |
+| `account_anchor`, `master_certificate_hash` | `B32`, `Hash`, current account/certificate |
+| `device_set_epoch` | `U53`, compaction/re-sign epoch at or below enclosing record in the same range |
+| `previous_checkpoint_hash` | `Hash` or `null` for first checkpoint |
+| `list_hash`, `count` | `Hash`, positive `U53` |
+| `compacted_before`, `issued_at` | `Time`; cutoff no newer than `issued_at - 7776000` |
+
+Its signature is by the primary's current self-signing key. The committed list is
+the full cumulative, unique array of revoked **device ids**, sorted by UTF-8 bytes:
+`list_hash = base64url(BLAKE3(frame("ramflux.identity.revoked_devices.list.v1",
+JCS(sorted_ids))))`. Device ids are anchor-qualified by the checkpoint and may
+never be reused at a different epoch. The inline removed tombstones must all be
+in the new list, and all previously checkpointed ids must remain. The count is the
+exact array length, never an estimate or a substitute for membership evidence.
+
+A flat sorted-list hash + count is not a membership/non-membership proof. Serve
+the canonical list by hash in bounded resumable pages; the verifier streams the
+whole committed list, checks ordering/uniqueness/count/hash, and builds or updates
+a local disk-backed index. Only then can it deny a member or prove an enrolled id
+absent. Cached verified list bytes/index may be reused by list hash. Missing,
+truncated or budget-interrupted evidence blocks the affected authorization until
+verification resumes; it cannot mean "not revoked". Check both inline tombstones
+and the checkpoint for enrollment, re-enrollment, proofs and operations.
+
+Retained previous checkpoints/lists let existing verifiers prove the cumulative
+superset; a first observer authenticates the current primary's complete committed
+list but still cannot prove a globally latest head. A certificate/range replacement
+re-signs the checkpoint under the new primary while retaining the cumulative list
+hash/count (and predecessor link). It cannot clear or shrink it. The 1024 roster
+cap counts only active devices and recent tombstones; the external list is not
+subject to that roster-entry cap. No compaction of active or recent entries is
+allowed. Full backup/restore preserves checkpoint/list pins and revocation denial.
 
 `MigrationV3` has exactly `migration_id: B32`, `started_at: Time`,
 `erase_deadline: Time`, `erasure_acks: Envelope<ErasureAck>[]` sorted by device id.
@@ -267,21 +410,31 @@ needs the primary; session proof renewal during a valid lease does not.
 | `certificate_hash`, `record_hash` | `Hash`, exact supplied verified certificate/head |
 | `proof_id`, `challenge_nonce` | Fresh `B32`, one-use challenge issued by the receiving verifier |
 | `audience` | `Id`, exact recipient service identity, never a wildcard |
-| `transport_binding` | `B32`, SHA-256 of the authenticated session exporter/binding bytes |
+| `binding_mode` | `"direct_exporter"` or `"home_relay_receipt"`, as allowed by the receiving deployment |
+| `transport_binding` | `B32` in direct mode; `null` only in authenticated home-relay receipt mode |
 | `issued_at`, `expires_at` | `Time`, `0 < expires_at - issued_at <= 300` |
 
 Proof is signed by the certified branch, checked against current authority per
 request, and consumed atomically in the receiver's replay cache through expiry
-plus skew. A retry uses a new challenge and proof id. Missing channel-binding
-support fails closed; it cannot be represented by a constant or empty value.
-For TLS 1.3/QUIC use 32 exporter bytes with label
-`"EXPORTER-ramflux-branch-proof-v3"` and context equal to the raw challenge nonce,
-then SHA-256 those bytes. A WebSocket uses its underlying TLS connection exporter.
-Other transports require a separately reviewed binding profile before v3 support;
-never infer authentication from a network address.
-Neither a valid TLS session nor a proof pins stale authorization for its duration.
+plus skew. A retry uses a new challenge and proof id. Direct mode requires TLS
+1.3/QUIC to terminate at the verifying service. Use 32 exporter bytes with label
+`"ramflux.identity.branch_proof.exporter.v3"` and raw challenge nonce as context,
+then SHA-256 those exporter bytes. A WebSocket uses its underlying direct TLS
+connection exporter. Do not use 0-RTT exporters or an exporter from another hop.
 
-## Delegation body
+With a TLS-terminating proxy, the client/proxy exporter is **not** the proxy/service
+exporter. Use `home_relay_receipt`: the signed proof sets transport_binding null
+and travels with a `RelayAcceptance` for the exact signed proof hash, source,
+challenge and service audience, signed by the receiving service's trusted home
+relay. The proof itself contains no receipt hash, avoiding a circular commitment.
+The signed receipt is the sole channel-evidence mechanism in this proxy mode;
+forwarded TLS headers, network addresses and an arbitrary sender relay cannot
+replace it. Current branch authority, one-use challenge and proof signature are
+still required. The verifier chooses allowed modes; absence of a supported direct
+exporter or trusted receipt fails closed, never falls back to a constant binding.
+Neither TLS nor a receipt freezes authorization for a session's duration.
+
+## Account delegation and private group restriction
 
 `Envelope<Delegation>` uses `CUSTODY_DELEGATION`:
 
@@ -291,20 +444,38 @@ Neither a valid TLS session nor a proof pins stale authorization for its duratio
 | `account_anchor`, `master_certificate_hash` | `B32`, `Hash` |
 | `self_signing_public_key` | Ed25519 `Key`, equal to certificate |
 | `delegate` | `Ref`, own active branch only |
-| `branch_certificate_hash` | `Hash`, must equal current branch certificate |
+| `branch_certificate_hash` | `Hash`, current branch certificate |
 | `delegation_id` | Random `B32` |
-| `scope` | `"create_group"` or `"creator_group"` |
-| `group_id`, `group_genesis_hash` | Both `Id`/`Hash` for creator group, both `null` for account-level create-group |
-| `operations` | Sorted: exactly `["genesis"]` for create-group; nonempty subset of `"request_result"`, `"snapshot"` for creator group |
-| `not_before`, `expires_at` | `Time`, `0 < expires_at - not_before <= 604800` (7 days) |
+| `scope` | Exactly `"create_and_administer_own_groups"` |
+| `operations` | Sorted nonempty subset of `"genesis"`, `"request_result"`, `"snapshot"`; verified-secondary default includes all three |
+| `not_before`, `expires_at` | `Time`, `0 < expires_at - not_before <= 604800` |
 | `subdelegation` | Exactly `false` |
 
-Only current, roster-included, non-revoked delegations apply. Lease renewal
-issues a new delegation bound to the new branch certificate; prior ids are fenced
-by certificate mismatch or revocation. Group ownership transfer, changing branch
-keys, device revocation and a higher master range all fence old delegations.
-Delegation authorizes only the creator's existing group powers, retaining current
-fresh-head/countersign/removal rules. It never grants account/device management.
+Exactly one current account delegation per verified secondary; no group id,
+genesis hash, group count or per-group id list is permitted in this public body
+or elsewhere in the public v3 record. A group verifier checks the delegate anchor
+against the group's actual creator anchor and its current roster/permissions.
+The account grant never gives authority over another creator's group. Ordinary
+renewal may change id/certificate/time but not scope or operations, and is silent
+except in the security log. New device, first scope grant or operation widening
+raises the persistent alert; changing master/self-signing keys retains its
+blocking alert. Revocation, branch change, ownership transfer and higher ranges
+fence old grants. Only current-head-included account delegations apply.
+
+An optional narrower group-specific `Envelope<GroupDelegation>` uses
+`CUSTODY_GROUP_DELEGATION`, signed by the current primary, with exactly `schema`,
+`version: 1`, `account_anchor: B32`, `master_certificate_hash: Hash`,
+`account_delegation_id: B32`, `delegate: Ref`, `delegation_id: B32`,
+`group_id: Id`, `group_genesis_hash: Hash`, `operations: string[]` (subset of the
+account grant), `not_before: Time`, `expires_at: Time` (inside the account lease),
+`subdelegation: false`. It and any per-group revocation travel only in that group's
+authenticated encrypted control channel. Group state applies the restriction
+and its revocations; it never widens or outlives the current public account grant.
+Only primary-signed group control may change/remove such restrictions or their
+revocations; a delegated snapshot preserves the authenticated restriction floor
+and cannot omit it to regain a wider account grant. Do not publish even a
+per-group delegation id/count in the identity record or its section index. No subdelegation or account/device management; existing creator
+fresh-head, transferee countersign and sticky-removal rules remain mandatory.
 
 ## Erasure ACK and proposed legacy binding bodies
 
@@ -351,7 +522,8 @@ newer legacy head needs reconciliation before first transition. A high legacy
 epoch cannot defeat the mode-rank rule. The binding has no secrets and no recovery
 ciphertext, but must remain discoverable for phrase-only legacy recovery.
 
-Two distinct valid binding hashes for one anchor mean `identity_compromised`:
+Without a permanently resolved binding pin, two distinct valid binding hashes
+for one anchor mean `identity_compromised`:
 retain both, alert, suspend both alternatives and do not automatically pick the
 first or the numerically newer migration. Re-attestation requires a new
 higher-range master certificate whose `legacy_binding_hash` selects the binding,
@@ -359,7 +531,15 @@ signed by the **already trusted** master (or independently reverified master for
 a fresh observer), plus a valid v3 record carrying it. This does not authorize a
 master change. If that trust cannot be established, remain blocked and offer new
 identity with local history. A master selected solely from one conflicting binding
-cannot certify itself as the resolution. Historical conflicts remain visible.
+cannot certify itself as the resolution. After accepting this trusted-master
+re-attestation, persist the resolved master **and chosen binding hash** permanently
+for the anchor. Later competing legacy-root bindings are ignored for authority,
+logged as security evidence and may alert, but can never re-suspend that verifier
+or require another phrase ceremony. Invalid inputs do not establish this pin.
+Higher-range same-master recovery preserves it; backups/restarts cannot clear it.
+New observers lacking the resolved pin remain first-observer limited and need
+independent verification if conflicting evidence appears. An untrusted copied
+legacy root still calls for a new identity. Historical conflicts remain visible.
 
 ## Contact consent v2
 
@@ -377,7 +557,7 @@ self-signing key, not by a secondary or the offline master:
 | `sending_device_ref` | `Ref`, exact authenticated transport source, anchor equals actor |
 | `issued_at`, `expires_at` | `Time`, `expires_at = issued_at + 604800` |
 | `note` | `string|null`, current safe single-line 140-character limit |
-| `actor_record_hash`, `master_certificate_hash` | `Hash`, current authority approving this exact intent |
+| `actor_record_hash`, `master_certificate_hash` | `Hash`, exact authority that approved this intent, potentially superseded at receive time under the rule below |
 
 Authority envelopes are resolved by hash through the authenticated identity
 lookup; never substitute a current record for the signed hash. Request actor is
@@ -386,28 +566,99 @@ routing/endpoint equality checks, source branch possession, request-id matching
 and existing replay/consent-state rules. The certified management key approves
 exact body bytes including the sending branch. A secondary queues an intent for
 primary approval and waits; the request is pending while primary is offline.
-If approval head is stale at send time, require fresh approval. Legacy accounts
-retain v1 until migrated; custody senders/receivers require v2 support and never
-obtain/sign with the legacy root for interoperability.
+At approval/send time require a then-current verified head. At delayed receive
+time, consent is valid iff the referenced record authenticates, its epoch is at
+or below the receiver's fresh current head and in the **same certified range**,
+the master certificate/self-signing key is unchanged, the sending certificate
+covered the consent issue time, the exact sending branch
+and key epoch are active/unrevoked in the current head with a live certificate,
+and the consent's seven-day TTL, endpoint, time and replay checks pass. A newer
+revision in that range alone does not invalidate consent. Resolve the signed
+historical hash, never replace it by the current body or require hash equality
+with the current head. A range/key change, device revocation or expiry invalidates
+the pending consent; the primary must approve again under new authority.
 
-## Queued-message acceptance evidence
+Directories retain and serve the historical record for the TTL plus skew as
+specified above. Historical consent lookup is a narrow exception to "exact head"
+for current operations; no historical record grants new enrollment, proof or
+delegation powers. Legacy accounts retain v1 until migrated; custody peers require
+v2 consent support and never obtain the legacy root for interoperability.
 
-`Envelope<RelayAcceptance>` uses `CUSTODY_RELAY_ACCEPTANCE`. Its signer is the
-configured authenticated relay service signing key, never an identity branch or
-a key accepted solely because the receipt supplies it. The body has exactly
-`schema` (domain above), `version: 1`, `relay_id: Id`, `receipt_id: B32`,
-`source_device_ref: Ref`, `target_anchor: B32`, `message_hash: Hash`,
-`branch_certificate_hash: Hash`, `accepted_at: Time`. It attests durable acceptance
-of those exact signed message bytes under that certificate; `message_hash` uses
-the object hash convention above on the message's complete signed JSON object.
-At most 8 KiB per receipt. The relay checks live branch authority when accepting,
-not just when emitting the receipt; it must never issue an earlier acceptance time
-for a message received after lease expiry. A repeated receipt is idempotent only
-for the same exact message/source/target. Receipt authenticity still assumes a
-trusted relay clock and service key; a compromised relay can lie about acceptance
-time. Messages without this receipt cannot use the post-expiry queued exception.
-This is a proposed new receipt profile, not a claim that existing relay ACKs
-already supply this evidence.
+## Relay keys and acceptance evidence
+
+This is a proposed extension of node public authentication metadata, not a claim
+that current services already publish this profile. The current deployment has a
+pinned node/federation identity key (see [server data](server-data.md)).
+`Envelope<NodeIdentityRecord>` uses `CUSTODY_NODE_RECORD`, signed by that existing
+pinned node identity key, with exactly `schema`, `version: 1`, `node_id: Id`,
+`node_signing_public_key: Key`, `epoch: U53` (positive),
+`previous_record_hash: Hash|null`, `issued_at: Time`, `receipt_keys: ReceiptKey[]`
+and `revoked_receipt_key_ids: B32[]` (sorted, cumulative). Each ReceiptKey has
+exactly `key_id: B32`, `public_key: Key` (Ed25519), `not_before: Time`,
+`sign_until: Time`, `overlap_until: Time`, `status: "active"|"retiring"`.
+Node record budget is 512 KiB; at most 16 active/overlap descriptors. Its epoch and
+revocation pins persist monotonically; a node-identity-key replacement still
+requires existing explicit node trust/pin procedures, never a supplied receipt key.
+
+Publish/lookup the record through authenticated node/federation discovery and
+verify it against the already trusted node identity. The existing v1 federation
+handshake alone does not yet convey this new profile; capability rollout must
+add authenticated discovery before custody receipt mode is enabled. For message
+or branch-proof authority, a peer trusts only its **receiving account/service's
+own home relay**, selected through that
+pinned home-node relationship, not the sender's home, an arbitrary forwarding
+relay or a TLS-terminating proxy certificate. A remote sender may carry the public
+record by hash, but cannot establish the receiver's trust anchor. A time-probe
+receipt is not account authority: the separate clock-recovery flow may authenticate
+an independently pinned node/relay as its second time source, never as a signer
+for ordinary inbox or registration evidence.
+
+Rotate receipt keys by publishing a higher signed node-record epoch containing
+both the new active key and the old retiring key. Stop old-key signing at
+`sign_until`; retain its descriptor in current records through `overlap_until`,
+at least 604800 + 600 seconds after the replacement starts. This overlap permits
+in-flight delivery and clock skew without simultaneously replacing the node pin.
+Normal rotation does not invalidate receipts whose `accepted_at` lies within that
+key's signed issuance interval. After overlap, resolve its historical node record
+by hash; node records and receipt verification keys are retained permanently for
+queued evidence. Current cumulative revocations always dominate historical keys:
+a compromised receipt key is refused for any unconsumed proof/message, even with
+a backdated timestamp; already authenticated local history remains readable.
+Key ids/public keys cannot be silently rebound or recycled.
+
+`Envelope<RelayAcceptance>` uses `CUSTODY_RELAY_ACCEPTANCE`, signed by one of those
+home-relay keys. The exact body is:
+
+| Field | Type / requirement |
+| --- | --- |
+| `schema`, `version` | Exact receipt domain, `1` |
+| `relay_id`, `relay_key_id`, `node_identity_record_hash` | `Id`, `B32`, `Hash`; pinned receiver-home issuer for message/proof, independently pinned clock source for time probe |
+| `receipt_id`, `message_hash` | Fresh `B32`, `Hash` of the exact accepted object |
+| `purpose` | `"message"`, `"branch_proof"` or `"time_probe"` |
+| `audience` | `Id`, exact receiving service |
+| `source_device_ref`, `branch_certificate_hash` | `Ref`, `Hash` for message/proof; both `null` for an anonymous time probe |
+| `target_anchor` | Recipient `B32` for message; `null` for service proof/time probe |
+| `challenge_nonce` | `B32` matching the proof/probe; `null` for ordinary queued messages |
+| `accepted_at` | `Time`, inside issuer key's `not_before..sign_until` interval |
+
+Receipt budget is 8 KiB. For a message, the relay attests durable acceptance of
+that exact signed JSON message under the source certificate and checks live
+branch authority at acceptance. It may not backdate receipt issuance to bypass a
+lease. For proxy-mode branch proof, it binds the exact signed proof, source,
+challenge and audience; it does not independently grant operation authority.
+`message_hash` uses the object hash above, including signatures when present.
+A repeated receipt is idempotent only for the same object/source/target/purpose.
+A compromised trusted relay can lie about time: signatures authenticate a clock
+claim, not UTC truth. No receipt exception defeats current account revocation.
+
+For time recovery only, a bounded endpoint accepts a small public probe with
+exactly `schema: "ramflux.identity.time_probe.v1"`, `version: 1`,
+`challenge_nonce: B32`. The time-probe receipt binds its object hash, purpose and
+nonce. It certifies no user/device identity or lease and cannot be used as message
+or registration evidence. It is allowed while ordinary sends are time-blocked.
+A queued message without a valid message-purpose receipt cannot use the
+post-expiry exception. A proxied proof without a valid proof-purpose receipt
+cannot replace a missing direct exporter. No TLS forwarded header is evidence.
 
 ## Time and verification order
 
@@ -424,18 +675,60 @@ registration, delegation mutations or new sends. The branch-signed message time
 `t` and authenticated relay acceptance time `a` must each lie in
 `[not_before - S, expires_at + S]`, and `t <= a + S`, `t <= now + S`, `a <= now + S`.
 Require relay acceptance evidence bound to the exact signed-message hash and
-source, authenticated by the configured relay service identity. Missing evidence
-fails the exception; a self-claimed relay timestamp is insufficient. Current
+source, authenticated by the pinned receiving-home relay key and node identity
+record above, with purpose `message`. Missing evidence fails the exception; a self-claimed relay timestamp is insufficient. Current
 revocations and retained authority floors still apply. Already pinned local history
 remains readable regardless of current lease. Persist the maximum fully
 authenticated, locally plausible event time as high-water mark `H`; never use
 future validity endpoints, unverified data or a bare directory clock to advance
 it. A local clock rollback is detected when `now + S < H`. It blocks new
 authorization until trusted local time is re-established, never local history
-reading; missing/unknown trusted time has the same send-blocking behaviour. Time
+reading; missing/unknown trusted time has the same send-blocking behaviour. The
+recovery flow below is the only explicit exception for authenticating time samples against a clock already known to be
+wrong; such samples grant no operation authority by themselves. Normal time
 checks precede pin/high-water updates, preventing future-dated state from poisoning
 the time floor. These marks detect observed rollback; they do not establish UTC
 on a device that has no trustworthy local clock.
+
+### Re-establishing trusted time
+
+Show a persistent "clock needs confirmation; sending paused" state. Request fresh,
+nonce-bound authenticated times from at least two independent sources: the own
+home node plus a separately operated federated node, or that node/relay's fresh
+time-probe receipt. Different hostnames behind one operator/key are not independent.
+An old inbox receipt or a bare directory timestamp is not a fresh sample.
+The second source is selected from independently trusted/pinned federation nodes,
+not an attacker-supplied key. A signed node `Envelope<TimeAttestation>` uses
+`CUSTODY_TIME_ATTESTATION` and exactly `schema`, `version: 1`, `node_id: Id`,
+`node_identity_record_hash: Hash`, `sample_id: B32`, `challenge_nonce: B32`,
+`observed_at: Time`; it is signed by that node's pinned identity key (8 KiB limit).
+A relay alternative uses the distinct time-probe-purpose receipt profile above.
+
+Use a fresh 32-byte challenge per source and local monotonic round-trip measurement
+of at most 300 seconds. Require signatures, node identity/epoch pins and non-revoked
+keys, and samples agreeing within 300 seconds, accounting for the measured trip.
+Only the completed multi-source check may establish a new logical UTC anchor
+against the monotonic clock; its initial value is the largest agreeing signed
+time plus its measured return-trip bound. The agreement test includes those
+bounds, so a slow path cannot silently add another skew interval. Do not set the
+OS clock or treat a single authenticated source as sufficient. The assumption is
+independent, honest-enough time sources; two colluding sources can still lie.
+
+If independent samples are unavailable/disagree, ordinary sends stay paused unless
+the user explicitly confirms the displayed/corrected time with the visible warning:
+"This time could be wrong. Expired device permissions may appear valid. Continue
+only after checking the clock independently." Never open a phrase form for this.
+
+Persist a local time-recovery journal entry with old `H`, samples/source identities
+or explicit user confirmation, chosen time, and an increasing local recovery
+generation. Atomically install the new logical clock and a new-generation `H`;
+this explicit flow may reset a wrongly future `H`, preventing permanent lockout
+after a fast clock is corrected. It never lowers identity epochs, mode latches,
+master/binding pins or revocation checkpoints. Retain the old floor as audit
+history; subsequent normal authenticated events advance only the new-generation
+floor. Backup/restore cannot silently replay an older time-reset generation.
+Revalidate current leases and authority after the reset, before any ordinary send.
+Local history stays readable throughout.
 
 Every verifier (SDK, router, gateway/directory, federation, peers) performs:
 
@@ -458,7 +751,8 @@ Every verifier (SDK, router, gateway/directory, federation, peers) performs:
 5. Verify complete roster, key commitments, branch certificates, delegation
    envelopes, erasure evidence and unsigned profile constraints. Enforce immutable
    id/kind/origin/master, retained tombstones and primary/custodian role. Do not
-   clear a known floor because predecessor material is unavailable; reconcile.
+   clear a known floor because predecessor/list material is unavailable; reconcile.
+   Apply both inline revocations and the verified compacted membership index.
 6. Atomically persist the accepted head/floor, master/binding/certificate pins and
    custody latch **before** granting authority or returning durable success. On a
    valid conflict persist the fence/evidence instead and grant no new authority.
@@ -466,10 +760,15 @@ Every verifier (SDK, router, gateway/directory, federation, peers) performs:
 7. For an operation, require current authority fetched at most 300 seconds ago;
    refresh failure has no stale-cache fallback. Check operation-specific branch
    possession, key epoch, capability, leases, replay/audience/transport binding
-   and exact head. Contact consent additionally verifies the self-signing approval.
+   and exact head. Only delayed consent may use its authenticated historical
+   same-range head under the receive-time rule; verify the self-signing approval
+   and live current sending branch separately. Proxy-mode proofs require the
+   receiver-home signed receipt, not an exporter from another TLS hop.
    No session, delegation or erasure ACK overrides a higher retained floor.
 8. Generate persistent alerts from authenticated state changes, including roster
-   additions, delegation issuance, display-name changes and removed-device state.
+   additions, new delegation scopes or operation widening, display-name changes
+   and removed-device state. Equivalent lease/delegation renewals are security-log
+   entries without alerts; compare semantic permissions, not newly issued ids.
    Primary/self-signing changes are blocking alerts; no alert opens a phrase form.
 
 An isolated verifier cannot prove globally latest state. Records and trusted
@@ -500,13 +799,13 @@ sorted), `initiator_sas_key: Key`, `responder_sas_key: Key` (X25519),
 `responder_agreement_key: Key` (X25519), `sender_hpke_key: Key|null`,
 `recipient_hpke_key: Key|null` (X25519, non-null only on primary transfer),
 `sas_suite: "ramflux.identity.pairing.sas_emoji.v1"` and
-`hpke_suite: "auth_x25519_hkdf_sha256_aes256gcm"|null`.
+`hpke_suite: "ramflux.identity.transfer.hpke_suite.v1"|null`.
 Initiator is the old primary. `transcript_hash` is
-`SHA-256(UTF8("ramflux.identity.pairing.transcript.v1") || transcript)`.
+`SHA-256(frame("ramflux.identity.pairing_transcript.v1", transcript))`.
 
 Before public-key reveal each party commits to
-`SHA-256(UTF8("ramflux.identity.pairing.commitment.v1") || role_byte ||
-random_32_byte_salt || own_raw_sas_key || invitation_id_raw)`;
+`SHA-256(frame("ramflux.identity.pairing.commitment.v1", role_byte ||
+random_32_byte_salt || own_raw_sas_key || invitation_id_raw))`;
 role byte is 0 for initiator, 1 for responder. Exchange both commitments before
 either reveal; salts and keys are fixed once, and mismatch cancels. These exact
 commitment/transcript bindings need provider adaptation review and vectors: a
@@ -537,7 +836,7 @@ reusing Ed25519 as X25519 or leaving Base-mode ciphertexts unauthenticated.
 The following exact bytes bind context, with no delimiter ambiguity:
 
 ```text
-info = UTF8("ramflux.custody.transfer.hpke.v1") || raw_transcript_hash
+info = UTF8("ramflux.identity.transfer.hpke_info.v1") || 0x00 || raw_transcript_hash
 # hash is fixed 32 bytes
 AAD = JCS({"schema":"ramflux.identity.transfer.aad.v1", "version":1,
            "transfer_id":transfer_id, "current_record_hash":current_record_hash,
@@ -596,7 +895,11 @@ behaviour. Publish cross-client JCS/signature/hash vectors for every body, max
 epoch/skipped ranges/conflicts, invalid I-JSON and unsupported versions; RFC 9180
 suite vectors (including Auth mode 2 / KEM 32 / KDF 1 / AEAD 2 from the
 [RFC-linked vector corpus](https://github.com/cfrg/draft-irtf-cfrg-hpke/blob/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json))
-plus application transcript/AAD/substitution/replay vectors; SAS
+plus application transcript/AAD/substitution/replay vectors; section-hash/cache
+reconstruction and not-modified/eviction vectors; consent delay/retention across
+same-range renewal and range replacement; cumulative revocation compaction,
+missing-list refusal and anti-resurrection vectors; node-key overlap/revocation,
+proxy receipt mode and multi-source/user-confirmed clock-reset tests; SAS
 commitment/MAC/emoji mapping vectors and full-flow recovery benchmark plan.
 Do not describe those planned vectors as already published by this document.
 

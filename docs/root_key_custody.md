@@ -1,6 +1,6 @@
 # Root key custody
 
-Design revision 3, phase 1. This proposal changes no executable behavior. The
+Design revision 4, phase 1. This proposal changes no executable behavior. The
 inspected product baseline is `eae12fbb197f8bbea21b682686c8548fc1a27958`.
 Current accounts still keep the root seed on each device. Activation requires
 coordinated protocol, verifier, vault, backup and client changes; the guarantees
@@ -93,8 +93,11 @@ verification version before a creator secondary can discard its legacy root.
 
 Every own device records a blocking security alert for a primary-holder or
 self-signing-key change, including a revoked old primary on its next public
-update. Every roster addition, delegation issuance and display-name change also
-creates a persistent non-blocking alert on every own device. Show the new device,
+update. Every new device, first delegation scope, widening of operations and
+display-name change creates a persistent non-blocking alert on every own device.
+Equivalent branch/delegation renewals are silent and visible in the device/security
+log; compare actual permissions, not a newly generated certificate/delegation id.
+Show the new device,
 kind, capabilities, enrolling primary and delegation scope/expiry. Removal alerts
 the removed device: "If this was not you, recover with your phrase on a trusted
 device." Alerts identify the account fingerprint, old/new key fingerprints and
@@ -167,8 +170,8 @@ phrase are the same authority, not revocable recovery credentials.
 
 Extend the existing signed device-set/profile family. Device-set v3 carries the
 immutable account anchor/kind, public master authorization, primary holder,
-self-signing public key, complete device roster and tombstones, branch certificate
-leases, custody mode, migration status and profile. Its signature is by the
+self-signing public key, active/recent device roster and revoked-id checkpoint,
+branch certificate leases, custody mode, migration status and profile. Its signature is by the
 master-certified self-signing key, under a new critical v3 domain. The master
 certificate binds that key, account anchor, primary holder, authority scopes and
 its permitted record-epoch range. No independent custody record or profile chain.
@@ -230,6 +233,23 @@ master binding cannot be replaced by another legacy-root endorsement. Unknown
 critical formats fail closed. Old peers that only understand v1/v2 cannot contact
 a migrated account; rollout/release notes must say so.
 
+The public record includes hashes of its profile, device, delegation, migration,
+revocation-id and revoked-checkpoint sections. Conditional fetch by a known head
+hash returns `not_modified`; for a changed head, cached unchanged section bodies
+are reused. Reconstruct and verify the full logical signed record before accepting
+it. Routine renewals never force peers to download unchanged bodies. A response
+hash alone grants no authority, and missing/evicted sections must be fetched and
+verified rather than silently omitted.
+
+Compaction after 90 days moves old tombstones to a primary-signed cumulative
+revoked-device checkpoint (sorted-list hash plus count). The roster cap counts
+only active devices and recent tombstones. Verifiers must obtain, stream-verify
+and index the committed list: the digest/count alone proves no membership or
+absence. All enrolled ids are checked against recent and compacted revocations,
+which persist across higher ranges, backups and restart; an old device id is
+never reusable. Missing list evidence blocks affected authorization, never means
+"not revoked". The wire spec defines page bounds, retention and supersets.
+
 For new online operations, refresh verified authority at most five minutes apart;
 no older cached fallback after a required refresh fails. Pins dominate cache
 freshness. Check current authority per request rather than freezing a device set
@@ -242,8 +262,17 @@ Queued messages accepted while a branch lease was valid remain receivable after
 expiry if their branch-signed timestamp is inside the lease plus skew and the
 authenticated relay acceptance timestamp independently satisfies that bound.
 Backdating alone does not authorize a new send; current revocation still applies.
-See the wire spec for the exact comparisons. Withholding newer signed state
-remains a first-observer limitation.
+For a clock rollback, re-establish logical trusted time using fresh authenticated,
+challenge-bound samples from at least two independent sources: the own home node
+and an independently operated federated node or relay time-probe receipt, agreeing
+within ±300 seconds. Different hostnames of one operator do not count twice.
+Alternatively the user explicitly confirms the displayed/corrected time with a
+visible expiry-risk warning. A journaled new local time generation may replace a
+wrongly future time floor; it never lowers identity/mode/epoch/revocation pins.
+Ordinary sends remain paused until this succeeds; local history stays readable.
+No clock alert requests the recovery phrase. See the wire spec for exact checks,
+time-source authentication, reset audit state and proxy deployment assumptions.
+Withholding newer signed state remains a first-observer limitation.
 
 ## Primary vault and typed signer
 
@@ -280,11 +309,11 @@ prove that a vault provider is hardware-backed.
 | Device add, branch rotation, revocation, lease renewal, signed-set publish | Primary self-signing key and exact current record |
 | Contact request, accept or decline (v2 consent) | Primary self-signing key; a secondary queues the exact intent for primary approval |
 | Public display-name change | Primary self-signing key; secondary request remains pending |
-| Issue/revoke creator or create-group delegation | Primary self-signing key within master-certified scopes |
+| Issue/revoke account-level own-group scope or private group restriction | Primary self-signing key within master-certified scopes |
 | Register, renew session proof, resume | Device branch + unexpired certificate + current v3 device set |
 | Prekeys, messages, receipts, calls and transport envelopes | Branch keys, current authority and existing operation permissions |
 | Own-device history/contact sync; data backup | Branch authentication and data keys; no authority secret |
-| Creator snapshot/request result or group genesis | Current creator branch with the appropriate seven-day delegation |
+| Creator snapshot/request result or group genesis | Current creator branch with its seven-day `create_and_administer_own_groups` grant; creator anchor and any encrypted group restriction checked |
 | Group ownership transfer | Primary authority plus the existing fresh-head/transferee acceptance rules |
 | Non-creator group change request | Requesting branch plus current group role |
 | Recover data into a secondary | Fresh local branch, sanitized data, then primary approval before networking |
@@ -300,7 +329,13 @@ Registration v3 is required across gateway, router, SDK and federation.
 Contact consent v2 replaces the private-root signature in
 `ramflux.contact_request.v1` with a self-signing signature, tied to the actor
 anchor, exact sending branch, v3 record hash and current master certificate (wire
-spec). A secondary can transport a primary-approved exact intent but cannot mint
+spec). A delayed consent remains valid through unrelated same-range revisions
+if its referenced historical record authenticates, its self-signing key is unchanged,
+its sending branch/key epoch is still active with current authority, and its seven-day
+TTL, time and replay checks pass. A higher range/key replacement or revocation
+requires a new approval. Directories serve superseded records by hash for the TTL
+plus skew; the initial migration record and last legacy head are retained forever.
+A secondary can transport a primary-approved exact intent but cannot mint
 it. All request/accept/decline kinds follow this rule. Never reinterpret v1's
 `actor_root` as a self-signing key or let a secondary fetch the legacy root.
 Legacy accounts keep v1 until migration; custody accounts require peers with v2
@@ -444,14 +479,19 @@ For this proposed path, **only after owner approval**:
    expires; revocation is the default, published by the primary on reconciliation.
    Later return requires explicit fresh enrollment, not silent reactivation.
 
-Two different authenticated legacy bindings for one anchor mark the account
-`identity_compromised`, alert every observing own device/contact safety view and
+Before a trusted re-attestation has resolved the binding, two different
+authenticated legacy bindings for one anchor mark the account `identity_compromised`, alert every observing own device/contact safety view and
 refuse both bindings. Never choose by arrival order or lowest hash. Resume only
 after a higher-range master re-attestation to the chosen binding under the
 already trusted master; a fresh verifier with no trusted master must independently
 reverify it out of band. A signature by an arbitrary competing master cannot
-resolve which identity was intended. See the wire verification algorithm. Test
-loss of the primary before and after publication, rejected/uncertain
+resolve which identity was intended. After a trusted-master re-attestation resolves
+the conflict, permanently pin that master and the chosen binding hash. Later
+competing legacy bindings are ignored for authority and logged as security events;
+they cannot suspend that verifier again or force repeated phrase ceremonies.
+New observers without this resolved pin remain first-observer limited. See the
+wire verification algorithm. Test loss of the primary before and after publication,
+rejected/uncertain
 publish results and partially received ACK batches. The phrase can recover the
 new management authority only once the corresponding public transition exists.
 Erasure ACKs are honest-client statements, not remote attestation. Inventory old
@@ -488,20 +528,23 @@ not recover history for which the user has no surviving data keys/backup.
 
 ## Creator secondary signing
 
-Auto-issue seven-day creator-device delegations to verified own secondaries at
-enrollment and renewal, for the account's groups. Include a separate account-level
-create-group scope so a secondary can create genesis while the primary is offline.
-No subdelegation. Ownership transfer remains primary-only and retains the group
-protocol's fresh creator-head check, transferee countersign and sticky removals.
+Each verified own secondary receives exactly one seven-day account-level
+`create_and_administer_own_groups` scope, auto-issued at enrollment and renewed
+without adding group-specific entries to the public identity record. Its allowed
+operations are genesis, snapshots and request results. Group verifiers check the
+account anchor against the group's actual creator anchor and current group role.
+No public group ids, genesis hashes, group counts or per-group delegation-id index.
+The grant count scales with secondaries, not groups × secondaries.
 
-A delegation binds account anchor/master authorization, current self-signing key,
-root-qualified branch/key epoch, group genesis/id (or explicit create-group scope),
-operations, certificate id, validity and revocation information. Current authority
-and group membership are checked alongside it. A new group wire version verifies
-this chain for snapshots/genesis/results while keeping independent transport
-source authentication, complete-state hashing, role/budget rules and the existing
-same-creator conflict/removal rules. Other roots still request changes; delegated
-branches do not restore cross-root multi-writer group authority.
+Any narrower group-specific delegation/restriction and its revocation travel only
+inside that group's authenticated encrypted control channel. They cannot widen
+or outlive the current account grant. A delegate cannot remove a primary-signed
+restriction from group state to regain broader permissions. No subdelegation.
+Ownership transfer remains primary-only and retains the existing fresh creator-head check, transferee
+countersign and sticky removals. A new group wire version verifies the account
+chain and encrypted restrictions, independent source authentication, complete-state
+hashing and role/budget/conflict rules. Other roots still request changes rather
+than gaining cross-root creator authority.
 
 A compromised delegate can add attacker roots, disclose future group traffic,
 remove members, change roles and rename within its authority window. This is an
@@ -509,7 +552,9 @@ explicit residual risk of offline creator availability. A foreign-root addition
 by a delegated own device creates an alert on the primary when observed; an
 attacker withholding all evidence cannot be promised to self-report. Ownership
 transfer, device revocation/key rotation and management-key replacement fence old
-delegations. The primary can revoke a delegation in v3 authority state.
+delegations. The primary revokes the account-level grant in v3 state; a narrower
+per-group revocation stays in the encrypted group control state. Routine equivalent grant
+renewals go to the security log; new scope or widening raises the device alert.
 
 Expired delegation cannot authorize a newly received mutation merely by backdating
 its claimed issue time. Previously pinned history remains readable. A fresh
@@ -546,9 +591,36 @@ creation and allow explicit per-service print/export, or storage of agent phrase
 in the human custodian's own vault with an explicit local compromise warning.
 Agent processes and nodes still receive none of them. Such optional user-managed
 vault storage does not turn routine full backups into authority backups.
-Custodian renewal can be batched with
-explicit scope; show expiry reminders and a clear waiting state when the human
+Custodian renewal can be batched with explicit scope; show expiry reminders and a clear waiting state when the human
 is unavailable. A daemon cannot promote itself to avoid lease expiry.
+
+Replacing or losing that human primary also requires N service re-certifications,
+even for a planned transfer: service self-signing secrets never travel, and each
+service master certifies a fresh key bound to the new human device. The human
+phrase alone cannot do this. Old device references/leases may stop service writes
+until each agent completes the step; explain the N-agent cost and warn on expiry.
+
+Provide a custodian-driven "re-certify my services" batch journal: enumerate the
+verified managed service anchors and old/new custodian devices, show per-agent
+expiry, generate each fresh service self-signing key in the new human vault, and
+request each agent phrase locally from its own operator or explicitly unlocked
+user-managed vault. Derive each master only inside that local ceremony, sign its
+higher-range certificate, erase temporary master/phrase buffers, then publish and
+verify the exact service ACK before marking that item complete. Only public
+certificates/records travel; neither agent phrases nor self-signing secrets are
+sent between devices or to nodes. Pause/resume is per agent and idempotent after
+crash/uncertain ACK; an unavailable phrase leaves that agent waiting, not silently
+rebound to the human master. Fresh same-root branch recertification and revocation
+of old service authority follow each new range. Service daemons cannot bypass it.
+
+Direct TLS exporter binding requires TLS/QUIC termination at the verifying service.
+Behind a TLS-terminating proxy, use only an authenticated receiving-home relay
+receipt for channel evidence, with the same branch signature, nonce, audience and
+current-authority checks. Receipt keys are published/rotated with overlap in the
+node's signed identity record, verified against its existing node/federation pin;
+ordinary rotation preserves historical queued receipts, compromise revocation
+fences unconsumed evidence. A sender-selected relay or forwarded TLS header is
+not a trust anchor. The wire spec defines record/key retention and proxy mode.
 
 Desktop security shows account fingerprint, primary/custodian, vault class,
 verified devices, pending erasures, phrase setup, branch/delegation expiry and
@@ -566,8 +638,8 @@ incomplete migration plainly rather than silently creating another account.
 ## Staged implementation and acceptance
 
 1. Freeze v3 authority/profile, master certification, epoch-range policy, branch
-   certificates/session proofs and group delegation formats. Decide legacy public
-   binding semantics, review SAS/HPKE implementations and vault classes, and
+   certificates/session proofs, section fetch/checkpoint, node receipt/time and
+   group delegation formats. Decide legacy public binding semantics, review SAS/HPKE implementations and vault classes, and
    publish cross-client vectors. Stage 1 exits only after independent approval
    of both this design and `root_key_custody_wire.md`, owner disposition of the
    legacy-binding proposal, reviewed epoch-range encoding, the pinned SAS provider/audit delta, vault providers
@@ -611,16 +683,18 @@ Required native/property/security tests:
 - Keyless proof renewal after one hour, fresh retry ids, resume, per-request
   revocation, stale/foreign authority, replay across accounts/sessions/transports,
   expired leases, ±300-second boundaries, authenticated queued delivery,
-  unknown/rollback time and readable offline history with networking blocked.
-- Contact v2 self-signing signatures, all consent kinds, actor/branch/head binding,
-  pending secondary intents and refusal of legacy-only peer/federation downgrade.
+  unknown/rollback time, two independent fresh samples, user-confirmed reset,
+  poisoned fast-clock recovery and readable offline history while sending is blocked.
+- Contact v2 self-signing signatures, all consent kinds, historical-head lookup,
+  same-range delayed delivery after renewal, changed-key/range/revocation refusal,
+  TTL+skew retention, pending intents and legacy-only peer/federation downgrade.
 - SAS commitment, key substitution, reflection, wrong root/kind/purpose, suite
   downgrade, comparison/MAC failure, attempt budgets, approval spam, modified
   proposal, concurrent enrollment and uncertain publication ACK.
 - HPKE vectors and transcript/AAD/recipient substitution, replay, truncation,
   cancellation and crashes at every recovery/transfer boundary; old primary is
-  fenced; every own device alerts on enrollment, delegation, display-name and
-  primary changes, removed devices alert, and phrase phishing prompts never appear.
+  fenced; device/new-scope/widening/name and primary changes alert, equivalent
+  renewals are log-only, removed devices alert, and no phishing phrase prompt appears.
 - Minimum-memory complete recovery on supported hardware, TUI/desktop parity,
   three-word setup, normalization/checksum/prefix rejection, reminders at day
   1/7/30/90, dry runs, expiry warnings and new-identity history migration.
@@ -633,6 +707,15 @@ Required native/property/security tests:
   delegate adds a foreign root and triggers the primary alert, then revocation,
   expiry, key rotation and transfer reject later writes. Same-epoch concurrency,
   sticky removals, large epoch gaps and bounded delivery remain covered.
+- Section hash reconstruction, head not-modified, missing/evicted sections and
+  no unchanged-body download on renewal; public records contain no group metadata.
+- Aged tombstone compaction preserves full-list membership/absence and supersets;
+  missing evidence, restart and restore cannot reactivate a compacted device id.
+- Resolved binding/master pins cannot be suspended by later legacy-root bindings.
+- Node receipt-key rotation/overlap, historical keys, compromise revocation and
+  TLS proxy proof/receipt substitution fail closed.
+- N-agent re-certification after planned/lost primary, per-agent pause/resume,
+  missing phrase and expiry; no service authority secret crosses devices.
 - Service custodian references must be verified human identities; bot/workflow/
   headless devices cannot become primary through API, restore or kind spoofing.
 

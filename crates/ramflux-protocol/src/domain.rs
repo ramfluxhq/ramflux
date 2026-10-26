@@ -73,7 +73,43 @@ pub const REGISTRATION_TRUST_TIER: &str = "ramflux.registration_trust_tier.v1";
 
 pub const TASK_EVENT: &str = "ramflux.task_event.v1";
 
-pub const ALL: [&str; 66] = [
+// Reserved custody labels do not activate a wire format or verifier.
+pub const CUSTODY_MASTER_CERTIFICATE: &str = "ramflux.identity.master_certificate.v1";
+pub const SIGNED_DEVICE_SET_V3: &str = "ramflux.identity.signed_device_set.v3";
+pub const CUSTODY_BRANCH_CERTIFICATE: &str = "ramflux.identity.branch_certificate.v1";
+pub const BRANCH_PROOF_V3: &str = "ramflux.identity.branch_proof.v3";
+pub const CUSTODY_DELEGATION: &str = "ramflux.identity.delegation.v1";
+pub const CUSTODY_GROUP_DELEGATION: &str = "ramflux.identity.group_delegation.v1";
+pub const CUSTODY_ERASURE_ACK: &str = "ramflux.identity.erasure_ack.v1";
+pub const CUSTODY_LEGACY_BINDING: &str = "ramflux.identity.legacy_binding.v1";
+pub const CONTACT_REQUEST_V2: &str = "ramflux.identity.contact_request.v2";
+pub const CUSTODY_RELAY_ACCEPTANCE: &str = "ramflux.identity.relay_acceptance.v1";
+pub const CUSTODY_TRANSFER_BINDING: &str = "ramflux.identity.transfer_binding.v1";
+pub const CUSTODY_REVOKED_CHECKPOINT: &str = "ramflux.identity.revoked_devices.checkpoint.v1";
+pub const CUSTODY_NODE_RECORD: &str = "ramflux.identity.node_record.v1";
+pub const CUSTODY_TIME_ATTESTATION: &str = "ramflux.identity.time_attestation.v1";
+pub const CUSTODY_MASTER_SEED: &str = "ramflux.identity.master.v1";
+pub const CUSTODY_OBJECT_HASH: &str = "ramflux.identity.custody.object_hash.v1";
+pub const CUSTODY_SECTION_HASH: &str = "ramflux.identity.custody.section_hash.v1";
+pub const CUSTODY_SAFETY_NUMBER: &str = "ramflux.identity.safety_number.v2";
+pub const CUSTODY_PAIRING_TRANSCRIPT: &str = "ramflux.identity.pairing_transcript.v1";
+pub const CUSTODY_PAIRING_COMMITMENT: &str = "ramflux.identity.pairing.commitment.v1";
+pub const CUSTODY_PAIRING_SAS: &str = "ramflux.identity.pairing.sas.v1";
+pub const CUSTODY_PAIRING_CONFIRM_INITIATOR: &str = "ramflux.identity.pairing.confirm.initiator.v1";
+pub const CUSTODY_PAIRING_CONFIRM_RESPONDER: &str = "ramflux.identity.pairing.confirm.responder.v1";
+pub const CUSTODY_PAIRING_CHANNEL_INITIATOR: &str = "ramflux.identity.pairing.channel.initiator.v1";
+pub const CUSTODY_PAIRING_CHANNEL_RESPONDER: &str = "ramflux.identity.pairing.channel.responder.v1";
+pub const CUSTODY_PAIRING_EMOJI_SUITE: &str = "ramflux.identity.pairing.sas_emoji.v1";
+pub const CUSTODY_TRANSFER_HPKE_INFO: &str = "ramflux.identity.transfer.hpke_info.v1";
+pub const CUSTODY_TRANSFER_AAD: &str = "ramflux.identity.transfer.aad.v1";
+pub const CUSTODY_TRANSFER_HPKE: &str = "ramflux.identity.transfer.hpke.v1";
+pub const CUSTODY_TRANSFER_PAYLOAD: &str = "ramflux.identity.transfer.payload.v1";
+pub const CUSTODY_TRANSFER_HPKE_SUITE: &str = "ramflux.identity.transfer.hpke_suite.v1";
+pub const CUSTODY_BRANCH_EXPORTER: &str = "ramflux.identity.branch_proof.exporter.v3";
+pub const CUSTODY_REVOKED_LIST: &str = "ramflux.identity.revoked_devices.list.v1";
+pub const CUSTODY_TIME_PROBE: &str = "ramflux.identity.time_probe.v1";
+
+pub const ALL: [&str; 100] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -140,6 +176,40 @@ pub const ALL: [&str; 66] = [
     KEY_VERIFICATION_DEVICE_SET,
     REGISTRATION_POW,
     REGISTRATION_TRUST_TIER,
+    CUSTODY_MASTER_CERTIFICATE,
+    SIGNED_DEVICE_SET_V3,
+    CUSTODY_BRANCH_CERTIFICATE,
+    BRANCH_PROOF_V3,
+    CUSTODY_DELEGATION,
+    CUSTODY_GROUP_DELEGATION,
+    CUSTODY_ERASURE_ACK,
+    CUSTODY_LEGACY_BINDING,
+    CONTACT_REQUEST_V2,
+    CUSTODY_RELAY_ACCEPTANCE,
+    CUSTODY_TRANSFER_BINDING,
+    CUSTODY_REVOKED_CHECKPOINT,
+    CUSTODY_NODE_RECORD,
+    CUSTODY_TIME_ATTESTATION,
+    CUSTODY_MASTER_SEED,
+    CUSTODY_OBJECT_HASH,
+    CUSTODY_SECTION_HASH,
+    CUSTODY_SAFETY_NUMBER,
+    CUSTODY_PAIRING_TRANSCRIPT,
+    CUSTODY_PAIRING_COMMITMENT,
+    CUSTODY_PAIRING_SAS,
+    CUSTODY_PAIRING_CONFIRM_INITIATOR,
+    CUSTODY_PAIRING_CONFIRM_RESPONDER,
+    CUSTODY_PAIRING_CHANNEL_INITIATOR,
+    CUSTODY_PAIRING_CHANNEL_RESPONDER,
+    CUSTODY_PAIRING_EMOJI_SUITE,
+    CUSTODY_TRANSFER_HPKE_INFO,
+    CUSTODY_TRANSFER_AAD,
+    CUSTODY_TRANSFER_HPKE,
+    CUSTODY_TRANSFER_PAYLOAD,
+    CUSTODY_TRANSFER_HPKE_SUITE,
+    CUSTODY_BRANCH_EXPORTER,
+    CUSTODY_REVOKED_LIST,
+    CUSTODY_TIME_PROBE,
 ];
 
 #[cfg(test)]
@@ -150,5 +220,21 @@ mod tests {
         assert_eq!(unique.len(), super::ALL.len());
         assert!(unique.contains(super::A2UI_ACTION_ARGS));
         assert_eq!(super::A2UI_ACTION_ARGS, "ramflux.a2ui.action_args.v1");
+    }
+    #[test]
+    fn registered_domains_are_prefix_free_and_custody_labels_share_the_identity_namespace() {
+        for (index, left) in super::ALL.iter().enumerate() {
+            assert!(!left.as_bytes().contains(&0), "domain contains a frame separator");
+            for right in &super::ALL[index + 1..] {
+                assert!(
+                    !left.starts_with(right) && !right.starts_with(left),
+                    "ambiguous domains: {left} / {right}"
+                );
+            }
+        }
+        for label in &super::ALL[66..] {
+            assert!(label.starts_with("ramflux.identity."));
+        }
+        assert_eq!(super::CUSTODY_PAIRING_TRANSCRIPT, "ramflux.identity.pairing_transcript.v1");
     }
 }

@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Reserved identity custody domains and labels for protocol review. This does not
+  enable custody accounts or change existing authentication and signing behavior.
+
 - Root-signed public profiles in device-set v2, with verified kind and normalized
   public display names. Legacy v1 remains readable; coordinated client/server
   upgrades are required for v2 publications. Kind verification authenticates a
