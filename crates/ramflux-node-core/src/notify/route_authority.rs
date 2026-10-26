@@ -10,9 +10,15 @@ use super::{DevicePushRoute, NOTIFY_ROUTE_TABLE, NotifyRedbStore, routes};
 use crate::{DeviceAuthKeyResponse, NodeCoreError};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 const OWNERS: TableDefinition<&str, &[u8]> = TableDefinition::new("notify_route_authority_v1");
-/// Per-device sequence of the last deregistration. Kept after the routes are deleted, so a
-/// registration that finishes late (older client sequence) cannot recreate a cleared route.
-const FENCES: TableDefinition<&str, u64> = TableDefinition::new("notify_route_fence_v1");
+/// Per-device `(client sequence, set at)` of the last deregistration. It only has to outlive a
+/// registration still in flight (control freshness 30 s, gateway bound 10 s), so it expires
+/// [`PUSH_ROUTE_FENCE_SECONDS`] after it was set, by notify's own clock, and the retention
+/// sweep deletes it. A wrong client clock therefore delays registration by at most that long.
+const FENCES: TableDefinition<&str, (u64, u64)> = TableDefinition::new("notify_route_fence_v2");
+/// Unreleased pre-expiry fence table; dropped by the retention sweep.
+const LEGACY_FENCES: TableDefinition<&str, u64> = TableDefinition::new("notify_route_fence_v1");
+/// Lifetime of a deregistration fence.
+pub const PUSH_ROUTE_FENCE_SECONDS: u64 = 600;
 /// Owners per authority lookup request.
 pub const PUSH_ROUTE_AUTHORITY_BATCH: usize = 256;
 /// Owners checked per revocation sweep call.
@@ -113,7 +119,10 @@ impl NotifyRedbStore {
             .get(route.device_delivery_id.as_str())
             .map_err(error)?
             .map(|value| value.value());
-        if fence.is_some_and(|fence| client_seq.unwrap_or(0) <= fence) {
+        let fenced = fence.is_some_and(|(seq, set_at)| {
+            now.saturating_sub(set_at) < PUSH_ROUTE_FENCE_SECONDS && client_seq.unwrap_or(0) <= seq
+        });
+        if fenced {
             txn.abort().map_err(error)?;
             return Ok(false);
         }
@@ -175,15 +184,17 @@ impl NotifyRedbStore {
         if let Some(binding) = &binding
             && self.open_binding(target, binding)?.authenticated_device_identity()? != caller
         {
-            return Err(NodeCoreError::Unauthorized("push route owner rejected".into()));
+            return Err(NodeCoreError::PushRouteOwnerMismatch);
         }
         let txn = self.db.begin_write().map_err(error)?;
         if let Some(seq) = client_seq {
+            let now = crate::now_unix_seconds();
             let mut fences = txn.open_table(FENCES).map_err(error)?;
             let current = fences.get(target).map_err(error)?.map(|value| value.value());
-            if current.is_none_or(|current| current < seq) {
-                fences.insert(target, seq).map_err(error)?;
-            }
+            let live = current
+                .filter(|(_, set_at)| now.saturating_sub(*set_at) < PUSH_ROUTE_FENCE_SECONDS)
+                .map_or(0, |(seq, _)| seq);
+            fences.insert(target, (seq.max(live), now)).map_err(error)?;
         }
         if binding.is_none() {
             txn.commit().map_err(error)?;
@@ -378,5 +389,48 @@ impl NotifyRedbStore {
         txn.commit().map_err(error)?;
         self.ownerless_routes_cleared.store(true, std::sync::atomic::Ordering::Release);
         Ok(removed)
+    }
+
+    /// Deletes deregistration fences older than [`PUSH_ROUTE_FENCE_SECONDS`] and the
+    /// unreleased pre-expiry fence table. Returns the number of removed fences.
+    pub(super) fn prune_route_fences(&self, now: u64) -> Result<usize, NodeCoreError> {
+        let txn = self.db.begin_write().map_err(error)?;
+        let removed;
+        {
+            let mut fences = txn.open_table(FENCES).map_err(error)?;
+            let expired = fences
+                .iter()
+                .map_err(error)?
+                .filter_map(|row| {
+                    row.map(|(key, value)| {
+                        let (_, set_at) = value.value();
+                        (now.saturating_sub(set_at) >= PUSH_ROUTE_FENCE_SECONDS)
+                            .then(|| key.value().to_owned())
+                    })
+                    .map_err(error)
+                    .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            removed = expired.len();
+            for key in expired {
+                fences.remove(key.as_str()).map_err(error)?;
+            }
+        }
+        txn.delete_table(LEGACY_FENCES).map_err(error)?;
+        txn.commit().map_err(error)?;
+        Ok(removed)
+    }
+
+    /// Test hook: places a fence as if it had been set at `set_at`.
+    #[cfg(test)]
+    pub(crate) fn set_route_fence_for_test(
+        &self,
+        target: &str,
+        seq: u64,
+        set_at: u64,
+    ) -> Result<(), NodeCoreError> {
+        let txn = self.db.begin_write().map_err(error)?;
+        txn.open_table(FENCES).map_err(error)?.insert(target, (seq, set_at)).map_err(error)?;
+        txn.commit().map_err(error)
     }
 }

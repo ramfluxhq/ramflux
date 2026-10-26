@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) mod retention;
 mod route_authority;
+pub use route_authority::PUSH_ROUTE_FENCE_SECONDS;
 mod routes;
 
 pub const NOTIFY_RATE_ALIAS_PER_MINUTE: usize = 60;

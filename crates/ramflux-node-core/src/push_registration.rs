@@ -195,6 +195,8 @@ pub enum PushRouteRefusal {
     /// A newer control from the same session replaced this one before it ran, or a newer
     /// deregistration was already confirmed.
     Superseded,
+    /// The caller is verifiably not the routes' bound owner; retrying cannot succeed.
+    RejectedOwner,
     /// A code from a newer peer; treated as transient.
     #[serde(other)]
     Unknown,

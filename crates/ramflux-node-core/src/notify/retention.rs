@@ -136,6 +136,7 @@ impl NotifyRedbStore {
         }
         txn.commit().map_err(error)?;
         self.prune_route_owners()?;
+        removed += self.prune_route_fences(now)?;
         if let Some(shards) = &self.wal_shards {
             for shard in shards {
                 shard.store.prune_expired(now)?;

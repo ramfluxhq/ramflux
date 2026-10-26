@@ -355,6 +355,7 @@ fn itest_error_status(error: &ramflux_node_core::NodeCoreError) -> &'static str 
 fn notify_mesh_error_status(error: &ramflux_node_core::NodeCoreError) -> u16 {
     match error {
         ramflux_node_core::NodeCoreError::Unauthorized(_message) => 401,
+        ramflux_node_core::NodeCoreError::PushRouteOwnerMismatch => 403,
         _ => 500,
     }
 }

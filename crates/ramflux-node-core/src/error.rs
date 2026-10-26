@@ -57,4 +57,7 @@ pub enum NodeCoreError {
     ItestJson(String),
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+    /// The caller is verifiably not the device bound as the push routes' owner.
+    #[error("push route owner mismatch")]
+    PushRouteOwnerMismatch,
 }

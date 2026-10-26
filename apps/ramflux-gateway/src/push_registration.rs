@@ -162,18 +162,19 @@ async fn execute(
         Ok(Ok(Answer::Refused(code))) => refused(request_id, code),
         Ok(Err(error)) => {
             tracing::warn!(%error, "push route control failed");
-            // Notify refused the caller itself (for example not the routes' owner): permanent.
-            let unauthorized =
+            // Only a verified owner mismatch (403) is permanent. Other refusals, such as an
+            // expired control after clock skew (401), are transient.
+            let owner_mismatch =
                 error.downcast_ref::<ramflux_transport::TransportError>().is_some_and(|error| {
                     matches!(
                         error,
-                        ramflux_transport::TransportError::HttpStatus { status: 401 | 403, .. }
+                        ramflux_transport::TransportError::HttpStatus { status: 403, .. }
                     )
                 });
             refused(
                 request_id,
-                if unauthorized {
-                    PushRouteRefusal::Rejected
+                if owner_mismatch {
+                    PushRouteRefusal::RejectedOwner
                 } else {
                     PushRouteRefusal::Unavailable
                 },
