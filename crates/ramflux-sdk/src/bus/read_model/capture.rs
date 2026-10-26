@@ -14,12 +14,7 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
         "account",
         &json!({"principal_id":config.principal_id,"device_id":config.device_id}),
     )?;
-    if db.client_record("identity", &config.principal_id)?.is_none() {
-        let public_key = account.client.device_branch.as_ref().map(|branch| {
-            ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
-        });
-        db.persist_client_record("identity",&config.principal_id,&json!({"id":config.principal_id,"principal_id":config.principal_id,"display_name":null,"kind":null,"is_self":true,"contact_identity_commitment":account.principal_commitment,"devices":[{"id":config.device_id,"device_id":config.device_id,"label":null,"last_seen":null,"target_delivery_id":config.target_delivery_id,"signing_public_key":public_key}],"safety_number":null}))?;
-    }
+    initialize_own_identity(account)?;
     let path = local_bus_account_manifest_path(
         account.client.account_index()?.root(),
         &db.local_account_id,
@@ -59,6 +54,23 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
     device["principal_commitment"] = json!(account.principal_commitment);
     device["device_id"] = json!(config.device_id);
     db.persist_client_record("device", &config.device_id, &device)?;
+    Ok(())
+}
+
+fn initialize_own_identity(account: &LocalBusAccountState) -> Result<(), SdkError> {
+    let db = account.client.account_db()?;
+    let config = &account.gateway_config;
+    let mut identity = db.client_record("identity", &config.principal_id)?.unwrap_or_else(||json!({"id":config.principal_id,"principal_id":config.principal_id,"display_name":null,"kind":null,"is_self":true,"contact_identity_commitment":account.principal_commitment,"safety_number":null}));
+    let mut devices = identity["devices"].as_array().cloned().unwrap_or_default();
+    let mut device = devices.iter().find(|d|d["device_id"]==config.device_id).cloned().unwrap_or_else(||json!({"id":config.device_id,"device_id":config.device_id,"label":null,"last_seen":null}));
+    device["target_delivery_id"] = json!(config.target_delivery_id);
+    device["signing_public_key"] = json!(account.client.device_branch.as_ref().map(|branch| {
+        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes())
+    }));
+    devices.retain(|d| d["device_id"] != config.device_id);
+    devices.push(device);
+    identity["devices"] = json!(devices);
+    db.persist_client_record("identity", &config.principal_id, &identity)?;
     Ok(())
 }
 

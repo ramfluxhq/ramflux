@@ -59,3 +59,25 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn owned_profile_publication_preserves_self_device_routes_during_daemon_initialization()
+-> Result<(), SdkError> {
+    let root = root("owned-profile-route");
+    let account = account(&root, "local", None, Arc::new(AtomicBool::new(false)))?;
+    let record = account.client.prepare_owned_authority(None)?;
+    account.client.accept_owned_record(&record)?;
+    super::super::read_model::initialize(&account)?;
+    let row = super::super::read_model::row(&account.client, "identity", "local")?;
+    assert_eq!(row["kind"], "human");
+    assert_eq!(row["kind_verified"], true);
+    assert!(row["devices"].as_array().is_some_and(|devices| {
+        devices.iter().any(|device| {
+            device["device_id"] == account.gateway_config.device_id
+                && device["target_delivery_id"] == account.gateway_config.target_delivery_id
+        })
+    }));
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
