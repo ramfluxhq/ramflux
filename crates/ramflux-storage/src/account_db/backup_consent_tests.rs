@@ -366,5 +366,81 @@ fn merge_clamps_link_projection_to_restrictive_decision_despite_projection_clock
     Ok(())
 }
 
+#[test]
+fn merge_preserves_removed_links_for_block_and_decline_in_both_directions() -> TestResult {
+    for denied in ["blocked", "declined"] {
+        let (removed_root, removed_index, removed) = account("removed-link")?;
+        let (other_root, other_index, other) = account("unrelated-link")?;
+        if denied == "blocked" {
+            removed.establish_friend_link("removed", "own", "peer")?;
+            removed.block_friend_link("removed", 11)?;
+        } else {
+            removed.record_pending_friend_link("removed", "peer", "own", 10)?;
+            removed.reject_friend_link("removed", 11)?;
+        }
+        removed.remove_friend_link("removed", "both", 12)?;
+        other.establish_friend_link("unrelated", "own", "other-peer")?;
+        let expected = removed.connection.query_row(
+            "SELECT state,remove_scope,blocked,capability_revoked_at,updated_at
+             FROM friend_link_projection WHERE link_id='removed'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+        assert_eq!(expected.0, "removed");
+        assert_eq!(expected.2, denied == "blocked");
+
+        for reverse in [false, true] {
+            let (incoming, live) = if reverse { (&removed, &other) } else { (&other, &removed) };
+            let archive = removed_root.join(format!("removed-incoming-{denied}-{reverse}.db"));
+            let saved = incoming.write_backup_snapshot(&archive)?;
+            let target = other_root.join(format!("removed-live-{denied}-{reverse}.db"));
+            let local = live.write_backup_snapshot(&target)?;
+            let mut merged = BackupDatabase::open(&target, &local.key)?;
+            for round in 0..2 {
+                merged.merge_backup(&archive, &saved.key, || Ok(()))?;
+                let actual = merged.db.query_row(
+                    "SELECT state,remove_scope,blocked,capability_revoked_at,updated_at
+                     FROM friend_link_projection WHERE link_id='removed'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )?;
+                assert_eq!(actual, expected, "{denied}, reverse={reverse}, round={round}");
+                assert_eq!(
+                    merged.db.query_row(
+                        "SELECT state FROM friend_link_projection WHERE link_id='unrelated'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )?,
+                    "accepted",
+                    "{denied}, reverse={reverse}, round={round}"
+                );
+            }
+        }
+        drop(removed);
+        drop(other);
+        drop(removed_index);
+        drop(other_index);
+        std::fs::remove_dir_all(removed_root)?;
+        std::fs::remove_dir_all(other_root)?;
+    }
+    Ok(())
+}
+
 #[path = "backup_legacy_consent_tests.rs"]
 mod legacy;

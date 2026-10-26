@@ -72,13 +72,16 @@ impl BackupDatabase {
     }
     pub(super) fn apply_merged_link_consent(&self) -> Result<(), StorageError> {
         // Projection timestamps come from callers and may disagree with decision order.
-        // Reapply final denials after row selection; a surviving lift never revives a removal.
+        // Reapply final denials only to links represented by this archive. A surviving lift
+        // never revives a removal, and a denial never rewrites the removed lifecycle state.
         self.db.execute_batch("UPDATE friend_link_projection AS p
-            SET state=(SELECT CASE d.state WHEN 'blocked' THEN 'blocked' ELSE 'rejected' END FROM contact_link_decision d WHERE d.link_id=p.link_id),
-                blocked=(SELECT d.state='blocked' FROM contact_link_decision d WHERE d.link_id=p.link_id),
+            SET state=CASE WHEN p.state='removed' THEN p.state ELSE (SELECT CASE d.state WHEN 'blocked' THEN 'blocked' ELSE 'rejected' END FROM contact_link_decision d WHERE d.link_id=p.link_id) END,
+                blocked=CASE WHEN p.state='removed' THEN 1 ELSE (SELECT d.state='blocked' FROM contact_link_decision d WHERE d.link_id=p.link_id) END,
                 capability_revoked_at=CASE WHEN EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state='blocked')
                     THEN coalesce(p.capability_revoked_at,(SELECT max(d.decided_at,0)/1000 FROM contact_link_decision d WHERE d.link_id=p.link_id)) ELSE p.capability_revoked_at END
-            WHERE EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state IN ('blocked','declined'));")?;
+            WHERE EXISTS(SELECT 1 FROM incoming.friend_link_projection source WHERE source.link_id=p.link_id)
+              AND (p.state IN ('accepted','pending') OR (p.blocked=0 AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state='blocked')))
+              AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=p.link_id AND d.state IN ('blocked','declined'));")?;
         Ok(())
     }
     fn merge_link_consent_decisions(&self) -> Result<(), StorageError> {
