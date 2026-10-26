@@ -119,7 +119,7 @@ impl RamfluxClient {
             .into(),
             reject: None,
         };
-        self.store_task_message_metadata(delivery, &outcome)?;
+        self.store_task_message_metadata(delivery, &outcome, c)?;
         Ok(outcome)
     }
     pub(crate) fn retry_pending_tasks(&self, now: i64) -> Result<usize, SdkError> {
@@ -156,9 +156,10 @@ impl RamfluxClient {
                         at: p.at,
                     },
                     &outcome,
+                    &p.carrier,
                 )?;
                 self.replace_task_pending_fallback(&p, &outcome)?;
-                self.account_db()?.append_journal(&format!("task-hold-expired:{key}"),"task.changed",&serde_json::json!({"conversation_id":p.conversation,"task_id":p.carrier.event()?.event().task_id(),"resync_required":true,"actor_kind_verified":super::actor_kind_verified(self, &p.carrier.principal_id, &p.carrier.device_id)}),now,None)?;
+                self.account_db()?.append_journal(&format!("task-hold-expired:{key}"),"task.changed",&serde_json::json!({"conversation_id":p.conversation,"task_id":p.carrier.event()?.event().task_id(),"resync_required":true,"actor_kind_verified":super::carrier_kind_verified(self, &p.carrier)}),now,None)?;
                 continue;
             }
             if self.task_event_is_future(&p.carrier)? {
@@ -199,6 +200,7 @@ impl RamfluxClient {
                             at: p.at,
                         },
                         &outcome,
+                        &p.carrier,
                     )?;
                     self.replace_task_pending_fallback(&p, &outcome)?;
                 }

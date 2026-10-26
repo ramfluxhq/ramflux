@@ -189,8 +189,10 @@ impl RamfluxClient {
         if !body.starts_with(super::carrier::PREFIX) {
             return Ok(None);
         }
-        self.account_db()?
-            .write_transaction(|| self.apply_task_message(delivery, body, true).map(Some))
+        self.with_profile_read_scope(|| {
+            self.account_db()?
+                .write_transaction(|| self.apply_task_message(delivery, body, true).map(Some))
+        })
     }
     fn apply_task_message(
         &self,
@@ -244,7 +246,7 @@ impl RamfluxClient {
                     self.queue_task_decision_ack(&carrier, certificate)?;
                 }
             }
-            self.store_task_message_metadata(delivery, &receipt.outcome)?;
+            self.store_task_message_metadata(delivery, &receipt.outcome, &carrier)?;
             return Ok(receipt.outcome);
         }
         self.require_task_member(
@@ -293,7 +295,7 @@ impl RamfluxClient {
         if !outcome.accepted {
             db.prune_task_diagnostics("task/rejected/", 256)?;
         }
-        self.store_task_message_metadata(delivery, &outcome)?;
+        self.store_task_message_metadata(delivery, &outcome, &carrier)?;
         let key = scoped("message", delivery.conversation, delivery.message)?;
         let mut metadata = db.load_actor_state::<Value>(&key)?.unwrap_or_else(|| json!({}));
         metadata["task_id"] = json!(carrier.event()?.event().task_id());
@@ -435,13 +437,14 @@ impl RamfluxClient {
         &self,
         delivery: &Delivery<'_>,
         outcome: &Outcome,
+        carrier: &Carrier,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let key = scoped("message", delivery.conversation, delivery.message)?;
         let task_id = outcome.task_id.clone().or(db
             .load_actor_state::<Value>(&key)?
             .and_then(|v| v["task_id"].as_str().map(str::to_owned)));
-        db.persist_actor_state(&key,&json!({"task_id":task_id,"reason_code":outcome.reason_code,"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind_verified":super::actor_kind_verified(self, delivery.principal, delivery.device)}))?;
+        db.persist_actor_state(&key,&json!({"task_id":task_id,"reason_code":outcome.reason_code,"content_type":"task","accepted":outcome.accepted,"fallback_text":outcome.fallback_text,"reject":outcome.reject,"pending":outcome.pending,"actor_kind_verified":super::carrier_kind_verified(self, carrier)}))?;
         Ok(())
     }
     pub(crate) fn task_message_metadata(

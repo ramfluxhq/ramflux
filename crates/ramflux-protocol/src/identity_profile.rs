@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-owned public profile, independently signed and bound into complete device-set v2.
+use crate::identity_name::normalize_profile_display_name;
 use serde::{Deserialize, Serialize};
-use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,23 +15,6 @@ pub struct SignedIdentityProfile {
     pub display_name: String,
     pub epoch: u64,
     pub signature: String,
-}
-/// Normalizes locally supplied public names before signing. Verifiers compare exact NFC bytes.
-/// # Errors
-/// Rejects blank, oversized or unsafe single-line names.
-pub fn normalize_profile_display_name(value: &str) -> Result<String, crate::ProtocolError> {
-    if value.len() > 1024 || !crate::text_safety::single_line_is_safe(value) {
-        return Err(invalid());
-    }
-    let name: String = value.trim().nfc().collect();
-    if name.is_empty()
-        || name.len() > 256
-        || name.chars().count() > 128
-        || !crate::text_safety::single_line_is_safe(&name)
-    {
-        return Err(invalid());
-    }
-    Ok(name)
 }
 /// Canonical profile bytes exclude the signature and include the root/principal/domain binding.
 /// # Errors
@@ -62,4 +45,41 @@ pub fn identity_profile_signing_bytes(
 }
 fn invalid() -> crate::ProtocolError {
     crate::ProtocolError::InvalidIdentityRecord("invalid public identity profile")
+}
+
+#[cfg(test)]
+mod name_policy_tests {
+    use super::*;
+    #[test]
+    fn profile_names_reject_blank_rendering_default_ignorables_and_false_verification_glyphs() {
+        for name in [
+            "\u{3164}",
+            "\u{115f}\u{1160}",
+            "\u{ffa0}",
+            "\u{2800}",
+            "\u{301}",
+            "\u{301}Alice",
+            "a\u{fe0f}\u{34f}b",
+            "Alice\u{a0}\u{a0}(verified human)",
+            "Alice ✓",
+            "Alice ✔",
+            "Alice ✅",
+            "Alice ☑",
+            "Alice 🗸",
+            "Alice 🗹",
+            "-._",
+        ] {
+            assert!(
+                normalize_profile_display_name(name).is_err(),
+                "unsafe name accepted: {name:?}"
+            );
+        }
+        for ch in ['\u{ad}', '\u{17b4}', '\u{180b}', '\u{fe0e}', '\u{e0100}', '\u{e0001}'] {
+            assert!(
+                normalize_profile_display_name(&format!("A{ch}B")).is_err(),
+                "default ignorable U+{:X}",
+                u32::from(ch)
+            );
+        }
+    }
 }

@@ -31,7 +31,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.account_db()?.append_journal(
             &format!("task-pending:{key}:{state}"), "task.changed",
-            &serde_json::json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"pending":pending,"pending_state":state,"actor_kind_verified":super::actor_kind_verified(self, &c.principal_id, &c.device_id)}), now, None,
+            &serde_json::json!({"kind":ramflux_protocol::TaskChangeKind::Updated,"conversation_id":c.conversation_id,"task_id":c.event()?.event().task_id(),"pending":pending,"pending_state":state,"actor_kind_verified":super::carrier_kind_verified(self, c)}), now, None,
         )?;
         Ok(())
     }
@@ -107,6 +107,7 @@ impl RamfluxClient {
                         at: pending.at,
                     },
                     &outcome,
+                    &pending.carrier,
                 )?;
                 self.replace_task_pending_fallback(pending, &outcome)?;
                 db.delete_task_state(key)?;
@@ -242,6 +243,7 @@ impl RamfluxClient {
                             at: p.at,
                         },
                         &outcome,
+                        &p.carrier,
                     )?;
                     self.replace_task_pending_fallback(&p, &outcome)?;
                     self.announce_task_pending(&p.carrier, &key, "executor_timeout", true, now)?;

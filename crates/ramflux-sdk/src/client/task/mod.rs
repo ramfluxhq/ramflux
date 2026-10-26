@@ -84,32 +84,14 @@ pub(crate) fn check_delivery_size(bytes: usize) -> Result<(), SdkError> {
     Ok(())
 }
 
-/// A verified profile is required; an event device must also belong to that current authority.
+/// Test fixtures may query the signed kind without assigning a relation role.
+#[cfg(test)]
 pub(crate) fn actor_kind_verified(
     client: &crate::RamfluxClient,
     principal: &str,
     device: &str,
 ) -> bool {
-    let verified = || -> Result<bool, SdkError> {
-        let Some(profile) = client.verified_identity_profile(principal)? else { return Ok(false) };
-        if device.is_empty() {
-            return Ok(true);
-        }
-        let raw = if let Some((root, raw)) = ramflux_protocol::parse_qualified_device_id(device)? {
-            if root != profile.principal_commitment {
-                return Ok(false);
-            }
-            raw
-        } else {
-            device.to_owned()
-        };
-        Ok(client.observed_device_set(&profile.principal_commitment)?.is_some_and(|record| {
-            record.devices.iter().any(|entry| {
-                entry.device_id == raw && entry.status == ramflux_protocol::DeviceSetStatus::Active
-            })
-        }))
-    };
-    verified().unwrap_or(false)
+    client.read_profile_facts(principal).is_some_and(|facts| facts.matches_device(device))
 }
 
 /// Presentation of a relation role must not turn a signed bot profile into a verified human.
@@ -119,13 +101,18 @@ pub(crate) fn actor_role_kind_verified(
     device: &str,
     role: ramflux_protocol::ActorType,
 ) -> bool {
-    use ramflux_protocol::{ActorType, PrincipalKind};
-    actor_kind_verified(client, principal, device)
-        && client.verified_identity_profile(principal).ok().flatten().is_some_and(|p| {
-            matches!(
-                (role, p.kind),
-                (ActorType::Human, PrincipalKind::Human)
-                    | (ActorType::Bot, PrincipalKind::Bot | PrincipalKind::HeadlessAi)
-            )
-        })
+    client.read_profile_facts(principal).is_some_and(|facts| facts.matches_role(device, role))
+}
+pub(crate) fn carrier_kind_verified(
+    client: &crate::RamfluxClient,
+    carrier: &carrier::Carrier,
+) -> bool {
+    carrier.event().is_ok_and(|event| {
+        actor_role_kind_verified(
+            client,
+            &carrier.principal_id,
+            &carrier.device_id,
+            authority::relation_role(event.event()),
+        )
+    })
 }

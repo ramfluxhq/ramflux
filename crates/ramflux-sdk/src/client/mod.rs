@@ -54,6 +54,8 @@ pub struct RamfluxClient {
     // It is never shared across accounts, held over an await, or serialized with media secrets.
     pub(crate) voice_transition: std::cell::RefCell<Option<(String, Box<call::state::LiveCall>)>>,
     pub(crate) node_relay_options: Option<crate::object::RelayTransferOptions>,
+    pub(crate) profile_read_cache:
+        std::cell::RefCell<Option<Box<identity_authority::profile_read::ProfileReadCache>>>,
     pub(crate) identity_root: Option<IdentityRoot>,
     pub(crate) reader_device_identity: Option<ramflux_crypto::RootQualifiedDeviceRef>,
     pub(crate) device_branch: Option<DeviceBranch>,
@@ -72,6 +74,7 @@ impl Default for RamfluxClient {
             voice_calls: BTreeMap::new(),
             voice_transition: std::cell::RefCell::new(None),
             node_relay_options: None,
+            profile_read_cache: std::cell::RefCell::new(None),
             identity_root: None,
             reader_device_identity: None,
             device_branch: None,

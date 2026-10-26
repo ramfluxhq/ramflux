@@ -111,7 +111,9 @@ pub use envelope_sender::envelope_sender_signed_bytes;
 mod call;
 pub use call::*;
 
+mod identity_name;
 mod identity_profile;
-pub use identity_profile::{
-    SignedIdentityProfile, identity_profile_signing_bytes, normalize_profile_display_name,
+pub use identity_name::{
+    DisplayNameSecurity, normalize_profile_display_name, profile_display_name_security,
 };
+pub use identity_profile::{SignedIdentityProfile, identity_profile_signing_bytes};

@@ -181,6 +181,9 @@ impl RamfluxClient {
     }
 
     pub(crate) fn contact_entry(&self, principal: &str) -> Result<Value, SdkError> {
+        self.with_profile_read_scope(|| self.contact_entry_inner(principal))
+    }
+    fn contact_entry_inner(&self, principal: &str) -> Result<Value, SdkError> {
         let db = self.account_db()?;
         let identity = db.client_record("identity", principal)?.unwrap_or_else(|| json!({}));
         let commitment = identity["contact_identity_commitment"].as_str();
@@ -212,7 +215,7 @@ impl RamfluxClient {
             .map(|request| request.state.as_str())
             .or_else(|| retained_status.as_ref().and_then(|row| row["state"].as_str()));
         let request_id = outgoing_request.as_ref().map(|request| &request.request_id);
-        let profile = self.verified_identity_profile(principal)?;
+        let profile = self.read_profile_facts(principal).map(|facts| facts.profile.clone());
         let display_name = profile
             .as_ref()
             .map_or_else(|| identity["display_name"].clone(), |p| json!(p.display_name));
@@ -220,8 +223,9 @@ impl RamfluxClient {
             || identity["kind_asserted"].as_str().map_or(Value::Null, |kind| json!(kind)),
             |p| json!(p.kind),
         );
+        let warnings = self.identity_name_warnings(principal, display_name.as_str())?;
         Ok(
-            json!({"principal_id":principal,"display_name":display_name,"reachable":reachable,"verified":verified,"kind_asserted":asserted,"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"],"request_state":request_state,"request_id":request_id}),
+            json!({"principal_id":principal,"kind_verified":profile.is_some(),"display_name_confusable_with":warnings["display_name_confusable_with"],"mixed_script":warnings["mixed_script"],"display_name":display_name,"reachable":reachable,"verified":verified,"kind_asserted":asserted,"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"],"request_state":request_state,"request_id":request_id}),
         )
     }
 }

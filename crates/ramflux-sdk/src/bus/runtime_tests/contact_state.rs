@@ -12,9 +12,30 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
     let client = &account.client;
     let db = client.account_db()?;
     client.establish_friend_link("contact", "local", "peer")?;
-    let mut identity = json!({"id":"peer","principal_id":"peer","contact_identity_commitment":"root-peer","device_set_hash":"devices-peer","devices":[],"kind_asserted":null});
+    let manifest = crate::client::identity_authority::test_support::remote_manifest(
+        "peer",
+        "peer-device",
+        [89; 32],
+    )?;
+    client.observe_device_manifest_json(
+        serde_json::to_value(&manifest)?,
+        &manifest.principal_commitment,
+    )?;
+    let mut identity = db
+        .client_record("identity", "peer")?
+        .ok_or_else(|| SdkError::LocalBus("fixture identity absent".into()))?;
+    let device_hash = identity["device_set_hash"]
+        .as_str()
+        .ok_or_else(|| SdkError::LocalBus("fixture hash absent".into()))?
+        .to_owned();
+    identity["devices"] = json!([]);
+    identity["kind_asserted"] = serde_json::Value::Null;
     db.persist_client_record("identity", "peer", &identity)?;
-    db.persist_client_record("commitment", "root-peer", &json!({"principal_id":"peer"}))?;
+    db.persist_client_record(
+        "commitment",
+        &manifest.principal_commitment,
+        &json!({"principal_id":"peer"}),
+    )?;
     let mut entry = ramflux_storage::AccountOutboxEntry {
         sequence: 1,
         table_name: "runtime_actor_state".into(),
@@ -35,15 +56,24 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
         && row["kind_asserted"] == "bot"
         && row["verified"] == false));
     db.mark_contact_verified(ContactVerificationUpdate {
-        contact_identity_commitment: "root-peer",
+        contact_identity_commitment: &manifest.principal_commitment,
         safety_number_hash: "safety",
-        device_set_hash: "devices-peer",
+        device_set_hash: &device_hash,
         lineage_head: "lineage",
         verified_at: now_unix_timestamp(),
         verified_by_device_id: "local",
     })?;
+    db.persist_actor_state(
+        &format!("identity/safety_verified_set/{}", manifest.principal_commitment),
+        &crate::client::identity_authority::set_fingerprint(
+            manifest
+                .signed_device_set
+                .as_ref()
+                .ok_or_else(|| SdkError::LocalBus("fixture set absent".into()))?,
+        )?,
+    )?;
     entry.table_name = "contact_verification_projection".into();
-    entry.keys = json!({"contact_identity_commitment":"root-peer"});
+    entry.keys = json!({"contact_identity_commitment":manifest.principal_commitment});
     let verified = super::super::journal::project(client, &entry)?;
     assert!(verified.iter().any(|(topic, row, _)| topic == "contact.changed"
         && row["verified"] == true

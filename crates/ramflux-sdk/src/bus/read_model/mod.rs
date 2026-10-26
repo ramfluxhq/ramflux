@@ -29,6 +29,10 @@ struct PageRequest {
 }
 
 pub(crate) fn read(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, SdkError> {
+    client.with_profile_read_scope(|| read_inner(client, request))
+}
+
+fn read_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, SdkError> {
     let (directory, field) = match request.method.as_str() {
         "conversation.directory" => ("conversation", "conversations"),
         "identity.directory" => ("identity", "identities"),

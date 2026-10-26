@@ -217,6 +217,17 @@ impl RamfluxClient {
         let devices=manifest.devices.iter().map(|d|json!({"id":d.device_id,"device_id":d.device_id,"target_delivery_id":d.target_delivery_id,"signing_public_key":d.branch_public_key,"device_epoch":d.device_epoch})).collect::<Vec<_>>();
         let profile = record.profile.as_ref();
         db.persist_client_record("identity",&manifest.principal_id,&json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":profile.map(|p|p.display_name.as_str()).or_else(||old["display_name"].as_str()),"kind":record.principal_kind,"kind_asserted":profile.map(|p|p.kind),"kind_verified":profile.is_some(),"device_set_epoch":record.device_set_epoch,"is_self":self.device_branch.as_ref().is_some_and(|b|b.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":hash,"safety_number":if changed {Value::Null} else {old["safety_number"].clone()}}))?;
+        if let Some(profile) = profile
+            && let Some(previous) = old["display_name"].as_str()
+            && previous != profile.display_name
+        {
+            db.append_journal(
+                &format!("identity-public-name:{}:{}",manifest.principal_commitment,profile.epoch),
+                "contact.changed",
+                &json!({"principal_id":manifest.principal_id,"reason":"public_profile_renamed","old_display_name":previous,"new_display_name":profile.display_name}),
+                crate::prelude::now_unix_timestamp(),None,
+            )?;
+        }
         db.persist_client_record(
             "commitment",
             &manifest.principal_commitment,

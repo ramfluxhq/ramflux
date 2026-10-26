@@ -338,6 +338,9 @@ impl RamfluxClient {
         self.stage_own_contact(&manifest, &request.link_id)
     }
     pub(crate) fn contact_requests_list(&self) -> Result<Value, SdkError> {
+        self.with_profile_read_scope(|| self.contact_requests_list_inner())
+    }
+    fn contact_requests_list_inner(&self) -> Result<Value, SdkError> {
         self.maintain_contact_requests()?;
         let db = self.account_db()?;
         let now = now_unix_timestamp();
@@ -383,8 +386,9 @@ impl RamfluxClient {
                     .map(|peer| ramflux_crypto::safety_number(&own, &peer))
             })
             .ok();
+        let contact = self.contact_entry(&record.principal_id)?;
         Ok(
-            json!({"request_id":record.request_id,"link_id":record.link_id,"principal_id":record.principal_id,
+            json!({"kind_asserted":contact["kind_asserted"],"kind_verified":contact["kind_verified"],"display_name":contact["display_name"],"display_name_confusable_with":contact["display_name_confusable_with"],"mixed_script":contact["mixed_script"],"request_id":record.request_id,"link_id":record.link_id,"principal_id":record.principal_id,
             "root_commitment":record.contact_identity_commitment,"direction":record.direction,"state":record.state,
             "expires_at":record.expires_at,"note":note,"message_count":held.len(),
             "preview":Self::contact_message_preview(held.first().map(Vec::as_slice))?,

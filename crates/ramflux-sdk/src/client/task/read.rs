@@ -7,6 +7,9 @@ use crate::{RamfluxClient, SdkError};
 use serde_json::{Value, json};
 impl RamfluxClient {
     pub(crate) fn task_get(&self, conversation: Option<&str>, id: &str) -> Result<Value, SdkError> {
+        self.with_profile_read_scope(|| self.task_get_inner(conversation, id))
+    }
+    fn task_get_inner(&self, conversation: Option<&str>, id: &str) -> Result<Value, SdkError> {
         if let Some(conversation) = conversation {
             let mut row = self
                 .account_db()?
@@ -22,6 +25,7 @@ impl RamfluxClient {
                         .collect::<Vec<_>>()
                 );
             }
+            refresh_actors(self, &mut row);
             return Ok(row);
         }
         let mut found = None;
@@ -41,12 +45,22 @@ impl RamfluxClient {
             if done {
                 let mut row = found.unwrap_or(Value::Null);
                 attach_pending(&mut row, &self.account_db()?.task_pending_metadata()?);
+                refresh_actors(self, &mut row);
                 return Ok(row);
             }
         }
         Err(invalid("task lookup budget exceeded; conversation_id is required"))
     }
     pub(crate) fn task_list(
+        &self,
+        conversation: &str,
+        filter: Option<&str>,
+        cursor: &str,
+        limit: u32,
+    ) -> Result<Value, SdkError> {
+        self.with_profile_read_scope(|| self.task_list_inner(conversation, filter, cursor, limit))
+    }
+    fn task_list_inner(
         &self,
         conversation: &str,
         filter: Option<&str>,
@@ -72,6 +86,7 @@ impl RamfluxClient {
                     && filter.is_none_or(|s| row["state"] == s)
                 {
                     attach_pending(&mut row, &pending);
+                    refresh_actors(self, &mut row);
                     result.push(row);
                 }
                 if result.len() == limit {
@@ -102,6 +117,13 @@ pub(super) fn actor_metadata(
     task: &ramflux_protocol::Task,
     history: &super::TaskHistory,
 ) -> Result<Value, SdkError> {
+    client.with_profile_read_scope(|| actor_metadata_inner(client, task, history))
+}
+fn actor_metadata_inner(
+    client: &RamfluxClient,
+    task: &ramflux_protocol::Task,
+    history: &super::TaskHistory,
+) -> Result<Value, SdkError> {
     let old = client
         .account_db()?
         .load_actor_state::<Value>(&scoped("view", &task.conversation_id, &task.task_id)?)?
@@ -126,7 +148,34 @@ pub(super) fn actor_metadata(
         let device = principal
             .and_then(|id| history.events.iter().rev().find(|e| e.carrier.principal_id == id))
             .map_or("", |e| e.carrier.device_id.as_str());
-        actors[role] = json!({"principal_id":principal,"actor_kind_verified":principal.is_some_and(|p|super::actor_role_kind_verified(client,p,device,if role=="assignee" {ramflux_protocol::ActorType::Bot} else {ramflux_protocol::ActorType::Human})),"actor_kind":principal.map(|p|client.verified_identity_profile(p)).transpose()?.flatten().map(|p|p.kind)});
+        let facts = principal.and_then(|p| client.read_profile_facts(p));
+        let kind_verified =
+            facts.as_ref().is_some_and(|f| f.matches_role(device, relation_role(role)));
+        actors[role] = json!({"principal_id":principal,"device_id":device,"actor_kind_verified":kind_verified,"actor_kind":facts.map(|f|f.profile.kind)});
     }
     Ok(actors)
+}
+
+fn relation_role(role: &str) -> ramflux_protocol::ActorType {
+    if role == "assignee" {
+        ramflux_protocol::ActorType::Bot
+    } else {
+        ramflux_protocol::ActorType::Human
+    }
+}
+fn refresh_actors(client: &RamfluxClient, row: &mut Value) {
+    if row.is_null() {
+        return;
+    }
+    for role in ["requester", "assignee", "acceptor"] {
+        let actor = &mut row["actors"][role];
+        if actor.is_null() {
+            continue;
+        }
+        let facts = actor["principal_id"].as_str().and_then(|p| client.read_profile_facts(p));
+        actor["actor_kind_verified"] = json!(facts.as_ref().is_some_and(|f| {
+            f.matches_role(actor["device_id"].as_str().unwrap_or(""), relation_role(role))
+        }));
+        actor["actor_kind"] = json!(facts.map(|f| f.profile.kind));
+    }
 }

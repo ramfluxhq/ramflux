@@ -108,11 +108,7 @@ impl RamfluxClient {
             history.events.push(AcceptedEvent {
                 carrier: carrier.clone(),
                 public_key: public,
-                actor_kind_verified: super::actor_kind_verified(
-                    self,
-                    &carrier.principal_id,
-                    &carrier.device_id,
-                ),
+                actor_kind_verified: super::carrier_kind_verified(self, carrier),
                 received_at: at,
                 decision_certificate: None,
                 membership: Some(membership),

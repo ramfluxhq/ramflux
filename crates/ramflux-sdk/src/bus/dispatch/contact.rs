@@ -192,6 +192,14 @@ fn contact_list(
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account(state, account_id)?;
+    account.client.with_profile_read_scope(|| contact_list_inner(state, account_id))
+}
+
+fn contact_list_inner(
+    state: &LocalBusDaemonState,
+    account_id: &str,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account = local_bus_account(state, account_id)?;
     let links = account.client.friend_links()?;
     let mut contacts = Vec::new();
     for link in links {

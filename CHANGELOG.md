@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every group participant together: older clients cannot import v3 distributions,
   so mixed-version groups can lose delivery after sender-key rotation. Existing
   v1/v2 receive chains remain readable; live outbound checkpoints are retained.
+- Public-name policy rejects invisible names and verification-like checkmarks.
+  Directory/contact rows expose warning-only confusable-name and mixed-script facts.
+- `device.refresh.kind_asserted` is a kind string or null, and `kind_verified`
+  authenticates a public profile. Its former manual-safety signal is now
+  `safety_kind_verified`. Upgrade clients with servers before publishing device-set
+  v2 profiles; v1-only nodes and clients reject v2 records. This is a coordinated
+  pre-1.0 contract change.
 
 ### Added
 

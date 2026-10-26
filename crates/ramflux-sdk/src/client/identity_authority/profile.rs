@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-signed public profile publication and verified read-model access.
-use super::{invalid, record_key};
+use super::invalid;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{PrincipalKind, SignedDeviceSetRecord, SignedIdentityProfile};
 const DESIRED: &str = "identity/owned_public_profile";
@@ -91,37 +91,6 @@ impl RamfluxClient {
         &self,
         principal: &str,
     ) -> Result<Option<SignedIdentityProfile>, SdkError> {
-        let db = self.account_db()?;
-        let Some(row) = db.client_record("identity", principal)? else { return Ok(None) };
-        let Some(commitment) = row["contact_identity_commitment"].as_str() else { return Ok(None) };
-        let Some(record) = db.load_actor_state::<SignedDeviceSetRecord>(&record_key(commitment))?
-        else {
-            return Ok(None);
-        };
-        if record.principal_id != principal || record.principal_commitment != commitment {
-            return Err(invalid("profile cache ownership mismatch"));
-        }
-        let Some(profile) = record.profile.as_deref() else { return Ok(None) };
-        let public = if let Some(root) =
-            self.identity_root.as_ref().filter(|r| r.principal_id == principal)
-        {
-            root.signing_key.verifying_key()
-        } else {
-            let encoded = if let Some(manifest) = db
-                .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
-                    "identity/manifest-root/{commitment}"
-                ))? {
-                manifest.root_public_key
-            } else if let Some(public) =
-                db.load_actor_state::<String>(&format!("identity/root_public/{commitment}"))?
-            {
-                public
-            } else {
-                return Ok(None);
-            };
-            ramflux_crypto::verifying_key_from_base64url(&encoded)?
-        };
-        ramflux_crypto::verify_signed_device_set(&public, &record)?;
-        Ok(Some(profile.clone()))
+        Ok(self.verified_profile_facts(principal)?.map(|facts| facts.profile.clone()))
     }
 }

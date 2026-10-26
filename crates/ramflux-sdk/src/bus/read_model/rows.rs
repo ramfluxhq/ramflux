@@ -7,61 +7,15 @@ use crate::prelude::*;
 use serde_json::{Value, json};
 
 pub(crate) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<Value, SdkError> {
+    client.with_profile_read_scope(|| row_inner(client, directory, id))
+}
+
+fn row_inner(client: &RamfluxClient, directory: &str, id: &str) -> Result<Value, SdkError> {
     let db = client.account_db()?;
     let own = db.client_record("self", "account")?.unwrap_or_else(|| json!({}));
-    let mut saved = db.client_record(directory, id)?.unwrap_or_else(|| json!({}));
+    let saved = db.client_record(directory, id)?.unwrap_or_else(|| json!({}));
     match directory {
-        "identity" => {
-            saved["id"] = json!(id);
-            saved["principal_commitment"] =
-                saved.get("contact_identity_commitment").cloned().unwrap_or(Value::Null);
-            for field in [
-                "principal_id",
-                "display_name",
-                "kind",
-                "contact_identity_commitment",
-                "safety_number",
-            ] {
-                if saved.get(field).is_none() {
-                    saved[field] = Value::Null;
-                }
-            }
-            if saved.get("devices").is_none() {
-                saved["devices"] = json!([]);
-            }
-            let commitment =
-                saved.get("contact_identity_commitment").and_then(Value::as_str).unwrap_or("");
-            let verification = db.contact_verification(commitment)?;
-            saved["safety_state"] = json!(verification.map_or("unverified".to_owned(), |record| {
-                if record.verification_state == "verified"
-                    && saved.get("device_set_hash").and_then(Value::as_str)
-                        != Some(record.verified_device_set_hash.as_str())
-                {
-                    "verification_stale".to_owned()
-                } else {
-                    record.verification_state
-                }
-            }));
-            let profile = client.verified_identity_profile(id)?;
-            saved["kind_verified"] = json!(profile.is_some());
-            if let Some(profile) = &profile {
-                saved["kind"] = json!(profile.kind);
-                saved["display_name"] = json!(profile.display_name);
-            } else if let Some(kind) = client.root_asserted_principal_kind(id)? {
-                saved["kind"] = json!(kind);
-            }
-            // Gateway-fetched safety material is persisted by the verified contact path.
-            let contact = client.contact_entry(id)?;
-            for field in
-                ["reachable", "verified", "kind_asserted", "root_commitment", "root_source", "node"]
-            {
-                saved[field] = contact[field].clone();
-            }
-            saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);
-            saved["safety_number_available"] =
-                json!(saved.get("safety_number").is_some_and(|number| !number.is_null()));
-            Ok(saved)
-        }
+        "identity" => identity(client, id, saved),
         "conversation" => conversation(client, id, &own, &saved),
         "object" => {
             let mut object = db.client_object_metadata(id)?;
@@ -167,4 +121,66 @@ fn group_row(client: &RamfluxClient, id: &str, saved: &Value) -> Result<Value, S
     group["conversation_id"] = saved.get("conversation_id").cloned().unwrap_or(Value::Null);
     group["conversation_ids"] = saved.get("conversation_ids").cloned().unwrap_or_else(|| json!([]));
     Ok(group)
+}
+
+fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value, SdkError> {
+    let db = client.account_db()?;
+    saved["id"] = json!(id);
+    saved["principal_commitment"] =
+        saved.get("contact_identity_commitment").cloned().unwrap_or(Value::Null);
+    for field in
+        ["principal_id", "display_name", "kind", "contact_identity_commitment", "safety_number"]
+    {
+        if saved.get(field).is_none() {
+            saved[field] = Value::Null;
+        }
+    }
+    if saved.get("devices").is_none() {
+        saved["devices"] = json!([]);
+    }
+    let commitment = saved.get("contact_identity_commitment").and_then(Value::as_str).unwrap_or("");
+    let verification = db.contact_verification(commitment)?;
+    saved["safety_state"] = json!(verification.map_or("unverified".to_owned(), |record| {
+        if record.verification_state == "verified"
+            && saved.get("device_set_hash").and_then(Value::as_str)
+                != Some(record.verified_device_set_hash.as_str())
+        {
+            "verification_stale".to_owned()
+        } else {
+            record.verification_state
+        }
+    }));
+    if saved["safety_state"] == "verified"
+        && client.verified_principal_kind(id).ok().flatten().is_none()
+    {
+        saved["safety_state"] = json!("verification_stale");
+    }
+    let profile = client.read_profile_facts(id).map(|facts| facts.profile.clone());
+    saved["kind_verified"] = json!(profile.is_some());
+    if let Some(profile) = &profile {
+        saved["kind"] = json!(profile.kind);
+        saved["display_name"] = json!(profile.display_name);
+    } else if let Some(kind) = client.root_asserted_principal_kind(id).ok().flatten() {
+        saved["kind"] = json!(kind);
+    }
+    // Gateway-fetched safety material is persisted by the verified contact path.
+    let contact = client.contact_entry(id)?;
+    for field in [
+        "reachable",
+        "verified",
+        "kind_asserted",
+        "kind_verified",
+        "display_name",
+        "display_name_confusable_with",
+        "mixed_script",
+        "root_commitment",
+        "root_source",
+        "node",
+    ] {
+        saved[field] = contact[field].clone();
+    }
+    saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);
+    saved["safety_number_available"] =
+        json!(saved.get("safety_number").is_some_and(|number| !number.is_null()));
+    Ok(saved)
 }

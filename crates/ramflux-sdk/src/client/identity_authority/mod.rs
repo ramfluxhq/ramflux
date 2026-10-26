@@ -7,6 +7,7 @@ pub(crate) mod device_namespace;
 mod directory;
 mod owned;
 mod profile;
+pub(crate) mod profile_read;
 mod publication;
 mod reconcile;
 pub(crate) mod registration;
