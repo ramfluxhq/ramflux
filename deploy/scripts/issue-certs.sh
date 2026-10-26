@@ -122,11 +122,26 @@ migrate_signing_seed() {
   fi
 }
 
+# Resolves a group name to its id without assuming getent (absent on macOS).
+group_id_of() {
+  _gid=""
+  if command -v getent >/dev/null 2>&1; then
+    _gid=$(getent group "$1" 2>/dev/null | cut -d: -f3)
+  fi
+  if [ -z "${_gid}" ] && command -v dscl >/dev/null 2>&1; then
+    _gid=$(dscl . -read "/Groups/$1" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+  fi
+  if [ -z "${_gid}" ] && [ -r /etc/group ]; then
+    _gid=$(awk -F: -v name="$1" '$1 == name { print $3; exit }' /etc/group)
+  fi
+  [ -n "${_gid}" ] || return 1
+  printf '%s\n' "${_gid}"
+}
+
 secret_group_id() {
   if [ -n "${RAMFLUX_SECRET_GROUP:-}" ]; then
-    _entry=$(getent group "${RAMFLUX_SECRET_GROUP}" 2>/dev/null) \
+    group_id_of "${RAMFLUX_SECRET_GROUP}" \
       || { printf 'unknown RAMFLUX_SECRET_GROUP %s\n' "${RAMFLUX_SECRET_GROUP}" >&2; return 1; }
-    printf '%s\n' "${_entry}" | cut -d: -f3
   else
     id -g
   fi
@@ -135,7 +150,18 @@ secret_group_id() {
 record_secret_gid() {
   _env="${deploy_dir}/.env"
   if [ -f "${_env}" ] && grep -q '^RAMFLUX_SECRET_GID=' "${_env}"; then
+    _recorded=$(sed -n 's/^RAMFLUX_SECRET_GID=//p' "${_env}" | tail -n 1)
+    if [ "${_recorded}" != "$1" ]; then
+      printf 'warning: %s sets RAMFLUX_SECRET_GID=%s but the node secrets belong to group %s;\n' \
+        "${_env}" "${_recorded}" "$1" >&2
+      printf 'warning: the services cannot read them until RAMFLUX_SECRET_GID=%s is set there.\n' \
+        "$1" >&2
+    fi
     return 0
+  fi
+  # Keep the appended assignment on its own line even if the file lacks a final newline.
+  if [ -s "${_env}" ] && [ -n "$(tail -c 1 "${_env}")" ]; then
+    printf '\n' >> "${_env}"
   fi
   printf 'RAMFLUX_SECRET_GID=%s\n' "$1" >> "${_env}"
 }

@@ -1,5 +1,6 @@
 """Native secret provisioning checks; no container runtime is started."""
 import base64
+import grp
 import os
 from pathlib import Path
 import stat
@@ -60,6 +61,41 @@ class NodeSecretsTests(unittest.TestCase):
             subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.assertEqual((root / ".env").read_text(), "RAMFLUX_SECRET_GID=4242\n")
+
+    def test_secret_gid_append_is_newline_safe_and_mismatches_warn(self):
+        with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
+            root = Path(directory)
+            env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root))
+            env.pop("RAMFLUX_SECRET_GROUP", None)
+            subprocess.run(["sh", str(SCRIPTS / "bootstrap-ca.sh")], env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            (root / ".env").write_text("OTHER=1")
+            subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual((root / ".env").read_text().splitlines(),
+                             ["OTHER=1", f"RAMFLUX_SECRET_GID={os.getgid()}"])
+            (root / ".env").write_text("RAMFLUX_SECRET_GID=4242\n")
+            result = subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            self.assertIn("RAMFLUX_SECRET_GID=4242", result.stderr)
+            self.assertIn(f"RAMFLUX_SECRET_GID={os.getgid()}", result.stderr)
+
+    def test_named_secret_group_resolves_without_getent(self):
+        group = grp.getgrgid(os.getgid()).gr_name
+        with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            # Hide getent, as on macOS.
+            for tool in ("getent",):
+                (bin_dir / tool).write_text("#!/bin/sh\nexit 127\n")
+                (bin_dir / tool).chmod(0o755)
+            env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root), RAMFLUX_SECRET_GROUP=group,
+                       PATH=f"{bin_dir}:{os.environ['PATH']}")
+            for script in ("bootstrap-ca.sh", "issue-certs.sh"):
+                subprocess.run(["sh", str(SCRIPTS / script)], env=env, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual((root / ".env").read_text(), f"RAMFLUX_SECRET_GID={os.getgid()}\n")
 
     def test_conflicting_signing_seeds_fail_closed_and_keep_both(self):
         with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
