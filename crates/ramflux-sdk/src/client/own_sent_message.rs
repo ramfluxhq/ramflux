@@ -274,7 +274,7 @@ fn own_row_id(
     envelope: &str,
 ) -> Result<String, SdkError> {
     Ok(format!(
-        "own:{}",
+        "routed:own:{}",
         super::own_device_copy::copy_id(source.root_commitment(), source.device_id(), envelope)?
     ))
 }
