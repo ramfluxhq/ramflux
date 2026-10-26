@@ -53,6 +53,7 @@ impl RamfluxClient {
         options: FederatedSendOptions,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         Self::normalize_recipient(&mut message)?;
+        let copy_plain = options.route.kind == crate::client::routed::Kind::Direct;
         let attachments = options.route.attachments;
         let prekey_url =
             federation.recipient_prekey_url.as_deref().or(engine.config.prekey_http_url.as_deref());
@@ -61,22 +62,38 @@ impl RamfluxClient {
         let franking =
             options.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
         message.encrypted_body = serde_json::to_vec(&sealed)?;
-        self.send_direct_message(
-            &message.conversation_id,
-            &message.message_id,
-            &message.sender_id,
-            &message.encrypted_body,
-        )?;
-        let content = zeroize::Zeroizing::new(if attachments {
-            crate::client::dm::decode_dm_attachment_body(plaintext)?.0
-        } else {
-            plaintext.to_vec()
-        });
-        self.account_db()?.store_message_content(
-            &message.conversation_id,
-            &message.message_id,
-            &content,
-        )?;
+        self.account_db()?.write_transaction(|| {
+            self.send_direct_message(
+                &message.conversation_id,
+                &message.message_id,
+                &message.sender_id,
+                &message.encrypted_body,
+            )?;
+            let content = zeroize::Zeroizing::new(if attachments {
+                crate::client::dm::decode_dm_attachment_body(plaintext)?.0
+            } else {
+                plaintext.to_vec()
+            });
+            self.account_db()?.store_message_content(
+                &message.conversation_id,
+                &message.message_id,
+                &content,
+            )?;
+            if copy_plain {
+                let peer = self.own_sent_peer(&message)?;
+                self.stage_own_sent_message(super::own_sent_message::OwnSentInput {
+                    envelope: &message.envelope_id,
+                    conversation: &message.conversation_id,
+                    message: &message.message_id,
+                    sender: &message.sender_id,
+                    group: None,
+                    peer: Some(&peer),
+                    body: &content,
+                    at: message.created_at,
+                })?;
+            }
+            Ok::<_, SdkError>(())
+        })?;
         let envelope =
             gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
         tracing::info!(

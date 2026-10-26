@@ -282,7 +282,16 @@ impl RamfluxClient {
         context: &PrivateContext,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if !self.receive_own_contact(body)?
+        if !self.receive_own_sent_message(
+            source_identity,
+            OwnMessageInput {
+                id: &context.message,
+                conversation: &context.conversation,
+                group: context.group.as_deref(),
+                created_at: context.created_at,
+                body,
+            },
+        )? && !self.receive_own_contact(body)?
             && !self.receive_surface_control_from(
                 entry,
                 source_identity,

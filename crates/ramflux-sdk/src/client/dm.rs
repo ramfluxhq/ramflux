@@ -114,6 +114,7 @@ impl RamfluxClient {
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
         self.resolve_message_recipient(&engine.config, &mut message).await?;
+        let copy_plain = route.kind == crate::client::routed::Kind::Direct;
         let attachments = route.attachments;
         let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)
             && serde_json::from_slice::<serde_json::Value>(plaintext)
@@ -127,22 +128,38 @@ impl RamfluxClient {
             if let Some(carrier) = crate::client::surface::Carrier::decode(plaintext)? {
                 self.journal_surface_frame(&message, &carrier, &message.encrypted_body)?;
             } else {
-                self.send_direct_message(
-                    &message.conversation_id,
-                    &message.message_id,
-                    &message.sender_id,
-                    &message.encrypted_body,
-                )?;
-                let content = zeroize::Zeroizing::new(if attachments {
-                    crate::client::dm::decode_dm_attachment_body(plaintext)?.0
-                } else {
-                    plaintext.to_vec()
-                });
-                self.account_db()?.store_message_content(
-                    &message.conversation_id,
-                    &message.message_id,
-                    &content,
-                )?;
+                self.account_db()?.write_transaction(|| {
+                    self.send_direct_message(
+                        &message.conversation_id,
+                        &message.message_id,
+                        &message.sender_id,
+                        &message.encrypted_body,
+                    )?;
+                    let content = zeroize::Zeroizing::new(if attachments {
+                        crate::client::dm::decode_dm_attachment_body(plaintext)?.0
+                    } else {
+                        plaintext.to_vec()
+                    });
+                    self.account_db()?.store_message_content(
+                        &message.conversation_id,
+                        &message.message_id,
+                        &content,
+                    )?;
+                    if copy_plain {
+                        let peer = self.own_sent_peer(&message)?;
+                        self.stage_own_sent_message(super::own_sent_message::OwnSentInput {
+                            envelope: &message.envelope_id,
+                            conversation: &message.conversation_id,
+                            message: &message.message_id,
+                            sender: &message.sender_id,
+                            group: None,
+                            peer: Some(&peer),
+                            body: &content,
+                            at: message.created_at,
+                        })?;
+                    }
+                    Ok::<_, SdkError>(())
+                })?;
             }
         }
         let envelope =

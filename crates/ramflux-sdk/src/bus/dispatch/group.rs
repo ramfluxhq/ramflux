@@ -740,43 +740,60 @@ pub(crate) async fn dispatch_group_send_request(
         "conversation_id": body.conversation_id,
         "message_id": body.message_id,
     });
-    if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
-        if existing.encrypted_body.is_empty() {
-            account.client.account_db()?.fill_pending_message_body(
+    account.client.account_db()?.write_transaction(|| {
+        if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
+            if existing.encrypted_body.is_empty() {
+                account.client.account_db()?.fill_pending_message_body(
+                    &body.conversation_id,
+                    &body.message_id,
+                    &body.sender_id,
+                    &encrypted_body,
+                )?;
+            } else if existing.encrypted_body != encrypted_body {
+                return Err(SdkError::LocalBus("group message id collision".into()));
+            }
+        } else {
+            account.client.send_direct_message(
                 &body.conversation_id,
                 &body.message_id,
                 &body.sender_id,
                 &encrypted_body,
             )?;
-        } else if existing.encrypted_body != encrypted_body {
-            return Err(SdkError::LocalBus("group message id collision".into()));
         }
-    } else {
-        account.client.send_direct_message(
-            &body.conversation_id,
-            &body.message_id,
-            &body.sender_id,
-            &encrypted_body,
-        )?;
-    }
-    if let Some(carrier) = &surface {
-        let outcome = if let Some(outcome) = account.client.surface_delivery_receipt(carrier)? {
-            outcome
+        if let Some(carrier) = &surface {
+            let outcome = if let Some(outcome) = account.client.surface_delivery_receipt(carrier)? {
+                outcome
+            } else {
+                account.client.preflight_surface(carrier)?
+            };
+            account.client.account_db()?.replace_surface_message_content(
+                &body.conversation_id,
+                &body.message_id,
+                outcome.fallback_text.as_bytes(),
+            )?;
         } else {
-            account.client.preflight_surface(carrier)?
-        };
-        account.client.account_db()?.replace_surface_message_content(
-            &body.conversation_id,
-            &body.message_id,
-            outcome.fallback_text.as_bytes(),
-        )?;
-    } else {
-        account.client.account_db()?.store_message_content(
-            &body.conversation_id,
-            &body.message_id,
-            &plaintext_body,
-        )?;
-    }
+            account.client.account_db()?.store_message_content(
+                &body.conversation_id,
+                &body.message_id,
+                &plaintext_body,
+            )?;
+        }
+        if surface.is_none() {
+            account.client.stage_own_sent_message(
+                crate::client::own_sent_message::OwnSentInput {
+                    envelope: body.envelope_id.as_deref().unwrap_or(&body.message_id),
+                    conversation: &body.conversation_id,
+                    message: &body.message_id,
+                    sender: &body.sender_id,
+                    group: Some(&body.group_id),
+                    peer: None,
+                    body: &plaintext_body,
+                    at: now_unix_timestamp(),
+                },
+            )?;
+        }
+        Ok::<_, SdkError>(())
+    })?;
     if let (Some(envelope_id), Some(source_principal_id), Some(target_delivery_id)) = (
         body.envelope_id.clone(),
         body.source_principal_id.clone(),
