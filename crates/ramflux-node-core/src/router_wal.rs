@@ -123,15 +123,14 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
     fn try_from(payload: StoredRouterWalPayload) -> Result<Self, Self::Error> {
         match payload {
             StoredRouterWalPayload::Submission { replay_key, replay_expires_at, entry } => {
+                // Records from before acceptance times were logged. The router store resolves
+                // and persists their deadline once, so it is never rebased at a later restart.
                 let entry = entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?;
-                // Records from before acceptance times were logged: accepted no later than now.
-                let accepted_at =
-                    entry.as_ref().map(|entry| entry.envelope.created_at.min(router_wal_now()));
                 Ok(Self::Submission {
                     replay_key,
                     replay_expires_at,
                     entry: entry.map(Box::new),
-                    accepted_at,
+                    accepted_at: None,
                 })
             }
             StoredRouterWalPayload::SubmissionAccepted {
@@ -250,9 +249,9 @@ impl RouterWalSubmissionRecord {
     #[must_use]
     pub fn retain_until(&self) -> i64 {
         self.entry.as_ref().map_or(self.replay_expires_at, |entry| {
-            crate::inbox_retain_until(
-                &entry.envelope,
-                self.accepted_at.unwrap_or(entry.envelope.created_at),
+            self.accepted_at.map_or_else(
+                || crate::inbox_legacy_retain_until(&entry.envelope, router_wal_now()),
+                |accepted_at| crate::inbox_retain_until(&entry.envelope, accepted_at),
             )
         })
     }
@@ -1203,6 +1202,29 @@ fn sync_router_wal_files(files: &[Arc<File>]) -> Result<(), NodeCoreError> {
         file.sync_all().map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
     }
     Ok(())
+}
+
+/// Writes a record in the format used before acceptance times were logged (test fixture).
+#[cfg(test)]
+pub(crate) fn write_legacy_router_wal_segment(
+    root: &Path,
+    replay_key: &str,
+    replay_expires_at: i64,
+    entry: &InboxEntry,
+) -> Result<(), NodeCoreError> {
+    fs::create_dir_all(root).map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+    let stored = StoredRouterWalPayload::Submission {
+        replay_key: replay_key.to_owned(),
+        replay_expires_at,
+        entry: Some(Box::new(StoredRouterWalInboxEntry::try_from(entry)?)),
+    };
+    let encoded = postcard::to_allocvec(&stored)
+        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+    let mut file = File::create(router_wal_segment_path(root, 0))
+        .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+    file.write_all(ROUTER_WAL_MAGIC)
+        .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+    write_router_wal_record_to_file(&file, &encoded)
 }
 
 fn write_router_wal_record_to_file(file: &File, encoded: &[u8]) -> Result<(), NodeCoreError> {

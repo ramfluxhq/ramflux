@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 const INBOX_EXPIRY: TableDefinition<&str, &[u8]> = TableDefinition::new("router_inbox_expiry_v1");
 const REPLAY_EXPIRY: TableDefinition<&str, &[u8]> = TableDefinition::new("router_replay_expiry_v1");
 const FORMAT: TableDefinition<&str, u8> = TableDefinition::new("router_expiry_index_format_v1");
+/// Deadlines computed once for WAL records written before acceptance times were logged.
+const LEGACY_WAL_DEADLINES: TableDefinition<&str, i64> =
+    TableDefinition::new("router_legacy_wal_deadlines_v1");
 
 /// Durable mailbox row: the entry plus the deadline assigned when the router accepted it.
 #[derive(Deserialize, Serialize)]
@@ -158,6 +161,42 @@ pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError>
     }
     format.insert("version", FORMAT_VERSION).map_err(db_error)?;
     Ok(())
+}
+
+/// Returns the persisted deadline of each legacy WAL record, storing `computed` the first
+/// time a record is seen. Rows for records no longer in the WAL are removed.
+pub(super) fn resolve_legacy_wal_deadlines(
+    db: &redb::Database,
+    records: &[(String, i64)],
+) -> Result<std::collections::BTreeMap<String, i64>, NodeCoreError> {
+    let txn = db.begin_write().map_err(db_error)?;
+    let mut resolved = std::collections::BTreeMap::new();
+    {
+        let mut table = txn.open_table(LEGACY_WAL_DEADLINES).map_err(db_error)?;
+        let stale = table
+            .iter()
+            .map_err(db_error)?
+            .map(|row| row.map(|(key, _)| key.value().to_owned()).map_err(db_error))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|key| !records.iter().any(|(record, _)| record == key))
+            .collect::<Vec<_>>();
+        for key in stale {
+            table.remove(key.as_str()).map_err(db_error)?;
+        }
+        for (key, computed) in records {
+            let stored = table.get(key.as_str()).map_err(db_error)?.map(|value| value.value());
+            let deadline = if let Some(deadline) = stored {
+                deadline
+            } else {
+                table.insert(key.as_str(), computed).map_err(db_error)?;
+                *computed
+            };
+            resolved.insert(key.clone(), deadline);
+        }
+    }
+    txn.commit().map_err(db_error)?;
+    Ok(resolved)
 }
 
 /// Replaces both indexes after a full table rewrite.

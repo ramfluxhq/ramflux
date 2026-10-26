@@ -987,7 +987,7 @@ impl RouterRedbStore {
             &incremental_cursors,
             &mut incremental_entries,
             &mut incremental_replay_tuples,
-        );
+        )?;
         let has_incremental_inbox =
             !incremental_entries.is_empty() || !incremental_cursors.is_empty();
         let has_incremental_replay = !incremental_replay_tuples.is_empty();
@@ -1037,11 +1037,25 @@ impl RouterRedbStore {
         incremental_cursors: &[CursorAckState],
         incremental_entries: &mut Vec<(InboxEntry, i64)>,
         incremental_replay_tuples: &mut Vec<(String, i64)>,
-    ) {
+    ) -> Result<(), NodeCoreError> {
         let Some(wal) = &self.submission_wal else {
-            return;
+            return Ok(());
         };
-        for submission in wal.submissions(now_unix_seconds) {
+        let submissions = wal.submissions(now_unix_seconds);
+        let legacy = submissions
+            .iter()
+            .filter(|submission| submission.accepted_at.is_none())
+            .filter_map(|submission| {
+                submission.entry.as_ref().map(|entry| {
+                    (
+                        inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq),
+                        submission.retain_until(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let legacy_deadlines = expiry_index::resolve_legacy_wal_deadlines(&self.db, &legacy)?;
+        for submission in submissions {
             if !incremental_replay_tuples
                 .iter()
                 .any(|(key, _expires_at)| key == &submission.replay_key)
@@ -1049,10 +1063,16 @@ impl RouterRedbStore {
                 incremental_replay_tuples
                     .push((submission.replay_key.clone(), submission.replay_expires_at));
             }
-            let retain_until = submission.retain_until();
+            let mut retain_until = submission.retain_until();
             let Some(entry) = submission.entry else {
                 continue;
             };
+            if submission.accepted_at.is_none()
+                && let Some(deadline) = legacy_deadlines
+                    .get(&inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq))
+            {
+                retain_until = *deadline;
+            }
             if retain_until <= now_unix_seconds {
                 continue;
             }
@@ -1071,6 +1091,7 @@ impl RouterRedbStore {
             }
             incremental_entries.push((entry, retain_until));
         }
+        Ok(())
     }
 
     fn replace_incremental_router_tables(
