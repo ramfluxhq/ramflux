@@ -16,9 +16,13 @@ type GatewaySessionFrameFuture<'a, T> =
 struct Gateway {
     last: Option<GatewayClientFrame>,
     pending_cursor: Option<GatewayCursor>,
-    blocked: Option<oneshot::Sender<()>>,
+    blocked: Option<GatewayBlock>,
     cancelled: Arc<AtomicBool>,
     submits: Arc<AtomicUsize>,
+}
+struct GatewayBlock {
+    entered: oneshot::Sender<()>,
+    submit_envelope: Option<String>,
 }
 struct Cancelled(Arc<AtomicBool>);
 impl Drop for Cancelled {
@@ -45,9 +49,12 @@ impl GatewaySessionFrameSink for Gateway {
 impl GatewaySessionFrameSource for Gateway {
     fn recv_frame(&mut self) -> GatewaySessionFrameFuture<'_, Vec<u8>> {
         Box::pin(async move {
-            if let Some(blocked) = self.blocked.take() {
+            let block = self.blocked.as_ref().and_then(|block| block.submit_envelope.as_deref()).is_none_or(|id| {
+                matches!(&self.last, Some(GatewayClientFrame::Submit { submit }) if submit.envelope.envelope_id == id)
+            });
+            if block && let Some(blocked) = self.blocked.take() {
                 let _guard = Cancelled(Arc::clone(&self.cancelled));
-                let _ = blocked.send(());
+                let _ = blocked.entered.send(());
                 return std::future::pending().await;
             }
             if let Some(cursor) = self.pending_cursor.take() {
@@ -103,7 +110,14 @@ pub(super) fn account(
     blocked: Option<oneshot::Sender<()>>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<LocalBusAccountState, SdkError> {
-    account_with_counter(root, id, blocked, cancelled, Arc::new(AtomicUsize::new(0)), None)
+    account_with_setup(
+        root,
+        id,
+        blocked,
+        cancelled,
+        Arc::new(AtomicUsize::new(0)),
+        AccountSetup::default(),
+    )
 }
 fn account_with_counter(
     root: &Path,
@@ -113,8 +127,30 @@ fn account_with_counter(
     submits: Arc<AtomicUsize>,
     index: Option<AccountIndex>,
 ) -> Result<LocalBusAccountState, SdkError> {
+    account_with_setup(
+        root,
+        id,
+        blocked,
+        cancelled,
+        submits,
+        AccountSetup { index, ..AccountSetup::default() },
+    )
+}
+#[derive(Default)]
+struct AccountSetup {
+    index: Option<AccountIndex>,
+    blocked_submit_envelope: Option<String>,
+}
+fn account_with_setup(
+    root: &Path,
+    id: &str,
+    blocked: Option<oneshot::Sender<()>>,
+    cancelled: Arc<AtomicBool>,
+    submits: Arc<AtomicUsize>,
+    setup: AccountSetup,
+) -> Result<LocalBusAccountState, SdkError> {
     let mut client = RamfluxClient::new();
-    client.account_index = index;
+    client.account_index = setup.index;
     let root_seed = ramflux_crypto::blake3_256("ramflux.test.account.root.v1", id.as_bytes());
     client.create_identity_root(id, root_seed);
     client.create_device_branch(id, &format!("device-{id}"), 1, [0x62; 32]);
@@ -164,7 +200,16 @@ fn account_with_counter(
     let config = GatewaySessionConfig::quic(endpoint).with_account_identity(&client)?;
     let engine = GatewaySessionEngine::with_test_transport(
         config,
-        Box::new(Gateway { last: None, pending_cursor: None, blocked, cancelled, submits }),
+        Box::new(Gateway {
+            last: None,
+            pending_cursor: None,
+            blocked: blocked.map(|entered| GatewayBlock {
+                entered,
+                submit_envelope: setup.blocked_submit_envelope,
+            }),
+            cancelled,
+            submits,
+        }),
     );
     Ok(LocalBusAccountState::new(client, engine, format!("commitment-{id}")))
 }
@@ -186,7 +231,14 @@ fn actor_account_with_counter(
     let root = root.to_path_buf();
     let id = id.to_owned();
     Box::new(move |index| {
-        account_with_counter(&root, &id, blocked, cancelled, submits, Some(index))
+        account_with_setup(
+            &root,
+            &id,
+            blocked,
+            cancelled,
+            submits,
+            AccountSetup { index: Some(index), ..AccountSetup::default() },
+        )
     })
 }
 fn supervisor(
@@ -225,14 +277,36 @@ async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Res
         let root = root("independent");
         let (entered, blocked) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let alice = actor_account(&root, "alice", Some(entered), Arc::clone(&cancelled));
+        let alice_root = root.clone();
+        let alice_cancelled = Arc::clone(&cancelled);
+        let alice: AccountInitializer = Box::new(move |index| account_with_setup(
+            &alice_root,"alice",Some(entered),alice_cancelled,Arc::new(AtomicUsize::new(0)),
+            AccountSetup{index:Some(index),blocked_submit_envelope:Some("slow-envelope".into())},
+        ));
         let bob = actor_account(&root, "bob", None, Arc::new(AtomicBool::new(false)));
         let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), alice), ("bob".to_owned(), bob)]))?;
         let (one, server_one) = client(Rc::clone(&supervisor), 1).await?;
         let (two, server_two) = client(Rc::clone(&supervisor), 2).await?;
+        // Warm the sending accounts before timing isolation from Alice's blocked gateway.
+        // The checked send below keeps its original 500 ms deadline and unique response id.
+        two.request_frame(request("warm-send", "bob", "message.submit", serde_json::json!({
+            "conversation_id":"conversation", "message_id":"warm-message", "envelope_id":"warm-envelope",
+            "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
+            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"warm opaque"), "created_at":1, "ttl":60
+        }))).await?;
+        one.request_frame(request("warm-alice", "alice", "message.submit", serde_json::json!({
+            "conversation_id":"conversation", "message_id":"warm-alice-message", "envelope_id":"warm-alice-envelope",
+            "source_principal_id":"alice", "sender_id":"device-alice", "recipient_principal_commitment":"alice",
+            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"warm opaque"), "created_at":1, "ttl":60
+        }))).await?;
+        // Background receive polls cannot consume this foreground submit's blocking signal.
         let slow_client = one.clone();
         let slow = tokio::task::spawn_local(async move {
-            slow_client.request_frame(request("slow", "alice", "message.receive", serde_json::json!({"limit":1}))).await
+            slow_client.request_frame(request("slow", "alice", "message.submit", serde_json::json!({
+                "conversation_id":"conversation", "message_id":"slow-message", "envelope_id":"slow-envelope",
+                "source_principal_id":"alice", "sender_id":"device-alice", "recipient_principal_commitment":"alice",
+                "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
+            }))).await
         });
         tokio::time::timeout(Duration::from_secs(2), blocked).await.map_err(|_| failure("gateway not entered"))?.map_err(|_| failure("gateway dropped"))?;
         let sent = tokio::time::timeout(Duration::from_millis(500), two.request_frame(request("send", "bob", "message.submit", serde_json::json!({
@@ -508,13 +582,13 @@ async fn pipelined_mutations_keep_mailbox_order_and_control_state_survives_resta
             for round in 0..2 {
                 let account_root = root.clone();
                 let initialize: AccountInitializer = Box::new(move |index| {
-                    let account = account_with_counter(
+                    let account = account_with_setup(
                         &account_root,
                         "alice",
                         None,
                         Arc::new(AtomicBool::new(false)),
                         Arc::new(AtomicUsize::new(0)),
-                        Some(index),
+                        AccountSetup { index: Some(index), ..AccountSetup::default() },
                     )?;
                     account.client.initialize_and_publish_prekey_bundle(
                         "alice",
