@@ -28,6 +28,9 @@ floor store uses indexed rows capped at 4096 irreducible fences per group.
 Device fences subsumed by a departed-root fence are pruned. Only an operation
 adding a new irreducible fence beyond that cap returns a typed
 `GroupStateCapacity` refusal for `RemovalFences` rather than discarding safety state.
+A receiver at the cap rejects a snapshot requiring another irreducible fence and
+cannot follow later snapshots carrying that removal. This per-receiver limit is
+accepted for this phase; receivers never discard a floor to catch up.
 Conflicting snapshots within the same transfer chain can only be creator-device
 writes; the lowest content hash wins, and the losing creator device reapplies its own pending
 intents. Requests from other roots are always revalidated against the winning
@@ -95,17 +98,19 @@ The SDK fails closed when an active device cannot be reached; it never guesses
 that a silent device is offline. Revoke an unavailable device through the account's
 normal device-set flow before retrying. This is deliberately stricter than a
 best-effort reachability check. Honest creator devices reserve that head for the
-proposal until its signed outcome is observed: local mutations and admin requests
-wait, and another transfer cannot obtain approval during the reservation. The
-60-second bound limits issuing, not the reservation. A changed unrelated head or
-elapsed wall-clock time does not release it. Only the matching committed transfer
-or a nonce/base-bound cancellation signed by the proposing device releases it.
-After timeout the issuer cancels durably; retry waits for cancellation delivery
-before beginning another proposal. Proposal metadata remains until that outcome;
-the issue deadline cannot garbage-collect an active reservation. A short durable
-outcome fence prevents delayed probes from recreating a completed reservation.
-An unavailable issuer therefore requires its
-return to release an unfinished reservation; timeouts never assume consent.
+proposal until its signed outcome is observed or its issue deadline plus the
+five-minute clock-skew allowance has passed. Local mutations and admin requests
+wait during that reservation. The 60-second bound still limits issuing a transfer;
+no valid issue can use the later release deadline. An unrelated changed head does
+not release a live reservation.
+
+On the first courier tick after the issue deadline plus five minutes, an issuer
+without a committed transfer stages a durable signed cancellation. Siblings also
+release an expired reservation without requiring the issuer to return. A revoked
+or no-longer-selected issuer releases its sibling reservations sooner. New
+proposals wait for cancellation acknowledgements from still-active selected
+targets; revoked or deselected targets count as released. Silence alone is not
+revocation. A short durable outcome fence rejects delayed completed probes.
 Devices need synchronized clocks within ±5 minutes. Probe/reply validation permits
 that skew; transferee acceptance uses the issuer's probe timestamp so skew cannot
 extend the issuer's strict 60-second completion window. Typed
@@ -116,7 +121,8 @@ Snapshots retain this acceptance and the root-signed transfer certificate so
 receivers can verify it offline after the handshake expires. Head probes and
 signed refusals use the existing bounded group-control pair courier, with 60-second
 issue lifetime plus the five-minute transport skew allowance, at most 8 retained
-controls per group and 512 per account. Signed cancellations remain durable until the participants acknowledge observation;
+controls per group and 512 per account. Signed cancellations remain durable until
+all still-active selected participants acknowledge observation;
 their seven-day signed transport lifetime is renewed while outstanding. Gateway
 submission alone does not count as a cancellation acknowledgement. Other completed
 deliveries are retired; retries never renew a reservation.
@@ -279,8 +285,16 @@ object, message-erasure, profile and kind merge policies remain independent.
 
 Own-account invitation decisions are ordered by their branch-signed `issued_at`:
 the latest explicit decision wins, and decline wins an exact timestamp tie.
-Replays never renew decision expiry. An older decline cannot undo a later
+A new local decision signs at `max(now, stored_issued_at + 1)` and is saved before
+local adoption in the same transaction, so a clock-ahead stored decision cannot
+contradict a successful local reply. Replays never renew decision expiry. An older decline cannot undo a later
 acceptance; account blocks, group exclusions and genesis checks remain mandatory.
 Creator devices repair losing branches from the durable receiver removal floors,
 even after the seven-day pending-intent log expires, then re-sign the removals
 before replaying other pending edits.
+
+Backup restore and merge archive `group-transfer/*` rows as inert audit data and
+start without live reservations, pending proposals, deliveries or outcome fences.
+A restore cannot resume a pre-backup handshake. It must synchronize current group
+state before attempting another ownership transfer; remote reservations still
+observe their bounded release rules.

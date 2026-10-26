@@ -98,7 +98,10 @@ impl RamfluxClient {
         accepted: bool,
         target: &str,
     ) -> Result<(), SdkError> {
-        let now = now_unix_timestamp();
+        let stored =
+            self.account_db()?.load_actor_state::<Decision>(&key(&state.view().group_id))?;
+        let now = now_unix_timestamp()
+            .max(stored.map_or(0, |decision| decision.issued_at.saturating_add(1)));
         let mut consent = Consent {
             schema: DOMAIN.into(),
             actor: self.owned_group_actor(target)?,
@@ -113,7 +116,7 @@ impl RamfluxClient {
             &signing(&consent)?,
         )?;
         if !self.save_own_group_decision(&consent, state)? {
-            return Ok(());
+            return Err(super::invalid("local group decision did not supersede stored state"));
         }
         let mut body = PREFIX.to_vec();
         body.extend(serde_json::to_vec(&consent)?);
@@ -209,6 +212,51 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r8_local_decision_advances_past_a_future_account_decision_and_matches_reply()
+    -> Result<(), SdkError> {
+        use crate::client::identity_authority::test_support::public_manifest;
+        let path = super::super::tests::temp_root("local-consent-clock")?;
+        let phone = super::super::tests::person(&path.join("phone"), "owner", "phone", 11, 12)?;
+        let stranger =
+            super::super::tests::person(&path.join("stranger"), "stranger", "stranger", 21, 22)?;
+        phone.persist_identity_directory(&public_manifest(&phone)?)?;
+        for accepted in [true, false] {
+            let group = if accepted { "accept" } else { "decline" };
+            stranger.shared_group_create(group, group, None, "target-stranger")?;
+            let state = stranger.shared_group_change(
+                group,
+                "target-stranger",
+                ramflux_protocol::GroupStateChange::Add {
+                    member: phone.owned_group_actor("target-phone")?.identity,
+                    role: ramflux_protocol::SharedGroupRole::Member,
+                },
+            )?;
+            phone.hold_group_invitation(&state, &super::super::bootstrap::packet_bytes(&state)?)?;
+            let future = now_unix_timestamp() + 120;
+            phone.account_db()?.persist_actor_state(
+                &key(group),
+                &Decision {
+                    genesis_hash: state.genesis_hash()?,
+                    accepted: !accepted,
+                    issued_at: future,
+                    expires_at: future + 7 * 86400,
+                },
+            )?;
+            let reply = phone.decide_group_invitation(group, accepted, "target-phone")?;
+            assert_eq!(reply["accepted"], accepted);
+            let saved: Decision = phone
+                .account_db()?
+                .load_actor_state(&key(group))?
+                .ok_or(StorageError::AuthorizationRejected)?;
+            assert_eq!(saved.issued_at, future + 1);
+            assert_eq!(saved.accepted, accepted);
+            assert_eq!(phone.local_is_group_member(group)?, accepted);
+        }
+        drop((phone, stranger));
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
     #[test]
     fn r7_signed_account_decisions_follow_time_and_decline_wins_ties() -> Result<(), SdkError> {
         use crate::client::identity_authority::test_support::{public_manifest, sign_manifest};

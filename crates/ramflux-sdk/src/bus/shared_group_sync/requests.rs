@@ -32,6 +32,7 @@ pub(in crate::bus) async fn flush_with_clock(
 ) -> Result<usize, SdkError> {
     let now = clock();
     let client = &account.client;
+    client.advance_group_transfer_deadlines(now)?;
     client.account_db()?.retain_expiring_actor_states("group-beacon/", now, 4096)?;
     client.account_db()?.retain_expiring_actor_states(TRANSFER_SEND_PREFIX, now, 512)?;
     client.account_db()?.retain_expiring_actor_states("group-courier/sealed/", now, 4096)?;
@@ -370,13 +371,24 @@ async fn send(
                     client.account_db()?.load_actor_state::<TransferDelivery>(&attempt.id)?
                 {
                     record.delivered.insert((attempt.root.clone(), attempt.device.clone()));
-                    let all=record.control.targets().iter().all(|d|record.delivered.contains(&(d.root.clone(),d.device.clone())));
-                    if matches!(&record.control.body,crate::client::shared_group::TransferBody::Head{reply} if reply.cancelled) {
-                        record.next_at=if all {now_unix_timestamp().saturating_add(30)} else {0};
-                        if all {record.delivered.clone_from(&record.acknowledged);}
-                        client.account_db()?.persist_actor_state(&attempt.id,&record)?;
-                    } else if all {client.account_db()?.remove_actor_state(&attempt.id)?;}
-                    else {client.account_db()?.persist_actor_state(&attempt.id,&record)?;}
+                    let all = record.control.targets().iter().all(|target| {
+                        record.delivered.contains(&(target.root.clone(), target.device.clone()))
+                    });
+                    let cancellation = matches!(
+                        &record.control.body,
+                        crate::client::shared_group::TransferBody::Head { reply } if reply.cancelled
+                    );
+                    if cancellation {
+                        record.next_at = if all { now_unix_timestamp().saturating_add(30) } else { 0 };
+                        if all {
+                            record.delivered.clone_from(&record.acknowledged);
+                        }
+                        client.account_db()?.persist_actor_state(&attempt.id, &record)?;
+                    } else if all {
+                        client.account_db()?.remove_actor_state(&attempt.id)?;
+                    } else {
+                        client.account_db()?.persist_actor_state(&attempt.id, &record)?;
+                    }
                 }
             }
             GroupControlBody::DeviceSet { .. } => {

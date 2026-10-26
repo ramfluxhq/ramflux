@@ -273,13 +273,24 @@ fn backup_group_actor(
     local: &crate::bus::LocalBusPersistedAccount,
 ) -> Result<ramflux_protocol::GroupStateActor, SdkError> {
     let root = ramflux_crypto::create_identity_root(&local.principal_id, local.root_seed);
-    let branch = ramflux_crypto::create_device_branch(
+    let branch = backup_device_branch(local);
+    Ok(ramflux_crypto::certify_group_state_actor(&root, &branch, &local.target_delivery_id)?)
+}
+
+pub(super) fn backup_device_branch(
+    local: &crate::bus::LocalBusPersistedAccount,
+) -> ramflux_crypto::DeviceBranch {
+    let epoch = local
+        .devices
+        .iter()
+        .find(|device| device.device_id == local.device_id)
+        .map_or(1, |device| device.device_epoch);
+    ramflux_crypto::create_device_branch(
         &local.principal_id,
         &local.device_id,
-        1,
+        epoch,
         local.device_seed,
-    );
-    Ok(ramflux_crypto::certify_group_state_actor(&root, &branch, &local.target_delivery_id)?)
+    )
 }
 
 fn merge_shared_backup(

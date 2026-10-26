@@ -11,6 +11,8 @@ use ramflux_protocol::{GroupStateActor, GroupTransferAcceptance};
 use serde::{Deserialize, Serialize};
 pub(crate) const SEND_PREFIX: &str = "group-transfer/send/";
 const PENDING: &str = "group-transfer/pending/";
+const LEASE: &str = "group-transfer/lease/";
+const TRANSFER_SKEW_SECONDS: i64 = 300;
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct TransferDelivery {
     pub control: TransferControl,
@@ -59,10 +61,114 @@ impl RamfluxClient {
         group: &str,
         nonce: Option<&str>,
     ) -> Result<(), SdkError> {
-        let lease: Option<Lease> =
-            self.account_db()?.load_actor_state(&key("group-transfer/lease/", group))?;
+        self.release_group_transfer_lease_at(group, now_unix_timestamp())?;
+        let lease: Option<Lease> = self.account_db()?.load_actor_state(&key(LEASE, group))?;
         if lease.is_some_and(|lease| nonce != Some(lease.proposal.as_str())) {
             return Err(requires_sync_reason("transfer_outcome_pending"));
+        }
+        Ok(())
+    }
+    fn transfer_target_selected(
+        &self,
+        group: &str,
+        target: &TransferDevice,
+    ) -> Result<bool, SdkError> {
+        let Some(state) = self.account_db()?.shared_group_state(group)? else { return Ok(false) };
+        if state.view().effective_role(&target.root, &target.device).is_none() {
+            return Ok(false);
+        }
+        // Missing cached authority is not proof that an implicit sibling was deselected.
+        if self.observed_device_set(&target.root)?.is_none() {
+            return Ok(true);
+        }
+        Ok(self
+            .shared_group_selected_devices(&state)?
+            .get(&target.root)
+            .is_some_and(|devices| devices.contains(&target.device)))
+    }
+    fn release_group_transfer_lease_at(&self, group: &str, now: i64) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        db.write_transaction(|| -> Result<(), SdkError> {
+            if let Some(lease) = db.load_actor_state::<Lease>(&key(LEASE, group))? {
+                let issuer_released = if let Some(issuer) = &lease.issuer {
+                    !self.transfer_target_selected(group, issuer)?
+                } else {
+                    false
+                };
+                let released =
+                    lease.expires_at.saturating_add(TRANSFER_SKEW_SECONDS) < now || issuer_released;
+                if released {
+                    self.finish_group_transfer_outcome(group, &lease.proposal)?;
+                    db.remove_actor_state(&key(LEASE, group))?;
+                }
+            }
+            Ok(())
+        })
+    }
+    fn release_cancel_targets(&self, row: &mut TransferDelivery) -> Result<bool, SdkError> {
+        for target in row.control.targets() {
+            if !self.transfer_target_selected(row.control.group(), &target)? {
+                let key = (target.root.clone(), target.device.clone());
+                row.acknowledged.insert(key.clone());
+                row.delivered.insert(key);
+            }
+        }
+        Ok(row
+            .control
+            .targets()
+            .iter()
+            .all(|d| row.acknowledged.contains(&(d.root.clone(), d.device.clone()))))
+    }
+    fn cancellation_delivery_pending(&self, group: &str) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        let mut pending = false;
+        for id in db.actor_state_key_page(SEND_PREFIX, 512)? {
+            let Some(mut row) = db.load_actor_state::<TransferDelivery>(&id)? else { continue };
+            if row.control.group() == group
+                && matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled)
+            {
+                if self.release_cancel_targets(&mut row)? {
+                    db.remove_actor_state(&id)?;
+                } else {
+                    db.persist_actor_state(&id, &row)?;
+                    pending = true;
+                }
+            }
+        }
+        Ok(pending)
+    }
+    /// Advance abandoned proposals without needing another user transfer request.
+    pub(crate) fn advance_group_transfer_deadlines(&self, now: i64) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        for id in db.actor_state_key_page(PENDING, 128)? {
+            if let Some(pending) = db.load_actor_state::<Pending>(&id)?
+                && pending.probe.expires_at.saturating_add(TRANSFER_SKEW_SECONDS) < now
+            {
+                if let Some(state) = db.shared_group_state(&pending.probe.base.group_id)?
+                    && state.snapshot().transfers.iter().any(|transfer| {
+                        transfer.acceptance.nonce == pending.probe.id
+                            && transfer.previous_hash == pending.probe.base.state_hash
+                    })
+                {
+                    self.finish_group_transfer_head_change(&state)?;
+                } else {
+                    self.cancel_group_transfer(&pending.probe)?;
+                }
+            }
+        }
+        for id in db.actor_state_key_page(LEASE, 4096)? {
+            let bytes = ramflux_protocol::decode_base64url(
+                id.strip_prefix(LEASE).ok_or_else(|| super::invalid("transfer lease key"))?,
+            )
+            .map_err(|_| super::invalid("transfer lease key encoding"))?;
+            let group =
+                String::from_utf8(bytes).map_err(|_| super::invalid("transfer lease group"))?;
+            self.release_group_transfer_lease_at(&group, now)?;
+        }
+        for row in db.list_actor_states::<TransferDelivery>(SEND_PREFIX)? {
+            if matches!(&row.control.body, TransferBody::Head{reply} if reply.cancelled) {
+                self.cancellation_delivery_pending(row.control.group())?;
+            }
         }
         Ok(())
     }
@@ -178,17 +284,7 @@ impl RamfluxClient {
             self.cancel_group_transfer(&old.probe)?;
             return Err(requires_sync_reason("previous_transfer_cancelled"));
         }
-        if self.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?.iter().any(
-            |row| {
-                row.control.group() == state.view().group_id
-                    && matches!(&row.control.body, TransferBody::Head { reply } if reply.cancelled)
-                    && row
-                        .control
-                        .targets()
-                        .iter()
-                        .any(|d| !row.acknowledged.contains(&(d.root.clone(), d.device.clone())))
-            },
-        ) {
+        if self.cancellation_delivery_pending(&state.view().group_id)? {
             return Err(requires_sync_reason("cancellation_delivery_pending"));
         }
         self.check_group_transfer_lease(&state.view().group_id, None)?;
@@ -287,7 +383,7 @@ impl RamfluxClient {
         self.check_group_transfer_lease(&state.view().group_id, Some(&probe.id))?;
         self.reserve_group_transfer_outcome(probe)?;
         self.account_db()?.persist_actor_state(
-            &key("group-transfer/lease/", &state.view().group_id),
+            &key(LEASE, &state.view().group_id),
             &Lease {
                 proposal: probe.id.clone(),
                 issuer: Some(TransferDevice {
@@ -447,15 +543,13 @@ impl RamfluxClient {
         state: &VerifiedGroupState,
     ) -> Result<(), SdkError> {
         let group = &state.view().group_id;
-        if let Some(lease) =
-            self.account_db()?.load_actor_state::<Lease>(&key("group-transfer/lease/", group))?
-        {
+        if let Some(lease) = self.account_db()?.load_actor_state::<Lease>(&key(LEASE, group))? {
             let committed = state.snapshot().transfers.iter().any(|transfer| {
                 transfer.acceptance.nonce == lease.proposal && transfer.previous_hash == lease.head
             });
             if committed {
                 self.finish_group_transfer_outcome(group, &lease.proposal)?;
-                self.account_db()?.remove_actor_state(&key("group-transfer/lease/", group))?;
+                self.account_db()?.remove_actor_state(&key(LEASE, group))?;
                 self.account_db()?.remove_actor_state(&key(PENDING, group))?;
             } else if let Some(pending) =
                 self.account_db()?.load_actor_state::<Pending>(&key(PENDING, group))?
@@ -592,8 +686,7 @@ impl RamfluxClient {
                 },
             )?;
             self.account_db()?.remove_actor_state(&key(PENDING, &probe.base.group_id))?;
-            self.account_db()?
-                .remove_actor_state(&key("group-transfer/lease/", &probe.base.group_id))?;
+            self.account_db()?.remove_actor_state(&key(LEASE, &probe.base.group_id))?;
             Ok(())
         })
     }
@@ -603,8 +696,7 @@ impl RamfluxClient {
         target: &str,
     ) -> Result<(), SdkError> {
         let group = &reply.head.group_id;
-        if let Some(lease) =
-            self.account_db()?.load_actor_state::<Lease>(&key("group-transfer/lease/", group))?
+        if let Some(lease) = self.account_db()?.load_actor_state::<Lease>(&key(LEASE, group))?
             && lease.proposal == reply.proposal
             && lease.head == reply.requested_hash
         {
@@ -619,7 +711,7 @@ impl RamfluxClient {
                 return Err(StorageError::GroupPermissionDenied.into());
             }
             self.remember_group_transfer_outcome(group, &reply.proposal, source)?;
-            self.account_db()?.remove_actor_state(&key("group-transfer/lease/", group))?;
+            self.account_db()?.remove_actor_state(&key(LEASE, group))?;
         }
         self.remember_group_transfer_outcome(
             group,
@@ -671,12 +763,7 @@ impl RamfluxClient {
             {
                 row.acknowledged.insert((actor.root_commitment.clone(), actor.device_id.clone()));
                 row.delivered.insert((actor.root_commitment.clone(), actor.device_id.clone()));
-                if row
-                    .control
-                    .targets()
-                    .iter()
-                    .all(|d| row.acknowledged.contains(&(d.root.clone(), d.device.clone())))
-                {
+                if self.release_cancel_targets(&mut row)? {
                     self.account_db()?.remove_actor_state(&id)?;
                 } else {
                     self.account_db()?.persist_actor_state(&id, &row)?;
@@ -847,7 +934,7 @@ mod tests {
         std::fs::remove_dir_all(path)?;
         Ok(())
     }
-    fn install_transfer_directories(
+    pub(super) fn install_transfer_directories(
         phone: &RamfluxClient,
         laptop: &RamfluxClient,
         next: &RamfluxClient,
@@ -982,3 +1069,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "transfer_deadline_tests.rs"]
+mod deadline_tests;

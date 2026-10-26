@@ -211,6 +211,9 @@ impl RamfluxClient {
                 return Err(StorageError::GroupPermissionDenied.into());
             }
             let state = ramflux_crypto::verify_group_state_snapshot(invitation.snapshot.clone())?;
+            // Supersede a clock-ahead sibling decision before adoption checks its fence.
+            // The enclosing transaction rolls back both publication and adoption on failure.
+            self.publish_own_group_decision(&state, accept, target)?;
             if accept {
                 self.group_snapshot_requires_consent(&state)?;
                 invitation.accepted = true;
@@ -227,7 +230,6 @@ impl RamfluxClient {
                 invitation.snapshot.state.members.clear();
                 db.persist_actor_state(&key(group), &invitation)?;
             }
-            self.publish_own_group_decision(&state, accept, target)?;
             Ok(serde_json::json!({"group_id":group,"accepted":accept,"declined":!accept}))
         })
     }

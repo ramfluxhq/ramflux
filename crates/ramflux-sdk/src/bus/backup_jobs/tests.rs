@@ -650,3 +650,26 @@ async fn r2_create_fetches_missing_files_then_requires_explicit_authenticated_om
 }
 
 mod r3;
+
+#[test]
+fn r8_backup_actor_uses_the_manifests_current_branch_epoch() -> TestResult {
+    let root = crate::bus::runtime_tests::root("backup-actor-epoch");
+    let index = AccountIndex::open(&root)?;
+    let account = initialized_at_scale(
+        &root,
+        index,
+        Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
+    )?;
+    let mut local =
+        read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
+    local.devices[0].device_epoch = 7;
+    let branch = super::install::backup_device_branch(&local);
+    assert_eq!(branch.device_epoch, 7);
+    assert_eq!(
+        branch.signing_key.verifying_key(),
+        account.client.device_branch.as_ref().ok_or("branch")?.signing_key.verifying_key()
+    );
+    drop(account);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
