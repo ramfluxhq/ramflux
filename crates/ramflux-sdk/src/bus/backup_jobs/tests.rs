@@ -648,3 +648,5 @@ async fn r2_create_fetches_missing_files_then_requires_explicit_authenticated_om
         std::fs::remove_dir_all(root)?;std::fs::remove_dir_all(target_root)?;Ok(())
     })).await
 }
+
+mod r3;

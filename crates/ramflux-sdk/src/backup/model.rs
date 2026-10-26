@@ -103,6 +103,8 @@ pub struct BackupAttachmentChecks {
     pub missing: u64,
     #[serde(default)]
     pub unavailable_at_source: u64,
+    #[serde(default)]
+    pub local_missing_kept: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

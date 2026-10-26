@@ -60,6 +60,8 @@ impl BackupJobs {
         let mut metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
         let id = metadata.manifest.local_account_id.clone();
+        let lease =
+            self.generations.try_acquire(&id)?.ok_or_else(|| refused("install_in_progress"))?;
         let incoming = staging.directory().join("account.db");
         let incoming_key = AccountDbKey::from_bytes(metadata.database_key);
         self.check_existing_identity(&metadata, &incoming, &incoming_key).map_err(|failure| {
@@ -99,6 +101,8 @@ impl BackupJobs {
         crate::bus::daemon::set_owner_only_dir_permissions(&generation)?;
         let mut guard = PrivateDirectory { path: generation.clone(), transferred: false };
         super::recovery::mark_install(&generation)?;
+        #[cfg(test)]
+        self.install_checkpoint(super::test_install::InstallPoint::Prepared, &generation)?;
         let target = generation.join("account.db");
         let installed_key = AccountDbKey::generate()?;
         let (restored, kept_newer) = if let Some(record) = previous.as_ref() {
@@ -119,10 +123,7 @@ impl BackupJobs {
         let db = BackupDatabase::open(&target, &installed_key)?;
         db.check_integrity()?;
         db.enqueue_restore_events(&id, &job.job_id)?;
-        let files = db.verify_attachments(|_, _| Ok(()))?;
-        if files.missing != files.unavailable_at_source || files.mismatched != 0 {
-            return Err(refused("attachment_mismatch"));
-        }
+        self.verify_install_contribution(job, &db, &incoming, &incoming_key, previous.is_some())?;
         drop(db);
         let ca = generation.join("ca.pem");
         std::fs::write(&ca, &metadata.ca_pem)?;
@@ -134,6 +135,8 @@ impl BackupJobs {
         std::fs::File::open(&generation)?.sync_all()?;
         std::fs::File::open(&parent)?.sync_all()?;
         super::reclamation::remember(&generation, previous.as_ref())?;
+        #[cfg(test)]
+        self.install_checkpoint(super::test_install::InstallPoint::BeforeCommit, &generation)?;
         self.index.install_backup_generation(&BackupIndexInstall {
             account_id: &id,
             principal_commitment: &metadata.manifest.principal_commitment,
@@ -142,13 +145,56 @@ impl BackupJobs {
             manifest_json: &manifest,
             wrapped_key: &wrapped,
         })?;
+        #[cfg(test)]
+        self.install_checkpoint(super::test_install::InstallPoint::Committed, &generation)?;
         guard.transferred = true;
         super::recovery::selected(&generation);
-        if super::reclamation::complete(&generation, &self.data_root, &self.index, &id).is_err() {
-            tracing::warn!("replaced backup generation cleanup deferred until retry");
-        }
+        drop(lease);
+        self.cleanup_committed_generations();
         drop(staging);
         Ok((id, restored, kept_newer))
+    }
+}
+
+impl BackupJobs {
+    fn cleanup_committed_generations(&self) {
+        if super::recovery::recover_generations(&self.data_root, &self.index, &self.generations)
+            .is_err()
+        {
+            tracing::warn!(
+                "committed generation cleanup deferred until restart or the next install"
+            );
+        }
+    }
+    fn verify_install_contribution(
+        &self,
+        job: &BackupJob,
+        db: &BackupDatabase,
+        incoming: &Path,
+        key: &AccountDbKey,
+        merge: bool,
+    ) -> Result<(), SdkError> {
+        let files = if merge {
+            db.verify_archive_contribution(incoming, key, |_, _| Ok(()))?
+        } else {
+            db.verify_attachments(|_, _| Ok(()))?
+        };
+        if files.missing != files.unavailable_at_source || files.mismatched != 0 {
+            return Err(refused("attachment_mismatch"));
+        }
+        self.change(|registry| {
+            registry.attachment_checks(
+                &job.job_id,
+                crate::backup::BackupAttachmentChecks {
+                    verified: files.verified,
+                    mismatched: files.mismatched,
+                    missing: files.missing,
+                    unavailable_at_source: files.unavailable_at_source,
+                    local_missing_kept: files.local_missing_kept,
+                },
+            )
+        })?;
+        Ok(())
     }
 }
 

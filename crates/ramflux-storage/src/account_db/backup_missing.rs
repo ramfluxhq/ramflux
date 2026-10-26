@@ -5,13 +5,23 @@
 use super::{AccountDb, backup_database::BackupDatabase};
 use crate::StorageError;
 use rusqlite::{Connection, params};
-const MISSING: &str = "r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE CAST(o.manifest_hash AS TEXT)=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))";
+pub(super) const MISSING: &str = "r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE CAST(o.manifest_hash AS TEXT)=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))";
 fn page(db: &Connection, after: &str) -> rusqlite::Result<Vec<String>> {
     let mut q=db.prepare(&format!("SELECT substr(r.state_kind,length('attachment/reference/')+1) FROM runtime_actor_state r WHERE {MISSING} AND r.state_kind>?1 ORDER BY r.state_kind LIMIT 64"))?;
     q.query_map(params![format!("attachment/reference/{after}")], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()
 }
 impl AccountDb {
+    /// Counts missing references on the actor connection without retaining a reader snapshot.
+    /// # Errors
+    /// Returns SQLite errors.
+    pub fn backup_missing_count(&self) -> Result<u64, StorageError> {
+        Ok(self.connection.query_row(
+            &format!("SELECT count(*) FROM runtime_actor_state r WHERE {MISSING}"),
+            [],
+            |r| r.get(0),
+        )?)
+    }
     /// Lists the next 64 missing payload selectors, without decoding references or grants.
     /// # Errors
     /// Returns SQLite errors. Continue after the last selector until an empty page.
@@ -61,5 +71,18 @@ impl BackupDatabase {
     /// Returns SQLite errors; unrelated or subsequently available records do not grant an omission.
     pub fn approved_missing_count(&self) -> Result<u64, StorageError> {
         Ok(self.db.query_row(&format!("SELECT count(*) FROM runtime_actor_state r JOIN backup_missing_attachment m ON m.selector=substr(r.state_kind,length('attachment/reference/')+1) AND m.manifest_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND m.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash') WHERE {MISSING}"),[],|r|r.get(0))?)
+    }
+}
+
+impl BackupDatabase {
+    pub(super) fn install_missing_counts(&self) -> Result<(u64, u64), StorageError> {
+        let supplied = "EXISTS(SELECT 1 FROM incoming.runtime_actor_state source WHERE source.state_kind=r.state_kind AND source.state_json=r.state_json)";
+        let missing = self.db.query_row(
+            &format!("SELECT count(*) FROM runtime_actor_state r WHERE {MISSING} AND {supplied}"),
+            [],
+            |r| r.get::<_, u64>(0),
+        )?;
+        let approved=self.db.query_row(&format!("SELECT count(*) FROM runtime_actor_state r JOIN incoming.backup_missing_attachment m ON m.selector=substr(r.state_kind,length('attachment/reference/')+1) AND m.manifest_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND m.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash') WHERE {MISSING} AND {supplied}"),[],|r|r.get::<_,u64>(0))?;
+        Ok((missing, approved))
     }
 }

@@ -27,15 +27,18 @@ impl BackupJobs {
         actor: &AccountActor,
         job: &BackupJob,
     ) -> Result<CapturedAccount, SdkError> {
-        let captured = actor.capture_backup().await?;
-        let account = captured.manifest.local_account_id.clone();
         let mut after = String::new();
+        let mut done = 0_u64;
+        let mut total = 0_u64;
         loop {
-            let page = captured.reader.backup_missing_page(&after)?;
-            if page.is_empty() {
+            let page = actor.backup_missing_page(after.clone()).await?;
+            let account = page.account_id;
+            total = total.max(page.total).max(done.saturating_add(page.selectors.len() as u64));
+            self.progress_fetch(&job.job_id, done, total);
+            if page.selectors.is_empty() {
                 break;
             }
-            for selector in page {
+            for selector in page.selectors {
                 if self.cancellation(&job.job_id)?.load(Ordering::Acquire) {
                     return Err(refused("interrupted"));
                 }
@@ -71,9 +74,11 @@ impl BackupJobs {
                         reply: None,
                     })
                     .await;
+                done = done.saturating_add(1);
+                self.progress_fetch(&job.job_id, done, total);
             }
         }
-        drop(captured);
+        self.progress_fetch(&job.job_id, done, done);
         actor.capture_backup().await
     }
     pub(super) fn unavailable_failure(

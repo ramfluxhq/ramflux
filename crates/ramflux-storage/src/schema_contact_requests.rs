@@ -61,5 +61,8 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
             count INTEGER NOT NULL
         );",
     )?;
+    connection.execute_batch(HELD_MESSAGE_FENCES)?;
     Ok(())
 }
+
+pub(crate) const HELD_MESSAGE_FENCES: &str = "CREATE TABLE IF NOT EXISTS contact_message_request_fence(sender_identity TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(sender_identity,message_id)); CREATE TRIGGER IF NOT EXISTS contact_message_erasure_fence AFTER DELETE ON contact_message_request BEGIN INSERT OR IGNORE INTO contact_message_request_fence(sender_identity,message_id) VALUES(OLD.sender_identity,OLD.message_id); END;";

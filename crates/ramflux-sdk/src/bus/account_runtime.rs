@@ -211,17 +211,37 @@ impl AccountRuntime {
     }
 
     async fn apply(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
-        if let Some(reply) = command.backup.take() {
-            if !reply.is_closed() {
-                let result = (|| {
-                    let account = local_bus_account(&self.state, &self.id)?;
-                    let reader = account.client.account_db()?.open_backup_reader()?;
-                    let manifest = read_local_bus_account_manifest(
-                        &local_bus_account_manifest_path(&self.state.config.data_root, &self.id),
-                    )?;
-                    Ok(super::backup_jobs::CapturedAccount { reader, manifest })
-                })();
-                let _ = reply.send(result);
+        if let Some(backup) = command.backup.take() {
+            match backup {
+                super::actor::BackupCommand::Capture(reply) => {
+                    if !reply.is_closed() {
+                        let result = (|| {
+                            let account = local_bus_account(&self.state, &self.id)?;
+                            let reader = account.client.account_db()?.open_backup_reader()?;
+                            let manifest =
+                                read_local_bus_account_manifest(&local_bus_account_manifest_path(
+                                    &self.state.config.data_root,
+                                    &self.id,
+                                ))?;
+                            Ok(super::backup_jobs::CapturedAccount { reader, manifest })
+                        })();
+                        let _ = reply.send(result);
+                    }
+                }
+                super::actor::BackupCommand::Missing { after, reply } => {
+                    if !reply.is_closed() {
+                        let result = (|| {
+                            let db =
+                                local_bus_account(&self.state, &self.id)?.client.account_db()?;
+                            Ok(super::backup_jobs::MissingAttachmentPage {
+                                account_id: self.id.clone(),
+                                total: db.backup_missing_count()?,
+                                selectors: db.backup_missing_page(&after)?,
+                            })
+                        })();
+                        let _ = reply.send(result);
+                    }
+                }
             }
             return Ok(false);
         }

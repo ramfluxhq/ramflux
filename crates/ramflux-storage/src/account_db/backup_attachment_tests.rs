@@ -144,3 +144,62 @@ fn r2_attachment_merge_cannot_resurrect_a_local_deletion_with_a_later_upsert()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn r3_equal_timestamp_attachment_deletion_wins_in_both_merge_directions()
+-> Result<(), Box<dyn std::error::Error>> {
+    for local_deleted in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "rf-backup-delete-tie-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let si = AccountIndex::open(root.join("source"))?;
+        let li = AccountIndex::open(root.join("local"))?;
+        si.create_account("a", "root")?;
+        li.create_account("a", "root")?;
+        let source = AccountDb::open(&si, "a", &AccountDbKey::generate()?)?;
+        let local = AccountDb::open(&li, "a", &AccountDbKey::generate()?)?;
+        let descriptor = serde_json::json!({"object_id":"file"});
+        for db in [&source, &local] {
+            db.upsert_object(&ObjectWrite {
+                object_id: "file",
+                manifest_hash: "hash",
+                nonce: "nonce",
+                ciphertext: b"ciphertext",
+                plaintext_hash: "plain",
+                tombstoned: false,
+                backup_excluded: false,
+                content_key: Some(&[1; 32]),
+                object: &descriptor,
+                updated_at: 10,
+            })?;
+        }
+        if local_deleted {
+            local.set_object_tombstoned("file")?;
+        } else {
+            source.set_object_tombstoned("file")?;
+        }
+        let path = root.join("incoming.db");
+        let saved = source.write_backup_snapshot(&path)?;
+        let target = root.join("target.db");
+        let snapshot = local.write_backup_snapshot(&target)?;
+        let mut merged = BackupDatabase::open(&target, &snapshot.key)?;
+        merged.merge_backup(&path, &saved.key, || Ok(()))?;
+        assert!(
+            merged.db.query_row(
+                "SELECT tombstoned FROM object_index WHERE object_id='file'",
+                [],
+                |r| r.get::<_, bool>(0)
+            )?,
+            "a deletion must win equal timestamps from either side"
+        );
+        drop(merged);
+        drop(local);
+        drop(source);
+        drop(li);
+        drop(si);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}

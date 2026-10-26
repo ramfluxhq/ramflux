@@ -77,6 +77,7 @@ impl BackupJobs {
             mismatched: checks.mismatched,
             missing: checks.missing,
             unavailable_at_source: checks.unavailable_at_source,
+            local_missing_kept: checks.local_missing_kept,
         };
         self.change(|registry| registry.attachment_checks(&job.job_id, checks.clone()))
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;
@@ -207,9 +208,41 @@ impl BackupJobs {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
-        // Cancellation and publication have one linearization point; no async lock spans I/O.
+        // The potentially long NFS/FUSE copy never holds the daemon job-state lock.
+        {
+            let state = self.state.lock().map_err(|_| failure(BackupFailureCode::Interrupted))?;
+            if cancel.load(Ordering::Acquire)
+                || state
+                    .registry
+                    .job(&job.job_id)
+                    .map_err(|_| failure(BackupFailureCode::Interrupted))?
+                    .state
+                    != BackupJobState::Writing
+            {
+                return Err(failure(BackupFailureCode::Interrupted));
+            }
+        }
+        super::publication::publish_cancellable(temporary, output, cancel).map_err(|error| {
+            if cancel.load(Ordering::Acquire) {
+                failure(BackupFailureCode::Interrupted)
+            } else if error.kind() == std::io::ErrorKind::StorageFull {
+                BackupFailure {
+                    needed_bytes: Some(bytes),
+                    available_bytes: fs2::available_space(parent).ok(),
+                    ..failure(BackupFailureCode::InsufficientSpace)
+                }
+            } else {
+                failure(BackupFailureCode::NotWritable)
+            }
+        })?;
+        let mut output_guard = PartialFile { path: output.to_owned(), published: false };
+        let _ = std::fs::remove_file(temporary);
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let mut state = self.state.lock().map_err(|_| failure(BackupFailureCode::Interrupted))?;
         if cancel.load(Ordering::Acquire)
+            || state.cancelling.contains(&job.job_id)
             || state
                 .registry
                 .job(&job.job_id)
@@ -219,14 +252,6 @@ impl BackupJobs {
         {
             return Err(failure(BackupFailureCode::Interrupted));
         }
-        super::publication::publish(temporary, output)
-            .map_err(|_| failure(BackupFailureCode::NotWritable))?;
-        if std::fs::File::open(parent).and_then(|directory| directory.sync_all()).is_err() {
-            let _ = std::fs::remove_file(output);
-            return Err(failure(BackupFailureCode::NotWritable));
-        }
-        let _ = std::fs::remove_file(temporary);
-        guard.published = true;
         let row = state
             .registry
             .written(&job.job_id, bytes, now())
@@ -234,6 +259,8 @@ impl BackupJobs {
         state.head += 1;
         let seq = state.head;
         state.events.push_back((seq, row));
+        output_guard.published = true;
+        guard.published = true;
         Ok(())
     }
     pub(super) fn verify_archive(

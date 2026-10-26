@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Newly created group sender-key chains use seed-bound v3 distributions. Upgrade
+  every group participant together: older clients cannot import v3 distributions,
+  so mixed-version groups can lose delivery after sender-key rotation. Existing
+  v1/v2 receive chains remain readable; live outbound checkpoints are retained.
+
 ### Added
 
 - Initial public workspace preparation.

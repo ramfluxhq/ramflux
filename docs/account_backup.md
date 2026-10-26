@@ -36,7 +36,7 @@ The whole secret-free row includes `job_id`, `kind`, `state`, `seq`, `path`,
 `kept_newer` are per-category objects: contacts, conversations, messages, groups,
 surfaces, tasks, attachments, attachment_bytes. Totals describe the exact snapshot,
 not the currently advancing live account. Restore totals are trusted only after
-header authentication. Attachment checks distinguish verified, mismatched, missing and explicitly `unavailable_at_source` (included in missing). Progress updates are coalesced at 250 ms or one percent; phase and terminal updates are immediate.
+header authentication. Attachment checks distinguish verified, mismatched, missing, explicitly `unavailable_at_source` (included in missing), and `local_missing_kept` (pre-existing undownloaded local references retained by merge, not archive omissions). Progress updates are coalesced at 250 ms or one percent; phase and terminal updates are immediate.
 
 States are Preparing → Writing → Done for backup and Verifying → Verified →
 Installing → Done for restore. Cancel is available until Installing. Verified
@@ -60,12 +60,12 @@ manifest. An error before that commit keeps the previous generation selected.
 An interrupted pre-commit install cannot expose partial live state. On restart,
 secret-free ownership markers remove abandoned output prefixes and unselected
 prepared generations. The committed generation pointer always wins, including a
-crash immediately after commit. A durable post-commit marker reclaims exactly the previously selected database/generation; unrelated unmarked data is preserved. Failed cleanup logs a warning, never blocks daemon startup, and is retried periodically without deleting active job staging. Other accounts and daemon requests continue.
+crash immediately after commit. A durable post-commit marker reclaims exactly the previously selected database/generation; unrelated unmarked data is preserved. Failed cleanup logs a warning and never blocks daemon startup. Periodic retry handles job folders only. Generation cleanup runs at startup and after committed installs, under per-account leases that skip active installs. Other accounts and daemon requests continue.
 Normal contact/conversation/message invalidations are queued through the durable
 outbox, followed by `account.restored`; clients reload after completion.
 
 Output is written to a private partial file and published exclusively after final
-AEAD and fsync completion. Hard-link publication falls back to an exclusive no-replace rename for removable or network filesystems. Existing output files are never overwritten. Space is
+AEAD and fsync completion. Hard-link publication falls back to an exclusive no-replace rename, then to exclusive `create_new` plus a bounded streamed copy and fsync on filesystems such as NFS/FUSE that lack both operations. The copy fallback makes the final path visible while writing; clients must wait for Done. Failure/cancellation removes its partial final, and copy I/O never holds the job-state lock. Existing output files are never overwritten. Space is
 estimated before writing and checked between bounded copy/write batches. Partial
 output and encrypted staging are removed on cancellation or failure.
 
@@ -84,21 +84,23 @@ stored version/time; read/delivery receipts use their own timestamps. Immutable
 contact roots and group member pins cannot change. Unordered conflicts keep the
 live value; nonconflicting history is added. The live recovery manifest and live
 outbound crypto always win. Imported outbound state is archived, never resumed. Archive `backup/*` controls never enter the live merge.
-The report distinguishes restored and retained values per category.
+The report distinguishes restored and retained values per category. Verify and install strictly authenticate the archive's supplied payloads and references. Merge does not demand downloads of unchanged local references: those stay fetchable and are reported as `attachments.local_missing_kept`, outside source-omission counts. Local corruption outside the archive contribution does not grant any archive omission approval.
+
+Released/deleted held contact messages have durable per-message erasure fences, which merge unions. Direct-message projections and deletion tombstones also prevent older held copies from returning. Block/decline fences keep the stricter state and maximum expiry, request-state ties prefer restrictive states, and requester authority floors keep the maximum epoch and retention time. Unseen held history remains private; merging never executes its controls.
 
 On an empty data root, restore preserves all history, attachment keys and inbound
 or archived sessions needed for late messages. Saved outbound DM sessions are
 inactive; saved outbound group chains stay archived. Before the first send, the
-device performs fresh root-authorized activation at an increased device epoch,
-starts fresh outbound DM sessions, and rotates each group's sender seed/chain ID
-before distributing it to members. All newly created distributions use
+device performs fresh root-authorized activation at an increased device epoch.
+The first post-restore send establishes fresh outbound DM sessions; each group's
+first send rotates its sender seed/chain ID before distributing it to members. All newly created distributions use
 `ramflux.sdk.group_sender_key.distribution.v3`, which binds the fresh seed into the
 chain ID; participating receivers need v3 support. Existing v1/v2 receive chains
 remain readable. The UI must show **re-establishing secure
 sessions** while `account.status` / `sync.status.get` has
 `secure_sessions:reestablishing`; `account.secure_sessions.changed` announces ready.
 If activation is refused, history remains readable and sending fails closed.
-Merge preserves existing live outbound sessions. A group without a live sending checkpoint gets a fresh seed-bound chain; a known chain ID with different secret material is refused loudly. Inactive receive-only DM chains remain subject to the ordinary eight-chain retirement limit and a 24-hour late-delivery deadline. Retirement erases private archived copies as well as live session records.
+Merge preserves existing live outbound sessions. The first group send without a live sending checkpoint gets a fresh seed-bound chain; a known chain ID with different secret material is refused loudly. Inactive receive-only DM chains remain subject to the ordinary eight-chain retirement limit and a 24-hour late-delivery deadline measured from restore/migration, never from last use. Retirement erases private archived copies as well as live session records.
 
 Transient network work is intentionally not resumed: queued gateway sends,
 own-device sends and runtime command idempotency/outbox receipts are not replayed
@@ -106,6 +108,8 @@ from the imported snapshot. Their historical records remain available. CA bytes
 are included; network endpoint reachability and external helper processes are
 re-established separately. The account database is the backup boundary: temporary
 upload spool files outside that database are not historical attachments. Incomplete referenced attachments require the explicit omission workflow described below.
+
+Before opening the snapshot, the actor enumerates missing references in bounded pages and attempts their fetches. Preparing-phase progress reports attempted items and an estimated total; the final attempted count is emitted before snapshot capture. No reader snapshot is held across network waits. The one coherent backup reader opens only after this phase.
 
 ## Explicit unavailable-file workflow
 

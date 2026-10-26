@@ -238,6 +238,7 @@ impl AccountDb {
         message: ContactMessageRequestWrite<'_>,
     ) -> Result<bool, StorageError> {
         self.write_transaction(|| {
+            if self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contact_message_request_fence WHERE sender_identity=?1 AND message_id=?2)",params![message.sender.storage_key(),message.message_id],|r|r.get::<_,bool>(0))? {return Ok(false);}
             let counts:(u64,u64,u64,u64)=self.connection.query_row("SELECT count(*),COALESCE(sum(byte_count),0),COALESCE(sum(CASE WHEN contact_identity_commitment=?1 THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN contact_identity_commitment=?1 THEN byte_count ELSE 0 END),0) FROM contact_message_request",params![message.sender.root_commitment()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
             let bytes=u64::try_from(message.message_json.len()).map_err(|_|StorageError::AuthorizationRejected)?;
             if counts.0>=MAX_MESSAGES || counts.2>=MAX_MESSAGES_PER_ROOT || counts.1.saturating_add(bytes)>MAX_BYTES || counts.3.saturating_add(bytes)>MAX_BYTES_PER_ROOT { return Ok(false); }

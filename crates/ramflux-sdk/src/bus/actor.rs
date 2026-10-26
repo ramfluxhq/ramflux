@@ -12,8 +12,15 @@ use tokio::sync::oneshot;
 pub(super) type AccountInitializer =
     Box<dyn FnOnce(AccountIndex) -> Result<LocalBusAccountState, SdkError> + Send>;
 
+pub(super) enum BackupCommand {
+    Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
+    Missing {
+        after: String,
+        reply: oneshot::Sender<Result<super::backup_jobs::MissingAttachmentPage, SdkError>>,
+    },
+}
 pub(super) struct AccountCommand {
-    pub backup: Option<oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>>,
+    pub backup: Option<BackupCommand>,
     pub request: LocalBusFrame,
     pub connection_id: u64,
     pub topics: BTreeSet<String>,
@@ -41,6 +48,8 @@ pub(super) struct AccountActor {
     shutdown_signal: watch::Sender<bool>,
     done: watch::Receiver<ActorExit>,
     readers: Arc<RoutingMutex<Option<AccountReaders>>>,
+    #[cfg(test)]
+    backup_captures: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AccountActor {
@@ -90,35 +99,60 @@ impl AccountActor {
         if wait_for_initial {
             initialized.recv().map_err(|_| stopped())?;
         }
-        Ok(Self { sender, readers, shutdown_signal: lifetime, done })
+        Ok(Self {
+            sender,
+            readers,
+            shutdown_signal: lifetime,
+            done,
+            #[cfg(test)]
+            backup_captures: Arc::default(),
+        })
     }
 
     pub(super) async fn capture_backup(
         &self,
     ) -> Result<super::backup_jobs::CapturedAccount, SdkError> {
+        #[cfg(test)]
+        self.backup_captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (backup, received) = oneshot::channel();
-        let (reply, _) = oneshot::channel();
-        let (outbound, _) = mpsc::channel(1);
-        let command = AccountCommand {
-            backup: Some(backup),
-            request: LocalBusFrame::request(
-                "backup-capture",
-                None,
-                "account",
-                "account.backup.capture",
-                serde_json::json!({}),
-            ),
-            connection_id: 0,
-            topics: BTreeSet::default(),
-            attended: false,
-            nodes: None,
-            outbound,
-            reply: Some(reply),
-        };
-        self.sender.send(command).await.map_err(|_| stopped())?;
+        self.send_backup(BackupCommand::Capture(backup)).await?;
         received.await.map_err(|_| stopped())?
     }
+    pub(super) async fn backup_missing_page(
+        &self,
+        after: String,
+    ) -> Result<super::backup_jobs::MissingAttachmentPage, SdkError> {
+        let (reply, received) = oneshot::channel();
+        self.send_backup(BackupCommand::Missing { after, reply }).await?;
+        received.await.map_err(|_| stopped())?
+    }
+    async fn send_backup(&self, backup: BackupCommand) -> Result<(), SdkError> {
+        let (outbound, _events) = mpsc::channel(1);
+        self.sender
+            .send(AccountCommand {
+                backup: Some(backup),
+                request: LocalBusFrame::request(
+                    "backup-query",
+                    None,
+                    "account",
+                    "account.backup.capture",
+                    serde_json::json!({}),
+                ),
+                connection_id: 0,
+                topics: BTreeSet::new(),
+                attended: false,
+                nodes: None,
+                outbound,
+                reply: None,
+            })
+            .await
+            .map_err(|_| stopped())
+    }
 
+    #[cfg(test)]
+    pub(super) fn backup_capture_count(&self) -> usize {
+        self.backup_captures.load(std::sync::atomic::Ordering::Relaxed)
+    }
     pub(super) fn reader_pool(&self) -> Result<AccountReaders, SdkError> {
         self.readers.lock().map_err(|_| stopped())?.clone().ok_or_else(stopped)
     }

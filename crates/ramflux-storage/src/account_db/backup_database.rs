@@ -13,6 +13,7 @@ pub struct BackupAttachmentVerification {
     pub mismatched: u64,
     pub missing: u64,
     pub unavailable_at_source: u64,
+    pub local_missing_kept: u64,
 }
 
 pub struct BackupDatabase {
@@ -36,6 +37,7 @@ impl BackupDatabase {
         }
         let opened = Self { db };
         opened.ensure_missing_manifest()?;
+        opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
         Ok(opened)
     }
     /// Copies a quiesced generation to a fresh encrypted private generation.
@@ -129,10 +131,22 @@ impl BackupDatabase {
     /// Returns SQLite/I/O errors. Missing or corrupt files are counted, never omitted.
     pub fn verify_attachments(
         &self,
+        progress: impl FnMut(u64, u64) -> Result<(), StorageError>,
+    ) -> Result<BackupAttachmentVerification, StorageError> {
+        self.verify_attachments_scope(false, progress)
+    }
+    pub(super) fn verify_attachments_scope(
+        &self,
+        archive_only: bool,
         mut progress: impl FnMut(u64, u64) -> Result<(), StorageError>,
     ) -> Result<BackupAttachmentVerification, StorageError> {
         let mut checks = BackupAttachmentVerification::default();
-        let mut statement=self.db.prepare("SELECT rowid,object_id,CAST(manifest_hash AS TEXT),plaintext_hash,object_content_key,length(ciphertext) FROM object_index WHERE backup_excluded=0 ORDER BY rowid")?;
+        let predicate = if archive_only {
+            " AND EXISTS(SELECT 1 FROM incoming.object_index source WHERE source.object_id=object_index.object_id AND source.backup_excluded=0)"
+        } else {
+            ""
+        };
+        let mut statement=self.db.prepare(&format!("SELECT rowid,object_id,CAST(manifest_hash AS TEXT),plaintext_hash,object_content_key,length(ciphertext) FROM object_index WHERE backup_excluded=0{predicate} ORDER BY rowid"))?;
         let mut rows = statement.query([])?;
         let mut bytes = 0_u64;
         while let Some(row) = rows.next()? {
@@ -173,9 +187,15 @@ impl BackupDatabase {
             bytes = bytes.saturating_add(size);
             progress(checks.verified + checks.mismatched + checks.missing, bytes)?;
         }
-        // References with no matching local payload make a full archive incomplete.
-        checks.missing+=self.db.query_row("SELECT count(*) FROM runtime_actor_state r WHERE r.state_kind LIKE 'attachment/reference/%' AND NOT EXISTS(SELECT 1 FROM object_index o WHERE CAST(o.manifest_hash AS TEXT)=json_extract(CAST(r.state_json AS TEXT),'$.reference.manifest_hash') AND o.plaintext_hash=json_extract(CAST(r.state_json AS TEXT),'$.reference.plaintext_hash'))",[],|row|row.get::<_,u64>(0))?;
-        checks.unavailable_at_source = self.approved_missing_count()?;
+        let all_missing = self.missing_attachment_count()?;
+        let (missing, approved) = if archive_only {
+            self.install_missing_counts()?
+        } else {
+            (all_missing, self.approved_missing_count()?)
+        };
+        checks.missing += missing;
+        checks.unavailable_at_source = approved;
+        checks.local_missing_kept = all_missing.saturating_sub(missing);
         Ok(checks)
     }
 }

@@ -4,6 +4,7 @@
 //! Daemon-owned background backup jobs with account-ordered snapshot capture.
 mod attachments;
 mod format;
+mod generation_lock;
 mod install;
 mod publication;
 mod reclamation;
@@ -23,3 +24,12 @@ pub(super) struct CapturedAccount {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod test_install;
+
+pub(super) struct MissingAttachmentPage {
+    pub account_id: String,
+    pub total: u64,
+    pub selectors: Vec<String>,
+}

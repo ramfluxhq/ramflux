@@ -23,6 +23,24 @@ struct RowSelection<'a> {
     newer: &'a str,
     filter: &'a str,
 }
+fn skip_merge_table(table: &str) -> bool {
+    matches!(
+        table,
+        "contact_request_fence"
+            | "contact_request_authority_floor"
+            | "contact_message_request_fence"
+    ) || table.starts_with("backup_archived_")
+        || table == "account_key_check"
+        || table.starts_with("schema_")
+        || matches!(
+            table,
+            "runtime_outbox" | "runtime_operation" | "runtime_journal" | "runtime_journal_bounds"
+        )
+        || matches!(
+            table,
+            "outbox_queue" | "ack_state" | "nack_state" | "backup_archived_actor_state"
+        )
+}
 impl BackupDatabase {
     /// Checks immutable relationship roots and member keys before preview or installation.
     /// # Errors
@@ -48,6 +66,21 @@ impl BackupDatabase {
         )?;
         Ok(())
     }
+    /// Verifies only archive-supplied payloads and exact imported references after a merge.
+    /// Existing local undownloaded references are retained and counted, never source omissions.
+    /// # Errors
+    /// Returns authentication, SQLite or I/O errors; the caller owns a private generation.
+    pub fn verify_archive_contribution(
+        &self,
+        path: &Path,
+        key: &AccountDbKey,
+        progress: impl FnMut(u64, u64) -> Result<(), StorageError>,
+    ) -> Result<super::backup_database::BackupAttachmentVerification, StorageError> {
+        self.attach(path, key)?;
+        let result = self.verify_attachments_scope(true, progress);
+        self.db.execute_batch("DETACH DATABASE incoming")?;
+        result
+    }
     /// Merges into a private snapshot. The live generation is not involved.
     /// # Errors
     /// Returns schema incompatibility, pin conflicts, cancellation or I/O/SQL errors.
@@ -68,6 +101,7 @@ impl BackupDatabase {
             };
             self.db.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
             self.preserve_imported_archives(key)?;
+            self.merge_contact_fences()?;
             self.prepare_conversation_counts()?;
             let mut report = BackupMergeReport::default();
             for table in tables {
@@ -76,21 +110,7 @@ impl BackupDatabase {
                     self.merge_objects(&mut report, &mut progress)?;
                     continue;
                 }
-                if table.starts_with("backup_archived_")
-                    || table == "account_key_check"
-                    || table.starts_with("schema_")
-                    || matches!(
-                        table.as_str(),
-                        "runtime_outbox"
-                            | "runtime_operation"
-                            | "runtime_journal"
-                            | "runtime_journal_bounds"
-                    )
-                    || matches!(
-                        table.as_str(),
-                        "outbox_queue" | "ack_state" | "nack_state" | "backup_archived_actor_state"
-                    )
-                {
+                if skip_merge_table(&table) {
                     continue;
                 }
                 let incoming = columns(&self.db, "incoming", &table)?;
@@ -114,6 +134,8 @@ impl BackupDatabase {
                 let newer = newer_expression(&table, &columns);
                 let filter = if table == "runtime_actor_state" {
                     "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%'"
+                } else if table == "contact_message_request" {
+                    "NOT EXISTS(SELECT 1 FROM contact_message_request_fence f WHERE f.sender_identity=r.sender_identity AND f.message_id=r.message_id) AND NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.conversation_id=r.conversation_id) AND NOT EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=r.message_id AND t.conversation_id=r.conversation_id)"
                 } else if table == "runtime_message_content" {
                     "NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.deleted=1)"
                 } else if matches!(
@@ -145,6 +167,7 @@ impl BackupDatabase {
                 let _ = replacements;
             }
             self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));")?;
+            self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
             self.db.execute_batch("UPDATE direct_message_projection SET deleted=1,encrypted_body=x'' WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DROP TABLE backup_local_pair; DROP TABLE backup_local_conversation; DROP TABLE backup_source_conversation; DROP TABLE backup_changed_conversation; COMMIT;")?;
@@ -262,7 +285,7 @@ impl BackupDatabase {
             })
             .collect::<Vec<_>>()
             .join(",");
-        let mut query=self.db.prepare("SELECT rowid,object_id,updated_at,length(ciphertext),backup_excluded FROM incoming.object_index ORDER BY rowid")?;
+        let mut query=self.db.prepare("SELECT rowid,object_id,updated_at,length(ciphertext),backup_excluded,tombstoned FROM incoming.object_index ORDER BY rowid")?;
         let mut rows = query.query([])?;
         while let Some(row) = rows.next()? {
             progress()?;
@@ -271,6 +294,7 @@ impl BackupDatabase {
             let at: i64 = row.get(2)?;
             let bytes: u64 = row.get(3)?;
             let excluded: bool = row.get(4)?;
+            let source_deleted: bool = row.get(5)?;
             let current: Option<(i64, bool)> = self
                 .db
                 .query_row(
@@ -279,7 +303,9 @@ impl BackupDatabase {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if current.is_some_and(|(current, tombstoned)| tombstoned || current >= at) {
+            if current.is_some_and(|(current, tombstoned)| {
+                tombstoned || current > at || (current == at && !source_deleted)
+            }) {
                 if !excluded {
                     report.kept_newer.attachments += 1;
                     report.kept_newer.attachment_bytes += bytes;
@@ -376,6 +402,18 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
     }
     if table == "group_member_projection" {
         return "EXISTS(SELECT 1 FROM incoming.group_projection source JOIN main.group_projection live USING(group_id) WHERE source.group_id=r.group_id AND source.group_epoch>live.group_epoch) OR r.updated_at>l.updated_at".into();
+    }
+    if table == "contact_request_projection" {
+        let rank = |alias: &str| {
+            format!(
+                "CASE {alias}.state WHEN 'blocked' THEN 4 WHEN 'declined' THEN 3 WHEN 'expired' THEN 2 WHEN 'accepted' THEN 1 ELSE 0 END"
+            )
+        };
+        return format!(
+            "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND ({})>({}))",
+            rank("r"),
+            rank("l")
+        );
     }
     if table == "runtime_actor_state" {
         let timestamp = |alias: &str| {

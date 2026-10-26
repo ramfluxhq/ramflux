@@ -18,12 +18,19 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
+struct ProgressMark {
+    category: BackupCategory,
+    items: bool,
+    done: u64,
+    total: Option<u64>,
+    at: std::time::Instant,
+}
 pub(super) struct State {
     pub registry: BackupJobRegistry,
     pub events: VecDeque<(u64, BackupJob)>,
     pub head: u64,
     pub cancelling: std::collections::BTreeSet<String>,
-    progress: std::collections::BTreeMap<String, (BackupCategory, u64, std::time::Instant)>,
+    progress: std::collections::BTreeMap<String, ProgressMark>,
 }
 #[derive(Clone)]
 pub(crate) struct BackupJobs {
@@ -31,9 +38,12 @@ pub(crate) struct BackupJobs {
     pub(super) root: PathBuf,
     pub(super) data_root: PathBuf,
     pub(super) index: ramflux_storage::AccountIndex,
+    pub(super) generations: super::generation_lock::GenerationLocks,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     next_cleanup: Arc<Mutex<std::time::Instant>>,
     pub(super) diagnostics: super::attachments::Diagnostics,
+    #[cfg(test)]
+    pub(super) install_hook: super::test_install::InstallHook,
 }
 pub(super) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_secs())
@@ -53,7 +63,8 @@ impl BackupJobs {
         let root = data_root.join("backup_jobs");
         std::fs::create_dir_all(&root)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&root)?;
-        if super::recovery::recover(&root, data_root, &index).is_err() {
+        let generations = super::generation_lock::GenerationLocks::default();
+        if super::recovery::recover_with_locks(&root, data_root, &index, &generations).is_err() {
             tracing::warn!("backup cleanup deferred; daemon startup continues");
         }
         Ok(Self {
@@ -67,9 +78,12 @@ impl BackupJobs {
             root,
             data_root: data_root.to_owned(),
             index,
+            generations,
             tasks: Arc::default(),
             next_cleanup: Arc::new(Mutex::new(std::time::Instant::now())),
             diagnostics: Arc::default(),
+            #[cfg(test)]
+            install_hook: Arc::default(),
         })
     }
     pub(super) fn change(
@@ -251,6 +265,13 @@ impl BackupJobs {
         state.events.push_back((seq, row.clone()));
         Ok(row)
     }
+    #[cfg(test)]
+    pub(super) fn force_periodic_cleanup(&self) {
+        if let Ok(mut next) = self.next_cleanup.lock() {
+            *next = std::time::Instant::now();
+        }
+        self.expire();
+    }
     pub(crate) fn expire(&self) {
         if let Ok(mut diagnostics) = self.diagnostics.lock() {
             let retained = self
@@ -284,13 +305,7 @@ impl BackupJobs {
                 protected.extend(diagnostics.keys().map(|id| format!("job_{id}")));
             }
             if let Ok(protected) = protected
-                && super::recovery::recover_excluding(
-                    &self.root,
-                    &self.data_root,
-                    &self.index,
-                    &protected,
-                )
-                .is_err()
+                && super::recovery::recover_jobs_excluding(&self.root, &protected).is_err()
             {
                 tracing::warn!("backup cleanup remains deferred; retry scheduled");
             }
@@ -318,25 +333,7 @@ impl BackupJobs {
         bytes: u64,
         totals: Option<u64>,
     ) {
-        let Ok(mut state) = self.state.lock() else { return };
-        if !state.cancelling.is_empty() {
-            return;
-        }
-        let at = std::time::Instant::now();
-        if let Some((previous_category, previous_bytes, previous_at)) = state.progress.get(id) {
-            let percent = totals.filter(|total| *total > 0).is_some_and(|total| {
-                (u128::from(bytes.saturating_sub(*previous_bytes)) * 100 >= u128::from(total))
-                    || (bytes >= total && *previous_bytes < total)
-            });
-            if *previous_category == category
-                && bytes >= *previous_bytes
-                && !percent
-                && at.duration_since(*previous_at) < std::time::Duration::from_millis(250)
-            {
-                return;
-            }
-        }
-        let Ok(row) = state.registry.progress(
+        self.progress_value(
             id,
             BackupProgress {
                 category,
@@ -345,11 +342,48 @@ impl BackupJobs {
                 bytes_done: bytes,
                 bytes_total: totals,
             },
-        ) else {
+        );
+    }
+    pub(super) fn progress_fetch(&self, id: &str, done: u64, total: u64) {
+        self.progress_value(
+            id,
+            BackupProgress {
+                category: BackupCategory::Attachments,
+                items_done: done,
+                items_total: Some(total),
+                bytes_done: 0,
+                bytes_total: None,
+            },
+        );
+    }
+    fn progress_value(&self, id: &str, progress: BackupProgress) {
+        let Ok(mut state) = self.state.lock() else { return };
+        if !state.cancelling.is_empty() {
             return;
-        };
+        }
+        let at = std::time::Instant::now();
+        let items = progress.items_total.is_some() && progress.bytes_total.is_none();
+        let done = if items { progress.items_done } else { progress.bytes_done };
+        let total = if items { progress.items_total } else { progress.bytes_total };
+        if let Some(previous) = state.progress.get(id) {
+            let percent = total.filter(|n| *n > 0).is_some_and(|n| {
+                u128::from(done.saturating_sub(previous.done)) * 100 >= u128::from(n)
+                    || (done >= n && previous.done < n)
+            });
+            if previous.category == progress.category
+                && previous.items == items
+                && previous.total == total
+                && done >= previous.done
+                && !percent
+                && at.duration_since(previous.at) < std::time::Duration::from_millis(250)
+            {
+                return;
+            }
+        }
+        let category = progress.category;
+        let Ok(row) = state.registry.progress(id, progress) else { return };
         state.progress.retain(|key, _| key == id);
-        state.progress.insert(id.into(), (category, bytes, at));
+        state.progress.insert(id.into(), ProgressMark { category, items, done, total, at });
         state.head += 1;
         let seq = state.head;
         state.events.push_back((seq, row));

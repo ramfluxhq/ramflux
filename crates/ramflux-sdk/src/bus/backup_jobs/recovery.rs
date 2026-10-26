@@ -34,13 +34,21 @@ pub(super) fn selected(generation: &Path) {
         tracing::debug!(%error,"selected backup generation marker cleanup deferred");
     }
 }
+#[cfg(test)]
 pub(super) fn recover(root: &Path, data_root: &Path, index: &AccountIndex) -> Result<(), SdkError> {
-    recover_excluding(root, data_root, index, &std::collections::BTreeSet::new())
+    recover_with_locks(root, data_root, index, &super::generation_lock::GenerationLocks::default())
 }
-pub(super) fn recover_excluding(
+pub(super) fn recover_with_locks(
     root: &Path,
     data_root: &Path,
     index: &AccountIndex,
+    locks: &super::generation_lock::GenerationLocks,
+) -> Result<(), SdkError> {
+    recover_jobs_excluding(root, &std::collections::BTreeSet::new())?;
+    recover_generations(data_root, index, locks)
+}
+pub(super) fn recover_jobs_excluding(
+    root: &Path,
     protected: &std::collections::BTreeSet<String>,
 ) -> Result<(), SdkError> {
     for entry in std::fs::read_dir(root)? {
@@ -77,9 +85,13 @@ pub(super) fn recover_excluding(
         }
         std::fs::remove_dir_all(path)?;
     }
-    recover_generations(data_root, index)
+    Ok(())
 }
-fn recover_generations(data_root: &Path, index: &AccountIndex) -> Result<(), SdkError> {
+pub(super) fn recover_generations(
+    data_root: &Path,
+    index: &AccountIndex,
+    locks: &super::generation_lock::GenerationLocks,
+) -> Result<(), SdkError> {
     let accounts = data_root.join("accounts");
     if !accounts.exists() {
         return Ok(());
@@ -91,6 +103,7 @@ fn recover_generations(data_root: &Path, index: &AccountIndex) -> Result<(), Sdk
         }
         let name = account.file_name();
         let Some(id) = name.to_str() else { continue };
+        let Some(_lease) = locks.try_acquire(id)? else { continue };
         let selected = match index.account(id) {
             Ok(row) => Some(data_root.join(row.db_relative_path)),
             Err(ramflux_storage::StorageError::AccountNotFound(_)) => None,
