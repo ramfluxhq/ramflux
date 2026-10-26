@@ -247,7 +247,7 @@ async fn crossed_decline_still_fences_new_requests_after_outbound_expires() -> R
     assert_ne!(fresh.request_id, inbound.request_id);
     flush(&mut state, "alice").await?;
     let entries = frames(&directory)?;
-    assert!(!entries.is_empty());
+    assert!(!entries.is_empty(), "fresh outbound request must produce a carrier");
     let client = account(&state, "bob")?;
     let gateway = state.accounts["bob"].gateway_config.clone();
     for entry in entries {
