@@ -694,6 +694,7 @@ impl RamfluxClient {
                 metadata: &message.metadata,
                 created_at: message.created_at,
             })?;
+            self.index_imported_own_sent_ciphertext(message)?;
             if let Some(content) = bundle.contents.get(&message.message_id) {
                 self.account_db()?.store_message_content(
                     &message.conversation_id,
@@ -878,6 +879,63 @@ pub(crate) mod tests {
             &history,
         )?;
         assert_eq!(client.direct_messages("direct")?.len(), 1);
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn history_import_then_delete_then_live_copy_keeps_the_original_tombstone()
+    -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("history-delete-live", "principal_sync", "target_device_sync")?;
+        let message = DirectMessageRecord {
+            conversation_id: "direct".into(),
+            message_id: "live-message".into(),
+            sender_id: "source_device_sync".into(),
+            encrypted_body: vec![1, 2, 3],
+            metadata: MessageMetadata::default(),
+            deleted: false,
+            created_at: 1,
+            receipts: Vec::new(),
+        };
+        let mut history =
+            bundle("source_device_sync", "target_device_sync", vec![message], Vec::new());
+        history
+            .contents
+            .insert("live-message".into(), zeroize::Zeroizing::new(b"outgoing live body".to_vec()));
+        client.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        assert!(client.message_origin("direct", "live-message")?.is_none());
+        client.account_db()?.delete_direct_message(
+            "direct",
+            "live-message",
+            "self",
+            "history-delete",
+        )?;
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            "source_device_sync",
+        )?;
+        let mut bytes = b"ramflux.own_sent_message.v1\n".to_vec();
+        bytes.extend(serde_json::to_vec(&serde_json::json!({"envelope_id":"live-envelope","message_id":"live-message","sender_id":"source_device_sync","context":{"conversation_id":"direct","participants":["principal_sync","peer"],"group":null,"friend":null},"ciphertext_hash":super::super::own_sent_message::own_sent_ciphertext_hash(&[1,2,3]),"body_base64":ramflux_protocol::encode_base64url(b"outgoing live body")}))?);
+        client.receive_own_sent_message(
+            &source,
+            super::super::own_device_copy::OwnMessageInput {
+                id: "live-envelope",
+                conversation: "direct",
+                group: None,
+                created_at: 1,
+                body: &bytes,
+            },
+        )?;
+        let rows = client.direct_messages("direct")?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_id, "live-message");
+        assert!(rows[0].deleted);
+        assert!(client.account_db()?.message_content("live-message")?.is_none());
         drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())

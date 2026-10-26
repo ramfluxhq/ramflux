@@ -123,6 +123,7 @@ impl RamfluxClient {
         let franking = include_franking_ext
             .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
         message.encrypted_body = serde_json::to_vec(&sealed)?;
+        let mut own_copy = None;
         // History replication controls must not become history messages themselves.
         if !own_history_control {
             if let Some(carrier) = crate::client::surface::Carrier::decode(plaintext)? {
@@ -146,36 +147,27 @@ impl RamfluxClient {
                         &content,
                     )?;
                     if copy_plain {
-                        let peer = self.own_sent_peer(&message)?;
-                        let original_recipients = self.own_original_recipient(&message)?;
-                        self.stage_own_sent_message(super::own_sent_message::OwnSentInput {
-                            envelope: &message.envelope_id,
-                            conversation: &message.conversation_id,
-                            message: &message.message_id,
-                            sender: &message.sender_id,
-                            original_recipients: &original_recipients,
-                            group: None,
-                            peer: Some(&peer),
-                            body: &content,
-                            ciphertext: &message.encrypted_body,
-                            at: message.created_at,
-                        })?;
+                        own_copy = self.queue_own_sent_dm(&message, &content);
                     }
                     Ok::<_, SdkError>(())
                 })?;
             }
         }
-        let envelope =
-            gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
-        // Persist the advanced send ratchet before the remote submit. A process death after the
-        // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
-        // same message key for a later message. If submit fails, skipping one send key is safe;
-        // reusing it is not.
+        let result = async {
+            let envelope =
+                gateway_direct_message_envelope(&engine.config, &message, franking.as_ref())?;
+            // Persist the advanced send ratchet before the remote submit. A process death after the
+            // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
+            // same message key for a later message. If submit fails, skipping one send key is safe;
+            // reusing it is not.
 
-        #[cfg(feature = "itest-rfd-fault")]
-        crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmSend).await?;
-        let entry = engine.submit_envelope(envelope).await?;
-        Ok(entry)
+            #[cfg(feature = "itest-rfd-fault")]
+            crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmSend).await?;
+            engine.submit_envelope(envelope).await
+        }
+        .await;
+        self.finish_own_sent_copy(&message.message_id, own_copy.as_deref(), result.is_ok());
+        result
     }
 
     /// # Errors
