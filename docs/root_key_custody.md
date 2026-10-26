@@ -1,6 +1,6 @@
 # Root key custody
 
-Design revision 2, phase 1. This proposal changes no executable behavior. The
+Design revision 3, phase 1. This proposal changes no executable behavior. The
 inspected product baseline is `eae12fbb197f8bbea21b682686c8548fc1a27958`.
 Current accounts still keep the root seed on each device. Activation requires
 coordinated protocol, verifier, vault, backup and client changes; the guarantees
@@ -68,6 +68,9 @@ These source facts were checked on the baseline above:
   v19 with 262144 KiB, three passes and one lane. That existing password-based
   behavior is not the proposed generated-phrase derivation below.
 - Current root access also serves group actor/certificate and profile signing.
+  This includes first-contact request/accept/decline signing under
+  `ramflux.contact_request.v1` in
+  [contact request wire](../crates/ramflux-sdk/src/client/contact_requests/wire.rs).
   Every such accessor needs an explicit authority capability; a missing secret
   must never trigger legacy seed copying or implicit account creation.
 
@@ -88,19 +91,26 @@ verification version before a creator secondary can discard its legacy root.
 | Rollback, stale backup or old client | Custody-mode latches, one signed-record epoch floor, exact key bindings and revocation tombstones apply before authorization. Restore cannot lower these floors or restore a primary role. |
 | Copied legacy root | Erasure cannot remove an attacker's copy. Migration cannot retroactively establish that a historical root was never compromised; an untrusted former holder requires a new identity. |
 
-Every observing device records a prominent security alert for a primary-holder
-or self-signing-key change, including a revoked old primary when it next obtains
-the public update. Alerts identify the account fingerprint, old/new key
-fingerprints and whether the device initiated the ceremony. They remain visible
-until explicitly acknowledged; an offline or censored device cannot be promised
-immediate delivery. Contact-facing security state should distinguish the same
-identity's management-key replacement from a changed identity root.
+Every own device records a blocking security alert for a primary-holder or
+self-signing-key change, including a revoked old primary on its next public
+update. Every roster addition, delegation issuance and display-name change also
+creates a persistent non-blocking alert on every own device. Show the new device,
+kind, capabilities, enrolling primary and delegation scope/expiry. Removal alerts
+the removed device: "If this was not you, recover with your phrase on a trusted
+device." Alerts identify the account fingerprint, old/new key fingerprints and
+whether this device initiated the action, and remain until acknowledged. Offline
+or censored devices receive alerts only when they observe authenticated state;
+immediate delivery cannot be promised. Contacts distinguish management-key
+replacement from an identity-root change.
 
 The app never solicits the phrase in response to a network event, alert, login,
 ordinary unlock or support request. Phrase entry exists only inside a locally
 user-started recovery/primary-promotion ceremony, including an explicitly started
 recovery dry run. Setup explains this rule. A periodic reminder asks whether the
 user can still find their phrase; it never opens a phrase-entry form by itself.
+Remind at day 1, 7 and 30 after setup, then every 90 days (snoozable). Fixed copy:
+"Ramflux will never ask for your recovery phrase outside a recovery or primary
+promotion you start yourself. Never share it with support or another person."
 
 ## Phrase encoding and deterministic derivation
 
@@ -110,6 +120,11 @@ form 24 words. Decode back to the original entropy before derivation. This uses
 [BIP39's entropy transcription](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki),
 not its wallet mnemonic-to-seed PBKDF2 function. Reject invalid word counts,
 unknown words and checksum failures; never use a user-invented sentence.
+Normalize input with Unicode NFKD per BIP39, lowercase English letters and
+collapse Unicode whitespace to one ASCII space, trimming ends. Accept only the
+English wordlist in v1; a unique four-letter prefix expands to its full English
+word before checksum validation. Reject ambiguous/unknown tokens. Never normalize
+or alter the decoded 32 entropy bytes.
 
 Proposed profile `ramflux-recovery-v1`:
 
@@ -134,7 +149,8 @@ by this design note.
 
 Setup is mandatory for new custody accounts before their first authority record
 is published. Show the phrase once in a trusted screen and require the user to
-re-enter a randomly selected subset from their saved copy. Publicly display the
+re-enter three distinct, uniformly randomly selected word positions from their
+saved copy (selected after the phrase is hidden). Publicly display the
 resulting account fingerprint for confirmation. Explicit print/export is allowed;
 warn that the exported phrase is identity authority. Export is a user-managed artifact, not
 managed runtime state or an application backup; keeping it on the primary makes
@@ -162,20 +178,42 @@ rules and verified-kind semantics; neither a profile nor a custodian reference
 proves biological humanity. The v3 profile's version is the enclosing record
 epoch, including when a device/lease update leaves the visible name unchanged.
 The primary alone publishes display-name changes; a secondary queues a request.
-The v3 signature authenticates the entire embedded profile through the authority
-chain. A v2 root signature must not be reinterpreted as a self-signing signature.
+The embedded v3 profile is unsigned on its own: only the v3 self-signing
+signature authenticates it through the authority chain. It has no nested v1
+profile signature. A v2 root signature must not be reinterpreted as a
+self-signing signature.
 Workflow custody needs an explicitly supported v3 profile rather than silently
 reusing v2's legacy workflow behavior.
 
-**Counter-poisoning proposal for protocol review:** use one safe-JSON integer
-epoch with master-allocated ranges. Reserve its high 21 bits for a master-certified
-range and low 32 bits for primary revisions. A self-signing key cannot sign beyond
-its assigned range. Master recovery advances to the next range even if a stolen
-primary exhausted every revision in its old range. Verifiers persist one integer
-floor and enforce the certificate's range before advancing it. Migration chooses
-a range above retained epochs; exhaustion is a typed refusal, never wraparound.
-The exact allocation needs protocol review before implementation, but master
-recovery must not be blocked by a poisoned management counter.
+The [normative proposed wire specification](root_key_custody_wire.md) fixes the
+signature domains, JCS bodies, anchor rules, epoch encoding and verification
+order. It is a stage-1 review artifact, not an implemented protocol.
+
+New accounts use `identity_root_commitment(master_public_key)` as their immutable
+anchor, start in v3 at genesis and never accept v1/v2 sets or legacy branch proofs.
+The master signs master certificates only, never legacy sets/profiles/proofs.
+Migrated accounts keep `identity_root_commitment(legacy_root_public_key)` and embed
+the proposed legacy binding in **every** v3 record. Account fingerprints and
+custody contact safety numbers derive from the anchors as specified in the wire
+spec; management-key replacement never changes them. Current v1 safety material
+also includes device/lineage state, so v3 uses an explicitly versioned stable
+anchor comparison and keeps device-change verification state separate. Master
+compromise requires a new identity/anchor, not a binding to a new master.
+
+**Epoch-range proposal (approval pending):**
+`epoch = range_index * 2^32 + revision`, with `range_index` in
+`[1, 2^21 - 1]` and `revision` in `[1, 2^32 - 1]`; all values remain safe JSON
+integers. Each master certificate authorizes exactly one range and one
+self-signing key. Pin the first fully authenticated certificate per
+`(anchor, range_index)`; any different certificate is equivocation, fences that
+range and raises the takeover alert until a higher range is certified. Accept
+**any** higher range, not only the next integer. Recovery chooses the maximum
+observed range plus one, querying all available trusted checkpoints, and retries
+higher on conflict. A primary cannot spend revisions outside its certified range.
+Migration starts at v3 range 1, independently of legacy epochs: v3 ranks above
+all legacy records regardless of their numeric epoch. Exhaustion is a typed
+refusal, never wraparound. No globally latest range can be proved against
+withholding directories; preserve that limitation in the recovery UI.
 
 Publish against the verified prior record hash/epoch. Stage the exact intent,
 require its exact durable acknowledgement and reconcile uncertain results before
@@ -195,9 +233,17 @@ a migrated account; rollout/release notes must say so.
 For new online operations, refresh verified authority at most five minutes apart;
 no older cached fallback after a required refresh fails. Pins dominate cache
 freshness. Check current authority per request rather than freezing a device set
-for an entire session. Require trustworthy local time, detect rollback, and fail
-closed when lease time cannot be established. A directory timestamp alone is not
-trusted time. Withholding newer signed state remains a first-observer limitation.
+for an entire session. Use verifier-local time with ±300 seconds of clock-skew
+tolerance and a
+persisted monotonic high-water mark of authenticated times to detect rollback;
+a directory timestamp alone cannot establish trusted time. Unknown/rollback time
+blocks new network authorization and sending, while local history stays readable.
+Queued messages accepted while a branch lease was valid remain receivable after
+expiry if their branch-signed timestamp is inside the lease plus skew and the
+authenticated relay acceptance timestamp independently satisfies that bound.
+Backdating alone does not authorize a new send; current revocation still applies.
+See the wire spec for the exact comparisons. Withholding newer signed state
+remains a first-observer limitation.
 
 ## Primary vault and typed signer
 
@@ -211,7 +257,7 @@ sign-arbitrary-bytes bus API. Public identity lookup must work without a signer.
 | --- | --- |
 | Hardware-wrapped, access-controlled local vault | Preferred when the platform/provider supports it; independent provider review is required. Do not claim native nonexportable Ed25519 support merely because hardware protects a wrapping key. |
 | Software OS credential vault | Explicitly show the weaker isolation boundary. Same-user process compromise and provider access rules remain relevant. Disable synchronization and portable secret export. |
-| TUI encrypted file vault | Initial proposal requires a generated local unlock secret with at least 128 bits of entropy and a reviewed authenticated format/HKDF wrapping profile. No plaintext fallback or entropy claim based only on password length. Human-chosen vault passphrases need a separately reviewed memory-hard profile. |
+| TUI encrypted file vault | Initial proposal requires a generated local unlock secret with at least 128 bits of entropy and a reviewed authenticated format/HKDF wrapping profile. Store the generated unlock secret exclusively in a non-synchronizing OS credential keychain. A 0600 plaintext file is not a fallback; if no supported keychain is available, primary signing is unavailable on that installation. No plaintext fallback or entropy claim based only on password length. Human-chosen vault passphrases need a separately reviewed memory-hard profile. |
 
 The local vault credential is for routine unlock, not another artifact needed to
 recover identity. Never substitute the recovery phrase as that credential or
@@ -232,6 +278,7 @@ prove that a vault provider is hardware-backed.
 | Initial master/self-signing setup | Phrase-derived master, explicit human ceremony |
 | Replacement primary or self-signing key | Phrase-derived master certifies a fresh key/range; old authority revoked |
 | Device add, branch rotation, revocation, lease renewal, signed-set publish | Primary self-signing key and exact current record |
+| Contact request, accept or decline (v2 consent) | Primary self-signing key; a secondary queues the exact intent for primary approval |
 | Public display-name change | Primary self-signing key; secondary request remains pending |
 | Issue/revoke creator or create-group delegation | Primary self-signing key within master-certified scopes |
 | Register, renew session proof, resume | Device branch + unexpired certificate + current v3 device set |
@@ -249,6 +296,16 @@ short session challenge using its own key, a fresh nonce, certificate hash,
 audience and session/transport binding. Refresh/retry uses a fresh proof id; it
 never needs the master or a primary round-trip while the lease remains valid.
 Registration v3 is required across gateway, router, SDK and federation.
+
+Contact consent v2 replaces the private-root signature in
+`ramflux.contact_request.v1` with a self-signing signature, tied to the actor
+anchor, exact sending branch, v3 record hash and current master certificate (wire
+spec). A secondary can transport a primary-approved exact intent but cannot mint
+it. All request/accept/decline kinds follow this rule. Never reinterpret v1's
+`actor_root` as a self-signing key or let a secondary fetch the legacy root.
+Legacy accounts keep v1 until migration; custody accounts require peers with v2
+consent capability. Otherwise show "this contact needs to update" and keep the
+intent pending, without a downgraded v1 signature.
 
 Expired devices can read local history but cannot send, register, resume or mint
 new authenticated operations. Servers and peers enforce this, not just UI. Warn
@@ -270,7 +327,12 @@ this application's transcript. Pin and review the implementation/audit delta.
 Do not invent a PAKE or adopt an unaudited SPAKE2 implementation.
 
 1. The user starts pairing on the primary. Create a one-use five-minute invitation
-   with a fresh random identifier. Public handshake input is size/rate bounded;
+   with a fresh random identifier. Deliver the invitation by QR or typed rendezvous
+   identifier over the existing device-pair session path
+   (`client/routed/session.rs` and `client/routed/pair_lifecycle.rs`), with a
+   restricted pre-enrollment bootstrap for SAS frames only; this is planned integration, not an existing
+   root-free enrollment endpoint. Relay transport is untrusted until SAS finishes.
+   Public handshake input is size/rate bounded;
    it cannot create an enrollment request or an unsolicited approval prompt.
 2. The secondary generates branch keys locally. Bind the committed handshake to
    both ephemeral/public branch keys, account/master fingerprints, invitation,
@@ -279,9 +341,9 @@ Do not invent a PAKE or adopt an unaudited SPAKE2 implementation.
 3. Both trusted screens compare seven emoji with accessible descriptions, giving
    42 SAS bits as in the
    [Matrix emoji method](https://spec.matrix.org/latest/client-server-api/#sas-method-emoji).
-   For TUI decimal display, propose four 13-bit groups (52 bits) under a distinct
-   suite label. Matrix's ordinary three-group decimal method has only 39 bits and
-   does not meet the 40-bit minimum. The extension needs vectors/protocol review.
+   The TUI displays those same seven emoji as their standard English Matrix
+   names, in order; no decimal alternative or new SAS encoding. Fixed copy:
+   "Only compare with a device you are holding; never read these symbols to anyone."
 4. Require both local human confirmations and independent MAC key confirmations.
    Only then send the signed enrollment proposal inside the confirmed channel.
    Display the exact new device, root, kind, capabilities and expiry using safe
@@ -292,7 +354,9 @@ Do not invent a PAKE or adopt an unaudited SPAKE2 implementation.
 6. The secondary verifies the account fingerprint, certificate, exact key/set
    inclusion and transcript. Erase invitation/ephemeral secrets on every exit.
 
-Allow at most three failed attempts per invitation, then invalidate it; limit
+A user-reported mismatch immediately cancels the invitation, erases ephemeral
+state and raises a warning; never retry the same invitation after a mismatch.
+Allow at most three transport/protocol failures per invitation, then invalidate it; limit
 concurrent invitations and creation rate on the primary. Propose three live
 invitations and ten creations per hour, with bounded unauthenticated frame queues.
 Limits protect availability and approval fatigue; a relay cannot grant approval.
@@ -303,12 +367,19 @@ A matching short code is a human authentication check, not an AEAD password.
 For planned primary transfer, generate the new self-signing key and fresh branch
 on the destination, and enter the phrase only in its user-started promotion flow.
 Authenticate both devices and the recipient's ephemeral HPKE key through SAS.
-Use [RFC 9180 HPKE](https://www.rfc-editor.org/rfc/rfc9180.html) for the bounded
-handover data/approval envelope, with a dedicated domain, transcript-bound info
-and AAD, one-use id and explicit acknowledgements. Proposed suite: DHKEM(X25519,
-HKDF-SHA256), HKDF-SHA256 and AES-256-GCM, subject to implementation review/vectors.
-Master and self-signing private keys never need to travel between devices. HPKE
-alone does not prevent replay; the journal, nonce and current authority checks do.
+Use [RFC 9180 HPKE](https://www.rfc-editor.org/rfc/rfc9180.html) mode Auth
+(`0x02`): DHKEM(X25519, HKDF-SHA256) (`0x0020`), HKDF-SHA256 (`0x0001`),
+AES-256-GCM (`0x0002`). The old primary's transfer-only X25519 sender key and the
+recipient's X25519 HPKE key are both bound by the confirmed SAS transcript and
+old-primary branch proof. Auth proves possession of that bound sender key;
+Base mode without a signed sender binding would allow anyone to encrypt a forged
+handover. The wire spec fixes `info`, `aad`, the 1 MiB payload and replay journal.
+Use one Seal/Open at sequence zero, then destroy the context. Require RFC 9180
+suite vectors and application binding vectors before implementation acceptance.
+The payload carries pending invitations/journal, delegation state, pending erasure
+state and explicitly selected optional data keys; no phrase, master, self-signing
+secret or vault unlock credential travels. The destination creates its certificate
+locally. HPKE does not itself approve enrollment or prevent replay.
 
 Publish the master-certified replacement and exact v3 record before activation.
 Then erase/demote or revoke the old primary; expose incomplete cooperative cleanup.
@@ -325,6 +396,10 @@ fresh possession proof, not copying the potentially compromised directory list.
 Publish the higher master-authorized range and alert all observing devices. Keep
 the same phrase/master: replacing the stolen management key does not require a
 new identity. If the phrase was exposed, create a new identity instead.
+After an uncommanded master-authorized replacement, steer to "new identity, keep
+history" rather than offering repeated counter-recovery: a thief with the phrase
+can alternate replacements forever. Any counter-recovery is an explicit expert
+action with that warning, never the default.
 
 If all trusted checkpoints are lost, disclose that a directory may withhold newer
 signed records. Do not promise global freshness or silently overwrite a conflict.
@@ -349,7 +424,7 @@ implementation. If even that public-metadata dependency is unacceptable, legacy
 migration requires a new identity with retained local history. Do not disguise
 this choice by skipping HKDF or retaining the old secret in a backup.
 
-For the approved migration path:
+For this proposed path, **only after owner approval**:
 
 1. Confirm the saved phrase and primary vault, freeze legacy writers, independently
    verify the existing device keys and profile, and stage the exact v3 transition.
@@ -369,8 +444,14 @@ For the approved migration path:
    expires; revocation is the default, published by the primary on reconciliation.
    Later return requires explicit fresh enrollment, not silent reactivation.
 
-Reject conflicting concurrent migrations; never choose a new master by lowest
-hash. Test loss of the primary before and after publication, rejected/uncertain
+Two different authenticated legacy bindings for one anchor mark the account
+`identity_compromised`, alert every observing own device/contact safety view and
+refuse both bindings. Never choose by arrival order or lowest hash. Resume only
+after a higher-range master re-attestation to the chosen binding under the
+already trusted master; a fresh verifier with no trusted master must independently
+reverify it out of band. A signature by an arbitrary competing master cannot
+resolve which identity was intended. See the wire verification algorithm. Test
+loss of the primary before and after publication, rejected/uncertain
 publish results and partially received ACK batches. The phrase can recover the
 new management authority only once the corresponding public transition exists.
 Erasure ACKs are honest-client statements, not remote attestation. Inventory old
@@ -435,7 +516,18 @@ its claimed issue time. Previously pinned history remains readable. A fresh
 receiver/catch-up after expiry needs renewed current authority; primary absence
 beyond seven days can therefore block creator mutations until renewal. Warn before
 that expiry (proposed one day), separately from the seven-day warning on 30-day
-device leases. No raw-root or legacy-signature fallback.
+device leases. No raw-root or legacy-signature fallback for custody accounts.
+
+Advertise `custody_v3`, `contact_consent_v2` and `group_delegation_v1` in authenticated
+device manifests and federation capability negotiation. Old nodes cannot verify
+v3 and must refuse it with an update-required result; federation never strips
+binding/certificates or converts it to legacy. In mixed-version groups, a legacy
+creator uses the current primary/root signing path when any member cannot verify
+delegation. A custody creator needs the custody-aware group wire even for direct
+primary signing; if any member lacks it, block the mutation and show the update
+requirement. Do not drop old members or silently create a fork to proceed.
+Legacy accounts in stage 2b retain existing one-hour proofs, signatures and group
+behaviour; 30-day certificates apply only once an account enters custody mode.
 
 ## Headless identities and user experience
 
@@ -448,7 +540,13 @@ receive only branch/data secrets and scoped certificates. Do not accept a role
 flag, restored manifest or self-asserted human kind as custody authority.
 
 Each service has independent user-held recovery entropy. The human account's
-phrase does not derive service masters. Custodian renewal can be batched with
+phrase does not derive service masters. A custodian with N service identities
+therefore manages N + 1 independent phrases. Explain that burden during service
+creation and allow explicit per-service print/export, or storage of agent phrases
+in the human custodian's own vault with an explicit local compromise warning.
+Agent processes and nodes still receive none of them. Such optional user-managed
+vault storage does not turn routine full backups into authority backups.
+Custodian renewal can be batched with
 explicit scope; show expiry reminders and a clear waiting state when the human
 is unavailable. A daemon cannot promote itself to avoid lease expiry.
 
@@ -459,8 +557,8 @@ Recovery distinguishes recovering authority from restoring data and confirms the
 fingerprint before publication. Offer user-started recovery dry runs and "new
 identity keeping my local history", with contacts requiring re-verification.
 
-TUI provides the same ceremonies, emoji descriptions or the reviewed decimal
-extension, safe delimited text and interactive hidden secret entry. Never accept
+TUI provides the same ceremonies and seven standard emoji names, safe delimited
+text and interactive hidden secret entry. Never accept
 phrases in shell arguments, environment or unattended confirmation flags. Routine
 unlock and automatic reminders never ask for the phrase. State loss/recovery and
 incomplete migration plainly rather than silently creating another account.
@@ -470,15 +568,25 @@ incomplete migration plainly rather than silently creating another account.
 1. Freeze v3 authority/profile, master certification, epoch-range policy, branch
    certificates/session proofs and group delegation formats. Decide legacy public
    binding semantics, review SAS/HPKE implementations and vault classes, and
-   publish cross-client vectors. No account activates custody yet.
+   publish cross-client vectors. Stage 1 exits only after independent approval
+   of both this design and `root_key_custody_wire.md`, owner disposition of the
+   binding/range proposals, the pinned SAS provider/audit delta, vault providers
+   and full-flow minimum-machine benchmark plan. Reviewed golden wire vectors
+   must be published before stage 2b begins. No account activates custody yet.
 2. **2a: public identity and typed signer separation.** Preserve current wire and
    legacy storage while removing implicit root access from ordinary SDK startup,
    owned identity lookup and non-root operations. Test the abstraction separately;
-   this stage alone does not authorize erasure.
+   this stage alone does not authorize erasure. Produce a complete reviewed
+   appendix inventorying every private-root use: registration, gateway auth,
+   contact request/accept/decline, group actor certificates/genesis/snapshots,
+   profile, device namespace, backups, manifest import/export and all additional
+   accessors found by the source audit, with each replacement signer/path.
 3. **2b: registration v3 and verifiers.** Implement certificate plus branch proof
    across router, gateway, directory, SDK and federation. Enforce current authority,
    all mode/epoch floors, immutable profiles, leases, replay and exact ACKs before
-   enabling writers. Prove keyless registration beyond one hour and resume.
+   enabling writers. Entry requires approved wire spec and published vectors
+   from stage 1 plus the reviewed 2a root-use inventory. Prove keyless registration
+   beyond one hour and resume. Legacy accounts remain unchanged until migration.
 4. Add vaults, SAS approval, replacement/recovery journals, mandatory phrase setup
    and both backup sanitizers/header classification. Fail closed on unavailable
    providers. No migration before the whole secret path is covered.
@@ -494,20 +602,28 @@ Required native/property/security tests:
   seed derivation, invalid phrase/length/domain, cancellation and zeroization.
 - No master/self-signing secret in secondary files, manifests, DB/WAL, exports,
   logs, API output or headless provisioning. Vault failure has no plaintext path.
-- Master recovery defeats a poisoned primary revision counter; wrong range,
-  forged primary/cert, same-epoch conflicts, profile downgrade/omission/kind swap
-  and every verifier's restart/restore custody-mode floor fail closed.
+- New anchors refuse legacy records from genesis; migrated anchors always carry
+  binding; conflicting bindings mark compromise and require trusted re-attestation.
+- Master recovery defeats poisoned primary revisions, accepts skipped ranges and
+  migrates despite a maximal legacy epoch. Wrong ranges, forged certificates,
+  same-range certificate equivocation, same-epoch record conflicts, profile
+  downgrade/omission/kind swaps and restart/restore floor rollback fail closed.
 - Keyless proof renewal after one hour, fresh retry ids, resume, per-request
   revocation, stale/foreign authority, replay across accounts/sessions/transports,
-  expired leases and readable offline history with networking blocked.
+  expired leases, ±300-second boundaries, authenticated queued delivery,
+  unknown/rollback time and readable offline history with networking blocked.
+- Contact v2 self-signing signatures, all consent kinds, actor/branch/head binding,
+  pending secondary intents and refusal of legacy-only peer/federation downgrade.
 - SAS commitment, key substitution, reflection, wrong root/kind/purpose, suite
   downgrade, comparison/MAC failure, attempt budgets, approval spam, modified
   proposal, concurrent enrollment and uncertain publication ACK.
 - HPKE vectors and transcript/AAD/recipient substitution, replay, truncation,
   cancellation and crashes at every recovery/transfer boundary; old primary is
-  fenced, every observing device alerts, phrase phishing prompts never appear.
+  fenced; every own device alerts on enrollment, delegation, display-name and
+  primary changes, removed devices alert, and phrase phishing prompts never appear.
 - Minimum-memory complete recovery on supported hardware, TUI/desktop parity,
-  phrase reminders/dry runs, expiry warnings and new-identity history migration.
+  three-word setup, normalization/checksum/prefix rejection, reminders at day
+  1/7/30/90, dry runs, expiry warnings and new-identity history migration.
 - Concurrent migration, primary loss mid-migration, ACK batching, malformed ACKs,
   node-withheld ACK/renewal, pending deadline/revocation and old clients facing v3.
 - Streamed/full/key backup root-header classification, missing flags, sanitized
