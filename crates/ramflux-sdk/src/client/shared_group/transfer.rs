@@ -78,6 +78,15 @@ impl RamfluxClient {
             TransferBody::Head { reply } => &reply.head.state_hash,
         };
         let kind = matches!(control.body, TransferBody::Probe { .. });
+        let outcome = match &control.body {
+            TransferBody::Probe { .. } => (false, false, false, None),
+            TransferBody::Head { reply } => (
+                reply.cancelled,
+                reply.cancel_ack,
+                reply.requires_sync,
+                Some(reply.requested_hash.as_str()),
+            ),
+        };
         let id = ramflux_protocol::hash_base64url(
             "ramflux.group.transfer.delivery.v1",
             &ramflux_protocol::canonical_json_bytes(&(
@@ -86,7 +95,7 @@ impl RamfluxClient {
                 &control.actor().identity,
                 head,
                 control.targets(),
-                &control.body,
+                outcome,
             ))?,
         );
         let id = format!("{SEND_PREFIX}{id}");
@@ -882,7 +891,7 @@ mod tests {
         let now = now_unix_timestamp();
         for offset in [-300, 300] {
             let probe = TransferProbe {
-                id: ramflux_protocol::encode_base64url([75; 32]),
+                id: ramflux_protocol::encode_base64url([if offset < 0 { 75 } else { 76 }; 32]),
                 actor: owner.owned_group_actor("target-owner")?,
                 creator: next.owned_group_actor("target-next")?,
                 base: base.snapshot().clone(),
@@ -909,6 +918,20 @@ mod tests {
                     TransferBody::Probe { .. } => None,
                 })
                 .ok_or(StorageError::AuthorizationRejected)?;
+            let count = rows.len();
+            let mut repeated =
+                rows.last().ok_or(StorageError::AuthorizationRejected)?.control.clone();
+            if let TransferBody::Head { reply } = &mut repeated.body {
+                reply.issued_at += 1;
+                reply.expires_at += 1;
+            }
+            repeated = TransferControl::sign(&next, repeated.body)?;
+            next.stage_group_transfer_control(repeated)?;
+            assert_eq!(
+                next.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?.len(),
+                count,
+                "repeated probes must not consume additional reply slots"
+            );
             assert_eq!(acceptance.issued_at, probe.issued_at);
             assert!(wire.verify(now - 301 - offset.abs()).is_err());
         }
