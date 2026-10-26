@@ -845,6 +845,7 @@ pub(crate) mod tests {
         bytes.extend(serde_json::to_vec(&serde_json::json!({
             "envelope_id":"live-envelope","message_id":"live-message","sender_id":"source_device_sync",
             "context":{"conversation_id":"direct","participants":["principal_sync","peer"],"group":null,"friend":null},
+            "ciphertext_hash":super::super::own_sent_message::own_sent_ciphertext_hash(&[1,2,3]),
             "body_base64":ramflux_protocol::encode_base64url(b"outgoing live body")
         }))?);
         client.receive_own_sent_message(
@@ -901,6 +902,7 @@ pub(crate) mod tests {
         bytes.extend(serde_json::to_vec(&serde_json::json!({
             "envelope_id":"live-envelope","message_id":"live-message","sender_id":"source_device_sync",
             "context":{"conversation_id":"direct","participants":["principal_sync","peer"],"group":null,"friend":null},
+            "ciphertext_hash":super::super::own_sent_message::own_sent_ciphertext_hash(&[1,2,3]),
             "body_base64":ramflux_protocol::encode_base64url(b"outgoing live body")
         }))?);
         for _ in 0..2 {
@@ -985,6 +987,7 @@ pub(crate) mod tests {
             group: None,
             peer: Some("peer"),
             body: b"outgoing live body",
+            ciphertext: &[1, 2, 3],
             at: 1,
         })?;
         let copied = format!(
@@ -1117,6 +1120,82 @@ pub(crate) mod tests {
         drop((client, primary));
         std::fs::remove_dir_all(root)?;
         std::fs::remove_dir_all(primary_root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn equal_sender_labels_ids_and_text_do_not_merge_different_authenticated_ciphertexts()
+    -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("different-ciphertexts", "principal_sync", "target_device_sync")?;
+        client.send_direct_message("direct", "shared-id", "same-label", &[9, 8, 7])?;
+        client.account_db()?.store_message_content("direct", "shared-id", b"same text")?;
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            "source_device_sync",
+        )?;
+        let mut bytes = b"ramflux.own_sent_message.v1\n".to_vec();
+        bytes.extend(serde_json::to_vec(&serde_json::json!({
+            "envelope_id":"different-envelope","message_id":"shared-id","sender_id":"same-label",
+            "ciphertext_hash":super::super::own_sent_message::own_sent_ciphertext_hash(&[1,2,3]),
+            "context":{"conversation_id":"direct","participants":["principal_sync","peer"],"group":null,"friend":null},
+            "body_base64":ramflux_protocol::encode_base64url(b"same text")
+        }))?);
+        client.receive_own_sent_message(
+            &source,
+            super::super::own_device_copy::OwnMessageInput {
+                id: "different-envelope",
+                conversation: "direct",
+                group: None,
+                created_at: 1,
+                body: &bytes,
+            },
+        )?;
+        let rows = client.direct_messages("direct")?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            client
+                .direct_message_by_id("shared-id")?
+                .ok_or(SdkError::IdentityRootMissing)?
+                .encrypted_body,
+            vec![9, 8, 7]
+        );
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_ciphertext_history_keeps_both_sources_and_exact_envelope_aliases()
+    -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("ambiguous-ciphertext", "principal_sync", "target_device_sync")?;
+        let authority = client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let a = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            authority, "source-a",
+        )?;
+        let b = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            authority, "source-b",
+        )?;
+        let hash = super::super::own_sent_message::own_sent_ciphertext_hash(&[1, 2, 3]);
+        for (source, id, envelope) in [(&a, "row-a", "env-a"), (&b, "row-b", "env-b")] {
+            client.send_direct_message("direct", id, source.device_id(), &[])?;
+            client.account_db()?.store_message_content("direct", id, b"same text")?;
+            client.index_own_sent_projection(source, envelope, id, Some(&hash))?;
+        }
+        let mut unknown =
+            client.direct_message_by_id("row-a")?.ok_or(SdkError::IdentityRootMissing)?;
+        unknown.message_id = "unattributed-history".into();
+        unknown.encrypted_body = vec![1, 2, 3];
+        assert!(!client.already_projected_own_sent_message(&unknown, Some(b"same text"))?);
+        unknown.message_id = format!(
+            "routed:own:{}",
+            super::super::own_device_copy::copy_id(a.root_commitment(), a.device_id(), "env-a")?
+        );
+        assert!(client.already_projected_own_sent_message(&unknown, Some(b"same text"))?);
+        assert_eq!(client.direct_messages("direct")?.len(), 2);
+        drop(client);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

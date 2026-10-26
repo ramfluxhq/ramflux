@@ -55,6 +55,17 @@ impl RamfluxClient {
         message: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
+        let ciphertext = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
+            .map_err(|_| SdkError::InboundRejected("invalid receipt ciphertext encoding".into()))?;
+        self.stage_delivery_receipt_for_ciphertext(conversation, message, entry, &ciphertext)
+    }
+    pub(crate) fn stage_delivery_receipt_for_ciphertext(
+        &self,
+        conversation: &str,
+        message: &str,
+        entry: &GatewayInboxEntry,
+        ciphertext: &[u8],
+    ) -> Result<(), SdkError> {
         let Some(local_branch) = self.device_branch.as_ref() else {
             return Ok(());
         };
@@ -75,6 +86,14 @@ impl RamfluxClient {
                 "sender_device_display":source.storage_key(),"direction":"outgoing",
                 "envelope_id":entry.envelope.envelope_id
             }))?;
+            let digest = (!ciphertext.is_empty())
+                .then(|| super::own_sent_message::own_sent_ciphertext_hash(ciphertext));
+            self.index_own_sent_projection(
+                &source,
+                &entry.envelope.envelope_id,
+                message,
+                digest.as_deref(),
+            )?;
             return Ok(());
         }
         if entry.envelope.source_principal_id == local_branch.principal_id {
