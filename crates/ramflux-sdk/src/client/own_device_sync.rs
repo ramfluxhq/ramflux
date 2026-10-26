@@ -941,6 +941,7 @@ pub(crate) mod tests {
             conversation: "direct",
             message: "authored",
             sender: "target_device_sync",
+            original_recipients: &[],
             group: None,
             peer: Some("peer"),
             body: b"outgoing live body",
@@ -998,6 +999,84 @@ pub(crate) mod tests {
         );
         drop(client);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_original_dm_or_group_recipient_consumes_its_copy_without_a_second_timeline_row()
+    -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("original-recipient", "principal_sync", "target_device_sync")?;
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+            client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            "source_device_sync",
+        )?;
+        let (primary, primary_root) =
+            client_with_account("original-source", "principal_sync", "source_device_sync")?;
+        primary.create_group("own-group", "source_device_sync")?;
+        primary.account_db()?.upsert_group_member_snapshot(
+            "own-group",
+            "target_device_sync",
+            "member",
+            1,
+        )?;
+        let snapshot = primary.own_device_group_snapshot("own-group", "source_device_sync")?;
+        for (conversation, group, context) in [
+            (
+                "direct-original",
+                None,
+                serde_json::json!({"conversation_id":"direct-original","participants":["principal_sync","principal_sync"],"group":null,"friend":null}),
+            ),
+            (
+                "group-original",
+                Some("own-group"),
+                serde_json::json!({"conversation_id":"group-original","participants":[],"group":snapshot,"friend":null}),
+            ),
+        ] {
+            let mut bytes = b"ramflux.own_sent_message.v1\n".to_vec();
+            bytes.extend(serde_json::to_vec(&serde_json::json!({
+                "envelope_id":"original-envelope","message_id":"original-message","sender_id":"source_device_sync",
+                "original_recipients":["target_device_sync"],"context":context,
+                "body_base64":ramflux_protocol::encode_base64url(b"original body")
+            }))?);
+            assert!(client.receive_own_sent_message(
+                &source,
+                super::super::own_device_copy::OwnMessageInput {
+                    id: "original-envelope",
+                    conversation,
+                    group,
+                    created_at: 1,
+                    body: &bytes,
+                }
+            )?);
+            assert_eq!(client.direct_messages(conversation)?.len(), 0);
+            client.send_direct_message(conversation, conversation, "source_device_sync", &[])?;
+            client.account_db()?.store_message_content(
+                conversation,
+                conversation,
+                b"original body",
+            )?;
+            assert!(client.receive_own_sent_message(
+                &source,
+                super::super::own_device_copy::OwnMessageInput {
+                    id: "original-envelope",
+                    conversation,
+                    group,
+                    created_at: 1,
+                    body: &bytes,
+                }
+            )?);
+            assert_eq!(client.direct_messages(conversation)?.len(), 1);
+            client.account_db()?.delete_direct_message(
+                conversation,
+                conversation,
+                "self",
+                "original-deleted",
+            )?;
+        }
+        drop((client, primary));
+        std::fs::remove_dir_all(root)?;
+        std::fs::remove_dir_all(primary_root)?;
         Ok(())
     }
 

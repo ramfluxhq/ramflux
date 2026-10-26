@@ -14,6 +14,8 @@ struct SentMessage {
     envelope_id: String,
     message_id: String,
     sender_id: String,
+    #[serde(default)]
+    original_recipients: Vec<String>,
     context: OwnContext,
     body_base64: zeroize::Zeroizing<String>,
 }
@@ -23,6 +25,7 @@ pub(crate) struct OwnSentInput<'a> {
     pub conversation: &'a str,
     pub message: &'a str,
     pub sender: &'a str,
+    pub original_recipients: &'a [String],
     pub group: Option<&'a str>,
     pub peer: Option<&'a str>,
     pub body: &'a [u8],
@@ -52,6 +55,7 @@ impl RamfluxClient {
         };
         let friend = input
             .peer
+            .filter(|_| input.original_recipients.is_empty())
             .map(|peer| {
                 let direct = db.friend_link_for_peer(peer)?;
                 if direct.is_some() {
@@ -72,6 +76,7 @@ impl RamfluxClient {
             envelope_id: input.envelope.into(),
             message_id: input.message.into(),
             sender_id: input.sender.into(),
+            original_recipients: input.original_recipients.to_vec(),
             context: OwnContext {
                 conversation_id: input.conversation.into(),
                 participants,
@@ -162,6 +167,19 @@ impl RamfluxClient {
         Ok(row.conversation_id == message.conversation_id
             && (row.deleted || db.message_content(id)?.as_deref() == content))
     }
+    pub(crate) fn own_original_recipient(
+        &self,
+        message: &GatewayDirectMessage,
+    ) -> Result<Vec<String>, SdkError> {
+        if message.recipient_principal_commitment.as_deref()
+            == Some(self.owned_device_identity()?.root_commitment())
+        {
+            return Ok(vec![
+                message.recipient_device_id.clone().ok_or(SdkError::IdentityRootMissing)?,
+            ]);
+        }
+        Ok(Vec::new())
+    }
     pub(crate) fn own_sent_peer(&self, message: &GatewayDirectMessage) -> Result<String, SdkError> {
         let reference = Self::qualified_recipient(message)?;
         self.account_db()?
@@ -190,6 +208,8 @@ impl RamfluxClient {
             || packet.message_id.len() > 256
             || packet.sender_id.is_empty()
             || packet.sender_id.len() > 256
+            || packet.original_recipients.len() > 4096
+            || packet.original_recipients.iter().any(|id| id.is_empty() || id.len() > 256)
         {
             return Err(invalid("own sent message context mismatch"));
         }
@@ -205,6 +225,12 @@ impl RamfluxClient {
         self.import_surface_context(&packet.context, source.device_id())?;
         if let Some(group) = group {
             self.merge_routed_group_link(group, conversation)?;
+        }
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if packet.original_recipients.contains(&local.device_id) {
+            // The original pair/group delivery owns the timeline row. Still consume this
+            // authenticated control so its key-slot ratchet advances and later copies progress.
+            return Ok(true);
         }
         let db = self.account_db()?;
         let candidate = self.direct_message_by_id(&packet.message_id)?;
@@ -245,6 +271,7 @@ impl RamfluxClient {
                 conversation,
                 message: &packet.message_id,
                 sender: &packet.sender_id,
+                original_recipients: &packet.original_recipients,
                 group,
                 peer: None,
                 body: &body,
