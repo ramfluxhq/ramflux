@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Root-signed public profiles in device-set v2, with verified kind and normalized
+  public display names. Legacy v1 remains readable; coordinated client/server
+  upgrades are required for v2 publications. Kind verification authenticates a
+  root statement and does not attest biological humanity.
+
 - Initial public workspace preparation.
 
 ## [0.1.0] - TBD

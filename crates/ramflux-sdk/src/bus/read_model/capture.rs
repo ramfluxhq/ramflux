@@ -27,22 +27,23 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
     if let Some(manifest) = super::super::sync_status::optional_manifest(&path)
         && let Some(mut value) = db.client_record("identity", &config.principal_id)?
     {
-        value["display_name"] = json!(manifest.label);
-        let asserted = account.client.root_asserted_principal_kind(&config.principal_id)?;
-        value["kind_asserted"] = json!(asserted.is_some());
-        value["kind_verified"] =
-            json!(account.client.verified_principal_kind(&config.principal_id)?.is_some());
-        value["kind"] = if let Some(kind) = asserted {
-            json!(kind)
-        } else {
-            json!(manifest.kind.unwrap_or_else(|| {
-                if manifest.client_mode == LocalBusClientMode::HeadlessAi {
-                    "headless_ai".to_owned()
-                } else {
-                    "human".to_owned()
-                }
-            }))
-        };
+        let profile = account.client.verified_identity_profile(&config.principal_id)?;
+        value["display_name"] =
+            profile.as_ref().map_or_else(|| json!(manifest.label), |p| json!(p.display_name));
+        value["kind_asserted"] = json!(profile.as_ref().map(|p| p.kind));
+        value["kind_verified"] = json!(profile.is_some());
+        value["kind"] = profile.as_ref().map_or_else(
+            || {
+                json!(manifest.kind.unwrap_or_else(|| {
+                    if manifest.client_mode == LocalBusClientMode::HeadlessAi {
+                        "headless_ai".to_owned()
+                    } else {
+                        "human".to_owned()
+                    }
+                }))
+            },
+            |p| json!(p.kind),
+        );
         db.persist_client_record("identity", &config.principal_id, &value)?;
     }
     let mut device = db

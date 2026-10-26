@@ -27,6 +27,8 @@ pub const NACK: &str = "ramflux.nack.v1";
 pub const CURSOR: &str = "ramflux.cursor.v1";
 pub const IDENTITY_EVENT: &str = "ramflux.identity_event.v1";
 pub const BRANCH_PROOF_V2: &str = "ramflux.branch_proof.v2";
+pub const IDENTITY_PROFILE: &str = "ramflux.identity.profile.v1";
+pub const SIGNED_DEVICE_SET_V2: &str = "ramflux.identity.signed_device_set.v2";
 pub const SIGNED_DEVICE_SET: &str = "ramflux.identity.signed_device_set.v1";
 pub const DEVICE_SIGNING_KEY_COMMITMENT: &str = "ramflux.identity.device_signing_key.v1";
 pub const DEVICE_AGREEMENT_KEY_COMMITMENT: &str = "ramflux.identity.device_agreement_key.v1";
@@ -71,7 +73,7 @@ pub const REGISTRATION_TRUST_TIER: &str = "ramflux.registration_trust_tier.v1";
 
 pub const TASK_EVENT: &str = "ramflux.task_event.v1";
 
-pub const ALL: [&str; 64] = [
+pub const ALL: [&str; 66] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -97,6 +99,8 @@ pub const ALL: [&str; 64] = [
     BRANCH_PROOF,
     BRANCH_PROOF_V2,
     SIGNED_DEVICE_SET,
+    SIGNED_DEVICE_SET_V2,
+    IDENTITY_PROFILE,
     DEVICE_SIGNING_KEY_COMMITMENT,
     DEVICE_AGREEMENT_KEY_COMMITMENT,
     FRIEND_EVENT,

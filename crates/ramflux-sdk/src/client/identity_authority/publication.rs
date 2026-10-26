@@ -73,7 +73,7 @@ impl RamfluxClient {
         let mut next = if entries == old.devices {
             old.clone()
         } else {
-            ramflux_crypto::sign_device_set(
+            ramflux_crypto::sign_device_set_with_profile(
                 root,
                 ramflux_crypto::DeviceSetSigningInput {
                     principal_kind: old.principal_kind,
@@ -83,6 +83,7 @@ impl RamfluxClient {
                         .ok_or_else(|| invalid("epoch exhausted"))?,
                     devices: entries,
                 },
+                self.owned_public_profile(Some(&old))?,
             )?
         };
         ramflux_crypto::validate_device_set_transition(&old, &next)?;

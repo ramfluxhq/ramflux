@@ -42,13 +42,13 @@ pub(crate) fn row(client: &RamfluxClient, directory: &str, id: &str) -> Result<V
                     record.verification_state
                 }
             }));
-            saved["kind_asserted"] = json!(client.root_asserted_principal_kind(id)?.is_some());
-            saved["kind_verified"] = json!(client.verified_principal_kind(id)?.is_some());
-            if let Some(kind) = client.root_asserted_principal_kind(id)? {
+            let profile = client.verified_identity_profile(id)?;
+            saved["kind_verified"] = json!(profile.is_some());
+            if let Some(profile) = &profile {
+                saved["kind"] = json!(profile.kind);
+                saved["display_name"] = json!(profile.display_name);
+            } else if let Some(kind) = client.root_asserted_principal_kind(id)? {
                 saved["kind"] = json!(kind);
-                if saved["safety_state"] == "verified" && saved["kind_verified"] == false {
-                    saved["safety_state"] = json!("verification_stale");
-                }
             }
             // Gateway-fetched safety material is persisted by the verified contact path.
             let contact = client.contact_entry(id)?;

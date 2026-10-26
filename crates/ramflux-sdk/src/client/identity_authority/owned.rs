@@ -259,20 +259,25 @@ impl RamfluxClient {
                 ramflux_crypto::validate_device_set_transition(&pending, previous)?;
             }
         }
-        if let Some(old) = previous.as_ref().filter(|r| r.devices == entries) {
+        let profile = self.owned_public_profile(previous.as_ref())?;
+        if let Some(old) = previous
+            .as_ref()
+            .filter(|r| r.devices == entries && r.profile.as_deref() == profile.as_ref())
+        {
             return Ok(old.clone());
         }
         let epoch = previous
             .as_ref()
             .map_or(Some(1), |r| r.device_set_epoch.checked_add(1))
             .ok_or_else(|| invalid("device-set epoch exhausted"))?;
-        let next = ramflux_crypto::sign_device_set(
+        let next = ramflux_crypto::sign_device_set_with_profile(
             root,
             ramflux_crypto::DeviceSetSigningInput {
                 principal_kind: self.local_principal_kind()?,
                 device_set_epoch: epoch,
                 devices: entries,
             },
+            profile,
         )?;
         if let Some(old) = &previous {
             ramflux_crypto::validate_device_set_transition(old, &next)?;
@@ -293,6 +298,7 @@ impl RamfluxClient {
             self.check_observed_set(record)?;
             self.account_db()?
                 .persist_actor_state(&record_key(&record.principal_commitment), record)?;
+            self.persist_owned_profile_metadata(record)?;
             self.apply_record_retirements(record)?;
             self.reconcile_owned_pending(record)?;
             Ok::<_, SdkError>(())

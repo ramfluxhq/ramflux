@@ -338,8 +338,12 @@ impl RamfluxClient {
             history.created_at = delivery.at;
         }
         history.updated_at = delivery.at;
-        let kind_verified =
-            super::actor_kind_verified(self, &carrier.principal_id, &carrier.device_id);
+        let kind_verified = super::actor_role_kind_verified(
+            self,
+            &carrier.principal_id,
+            &carrier.device_id,
+            super::authority::relation_role(event.event()),
+        );
         let mut fallback = event.fallback_text_with_actor_kind(kind_verified);
         if !kind_verified && !fallback.contains("(actor kind unverified)") {
             fallback.push_str(" (actor kind unverified)");

@@ -212,8 +212,16 @@ impl RamfluxClient {
             .map(|request| request.state.as_str())
             .or_else(|| retained_status.as_ref().and_then(|row| row["state"].as_str()));
         let request_id = outgoing_request.as_ref().map(|request| &request.request_id);
+        let profile = self.verified_identity_profile(principal)?;
+        let display_name = profile
+            .as_ref()
+            .map_or_else(|| identity["display_name"].clone(), |p| json!(p.display_name));
+        let asserted = profile.as_ref().map_or_else(
+            || identity["kind_asserted"].as_str().map_or(Value::Null, |kind| json!(kind)),
+            |p| json!(p.kind),
+        );
         Ok(
-            json!({"principal_id":principal,"display_name":identity["display_name"],"reachable":reachable,"verified":verified,"kind_asserted":identity["kind_asserted"],"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"],"request_state":request_state,"request_id":request_id}),
+            json!({"principal_id":principal,"display_name":display_name,"reachable":reachable,"verified":verified,"kind_asserted":asserted,"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"],"request_state":request_state,"request_id":request_id}),
         )
     }
 }

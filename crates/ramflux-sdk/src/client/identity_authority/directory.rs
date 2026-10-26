@@ -215,7 +215,8 @@ impl RamfluxClient {
         let changed =
             authority_changed || old["device_set_hash"].as_str().is_some_and(|old| old != hash);
         let devices=manifest.devices.iter().map(|d|json!({"id":d.device_id,"device_id":d.device_id,"target_delivery_id":d.target_delivery_id,"signing_public_key":d.branch_public_key,"device_epoch":d.device_epoch})).collect::<Vec<_>>();
-        db.persist_client_record("identity",&manifest.principal_id,&json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":old.get("display_name"),"kind":record.principal_kind,"kind_asserted":true,"kind_verified":false,"device_set_epoch":record.device_set_epoch,"is_self":self.device_branch.as_ref().is_some_and(|b|b.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":hash,"safety_number":if changed {Value::Null} else {old["safety_number"].clone()}}))?;
+        let profile = record.profile.as_ref();
+        db.persist_client_record("identity",&manifest.principal_id,&json!({"id":manifest.principal_id,"principal_id":manifest.principal_id,"display_name":profile.map(|p|p.display_name.as_str()).or_else(||old["display_name"].as_str()),"kind":record.principal_kind,"kind_asserted":profile.map(|p|p.kind),"kind_verified":profile.is_some(),"device_set_epoch":record.device_set_epoch,"is_self":self.device_branch.as_ref().is_some_and(|b|b.principal_id==manifest.principal_id),"contact_identity_commitment":manifest.principal_commitment,"devices":devices,"device_set_hash":hash,"safety_number":if changed {Value::Null} else {old["safety_number"].clone()}}))?;
         db.persist_client_record(
             "commitment",
             &manifest.principal_commitment,

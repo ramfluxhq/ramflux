@@ -126,7 +126,7 @@ pub(super) fn actor_metadata(
         let device = principal
             .and_then(|id| history.events.iter().rev().find(|e| e.carrier.principal_id == id))
             .map_or("", |e| e.carrier.device_id.as_str());
-        actors[role] = json!({"principal_id":principal,"actor_kind_verified":principal.is_some_and(|p|super::actor_kind_verified(client,p,device))});
+        actors[role] = json!({"principal_id":principal,"actor_kind_verified":principal.is_some_and(|p|super::actor_role_kind_verified(client,p,device,if role=="assignee" {ramflux_protocol::ActorType::Bot} else {ramflux_protocol::ActorType::Human})),"actor_kind":principal.map(|p|client.verified_identity_profile(p)).transpose()?.flatten().map(|p|p.kind)});
     }
     Ok(actors)
 }

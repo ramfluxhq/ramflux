@@ -46,18 +46,37 @@ pub fn device_key_commitments(
 /// Rejects invalid/duplicate entries, unsafe integers, or canonical serialization errors.
 pub fn sign_device_set(
     root: &IdentityRoot,
-    mut input: DeviceSetSigningInput,
+    input: DeviceSetSigningInput,
 ) -> Result<SignedDeviceSetRecord, CryptoError> {
+    sign_device_set_with_profile(root, input, None)
+}
+/// Signs v2 when a root-signed public profile is present; legacy v1 stays byte-compatible.
+/// # Errors
+/// Rejects invalid profiles, mismatched authority or invalid device entries.
+pub fn sign_device_set_with_profile(
+    root: &IdentityRoot,
+    mut input: DeviceSetSigningInput,
+    profile: Option<ramflux_protocol::SignedIdentityProfile>,
+) -> Result<SignedDeviceSetRecord, CryptoError> {
+    if let Some(profile) = &profile {
+        crate::verify_identity_profile(&root.signing_key.verifying_key(), profile)?;
+    }
+    let domain = if profile.is_some() {
+        ramflux_protocol::domain::SIGNED_DEVICE_SET_V2
+    } else {
+        ramflux_protocol::domain::SIGNED_DEVICE_SET
+    };
     input.devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
     let mut record = SignedDeviceSetRecord {
-        schema: ramflux_protocol::domain::SIGNED_DEVICE_SET.into(),
-        version: 1,
-        domain: ramflux_protocol::domain::SIGNED_DEVICE_SET.into(),
+        schema: domain.into(),
+        version: if profile.is_some() { 2 } else { 1 },
+        domain: domain.into(),
         principal_id: root.principal_id.clone(),
         principal_commitment: identity_root_commitment(&root.signing_key.verifying_key()),
         principal_kind: input.principal_kind,
         device_set_epoch: input.device_set_epoch,
         devices: input.devices,
+        profile: profile.map(Box::new),
         signature: String::new(),
     };
     validate(&record)?;
@@ -79,6 +98,9 @@ pub fn verify_signed_device_set(
     validate(record)?;
     if root.is_weak() || identity_root_commitment(root) != record.principal_commitment {
         return Err(invalid("device set root mismatch"));
+    }
+    if let Some(profile) = &record.profile {
+        crate::verify_identity_profile(root, profile)?;
     }
     crate::verify_canonical_signature(
         &ramflux_protocol::signed_device_set_signing_bytes(record)?,
@@ -107,6 +129,10 @@ pub fn validate_device_set_transition(
     if next.device_set_epoch <= previous.device_set_epoch {
         return Err(invalid("device set epoch rollback or equivocation"));
     }
+    crate::identity_profile::validate_transition(
+        previous.profile.as_deref(),
+        next.profile.as_deref(),
+    )?;
     for old in &previous.devices {
         let new = next
             .devices
@@ -125,9 +151,22 @@ pub fn validate_device_set_transition(
     Ok(())
 }
 fn validate(record: &SignedDeviceSetRecord) -> Result<(), CryptoError> {
-    if record.schema != ramflux_protocol::domain::SIGNED_DEVICE_SET
-        || record.domain != ramflux_protocol::domain::SIGNED_DEVICE_SET
-        || record.version != 1
+    let domain = match (record.version, record.profile.as_ref()) {
+        (1, None) => ramflux_protocol::domain::SIGNED_DEVICE_SET,
+        (2, Some(profile)) => {
+            ramflux_protocol::identity_profile_signing_bytes(profile)?;
+            if profile.principal_id != record.principal_id
+                || profile.principal_commitment != record.principal_commitment
+                || profile.kind != record.principal_kind
+            {
+                return Err(invalid("profile and device-set owner or kind mismatch"));
+            }
+            ramflux_protocol::domain::SIGNED_DEVICE_SET_V2
+        }
+        _ => return Err(invalid("device-set profile version mismatch")),
+    };
+    if record.schema != domain
+        || record.domain != domain
         || record.device_set_epoch == 0
         || record.device_set_epoch > ramflux_protocol::MAX_SAFE_JSON_INTEGER
         || record.devices.is_empty()

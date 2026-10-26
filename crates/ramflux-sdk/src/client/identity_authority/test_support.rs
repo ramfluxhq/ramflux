@@ -42,13 +42,15 @@ pub(crate) fn sign_manifest(
             revoked_at: None,
         });
     }
-    manifest.signed_device_set = Some(ramflux_crypto::sign_device_set(
+    let profile = manifest.signed_device_set.as_ref().and_then(|r| r.profile.as_deref().cloned());
+    manifest.signed_device_set = Some(ramflux_crypto::sign_device_set_with_profile(
         root,
         ramflux_crypto::DeviceSetSigningInput {
             principal_kind: kind,
             device_set_epoch: epoch,
             devices: entries,
         },
+        profile,
     )?);
     Ok(())
 }

@@ -50,6 +50,8 @@ pub struct SignedDeviceSetRecord {
     pub principal_kind: PrincipalKind,
     pub device_set_epoch: u64,
     pub devices: Vec<SignedDeviceSetEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Box<crate::SignedIdentityProfile>>,
     pub signature: String,
 }
 impl SignedDeviceSetRecord {
@@ -66,7 +68,7 @@ impl SignedDeviceSetRecord {
         crate::parse_i_json(bytes)
     }
 }
-/// Canonical v1 device-set signing bytes, with signature excluded and domain included.
+/// Canonical v1/v2 device-set signing bytes, with signature excluded and domain included.
 /// # Errors
 /// Rejects non-I-JSON values or serialization errors.
 pub fn signed_device_set_signing_bytes(
@@ -82,6 +84,8 @@ pub fn signed_device_set_signing_bytes(
         principal_kind: PrincipalKind,
         device_set_epoch: u64,
         devices: &'a [SignedDeviceSetEntry],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        profile: Option<&'a crate::SignedIdentityProfile>,
     }
     crate::canonical_json_bytes(&Body {
         schema: &record.schema,
@@ -92,5 +96,6 @@ pub fn signed_device_set_signing_bytes(
         principal_kind: record.principal_kind,
         device_set_epoch: record.device_set_epoch,
         devices: &record.devices,
+        profile: record.profile.as_deref(),
     })
 }

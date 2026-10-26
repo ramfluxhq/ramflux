@@ -123,13 +123,14 @@ fn real_node_enrollment_device_add_signed_revoke_and_restart_reject_rollback() -
     let entry = entries.iter_mut().find(|e| e.device_id == "alice-two").ok_or("device")?;
     entry.status = DeviceSetStatus::Revoked;
     entry.revoked_at = Some(now_unix_timestamp());
-    let record = ramflux_crypto::sign_device_set(
+    let record = ramflux_crypto::sign_device_set_with_profile(
         first.client.identity_root.as_ref().ok_or("root")?,
         ramflux_crypto::DeviceSetSigningInput {
             principal_kind: PrincipalKind::Human,
             device_set_epoch: 3,
             devices: entries,
         },
+        added.signed_device_set.as_ref().ok_or("set")?.profile.as_deref().cloned(),
     )?;
     node.publish_signed_device_set(&ramflux_node_core::DeviceSetPublishRequest {
         root_public_key: initial.root_public_key.clone(),
@@ -319,13 +320,14 @@ fn migration_requires_independent_root_binding_for_every_legacy_device_and_reuse
     let e = entries.iter_mut().find(|e| e.device_id == "first").ok_or("device")?;
     e.status = DeviceSetStatus::Revoked;
     e.revoked_at = Some(now);
-    let record = ramflux_crypto::sign_device_set(
+    let record = ramflux_crypto::sign_device_set_with_profile(
         first.client.identity_root.as_ref().ok_or("root")?,
         ramflux_crypto::DeviceSetSigningInput {
             principal_kind: PrincipalKind::Human,
             device_set_epoch: 2,
             devices: entries,
         },
+        proposal.profile.as_deref().cloned(),
     )?;
     revoked.signed_device_set = Some(record.clone());
     assert!(first.client.prepare_owned_authority(Some(&revoked)).is_err());
@@ -541,3 +543,6 @@ fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions(
     assert!(!restored.client.friend_link_peer_is_accepted(&remote.principal_commitment)?);
     Ok(())
 }
+
+#[path = "profile_tests.rs"]
+mod profile;

@@ -25,7 +25,10 @@ impl RamfluxClient {
                 ("display_name", json!(card.display_name)),
                 ("kind_asserted", json!(card.kind_asserted)),
             ] {
-                identity[field] = old.get(field).filter(|v| !v.is_null()).cloned().unwrap_or(value);
+                if identity["kind_verified"] != true {
+                    identity[field] =
+                        old.get(field).filter(|v| !v.is_null()).cloned().unwrap_or(value);
+                }
             }
             identity["node"] = json!(card.node);
         }

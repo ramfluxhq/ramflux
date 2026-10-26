@@ -14,6 +14,8 @@ mod group_sender;
 mod home_node_migration;
 mod identity;
 mod identity_binding;
+mod identity_profile;
+pub use identity_profile::{sign_identity_profile, verify_identity_profile};
 mod signed_device_set;
 pub use identity_binding::{
     BRANCH_PROOF_CLOCK_SKEW_SECONDS, BranchAuthorization, MAX_BRANCH_PROOF_LIFETIME_SECONDS,
@@ -22,7 +24,7 @@ pub use identity_binding::{
 };
 pub use signed_device_set::{
     DeviceSetSigningInput, device_key_commitments, identity_root_commitment, sign_device_set,
-    validate_device_set_transition, verify_signed_device_set,
+    sign_device_set_with_profile, validate_device_set_transition, verify_signed_device_set,
 };
 mod kdf;
 mod key_verification;
@@ -105,3 +107,6 @@ pub const fn crate_name() -> &'static str {
 }
 
 pub use sframe::{SFRAME_AES_256_GCM_SHA512_128, SFrameHeader, SFrameReceiver, SFrameSender};
+
+#[cfg(test)]
+mod identity_profile_tests;
