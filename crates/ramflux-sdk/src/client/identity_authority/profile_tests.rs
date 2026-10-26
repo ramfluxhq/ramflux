@@ -154,3 +154,17 @@ fn public_profile_is_published_by_the_device_set_signer_and_survives_device_set_
     );
     Ok(())
 }
+
+#[test]
+fn a_valid_long_principal_remains_publishable_with_a_bounded_safe_default_name() -> TestResult {
+    let principal = "a".repeat(200);
+    let owner = Actor::new(&principal, "phone", 211, 212, 1)?;
+    let set = owner.client.prepare_owned_authority(None)?;
+    let profile = set.profile.as_ref().ok_or("profile")?;
+    assert_eq!(profile.display_name, "Account");
+    ramflux_crypto::verify_signed_device_set(
+        &owner.client.identity_root.as_ref().ok_or("root")?.signing_key.verifying_key(),
+        &set,
+    )?;
+    Ok(())
+}

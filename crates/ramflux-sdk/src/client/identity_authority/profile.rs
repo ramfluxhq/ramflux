@@ -59,7 +59,9 @@ impl RamfluxClient {
         if let Some(old) = old {
             return Ok(Some(old.clone()));
         }
-        Ok(Some(ramflux_crypto::sign_identity_profile(root, kind, &root.principal_id, 1)?))
+        let name = ramflux_protocol::normalize_profile_display_name(&root.principal_id)
+            .unwrap_or_else(|_| "Account".to_owned());
+        Ok(Some(ramflux_crypto::sign_identity_profile(root, kind, &name, 1)?))
     }
     pub(super) fn persist_owned_profile_metadata(
         &self,

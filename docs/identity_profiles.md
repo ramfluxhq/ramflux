@@ -21,7 +21,10 @@ Unicode control/format or line/paragraph separator characters. Verification
 requires exact normalized bytes; it does not normalize signed remote content.
 Unnormalized, unsigned, forged and oversized records fail closed.
 
-New owned publications default the public display name to the principal ID.
+New owned publications default the public display name to the principal ID when
+it meets the name policy; otherwise they use the fixed safe name `Account`.
+A long or unsafe legacy identifier therefore remains publishable without
+weakening the display-name policy.
 Private account labels are not published. The SDK's `set_identity_display_name`
 updates a root-signed desired profile for the next normal device-set publication;
 it does not acknowledge network publication. No new bus method is introduced.
