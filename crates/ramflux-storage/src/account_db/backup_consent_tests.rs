@@ -133,6 +133,111 @@ fn r4_newer_restored_lifts_and_denials_win_in_both_merge_directions() -> TestRes
     Ok(())
 }
 #[test]
+fn merge_prefers_restrictions_on_tied_link_and_request_decisions_and_newer_otherwise() -> TestResult
+{
+    // (incoming denial, incoming stamp, live lift stamp, expected merged request state)
+    for (denied, denied_at, lifted_at, expected) in [
+        ("blocked", 7_000, 7_000, "blocked"),
+        ("declined", 7_000, 7_000, "declined"),
+        ("blocked", 7_001, 7_000, "blocked"),
+        ("blocked", 7_000, 7_001, "accepted"),
+        ("declined", 7_001, 7_000, "declined"),
+        ("declined", 7_000, 7_001, "accepted"),
+    ] {
+        let (source_root, source_index, source) = account("tie-source")?;
+        let (root, index, local) = account("tie-local")?;
+        local.establish_friend_link("link", "own", "peer")?;
+        if denied == "blocked" {
+            source.establish_friend_link("link", "own", "peer")?;
+            source.block_friend_link("link", 10)?;
+        } else {
+            source.record_pending_friend_link("link", "own", "peer", 10)?;
+            source.reject_friend_link("link", 10)?;
+        }
+        source.connection.execute(
+            "UPDATE contact_link_decision SET decided_at=?1 WHERE link_id='link'",
+            rusqlite::params![denied_at],
+        )?;
+        local.connection.execute(
+            "UPDATE contact_link_decision SET decided_at=?1 WHERE link_id='link'",
+            rusqlite::params![lifted_at],
+        )?;
+        local.connection.execute_batch("UPDATE friend_link_projection SET updated_at=10")?;
+        source.fence_contact_request("peer", denied, 0)?;
+        source.connection.execute("INSERT INTO contact_request_projection VALUES('peer','inbound','req','bob','link',?1,x'7b7d',999,10)", rusqlite::params![denied])?;
+        local.fence_contact_request("peer", denied, 0)?;
+        local.clear_contact_request_fence("peer", None)?;
+        local.connection.execute_batch("INSERT INTO contact_request_projection VALUES('peer','inbound','req','bob','link','accepted',x'7b7d',999,10)")?;
+        // Pin the wall-clock decision stamps so a same-millisecond tie is exercised exactly.
+        source.connection.execute(
+            "UPDATE contact_request_decision SET decided_at=?1 WHERE root='peer'",
+            rusqlite::params![denied_at],
+        )?;
+        local.connection.execute(
+            "UPDATE contact_request_decision SET decided_at=?1 WHERE root='peer' AND state='lifted'",
+            rusqlite::params![lifted_at],
+        )?;
+        for reverse in [false, true] {
+            let (incoming, live_db) = if reverse { (&local, &source) } else { (&source, &local) };
+            let archive = source_root.join(format!("archive-{reverse}.db"));
+            let saved = incoming.write_backup_snapshot(&archive)?;
+            let target = root.join(format!("current-{reverse}.db"));
+            let live = live_db.write_backup_snapshot(&target)?;
+            let mut merged = BackupDatabase::open(&target, &live.key)?;
+            let case = format!("{denied}@{denied_at} vs lifted@{lifted_at}, reverse={reverse}");
+            for _ in 0..2 {
+                merged.merge_backup(&archive, &saved.key, || Ok(()))?;
+                assert_eq!(merged.db.query_row("SELECT state FROM contact_request_projection WHERE contact_identity_commitment='peer'", [], |r|r.get::<_,String>(0))?, expected, "{case}");
+                let decision = if expected == "accepted" { "lifted" } else { denied };
+                assert_eq!(
+                    merged.db.query_row(
+                        "SELECT state FROM contact_request_decision WHERE root='peer'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    decision,
+                    "{case}"
+                );
+                assert_eq!(
+                    merged.db.query_row(
+                        "SELECT state FROM contact_link_decision WHERE link_id='link'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    decision,
+                    "{case}"
+                );
+                let link_state = match expected {
+                    "declined" => "rejected",
+                    other => other,
+                };
+                assert_eq!(
+                    merged.db.query_row(
+                        "SELECT state,blocked FROM friend_link_projection WHERE link_id='link'",
+                        [],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+                    )?,
+                    (link_state.into(), expected == "blocked"),
+                    "{case}"
+                );
+                let fences: u64 = merged.db.query_row(
+                    "SELECT count(*) FROM contact_request_fence WHERE root='peer'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(fences, u64::from(expected != "accepted"), "{case}");
+            }
+        }
+        drop(source);
+        drop(local);
+        drop(source_index);
+        drop(index);
+        std::fs::remove_dir_all(source_root)?;
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+#[test]
 fn r4_merge_replacement_of_a_newer_held_message_does_not_create_an_erasure_fence() -> TestResult {
     let (root, index, db) = account("held-replacement")?;
     db.connection.execute_batch("INSERT INTO contact_message_request VALUES('peer','sender','message','thread',x'7b7d',2,999,2)")?;

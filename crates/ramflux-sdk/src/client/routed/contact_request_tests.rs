@@ -550,3 +550,31 @@ mod r3;
 
 #[path = "contact_request_r4_tests.rs"]
 mod r4;
+
+#[tokio::test]
+async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_provenance()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::new("alice", 71)?;
+    let mut bob = Fixture::new("bob", 81)?;
+    let directory = Directory::new(&alice, &bob).await?;
+    let mut state = state(&mut alice, &mut bob, &directory)?;
+    // The request reaches the cold receiver before it accepts by principal name.
+    let entry = pending(&mut state, &directory).await?;
+    let source = |state: &LocalBusDaemonState, who: &str, peer: &str| -> Result<Value, SdkError> {
+        let db = account(state, who)?.account_db()?;
+        let row = db.client_record("identity", peer)?.ok_or_else(|| invalid("identity"))?;
+        Ok(row["root_source"].clone())
+    };
+    assert_eq!(source(&state, "bob", "alice")?, "lookup", "a requester root is never a card");
+    // Retry delivery and republish the peer manifest after contact.add decorated the row.
+    deliver(&mut state, "bob", &entry).await?;
+    let manifest = directory.records.lock().map_err(|_| invalid("directory"))?[1].clone();
+    account(&state, "alice")?.persist_root_verified_directory(&manifest)?;
+    assert_eq!(source(&state, "alice", "bob")?, "lookup");
+    let accepted =
+        contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
+    assert_eq!(accepted["direction"], "inbound");
+    assert_eq!(accepted["contact"]["root_source"], "lookup");
+    assert_eq!(account(&state, "alice")?.contact_entry("bob")?["root_source"], "lookup");
+    Ok(())
+}

@@ -429,3 +429,38 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
     assert!(!b.client.friend_links()?.iter().any(|l| l.link_id == "incoming-request"));
     Ok(())
 }
+
+#[tokio::test]
+async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> Result<(), SdkError>
+{
+    let mut a = Fixture::new("alice", 21)?;
+    let mut b = Fixture::new("bob", 31)?;
+    let d = Directory::new(&a, &b).await?;
+    let origin = Origin::new(&d).await?;
+    let mut s = state(&mut a, &mut b, &d)?;
+    origin.configure(&mut s, "alice")?;
+    origin.configure(&mut s, "bob")?;
+    let signed = card(&mut s).await?;
+    let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
+    let node = added["contact"]["node"].clone();
+    assert!(!node.is_null());
+    let manifest = d.records.lock().map_err(|_| invalid("directory"))?[1].clone();
+    for source in ["card", "verified"] {
+        if source == "verified" {
+            call(
+                &mut s,
+                "alice",
+                "contact.verify",
+                json!({"contact_identity_commitment":manifest.principal_commitment}),
+            )
+            .await?;
+        }
+        client(&s)?.persist_root_verified_directory(&manifest)?;
+        let db = client(&s)?.account_db()?;
+        let identity = db.client_record("identity", "bob")?.ok_or_else(|| invalid("identity"))?;
+        assert_eq!(identity["root_source"], source);
+        assert_eq!(identity["node"], node);
+        assert!(client(&s)?.contact_replacement(&identity, "bob", "different-root", None).is_err());
+    }
+    Ok(())
+}

@@ -341,8 +341,14 @@ impl RamfluxClient {
         self.account_db()?.write_transaction(|| {
             // A malformed request cannot leave a cached root or device, pair state, consent,
             // or message projection behind. Candidate authentication preceded this transaction.
+            let first_seen =
+                self.account_db()?.client_record("identity", &manifest.principal_id)?.is_none();
             self.remember_contact_request_cache(manifest)?;
             self.persist_root_verified_directory(manifest)?;
+            if first_seen {
+                // A requester's root comes from the network, never from an imported card.
+                self.mark_lookup_root(&manifest.principal_id)?;
+            }
             let receipt = self.authenticated_committed_key(entry)?;
             if let Some(committed) = self.account_db()?.load_actor_state::<Committed>(&receipt)? {
                 if committed.entry.envelope.payload_hash != entry.envelope.payload_hash {

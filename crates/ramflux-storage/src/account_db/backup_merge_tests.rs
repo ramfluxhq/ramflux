@@ -44,12 +44,7 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     source.create_group("new-membership", "owner")?;
     source.add_group_member("new-membership", "peer", "member")?;
     local.create_group("new-membership", "owner")?;
-    source.establish_friend_link("tie-link", "own", "tie-peer")?;
-    local.establish_friend_link("tie-link", "own", "tie-peer")?;
-    source.block_friend_link("tie-link", 1)?;
-    local
-        .connection
-        .execute_batch("UPDATE friend_link_projection SET updated_at=1 WHERE link_id='tie-link'")?;
+    stage_link_consent_order(&source, &local)?;
     let incoming = root.join("incoming.db");
     let snapshot = source.write_backup_snapshot(&incoming)?;
     let target = root.join("merged.db");
@@ -79,11 +74,7 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     assert_eq!(merged.db.query_row("SELECT CAST(event_body AS TEXT) FROM backup_archived_local_event WHERE event_id='source-only-counter'",[],|r|r.get::<_,String>(0))?,"preserved despite actor-counter collision");
     assert!(!merged.db.query_row("SELECT active FROM group_member_projection WHERE group_id='membership' AND member_id='peer'",[],|r|r.get::<_,bool>(0))?);
     assert!(merged.db.query_row("SELECT active FROM group_member_projection WHERE group_id='new-membership' AND member_id='peer'",[],|r|r.get::<_,bool>(0))?);
-    assert!(merged.db.query_row(
-        "SELECT blocked FROM friend_link_projection WHERE link_id='tie-link'",
-        [],
-        |r| r.get::<_, bool>(0)
-    )?);
+    assert_link_consent_order(&merged.db)?;
     merged.check_integrity()?;
     drop(merged);
     drop(source);
@@ -91,6 +82,51 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     drop(index);
     drop(local_index);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+/// Same-root decisions on one tie and two strictly ordered links, with pinned stamps.
+fn stage_link_consent_order(source: &AccountDb, local: &AccountDb) -> TestResult {
+    // Decision stamps are wall-clock milliseconds; pin them so the tie and both strict
+    // orders are exercised deterministically instead of depending on runner speed.
+    for (link, blocked_at, lifted_at) in
+        [("tie-link", 5_000, 5_000), ("block-newer", 5_001, 5_000), ("lift-newer", 5_000, 5_001)]
+    {
+        source.establish_friend_link(link, "own", "tie-peer")?;
+        local.establish_friend_link(link, "own", "tie-peer")?;
+        source.block_friend_link(link, 1)?;
+        local.connection.execute(
+            "UPDATE friend_link_projection SET updated_at=1 WHERE link_id=?1",
+            rusqlite::params![link],
+        )?;
+        source.connection.execute(
+            "UPDATE contact_link_decision SET decided_at=?2 WHERE link_id=?1 AND state='blocked'",
+            rusqlite::params![link, blocked_at],
+        )?;
+        local.connection.execute(
+            "UPDATE contact_link_decision SET decided_at=?2 WHERE link_id=?1 AND state='lifted'",
+            rusqlite::params![link, lifted_at],
+        )?;
+    }
+    Ok(())
+}
+fn assert_link_consent_order(db: &rusqlite::Connection) -> TestResult {
+    let blocked = |link: &str| {
+        db.query_row("SELECT blocked FROM friend_link_projection WHERE link_id=?1", [link], |r| {
+            r.get::<_, bool>(0)
+        })
+    };
+    assert!(blocked("tie-link")?, "a block tied with a lift must not be dropped");
+    assert!(blocked("block-newer")?, "a strictly newer block wins");
+    assert!(!blocked("lift-newer")?, "a strictly newer lift wins");
+    assert_eq!(
+        db.query_row(
+            "SELECT group_concat(link_id||'='||state,',') FROM (SELECT * FROM contact_link_decision WHERE link_id IN ('tie-link','block-newer','lift-newer') ORDER BY link_id)",
+            [],
+            |r| r.get::<_, String>(0)
+        )?,
+        "block-newer=blocked,lift-newer=lifted,tie-link=blocked"
+    );
     Ok(())
 }
 

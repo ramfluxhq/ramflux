@@ -46,6 +46,23 @@ impl RamfluxClient {
         Ok(())
     }
 
+    /// Records lookup provenance for a root first learned from a root-verified network
+    /// manifest rather than an imported card. Existing provenance is never rewritten.
+    pub(crate) fn mark_lookup_root(&self, principal: &str) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let Some(mut identity) = db.client_record("identity", principal)? else {
+            return Ok(());
+        };
+        if identity.get("root_source").is_some_and(|v| !v.is_null())
+            || identity.get("node").is_some_and(|v| !v.is_null())
+        {
+            return Ok(());
+        }
+        identity["root_source"] = json!(ContactRootSource::Lookup);
+        db.persist_client_record("identity", principal, &identity)?;
+        Ok(())
+    }
+
     pub(crate) fn contact_root_source(
         &self,
         identity: &Value,

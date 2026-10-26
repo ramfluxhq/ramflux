@@ -3,6 +3,7 @@
 
 //! Merge private generations; large object BLOBs use incremental copy rather than SQL values.
 
+use super::backup_consent_merge::consent_supersedes;
 use super::backup_database::BackupDatabase;
 use crate::{AccountDbKey, BackupCounts, StorageError};
 use rusqlite::{OptionalExtension, params};
@@ -409,7 +410,10 @@ const ORDER_FIELDS: &[&str] = &[
 ];
 fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
     if table == "friend_link_projection" {
-        return "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND (r.blocked>l.blocked OR (r.capability_revoked_at IS NOT NULL AND l.capability_revoked_at IS NULL) OR (r.state IN ('removed','rejected') AND l.state IN ('accepted','pending')))) OR EXISTS(SELECT 1 FROM backup_source_link_consent s LEFT JOIN backup_local_link_consent old USING(link_id) WHERE s.link_id=r.link_id AND s.decided_at>coalesce(old.decided_at,min(max(coalesce(l.updated_at,0),0),9223372036854775)*1000) AND ((s.state='lifted' AND r.state='accepted' AND r.blocked=0) OR (s.state='blocked' AND r.blocked=1) OR (s.state='declined' AND r.state='rejected')))".into();
+        return format!(
+            "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND (r.blocked>l.blocked OR (r.capability_revoked_at IS NOT NULL AND l.capability_revoked_at IS NULL) OR (r.state IN ('removed','rejected') AND l.state IN ('accepted','pending')))) OR EXISTS(SELECT 1 FROM backup_source_link_consent s LEFT JOIN backup_local_link_consent old USING(link_id) WHERE s.link_id=r.link_id AND (s.decided_at>coalesce(old.decided_at,min(max(coalesce(l.updated_at,0),0),9223372036854775)*1000) OR (old.link_id IS NOT NULL AND {})) AND ((s.state='lifted' AND r.state='accepted' AND r.blocked=0) OR (s.state='blocked' AND r.blocked=1) OR (s.state='declined' AND r.state='rejected')))",
+            consent_supersedes("s", "old")
+        );
     }
     if table == "direct_message_projection" {
         return "r.deleted>l.deleted OR (r.deleted=l.deleted AND r.created_at>l.created_at)".into();
@@ -424,9 +428,10 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
             )
         };
         return format!(
-            "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND ({})>({})) OR EXISTS(SELECT 1 FROM backup_source_consent s LEFT JOIN backup_local_consent old USING(root) WHERE s.root=r.contact_identity_commitment AND s.decided_at>coalesce(old.decided_at,min(max(coalesce(l.updated_at,0),0),9223372036854775)*1000) AND ((s.state='lifted' AND r.state='accepted') OR s.state=r.state))",
+            "r.updated_at>l.updated_at OR (r.updated_at=l.updated_at AND ({})>({})) OR EXISTS(SELECT 1 FROM backup_source_consent s LEFT JOIN backup_local_consent old USING(root) WHERE s.root=r.contact_identity_commitment AND (s.decided_at>coalesce(old.decided_at,min(max(coalesce(l.updated_at,0),0),9223372036854775)*1000) OR (old.root IS NOT NULL AND {})) AND ((s.state='lifted' AND r.state='accepted') OR s.state=r.state))",
             rank("r"),
-            rank("l")
+            rank("l"),
+            consent_supersedes("s", "old")
         );
     }
     if table == "runtime_actor_state" {
