@@ -998,6 +998,7 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
 }
 
 mod metadata;
+mod push_clear;
 mod restore;
 mod stream;
 

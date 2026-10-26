@@ -677,6 +677,14 @@ impl GatewaySessionEngine {
         if let Some(frame) = self.deferred_frames.pop_front() {
             return Ok(frame);
         }
+        self.read_stream_frame(operation).await
+    }
+
+    /// Reads the next frame from the transport, bypassing frames kept for later readers.
+    pub(crate) async fn read_stream_frame(
+        &mut self,
+        operation: &'static str,
+    ) -> Result<GatewayServerFrame, SdkError> {
         gateway_session_timeout(operation, async {
             read_gateway_server_frame(&mut *self.stream).await
         })

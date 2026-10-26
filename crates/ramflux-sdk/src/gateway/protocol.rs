@@ -98,6 +98,8 @@ pub struct GatewaySessionConfig {
     pub push_route_clear_pending: bool,
     /// Push route retry and backoff state; survives reconnects with the config.
     pub push_route_retry: super::PushRouteRetry,
+    /// Last push route control sequence (milliseconds, strictly increasing).
+    pub push_route_last_seq: u64,
 }
 
 impl GatewaySessionConfig {
@@ -196,6 +198,7 @@ impl GatewaySessionConfig {
             push_route: None,
             push_route_clear_pending: false,
             push_route_retry: super::PushRouteRetry::default(),
+            push_route_last_seq: 0,
         }
     }
 

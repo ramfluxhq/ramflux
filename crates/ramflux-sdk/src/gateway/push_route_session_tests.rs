@@ -5,7 +5,7 @@
 #![allow(clippy::expect_used)]
 use crate::gateway::{
     GatewayPushProvider, GatewayPushRouteRegistration, GatewayQuicEndpointConfig,
-    GatewaySessionConfig, GatewaySessionEngine,
+    GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine,
 };
 use crate::prelude::*;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
@@ -25,6 +25,8 @@ struct SlowPushGateway {
     refuse: Option<&'static str>,
     /// Send a drain frame before answering a registration.
     drain_first: bool,
+    /// Send an unrelated (stray) frame before answering a registration.
+    stray_first: bool,
     registrations: Arc<Mutex<usize>>,
     waker: Option<std::task::Waker>,
 }
@@ -42,6 +44,14 @@ impl GatewaySessionFrameSink for SlowPushGateway {
                         self.outbox.push_back(serde_json::json!({
                             "frame_type": "push_route_refused", "request_id": id,
                             "reason": "refused", "code": code,
+                        }));
+                    } else if self.stray_first {
+                        self.outbox.push_back(serde_json::json!({
+                            "frame_type": "cursor", "cursor": null,
+                        }));
+                        self.outbox.push_back(serde_json::json!({
+                            "frame_type": "push_route_registered", "expires_at": 4_000_000_000_u64,
+                            "request_id": id,
                         }));
                     } else if self.drain_first {
                         self.outbox.push_back(serde_json::json!({
@@ -104,6 +114,15 @@ pub(super) fn engine_with(
     refuse: Option<&'static str>,
     drain_first: bool,
 ) -> (GatewaySessionEngine, Arc<Mutex<usize>>) {
+    engine_with_stray(blackhole, refuse, drain_first, false)
+}
+
+fn engine_with_stray(
+    blackhole: bool,
+    refuse: Option<&'static str>,
+    drain_first: bool,
+    stray_first: bool,
+) -> (GatewaySessionEngine, Arc<Mutex<usize>>) {
     let root = ramflux_crypto::create_identity_root("principal_slow_push", [0x95; 32]);
     let branch =
         ramflux_crypto::create_device_branch("principal_slow_push", "device_slow", 1, [11_u8; 32]);
@@ -133,6 +152,7 @@ pub(super) fn engine_with(
         blackhole,
         refuse,
         drain_first,
+        stray_first,
         registrations: Arc::clone(&registrations),
         waker: None,
     };
@@ -186,4 +206,33 @@ async fn a_drain_during_push_route_set_is_kept_for_the_next_reader() {
     assert!(engine.set_push_route(registration).await.is_err(), "the drain must end the wait");
     let error = engine.heartbeat().await.expect_err("the drain is delivered, not dropped");
     assert!(format!("{error:?}").contains("Drain"), "{error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stray_frame_during_push_route_set_does_not_spin_and_is_kept() {
+    let (mut engine, _registrations) = engine_with_stray(false, None, false, true);
+    let registration = engine.config.push_route.clone();
+    // Run the wait on its own task: a busy loop would pin that worker, but this timer
+    // still fires on the other one.
+    let task = tokio::spawn(async move {
+        let outcome = engine.set_push_route(registration).await;
+        (engine, outcome)
+    });
+    let (mut engine, outcome) = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("set_push_route spun instead of reading the stream")
+        .expect("task");
+    assert_eq!(outcome.expect("registered"), Some(4_000_000_000));
+    let error = engine.heartbeat().await.expect_err("the stray frame is delivered, not dropped");
+    assert!(format!("{error:?}").contains("Cursor"), "{error:?}");
+}
+
+#[test]
+fn unknown_refusal_codes_decode_and_back_off_as_transient() {
+    let frame: GatewayServerFrame = serde_json::from_value(serde_json::json!({
+        "frame_type": "push_route_refused", "request_id": "r", "reason": "x",
+        "code": "a_code_from_a_newer_node",
+    }))
+    .expect("a newer refusal code must not break the session");
+    assert!(matches!(frame, GatewayServerFrame::PushRouteRefused { .. }));
 }

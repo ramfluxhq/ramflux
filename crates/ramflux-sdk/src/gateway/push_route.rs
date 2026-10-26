@@ -83,7 +83,13 @@ pub enum GatewayPushRouteRefusal {
     Rejected,
     Unavailable,
     Superseded,
+    /// A code from a newer node; retried like `unavailable` so it never breaks the session.
+    #[serde(other)]
+    Unknown,
 }
+
+/// Frames other than push answers that a waiting `set_push_route` keeps for later readers.
+const PUSH_ROUTE_STASH_LIMIT: usize = 64;
 
 /// Whether a route that expires at `expires_at` must be registered again at `now`.
 #[must_use]
@@ -112,6 +118,7 @@ const PUSH_ROUTE_PERMANENT_RETRY_SECONDS: u64 = 24 * 3_600;
 pub(crate) struct PendingPushRoute {
     request_id: String,
     sent_at: u64,
+    deregister: bool,
 }
 
 /// Retry state for push route control; kept in the session config so it survives reconnects.
@@ -139,7 +146,7 @@ impl PushRouteRetry {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
             }
-            GatewayPushRouteRefusal::Unavailable => {
+            GatewayPushRouteRefusal::Unavailable | GatewayPushRouteRefusal::Unknown => {
                 self.failures = self.failures.saturating_add(1);
                 let jitter = ramflux_crypto::random_32().map_or(0, |bytes| bytes[0]);
                 self.not_before =
@@ -210,8 +217,11 @@ impl GatewaySessionEngine {
             request: Box::new(GatewayPushRouteFrame { signed_request, body }),
         })
         .await?;
-        self.pending_push_route =
-            Some(PendingPushRoute { request_id: request_id.clone(), sent_at: now });
+        self.pending_push_route = Some(PendingPushRoute {
+            request_id: request_id.clone(),
+            sent_at: now,
+            deregister: false,
+        });
         Ok(Some(request_id))
     }
 
@@ -226,8 +236,11 @@ impl GatewaySessionEngine {
             request: Box::new(GatewayPushRouteDeregistrationFrame { signed_request, body }),
         })
         .await?;
-        self.pending_push_route =
-            Some(PendingPushRoute { request_id: request_id.clone(), sent_at: now });
+        self.pending_push_route = Some(PendingPushRoute {
+            request_id: request_id.clone(),
+            sent_at: now,
+            deregister: true,
+        });
         Ok(Some(request_id))
     }
 
@@ -241,6 +254,17 @@ impl GatewaySessionEngine {
             .ext
             .ext
             .insert("session_id".to_owned(), serde_json::json!(self.session.session_id));
+        // Strictly increasing per device: the node refuses a registration older than its last
+        // confirmed deregistration, whatever order the two finish in.
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis()),
+        )
+        .unwrap_or(u64::MAX);
+        let seq = now_ms.max(self.config.push_route_last_seq.saturating_add(1));
+        self.config.push_route_last_seq = seq;
+        signed_request.ext.ext.insert("push_route_seq".to_owned(), serde_json::json!(seq));
         let branch = self.config.device_branch.as_ref().ok_or_else(|| {
             SdkError::GatewaySessionRejected("missing registered device branch".to_owned())
         })?;
@@ -261,8 +285,21 @@ impl GatewaySessionEngine {
     /// Reads frames until the answer to `request_id`, buffering deliveries meanwhile. Any other
     /// frame is kept for the next reader; a drain or close also ends the wait.
     async fn await_push_reply(&mut self, request_id: &str) -> Result<Option<u64>, SdkError> {
+        // Read the stream, never the deferred queue: a stashed frame is not seen again here,
+        // so every iteration awaits I/O and the caller's timeout can always fire.
+        let mut stash = Vec::new();
+        let outcome = self.await_push_reply_into(request_id, &mut stash).await;
+        self.deferred_frames.extend(stash);
+        outcome
+    }
+
+    async fn await_push_reply_into(
+        &mut self,
+        request_id: &str,
+        stash: &mut Vec<GatewayServerFrame>,
+    ) -> Result<Option<u64>, SdkError> {
         loop {
-            let frame = self.read_raw_gateway_frame("push route answer").await?;
+            let frame = self.read_stream_frame("push route answer").await?;
             match frame {
                 GatewayServerFrame::Deliver { entry } => self.pending_deliveries.push_back(entry),
                 frame if is_push_route_reply(&frame) => {
@@ -273,12 +310,20 @@ impl GatewaySessionEngine {
                     }
                 }
                 frame @ (GatewayServerFrame::Drain { .. } | GatewayServerFrame::Close { .. }) => {
-                    self.deferred_frames.push_back(frame);
+                    stash.push(frame);
                     return Err(SdkError::GatewaySessionRejected(
                         "gateway session is ending; push route answer pending".to_owned(),
                     ));
                 }
-                frame => self.deferred_frames.push_back(frame),
+                frame => {
+                    stash.push(frame);
+                    if stash.len() >= PUSH_ROUTE_STASH_LIMIT {
+                        return Err(SdkError::GatewaySessionRejected(
+                            "too many unrelated frames while waiting for a push route answer"
+                                .to_owned(),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -312,7 +357,16 @@ impl GatewaySessionEngine {
             }
             GatewayServerFrame::PushRouteRefused { reason, code, .. } => {
                 if let Some(pending) = pending {
-                    self.config.push_route_retry.record(code, pending.sent_at);
+                    if pending.deregister && code == GatewayPushRouteRefusal::Rejected {
+                        // Not the routes' owner (or not allowed): retrying cannot succeed.
+                        tracing::warn!(
+                            "push route deregistration refused; dropping the pending clear"
+                        );
+                        self.config.push_route_clear_pending = false;
+                        self.config.push_route_retry = PushRouteRetry::default();
+                    } else {
+                        self.config.push_route_retry.record(code, pending.sent_at);
+                    }
                 }
                 Err(SdkError::GatewaySessionRejected(reason))
             }
@@ -543,6 +597,33 @@ mod tests {
         let attempts = *attempts.lock().expect("lock");
         assert!((2..=9).contains(&attempts), "{attempts} deregistrations in an hour");
         assert!(engine.config.push_route_clear_pending);
+    }
+
+    #[tokio::test]
+    async fn a_deregistration_refused_as_not_the_owner_is_not_retried() {
+        let (mut engine, attempts) =
+            super::session_tests::engine_with(false, Some("rejected"), false);
+        assert!(engine.set_push_route(None).await.is_err());
+        assert!(!engine.config.push_route_clear_pending, "the pending clear is dropped");
+        let start = now_unix_timestamp().unsigned_abs();
+        for tick in 0..720 {
+            engine.refresh_push_route_at(start + tick * 5).await;
+            let _ = engine.heartbeat().await;
+        }
+        assert_eq!(*attempts.lock().expect("lock"), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_refusal_codes_back_off_like_transient_failures() {
+        let (mut engine, attempts) =
+            super::session_tests::engine_with(false, Some("a_code_from_a_newer_node"), false);
+        let start = 2_000_000_000;
+        for tick in 0..720 {
+            engine.refresh_push_route_at(start + tick * 5).await;
+            let _ = engine.heartbeat().await;
+        }
+        let attempts = *attempts.lock().expect("lock");
+        assert!((2..=8).contains(&attempts), "{attempts} registrations in an hour");
     }
 
     #[tokio::test]

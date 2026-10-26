@@ -293,6 +293,9 @@ impl LocalBusAccountState {
                 Ok(())
             };
             connected?;
+            if self.gateway_config.push_route_clear_pending {
+                self.forget_confirmed_push_clear();
+            }
             if let Some(manifest) = pending.as_mut().filter(|manifest| manifest.activation_pending)
             {
                 manifest.activation_pending = false;
@@ -309,9 +312,29 @@ impl LocalBusAccountState {
     }
 
     pub(crate) fn put_engine(&mut self, engine: GatewaySessionEngine) {
+        let was_pending = self.gateway_config.push_route_clear_pending;
         self.gateway_config = engine.config.clone();
         engine.target_delivery_id().clone_into(&mut self.target_delivery_id);
         self.engine = Some(engine);
+        if was_pending {
+            self.forget_confirmed_push_clear();
+        }
+    }
+
+    /// Once the engine has confirmed a background deregistration, drop the persisted
+    /// pending marker so later starts do not deregister again.
+    pub(crate) fn forget_confirmed_push_clear(&mut self) {
+        let confirmed = self.engine.as_ref().is_some_and(|engine| {
+            engine.config.push_route.is_none() && !engine.config.push_route_clear_pending
+        });
+        if !confirmed {
+            return;
+        }
+        let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_CHECKPOINT;
+        match self.client.set_projection_checkpoint(checkpoint, "") {
+            Ok(()) => self.gateway_config.push_route_clear_pending = false,
+            Err(error) => tracing::warn!(%error, "push route clear confirmation not persisted"),
+        }
     }
 
     /// Returns a shared handle to the account's relay QUIC pool, installing it (with the current
