@@ -4,7 +4,7 @@
 //! Operation-scoped custody migration execution over independently admitted node peers.
 use crate::{MigrationNode, NodeCoreError};
 use ramflux_protocol::home_migration::{Request, Response};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Server configuration supplies peers and transport; request JSON never supplies a trusted pin.
 pub trait HomeMigrationMesh: Send + Sync {
@@ -30,25 +30,78 @@ pub(crate) struct MigrationCaller {
     pub publication: crate::CustodyPublication,
     pub source: std::net::IpAddr,
 }
+pub(crate) struct MigrationExecution<'a> {
+    pub router: &'a crate::RouterCore,
+    pub store: &'a crate::RouterRedbStore,
+    pub caller: &'a MigrationCaller,
+    pub authority: &'a ramflux_crypto::custody::VerifiedRecord,
+    pub now: u64,
+}
 pub struct HomeMigrationService {
     pub(crate) node: Arc<MigrationNode>,
     pub(crate) mesh: Arc<dyn HomeMigrationMesh>,
+    pub(crate) preflight: Mutex<crate::home_migration_preflight::PreflightCache>,
 }
 impl HomeMigrationService {
     #[must_use]
     pub fn new(node: Arc<MigrationNode>, mesh: Arc<dyn HomeMigrationMesh>) -> Self {
-        Self { node, mesh }
+        Self { node, mesh, preflight: Mutex::default() }
     }
     pub(crate) fn execute(
         &self,
-        _router: &crate::RouterCore,
-        _store: &crate::RouterRedbStore,
-        _request: Request,
+        router: &crate::RouterCore,
+        store: &crate::RouterRedbStore,
+        request: Request,
         caller: MigrationCaller,
-        _now: u64,
+        now: u64,
     ) -> Result<Response, ramflux_protocol::custody::CustodyRefusal> {
-        let _ = &self.mesh;
-        drop((caller.publication, caller.source, caller.purpose));
-        Err(ramflux_protocol::custody::CustodyRefusal::Unsupported)
+        use ramflux_protocol::{
+            custody::CustodyRefusal,
+            home_migration::{Action, ActionPayload, AttestRequest, Refusal},
+        };
+        let result = (|| {
+            let _verification = self.node.acquire_migration_verification()?;
+            let now = store.migration_clock_floor(now)?;
+            request
+                .validate_payload_binding()
+                .map_err(|_| NodeCoreError::HomeMigration(Refusal::EvidenceRequired))?;
+            if !caller.purpose.allows(request.control.body.action)
+                || (request.control.body.action != Action::Attest
+                    && request.control.body.audience_node != self.node.node_id())
+            {
+                return Err(NodeCoreError::HomeMigration(Refusal::PinMismatch));
+            }
+            let authority = match caller.purpose {
+                ramflux_protocol::custody::MigrationPurpose::Manage => {
+                    router.verify_migration_possession_authority(&caller.publication, now)?
+                }
+                ramflux_protocol::custody::MigrationPurpose::Read => {
+                    router.verify_custody_possession_authority(&caller.publication, now, false)?
+                }
+            };
+            ramflux_crypto::home_migration::verify_actor(&request.control, &authority, now)
+                .map_err(|_| NodeCoreError::HomeMigration(Refusal::AuthorityUpdateRequired))?;
+            let scope =
+                MigrationExecution { router, store, caller: &caller, authority: &authority, now };
+            match &request.payload {
+                ActionPayload::Attest(payload) => self.attest_owner(
+                    &scope,
+                    &request,
+                    &AttestRequest { control: request.control.clone(), payload: payload.clone() },
+                ),
+                ActionPayload::Prepare(prepare) => self.prepare_owner(&scope, &request, prepare),
+                _ => return Ok(None),
+            }
+            .map(Some)
+        })();
+        drop((request, caller));
+        match result {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => Err(CustodyRefusal::Unsupported),
+            Err(NodeCoreError::HomeMigration(reason)) => {
+                Err(CustodyRefusal::HomeMigration { reason, nack: None })
+            }
+            Err(_) => Err(CustodyRefusal::PersistenceUnavailable),
+        }
     }
 }

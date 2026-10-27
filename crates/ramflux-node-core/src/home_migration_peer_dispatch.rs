@@ -26,6 +26,7 @@ impl RouterCore {
         now: u64,
     ) -> Result<MigrationPeerReply, NodeCoreError> {
         let result = (|| {
+            let _verification = node.acquire_migration_verification()?;
             call.verify(peer, node.node_id(), now)?;
             match call {
                 MigrationPeerCall::Attest { owner, .. } => self
