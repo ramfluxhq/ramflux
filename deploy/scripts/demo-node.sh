@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
-usage() { fail 'usage: demo-node.sh {up|upgrade|rollback|down|status|logs} ENV_FILE [--purge|--remote] [--voice-udp-port PORT]'; }
+usage() { fail 'usage: demo-node.sh {up|upgrade|rollback|recover|down|status|logs} ENV_FILE [--purge|--remote] [--voice-udp-port PORT]'; }
 [ "$#" -ge 2 ] || usage
 command=$1
 env_file=$2
@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
     *) usage ;;
   esac
 done
-case "$command:$flag" in up:|upgrade:|rollback:|down:|down:--purge|status:|status:--remote|logs:) ;; *) usage ;; esac
+case "$command:$flag" in up:|upgrade:|rollback:|recover:|down:|down:--purge|status:|status:--remote|logs:) ;; *) usage ;; esac
 case "$env_file" in /*) ;; *) env_file="$PWD/$env_file" ;; esac
 [ -f "$env_file" ] || fail 'an existing operator env file is required'
 # The operator file is trusted shell configuration, never downloaded or committed.
@@ -99,20 +99,56 @@ case "$command" in up) mkdir -p "$DEMO_DATA_DIR" ;; esac
 state=$(CDPATH='' cd -- "$DEMO_DATA_DIR" && pwd -P)
 [ "$state" != / ] && [ "$state" != "$HOME" ] && [ "$state" != "$repo" ] || fail 'unsafe data directory'
 mkdir "$state.lock" 2>/dev/null || fail 'demo operation already running (check adjacent .lock directory)'
+runtime_mutation_started=0
 cleanup() {
-  rm -f -- "$state/owner.json.pending"
+  result=$?
+  trap - EXIT
+  set +e
+  if [ "$result" -ne 0 ] && [ -f "$state/transaction.pending" ]; then
+    restored_version=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover 2>&1)
+    recovery_result=$?
+    if [ "$recovery_result" -eq 0 ]; then
+      DEMO_VERSION=$restored_version
+      export DEMO_VERSION
+      if [ "$runtime_mutation_started" -eq 1 ]; then
+        owner=$(cat "$state/owner.token")
+        check_prebuilt_images && compose_up no-build && wait_for_services && verify_public_endpoints
+        recovery_result=$?
+      fi
+      if [ "$recovery_result" -eq 0 ]; then
+        python3 "$script_dir/demo-node-config.py" "$repo" "$state" finish-recovery
+        printf 'failed %s automatically restored demo version %s\n' "$command" "$DEMO_VERSION" >&2
+      fi
+    fi
+    if [ "$recovery_result" -ne 0 ]; then
+      if [ "$command" = up ]; then
+        python3 "$script_dir/demo-node-config.py" "$repo" "$state" abort-initial
+        printf 'initial demo up failed before a snapshot was committed; owned state retained for retry\n' >&2
+      else
+        printf 'automatic demo recovery failed; transaction marker retained: %s\n' "$restored_version" >&2
+      fi
+    fi
+  fi
+  [ -f "$state/transaction.pending" ] || rm -f -- "$state/owner.json.pending"
   rmdir "$state.lock"
+  exit "$result"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
-if [ "$command" = up ]; then
-  python3 "$script_dir/demo-node-config.py" "$repo" "$state" "$command"
+if [ "$command" = recover ]; then
+  [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
+  DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
+  export DEMO_VERSION
+elif [ "$command" = up ]; then
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" prepare "$command"
 else
   [ -f "$state/owner.json" ] || fail 'data directory is not owned by this demo tooling'
-  python3 "$script_dir/demo-node-config.py" "$repo" "$state" "$command"
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" prepare "$command"
 fi
 if [ "$command" = upgrade ] || [ "$command" = rollback ]; then
-  DEMO_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["settings"]["DEMO_VERSION"])' "$state/owner.json.pending")
+  version_marker="$state/owner.json.pending"
+  [ "$command" != rollback ] || version_marker="$state/owner.json"
+  DEMO_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["settings"]["DEMO_VERSION"])' "$version_marker")
   export DEMO_VERSION
 fi
 owner=$(cat "$state/owner.token")
@@ -309,43 +345,49 @@ wait_for_services() {
     [ "$health_delay" -le 0 ] || sleep "$health_delay"
   done
 }
+verify_public_endpoints() {
+  # shellcheck disable=SC1091
+  . "$state/identity.env"
+  "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+}
 check_resources
 case "$command" in
-  up|upgrade|rollback)
+  up|upgrade|rollback|recover)
     chmod 700 "$state"
-    RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/bootstrap-ca.sh"
-    RAMFLUX_DEPLOY_DIR="$state" RAMFLUX_NODE_ID="$DEMO_NODE_ID" sh "$script_dir/issue-certs.sh"
-    RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/provision-node.sh"
+    if [ "$command" != rollback ] && [ "$command" != recover ]; then
+      RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/bootstrap-ca.sh"
+      RAMFLUX_DEPLOY_DIR="$state" RAMFLUX_NODE_ID="$DEMO_NODE_ID" sh "$script_dir/issue-certs.sh"
+      RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/provision-node.sh"
     # Service identities and certificate SPIFFE identities must use the same node id.
-    python3 - "$state" "$DEMO_NODE_ID" <<'PY'
+      python3 - "$state" "$DEMO_NODE_ID" <<'PY'
 from pathlib import Path
 import sys
 for config in Path(sys.argv[1], "config").glob("*.toml"):
     config.write_text(config.read_text().replace('node_id = "localhost"', f'node_id = "{sys.argv[2]}"'))
 PY
-    "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
+      "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
     # The signing seed has its own mount, shared only by federation and retention.
-    legacy_seed="$state/certs/federation/node-signing.key"
-    seed="$state/certs/node-identity/node-signing.key"
-    if [ -e "$legacy_seed" ] && [ ! -e "$seed" ]; then
+      legacy_seed="$state/certs/federation/node-signing.key"
+      seed="$state/certs/node-identity/node-signing.key"
+      if [ -e "$legacy_seed" ] && [ ! -e "$seed" ]; then
       mkdir -p "$state/certs/node-identity"
       mv "$legacy_seed" "$seed"
-    elif [ -e "$legacy_seed" ]; then
+      elif [ -e "$legacy_seed" ]; then
       # Two different seeds: never guess which identity is real.
       cmp -s "$legacy_seed" "$seed" || fail "$legacy_seed and $seed differ; keep the seed matching the identity pin"
       rm -f "$legacy_seed"
-    fi
-    chmod 755 "$state/certs/node-identity"
+      fi
+      chmod 755 "$state/certs/node-identity"
     # Containers need to traverse their read-only mounts; the containing state directory stays private.
-    chmod 755 "$state/certs" "$state/config" "$state/secrets" "$state/secrets/gateway-v3" "$state/secrets/federation"
-    for service in gateway router notify federation relay signaling retention; do
-      chmod 755 "$state/certs/$service"
-    done
-    chmod 644 "$state"/config/*.toml "$state"/secrets/gateway-v3/*.json "$state"/secrets/federation/*.json
+      chmod 755 "$state/certs" "$state/config" "$state/secrets" "$state/secrets/gateway-v3" "$state/secrets/federation"
+      for service in gateway router notify federation relay signaling retention; do
+        chmod 755 "$state/certs/$service"
+      done
+      chmod 644 "$state"/config/*.toml "$state"/secrets/gateway-v3/*.json "$state"/secrets/federation/*.json
     # Preserve daemon/helper inputs and supply the separate Compose interpolation names.
     # The keyring is read-only trust material; the relay owns its durable cache in relay-redb.
-    cat "$state/identity.env" > "$state/runtime.env"
-    cat >> "$state/runtime.env" <<ENV
+      cat "$state/identity.env" > "$state/runtime.env"
+      cat >> "$state/runtime.env" <<ENV
 RAMFLUX_NOTIFY_ROUTE_KEY_FILE=/etc/ramflux/mesh/route.key
 RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE=/etc/ramflux/node-identity/node-signing.key
 RAMFLUX_SECRET_GID=$(id -g)
@@ -385,32 +427,40 @@ RAMFLUX_CLIENT_RELAY_SERVER_NAME=ramflux-relay
 RAMFLUX_CLIENT_PREKEY_HTTP_URL=$origin
 RAMFLUX_CLIENT_SIGNALING_TURN_ADDR=$DEMO_HOST:$DEMO_TURN_PORT
 ENV
-    if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
-      cat >> "$state/runtime.env" <<ENV
+      if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+        cat >> "$state/runtime.env" <<ENV
 RAMFLUX_RELAY_VOICE_UDP_ADDR=0.0.0.0:17449
 RAMFLUX_RELAY_VOICE_CONTROL_ADDR=0.0.0.0:17450
 RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT=$DEMO_HOST:$RAMFLUX_DEMO_VOICE_UDP_PORT
 RAMFLUX_RELAY_VOICE_UDP_PORT=$DEMO_BIND_ADDR:$RAMFLUX_DEMO_VOICE_UDP_PORT
 RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450
 ENV
+      fi
+      python3 "$script_dir/compose-env.py" "$state/runtime.env"
     fi
-    python3 "$script_dir/compose-env.py" "$state/runtime.env"
-    if [ "$command" = rollback ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
+    if [ "$command" = rollback ] || [ "$command" = recover ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
       check_prebuilt_images
+      runtime_mutation_started=1
       compose_up no-build
     else
       sh "$script_dir/build-prod-images.sh"
+      runtime_mutation_started=1
       compose_up build
     fi
     wait_for_services
-    if [ "$command" = upgrade ] || [ "$command" = rollback ]; then
-      mv "$state/owner.json.pending" "$state/owner.json"
+    verify_public_endpoints
+    if [ "$command" = recover ]; then
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" finish-recovery
+    else
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" commit "$command"
     fi
     printf 'demo URL: %s\n' "$origin"
     if [ "$command" = upgrade ]; then
-      printf 'rollback command: %s rollback %s\n' "$0" "$env_file"
+      printf 'rollback command: %s/demo-node.sh rollback %s\n' "$script_dir" "$env_file"
     elif [ "$command" = rollback ]; then
       printf 'rolled back demo images to version %s\n' "$DEMO_VERSION"
+    elif [ "$command" = recover ]; then
+      printf 'recovered demo version %s\n' "$DEMO_VERSION"
     fi
     ;;
   status)
