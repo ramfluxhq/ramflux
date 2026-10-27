@@ -476,6 +476,11 @@ impl RamfluxClient {
             references,
         } = context;
         self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
+            if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
+                && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
+            {
+                return Ok(None);
+            }
             if let Some(shared) = shared_group {
                 self.apply_prepared_shared_group(shared, local_target.ok_or_else(|| invalid("group receive target is absent"))?)?;
             }
