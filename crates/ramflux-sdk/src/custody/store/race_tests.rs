@@ -127,3 +127,35 @@ fn custody_legacy_create_after_manifest_check_preserves_wrapped_key_and_unlock()
 fn custody_legacy_create_before_authority_publication_preserves_wrapped_key_and_unlock() -> Result {
     legacy_wins_at(Stage::BeforeAuthorityPublish)
 }
+
+#[test]
+fn custody_reservation_cannot_replace_a_legacy_wrapped_key_before_manifest_publication() -> Result {
+    let root = Root::new()?;
+    let id = "legacy-awaiting-manifest";
+    let capability = crate::bus::custody_setup::test_creation_capability();
+    let mut ceremony = super::super::CreationCeremony::begin(&capability, &root.0, input(id), 100)?;
+    let phrase = ceremony.show_once()?;
+    let positions = ceremony.hidden_challenge()?;
+    let before = finish_prechecked_legacy_create(&root.0, id)?;
+    let path = crate::bus::daemon::local_bus_account_manifest_path(&root.0, id);
+    let manifest = crate::bus::daemon::read_local_bus_account_manifest(&path)?;
+    // Pause legacy completion after its index/database writes but before manifest publication.
+    // Custody must reach reserve_account; the earlier manifest check cannot hide replacement.
+    fs::remove_file(&path)?;
+    assert!(matches!(
+        ceremony.confirm(&words(&phrase, positions)?, &TestVault::default(), 100),
+        Err(SdkError::CustodyAccountConflict)
+    ));
+    assert!(!root.0.join("custody_accounts").join(id).exists());
+    let index = ramflux_storage::AccountIndex::open(&root.0)?;
+    assert_eq!(index.account(id)?, before.row);
+    assert_eq!(index.load_wrapped_db_key(id)?, Some(before.wrapped));
+    assert_eq!(index.known_account_ids()?, vec![id.to_owned()]);
+    crate::bus::daemon::write_local_bus_account_manifest(&root.0, &manifest)?;
+    assert_eq!(fs::read(&path)?, before.manifest);
+    let mut client = RamfluxClient::new();
+    client.open_account_index(&root.0)?;
+    client.unlock_account(id, b"legacy-secret")?;
+    client.verify_active_account_secret(id, b"legacy-secret")?;
+    Ok(())
+}
