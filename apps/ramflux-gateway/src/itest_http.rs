@@ -253,6 +253,13 @@ pub(crate) fn dispatch_protected_itest_request(
                 },
             )?;
         }
+        ("GET", path)
+            if path.starts_with(ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX) =>
+        {
+            let response: Option<ramflux_node_core::CustodyPublication> =
+                router_get_json(router, path)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
         ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
             let response: Option<ramflux_node_core::DeviceManifestResponse> =
                 router_get_json(router, path)?;

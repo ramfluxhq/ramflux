@@ -84,6 +84,9 @@ impl RamfluxClient {
         route: &crate::client::routed::Routing,
         bytes: &[u8],
     ) -> Result<Control, SdkError> {
+        if let Some(consent) = super::native::decode(bytes)? {
+            return self.verify_native_contact_control(entry, route, consent);
+        }
         if bytes.len() > MAX_WIRE_BYTES {
             return Err(invalid("contact request exceeds wire budget"));
         }
@@ -92,6 +95,13 @@ impl RamfluxClient {
         let now = now_unix_timestamp();
         let own = self.owned_device_identity()?;
         let source = self.authenticated_device_identity(entry)?;
+        if self
+            .current_custody_authority(source.root_commitment(), crate::custody::network_now()?)?
+            .is_some()
+        {
+            return Err(invalid("native sender cannot fall back to legacy contact consent"));
+        }
+
         let (actor, target) = if body.kind == Decision::Request {
             (&body.requester_root, &body.target_root)
         } else {

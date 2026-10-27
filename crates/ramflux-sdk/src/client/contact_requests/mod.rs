@@ -9,6 +9,11 @@ mod delivery;
 mod ingress;
 mod messages;
 mod metadata;
+mod native;
+mod native_delivery;
+mod native_history;
+#[cfg(test)]
+pub(crate) mod native_tests;
 mod retention;
 use metadata::Metadata;
 pub(crate) use retention::authority_digest;
@@ -135,9 +140,12 @@ impl RamfluxClient {
         struct HeaderBody {
             schema: String,
         }
-        if !serde_json::from_slice::<Header>(bytes)
-            .is_ok_and(|header| header.body.schema == wire::DOMAIN)
-        {
+        if !serde_json::from_slice::<Header>(bytes).is_ok_and(|header| {
+            matches!(
+                header.body.schema.as_str(),
+                wire::DOMAIN | ramflux_protocol::domain::CONTACT_REQUEST_V2
+            )
+        }) {
             return Ok(false);
         }
         let control = self.verify_contact_control(entry, route, bytes)?;

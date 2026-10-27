@@ -1,30 +1,34 @@
 # Experimental born-v3 networking
 
-Born-v3 creation remains explicitly disabled by default. Creation uses the existing
-local-bus recovery-phrase ceremony: enable `LocalBusConfig.enable_born_v3_creation`,
-show the phrase once, hide it, and confirm the three requested words. Confirmation
-persists local authority and returns `NetworkingPending`; it does not establish a
-network session. Existing account APIs retain their identity profile.
+Born-v3 creation is still explicitly enabled during development with
+`LocalBusConfig.enable_born_v3_creation`. The ordinary
+[account creation ceremony](local_bus_account_creation.md) returns a typed
+unlocked account after its data actor opens, with networking either `live` or
+`networking_pending`. Its passphrase unlocks data independently of primary
+custody. A selected trusted node can be configured later for a pending account.
 
-The explicit Rust SDK entry point is
-`ramflux_sdk::custody::CustodyConnection::connect`. Supply a
-`CustodyNetworkConfig` and an `Arc<dyn PrimaryVault>`. The native SDK currently
-uses TCP with TLS 1.3. The gateway also accepts the same native framing over QUIC.
-The config identifies the account directory/id, device, gateway address, TLS CA
-and server name, and the independently approved receiving-node id/public key and
-receiving node id as the proof audience. A discovery response cannot choose those trust anchors.
-Choose `HomeRelayReceipt` for a gateway, or `DirectExporter` for an explicitly
-configured client-facing router TLS listener. There is no automatic mode downgrade
-or legacy-proof fallback.
+Ordinary native sessions use `GatewaySessionEngine` with
+`GatewaySessionConfig::with_native_custody` and `with_account_identity`. The
+configuration binds the account directory/id, certified device, gateway address,
+TLS CA/server name and independently approved receiving-node id/public key.
+The same automatic QUIC/TCP selection, socket and normal session engine serve
+ordinary features after native proof; a discovery response cannot choose the
+trust anchors, and there is no legacy-proof fallback.
 
-The connection publishes the locally signed record, registers the certified
-branch's prekey bundle, and obtains a fresh authenticated session. Only after all
-three operations succeed does local account state become `Live`. This state means
-registration completed. It grants no restored session: reconnect always performs
-a new TLS handshake and new one-use challenges. Sessions expire within five
-minutes; expiry or a changed authority head requires reconnecting. Selecting a
-born-v3 account on `RamfluxClient` does not authorize its legacy session methods.
-Use the explicit custody connection for the native operations.
+Native authentication publishes the locally signed authority, registers the real
+branch's signed prekeys and obtains a fresh authenticated session. A private
+one-use gateway handoff binds the normal session to that exact verified head,
+device, epoch and remaining monotonic lifetime. Each ordinary operation rechecks
+current head/capabilities. Data unlock itself neither loads primary credentials
+nor manufactures a legacy identity root. Loading a real branch for networking
+also installs its signer for ordinary account events and its private prekeys for
+the persistent ordinary X3DH/ratchet stack.
+
+Local `Live` means registration completed; it is not a restored session grant.
+Reconnect authenticates a new TLS connection with new one-use challenges.
+Sessions expire within five minutes; expiry or a changed head requires reconnect.
+The earlier explicit `CustodyConnection` experiment remains available only until
+its retirement during v3-only integration; normal clients use the ordinary stack.
 
 `send_dm`, `receive_dm`, and `ack_dm` are a temporary experimental path and
 require the separate explicit `allow_experimental_native_dm: true` setting.
@@ -145,6 +149,54 @@ the whole identity registry. Prefix receipts retain at most the current/previous
 day; the global cumulative count remains durable. Principal names remain bound
 to their first authenticated root even after compromise or abandonment; a new
 anchor must choose a different name. Publication is not an administrative release.
+
+## Ordinary native contact consent
+
+Contact requests, acceptance and decline use the exact
+`ramflux.identity.contact_request.v2` envelope from the
+[wire specification](root_key_custody_wire.md#contact-consent-v2). The certified
+self-signing key approves an intent independently of the current branch's
+transport signature. Data unlock or branch possession alone cannot create that
+approval. An unavailable primary credential leaves a delivery intent pending;
+there is no legacy signer fallback. The sender persists the signed public intent
+for retries and rechecks its endpoints, certificate range, current branch keys,
+capability and lifetime before reuse.
+
+An encrypted request uses the ordinary X3DH/ratchet control carrier. For a
+stranger, a speculative decrypt runs inside a managed rollback transaction;
+no speculative directory facts or ratchet counters survive. The receiver then
+resolves any delayed authority outside the writer transaction. Endpoint, lifetime,
+transport branch and primary-signature checks precede that lookup. The final
+receive transaction decrypts again and verifies the exact historical record plus
+current pinned authority before projecting consent and consuming pair counters.
+A retransmitted committed envelope uses its durable receipt. Tampered requests
+cannot retain stranger metadata or advance receive replay state.
+
+`GET /mvp1/custody-history/<account_anchor>/<record_hash>` returns exactly the
+requested public publication or null. It never substitutes the current record
+for a historical hash. Current fences still apply; historical authority grants
+only the delayed-consent exception, never a current session, enrollment or device
+capability. A newer revision with the same certified range and unchanged sending
+branch can preserve consent. A changed range/certificate or revoked branch
+invalidates it.
+
+Directories retain superseded records for at least 605700 seconds after
+supersession. Incremental transactional history is bounded to 4096 records and
+64 MiB per account, and 65536 records and 1 GiB per node. Admission at capacity
+returns a typed capacity failure atomically with the unchanged previous head;
+unexpired authoritative records are never evicted. The ordered expiry index
+prunes at most 256 expired records per changed publication. Records, accounting
+and expiry survive restart; process loss cannot release an unexpired retention
+obligation. Identical publication remains a no-op. Current authority pins and
+fences do not expire with history.
+
+The SDK's separate public payload cache is evictable: at most 256 records,
+32 MiB total and eight records per actor. Cache eviction never removes durable
+mode/head/denial pins; a miss requires an exact-hash fetch or a typed unavailable
+result. Historical cache misses have per-actor and account-wide lookup budgets.
+Unaccepted requester retirement removes full directory payloads and device-pair
+state while preserving native rollback and mode pins. Accepted relationships
+retain the normal verified directory authority.
 
 ## Integration fixture and production boundary
 

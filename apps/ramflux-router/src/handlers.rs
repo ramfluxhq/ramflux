@@ -123,6 +123,12 @@ fn handle_itest_directory_request(
             let response = handle_mvp1_prekey_fetch(path, router.state(), router.store())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
+        ("GET", path)
+            if path.starts_with(ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX) =>
+        {
+            let response = handle_custody_consent_history(path, router)?;
+            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+        }
         ("GET", path) if path.starts_with("/mvp1/principal-manifest/") => {
             ramflux_node_core::write_itest_json_response(
                 stream,
@@ -530,6 +536,12 @@ fn handle_mesh_device_lookup(
 ) -> Option<anyhow::Result<MeshResponse>> {
     let state = router.state();
     let value = match (method, path) {
+        ("GET", path)
+            if path.starts_with(ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX) =>
+        {
+            handle_custody_consent_history(path, router).and_then(|r| Ok(serde_json::to_value(r)?))
+        }
+
         ("GET", path) if path.starts_with("/mvp1/prekey/") => {
             handle_mvp1_prekey_fetch(path, state, router.store())
                 .and_then(|r| Ok(serde_json::to_value(r)?))
@@ -1032,6 +1044,24 @@ fn handle_mvp1_prekey_fetch(
         "router mvp1 prekey fetch outcome"
     );
     Ok(response)
+}
+
+fn handle_custody_consent_history(
+    path: &str,
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<Option<ramflux_node_core::CustodyPublication>> {
+    let selector = path
+        .strip_prefix(ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("invalid custody history path"))?;
+    let (anchor, hash) = selector
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid custody history selector"))?;
+    Ok(router.state().custody_consent_history(
+        anchor,
+        hash,
+        ramflux_node_core::now_unix_seconds(),
+        router.store(),
+    )?)
 }
 
 fn is_identity_manifest_path(path: &str) -> bool {

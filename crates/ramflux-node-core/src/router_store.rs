@@ -31,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod custody;
 mod custody_accounts;
+mod custody_history;
 mod expiry_index;
 mod retention;
 

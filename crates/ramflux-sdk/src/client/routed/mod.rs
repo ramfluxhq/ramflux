@@ -10,8 +10,11 @@ mod auth;
 pub(crate) use auth::verify_sender_record;
 pub(crate) mod bootstrap_sequence;
 mod committed;
+mod contact_preview;
 mod context;
 pub(crate) mod control;
+#[cfg(test)]
+mod native_contact_tests;
 mod object_slot;
 mod project;
 pub(crate) use committed::{conversation_watermark, object_watermark};

@@ -255,8 +255,8 @@ fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys()
         assert!(found.reason_code.is_none());
         let found = found.manifest.ok_or("authenticated native manifest")?;
         assert!(found.signed_device_set.is_none());
-        assert!(found.devices.is_empty());
-        assert_eq!(found.custody.ok_or("native evidence")?, manifest);
+        assert_eq!(found.devices, Vec::<crate::mvp1_registry::DeviceManifestEntry>::new());
+        assert_eq!(*found.custody.ok_or("native evidence")?, manifest);
         let mut forged = request;
         forged.bundle.device_identity_ed25519_public =
             ramflux_crypto::fixture_public_key_base64url();

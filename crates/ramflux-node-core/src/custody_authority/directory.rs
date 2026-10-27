@@ -98,6 +98,28 @@ impl IdentityRegistry {
 }
 
 impl super::RouterCore {
+    /// Resolve an exact retained public head for delayed consent, never for current authorization.
+    /// # Errors
+    /// Rejects fenced current authority, malformed selectors and durable store failures.
+    pub fn custody_consent_history(
+        &self,
+        anchor: &str,
+        record_hash: &str,
+        now: u64,
+        store: &super::RouterRedbStore,
+    ) -> Result<Option<CustodyPublication>, NodeCoreError> {
+        let Some(current) = self.custody_record(anchor, now)? else {
+            return Ok(None);
+        };
+        if ramflux_protocol::custody::object_hash(&current.record)
+            .map_err(|e| super::reject(&e.to_string()))?
+            == record_hash
+        {
+            return Ok(Some(current));
+        }
+        store.custody_historical_publication(anchor, record_hash, now)
+    }
+
     /// Fetch native current authority and registered prekeys for an account anchor.
     /// # Errors
     /// Rejects fenced authority, substituted prekeys, excessive response size and store failure.

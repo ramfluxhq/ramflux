@@ -56,7 +56,9 @@ impl RamfluxClient {
             let mut state =
                 db.load_actor_state::<RetainedAuthority>(&state_key)?.unwrap_or_default();
             let outcome = state.pins.observe(&verified)?;
-            if outcome == PinOutcome::Advanced {
+            if outcome == PinOutcome::Advanced
+                || (outcome == PinOutcome::Unchanged && state.publication.is_none())
+            {
                 state.publication = Some(manifest.publication.clone());
                 state.custodian.clone_from(&manifest.custodian_publication);
             }
@@ -183,6 +185,47 @@ impl RamfluxClient {
         )?;
         state.pins.require_current(&verified)?;
         Ok(Some(verified))
+    }
+
+    pub(crate) fn retire_custody_directory_payload(&self, anchor: &str) -> Result<(), SdkError> {
+        let key = key(anchor)?;
+        let mut state = self
+            .account_db()?
+            .load_actor_state::<RetainedAuthority>(&key)?
+            .ok_or_else(|| invalid("retired custody pins absent"))?;
+        state.publication = None;
+        state.custodian = None;
+        self.account_db()?.persist_actor_state(&key, &state)?;
+        Ok(())
+    }
+
+    pub(crate) fn current_custody_evidence(
+        &self,
+        anchor: &str,
+        now: u64,
+    ) -> Result<Option<ramflux_protocol::custody::CustodyAuthority>, SdkError> {
+        let Some(current) = self.current_custody_authority(anchor, now)? else {
+            return Ok(None);
+        };
+        let state = self
+            .account_db()?
+            .load_actor_state::<RetainedAuthority>(&key(anchor)?)?
+            .ok_or_else(|| invalid("custody authority absent"))?;
+        let publication = state.publication.ok_or_else(|| invalid("custody publication absent"))?;
+        let master = &current.envelope().body.master_certificate.body;
+        let custodian_publication =
+            if master.custody_kind == ramflux_protocol::custody::CustodyKind::ExternalHuman {
+                self.account_db()?
+                    .load_actor_state::<RetainedAuthority>(&key(&master
+                        .primary_device_ref
+                        .account_anchor)?)?
+                    .and_then(|state| state.publication)
+                    .ok_or_else(|| invalid("human custodian publication absent"))?
+                    .into()
+            } else {
+                None
+            };
+        Ok(Some(ramflux_protocol::custody::CustodyAuthority { publication, custodian_publication }))
     }
 
     pub(super) fn require_custody_device(

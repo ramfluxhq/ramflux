@@ -308,6 +308,25 @@ impl BornAccount {
             .transpose()
     }
 
+    pub(crate) fn sign_contact_consent(
+        &self,
+        vault: &dyn PrimaryVault,
+        current: &VerifiedRecord,
+        body: ramflux_protocol::custody::ContactConsentV2,
+        now: u64,
+    ) -> Result<Envelope<ramflux_protocol::custody::ContactConsentV2>, SdkError> {
+        if current.envelope().body.account_anchor != self.record().body.account_anchor {
+            return Err(invalid());
+        }
+        let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
+        if primary.public_key()
+            != current.envelope().body.master_certificate.body.self_signing_public_key
+        {
+            return Err(SdkError::CustodyVaultUnavailable);
+        }
+        Ok(primary.sign_contact_consent(current, body, now)?)
+    }
+
     pub(crate) fn credentials(
         &self,
         vault: &dyn PrimaryVault,

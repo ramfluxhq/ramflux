@@ -110,3 +110,59 @@ fn custody_registry_rejects_legacy_publication_after_native_genesis() -> TestRes
     }
     Ok(())
 }
+
+#[test]
+fn custody_consent_history_retains_exact_superseded_heads_across_restart_and_expires() -> TestResult
+{
+    let path = temp_store_path("custody-consent-history")?;
+    let original = native()?;
+    let now = original.record.body.issued_at;
+    let anchor = original.record.body.account_anchor.clone();
+    let old_hash = ramflux_protocol::custody::object_hash(&original.record)?;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([2; 32]));
+    let mut next = original.clone();
+    let mut body = original.record.body.clone();
+    body.device_set_epoch += 1;
+    body.issued_at += 1;
+    body.previous_record_hash = Some(old_hash.clone());
+    body.profile.display_name = "Renamed Human".into();
+    next.record = primary.sign_record(body)?;
+    let next_hash = ramflux_protocol::custody::object_hash(&next.record)?;
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        let router = RouterCore::new();
+        store.save_router(&router)?;
+        router.publish_custody_record(&original, now, &store)?;
+        assert_eq!(
+            router.custody_consent_history(&anchor, &old_hash, now, &store)?,
+            Some(original.clone())
+        );
+        router.publish_custody_record(&next, now + 1, &store)?;
+        let writes = store.custody_publication_write_count();
+        router.publish_custody_record(&next, now + 1, &store)?;
+        assert_eq!(store.custody_publication_write_count(), writes);
+    }
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        let router = store.load_router()?.ok_or("router")?;
+        assert_eq!(
+            router.custody_consent_history(&anchor, &old_hash, now + 2, &store)?,
+            Some(original.clone())
+        );
+        assert_eq!(
+            router.custody_consent_history(&anchor, &next_hash, now + 2, &store)?,
+            Some(next)
+        );
+        let unknown = ramflux_protocol::encode_base64url([87; 32]);
+        assert!(router.custody_consent_history(&anchor, &unknown, now + 2, &store)?.is_none());
+        assert!(router.custody_consent_history(&anchor, "malformed", now + 2, &store).is_err());
+        let expires = now + 1 + 604_800 + 900;
+        assert_eq!(
+            store.custody_historical_publication(&anchor, &old_hash, expires - 1)?,
+            Some(original)
+        );
+        assert!(store.custody_historical_publication(&anchor, &old_hash, expires)?.is_none());
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
