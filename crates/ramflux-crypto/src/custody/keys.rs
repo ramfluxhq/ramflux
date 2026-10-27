@@ -119,6 +119,33 @@ impl SelfSigningKey {
     }
 }
 
+impl SelfSigningKey {
+    /// Approve consent under the current certified management key for this exact sending branch.
+    /// Callers must enforce current durable head pins before invoking this operation.
+    /// # Errors
+    /// Rejects unrelated authority, wrong hashes/endpoints, invalid branch leases and body data.
+    pub fn sign_contact_consent(
+        &self,
+        current: &super::VerifiedRecord,
+        body: custody::ContactConsentV2,
+        now: u64,
+    ) -> Result<custody::Envelope<custody::ContactConsentV2>, CryptoError> {
+        super::contact::validate_authority(&body, current, current, &body.sending_device_ref, now)?;
+        if self.public_key()
+            != current.envelope().body.master_certificate.body.self_signing_public_key
+        {
+            return Err(super::validate::reject(
+                "contact consent requires certified primary signer",
+            ));
+        }
+        let bytes = custody::signing_bytes(domain::CONTACT_REQUEST_V2, &body)?;
+        Ok(custody::Envelope {
+            body,
+            signature: ramflux_protocol::encode_base64url(self.0.sign(&bytes).to_bytes()),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
