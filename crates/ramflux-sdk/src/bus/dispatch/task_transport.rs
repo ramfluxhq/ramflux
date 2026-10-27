@@ -7,6 +7,10 @@ use crate::client::task::{Delivery, carrier::Carrier, invalid};
 use crate::prelude::*;
 use serde_json::{Value, json};
 use std::future::Future;
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
 // Preparation refreshes verified own and peer directories before sealing. Keep
 // task couriers bounded while allowing normal latency on CPU-constrained hosts.
@@ -22,7 +26,7 @@ impl PreparationBudget {
         Self::new(TASK_COURIER_PREPARATION_BUDGET)
     }
 
-    fn new(duration: Duration) -> Self {
+    pub(super) fn new(duration: Duration) -> Self {
         Self { deadline: tokio::time::Instant::now() + duration }
     }
 
@@ -30,9 +34,12 @@ impl PreparationBudget {
         tokio::time::Instant::now() >= self.deadline
     }
 
-    fn next_timeout(&self) -> Option<Duration> {
+    fn next_timeout(&self) -> Option<(Duration, bool)> {
         let remaining = self.deadline.saturating_duration_since(tokio::time::Instant::now());
-        (!remaining.is_zero()).then_some(remaining.min(TASK_PREPARATION_TIMEOUT))
+        (!remaining.is_zero()).then_some((
+            remaining.min(TASK_PREPARATION_TIMEOUT),
+            remaining < TASK_PREPARATION_TIMEOUT,
+        ))
     }
 }
 
@@ -47,14 +54,25 @@ pub(super) async fn await_preparation<T>(
     budget: &PreparationBudget,
     deferred: &'static str,
 ) -> Result<Preparation<T>, SdkError> {
-    let Some(timeout) = budget.next_timeout() else {
+    let Some((timeout, budget_limited)) = budget.next_timeout() else {
         return Ok(Preparation::Deferred);
     };
-    if let Ok(result) = tokio::time::timeout(timeout, future).await {
-        result.map(Preparation::Ready)
-    } else {
-        tracing::debug!(deferred, "task courier preparation deferred without retry charge");
-        Ok(Preparation::Deferred)
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(value)) => Ok(Preparation::Ready(value)),
+        Ok(Err(SdkError::ContactRequestCapacity(reason))) => {
+            tracing::debug!(
+                deferred,
+                reason,
+                "task courier preparation deferred without retry charge"
+            );
+            Ok(Preparation::Deferred)
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) if budget_limited => {
+            tracing::debug!(deferred, "task courier cycle budget exhausted without retry charge");
+            Ok(Preparation::Deferred)
+        }
+        Err(_) => Err(SdkError::InboundPending(deferred.to_owned())),
     }
 }
 
@@ -136,6 +154,10 @@ pub(super) async fn prepare(
     thread: &Value,
     mode: Mode<'_>,
 ) -> Result<Vec<SealedDelivery>, SdkError> {
+    #[cfg(test)]
+    if let Some(delay) = thread["test_preparation_delay_ms"].as_u64() {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let mut own_targets = own_targets(account, &engine.config).await?;
@@ -154,7 +176,7 @@ pub(super) async fn prepare(
                 .await?,
             );
         } else {
-            peers = direct_targets(account, &engine.config, thread).await?;
+            peers = task_direct_targets(account, &engine.config, thread).await?;
         }
     }
     let intent = matches!(mode, Mode::Event)
@@ -353,8 +375,15 @@ pub(crate) async fn drain_confirmations(
     use crate::client::task::control::{AckJob, ForwardJob};
     let now = now_unix_timestamp();
     let mut sent = 0;
-    let jobs =
+    let mut jobs =
         account.client.account_db()?.task_record_page::<AckJob>("task/ack/", "task/ack/", 65)?;
+    jobs.sort_by(|left, right| {
+        (left.1.next_at, left.1.attempts, &left.0).cmp(&(
+            right.1.next_at,
+            right.1.attempts,
+            &right.0,
+        ))
+    });
     for (key, mut job) in jobs.into_iter().filter(|(_, j)| j.next_at <= now).take(2) {
         if job.attempts >= 8 || now.saturating_sub(job.created_at) > 600 {
             account.client.account_db()?.delete_task_state(&key)?;
@@ -382,11 +411,18 @@ pub(crate) async fn drain_confirmations(
             account.client.account_db()?.persist_actor_state(&key, &job)?;
         }
     }
-    let jobs = account.client.account_db()?.task_record_page::<ForwardJob>(
+    let mut jobs = account.client.account_db()?.task_record_page::<ForwardJob>(
         "task/forward/",
         "task/forward/",
         65,
     )?;
+    jobs.sort_by(|left, right| {
+        (left.1.next_at, left.1.attempts, &left.0).cmp(&(
+            right.1.next_at,
+            right.1.attempts,
+            &right.0,
+        ))
+    });
     for (key, mut job) in jobs.into_iter().filter(|(_, j)| j.next_at <= now).take(2) {
         if job.attempts >= 8 || now.saturating_sub(job.created_at) > 600 {
             account.client.account_db()?.delete_task_state(&key)?;
@@ -449,6 +485,23 @@ pub(super) async fn direct_targets(
     gateway: &GatewaySessionConfig,
     thread: &Value,
 ) -> Result<Vec<Target>, SdkError> {
+    direct_targets_with_policy(account, gateway, thread, false).await
+}
+
+pub(super) async fn task_direct_targets(
+    account: &LocalBusAccountState,
+    gateway: &GatewaySessionConfig,
+    thread: &Value,
+) -> Result<Vec<Target>, SdkError> {
+    direct_targets_with_policy(account, gateway, thread, true).await
+}
+
+async fn direct_targets_with_policy(
+    account: &LocalBusAccountState,
+    gateway: &GatewaySessionConfig,
+    thread: &Value,
+    bounded_manifest_worker: bool,
+) -> Result<Vec<Target>, SdkError> {
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let ids = thread["participants"]
@@ -487,7 +540,11 @@ pub(super) async fn direct_targets(
             .recipient_prekey_url
             .as_deref()
             .ok_or_else(|| invalid("task federated peer prekey URL missing"))?;
-        let manifest = fetch_federated_manifest(url, commitment).await?;
+        let manifest = if bounded_manifest_worker {
+            fetch_federated_manifest(url, commitment).await?
+        } else {
+            crate::client::contact::fetch_verified_device_manifest_from_url(url, commitment)?
+        };
         client.persist_identity_directory(&manifest)?;
         manifest
     } else {
@@ -517,11 +574,79 @@ async fn fetch_federated_manifest(
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
     let url = url.to_owned();
     let commitment = commitment.to_owned();
+    let flight = loop {
+        match reserve_manifest_flight(&url)? {
+            ManifestReservation::Wait(flight) => {
+                let notified = flight.complete.notified();
+                if !flight.finished.load(Ordering::Acquire) {
+                    notified.await;
+                }
+            }
+            ManifestReservation::Start(flight) => break flight,
+        }
+    };
     tokio::task::spawn_blocking(move || {
-        crate::client::contact::fetch_verified_device_manifest_from_url(&url, &commitment)
+        let result = crate::client::contact::fetch_verified_device_manifest_from_url_bounded(
+            &url,
+            &commitment,
+            TASK_PREPARATION_TIMEOUT,
+        );
+        finish_manifest_flight(&url, &flight);
+        result
     })
     .await
     .map_err(|error| SdkError::LocalBus(format!("federated manifest worker failed: {error}")))?
+}
+
+const MAX_MANIFEST_WORKERS: usize = 4;
+
+struct ManifestFlight {
+    complete: tokio::sync::Notify,
+    finished: std::sync::atomic::AtomicBool,
+}
+
+enum ManifestReservation {
+    Start(Arc<ManifestFlight>),
+    Wait(Arc<ManifestFlight>),
+}
+
+fn manifest_flights() -> &'static Mutex<std::collections::HashMap<String, Arc<ManifestFlight>>> {
+    static FLIGHTS: OnceLock<Mutex<std::collections::HashMap<String, Arc<ManifestFlight>>>> =
+        OnceLock::new();
+    FLIGHTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn manifest_worker_count() -> &'static AtomicUsize {
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    &COUNT
+}
+
+fn reserve_manifest_flight(url: &str) -> Result<ManifestReservation, SdkError> {
+    let mut flights = manifest_flights().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(flight) = flights.get(url) {
+        return Ok(ManifestReservation::Wait(Arc::clone(flight)));
+    }
+    manifest_worker_count()
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < MAX_MANIFEST_WORKERS).then_some(count + 1)
+        })
+        .map_err(|_| SdkError::ContactRequestCapacity("manifest worker capacity is full".into()))?;
+    let flight = Arc::new(ManifestFlight {
+        complete: tokio::sync::Notify::new(),
+        finished: std::sync::atomic::AtomicBool::new(false),
+    });
+    flights.insert(url.to_owned(), Arc::clone(&flight));
+    Ok(ManifestReservation::Start(flight))
+}
+
+fn finish_manifest_flight(url: &str, flight: &Arc<ManifestFlight>) {
+    let mut flights = manifest_flights().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if flights.get(url).is_some_and(|current| Arc::ptr_eq(current, flight)) {
+        flights.remove(url);
+        manifest_worker_count().fetch_sub(1, Ordering::AcqRel);
+    }
+    flight.finished.store(true, Ordering::Release);
+    flight.complete.notify_waiters();
 }
 
 pub(super) async fn own_targets(

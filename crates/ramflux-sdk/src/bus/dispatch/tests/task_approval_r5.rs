@@ -136,6 +136,108 @@ fn decide(human: &LocalBusAccountState, packet: &Packet, approved: bool) -> Case
         .ok_or_else(|| "decision missing".into())
 }
 
+#[tokio::test(start_paused = true)]
+async fn r9_cycle_budget_defers_but_item_timeout_charges_stored_decision_jobs() -> Case {
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        Box::pin(async {
+            let (root, mut agent, mut human) = pair("courier-timeout-accounting-r9")?;
+            open_named(&human, &agent, "task-a", "grant-a")?;
+            open_named(&human, &agent, "task-b", "grant-b")?;
+            pending(&mut agent, "approval-a", "grant-a")?;
+            pending(&mut agent, "approval-b", "grant-b")?;
+            let request = request_job(&agent, "task-a")?;
+            let other_request = request_job(&agent, "task-b")?;
+            let decision = decide(&human, &request.packet, true)?;
+            let other_decision = decide(&human, &other_request.packet, true)?;
+            let id = decision.packet.id()?;
+            let other_id = other_decision.packet.id()?;
+            let storage = key("approval_decision_out", &id);
+            let other_storage = key("approval_decision_out", &other_id);
+            let mut thread = human
+                .client
+                .account_db()?
+                .client_record("conversation", "thread")?
+                .ok_or("conversation")?;
+            thread["test_preparation_delay_ms"] = json!(6_000);
+            human.client.account_db()?.persist_client_record("conversation", "thread", &thread)?;
+            let receipt_before =
+                human.client.task_approval_receipt(&id)?.ok_or("initial receipt")?;
+
+            let short_budget = crate::bus::dispatch::task_transport::PreparationBudget::new(
+                Duration::from_secs(3),
+            );
+            assert_eq!(drive_with_budget(&mut human, &short_budget).await?, 0);
+            let deferred: Job =
+                human.client.account_db()?.load_actor_state(&storage)?.ok_or("deferred job")?;
+            let other_deferred: Job = human
+                .client
+                .account_db()?
+                .load_actor_state(&other_storage)?
+                .ok_or("other deferred job")?;
+            assert_eq!(deferred.attempts, 0);
+            assert_eq!(deferred.next_at, 0);
+            assert_eq!(other_deferred.attempts, 0);
+            assert_eq!(other_deferred.next_at, 0);
+            let receipt_after =
+                human.client.task_approval_receipt(&id)?.ok_or("deferred receipt")?;
+            assert_eq!(receipt_after.delivery_state, receipt_before.delivery_state);
+            assert_eq!(receipt_after.reason_code, receipt_before.reason_code);
+            assert_eq!(receipt_after.revision, receipt_before.revision);
+
+            for _ in 0..2 {
+                let budget =
+                    crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
+                assert_eq!(drive_with_budget(&mut human, &budget).await?, 0);
+            }
+            let first: Job = human
+                .client
+                .account_db()?
+                .load_actor_state(&storage)?
+                .ok_or("first charged job")?;
+            let second: Job = human
+                .client
+                .account_db()?
+                .load_actor_state(&other_storage)?
+                .ok_or("second charged job")?;
+            assert_eq!((first.attempts, second.attempts), (1, 1));
+            let mut parked = second;
+            parked.next_at = i64::MAX;
+            human.client.account_db()?.persist_actor_state(&other_storage, &parked)?;
+
+            for expected_attempts in 2..=8 {
+                let mut job: Job =
+                    human.client.account_db()?.load_actor_state(&storage)?.ok_or("retry job")?;
+                job.next_at = 0;
+                human.client.account_db()?.persist_actor_state(&storage, &job)?;
+                let budget =
+                    crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
+                assert_eq!(drive_with_budget(&mut human, &budget).await?, 0);
+                let retried: Job =
+                    human.client.account_db()?.load_actor_state(&storage)?.ok_or("charged job")?;
+                assert_eq!(retried.attempts, expected_attempts);
+                assert!(retried.next_at > now_unix_timestamp());
+            }
+            let receipt = human.client.task_approval_receipt(&id)?.ok_or("failure receipt")?;
+            assert_eq!(
+                receipt.delivery_state,
+                crate::client::task::approval_retention::DeliveryState::Failed
+            );
+            assert_eq!(
+                receipt.reason_code,
+                Some(crate::client::task::approval_retention::DeliveryReason::RetryExhausted)
+            );
+            drop(human);
+            drop(agent);
+            std::fs::remove_dir_all(root)?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        }),
+    )
+    .await
+    .map_err(|_| "stored decision timeout regression exceeded its outer timeout")??;
+    Ok(())
+}
+
 #[test]
 fn r5_canonically_identical_decisions_apply_the_executors_original_request_and_do_not_wedge_other_grants()
 -> Case {

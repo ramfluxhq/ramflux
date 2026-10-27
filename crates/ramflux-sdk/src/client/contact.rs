@@ -996,6 +996,24 @@ pub(crate) fn fetch_verified_device_manifest_from_url(
     Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
 
+pub(crate) fn fetch_verified_device_manifest_from_url_bounded(
+    manifest_url: &str,
+    identity_commitment: &str,
+    total_timeout: Duration,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let manifest: Option<SdkDeviceManifestResponse> =
+        crate::prekey::sdk_http_get_json_with_deadline(
+            manifest_url,
+            &format!("/mvp1/device-manifest/{identity_commitment}"),
+            total_timeout,
+        )?;
+    let manifest = manifest.ok_or_else(|| {
+        SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
+    })?;
+    verify_device_manifest(&manifest, identity_commitment)?;
+    Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
+}
+
 /// # Errors
 /// Returns an error when the device manifest is missing, fails verification, or does not contain
 /// the expected active device.

@@ -4,7 +4,8 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::ToSocketAddrs;
 
 const SDK_HTTP_TIMEOUT: Duration = Duration::from_mins(1);
 
@@ -278,6 +279,102 @@ where
     sdk_http_json_request(base_url, request.as_bytes(), None)
 }
 
+pub(crate) fn sdk_http_get_json_with_deadline<R>(
+    base_url: &str,
+    path: &str,
+    total_timeout: Duration,
+) -> Result<R, SdkError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        sdk_http_host_port(base_url)?
+    );
+    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), total_timeout)
+}
+
+fn sdk_http_json_request_with_deadline<R>(
+    base_url: &str,
+    request_head: &[u8],
+    total_timeout: Duration,
+) -> Result<R, SdkError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let started = std::time::Instant::now();
+    let deadline = started + total_timeout;
+    let host_port = sdk_http_host_port(base_url)?;
+    let addresses = host_port.to_socket_addrs()?.collect::<Vec<_>>();
+    let mut last_error = None;
+    let mut stream = None;
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match std::net::TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(2)))
+        {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        last_error.unwrap_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "SDK HTTP connect deadline expired")
+        })
+    })?;
+    let mut stream = DeadlineStream { stream, deadline };
+    stream.write_all(request_head)?;
+    stream.flush()?;
+    let (status_line, body) = read_sdk_http_response(&mut stream)?;
+    if !status_line.contains(" 200 ") {
+        return Err(SdkError::LocalBus(format!(
+            "SDK HTTP request failed: {status_line}: {}",
+            String::from_utf8_lossy(&body)
+        )));
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+struct DeadlineStream {
+    stream: std::net::TcpStream,
+    deadline: std::time::Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> std::io::Result<Duration> {
+        let remaining = self.deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "SDK HTTP deadline expired"))
+        } else {
+            Ok(remaining)
+        }
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.flush()
+    }
+}
+
 pub(crate) fn sdk_http_json_request<R>(
     base_url: &str,
     request_head: &[u8],
@@ -305,7 +402,7 @@ where
     Ok(serde_json::from_slice(&body)?)
 }
 
-fn read_sdk_http_response(stream: &mut std::net::TcpStream) -> Result<(String, Vec<u8>), SdkError> {
+fn read_sdk_http_response(stream: &mut impl Read) -> Result<(String, Vec<u8>), SdkError> {
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
     reader.read_line(&mut status_line)?;

@@ -10,6 +10,11 @@ use super::*;
 use crate::bus::runtime_tests;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
+fn manifest_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 #[tokio::test(start_paused = true)]
 async fn confirmation_preparation_allows_slow_verified_directory_refresh() {
     let outcome = tokio::time::timeout(Duration::from_secs(10), async {
@@ -29,6 +34,39 @@ async fn confirmation_preparation_allows_slow_verified_directory_refresh() {
         matches!(outcome, Ok(Ok(super::Preparation::Ready(())))),
         "a slow verified directory refresh must remain deliverable"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_item_timeout_is_charged_while_short_cycle_budget_is_deferred() {
+    let charged = tokio::time::timeout(Duration::from_secs(10), async {
+        let budget = super::PreparationBudget::for_sync_cycle();
+        super::await_preparation(
+            async {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                Ok::<_, SdkError>(())
+            },
+            &budget,
+            "charged preparation timeout",
+        )
+        .await
+    })
+    .await;
+    assert!(matches!(charged, Ok(Err(SdkError::InboundPending(_)))));
+
+    let deferred = tokio::time::timeout(Duration::from_secs(10), async {
+        let budget = super::PreparationBudget::new(Duration::from_secs(3));
+        super::await_preparation(
+            async {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                Ok::<_, SdkError>(())
+            },
+            &budget,
+            "budget-limited preparation",
+        )
+        .await
+    })
+    .await;
+    assert!(matches!(deferred, Ok(Ok(super::Preparation::Deferred))));
 }
 
 #[tokio::test(start_paused = true)]
@@ -78,6 +116,7 @@ async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
     use std::sync::mpsc;
 
     tokio::time::timeout(Duration::from_secs(10), async {
+        let _guard = manifest_test_lock().lock().await;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
@@ -97,7 +136,10 @@ async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
             "task federated manifest preparation deferred",
         )
         .await;
-        assert!(matches!(outcome, Ok(super::Preparation::Deferred)));
+        assert!(
+            !matches!(outcome, Ok(super::Preparation::Ready(_))),
+            "a stalled fetch must either exhaust the cycle budget or report its item timeout"
+        );
         assert!(started.elapsed() < Duration::from_secs(7));
         accepted_rx.recv_timeout(Duration::from_secs(1))?;
         release_tx.send(())?;
@@ -106,6 +148,42 @@ async fn stalled_federated_manifest_fetch_respects_the_preparation_deadline()
     })
     .await
     .map_err(|_| "stalled manifest test exceeded its outer timeout")??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_stalled_manifest_fetches_never_exceed_the_global_worker_cap()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::net::TcpListener;
+
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let _guard = manifest_test_lock().lock().await;
+        let listeners =
+            (0..12).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<Result<Vec<_>, _>>()?;
+        let urls = listeners
+            .iter()
+            .map(|listener| listener.local_addr().map(|address| format!("http://{address}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut jobs = tokio::task::JoinSet::new();
+        for (index, url) in urls.into_iter().enumerate() {
+            jobs.spawn(async move {
+                super::fetch_federated_manifest(&url, &format!("stalled-{index}")).await
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire) <= 4);
+        let mut capacity_deferrals = 0;
+        while let Some(result) = jobs.join_next().await {
+            if matches!(result?, Err(SdkError::ContactRequestCapacity(_))) {
+                capacity_deferrals += 1;
+            }
+        }
+        assert!(capacity_deferrals >= 8, "excess stalled fetches must be deferred");
+        drop(listeners);
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await
+    .map_err(|_| "manifest worker cap regression exceeded its outer timeout")??;
     Ok(())
 }
 
@@ -200,11 +278,83 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
         before + 1,
         "over-cap rejection must precede sealing and submission"
     );
+    drain_healthy_confirmation_jobs(&mut source, &c).await?;
     directory.abort();
     drop(peers);
     drop(source);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+async fn drain_healthy_confirmation_jobs(
+    source: &mut LocalBusAccountState,
+    carrier: &Carrier,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (ack_key, forward_key) = store_healthy_confirmation_jobs(source, carrier)?;
+    let budget = super::PreparationBudget::for_sync_cycle();
+    let drained =
+        tokio::time::timeout(Duration::from_secs(10), super::drain_confirmations(source, &budget))
+            .await
+            .map_err(|_| "stored confirmation drain exceeded its outer timeout")??;
+    assert_eq!(drained, 2);
+    assert!(!source.client.account_db()?.actor_state_exists(&ack_key)?);
+    assert!(!source.client.account_db()?.actor_state_exists(&forward_key)?);
+    Ok(())
+}
+
+fn store_healthy_confirmation_jobs(
+    source: &LocalBusAccountState,
+    carrier: &Carrier,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let now = now_unix_timestamp();
+    let ack_key = "task/ack/healthy".to_owned();
+    source.client.account_db()?.persist_actor_state(
+        &ack_key,
+        &crate::client::task::control::AckJob {
+            ack: crate::client::task::control::Ack {
+                carrier_base64: ramflux_protocol::encode_base64url(carrier.bytes()?),
+                certificate: crate::client::task::certificate::Certificate {
+                    conversation_id: "thread".into(),
+                    resolution: ramflux_protocol::TaskResolve {
+                        task_id: "task".into(),
+                        base_revision: 1,
+                        step_id: "step".into(),
+                        target: ramflux_protocol::NeedsMe::Approval { grant_id: "grant".into() },
+                        decision_id: "decision".into(),
+                        decision: ramflux_protocol::TaskDecision::Resume,
+                    },
+                    assignee: "sender".into(),
+                    issuer_device: "device-sender".into(),
+                    issued_at: now,
+                    phase: crate::client::task::certificate::Phase::Committed,
+                    committed_version: Some(2),
+                    carrier_hash: None,
+                    decision_key: "decision".into(),
+                    evidence_hash: "evidence".into(),
+                    signature: String::new(),
+                },
+                manifests: Vec::new(),
+                signer_principal: "sender".into(),
+                signer_device: "device-sender".into(),
+                signature: String::new(),
+            },
+            attempts: 0,
+            next_at: 0,
+            created_at: now,
+        },
+    )?;
+    let forward_key = crate::client::task::scoped("forward", "thread", "task")?;
+    source.client.account_db()?.persist_actor_state(
+        &forward_key,
+        &crate::client::task::control::ForwardJob {
+            conversation_id: "thread".into(),
+            task_id: "task".into(),
+            attempts: 0,
+            next_at: 0,
+            created_at: now,
+        },
+    )?;
+    Ok((ack_key, forward_key))
 }
 
 #[tokio::test]

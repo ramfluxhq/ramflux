@@ -74,6 +74,15 @@ pub(crate) async fn drive_with_budget(
         "task/approval_out/",
         65,
     )?);
+    rows.sort_by(|left, right| {
+        let order = |row: &Value| {
+            (
+                row["next_at"].as_i64().unwrap_or(i64::MAX),
+                row["attempts"].as_u64().unwrap_or(u64::MAX),
+            )
+        };
+        order(&left.1).cmp(&order(&right.1)).then_with(|| left.0.cmp(&right.0))
+    });
     let mut sent = 0;
     let mut attempted = 0;
     for (storage, row) in rows {
@@ -122,7 +131,10 @@ pub(crate) async fn drive_with_budget(
         if matches!(&result, Ok(super::task_transport::Preparation::Ready(()))) {
             sent += 1;
         }
-        if attempted >= 2 {
+        // Leave the remainder of the shared cycle budget available to acknowledgement and
+        // own-device forwarding. A stalled approval is charged and backed off, but cannot spend
+        // both preparation slots ahead of unrelated confirmation work.
+        if attempted >= 1 {
             break;
         }
     }
