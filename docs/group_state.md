@@ -111,6 +111,12 @@ transfer's epoch, can make that delayed transfer stale for the sibling and its
 followers and leave a group fork. The issue deadline does not bound delivery time;
 clock skew can make this release overlap the issuer's last valid issue instant.
 
+Deadline maintenance checks at most 128 pending proposals, 4096 reservations and
+512 cancellation deliveries per tick. Each item updates in its own transaction;
+a failing item is logged and left for retry under the existing retention bounds
+while healthy deadline items and other group courier work continue. Transfer-delivery collection also skips a
+failed item rather than letting it block request/result selection.
+
 On the first courier tick after the issue deadline plus five minutes, an issuer
 without a committed transfer stages a durable signed cancellation. Siblings also
 release an expired reservation without requiring the issuer to return. A revoked
