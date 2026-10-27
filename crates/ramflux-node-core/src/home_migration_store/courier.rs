@@ -6,36 +6,62 @@ use super::{
     COURIER, MigrationOperation, MigrationRole, NodeCoreError, OPS, Phase, ReadableTable,
     RouterRedbStore, clock, commit_transition, decode, maintenance, op_key, read, storage, write,
 };
+pub(crate) struct MigrationCourierClaim {
+    pub(crate) peer: String,
+    key: String,
+    next_due: u64,
+    state_version: u64,
+}
 impl RouterRedbStore {
     pub(crate) fn claim_migration_courier(
         &self,
         now: u64,
         limit: usize,
-    ) -> Result<Vec<MigrationOperation>, NodeCoreError> {
-        let tx = self.migration_db().begin_write().map_err(storage)?;
-        let now = clock(&tx, now)?;
-        let upper = format!("{now:020}/~");
-        let due = tx
-            .open_table(COURIER)
-            .map_err(storage)?
-            .range(..upper.as_str())
-            .map_err(storage)?
-            .take(limit.min(128))
-            .map(|row| {
-                let (key, value) = row.map_err(storage)?;
-                Ok((key.value().to_owned(), decode::<String>(value.value())?))
-            })
-            .collect::<Result<Vec<_>, NodeCoreError>>()?;
+    ) -> Result<Vec<MigrationCourierClaim>, NodeCoreError> {
+        let now = self.migration_clock_floor(now)?;
+        let due = {
+            use redb::ReadableDatabase;
+            let tx = self.migration_db().begin_read().map_err(storage)?;
+            let table = match tx.open_table(COURIER) {
+                Ok(table) => table,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+                Err(error) => return Err(storage(error)),
+            };
+            let upper = format!("{now:020}/~");
+            table
+                .range(..upper.as_str())
+                .map_err(storage)?
+                .take(limit.min(128))
+                .map(|row| {
+                    let (key, value) = row.map_err(storage)?;
+                    Ok((key.value().to_owned(), decode::<String>(value.value())?))
+                })
+                .collect::<Result<Vec<_>, NodeCoreError>>()?
+        };
         let mut claimed = Vec::new();
         for (index, key) in due {
+            // Each claim has its own short write transaction. Never retain 128 full
+            // admission bundles or hold a node-wide writer over the whole bounded page.
+            let tx = self.migration_db().begin_write().map_err(storage)?;
+            let now = clock(&tx, now)?;
+            if tx
+                .open_table(COURIER)
+                .map_err(storage)?
+                .get(index.as_str())
+                .map_err(storage)?
+                .is_none()
+            {
+                continue;
+            }
             tx.open_table(COURIER).map_err(storage)?.remove(index.as_str()).map_err(storage)?;
             let Some(mut op) = read::<MigrationOperation>(&tx, OPS, &key)? else {
+                commit_transition(self, tx)?;
                 continue;
             };
             if !pending(op.phase) {
+                commit_transition(self, tx)?;
                 continue;
             }
-            // Reclaim a crashed worker after a bounded interval. No locks survive this commit.
             op.next_due = now.checked_add(30).ok_or_else(|| storage("courier time overflow"))?;
             write(&tx, OPS, &key, &op)?;
             write(
@@ -48,10 +74,33 @@ impl RouterRedbStore {
                 ),
                 &key,
             )?;
-            claimed.push(op);
+            claimed.push(MigrationCourierClaim {
+                peer: op.base.record.home().0.to_owned(),
+                key,
+                next_due: op.next_due,
+                state_version: op.state_version,
+            });
+            commit_transition(self, tx)?;
         }
-        commit_transition(self, tx)?;
         Ok(claimed)
+    }
+    pub(crate) fn claimed_migration_courier(
+        &self,
+        claim: &MigrationCourierClaim,
+    ) -> Result<Option<MigrationOperation>, NodeCoreError> {
+        use redb::ReadableDatabase;
+        let tx = self.migration_db().begin_read().map_err(storage)?;
+        let table = tx.open_table(OPS).map_err(storage)?;
+        let op = table
+            .get(claim.key.as_str())
+            .map_err(storage)?
+            .map(|value| decode::<MigrationOperation>(value.value()))
+            .transpose()?;
+        Ok(op.filter(|op| {
+            pending(op.phase)
+                && op.next_due == claim.next_due
+                && op.state_version == claim.state_version
+        }))
     }
     pub(crate) fn retry_migration_courier(
         &self,

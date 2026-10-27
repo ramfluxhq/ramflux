@@ -86,7 +86,8 @@ pub(super) fn context(
 #[test]
 fn public_listener_has_no_admin_routes_even_with_valid_token() -> TestResult {
     let root = temp_cert_root("http-boundary")?;
-    let admin = context(&root)?;
+    let mut admin = context(&root)?;
+    admin.discovery.node_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
@@ -94,6 +95,8 @@ fn public_listener_has_no_admin_routes_even_with_valid_token() -> TestResult {
     for path in [
         "/s8/federation/forward",
         "/internal/home-node-migration/forward",
+        ramflux_node_core::MIGRATION_LOCAL_PATH,
+        ramflux_node_core::MIGRATION_PEER_PATH,
         "/s8/federation/mesh-observability",
         "/admin/federation/peer",
         "/admin/federation/discover",

@@ -265,3 +265,82 @@ fn read_grant_cannot_execute_a_management_control_even_for_a_privileged_branch()
     assert_eq!(store.custody_publication_write_count(), 0);
     Ok(())
 }
+
+#[test]
+fn ordinary_native_proofs_and_existing_sessions_obey_root_cutover() -> Result {
+    let store = RouterRedbStore::open(temp_store_path("migration-ordinary-root")?)?;
+    let router = RouterCore::new();
+    let driver = Driver::new("alice", 10)?;
+    let service = service(&driver, &store)?;
+    driver.run(
+        &service,
+        &router,
+        &store,
+        CustodyProofAction::Publish {
+            publication: Box::new(Publication {
+                record: driver.publication.record.clone(),
+                compacted_ids: None,
+            }),
+        },
+    )?;
+    driver.run(
+        &service,
+        &router,
+        &store,
+        CustodyProofAction::Register { prekey_bundle: driver.bundle(10)? },
+    )?;
+    for reason in [
+        ramflux_protocol::home_migration::Refusal::DormantInbox,
+        ramflux_protocol::home_migration::Refusal::HomeMigrated,
+    ] {
+        store.cache_migration_root(&driver.reference.account_anchor, None)?;
+        let CustodyServerFrame::SessionEstablished { session } =
+            driver.run(&service, &router, &store, CustodyProofAction::OpenSession)?
+        else {
+            return Err("ordinary session".into());
+        };
+        store.cache_migration_root(&driver.reference.account_anchor, Some(reason))?;
+        let expected = CustodyServerFrame::Refused {
+            code: if reason == ramflux_protocol::home_migration::Refusal::HomeMigrated {
+                // A synthetic cache row has no committed proof: never emit an unsigned routing hint.
+                CustodyRefusal::PersistenceUnavailable
+            } else {
+                CustodyRefusal::HomeMigration { reason, nack: None }
+            },
+        };
+        assert_eq!(
+            driver.run(
+                &service,
+                &router,
+                &store,
+                CustodyProofAction::Register { prekey_bundle: driver.bundle(10)? }
+            )?,
+            expected
+        );
+        assert_eq!(
+            driver.run(&service, &router, &store, CustodyProofAction::OpenSession)?,
+            expected
+        );
+        assert_eq!(
+            send(
+                &driver,
+                &service,
+                &router,
+                &store,
+                &session,
+                CustodySessionAction::Inbox { after_seq: 0, limit: 1 }
+            )?,
+            expected
+        );
+        // Migration-only read grants must remain possible at the former home.
+        grant_with_purpose(
+            &driver,
+            &service,
+            &router,
+            &store,
+            &request(&driver, false)?,
+            MigrationPurpose::Read,
+        )?;
+    }
+    Ok(())
+}

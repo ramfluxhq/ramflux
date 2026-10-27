@@ -330,8 +330,13 @@ pub(crate) fn handle_mesh_request(
     peer_service_id: Option<&str>,
     connection: &ramflux_node_core::ConnectionGuard,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    let Some(request) = ramflux_transport::read_mesh_http_request(stream)
-        .map_err(|error| mesh_transport_error(&error))?
+    let received = std::time::Instant::now();
+    let _deadline = migration_request_deadline(stream, context, received)?;
+    let Some(request) = ramflux_transport::read_bounded_mesh_http_request(
+        stream,
+        ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+    )
+    .map_err(|error| mesh_transport_error(&error))?
     else {
         return Ok(false);
     };
@@ -371,6 +376,15 @@ pub(crate) fn handle_mesh_request(
             let envelope = federation_trust_snapshot_envelope()?;
             ramflux_transport::write_mesh_json_response(stream, "200 OK", &envelope)
                 .map_err(|error| mesh_transport_error(&error))?;
+        }
+        ("POST", ramflux_node_core::MIGRATION_PEER_PATH) => {
+            handle_migration_peer_request(
+                stream,
+                context,
+                peer_service_id,
+                &request.body,
+                received,
+            )?;
         }
         ("POST", "/s8/federation/envelope") => {
             context.observability.record_inbound_s8_envelope(MeshInboundTransport::Tcp);
@@ -760,6 +774,66 @@ fn text_quic_response(status: u16, body: &str) -> ramflux_transport::GatewayQuic
 
 fn response_error_text(body: &serde_json::Value) -> &str {
     body.get("error").and_then(serde_json::Value::as_str).unwrap_or("mesh request failed")
+}
+
+fn handle_migration_peer_request(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    context: &MeshServerContext,
+    peer_service_id: Option<&str>,
+    body: &[u8],
+    received: std::time::Instant,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if peer_service_id != Some("ramflux-federation") {
+        ramflux_transport::write_mesh_text_response(
+            stream,
+            "403 Forbidden",
+            "migration peer requires federation identity",
+        )
+        .map_err(|error| mesh_transport_error(&error))?;
+        return Ok(());
+    }
+    let envelope = ramflux_protocol::home_migration::decode(
+        body,
+        ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+    )
+    .map_err(|_| {
+        ramflux_node_core::NodeCoreError::ItestHttp("invalid migration peer frame".into())
+    })?;
+    let reply = crate::home_migration::inbound(
+        envelope,
+        &context.state,
+        &context.router,
+        &context.discovery,
+        received,
+    )?;
+    ramflux_transport::write_mesh_json_response(stream, "200 OK", &reply)
+        .map_err(|error| mesh_transport_error(&error))?;
+    Ok(())
+}
+
+fn migration_request_deadline(
+    stream: &ramflux_transport::MeshTlsServerStream,
+    context: &MeshServerContext,
+    received: std::time::Instant,
+) -> Result<Option<ramflux_transport::MeshRequestDeadline>, ramflux_node_core::NodeCoreError> {
+    Ok(
+        if context
+            .discovery
+            .node_capabilities
+            .iter()
+            .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+        {
+            Some(
+                ramflux_transport::mesh_request_deadline(
+                    stream,
+                    received + std::time::Duration::from_secs(10),
+                )
+                .map_err(|error| mesh_transport_error(&error))?,
+            )
+        } else {
+            None
+        },
+    )
 }
 
 #[cfg(test)]

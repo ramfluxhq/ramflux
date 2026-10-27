@@ -283,7 +283,7 @@ impl CustodyLeases {
         holder: String,
         now: u64,
         tick: Instant,
-    ) -> Result<CustodySession, CustodyRefusal> {
+    ) -> Result<CustodySession, CustodyAdmissionRefusal> {
         self.open_scoped(session, holder, now, tick, None)
     }
     pub fn open_migration(
@@ -293,12 +293,12 @@ impl CustodyLeases {
         now: u64,
         tick: Instant,
         grant: MigrationGrant,
-    ) -> Result<CustodySession, CustodyRefusal> {
+    ) -> Result<CustodySession, CustodyAdmissionRefusal> {
         self.prune(tick);
         if !ramflux_protocol::decode_base64url(&grant.control_hash).is_ok_and(|bytes| {
             bytes.len() == 32 && ramflux_protocol::encode_base64url(bytes) == grant.control_hash
         }) {
-            return Err(CustodyRefusal::InvalidInput);
+            return Err(CustodyRefusal::InvalidInput.into());
         }
         if self.sessions.values().filter(|s| s.migration.is_some()).count() >= 16
             || ramflux_protocol::canonical_json_bytes(&grant.publication)
@@ -306,7 +306,7 @@ impl CustodyLeases {
                 .len()
                 > ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES
         {
-            return Err(CustodyRefusal::Capacity);
+            return Err(CustodyRefusal::Capacity.into());
         }
         self.open_scoped(session, holder, now, tick, Some(grant))
     }

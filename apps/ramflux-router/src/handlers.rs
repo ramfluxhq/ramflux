@@ -305,7 +305,19 @@ pub(crate) fn handle_mesh_request(
     peer_service_id: &str,
     connection: &ramflux_node_core::ConnectionGuard,
 ) -> anyhow::Result<bool> {
-    let Some(request) = ramflux_transport::read_mesh_http_request(stream)? else {
+    let _deadline = if router.home_migration_enabled() {
+        Some(ramflux_transport::mesh_request_deadline(
+            stream,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )?)
+    } else {
+        None
+    };
+    let Some(request) = ramflux_transport::read_bounded_mesh_http_request(
+        stream,
+        ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+    )?
+    else {
         return Ok(false);
     };
     let Some(_request) = connection.begin_request() else {
@@ -369,6 +381,22 @@ pub(crate) fn handle_mesh_request_value(
     peer_service_id: &str,
 ) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
+    if method == "POST" && path == ramflux_node_core::MIGRATION_PEER_PATH {
+        if peer_service_id != "ramflux-federation" {
+            return Ok(MeshResponse::text(
+                "403 Forbidden",
+                "migration peer requires federation identity",
+            ));
+        }
+        let request = ramflux_protocol::home_migration::decode(
+            &body,
+            ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+        )?;
+        return Ok(MeshResponse::json(
+            "200 OK",
+            serde_json::to_vec(&router.migration_peer(&request)?)?,
+        ));
+    }
     if method == "POST" && path == ramflux_protocol::custody::CUSTODY_RPC_PATH {
         if peer_service_id != "ramflux-gateway" {
             anyhow::bail!("custody proxy ingress requires authenticated gateway")
@@ -428,7 +456,9 @@ pub(crate) async fn handle_mesh_quic_request_value(
         path: request.path.clone(),
         body,
     };
-    let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH {
+    let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH
+        || request.path == ramflux_node_core::MIGRATION_PEER_PATH
+    {
         let router = router.clone();
         let peer = peer_service_id.to_owned();
         tokio::task::spawn_blocking(move || handle_mesh_request_value(mesh_request, &router, &peer))
@@ -1263,6 +1293,27 @@ mod tests {
         assert_eq!(handle.store().custody_publication_write_count(), 0);
         drop(handle);
         let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_peer_ingress_requires_the_federation_role_before_decoding() -> anyhow::Result<()> {
+        let (state, store, path) = crate::router_runtime::tests::test_router("migration-role")?;
+        let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
+        for peer in ["ramflux-gateway", "ramflux-relay", "ramflux-retention"] {
+            let response = handle_mesh_request_value(
+                ramflux_transport::MeshHttpRequest {
+                    method: "POST".into(),
+                    path: ramflux_node_core::MIGRATION_PEER_PATH.into(),
+                    body: b"{}".to_vec(),
+                },
+                &handle,
+                peer,
+            )?;
+            assert_eq!(response.status, "403 Forbidden");
+        }
+        drop(handle);
+        let _ = std::fs::remove_file(&path);
         Ok(())
     }
 

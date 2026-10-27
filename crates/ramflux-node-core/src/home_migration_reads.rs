@@ -29,8 +29,18 @@ impl HomeMigrationService {
                     &request.control.body.requester.account_anchor,
                     scope.now,
                 )?;
-                let result =
-                    self.latest_migration_home(scope, payload, &request.control.body.migration_id)?;
+                // Retained proofs do not depend on the successor remaining online.
+                // Clients follow verified successors without lowering their own floor.
+                let result = if scope.store.migration_home(&payload.target_anchor)?.is_some() {
+                    scope.store.resolve_migration_home(
+                        &payload.target_anchor,
+                        payload.after_home_hash.as_deref(),
+                        usize::try_from(payload.limit)
+                            .map_err(|_| failure(Refusal::HomeCheckpointRequired))?,
+                    )?
+                } else {
+                    self.latest_migration_home(scope, payload, &request.control.body.migration_id)?
+                };
                 MigrationReply { resolve_result: Some(result), ..MigrationReply::default() }
                     .sign(&self.node, &request.control, None, scope.now)
                     .map(Some)
@@ -104,9 +114,29 @@ impl HomeMigrationService {
     ) -> Result<(), NodeCoreError> {
         let anchor = &request.control.body.requester.account_anchor;
         let head = scope.store.migration_home(anchor)?;
-        if head
-            .as_ref()
-            .is_none_or(|h| h.record.home() == (self.node.node_id(), self.node.public_key()))
+        // B owns its pending admission metadata, which contains no source drain counts.
+        // Checking B's accepted authority keeps sealed/in-doubt status usable when A is down.
+        let pending_local = scope
+            .store
+            .migration_operation(
+                anchor,
+                &request.control.body.migration_id,
+                MigrationRole::Destination,
+            )?
+            .is_some_and(|op| {
+                op.proof.is_none()
+                    && matches!(
+                        op.phase,
+                        ramflux_protocol::home_migration::Phase::Prepared
+                            | ramflux_protocol::home_migration::Phase::Sealed
+                            | ramflux_protocol::home_migration::Phase::CommitPending
+                            | ramflux_protocol::home_migration::Phase::CommitOutcomeUnknown
+                    )
+            });
+        if pending_local
+            || head
+                .as_ref()
+                .is_none_or(|h| h.record.home() == (self.node.node_id(), self.node.public_key()))
         {
             if scope.router.custody_record(anchor, scope.now)?.is_none() {
                 return Err(failure(Refusal::EvidenceRequired));

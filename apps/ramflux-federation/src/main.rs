@@ -6,6 +6,7 @@ mod discovery;
 mod flow;
 mod helpers;
 mod http_connections;
+mod home_migration;
 mod http_limits;
 #[cfg(test)]
 mod http_listener_tests;

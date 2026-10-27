@@ -4,8 +4,10 @@
 mod custody_listener;
 mod forward_http;
 mod handlers;
+mod home_migration;
 mod identity_authority;
 mod lifecycle;
+mod migration_courier;
 mod operator;
 mod retention;
 mod router_engine;

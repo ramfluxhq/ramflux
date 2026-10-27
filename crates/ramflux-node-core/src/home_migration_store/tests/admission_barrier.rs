@@ -308,3 +308,166 @@ fn source_rechecks_commit_deadline_after_waiting_for_the_database_writer() -> Te
     assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     Ok(())
 }
+
+#[test]
+fn staged_and_former_home_root_gates_cover_devices_outside_the_sealed_map() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    let sibling = ramflux_protocol::qualified_device_id(&s.anchor, "added-later")?;
+    for restart in [false, true] {
+        if restart {
+            s.b.restart()?;
+        }
+        assert!(matches!(
+            s.b.store()?.acquire_home_operation(&s.anchor),
+            Err(NodeCoreError::HomeMigration(Refusal::DormantInbox))
+        ));
+        assert!(matches!(
+            s.b.store()?.acquire_submission(&sibling),
+            Err(NodeCoreError::HomeMigration(Refusal::DormantInbox))
+        ));
+        assert!(!s.b.store()?.home_migration_target_active(&sibling)?);
+    }
+    let op = s.seal()?;
+    let proof = s.commit(&op)?;
+    for restart in [false, true] {
+        if restart {
+            s.a.restart()?;
+        }
+        assert!(matches!(
+            s.a.store()?.acquire_home_operation(&s.anchor),
+            Err(NodeCoreError::HomeMigration(Refusal::HomeMigrated))
+        ));
+        assert!(matches!(
+            s.a.store()?.acquire_submission(&sibling),
+            Err(NodeCoreError::HomeMigration(Refusal::HomeMigrated))
+        ));
+        let mut entry = super::wal_barrier::entry(&sibling);
+        entry.envelope.target_delivery_id = sibling.clone();
+        let refusal = s.a.core.migration_submission_refusal(
+            s.a.store()?,
+            &entry.envelope,
+            Refusal::HomeMigrated,
+            NOW + 3,
+        )?;
+        let nack = refusal.nack.ok_or("signed new-device refusal")?;
+        assert_eq!(nack.proof_hash, Some(record_hash(&proof.record)?));
+        ramflux_crypto::verify_canonical_signature(
+            &ramflux_protocol::signed_bytes(&nack)?,
+            &nack.signed.signature,
+            &public(8),
+        )?;
+    }
+    let actor = s.authorization.body.actor.clone();
+    let ramflux_protocol::custody::CustodyRefusal::HomeMigration { nack: Some(nack), .. } = s
+        .a
+        .core
+        .migration_owner_refusal(s.a.store()?, &actor, &hash(91), Refusal::HomeMigrated, NOW + 3)?
+    else {
+        return Err("signed owner refusal".into());
+    };
+    assert_eq!(nack.envelope_id, hash(91));
+    assert_eq!(nack.proof_hash, Some(record_hash(&proof.record)?));
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::signed_bytes(&*nack)?,
+        &nack.signed.signature,
+        &public(8),
+    )?;
+    s.b.store()?.activate_home_migration(
+        &s.b.node,
+        &ResolveResult { home: proof, predecessors: vec![] },
+        NOW + 3,
+    )?;
+    s.b.restart()?;
+    drop(s.b.store()?.acquire_home_operation(&s.anchor)?);
+    drop(s.b.store()?.acquire_submission(&sibling)?);
+    Ok(())
+}
+
+#[test]
+fn root_cutover_waits_for_an_unmapped_device_submission() -> TestResult {
+    let s = Scenario::prepared()?;
+    let op = s.seal()?;
+    let sibling = ramflux_protocol::qualified_device_id(&s.anchor, "new-device")?;
+    let lease = s.a.store()?.acquire_submission(&sibling)?;
+    assert!(matches!(
+        s.a.core.commit_home_migration(
+            s.a.store()?,
+            &s.a.node,
+            CommitMigration {
+                sealed: &op.sealed_evidence()?,
+                peer: MigrationPeer { node_id: "B", node_key: &public(9) }
+            },
+            NOW + 2
+        ),
+        Err(NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
+    ));
+    drop(lease);
+    s.commit(&op)?;
+    Ok(())
+}
+
+#[test]
+fn retained_records_refuse_missing_or_rotated_runtime_signer_after_restart() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    for node in [&mut s.a, &mut s.b] {
+        node.restart()?;
+        node.store()?
+            .validate_home_migration_runtime(Some((node.node.node_id(), node.node.public_key())))?;
+        assert!(node.store()?.validate_home_migration_runtime(None).is_err());
+        assert!(
+            node.store()?
+                .validate_home_migration_runtime(Some((node.node.node_id(), &public(99))))
+                .is_err()
+        );
+        assert!(
+            node.store()?
+                .validate_home_migration_runtime(Some(("replacement-node", node.node.public_key())))
+                .is_err()
+        );
+    }
+    let empty = TestNode::new("unused", 44, false)?;
+    empty.store()?.validate_home_migration_runtime(None)?;
+    empty.store()?.validate_home_migration_runtime(Some(("new-unused", &public(45))))?;
+    Ok(())
+}
+
+#[test]
+fn foreign_prepare_cannot_demote_an_already_registered_unattested_local_root() -> TestResult {
+    let s = Scenario::prepared()?;
+    let existing = TestNode::new("B", 9, true)?;
+    let pending =
+        s.b.store()?
+            .migration_operation(
+                &s.anchor,
+                &s.authorization.body.migration_id,
+                MigrationRole::Destination,
+            )?
+            .ok_or("pending")?;
+    assert!(matches!(
+        existing.core.prepare_home_migration(
+            existing.store()?,
+            &existing.node,
+            PrepareMigration {
+                prepare: &pending.prepare,
+                attestation: &pending.attestation,
+                base: &s.base,
+                delivery_map: &pending.delivery_map
+            },
+            NOW
+        ),
+        Err(NodeCoreError::HomeMigration(Refusal::HomeFork))
+    ));
+    assert!(existing.store()?.migration_home(&s.anchor)?.is_none());
+    assert!(
+        existing
+            .store()?
+            .migration_operation(
+                &s.anchor,
+                &s.authorization.body.migration_id,
+                MigrationRole::Destination
+            )?
+            .is_none()
+    );
+    drop(existing.store()?.acquire_home_operation(&s.anchor)?);
+    Ok(())
+}

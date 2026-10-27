@@ -33,6 +33,7 @@ pub struct SubmissionLease {
     writer: bool,
     acquired: bool,
     admission: bool,
+    root: Option<Box<SubmissionLease>>,
 }
 impl SubmissionLease {
     pub(super) fn target(&self) -> &str {
@@ -78,6 +79,7 @@ impl TargetGates {
             writer: deadline.is_some(),
             acquired: false,
             admission: false,
+            root: None,
         };
         let mut state = lease.gate.state.lock().map_err(|_| busy())?;
         if let Some(deadline) = deadline {
@@ -115,11 +117,38 @@ impl TargetGates {
     }
 }
 impl RouterRedbStore {
+    /// Keep a root-wide read lease for a local client operation through durable acceptance.
+    /// Unknown roots use the initial registration path; staged and former homes refuse.
+    /// # Errors
+    /// Returns the durable home refusal, or retryable busy while a root cutover is queued.
+    pub fn acquire_home_operation(&self, anchor: &str) -> Result<SubmissionLease, NodeCoreError> {
+        let lease = self.migration_root_gates.acquire(anchor, None)?;
+        if let Some(reason) = self
+            .inactive_migration_roots
+            .read()
+            .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+            .get(anchor)
+        {
+            return Err(NodeCoreError::HomeMigration(*reason));
+        }
+        Ok(lease)
+    }
+    pub(crate) fn migration_root_barrier(
+        &self,
+        anchor: &str,
+    ) -> Result<SubmissionLease, NodeCoreError> {
+        self.migration_root_gates.acquire(anchor, Some(Instant::now() + Duration::from_millis(250)))
+    }
     /// Acquire before allocating a mailbox sequence, accepting replay state or pushing live data.
     /// # Errors
     /// Returns a typed migration refusal while cutover is queued or the target is inactive.
     pub fn acquire_submission(&self, target: &str) -> Result<SubmissionLease, NodeCoreError> {
+        let root = ramflux_protocol::parse_qualified_device_id(target)
+            .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+            .map(|(anchor, _)| self.acquire_home_operation(&anchor).map(Box::new))
+            .transpose()?;
         let mut lease = self.submission_gates.acquire(target, None)?;
+        lease.root = root;
         if let Some(reason) = self
             .inactive_migration_targets
             .read()

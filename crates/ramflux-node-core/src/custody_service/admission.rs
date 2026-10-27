@@ -260,6 +260,14 @@ impl CustodyService {
         let now = now.saturating_add(tick.elapsed().as_secs());
         let tick = tick + tick.elapsed();
         let proof = attempt.proof;
+        let _home = if matches!(
+            attempt.action,
+            CustodyProofAction::Register { .. } | CustodyProofAction::OpenSession
+        ) {
+            Some(home_operation(scope, &proof.body.device_ref, &proof.body.challenge_nonce, now)?)
+        } else {
+            None
+        };
         match attempt.action {
             CustodyProofAction::HomeMigration { control_hash, publication, purpose } => {
                 let session = CustodySession {
@@ -340,17 +348,7 @@ impl CustodyService {
         let session =
             self.leases().session(session_id, &holder(peer, connection_id)?, now, tick)?;
         let grant = self.leases().migration_grant(session_id)?;
-        let publication = if let Some(grant) = &grant {
-            CustodyPublication {
-                record: grant.publication.record.clone(),
-                compacted_ids: grant.publication.compacted_ids.clone(),
-            }
-        } else {
-            router
-                .custody_record(&session.device_ref.account_anchor, now)
-                .map_err(invalid)?
-                .ok_or(CustodyRefusal::AuthorityUnavailable)?
-        };
+        let publication = session_publication(router, &session, grant.as_ref(), now)?;
         let authority = authority_for_request(
             router,
             &publication,
@@ -431,6 +429,12 @@ impl CustodyService {
         if matches!(action, CustodySessionAction::HomeMigration { .. }) {
             return Err(CustodyRefusal::BindingRefused);
         }
+        let _home =
+            if matches!(action, CustodySessionAction::Ack { .. } | CustodySessionAction::Close) {
+                None
+            } else {
+                Some(home_operation(scope, &session.device_ref, &request.nonce, now)?)
+            };
         self.leases().request(session_id, &request.nonce)?;
         self.perform_action(scope, &session, &authority, &source, attempt.action)
     }
@@ -587,4 +591,51 @@ fn authority_for_request(
         }
         None => router.verify_custody_possession_authority(publication, now, true).map_err(invalid),
     }
+}
+
+fn home_refusal(
+    router: &crate::RouterCore,
+    store: &crate::RouterRedbStore,
+    device: &ramflux_protocol::custody::DeviceRef,
+    nonce: &str,
+    now: u64,
+    error: crate::NodeCoreError,
+) -> CustodyRefusal {
+    match error {
+        crate::NodeCoreError::HomeMigration(reason) => router
+            .migration_owner_refusal(store, device, nonce, reason, now)
+            .unwrap_or(CustodyRefusal::PersistenceUnavailable),
+        error => persistence(error),
+    }
+}
+
+fn session_publication(
+    router: &crate::RouterCore,
+    session: &CustodySession,
+    grant: Option<&crate::custody_sessions::MigrationGrant>,
+    now: u64,
+) -> Result<CustodyPublication, CustodyRefusal> {
+    if let Some(grant) = grant {
+        Ok(CustodyPublication {
+            record: grant.publication.record.clone(),
+            compacted_ids: grant.publication.compacted_ids.clone(),
+        })
+    } else {
+        router
+            .custody_record(&session.device_ref.account_anchor, now)
+            .map_err(invalid)?
+            .ok_or(CustodyRefusal::AuthorityUnavailable)
+    }
+}
+
+fn home_operation(
+    scope: Scope<'_>,
+    device: &ramflux_protocol::custody::DeviceRef,
+    nonce: &str,
+    now: u64,
+) -> Result<crate::SubmissionLease, CustodyRefusal> {
+    scope
+        .store
+        .acquire_home_operation(&device.account_anchor)
+        .map_err(|error| home_refusal(scope.router, scope.store, device, nonce, now, error))
 }

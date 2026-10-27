@@ -60,6 +60,9 @@ pub struct RouterRedbStore {
     commit_writer: Option<RouterCommitWriter>,
     submission_wal: Option<RouterWalStore>,
     submission_gates: submission_barrier::TargetGates,
+    migration_root_gates: submission_barrier::TargetGates,
+    pub(crate) inactive_migration_roots:
+        std::sync::RwLock<BTreeMap<String, ramflux_protocol::home_migration::Refusal>>,
     pub(crate) inactive_migration_targets:
         std::sync::RwLock<BTreeMap<String, ramflux_protocol::home_migration::Refusal>>,
     identity_registry_writes: std::sync::atomic::AtomicU64,
@@ -503,6 +506,10 @@ impl RouterRedbStore {
             commit_writer,
             submission_wal,
             submission_gates: submission_barrier::TargetGates::default(),
+            migration_root_gates: submission_barrier::TargetGates::default(),
+            inactive_migration_roots: std::sync::RwLock::new(Self::load_inactive_migration_roots(
+                &db,
+            )?),
             inactive_migration_targets: std::sync::RwLock::new(
                 Self::load_inactive_migration_targets(&db)?,
             ),

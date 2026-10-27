@@ -11,7 +11,8 @@ use redb::TableDefinition;
 use serde::{Deserialize, Serialize};
 const AUTHORITIES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("migration_authority_evidence_v1");
-const EXPIRY: TableDefinition<&str, &[u8]> = TableDefinition::new("migration_authority_expiry_v1");
+pub(super) const EXPIRY: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("migration_authority_expiry_v1");
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Evidence {
