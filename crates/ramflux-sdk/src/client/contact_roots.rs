@@ -7,10 +7,7 @@ use crate::{ContactReason, ContactRootChange, ContactRootSource};
 use serde_json::{Value, json};
 impl RamfluxClient {
     pub(crate) fn contact_own_commitment(&self) -> Result<String, SdkError> {
-        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(
-            root.signing_key.verifying_key().to_bytes(),
-        ))
+        self.own_account_anchor()
     }
 
     pub(crate) fn decorate_contact_identity(

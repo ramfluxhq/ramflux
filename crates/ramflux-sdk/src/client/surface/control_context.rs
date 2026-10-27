@@ -7,10 +7,7 @@ use crate::{RamfluxClient, SdkError};
 use serde_json::{Value, json};
 impl RamfluxClient {
     pub(crate) fn surface_local_root_commitment(&self) -> Result<String, SdkError> {
-        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        crate::identity_root_public_key_commitment(&ramflux_protocol::encode_base64url(
-            root.signing_key.verifying_key().to_bytes(),
-        ))
+        self.own_account_anchor()
     }
     pub(super) fn own_surface_context_announced(
         &self,

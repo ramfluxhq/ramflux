@@ -92,10 +92,7 @@ impl RamfluxClient {
             {
                 return Err(invalid("own-device history transport scope mismatch"));
             }
-            let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            let expected = crate::identity_root_public_key_commitment(
-                &ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()),
-            )?;
+            let expected = self.own_account_anchor()?;
             self.import_own_device_sync(engine, pool, &expected, &sync, None).await?;
         }
         Ok(())

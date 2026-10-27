@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-authenticated device authority, monotonic observation and local root publication.
+mod custody_directory;
 mod device_identity;
 pub(crate) mod device_namespace;
 mod directory;
@@ -109,6 +110,11 @@ impl RamfluxClient {
         let db = self.account_db()?;
         if db.load_actor_state::<bool>(&Self::device_revocation_key(identity))?.unwrap_or(false) {
             return Err(invalid("device is locally fenced by a pending root revocation"));
+        }
+        let now = u64::try_from(crate::time::now_unix_timestamp())
+            .map_err(|_| invalid("invalid authority clock"))?;
+        if self.require_custody_device(identity, now)? {
+            return Ok(());
         }
         let row =
             db.client_record("device", device)?.ok_or_else(|| invalid("device metadata absent"))?;

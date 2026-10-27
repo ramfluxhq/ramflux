@@ -209,7 +209,7 @@ impl NodePins {
         Ok(())
     }
 }
-pub(super) fn verify_authority(
+pub(crate) fn verify_authority(
     publication: &ramflux_protocol::custody::Publication,
     custodian: Option<&ramflux_protocol::custody::Publication>,
     now: u64,
