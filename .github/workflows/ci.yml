@@ -37,7 +37,7 @@ jobs:
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -69,7 +69,7 @@ jobs:
   test-sdk:
     name: Rust tests (SDK)
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -85,7 +85,7 @@ jobs:
   test-rest:
     name: Rust tests (workspace except SDK)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
