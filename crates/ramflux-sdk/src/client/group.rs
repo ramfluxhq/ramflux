@@ -3,12 +3,16 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 
 impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn create_group(&self, group_id: &str, creator_id: &str) -> Result<GroupState, SdkError> {
+        if self.born_v3_account.is_some() {
+            self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Group)?;
+        }
         let address = ramflux_protocol::parse_qualified_device_id(creator_id)?;
         let raw = address.as_ref().map_or(creator_id, |(_, raw)| raw.as_str());
         ramflux_protocol::validate_device_name(raw)?;

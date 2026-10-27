@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -87,6 +88,7 @@ impl RamfluxClient {
         if *sender != self.owned_device_identity()? {
             return Err(SdkError::InboundRejected("group sender differs from owned device".into()));
         }
+        self.require_native_operation(sender, NativeOperation::Group)?;
         self.pin_local_group_member(group_id)?;
         let sender_id = sender.device_id();
         if self

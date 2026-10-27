@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -45,6 +46,10 @@ impl RamfluxClient {
         recipient_device_id: &str,
     ) -> Result<GroupGatewayDeliveryResult, SdkError> {
         self.authenticated_envelope_sender(entry)?;
+        self.require_native_operation(
+            &self.authenticated_device_identity(entry)?,
+            NativeOperation::Group,
+        )?;
         self.append_gateway_delivery(entry)?;
         let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;

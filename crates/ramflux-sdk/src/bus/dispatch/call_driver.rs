@@ -4,6 +4,7 @@
 //! Bounded account-owned signaling retries, ring timers and authenticated relay lease maintenance.
 use super::{invalid, recover};
 use crate::client::call::{self, state::LiveCall};
+use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use ramflux_protocol::{VoiceAllocationRequest, VoiceLeaseRequest};
 fn scope(c: &LiveCall) -> VoiceAllocationRequest {
@@ -44,6 +45,10 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
     Ok(count)
 }
 async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, SdkError> {
+    account.client.require_native_operation(
+        &account.client.owned_device_identity()?,
+        NativeOperation::Call,
+    )?;
     let pending = account.client.voice_calls[id].pending.clone();
     if pending.is_empty() {
         return Ok(0);

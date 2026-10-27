@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Private per-message own-device controls with opaque, pair-wrapped recipient key slots.
+use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
@@ -214,6 +215,10 @@ impl RamfluxClient {
             .cache_verified_device_manifest(&engine.config, &root, "own_device_message")
             .await?;
         let source = engine.config.device_id.clone();
+        self.require_native_operation(
+            &self.device_identity_for_root(&root, &source)?,
+            NativeOperation::Sync,
+        )?;
         if !manifest.devices.iter().any(|d| d.device_id == source) {
             return Err(invalid("own-device source is not active"));
         }
@@ -257,6 +262,10 @@ impl RamfluxClient {
                 .map_err(|_| invalid("own-device encryption failed"))?,
         );
         for target in targets {
+            self.require_native_operation(
+                &self.device_identity_for_root(&context.root, &target.device_id)?,
+                NativeOperation::Sync,
+            )?;
             let request: LocalBusMessageSubmitRequest = serde_json::from_value(
                 json!({"conversation_id":packet.id,"message_id":packet.id,"envelope_id":packet.id,"source_principal_id":context.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":context.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":input.created_at,"ttl":600}),
             )?;
@@ -328,6 +337,11 @@ impl RamfluxClient {
         let manifest = self
             .cache_verified_device_manifest(gateway, &root, "own_device_message_receive")
             .await?;
+        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
+        self.require_native_operation(
+            &self.device_identity_for_root(&root, &entry.envelope.source_device_id)?,
+            NativeOperation::Sync,
+        )?;
         let source = manifest
             .devices
             .iter()

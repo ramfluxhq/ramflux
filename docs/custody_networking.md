@@ -215,6 +215,12 @@ native account session refreshes its own directory when the current-head clock
 is missing or expired. Read-only account data remains separate from this
 permission to use a device for a new operation.
 
+The ordinary SDK separately checks certified `call`, `group` and `sync` branch
+scopes before new call controls/media access, group creation/signing/sender-key
+publication and network group delivery, and own-device copies/history transfer.
+A live `message` scope cannot substitute for these permissions. These checks do
+not gate decryption of data already stored in local history.
+
 ## Integration fixture and production boundary
 
 Production Linux primary-vault support is separate work; unsupported production
