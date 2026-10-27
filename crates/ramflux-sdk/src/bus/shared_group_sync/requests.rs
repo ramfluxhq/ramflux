@@ -33,7 +33,9 @@ pub(in crate::bus) async fn flush_with_clock(
 ) -> Result<usize, SdkError> {
     let now = clock();
     let client = &account.client;
-    client.advance_group_transfer_deadlines(now)?;
+    if let Err(error) = client.advance_group_transfer_deadlines(now) {
+        tracing::warn!(%error, "group transfer deadline scan failed; continuing sync pass");
+    }
     client.account_db()?.retain_expiring_actor_states("group-beacon/", now, 4096)?;
     client.account_db()?.retain_expiring_actor_states(TRANSFER_SEND_PREFIX, now, 512)?;
     client.account_db()?.retain_expiring_actor_states("group-courier/sealed/", now, 4096)?;

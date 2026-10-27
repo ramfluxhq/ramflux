@@ -16,25 +16,23 @@ struct Retry {
     expires_at: i64,
 }
 
-fn bad_data(error: &SdkError) -> bool {
+fn operational(error: &SdkError) -> bool {
     match error {
-        SdkError::Json(error) | SdkError::Storage(StorageError::Serde(error)) => !error.is_io(),
-        SdkError::Protocol(_)
-        | SdkError::InboundRejected(_)
-        | SdkError::Storage(
-            StorageError::Protocol(_)
-            | StorageError::GroupPermissionDenied
-            | StorageError::AuthorizationRejected,
-        )
-        | SdkError::Crypto(
-            CryptoError::Protocol(_)
-            | CryptoError::Base64(_)
-            | CryptoError::VerifyFailed
-            | CryptoError::InvalidSignatureLength(_)
-            | CryptoError::InvalidPublicKeyLength(_),
-        ) => true,
-        // In particular SQLite, filesystem, random-source and unavailable-authority
-        // failures are operational. Do not retry every key or quarantine those rows.
+        SdkError::Json(error) => error.is_io(),
+        SdkError::Storage(error) => match error {
+            StorageError::Sqlite(_)
+            | StorageError::Io(_)
+            | StorageError::Crypto(CryptoError::RandomUnavailable(_)) => true,
+            StorageError::Serde(error) => error.is_io(),
+            _ => false,
+        },
+        SdkError::ContactUnavailable(error) => operational(error),
+        SdkError::Io(_)
+        | SdkError::Crypto(CryptoError::RandomUnavailable(_))
+        | SdkError::AccountNotOpen(_)
+        | SdkError::AccountIndexNotOpen
+        | SdkError::AccountDbNotUnlocked
+        | SdkError::IdentityRootMissing => true,
         _ => false,
     }
 }
@@ -75,8 +73,8 @@ pub(crate) fn item_result<T>(
             }
             Ok(Some(value))
         }
-        Err(error) if bad_data(&error) => {
-            let warn = db.write_transaction(|| -> Result<bool, SdkError> {
+        Err(error) if !operational(&error) => {
+            let (warn, skipped) = db.write_transaction(|| -> Result<(bool, bool), SdkError> {
                 let warn =
                     db.load_actor_state::<Retry>(WARNING)?.is_none_or(|row| row.next_at <= now);
                 // Sweep once per warning interval, not once per poisoned row.
@@ -88,9 +86,16 @@ pub(crate) fn item_result<T>(
                 {
                     db.prune_actor_state_backoff(BACKOFF, now, 128)?;
                     if db.actor_state_usage(BACKOFF)?.0 >= MAX_BACKOFF_ROWS {
-                        return Err(SdkError::InboundPending(
-                            "group maintenance retry capacity".into(),
-                        ));
+                        if warn {
+                            db.persist_actor_state(
+                                WARNING,
+                                &Retry {
+                                    next_at: now.saturating_add(WARNING_SECONDS),
+                                    expires_at: now.saturating_add(3600),
+                                },
+                            )?;
+                        }
+                        return Ok((warn, true));
                     }
                 }
                 db.persist_actor_state(
@@ -109,10 +114,16 @@ pub(crate) fn item_result<T>(
                         },
                     )?;
                 }
-                Ok(warn)
+                Ok((warn, false))
             })?;
             if warn {
-                tracing::warn!(item = %id, "invalid group transfer item backed off; original row retained");
+                if skipped {
+                    tracing::warn!(
+                        "invalid group transfer item skipped because retry capacity is full"
+                    );
+                } else {
+                    tracing::warn!(item = %id, "invalid group transfer item backed off; original row retained");
+                }
             }
             Ok(None)
         }
