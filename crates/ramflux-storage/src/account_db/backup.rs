@@ -107,7 +107,7 @@ impl AccountDb {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             let mut target = rusqlite::Connection::open(path)?;
-            target.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\"; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048;"))?;
+            target.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\"; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; PRAGMA secure_delete=ON;"))?;
             {
                 let snapshot = rusqlite::backup::Backup::new(source, &mut target)?;
                 loop {
@@ -127,7 +127,8 @@ impl AccountDb {
                 }
             }
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
-            // All domain tables, keys and object payloads were copied by SQLite itself.
+            super::home_migration::strip_from_backup(&target)?;
+            // Domain history, keys and object payloads were copied by SQLite itself.
             let counts=read_counts(&target)?;
             target.close().map_err(|(_, error)| error)?;
             Ok(counts)

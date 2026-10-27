@@ -81,6 +81,7 @@ impl AccountDb {
              CREATE INDEX IF NOT EXISTS runtime_outbox_actor_kind
                  ON runtime_outbox(actor_state_kind,table_name,change_kind);",
         )?;
+        self.install_home_migration_schema()?;
         self.install_receipt_retention_schema()?;
         self.remove_consent_bookkeeping_triggers()?;
         self.install_domain_change_triggers()?;
@@ -93,7 +94,7 @@ impl AccountDb {
     fn install_domain_change_triggers(&self) -> Result<(), StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT LIKE 'backup_archived_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
+             AND name NOT LIKE 'backup_archived_%' AND name NOT LIKE 'runtime_home_migration_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?
