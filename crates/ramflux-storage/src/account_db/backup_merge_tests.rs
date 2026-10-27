@@ -181,6 +181,7 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     assert_eq!(report.kept_newer.conversations, 0);
     assert_eq!(merged.counts()?.conversations, 2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND deleted=1",[],|r|r.get::<_,u64>(0))?,2);
+    assert_eq!(merged.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND sender_id='' AND length(encrypted_body)=0 AND metadata_json=x'7b7d'",[],|r|r.get::<_,u64>(0))?,2);
     assert_eq!(merged.db.query_row("SELECT count(*) FROM runtime_message_content WHERE message_id IN ('source-deleted','local-deleted')",[],|r|r.get::<_,u64>(0))?,0);
     assert_eq!(
         merged.db.query_row(
@@ -195,6 +196,9 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
         "merging a private generation must not mutate the live account"
     );
     drop(merged);
+    let reopened = BackupDatabase::open(&path, &target.key)?;
+    assert_eq!(reopened.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id IN ('source-deleted','local-deleted') AND sender_id='' AND length(encrypted_body)=0 AND metadata_json=x'7b7d'",[],|r|r.get::<_,u64>(0))?,2);
+    drop(reopened);
     drop(source);
     drop(local);
     drop(source_index);

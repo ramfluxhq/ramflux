@@ -100,6 +100,8 @@ impl RamfluxClient {
             db.set_device_signer(device_branch);
         }
         super::contact_verification::migrate_legacy_contact_verifications(&db)?;
+        let own_devices = db.verified_own_device_ids()?;
+        db.scrub_deleted_messages(&own_devices)?;
         self.active_account_db = Some(db);
         Ok(())
     }

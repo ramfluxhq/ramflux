@@ -338,6 +338,9 @@ impl RamfluxClient {
         }
         let mut contents = BTreeMap::new();
         for message in &messages {
+            if message.deleted {
+                continue;
+            }
             if let Some(body) = self.account_db()?.message_content(&message.message_id)? {
                 contents.insert(message.message_id.clone(), zeroize::Zeroizing::new(body));
             }
@@ -357,8 +360,8 @@ impl RamfluxClient {
         Ok(SdkOwnDeviceHistoryBundle {
             authority_only: false,
             next_page: None,
-            schema: "ramflux.sdk.own_device_history_bundle.v1".to_owned(),
-            version: 1,
+            schema: "ramflux.sdk.own_device_history_bundle.v2".to_owned(),
+            version: 2,
             principal_commitment: principal_commitment.to_owned(),
             source_device_id: source_device_id.to_owned(),
             target_device_id: target_device_id.to_owned(),
@@ -682,26 +685,29 @@ impl RamfluxClient {
             if self.skip_owned_surface_message(bundle, &message.message_id, floor_by_group)? {
                 continue;
             }
-            self.account_db()?.import_direct_message_projection(DirectMessageWrite {
-                conversation_id: &message.conversation_id,
-                message_id: &message.message_id,
-                sender_id: &message.sender_id,
-                encrypted_body: &message.encrypted_body,
-                metadata: &message.metadata,
-                created_at: message.created_at,
-            })?;
             if message.deleted {
                 self.account_db()?.import_deleted_message_projection(
                     &message.conversation_id,
                     &message.message_id,
                     message.is_own,
+                    message.created_at,
                 )?;
-            } else if let Some(content) = bundle.contents.get(&message.message_id) {
-                self.account_db()?.store_message_content(
-                    &message.conversation_id,
-                    &message.message_id,
-                    content,
-                )?;
+            } else {
+                self.account_db()?.import_direct_message_projection(DirectMessageWrite {
+                    conversation_id: &message.conversation_id,
+                    message_id: &message.message_id,
+                    sender_id: &message.sender_id,
+                    encrypted_body: &message.encrypted_body,
+                    metadata: &message.metadata,
+                    created_at: message.created_at,
+                })?;
+                if let Some(content) = bundle.contents.get(&message.message_id) {
+                    self.account_db()?.store_message_content(
+                        &message.conversation_id,
+                        &message.message_id,
+                        content,
+                    )?;
+                }
             }
             imported_messages = imported_messages.saturating_add(1);
         }
@@ -1093,6 +1099,53 @@ pub(crate) mod tests {
             .direct_message_by_id("msg_sync_original_time")?
             .ok_or_else(|| SdkError::LocalBus("imported message missing".to_owned()))?;
         assert_eq!(imported.created_at, 1_760_000_111);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sibling_tombstone_deletes_a_live_copy_without_restoring_content() -> Result<(), SdkError> {
+        let (client, root) =
+            client_with_account("deleted-import", "principal_sync", "target_device_sync")?;
+        client.account_db()?.import_direct_message_projection(DirectMessageWrite {
+            conversation_id: "thread",
+            message_id: "deleted-message",
+            sender_id: "source_device_sync",
+            encrypted_body: b"live-ciphertext",
+            metadata: &MessageMetadata::default(),
+            created_at: 9,
+        })?;
+        client.account_db()?.store_message_content(
+            "thread",
+            "deleted-message",
+            b"live-plaintext",
+        )?;
+        let tombstone = DirectMessageRecord {
+            conversation_id: "thread".into(),
+            message_id: "deleted-message".into(),
+            sender_id: String::new(),
+            encrypted_body: Vec::new(),
+            metadata: MessageMetadata::default(),
+            deleted: true,
+            is_own: true,
+            created_at: 9,
+            receipts: Vec::new(),
+        };
+        let mut history =
+            bundle("source_device_sync", "target_device_sync", vec![tombstone], Vec::new());
+        history
+            .contents
+            .insert("deleted-message".into(), zeroize::Zeroizing::new(b"must-not-return".to_vec()));
+        client.import_own_device_history_bundle(
+            &envelope("source_device_sync", "target_device_sync"),
+            &history,
+        )?;
+        let imported = client
+            .direct_message_by_id("deleted-message")?
+            .ok_or_else(|| SdkError::LocalBus("deleted message missing".into()))?;
+        assert!(imported.deleted && imported.is_own);
+        assert_eq!(imported.sender_id, "");
+        assert_eq!(client.account_db()?.message_content("deleted-message")?, None);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
