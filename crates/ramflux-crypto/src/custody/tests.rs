@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod reject_paths;
+
 use super::*;
 use ramflux_protocol::{PrincipalKind, custody::*, domain, encode_base64url};
 use zeroize::Zeroizing;
