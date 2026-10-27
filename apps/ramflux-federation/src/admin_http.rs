@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use crate::http_response::HttpResponse;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::thread;
 
 use crate::SharedMeshObservability;
 use crate::{
@@ -39,41 +39,73 @@ pub(crate) fn serve_admin_http(
     context: FederationAdminHttpContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let limits = crate::http_limits::configured(false)?;
+    let limit = crate::http_connections::connection_limit(
+        false,
+        ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ADMIN_MAX_CONNECTIONS")
+            .ok()
+            .as_deref(),
+    )?;
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let listener = TcpListener::bind(addr).map_err(|source| {
         ramflux_node_core::NodeCoreError::ItestHttp(format!(
             "federation admin HTTP bind failed at {addr}: {source}"
         ))
     })?;
-    tracing::info!(addr, "federation production admin HTTP surface listening");
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = match stream {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::warn!(%error, "federation admin accept failed");
-                    continue;
-                }
-            };
-            let accepted_at = std::time::Instant::now();
-            let context = context.clone();
-            thread::spawn(move || {
-                if let Err(error) =
-                    handle_admin_request_with_limits(&mut stream, &context, limits, accepted_at)
-                {
-                    let body = format!("{error}");
-                    if let Err(write_error) = ramflux_node_core::write_itest_text_response(
-                        &mut stream,
-                        crate::http_limits::rejection(&error)
-                            .unwrap_or("500 Internal Server Error"),
-                        &body,
-                    ) {
-                        tracing::warn!(%write_error, "failed to write federation admin error");
+    tracing::info!(addr, limit, "federation production admin HTTP surface listening");
+    std::thread::Builder::new()
+        .spawn(move || {
+            for stream in listener.incoming() {
+                let stream = match stream {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::warn!(%error, "federation admin accept failed");
+                        continue;
                     }
-                }
-            });
-        }
-    });
+                };
+                let _worker =
+                    spawn_admin_connection(stream, context.clone(), active.clone(), limit, limits);
+            }
+        })
+        .map_err(|error| {
+            ramflux_node_core::NodeCoreError::ItestHttp(format!(
+                "federation admin listener thread unavailable: {error}"
+            ))
+        })?;
     Ok(())
+}
+
+pub(crate) fn spawn_admin_connection(
+    stream: TcpStream,
+    context: FederationAdminHttpContext,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    limit: usize,
+    limits: ramflux_node_core::HttpRequestLimits,
+) -> Option<std::thread::JoinHandle<()>> {
+    crate::http_connections::spawn_connection(stream, active, limit, move |stream, accepted_at| {
+        handle_admin_connection_with_limits(stream, &context, limits, accepted_at);
+    })
+}
+pub(crate) fn handle_admin_connection_with_limits(
+    stream: &mut TcpStream,
+    context: &FederationAdminHttpContext,
+    limits: ramflux_node_core::HttpRequestLimits,
+    accepted_at: std::time::Instant,
+) {
+    let response = match admin_response(stream, context, limits, accepted_at) {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "federation admin request failed");
+            Some(HttpResponse::text(
+                crate::http_limits::rejection(&error).unwrap_or("500 Internal Server Error"),
+                &error.to_string(),
+            ))
+        }
+    };
+    if let Some(response) = response {
+        if let Err(error) = response.write(stream, limits, accepted_at) {
+            tracing::warn!(%error, "federation admin response failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -81,48 +113,42 @@ pub(crate) fn handle_admin_request(
     stream: &mut TcpStream,
     context: &FederationAdminHttpContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    handle_admin_request_with_limits(
-        stream,
-        context,
-        crate::http_limits::defaults(false),
-        std::time::Instant::now(),
-    )
+    let limits = crate::http_limits::defaults(false);
+    let accepted_at = std::time::Instant::now();
+    if let Some(response) = admin_response(stream, context, limits, accepted_at)? {
+        response.write(stream, limits, accepted_at)?;
+    }
+    Ok(())
 }
-fn handle_admin_request_with_limits(
+
+fn admin_response(
     stream: &mut TcpStream,
     context: &FederationAdminHttpContext,
     limits: ramflux_node_core::HttpRequestLimits,
     accepted_at: std::time::Instant,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
+) -> Result<Option<HttpResponse>, ramflux_node_core::NodeCoreError> {
     let Some(request) =
         ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let state = &context.state;
     let store = context.store.as_ref();
     let discovery = &context.discovery;
     let admin_token = context.admin_token.as_deref();
     log_admin_request(&request, discovery);
-    match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/healthz") => {
-            ramflux_node_core::write_itest_json_response(
-                stream,
-                "200 OK",
-                &serde_json::json!({
-                    "service": "ramflux-federation-admin",
-                    "status": "ok"
-                }),
-            )?;
-        }
+    let response = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/healthz") => HttpResponse::json(&serde_json::json!({
+            "service": "ramflux-federation-admin", "status": "ok"
+        }))?,
         ("POST", "/s8/federation/forward") => {
-            handle_admin_forward_request(stream, &request, context, admin_token)?;
+            handle_admin_forward_request(&request, context, admin_token)?
         }
         ("POST", "/internal/home-node-migration/forward") => {
-            handle_home_node_forward_request(stream, &request, context, admin_token)?;
+            handle_home_node_forward_request(&request, context, admin_token)?
         }
         ("POST", "/s8/federation/mesh-observability") => {
-            handle_admin_mesh_observability_request(stream, &request, context, admin_token)?;
+            handle_admin_mesh_observability_request(&request, context, admin_token)?
         }
         ("POST", "/admin/federation/peer") => {
             let request: FederationAdminPeerRequest = serde_json::from_slice(&request.body)
@@ -133,7 +159,7 @@ fn handle_admin_request_with_limits(
             log_admin_peer_request(&request);
             let response = handle_admin_peer(request, state, store, discovery)?;
             log_admin_peer_response(&response);
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+            HttpResponse::json(&response)?
         }
         ("POST", "/admin/federation/discover") => {
             let request: FederationAdminDiscoverRequest = serde_json::from_slice(&request.body)
@@ -144,21 +170,18 @@ fn handle_admin_request_with_limits(
             log_admin_discover_request(&request);
             let response = handle_admin_discover(request, state, store)?;
             log_admin_discover_response(&response);
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
+            HttpResponse::json(&response)?
         }
-        _ => {
-            ramflux_node_core::write_itest_text_response(stream, "404 Not Found", "not found")?;
-        }
-    }
-    Ok(())
+        _ => HttpResponse::text("404 Not Found", "not found"),
+    };
+    Ok(Some(response))
 }
 
 fn handle_admin_mesh_observability_request(
-    stream: &mut TcpStream,
     request: &ramflux_node_core::NodeHttpRequest,
     context: &FederationAdminHttpContext,
     admin_token: Option<&str>,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
+) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
     let request: FederationAdminMeshObservabilityRequest = serde_json::from_slice(&request.body)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
     require_admin_token(admin_token, &request.admin_token)?;
@@ -171,15 +194,14 @@ fn handle_admin_mesh_observability_request(
         quic_inbound_s8_envelopes = snapshot.quic_inbound_s8_envelopes,
         "federation admin mesh observability returned"
     );
-    ramflux_node_core::write_itest_json_response(stream, "200 OK", &snapshot)
+    HttpResponse::json(&snapshot)
 }
 
 fn handle_admin_forward_request(
-    stream: &mut TcpStream,
     request: &ramflux_node_core::NodeHttpRequest,
     context: &FederationAdminHttpContext,
     admin_token: Option<&str>,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
+) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
     let request: ramflux_node_core::FederatedEnvelopeForwardRequest =
         serde_json::from_slice(&request.body)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
@@ -193,15 +215,14 @@ fn handle_admin_forward_request(
         &context.discovery,
     )?;
     log_admin_forward_response(&response);
-    ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)
+    HttpResponse::json(&response)
 }
 
 fn handle_home_node_forward_request(
-    stream: &mut TcpStream,
     request: &ramflux_node_core::NodeHttpRequest,
     context: &FederationAdminHttpContext,
     admin_token: Option<&str>,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
+) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
     let request: HomeNodeMigrationForwardLocalRequest = serde_json::from_slice(&request.body)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
     require_admin_token(admin_token, &request.admin_token)?;
@@ -214,7 +235,7 @@ fn handle_home_node_forward_request(
         &context.discovery,
     )?;
     log_home_node_forward_response(&response);
-    ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)
+    HttpResponse::json(&response)
 }
 
 fn log_admin_request(
