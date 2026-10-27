@@ -303,6 +303,8 @@ impl RouterWalSubmissionRecord {
 
 #[derive(Clone, Debug, Default)]
 struct RouterWalState {
+    #[cfg(test)]
+    ack_pause: Arc<Mutex<Option<acknowledgement_test::Pause>>>,
     submissions_by_replay_key: BTreeMap<String, RouterWalSubmissionRecord>,
     local_delivery_by_sender_envelope:
         HashMap<String, HashMap<String, RouterWalLocalDeliveryIndex>>,
@@ -532,14 +534,35 @@ impl RouterWalStore {
         entry: Option<&InboxEntry>,
         local_delivery: Option<RouterWalLocalDelivery>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        self.record_submission_classified_with_lease_async(
+            replay_key,
+            replay_expires_at,
+            entry,
+            local_delivery,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_submission_classified_with_lease_async(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+        local_delivery: Option<RouterWalLocalDelivery>,
+        lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    ) -> Result<RouterWalRecordLocation, NodeCoreError> {
         self.writer
-            .append_async(RouterWalPayload::Submission {
-                replay_key: replay_key.to_owned(),
-                replay_expires_at,
-                entry: entry.cloned().map(Box::new),
-                accepted_at: Some(router_wal_now()),
-                local_delivery,
-            })
+            .append_async(
+                RouterWalPayload::Submission {
+                    replay_key: replay_key.to_owned(),
+                    replay_expires_at,
+                    entry: entry.cloned().map(Box::new),
+                    accepted_at: Some(router_wal_now()),
+                    local_delivery,
+                },
+                lease,
+            )
             .await
     }
 
@@ -658,7 +681,10 @@ struct RouterWalAppendRequest {
 
 enum RouterWalAppendReply {
     Sync(mpsc::SyncSender<Result<RouterWalRecordLocation, NodeCoreError>>),
-    Async(tokio::sync::oneshot::Sender<Result<RouterWalRecordLocation, NodeCoreError>>),
+    Async(
+        tokio::sync::oneshot::Sender<Result<RouterWalRecordLocation, NodeCoreError>>,
+        Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    ),
 }
 
 impl RouterWalAppendReply {
@@ -667,7 +693,7 @@ impl RouterWalAppendReply {
             Self::Sync(reply) => {
                 let _sent = reply.send(result);
             }
-            Self::Async(reply) => {
+            Self::Async(reply, _submission) => {
                 let _sent = reply.send(result);
             }
         }
@@ -762,12 +788,13 @@ impl RouterWalWriter {
     async fn append_async(
         &self,
         payload: RouterWalPayload,
+        lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
         let (reply, response) = tokio::sync::oneshot::channel();
         let shard = self.shard_for_payload(&payload)?;
         self.submit_async(
             shard,
-            RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Async(reply) },
+            RouterWalAppendRequest { payload, reply: RouterWalAppendReply::Async(reply, lease) },
         )
         .await?;
         response.await.map_err(|source| {
@@ -1120,6 +1147,8 @@ fn router_wal_ack_success(
     locations: Vec<RouterWalRecordLocation>,
     wal_state: &Arc<Mutex<RouterWalState>>,
 ) {
+    #[cfg(test)]
+    let _pause = acknowledgement_test::before_apply(wal_state);
     let update_result = wal_state.lock().map_err(|source| source.to_string()).map(|mut guard| {
         for (payload, location) in payloads.iter().cloned().zip(locations.iter().cloned()) {
             guard.apply(payload, location);
@@ -1895,3 +1924,6 @@ mod tests {
         crate::environment::parsed::<usize>(name).unwrap_or(default)
     }
 }
+
+#[cfg(test)]
+pub(crate) mod acknowledgement_test;
