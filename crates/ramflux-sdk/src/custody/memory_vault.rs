@@ -5,13 +5,24 @@
 use super::{BranchCredentials, PrimaryVault};
 use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use zeroize::Zeroizing;
 #[derive(Default)]
 pub struct MemoryPrimaryVault {
     entries: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
+    migration_approval: AtomicBool,
 }
 impl MemoryPrimaryVault {
+    /// Grant one migration signature in the default-off integration fixture only.
+    pub fn approve_next_migration_for_test(&self) {
+        self.migration_approval.store(true, Ordering::SeqCst);
+    }
     fn put(&self, reference: &str, bytes: &[u8]) -> Result<(), SdkError> {
         let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
         if entries.contains_key(reference) {
@@ -35,6 +46,20 @@ impl PrimaryVault for MemoryPrimaryVault {
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
         self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
         Ok(())
+    }
+    fn sign_home_authorization(
+        &self,
+        request: super::HomeAuthorizationRequest<'_>,
+    ) -> Result<
+        ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
+        SdkError,
+    > {
+        if !self.migration_approval.swap(false, Ordering::SeqCst) {
+            return Err(super::home_authorization::unavailable());
+        }
+        let primary = self.load_primary(request.primary_reference())?;
+        let now = request.requested_at;
+        request.sign_once(&primary, now)
     }
     fn preflight(&self) -> Result<(), SdkError> {
         Ok(())

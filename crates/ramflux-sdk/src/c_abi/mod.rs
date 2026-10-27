@@ -817,6 +817,17 @@ fn clear_optional_out_error(out_error_json: *mut *mut RamfluxBuffer) {
 fn map_sdk_error(error: &SdkError) -> CAbiError {
     let message = error.to_string();
     let code = match error {
+        SdkError::HomeMigrationRefused(reason) => match reason {
+            ramflux_protocol::home_migration::Refusal::RateLimited => RamfluxErrorCode::RateLimited,
+            ramflux_protocol::home_migration::Refusal::StorageUnavailable => {
+                RamfluxErrorCode::StorageFailed
+            }
+            ramflux_protocol::home_migration::Refusal::PeeringUnavailable
+            | ramflux_protocol::home_migration::Refusal::CommitOutcomeUnknown => {
+                RamfluxErrorCode::TransportUnavailable
+            }
+            _ => RamfluxErrorCode::PermissionDenied,
+        },
         SdkError::NetworkingPending | SdkError::CustodyModeDowngrade => {
             RamfluxErrorCode::UnsupportedVersion
         }
@@ -831,8 +842,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
         | SdkError::Storage(_)
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
-        SdkError::CustodyConfirmationFailed
-        | SdkError::CustodyNetwork(_)
+        SdkError::CustodyNetwork(_)
         | SdkError::IdentityRootMissing
         | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,
         SdkError::Transport(error) => match crate::error_policy::transport_code(error) {

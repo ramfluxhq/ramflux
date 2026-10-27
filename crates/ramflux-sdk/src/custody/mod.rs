@@ -9,9 +9,11 @@ pub use bus::{ConfirmedAccount, CustodyBusClient};
 pub(crate) use commit_gate::CommitGate;
 mod secret_buffer;
 pub(crate) use secret_buffer::serialize_secret;
+mod home_authorization;
 mod store;
 mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
+pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{
