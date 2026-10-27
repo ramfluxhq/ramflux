@@ -6,7 +6,7 @@ use super::{
     BTreeMap, NodeCoreError, Read, ReadableDatabase, ReadableTable, RouterRedbStore,
     TableDefinition,
 };
-use ramflux_crypto::custody::{VerifiedNodeRecord, verify_node_identity_record};
+use ramflux_crypto::custody::{NodeKeyBinding, VerifiedNodeRecord, verify_node_identity_record};
 use ramflux_protocol::custody::{Envelope, NodeIdentityRecord};
 const HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_node_history_v1");
 const HEADS: TableDefinition<&str, &str> = TableDefinition::new("custody_node_heads_v1");
@@ -32,24 +32,15 @@ impl RouterRedbStore {
             let body = &node.envelope().body;
             let old_hash =
                 heads.get(body.node_id.as_str()).map_err(error)?.map(|v| v.value().to_string());
-            let entries: Vec<_> = body
-                .receipt_keys
-                .iter()
-                .map(|k| (&k.key_id, &k.public_key, "home_relay".to_owned()))
-                .chain(
-                    body.proxy_keys
-                        .iter()
-                        .map(|k| (&k.key_id, &k.public_key, format!("node_proxy:{}", k.proxy_id))),
-                )
-                .collect();
+            let entries: Vec<_> = node.key_bindings().collect();
             let mut known = BTreeMap::new();
             let mut publics = BTreeMap::new();
-            for (id, public, _) in &entries {
+            for (id, binding) in &entries {
+                let public = &binding.public_key;
                 let id_key = format!("{}/id/{id}", body.node_id);
                 if let Some(v) = keys.get(id_key.as_str()).map_err(error)? {
-                    let pair: (String, String) =
-                        serde_json::from_slice(v.value()).map_err(error)?;
-                    known.insert((*id).clone(), pair);
+                    let pair: NodeKeyBinding = serde_json::from_slice(v.value()).map_err(error)?;
+                    known.insert((*id).to_owned(), pair);
                 }
                 let pub_key = format!("{}/pub/{public}", body.node_id);
                 if let Some(v) = keys.get(pub_key.as_str()).map_err(error)? {
@@ -80,12 +71,13 @@ impl RouterRedbStore {
                 )
                 .map_err(error)?;
             }
-            for (id, public, role) in entries {
+            for (id, binding) in entries {
+                let public = &binding.public_key;
                 let id_key = format!("{}/id/{id}", body.node_id);
                 let pub_key = format!("{}/pub/{public}", body.node_id);
-                let bytes = serde_json::to_vec(&(public, role)).map_err(error)?;
+                let bytes = serde_json::to_vec(&binding).map_err(error)?;
                 keys.insert(id_key.as_str(), bytes.as_slice()).map_err(error)?;
-                let bytes = serde_json::to_vec(id).map_err(error)?;
+                let bytes = serde_json::to_vec(&id).map_err(error)?;
                 keys.insert(pub_key.as_str(), bytes.as_slice()).map_err(error)?;
             }
             let bytes = ramflux_protocol::canonical_json_bytes(node.envelope()).map_err(error)?;

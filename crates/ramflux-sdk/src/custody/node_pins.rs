@@ -3,7 +3,7 @@
 
 //! Durable public discovery evidence, indexed by hash/key instead of rewriting history.
 use crate::SdkError;
-use ramflux_crypto::custody::{VerifiedNodeRecord, verify_node_identity_record};
+use ramflux_crypto::custody::{NodeKeyBinding, VerifiedNodeRecord, verify_node_identity_record};
 use ramflux_protocol::custody::{Envelope, NodeIdentityRecord};
 use std::{
     fs,
@@ -72,21 +72,12 @@ impl NodePins {
         let _lock = self.lock()?;
         let mut known = std::collections::BTreeMap::new();
         let mut publics = std::collections::BTreeMap::new();
-        let body = &record.body;
-        let entries: Vec<_> = body
-            .receipt_keys
-            .iter()
-            .map(|k| (&k.key_id, &k.public_key, "home_relay".into()))
-            .chain(
-                body.proxy_keys
-                    .iter()
-                    .map(|k| (&k.key_id, &k.public_key, format!("node_proxy:{}", k.proxy_id))),
-            )
-            .collect();
-        for (id, public, _) in &entries {
+        let entries: Vec<_> = next.key_bindings().collect();
+        for (id, binding) in &entries {
+            let public = &binding.public_key;
             let path = self.root.join("keys").join(id);
             if path.try_exists()? {
-                known.insert((*id).clone(), read::<(String, String)>(&path, 4096)?);
+                known.insert((*id).to_owned(), read::<NodeKeyBinding>(&path, 4096)?);
             }
             let path = self.root.join("publics").join(public);
             if path.try_exists()? {
@@ -103,9 +94,10 @@ impl NodePins {
             &self.root.join("history").join(next.hash()),
             &ramflux_protocol::canonical_json_bytes(record)?,
         )?;
-        for (id, public, role) in entries {
-            create(&self.root.join("keys").join(id), &serde_json::to_vec(&(public, role))?)?;
-            create(&self.root.join("publics").join(public), &serde_json::to_vec(id)?)?;
+        for (id, binding) in entries {
+            let public = &binding.public_key;
+            create(&self.root.join("keys").join(id), &serde_json::to_vec(&binding)?)?;
+            create(&self.root.join("publics").join(public), &serde_json::to_vec(&id)?)?;
         }
         let temp = self.root.join(format!(
             ".head-{}",

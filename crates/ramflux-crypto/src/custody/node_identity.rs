@@ -15,6 +15,15 @@ use ramflux_protocol::{
 };
 use std::collections::BTreeSet;
 
+/// Immutable credential identity retained even after a descriptor leaves current metadata.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeKeyBinding {
+    pub public_key: String,
+    pub role: String,
+    pub not_before: u64,
+    pub sign_until: u64,
+}
 /// A signed node record authenticated with an independently trusted identity key.
 /// This capability cannot be deserialized from an untrusted discovery reply.
 #[derive(Clone, Debug)]
@@ -39,7 +48,7 @@ impl VerifiedNodeRecord {
     pub fn verify_successor(
         &self,
         next: &Self,
-        known_key: impl Fn(&str) -> Option<(String, String)>,
+        known_key: impl Fn(&str) -> Option<NodeKeyBinding>,
         known_public_key: impl Fn(&str) -> Option<String>,
     ) -> Result<(), CryptoError> {
         let old = &self.record.body;
@@ -59,10 +68,9 @@ impl VerifiedNodeRecord {
         {
             return Err(reject("node identity revocations cannot shrink"));
         }
-        for (key_id, public, role) in bindings(new) {
-            if known_key(key_id)
-                .is_some_and(|(old_public, old_role)| old_public != public || old_role != role)
-                || known_public_key(public).is_some_and(|old_id| old_id != key_id)
+        for (key_id, binding) in bindings(new) {
+            if known_key(key_id).is_some_and(|old| old != binding)
+                || known_public_key(&binding.public_key).is_some_and(|old_id| old_id != key_id)
             {
                 return Err(reject("node signing key identity cannot be recycled"));
             }
@@ -113,12 +121,36 @@ impl VerifiedNodeRecord {
     }
 }
 
-fn bindings(body: &NodeIdentityRecord) -> impl Iterator<Item = (&str, &str, String)> {
+impl VerifiedNodeRecord {
+    /// Permanent key identity, including its non-renewable signing interval.
+    pub fn key_bindings(&self) -> impl Iterator<Item = (&str, NodeKeyBinding)> {
+        bindings(&self.record.body)
+    }
+}
+fn bindings(body: &NodeIdentityRecord) -> impl Iterator<Item = (&str, NodeKeyBinding)> {
     body.receipt_keys
         .iter()
-        .map(|k| (k.key_id.as_str(), k.public_key.as_str(), "home_relay".into()))
-        .chain(body.proxy_keys.iter().map(|k| {
-            (k.key_id.as_str(), k.public_key.as_str(), format!("node_proxy:{}", k.proxy_id))
+        .map(|key| {
+            (
+                key.key_id.as_str(),
+                NodeKeyBinding {
+                    public_key: key.public_key.clone(),
+                    role: "home_relay".into(),
+                    not_before: key.not_before,
+                    sign_until: key.sign_until,
+                },
+            )
+        })
+        .chain(body.proxy_keys.iter().map(|key| {
+            (
+                key.key_id.as_str(),
+                NodeKeyBinding {
+                    public_key: key.public_key.clone(),
+                    role: format!("node_proxy:{}", key.proxy_id),
+                    not_before: key.not_before,
+                    sign_until: key.sign_until,
+                },
+            )
         }))
 }
 
@@ -164,10 +196,13 @@ fn structure(body: &NodeIdentityRecord) -> Result<(), CryptoError> {
     }
     let mut ids = BTreeSet::new();
     let mut publics = BTreeSet::new();
-    for (id, public, _) in bindings(body) {
+    for (id, binding) in bindings(body) {
         bytes(id, 32)?;
-        key(public)?;
-        if !ids.insert(id) || !publics.insert(public) || public == body.node_signing_public_key {
+        key(&binding.public_key)?;
+        if !ids.insert(id)
+            || binding.public_key == body.node_signing_public_key
+            || !publics.insert(binding.public_key)
+        {
             return Err(reject("node receipt, proxy and identity keys must be independent"));
         }
     }
