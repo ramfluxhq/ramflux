@@ -8,8 +8,7 @@ use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
 use ramflux_protocol::custody::{
     BindingMode, BranchProofV3, CUSTODY_REQUEST_PATH, CustodyClientFrame, CustodyPeer,
     CustodyProofAction, CustodyRefusal, CustodyServerFrame, CustodySession, CustodySessionAction,
-    DeviceRef, MAX_CUSTODY_FRAME_BYTES, Publication, custody_session_action_hash, decode,
-    object_hash,
+    DeviceRef, MAX_CUSTODY_FRAME_BYTES, custody_session_action_hash, decode, object_hash,
 };
 use ramflux_transport::GatewayTcpTlsStream;
 use std::{
@@ -169,8 +168,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     }
 
     async fn register(&mut self) -> Result<(), SdkError> {
-        let publication =
-            Publication { record: self.account.record().clone(), compacted_ids: None };
+        let publication = self.account.publication();
         let response =
             self.prove(CustodyProofAction::Publish { publication: Box::new(publication) }).await?;
         if !matches!(response, CustodyServerFrame::Published { .. }) {

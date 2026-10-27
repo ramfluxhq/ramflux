@@ -13,6 +13,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+mod publication;
+pub(crate) use publication::accept_publication;
+const MAX_STORED_AUTHORITY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +36,10 @@ pub(super) struct StoredAuthority {
     pub(super) branch_vault_ref: String,
     vault_class: String,
     record: Envelope<DeviceSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compacted_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custodian_publication: Option<Box<ramflux_protocol::custody::Publication>>,
     pins: AuthorityPins,
     custodian_account_id: Option<String>,
 }
@@ -41,11 +48,15 @@ pub(super) struct StoredAuthority {
 pub struct BornAccount {
     stored: StoredAuthority,
     verified: VerifiedRecord,
+    authority_blocked: bool,
 }
 impl BornAccount {
     #[must_use]
     pub const fn state(&self) -> CreationState {
-        self.stored.state
+        if self.authority_blocked { CreationState::NetworkingPending } else { self.stored.state }
+    }
+    pub(crate) const fn authority_blocked(&self) -> bool {
+        self.authority_blocked
     }
     #[must_use]
     pub fn local_account_id(&self) -> &str {
@@ -66,6 +77,13 @@ impl BornAccount {
     #[must_use]
     pub fn record(&self) -> &Envelope<DeviceSet> {
         &self.stored.record
+    }
+    #[must_use]
+    pub(crate) fn publication(&self) -> ramflux_protocol::custody::Publication {
+        ramflux_protocol::custody::Publication {
+            record: self.stored.record.clone(),
+            compacted_ids: self.stored.compacted_ids.clone(),
+        }
     }
     #[must_use]
     pub fn verified(&self) -> &VerifiedRecord {
@@ -90,7 +108,7 @@ impl BornAccount {
     pub fn summary(&self) -> serde_json::Value {
         serde_json::json!({"local_account_id":self.local_account_id(),"principal_id":self.stored.record.body.principal_id,
             "account_anchor":self.stored.record.body.account_anchor,"kind":self.stored.record.body.principal_kind,"display_name":self.stored.record.body.profile.display_name,
-            "state":self.state(),"custody_v3_observed":true,"vault_class":self.stored.vault_class})
+            "state":self.state(),"authority_blocked":self.authority_blocked,"custody_v3_observed":true,"vault_class":self.stored.vault_class})
     }
 }
 fn directory(root: &Path, id: &str) -> Result<PathBuf, SdkError> {
@@ -114,7 +132,7 @@ pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Val
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let id = entry.file_name().into_string().map_err(|_| invalid())?;
-            let summary=load_account(root,&id,now).map_or_else(
+            let summary=load_data_account(root,&id,now).map_or_else(
                 |_|serde_json::json!({"local_account_id":id,"state":CreationState::NetworkingPending,"custody_v3_observed":true,"setup_incomplete":true}),
                 |account|account.summary());
             accounts.push(summary);
@@ -128,14 +146,28 @@ pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Val
 /// # Errors
 /// Rejects missing/corrupt records, bad signatures, changed modes or missing custodian evidence.
 pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
+    read_account(root, id, now, true)
+}
+/// A signed public record can name existing data while its authority is fenced. This
+/// loader grants no branch permission and is used only by the data unlock/list paths.
+pub(crate) fn load_data_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
+    read_account(root, id, now, false)
+}
+fn read_account(
+    root: &Path,
+    id: &str,
+    now: u64,
+    require_current: bool,
+) -> Result<BornAccount, SdkError> {
     let path = directory(root, id)?.join("authority.json");
     let file = fs::File::open(path)?;
     let mut bytes = Vec::new();
-    file.take(600_001).read_to_end(&mut bytes)?;
-    if bytes.len() > 600_000 {
+    file.take((MAX_STORED_AUTHORITY_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STORED_AUTHORITY_BYTES {
         return Err(invalid());
     }
-    let stored: StoredAuthority = ramflux_protocol::custody::decode(&bytes, 600_000)?;
+    let stored: StoredAuthority =
+        ramflux_protocol::custody::decode(&bytes, MAX_STORED_AUTHORITY_BYTES)?;
     if stored.schema != "ramflux.local.custody_account.v1"
         || stored.local_account_id != id
         || !stored.custody_v3_observed
@@ -143,19 +175,27 @@ pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkE
         return Err(invalid());
     }
     require_account_binding(root, id, &stored.record.body.account_anchor)?;
-    let human =
-        stored.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?;
-    let verified = verify_record(&stored.record, now, None, human.as_ref())?;
-    stored.pins.require_current(&verified)?;
-    Ok(BornAccount { stored, verified })
+    let human = if let Some(publication) = &stored.custodian_publication {
+        Some(verify_record(&publication.record, now, publication.compacted_ids.as_deref(), None)?)
+    } else {
+        stored.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?
+    };
+    let verified =
+        verify_record(&stored.record, now, stored.compacted_ids.as_deref(), human.as_ref())?;
+    let authority_blocked = stored.pins.require_current(&verified).is_err();
+    if require_current {
+        stored.pins.require_current(&verified)?;
+    }
+    Ok(BornAccount { stored, verified, authority_blocked })
 }
 fn load_human(root: &Path, id: &str, now: u64) -> Result<VerifiedRecord, SdkError> {
     // Decode directly and reject nonhuman evidence before following any custodian reference.
     let mut bytes = Vec::new();
     fs::File::open(directory(root, id)?.join("authority.json"))?
-        .take(600_001)
+        .take((MAX_STORED_AUTHORITY_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
-    let stored: StoredAuthority = ramflux_protocol::custody::decode(&bytes, 600_000)?;
+    let stored: StoredAuthority =
+        ramflux_protocol::custody::decode(&bytes, MAX_STORED_AUTHORITY_BYTES)?;
     if stored.local_account_id != id
         || stored.custodian_account_id.is_some()
         || !stored.custody_v3_observed
@@ -164,7 +204,7 @@ fn load_human(root: &Path, id: &str, now: u64) -> Result<VerifiedRecord, SdkErro
         return Err(invalid());
     }
     require_account_binding(root, id, &stored.record.body.account_anchor)?;
-    let verified = verify_record(&stored.record, now, None, None)?;
+    let verified = verify_record(&stored.record, now, stored.compacted_ids.as_deref(), None)?;
     if stored.record.body.principal_kind != ramflux_protocol::PrincipalKind::Human {
         return Err(invalid());
     }
@@ -265,6 +305,8 @@ pub(super) fn persist(
             branch_vault_ref: branch_reference.clone(),
             vault_class: "software_os_credential_non_synchronizing".into(),
             record,
+            compacted_ids: None,
+            custodian_publication: None,
             pins,
             custodian_account_id: input.custodian_account_id.clone(),
         };
@@ -276,7 +318,7 @@ pub(super) fn persist(
             &ramflux_protocol::canonical_json_bytes(&stored)?,
         )?;
         fs::File::open(&dir)?.sync_all()?;
-        Ok(BornAccount { stored, verified })
+        Ok(BornAccount { stored, verified, authority_blocked: false })
     })();
     if result.is_err() {
         // Attempt both deletions even if one provider operation fails. The reservation remains
@@ -295,15 +337,16 @@ impl BornAccount {
         root: &Path,
         now: u64,
     ) -> Result<Option<ramflux_protocol::custody::Publication>, SdkError> {
+        if let Some(publication) = &self.stored.custodian_publication {
+            verify_record(&publication.record, now, publication.compacted_ids.as_deref(), None)?;
+            return Ok(Some((**publication).clone()));
+        }
         self.stored
             .custodian_account_id
             .as_ref()
             .map(|id| {
                 let human = load_account(root, id, now)?;
-                Ok(ramflux_protocol::custody::Publication {
-                    record: human.record().clone(),
-                    compacted_ids: None,
-                })
+                Ok(human.publication())
             })
             .transpose()
     }
@@ -315,7 +358,9 @@ impl BornAccount {
         body: ramflux_protocol::custody::ContactConsentV2,
         now: u64,
     ) -> Result<Envelope<ramflux_protocol::custody::ContactConsentV2>, SdkError> {
-        if current.envelope().body.account_anchor != self.record().body.account_anchor {
+        if self.authority_blocked
+            || current.envelope().body.account_anchor != self.record().body.account_anchor
+        {
             return Err(invalid());
         }
         let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
@@ -336,6 +381,7 @@ impl BornAccount {
         if device_id != self.local_device_id()? {
             return Err(invalid());
         }
+        self.stored.pins.require_current(&self.verified)?;
         let entry = self
             .record()
             .body
@@ -385,7 +431,7 @@ impl BornAccount {
         }
         current.stored.state = CreationState::Live;
         let bytes = ramflux_protocol::canonical_json_bytes(&current.stored)?;
-        if bytes.len() > 600_000 {
+        if bytes.len() > MAX_STORED_AUTHORITY_BYTES {
             return Err(invalid());
         }
         let temp = dir.join(format!(

@@ -185,6 +185,11 @@ pub(crate) fn create_with_device(
     let positions = ceremony.hidden_challenge()?;
     Ok(ceremony.confirm(&words(&phrase, positions)?, vault, now)?)
 }
+pub(crate) fn mark_live(root: &Path, id: &str, now: u64) -> Result {
+    let mut account = load_account(root, id, now)?;
+    account.mark_live(root)?;
+    Ok(())
+}
 #[test]
 fn custody_default_off_has_no_recovery_or_persistence_side_effects() -> Result {
     let root = Root::new()?;

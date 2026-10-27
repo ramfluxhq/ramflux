@@ -230,6 +230,7 @@ impl LocalBusAccountState {
 
     async fn prepare_native_branch(&mut self) -> Result<(), SdkError> {
         super::native_account::configure_pending(self).await?;
+        super::native_account::refresh_public_authority(self).await?;
         let custody = self.gateway_config.custody.as_ref().ok_or(SdkError::NetworkingPending)?;
         if self.client.device_branch.is_none() {
             self.client

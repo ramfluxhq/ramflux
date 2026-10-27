@@ -300,6 +300,29 @@ publication and network group delivery, and own-device copies/history transfer.
 A live `message` scope cannot substitute for these permissions. These checks do
 not gate decryption of data already stored in local history.
 
+## Durable local own authority
+
+A completely verified own publication advances the independent public authority
+file before updating actor caches. The update preserves local credential
+references, the local device selector, creation mode and registration state.
+Checkpoint id lists and attached custodian publication evidence are retained;
+reconnects publish that complete evidence. Unchanged publications are no-ops,
+rollback is refused, and equivocation fences remain durable across restart.
+The local file has a 32 MiB read/write bound covering its record, retained pins
+and public evidence; wire record/frame bounds remain unchanged.
+
+Ordinary reconnect preparation first reads the public directory over the
+configured TLS/QUIC peer, before accessing branch credentials or making an
+account proof. Missing authority is allowed only for an account still awaiting
+initial registration. A missing previously live head, invalid signature or
+legacy-only result fails closed. Actor permissions refuse a cache behind the
+independent local floor, including when a reconnect advanced the file first.
+
+An authority fence blocks credentials and networking. It still permits opening
+existing data with the correct data passphrase, without loading a primary key.
+List/status distinguish `authority_blocked` and `networking_pending` from the
+ordinary locked/unlocked data state. No legacy proof fallback is available.
+
 ## Integration fixture and production boundary
 
 Production Linux primary-vault support is separate work; unsupported production
