@@ -69,6 +69,16 @@ else:
     assert sys.argv[3] == "test-public-pin"
     import json
     control = json.loads((Path(__file__).parent.parent / "control.json").read_text())
+    root = Path(__file__).parent.parent / "data"
+    runtime = root / "runtime.env"
+    values = dict(line.split("=", 1) for line in runtime.read_text().splitlines()
+                  if "=" in line) if runtime.exists() else {}
+    with (Path(__file__).parent.parent / "public-probes.jsonl").open("a") as output:
+        output.write(json.dumps({"origin": sys.argv[2], "version": values.get("RAMFLUX_VERSION"),
+                                 "compose": (root / "compose.yml").read_text()
+                                 if (root / "compose.yml").exists() else ""}) + "\\n")
+    if values.get("RAMFLUX_VERSION") in control.get("public_unhealthy_versions", []):
+        sys.exit("published discovery endpoint unhealthy")
     if control.get("relay_quic_unhealthy"):
         sys.exit("relay QUIC unhealthy")
     print("mock discovery and QUIC verification")
@@ -147,6 +157,16 @@ else:
         self.assertFalse(self.cargo_journal.exists())
         self.assertFalse(any("up" in args for args in self.compose_commands()))
 
+    def current_snapshot(self):
+        owner = json.loads((self.state / "owner.json").read_text())
+        return self.state / "version-snapshots" / owner["current_snapshot"]
+
+    def managed_state(self):
+        names = ("compose.yml", "compose.voice.yml", "compose.admin.yml", "runtime.env",
+                 "owner.json", "demo-override.json", "deploy-tree.version")
+        return {name: (self.state / name).read_bytes() if (self.state / name).exists() else None
+                for name in names}
+
     def test_requires_env_and_refuses_unowned_data(self):
         self.run_script("up", env_file=self.root / "missing.env", success=False)
         self.state.mkdir()
@@ -176,11 +196,16 @@ else:
 
     def test_up_refreshes_pre_split_frozen_compose_without_changing_identity_or_ownership(self):
         self.seed_pre_split_state()
-        preserved = {name: (self.state / name).read_bytes() for name in ("owner.json", "identity.env", "owner.token", "certs/ca.pem")}
+        original_owner = json.loads((self.state / "owner.json").read_text())
+        preserved = {name: (self.state / name).read_bytes() for name in
+                     ("identity.env", "owner.token", "certs/ca.pem")}
         result = self.run_script("up")
         self.assertIn("demo configuration refreshed: compose.yml, compose.voice.yml", result.stdout)
         for name, value in preserved.items():
             self.assertEqual((self.state / name).read_bytes(), value)
+        owner = json.loads((self.state / "owner.json").read_text())
+        self.assertEqual(owner["settings"], original_owner["settings"])
+        self.assertEqual(owner["token"], original_owner["token"])
         deploy = SCRIPT.parent.parent
         self.assertEqual((self.state / "compose.yml").read_bytes(), (deploy / "docker-compose.yml").read_bytes())
         self.assertEqual((self.state / "compose.voice.yml").read_bytes(), (deploy / "docker-compose.voice.yml").read_bytes())
@@ -204,9 +229,10 @@ else:
 
         upgraded = self.run_script("upgrade")
         self.assertIn("rollback command:", upgraded.stdout)
+        self.assertIn(f"{SCRIPT} rollback {self.env_file}", upgraded.stdout)
         owner = json.loads((self.state / "owner.json").read_text())
         self.assertEqual(owner["settings"]["DEMO_VERSION"], "demo-v2")
-        self.assertEqual(owner["version_history"], ["demo-test"])
+        self.assertEqual(owner["version_history"], ["demo-test", "demo-v2"])
         self.assertIn("RAMFLUX_VERSION=demo-v2", (self.state / "runtime.env").read_text())
         for name, value in identity.items():
             self.assertEqual((self.state / name).read_bytes(), value)
@@ -222,7 +248,7 @@ else:
         self.assertIn("rolled back demo images to version demo-test", rolled_back.stdout)
         owner = json.loads((self.state / "owner.json").read_text())
         self.assertEqual(owner["settings"]["DEMO_VERSION"], "demo-test")
-        self.assertEqual(owner["version_history"], [])
+        self.assertEqual(owner["version_history"], ["demo-test"])
         self.assertIn("RAMFLUX_VERSION=demo-test", (self.state / "runtime.env").read_text())
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
         for name, value in identity.items():
@@ -232,6 +258,120 @@ else:
         self.env_file.write_text(self.env_file.read_text().replace(
             "DEMO_VERSION=demo-v2\n", "DEMO_VERSION=demo-test\n"))
         self.run_script("status")
+
+    def test_successful_up_creates_an_immutable_complete_snapshot(self):
+        self.run_script("up")
+        owner = json.loads((self.state / "owner.json").read_text())
+        self.assertEqual(owner["version_history"], ["demo-test"])
+        self.assertEqual(owner["snapshot_history"], [owner["current_snapshot"]])
+        snapshot = self.current_snapshot()
+        manifest = json.loads((snapshot / "manifest.json").read_text())
+        self.assertEqual(set(manifest["files"]), {
+            "compose.yml", "runtime.env", "owner.json", "demo-override.json",
+            "deploy-tree.version",
+        })
+        for name in manifest["files"]:
+            self.assertEqual((snapshot / name).read_bytes(), (self.state / name).read_bytes())
+            self.assertEqual((snapshot / name).stat().st_mode & 0o222, 0)
+
+    def test_rollback_restores_pre_split_snapshot_bytes_and_public_probe(self):
+        self.run_script("up")
+        snapshot = self.current_snapshot()
+        snapshot.chmod(0o700)
+        old_compose = (SCRIPT.parent / "tests/fixtures/demo-pre-split-compose.yml").read_bytes()
+        old_runtime = (self.state / "runtime.env").read_bytes().replace(
+            b"RAMFLUX_FEDERATION_PUBLIC_PORT=", b"RAMFLUX_FEDERATION_ADMIN_PORT=")
+        replacements = {
+            "compose.yml": old_compose,
+            "runtime.env": old_runtime,
+            "deploy-tree.version": b"pre-split-tree\n",
+        }
+        for name, content in replacements.items():
+            path = snapshot / name
+            path.chmod(0o600)
+            path.write_bytes(content)
+            path.chmod(0o400)
+            (self.state / name).write_bytes(content)
+        snapshot.chmod(0o500)
+        expected = {name: (snapshot / name).read_bytes()
+                    for name in json.loads((snapshot / "manifest.json").read_text())["files"]}
+
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.run_script("upgrade")
+        self.assertNotEqual((self.state / "compose.yml").read_bytes(), old_compose)
+        self.run_script("rollback")
+        for name, content in expected.items():
+            self.assertEqual((self.state / name).read_bytes(), content, name)
+        probes = [json.loads(line) for line in (self.root / "public-probes.jsonl").read_text().splitlines()]
+        self.assertEqual(probes[-1]["origin"], "http://demo.example.org:59482")
+        self.assertEqual(probes[-1]["version"], "demo-test")
+        self.assertEqual(probes[-1]["compose"].encode(), old_compose)
+
+    def test_upgrade_refuses_missing_recorded_overlays_before_writes(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_ADMIN_LOOPBACK_PORT=59487\n")
+        self.run_script("up", "--voice-udp-port", "59449")
+        before = self.managed_state()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+
+        missing_voice = self.run_script("upgrade", success=False)
+        self.assertIn("RAMFLUX_DEMO_VOICE_UDP_PORT", missing_voice.stderr)
+        self.assertNotIn("59449", missing_voice.stderr)
+        self.assertEqual(self.managed_state(), before)
+        self.assertFalse((self.state / "transaction.pending").exists())
+
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_DEMO_VOICE_UDP_PORT=59449\n")
+        self.env_file.write_text(self.env_file.read_text().replace(
+            "DEMO_ADMIN_LOOPBACK_PORT=59487\n", ""))
+        missing_admin = self.run_script("upgrade", success=False)
+        self.assertIn("DEMO_ADMIN_LOOPBACK_PORT", missing_admin.stderr)
+        self.assertNotIn("59487", missing_admin.stderr)
+        self.assertEqual(self.managed_state(), before)
+        self.assertFalse((self.state / "transaction.pending").exists())
+
+    def test_failed_upgrade_auto_restores_the_last_good_snapshot(self):
+        self.run_script("up")
+        initial = self.managed_state()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.control.write_text(json.dumps({"fail_up_versions": ["demo-v2"]}))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn("automatically restored demo version demo-test", failed.stderr)
+        self.assertEqual(self.managed_state(), initial)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
+
+        self.control.write_text("{}")
+        self.run_script("upgrade")
+        good_v2 = self.managed_state()
+        self.env_file.write_text(self.env_file.read_text().replace(
+            "DEMO_VERSION=demo-v2\n", "DEMO_VERSION=demo-v3\n"))
+        self.control.write_text(json.dumps({"public_unhealthy_versions": ["demo-v3"]}))
+        failed_probe = self.run_script("upgrade", success=False)
+        self.assertIn("published discovery endpoint unhealthy", failed_probe.stderr)
+        self.assertIn("automatically restored demo version demo-v2", failed_probe.stderr)
+        self.assertEqual(self.managed_state(), good_v2)
+        self.assertFalse((self.state / "transaction.pending").exists())
+
+    def test_recover_retries_a_retained_failed_transaction(self):
+        self.run_script("up")
+        initial = self.managed_state()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.control.write_text(json.dumps({"up_exit": "engine unavailable"}))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn("automatic demo recovery failed", failed.stderr)
+        self.assertTrue((self.state / "transaction.pending").is_file())
+        self.assertEqual(self.managed_state(), initial)
+
+        self.control.write_text("{}")
+        recovered = self.run_script("recover")
+        self.assertIn("recovered demo version demo-test", recovered.stdout)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertEqual(self.managed_state(), initial)
 
     def test_prebuilt_upgrade_requires_all_seven_versioned_images(self):
         self.run_script("up")
