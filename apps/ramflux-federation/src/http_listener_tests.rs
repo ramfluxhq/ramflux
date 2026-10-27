@@ -47,7 +47,7 @@ fn request(
     Ok(response)
 }
 
-fn context(
+pub(super) fn context(
     root: &std::path::Path,
 ) -> Result<FederationAdminHttpContext, Box<dyn std::error::Error>> {
     let seed = [7; 32];
@@ -354,16 +354,27 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut first = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
-    let worker =
-        crate::public_http::spawn_public_connection(stream, public.clone(), active.clone(), 1)
-            .ok_or("first connection rejected")?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public.clone(),
+        active.clone(),
+        1,
+        crate::http_limits::defaults(true),
+    )
+    .ok_or("first connection rejected")?;
     assert_eq!(active.load(Ordering::Acquire), 1);
     let mut excess = TcpStream::connect(listener.local_addr()?)?;
     excess.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (stream, _) = listener.accept()?;
     assert!(
-        crate::public_http::spawn_public_connection(stream, public.clone(), active.clone(), 1)
-            .is_none()
+        crate::public_http::spawn_public_connection(
+            stream,
+            public.clone(),
+            active.clone(),
+            1,
+            crate::http_limits::defaults(true)
+        )
+        .is_none()
     );
     let mut response = String::new();
     excess.read_to_string(&mut response)?;
@@ -375,8 +386,14 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
     assert_eq!(active.load(Ordering::Acquire), 0);
     let mut failed = TcpStream::connect(listener.local_addr()?)?;
     let (stream, _) = listener.accept()?;
-    let worker = crate::public_http::spawn_public_connection(stream, public, active.clone(), 1)
-        .ok_or("slot not released")?;
+    let worker = crate::public_http::spawn_public_connection(
+        stream,
+        public,
+        active.clone(),
+        1,
+        crate::http_limits::defaults(true),
+    )
+    .ok_or("slot not released")?;
     failed.write_all(b"GET /mvp1/prekey/root HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
     worker.join().map_err(|_| "worker panicked")?;
     failed.read_to_string(&mut String::new())?;

@@ -5,8 +5,11 @@ mod admin_http;
 mod discovery;
 mod flow;
 mod helpers;
+mod http_limits;
 #[cfg(test)]
 mod http_listener_tests;
+#[cfg(test)]
+mod http_request_limits_tests;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod key_migration;
@@ -118,7 +121,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             },
         )?;
         let admin_addr = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ADMIN_ADDR")
-            .unwrap_or_else(|_| "127.0.0.1:18087".to_owned());
+            .unwrap_or_else(|_| "127.0.0.1:18089".to_owned());
         serve_admin_http(
             &admin_addr,
             FederationAdminHttpContext {

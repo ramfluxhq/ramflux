@@ -109,6 +109,16 @@ else:
         self.assertEqual((self.state / "unrelated.txt").read_text(), "preserve")
         self.assertEqual(self.commands(), [])
 
+    def test_invalid_public_connection_limit_refuses_before_state_or_runtime_changes(self):
+        for value in ("", "0", "4097", "invalid", "${UNRESOLVED}", "999999999999999999999999999"):
+            with self.subTest(value=value):
+                with self.env_file.open("a") as output:
+                    output.write(f"RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS={shlex.quote(value)}\n")
+                result = self.run_script("up", success=False)
+                self.assertIn("public max connections", result.stderr)
+                self.assertFalse(self.state.exists())
+                self.assertEqual(self.commands(), [])
+
     def seed_pre_split_state(self):
         self.run_script("up")
         # Existing ownership, identity and volumes use the same pre-split schemas.

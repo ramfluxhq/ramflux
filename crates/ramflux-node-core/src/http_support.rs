@@ -36,91 +36,160 @@ impl NodeHttpResponse {
     }
 }
 
+/// Resource limits applied before allocation and across every request read.
+#[derive(Clone, Copy)]
+pub struct HttpRequestLimits {
+    pub max_header_bytes: usize,
+    pub max_body_bytes: usize,
+    pub read_timeout: Duration,
+    pub request_timeout: Duration,
+}
+impl Default for HttpRequestLimits {
+    fn default() -> Self {
+        Self {
+            max_header_bytes: 64 * 1024,
+            max_body_bytes: 1024 * 1024,
+            read_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+}
 /// # Errors
-/// Returns an error when the stream cannot be read or the request is malformed.
+/// Rejects malformed, oversized or timed-out requests without allocating their declared size.
 pub fn read_itest_http_request(
     stream: &mut TcpStream,
 ) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
     read_itest_http_request_with_timeout(stream, Duration::from_secs(5))
 }
-
 /// # Errors
-/// Returns an error when the stream cannot be read or the request is malformed.
+/// Rejects malformed, oversized or timed-out requests; the timeout is per read.
 pub fn read_itest_http_request_with_timeout(
     stream: &mut TcpStream,
     read_timeout: Duration,
 ) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
-    let source_ip_hash = stream.peer_addr().ok().map(|addr| source_ip_hash(&addr.ip().to_string()));
-    stream
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
-
+    match read_http_request_with_limits(
+        stream,
+        HttpRequestLimits { read_timeout, ..HttpRequestLimits::default() },
+        std::time::Instant::now(),
+    ) {
+        Err(NodeCoreError::HttpRequestRejected { status: "408 Request Timeout" }) => Ok(None),
+        other => other,
+    }
+}
+fn rejected(status: &'static str) -> NodeCoreError {
+    NodeCoreError::HttpRequestRejected { status }
+}
+/// Read a bounded request with a whole-request deadline measured from acceptance.
+/// # Errors
+/// Returns 400 for invalid framing, 413 for limits, 408 for timeouts, or a socket error.
+pub fn read_http_request_with_limits(
+    stream: &mut TcpStream,
+    limits: HttpRequestLimits,
+    accepted_at: std::time::Instant,
+) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
+    let deadline = accepted_at
+        .checked_add(limits.request_timeout)
+        .ok_or_else(|| rejected("400 Bad Request"))?;
     let mut raw = Vec::new();
-    let Some(header_end) = read_until_http_header_end(stream, &mut raw)? else {
-        return Ok(None);
+    let mut chunk = [0u8; 512];
+    let header_end = loop {
+        if let Some(end) = find_http_header_end(&raw) {
+            if end + http_header_separator_len(&raw, end) > limits.max_header_bytes {
+                return Err(rejected("413 Payload Too Large"));
+            }
+            break end;
+        }
+        let space = limits.max_header_bytes.saturating_sub(raw.len()).min(chunk.len());
+        if space == 0 {
+            return Err(rejected("413 Payload Too Large"));
+        }
+        let bytes = request_read(stream, &mut chunk[..space], limits.read_timeout, deadline)?;
+        if bytes == 0 {
+            return if raw.is_empty() { Ok(None) } else { Err(rejected("400 Bad Request")) };
+        }
+        raw.extend_from_slice(&chunk[..bytes]);
     };
-    let header = std::str::from_utf8(&raw[..header_end])
-        .map_err(|source| NodeCoreError::ItestHttp(format!("bad request header utf8: {source}")))?;
+    let header =
+        std::str::from_utf8(&raw[..header_end]).map_err(|_| rejected("400 Bad Request"))?;
     let mut lines = header.lines();
-    let request_line =
-        lines.next().ok_or_else(|| NodeCoreError::ItestHttp("missing request line".to_owned()))?;
-    let mut parts = request_line.split_whitespace();
-    let Some(method) = parts.next() else {
-        return Err(NodeCoreError::ItestHttp("missing method".to_owned()));
-    };
-    let Some(path) = parts.next() else {
-        return Err(NodeCoreError::ItestHttp("missing path".to_owned()));
-    };
-
-    let mut content_length = 0usize;
+    let mut parts = lines.next().ok_or_else(|| rejected("400 Bad Request"))?.split_whitespace();
+    let method = parts.next().ok_or_else(|| rejected("400 Bad Request"))?.to_owned();
+    let path = parts.next().ok_or_else(|| rejected("400 Bad Request"))?.to_owned();
+    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) || parts.next().is_some() {
+        return Err(rejected("400 Bad Request"));
+    }
+    let mut content_length = None;
     let mut keep_alive = false;
     let mut pre_auth_cookie = None;
     let mut pre_auth_now = None;
     for line in lines {
-        let trimmed = line.trim_end();
-        let Some((name, value)) = trimmed.split_once(':') else {
-            continue;
-        };
+        let (name, value) = line.split_once(':').ok_or_else(|| rejected("400 Bad Request"))?;
         let value = value.trim();
         if name.eq_ignore_ascii_case("Content-Length") {
-            content_length = value.parse().map_err(|source| {
-                NodeCoreError::ItestHttp(format!("bad content length: {source}"))
-            })?;
+            if content_length.is_some()
+                || value.is_empty()
+                || !value.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(rejected("400 Bad Request"));
+            }
+            let length: u64 = value.parse().map_err(|_| rejected("413 Payload Too Large"))?;
+            if length > limits.max_body_bytes as u64 {
+                return Err(rejected("413 Payload Too Large"));
+            }
+            content_length =
+                Some(usize::try_from(length).map_err(|_| rejected("413 Payload Too Large"))?);
+        } else if name.eq_ignore_ascii_case("Transfer-Encoding") {
+            return Err(rejected("400 Bad Request"));
         } else if name.eq_ignore_ascii_case("Connection") {
             keep_alive = connection_header_requests_keep_alive(value);
         } else if name.eq_ignore_ascii_case("X-Ramflux-PreAuth-Cookie") {
             pre_auth_cookie = Some(value.to_owned());
         } else if name.eq_ignore_ascii_case("X-Ramflux-PreAuth-Now") {
-            pre_auth_now = Some(value.parse().map_err(|source| {
-                NodeCoreError::ItestHttp(format!("bad pre-auth now: {source}"))
-            })?);
+            pre_auth_now = Some(value.parse().map_err(|_| rejected("400 Bad Request"))?);
         }
     }
-
+    let length = content_length.unwrap_or(0);
     let body_start = header_end + http_header_separator_len(&raw, header_end);
-    let mut body = raw.get(body_start..).unwrap_or_default().to_vec();
-    while body.len() < content_length {
-        let mut chunk = vec![0; content_length - body.len()];
-        let bytes = match stream.read(&mut chunk) {
-            Ok(bytes) => bytes,
-            Err(error) if is_read_timeout(&error) => return Ok(None),
-            Err(error) => return Err(NodeCoreError::ItestHttp(error.to_string())),
-        };
+    let mut body = raw[body_start..].iter().take(length).copied().collect::<Vec<_>>();
+    while body.len() < length {
+        let remaining = (length - body.len()).min(chunk.len());
+        let bytes = request_read(stream, &mut chunk[..remaining], limits.read_timeout, deadline)?;
         if bytes == 0 {
-            return Err(NodeCoreError::ItestHttp("incomplete request body".to_owned()));
+            return Err(rejected("400 Bad Request"));
         }
         body.extend_from_slice(&chunk[..bytes]);
     }
-    body.truncate(content_length);
+    if std::time::Instant::now() >= deadline {
+        return Err(rejected("408 Request Timeout"));
+    }
     Ok(Some(NodeHttpRequest {
-        method: method.to_owned(),
-        path: path.to_owned(),
+        method,
+        path,
         body,
         keep_alive,
-        source_ip_hash,
+        source_ip_hash: stream.peer_addr().ok().map(|addr| source_ip_hash(&addr.ip().to_string())),
         pre_auth_cookie,
         pre_auth_now,
     }))
+}
+fn request_read(
+    stream: &mut TcpStream,
+    chunk: &mut [u8],
+    timeout: Duration,
+    deadline: std::time::Instant,
+) -> Result<usize, NodeCoreError> {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| rejected("408 Request Timeout"))?;
+    stream
+        .set_read_timeout(Some(timeout.min(remaining)))
+        .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    match stream.read(chunk) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if is_read_timeout(&error) => Err(rejected("408 Request Timeout")),
+        Err(error) => Err(NodeCoreError::ItestHttp(error.to_string())),
+    }
 }
 
 fn read_until_http_header_end(
@@ -419,6 +488,41 @@ mod tests {
         release_server_tx.send(())?;
         join_stub_server(server)?;
         assert_eq!(value.get("accepted").and_then(serde_json::Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn request_limits_reject_huge_lengths_and_read_actual_body_incrementally()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (length, expected) in [
+            ("18446744073709551615", "413 Payload Too Large"),
+            ("9223372036854775000", "413 Payload Too Large"),
+            ("invalid", "400 Bad Request"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let mut client = TcpStream::connect(listener.local_addr()?)?;
+            let (mut server, _) = listener.accept()?;
+            write!(client, "POST /test HTTP/1.1\r\nContent-Length: {length}\r\n\r\n")?;
+            let result = read_itest_http_request(&mut server);
+            assert!(
+                matches!(result, Err(NodeCoreError::HttpRequestRejected { status }) if status == expected)
+            );
+        }
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        let (mut server, _) = listener.accept()?;
+        let payload = vec![b'x'; 4097];
+        write!(client, "POST /test HTTP/1.1\r\nContent-Length: {}\r\n\r\n", payload.len())?;
+        client.write_all(&payload)?;
+        let limits = HttpRequestLimits {
+            max_header_bytes: 128,
+            max_body_bytes: payload.len(),
+            ..HttpRequestLimits::default()
+        };
+        let request =
+            read_http_request_with_limits(&mut server, limits, std::time::Instant::now())?
+                .ok_or("request missing")?;
+        assert_eq!(request.body, payload);
         Ok(())
     }
 

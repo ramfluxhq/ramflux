@@ -22,6 +22,7 @@ pub(crate) fn serve_public_http(
             .ok()
             .as_deref(),
     )?;
+    let limits = crate::http_limits::configured(true)?;
     let listener = TcpListener::bind(addr).map_err(|error| {
         ramflux_node_core::NodeCoreError::ItestHttp(format!(
             "federation public HTTP bind failed at {addr}: {error}"
@@ -38,6 +39,7 @@ pub(crate) fn serve_public_http(
                         context.clone(),
                         Arc::clone(&active),
                         limit,
+                        limits,
                     );
                 }
                 Err(error) => tracing::warn!(%error, "federation public accept failed"),
@@ -69,8 +71,10 @@ pub(crate) fn spawn_public_connection(
     context: FederationPublicHttpContext,
     active: Arc<std::sync::atomic::AtomicUsize>,
     limit: usize,
+    limits: ramflux_node_core::HttpRequestLimits,
 ) -> Option<std::thread::JoinHandle<()>> {
     use std::sync::atomic::Ordering;
+    let accepted_at = std::time::Instant::now();
     if active
         .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             if count < limit { Some(count + 1) } else { None }
@@ -88,7 +92,7 @@ pub(crate) fn spawn_public_connection(
     let permit = ConnectionPermit(active);
     match std::thread::Builder::new().spawn(move || {
         let _permit = permit;
-        handle_public_connection(&mut stream, &context);
+        handle_public_connection_with_limits(&mut stream, &context, limits, accepted_at);
     }) {
         Ok(worker) => Some(worker),
         Err(error) => {
@@ -98,25 +102,57 @@ pub(crate) fn spawn_public_connection(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn handle_public_connection(
     stream: &mut TcpStream,
     context: &FederationPublicHttpContext,
 ) {
-    if let Err(error) = handle_public_request(stream, context) {
+    handle_public_connection_with_limits(
+        stream,
+        context,
+        crate::http_limits::defaults(true),
+        std::time::Instant::now(),
+    );
+}
+pub(crate) fn handle_public_connection_with_limits(
+    stream: &mut TcpStream,
+    context: &FederationPublicHttpContext,
+    limits: ramflux_node_core::HttpRequestLimits,
+    accepted_at: std::time::Instant,
+) {
+    if let Err(error) = handle_public_request_with_limits(stream, context, limits, accepted_at) {
         tracing::warn!(%error, "federation public request failed");
-        let _ = ramflux_node_core::write_itest_text_response(
-            stream,
-            "500 Internal Server Error",
-            "internal server error",
-        );
+        let status = crate::http_limits::rejection(&error).unwrap_or("500 Internal Server Error");
+        let body = if crate::http_limits::rejection(&error).is_some() {
+            "request rejected"
+        } else {
+            "internal server error"
+        };
+        let _ = ramflux_node_core::write_itest_text_response(stream, status, body);
     }
 }
 
+#[cfg(test)]
 pub(crate) fn handle_public_request(
     stream: &mut TcpStream,
     context: &FederationPublicHttpContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let Some(request) = ramflux_node_core::read_itest_http_request(stream)? else {
+    handle_public_request_with_limits(
+        stream,
+        context,
+        crate::http_limits::defaults(true),
+        std::time::Instant::now(),
+    )
+}
+fn handle_public_request_with_limits(
+    stream: &mut TcpStream,
+    context: &FederationPublicHttpContext,
+    limits: ramflux_node_core::HttpRequestLimits,
+    accepted_at: std::time::Instant,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let Some(request) =
+        ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
+    else {
         return Ok(());
     };
     let discovery = &context.discovery;

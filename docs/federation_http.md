@@ -1,7 +1,7 @@
 # Federation HTTP listeners
 
 There is no combined listener. `RAMFLUX_FEDERATION_PUBLIC_ADDR` defaults to
-`127.0.0.1:18082`; `RAMFLUX_FEDERATION_ADMIN_ADDR` defaults to `127.0.0.1:18087`.
+`127.0.0.1:18082`; `RAMFLUX_FEDERATION_ADMIN_ADDR` defaults to `127.0.0.1:18089`.
 Both listeners start independently. Binding them to the same address fails startup.
 The public handler has no admin token or federation trust-store reference.
 
@@ -100,8 +100,8 @@ are logged privately. Per-source-IP rate limiting is separate follow-up work.
 
 For host runs, set `RAMFLUX_FEDERATION_PUBLIC_ADDR` and
 `RAMFLUX_FEDERATION_ADMIN_ADDR` to distinct available addresses, for example
-`127.0.0.1:19082` and `127.0.0.1:19087`. The native admin default 18087 avoids
-the itest relay default host port 18084. Occupied public/admin binds fail startup
+`127.0.0.1:19082` and `127.0.0.1:19087`. The native admin default 18089 avoids
+the itest relay (18084) and retention (18087) default host ports. Occupied public/admin binds fail startup
 with the listener name and attempted address; they never silently share a socket.
 Compose explicitly retains internal admin 18084 and router forwarding on that port.
 
@@ -128,3 +128,25 @@ the next `up` to remove access.
 The router-to-federation admin hop carries its token in the JSON body over plain
 HTTP on the trusted Compose network. It is not mTLS-protected. Restrict network
 membership; mTLS for this hop is a separate hardening card.
+
+## Request resource limits
+
+Both HTTP listeners cap headers and bodies before allocation. Bodies are read in
+fixed-size chunks rather than reserving the declared Content-Length. Invalid or
+duplicate lengths and unsupported Transfer-Encoding return 400; oversized headers
+or bodies return 413; timeouts return 408. The public response bodies are generic.
+An absent body length means zero bytes; huge declarations never drive an allocation.
+
+Public defaults: 8 KiB headers, 64 KiB body, 10 seconds from accept for headers and
+body together. Admin defaults: 64 KiB headers, 1 MiB body, 30 seconds. Each socket
+read is also bounded to five seconds or the remaining whole-request budget,
+whichever is smaller. Slow trickle traffic cannot renew that budget. Configure
+`RAMFLUX_FEDERATION_{PUBLIC,ADMIN}_{MAX_HEADER_BYTES,MAX_BODY_BYTES,REQUEST_TIMEOUT_SECONDS}`.
+Allowed maxima are 64 KiB headers, 64 MiB body and 3600 seconds; all values must be
+positive integers. Compose uses the corresponding `RF_COMPOSE_` input aliases;
+demo writes concrete inputs from its operator env file. The shared reader's default
+body cap is 1 MiB. Parsing rejection is fail-closed and never shares admin routes.
+
+Over-cap 503 is best-effort: unread queued bytes can make the kernel close with a
+reset instead. Either result refuses the excess connection without a worker.
+Per-IP rate limiting remains follow-up work.

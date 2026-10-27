@@ -51,6 +51,8 @@ pub enum NodeCoreError {
     ReplayGuard(String),
     #[error("envelope TTL expired: {envelope_id}")]
     TtlExpired { envelope_id: String },
+    #[error("HTTP request rejected: {status}")]
+    HttpRequestRejected { status: &'static str },
     #[error("itest HTTP operation failed: {0}")]
     ItestHttp(String),
     #[error("itest HTTP JSON failed: {0}")]

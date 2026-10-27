@@ -301,3 +301,13 @@ env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. See
 [listener configuration, bounds and SSH commands](../docs/federation_http.md).
+
+Before upgrading, save the private state's frozen definitions for rollback:
+`cp -p STATE/compose.yml STATE/compose.yml.pre-split` and likewise save runtime.env
+and compose.voice.yml when present, keeping the state directory private. To roll
+back, stop the new project without `--purge`, restore the old checkout/images,
+restore **compose.yml** (and the saved voice copy) from those backups, then run the
+old `up` with the original operator env. Restoring compose.yml is mandatory:
+otherwise the old script mixes a new definition with old port inputs and can
+publish default host 18082 while breaking 59482. Never remove identity or volumes.
+The new script validates the public connection limit before state or engine changes.

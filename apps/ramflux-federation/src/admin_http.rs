@@ -38,6 +38,7 @@ pub(crate) fn serve_admin_http(
     addr: &str,
     context: FederationAdminHttpContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let limits = crate::http_limits::configured(false)?;
     let listener = TcpListener::bind(addr).map_err(|source| {
         ramflux_node_core::NodeCoreError::ItestHttp(format!(
             "federation admin HTTP bind failed at {addr}: {source}"
@@ -53,13 +54,17 @@ pub(crate) fn serve_admin_http(
                     continue;
                 }
             };
+            let accepted_at = std::time::Instant::now();
             let context = context.clone();
             thread::spawn(move || {
-                if let Err(error) = handle_admin_request(&mut stream, &context) {
+                if let Err(error) =
+                    handle_admin_request_with_limits(&mut stream, &context, limits, accepted_at)
+                {
                     let body = format!("{error}");
                     if let Err(write_error) = ramflux_node_core::write_itest_text_response(
                         &mut stream,
-                        "500 Internal Server Error",
+                        crate::http_limits::rejection(&error)
+                            .unwrap_or("500 Internal Server Error"),
                         &body,
                     ) {
                         tracing::warn!(%write_error, "failed to write federation admin error");
@@ -71,11 +76,27 @@ pub(crate) fn serve_admin_http(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn handle_admin_request(
     stream: &mut TcpStream,
     context: &FederationAdminHttpContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let Some(request) = ramflux_node_core::read_itest_http_request(stream)? else {
+    handle_admin_request_with_limits(
+        stream,
+        context,
+        crate::http_limits::defaults(false),
+        std::time::Instant::now(),
+    )
+}
+fn handle_admin_request_with_limits(
+    stream: &mut TcpStream,
+    context: &FederationAdminHttpContext,
+    limits: ramflux_node_core::HttpRequestLimits,
+    accepted_at: std::time::Instant,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let Some(request) =
+        ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
+    else {
         return Ok(());
     };
     let state = &context.state;
