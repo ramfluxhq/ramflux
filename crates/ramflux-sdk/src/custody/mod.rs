@@ -5,9 +5,10 @@
 mod bus;
 mod ceremony;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
-mod store;
+pub(crate) mod store;
 mod vault;
-pub use ceremony::{CreateInput, CreationCeremony};
+pub use ceremony::CreateInput;
+pub(crate) use ceremony::CreationCeremony;
 pub use store::{BornAccount, CreationState, load_account};
 pub(crate) use store::{account_exists, list_accounts};
 pub use vault::{NativePrimaryVault, PrimaryVault};

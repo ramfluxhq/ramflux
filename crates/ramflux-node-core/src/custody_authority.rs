@@ -3,7 +3,9 @@
 
 //! Born-v3 publication and durable mode fencing, separate from legacy enrollment.
 use crate::{IdentityRegistry, NodeCoreError, RouterCore, RouterRedbStore};
-use ramflux_crypto::custody::{AuthorityPins, PinOutcome, VerifiedRecord, verify_record};
+use ramflux_crypto::custody::{
+    AuthorityPins, CustodyConflictEvidence, PinOutcome, VerifiedRecord, verify_record,
+};
 use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -20,6 +22,9 @@ impl CustodyRegistry {
     }
     pub(crate) fn permits_legacy(&self, anchor: &str) -> bool {
         self.pins.permits_legacy(anchor)
+    }
+    fn conflict_evidence(&self, anchor: &str, range: u64) -> Option<&CustodyConflictEvidence> {
+        self.pins.conflict_evidence(anchor, range)
     }
 }
 /// Full signed authority plus the bounded cumulative membership evidence, when present.
@@ -90,17 +95,42 @@ impl IdentityRegistry {
             return Err(reject("legacy-to-custody migration is not enabled"));
         }
         let verified = self.verify_custody(publication, now)?;
-        let outcome = self.custody.pins.observe(&verified).map_err(|error| crypto(&error))?;
+        let previous = self.custody.records.get(anchor).map(|entry| entry.record.clone());
+        let outcome = self
+            .custody
+            .pins
+            .observe_with_previous(&verified, previous.as_ref())
+            .map_err(|error| crypto(&error))?;
         if outcome == PinOutcome::Advanced {
             if verified.capacity_pressure().any() {
                 tracing::warn!(account_anchor = %anchor, "custody authority reached eighty percent capacity; prioritize revocations");
             }
             self.custody.records.insert(anchor.clone(), publication.clone());
         }
+        if let PinOutcome::Fenced(alert) = &outcome {
+            tracing::error!(
+                account_anchor = %alert.account_anchor,
+                range_index = alert.range_index,
+                conflict_kind = ?alert.kind,
+                accepted_record_hash = %alert.accepted_record_hash,
+                conflicting_record_hash = %alert.conflicting_record_hash,
+                "custody authority conflict requires operator review and a new master certificate"
+            );
+        }
         Ok(outcome)
     }
 }
 impl RouterCore {
+    /// Return the first complete authenticated conflict pair retained for a fenced range.
+    #[must_use]
+    pub fn custody_conflict_evidence(
+        &self,
+        anchor: &str,
+        range: u64,
+    ) -> Option<CustodyConflictEvidence> {
+        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        control.mvp1_identities.custody.conflict_evidence(anchor, range).cloned()
+    }
     /// Verify and persist head/mode pins atomically, including valid equivocation fences.
     /// # Errors
     /// Rejects invalid/stale/migrated authority or durable write failures.
@@ -116,8 +146,8 @@ impl RouterCore {
         store.record_identity_registry(&candidate)?;
         control.mvp1_identities = candidate;
         self.refresh_migration_read_snapshot_from_control(&control);
-        if outcome == PinOutcome::Fenced {
-            return Err(reject("custody authority equivocation fenced"));
+        if let PinOutcome::Fenced(alert) = outcome {
+            return Err(NodeCoreError::CustodyConflict { alert: Box::new(alert) });
         }
         Ok(publication.record.clone())
     }

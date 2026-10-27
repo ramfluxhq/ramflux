@@ -7,8 +7,23 @@ use crate::{
     custody::{CreateInput, CreationCeremony, NativePrimaryVault},
 };
 use serde::Serialize;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use zeroize::Zeroizing;
+
+/// Unforgeable outside this module; creation code requires proof that the bus option was enabled.
+pub(crate) struct CreationCapability(());
+impl CreationCapability {
+    fn from_config(config: &LocalBusConfig) -> Result<Self, SdkError> {
+        if !config.enable_born_v3_creation {
+            return Err(SdkError::CustodyCreationDisabled);
+        }
+        Ok(Self(()))
+    }
+}
+#[cfg(test)]
+pub(crate) fn test_creation_capability() -> CreationCapability {
+    CreationCapability(())
+}
 
 pub(super) fn handles(method: &str) -> bool {
     method.starts_with("account.custody.")
@@ -54,12 +69,12 @@ pub(super) fn now() -> Result<u64, SdkError> {
         .map(|t| t.as_secs())
         .map_err(|_| SdkError::CustodySetupInvalid)
 }
-pub(super) fn respond(
+pub(super) async fn respond(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-    let result = apply(request, config, ceremony);
+    let result = apply(request, config, ceremony).await;
     // Every failed request consumes the pending ceremony, without word-level feedback.
     let result = match result {
         Ok(body) => body,
@@ -68,11 +83,16 @@ pub(super) fn respond(
             ResultBody::Error { code: super::io::local_bus_error_code(&error) }
         }
     };
-    Ok(Zeroizing::new(serde_json::to_vec(&Reply {
-        protocol: "ramflux.local_bus.custody.v1",
-        request_id: &request.request_id,
-        result,
-    })?))
+    let mut bytes = Zeroizing::new(Vec::with_capacity(4096));
+    serde_json::to_writer(
+        &mut *bytes,
+        &Reply {
+            protocol: "ramflux.local_bus.custody.v1",
+            request_id: &request.request_id,
+            result,
+        },
+    )?;
+    Ok(bytes)
 }
 fn empty(request: &LocalBusFrame) -> Result<(), SdkError> {
     if request.body.as_object().is_none_or(|map| !map.is_empty()) {
@@ -80,24 +100,21 @@ fn empty(request: &LocalBusFrame) -> Result<(), SdkError> {
     }
     Ok(())
 }
-fn primary_vault(config: &LocalBusConfig) -> &dyn crate::custody::PrimaryVault {
-    static NATIVE: NativePrimaryVault = NativePrimaryVault;
+fn primary_vault(config: &LocalBusConfig) -> Arc<dyn crate::custody::PrimaryVault + Send + Sync> {
     #[cfg(test)]
     if let Some(vault) = &config.custody_vault {
-        return vault.as_ref();
+        return Arc::clone(vault);
     }
     #[cfg(not(test))]
     let _ = config;
-    &NATIVE
+    Arc::new(NativePrimaryVault)
 }
-fn apply(
+async fn apply(
     request: &mut LocalBusFrame,
     config: &LocalBusConfig,
     ceremony: &mut Option<CreationCeremony>,
 ) -> Result<ResultBody, SdkError> {
-    if !config.enable_born_v3_creation {
-        return Err(SdkError::CustodyCreationDisabled);
-    }
+    let capability = CreationCapability::from_config(config)?;
     super::requests::deadline(request)?;
     if request.kind != crate::LocalBusFrameKind::Request || request.operation_id.is_some() {
         return Err(SdkError::CustodySetupInvalid);
@@ -112,8 +129,11 @@ fn apply(
             if index.account(&input.local_account_id).is_ok() {
                 return Err(SdkError::CustodySetupInvalid);
             }
-            primary_vault(config).preflight()?;
-            let pending = CreationCeremony::begin(true, &config.data_root, input, now()?)?;
+            let vault = primary_vault(config);
+            tokio::task::spawn_blocking(move || vault.preflight())
+                .await
+                .map_err(|_| SdkError::CustodyVaultUnavailable)??;
+            let pending = CreationCeremony::begin(&capability, &config.data_root, input, now()?)?;
             let anchor = pending.account_anchor().into();
             *ceremony = Some(pending);
             Ok(ResultBody::Prepared { account_anchor: anchor })
@@ -156,7 +176,13 @@ fn apply(
                 };
                 *target = Zeroizing::new(word);
             }
-            let account = pending.confirm(&words, primary_vault(config), now()?)?;
+            let vault = primary_vault(config);
+            let confirmed_at = now()?;
+            let account = tokio::task::spawn_blocking(move || {
+                pending.confirm(&words, vault.as_ref(), confirmed_at)
+            })
+            .await
+            .map_err(|_| SdkError::CustodyVaultUnavailable)??;
             Ok(ResultBody::NetworkingPending { account: account.summary() })
         }
         "account.custody.cancel" => {
@@ -167,7 +193,7 @@ fn apply(
         _ => Err(SdkError::CustodySetupInvalid),
     }
 }
-pub(super) fn guard_account(
+pub(crate) fn guard_account(
     root: &Path,
     request: &LocalBusFrame,
 ) -> Result<Option<serde_json::Value>, SdkError> {
@@ -183,7 +209,7 @@ pub(super) fn guard_account(
         return Ok(None);
     }
     if request.method == "account.status" {
-        return Ok(Some(crate::custody::load_account(root, id, now()?)?.summary()));
+        return Ok(Some(crate::custody::store::account_summary(root, id, now()?)?));
     }
     Err(SdkError::NetworkingPending)
 }

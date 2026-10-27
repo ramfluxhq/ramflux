@@ -23,12 +23,12 @@ impl MasterKey {
     /// # Errors
     /// Returns a derivation/provider failure without including recovery material.
     pub fn from_phrase(phrase: &RecoveryPhrase) -> Result<Self, CryptoError> {
-        let entropy = phrase.entropy();
-        if entropy.len() != 32 {
+        let (entropy, len) = phrase.entropy();
+        if len != 32 {
             return Err(CryptoError::IdentityAuthority("recovery entropy length"));
         }
         let mut seed = Zeroizing::new([0_u8; 32]);
-        Hkdf::<Sha256>::new(Some(&[0_u8; 32]), &entropy)
+        Hkdf::<Sha256>::new(Some(&[0_u8; 32]), &entropy[..len])
             .expand(domain::CUSTODY_MASTER_SEED.as_bytes(), &mut *seed)
             .map_err(|_| CryptoError::HkdfFailed)?;
         Ok(Self(SigningKey::from_bytes(&seed)))

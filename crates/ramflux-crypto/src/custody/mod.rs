@@ -8,7 +8,9 @@ mod management;
 pub use genesis::{GenesisInput, create_genesis};
 mod phrase;
 mod pins;
-pub use pins::{AuthorityPins, PinOutcome};
+pub use pins::{
+    AuthorityPins, CustodyConflictAlert, CustodyConflictEvidence, CustodyConflictKind, PinOutcome,
+};
 mod validate;
 mod verify;
 pub use keys::{MasterKey, SelfSigningKey};

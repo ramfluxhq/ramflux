@@ -149,6 +149,26 @@ fn tampering_wrong_signers_reused_keys_and_unsupported_modes_fail_closed() -> Re
     Ok(())
 }
 #[test]
+fn wrong_signature_domain_and_noncanonical_base64_are_rejected() -> Result {
+    let (_, _, record) = fixture()?;
+    let mut wrong_domain = record.clone();
+    wrong_domain.signature = crate::sign_canonical_bytes_with_seed(
+        &signing_bytes(domain::CUSTODY_BRANCH_CERTIFICATE, &wrong_domain.body)?,
+        [2; 32],
+    );
+    assert!(verify_record(&wrong_domain, 1_700_000_000, None, None).is_err());
+
+    let mut bad_base64 = record;
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut encoded = bad_base64.signature.into_bytes();
+    let last = encoded.last_mut().ok_or("signature")?;
+    let position = alphabet.iter().position(|candidate| candidate == last).ok_or("alphabet")?;
+    *last = alphabet[(position + 1) % alphabet.len()];
+    bad_base64.signature = String::from_utf8(encoded)?;
+    assert!(verify_record(&bad_base64, 1_700_000_000, None, None).is_err());
+    Ok(())
+}
+#[test]
 fn record_readability_does_not_extend_branch_leases_or_poison_time_with_endpoints() -> Result {
     let (_, _, record) = fixture()?;
     let reference = &record.body.master_certificate.body.primary_device_ref;
@@ -227,7 +247,13 @@ fn durable_mode_head_conflict_and_revocation_pins_survive_reload() -> Result {
     conflict.profile.display_name = "Another name".into();
     let conflict = primary.sign_record(conflict)?;
     let conflict = verify_record(&conflict, now + 1, None, None)?;
-    assert_eq!(pins.observe(&conflict)?, PinOutcome::Fenced);
+    let PinOutcome::Fenced(alert) = pins.observe(&conflict)? else {
+        return Err("conflict did not fence".into());
+    };
+    assert_eq!(alert.kind, CustodyConflictKind::RecordHead);
+    let evidence = pins.conflict_evidence(&record.body.account_anchor, 1).ok_or("evidence")?;
+    assert_eq!(&evidence.accepted, revoked.envelope());
+    assert_eq!(&evidence.conflicting, conflict.envelope());
     let pins: AuthorityPins = serde_json::from_slice(&serde_json::to_vec(&pins)?)?;
     assert!(pins.require_current(&revoked).is_err());
     assert!(!pins.permits_legacy(&record.body.account_anchor));
@@ -314,7 +340,11 @@ fn authenticated_certificate_forks_fence_a_range_and_a_higher_range_preserves_de
     let mut fork = revoked.body.clone();
     fork.master_certificate = master.certify(certificate)?;
     let fork = primary.sign_record(fork)?;
-    assert_eq!(pins.observe(&verify_record(&fork, now + 1, None, None)?)?, PinOutcome::Fenced);
+    let PinOutcome::Fenced(alert) = pins.observe(&verify_record(&fork, now + 1, None, None)?)?
+    else {
+        return Err("certificate conflict did not fence".into());
+    };
+    assert_eq!(alert.kind, CustodyConflictKind::MasterCertificate);
     assert!(pins.require_current(&revoked_verified).is_err());
 
     let next_primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([20; 32]));

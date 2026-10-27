@@ -116,18 +116,19 @@ pub(crate) fn create(
     vault: &dyn PrimaryVault,
     now: u64,
 ) -> Result<BornAccount> {
-    let mut ceremony = CreationCeremony::begin(true, root, input(id), now)?;
+    let mut ceremony = begin(root, input(id), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     Ok(ceremony.confirm(&words(&phrase, positions)?, vault, now)?)
 }
+fn begin(root: &Path, input: CreateInput, now: u64) -> Result<CreationCeremony> {
+    let capability = crate::bus::custody_setup::test_creation_capability();
+    Ok(CreationCeremony::begin(&capability, root, input, now)?)
+}
 #[test]
 fn custody_default_off_has_no_recovery_or_persistence_side_effects() -> Result {
     let root = Root::new()?;
-    assert!(matches!(
-        CreationCeremony::begin(false, &root.0, input("off"), 100),
-        Err(SdkError::CustodyCreationDisabled)
-    ));
+    assert!(!crate::LocalBusConfig::new(root.0.join("bus.sock"), &root.0).enable_born_v3_creation);
     assert!(!root.0.join("custody_accounts").exists());
     assert_eq!(std::fs::read_dir(&root.0)?.count(), 0);
     Ok(())
@@ -136,15 +137,15 @@ fn custody_default_off_has_no_recovery_or_persistence_side_effects() -> Result {
 fn custody_show_once_ordering_and_single_confirmation_attempt_are_enforced() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("repeat"), 100)?;
+    let mut ceremony = begin(&root.0, input("repeat"), 100)?;
     let phrase = ceremony.show_once()?;
     assert_eq!(phrase.split_whitespace().count(), 24);
     assert!(ceremony.show_once().is_err());
     assert!(ceremony.hidden_challenge().is_err());
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("wrong"), 100)?;
+    let mut ceremony = begin(&root.0, input("wrong"), 100)?;
     assert!(ceremony.hidden_challenge().is_err());
     assert!(ceremony.show_once().is_err());
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("failed"), 100)?;
+    let mut ceremony = begin(&root.0, input("failed"), 100)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     assert!(positions.iter().all(|p| (1..=24).contains(p)));
@@ -164,7 +165,7 @@ fn custody_show_once_ordering_and_single_confirmation_attempt_are_enforced() -> 
 fn custody_confirmed_authority_reloads_with_latch_and_without_phrase_or_master_on_disk() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input("new"), 100)?;
+    let mut ceremony = begin(&root.0, input("new"), 100)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     let account = ceremony.confirm(&words(&phrase, positions)?, &vault, 100)?;
@@ -214,7 +215,51 @@ fn custody_vault_failure_reserves_mode_and_never_creates_a_legacy_manifest() -> 
     assert!(account_exists(&root.0, "failed")?);
     assert!(load_account(&root.0, "failed", 100).is_err());
     assert!(!root.0.join("local_bus_accounts").exists());
-    assert!(CreationCeremony::begin(true, &root.0, input("failed"), 100).is_err());
+    assert!(begin(&root.0, input("failed"), 100).is_err());
+    Ok(())
+}
+#[test]
+fn directory_first_crash_reservation_is_typed_networking_pending() -> Result {
+    let root = Root::new()?;
+    std::fs::create_dir(root.0.join("custody_accounts"))?;
+    std::fs::create_dir(root.0.join("custody_accounts/interrupted"))?;
+    assert!(!root.0.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists());
+    assert!(!root.0.join("local_bus_accounts/interrupted.json").exists());
+    assert!(account_exists(&root.0, "interrupted")?);
+    let summary = super::store::account_summary(&root.0, "interrupted", 100)?;
+    assert_eq!(summary["state"], "networking_pending");
+    assert_eq!(summary["setup_incomplete"], true);
+    let status = crate::bus::custody_setup::guard_account(
+        &root.0,
+        &crate::LocalBusFrame::request(
+            "status",
+            Some("interrupted".into()),
+            "account",
+            "account.status",
+            serde_json::json!({}),
+        ),
+    )?
+    .ok_or("status")?;
+    assert_eq!(status["state"], "networking_pending");
+    assert!(matches!(
+        crate::bus::custody_setup::guard_account(
+            &root.0,
+            &crate::LocalBusFrame::request(
+                "create",
+                None,
+                "account",
+                "account.create",
+                serde_json::json!({"local_account_id":"interrupted"}),
+            ),
+        ),
+        Err(SdkError::NetworkingPending)
+    ));
+    let mut legacy = crate::RamfluxClient::new();
+    legacy.open_account_index(&root.0)?;
+    assert!(matches!(
+        legacy.unlock_account("interrupted", b"legacy-secret"),
+        Err(SdkError::NetworkingPending)
+    ));
     Ok(())
 }
 #[test]
@@ -224,9 +269,9 @@ fn custody_nonhuman_genesis_requires_current_local_human_custody() -> Result {
     let human = create(&root.0, "human", &vault, 100)?;
     let mut input = input("service");
     input.principal_kind = PrincipalKind::HeadlessAi;
-    assert!(CreationCeremony::begin(true, &root.0, input.clone(), 100).is_err());
+    assert!(begin(&root.0, input.clone(), 100).is_err());
     input.custodian_account_id = Some("human".into());
-    let mut ceremony = CreationCeremony::begin(true, &root.0, input, 100)?;
+    let mut ceremony = begin(&root.0, input, 100)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     let account = ceremony.confirm(&words(&phrase, positions)?, &vault, 100)?;

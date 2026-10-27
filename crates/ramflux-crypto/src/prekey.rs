@@ -30,7 +30,13 @@ impl fmt::Debug for X25519KeyPair {
 impl X25519KeyPair {
     #[must_use]
     pub fn from_seed(seed: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(seed);
+        Self::from_seed_ref(&seed)
+    }
+
+    /// Construct without transferring the caller's seed by value.
+    #[must_use]
+    pub fn from_seed_ref(seed: &[u8; 32]) -> Self {
+        let secret = StaticSecret::from(*seed);
         let public = X25519PublicKey::from(&secret).to_bytes();
         Self { secret, public }
     }

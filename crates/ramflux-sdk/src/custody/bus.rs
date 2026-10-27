@@ -126,7 +126,8 @@ impl CustodyBusClient {
             body,
             trace_id: None,
         };
-        let bytes = Zeroizing::new(serde_json::to_vec(&request)?);
+        let mut bytes = Zeroizing::new(Vec::with_capacity(4096));
+        serde_json::to_writer(&mut *bytes, &request)?;
         if bytes.len() > 4096 {
             return Err(SdkError::CustodySetupInvalid);
         }
