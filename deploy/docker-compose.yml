@@ -5,6 +5,7 @@ services:
         soft: 65536
         hard: 65536
     image: ghcr.io/ramfluxhq/ramflux-gateway:${RAMFLUX_VERSION:-dev}
+    stop_grace_period: 5s
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -47,6 +48,7 @@ services:
         soft: 65536
         hard: 65536
     image: ghcr.io/ramfluxhq/ramflux-router:${RAMFLUX_VERSION:-dev}
+    stop_grace_period: 5s
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -81,6 +83,7 @@ services:
 
   ramflux-notify:
     image: ghcr.io/ramfluxhq/ramflux-notify:${RAMFLUX_VERSION:-dev}
+    stop_grace_period: 5s
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -109,6 +112,7 @@ services:
 
   ramflux-federation:
     image: ghcr.io/ramfluxhq/ramflux-federation:${RAMFLUX_VERSION:-dev}
+    stop_grace_period: 5s
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -177,6 +181,7 @@ services:
 
   ramflux-relay:
     image: ghcr.io/ramfluxhq/ramflux-relay:${RAMFLUX_VERSION:-dev}
+    stop_grace_period: 5s
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -228,6 +233,7 @@ services:
 
   ramflux-signaling:
     image: ghcr.io/ramfluxhq/ramflux-signaling:${RAMFLUX_VERSION:-dev}
+    stop_grace_period: 5s
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -254,6 +260,7 @@ services:
 
   ramflux-retention:
     image: ghcr.io/ramfluxhq/ramflux-retention:${RAMFLUX_VERSION:-dev}
+    stop_grace_period: 5s
     build:
       context: ..
       dockerfile: deploy/Dockerfile

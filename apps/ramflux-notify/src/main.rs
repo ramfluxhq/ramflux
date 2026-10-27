@@ -106,15 +106,13 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").ok().as_deref() == Some("1") {
             return serve_itest_http(&ingress);
         }
-        std::thread::park();
-        return Ok(());
+        return ramflux_node_core::wait_for_service_shutdown(service);
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    std::thread::park();
-    Ok(())
+    ramflux_node_core::wait_for_service_shutdown(service)
 }
 
 struct NotifyIngressState {

@@ -69,6 +69,7 @@ mod router_store;
 mod router_wal;
 mod service_signing;
 mod session;
+mod shutdown;
 mod signaling;
 mod voice;
 pub use voice::*;
@@ -158,6 +159,7 @@ pub use router_store::{
 pub use router_wal::*;
 pub use service_signing::*;
 pub use session::*;
+pub use shutdown::*;
 pub use signaling::*;
 
 #[cfg(test)]
