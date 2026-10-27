@@ -31,29 +31,29 @@ services:
       RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE: "${RAMFLUX_V3_FEDERATION_PROVIDER_KEYRING_FILE:-/etc/ramflux/federation/provider-keyring.json}"
       RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID: "${RAMFLUX_V3_FEDERATION_TRUST_ISSUER_NODE_ID:-node_b.realnet}"
       RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE: "/var/lib/ramflux/relay/trust-snapshot.json"
-      RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS: "${RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS:-10}"
+      RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS: "${RF_COMPOSE_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS:-10}"
       # itest-only (compiled only under itest-http): activate the fail-first v3 ACK seam so a test
       # can exercise the SDK persist-then-ACK retry path. Defaults empty so other tests are unaffected.
-      RAMFLUX_RELAY_ITEST_FAIL_FIRST_V3_ACK: "${RAMFLUX_RELAY_ITEST_FAIL_FIRST_V3_ACK:-}"
+      RAMFLUX_RELAY_ITEST_FAIL_FIRST_V3_ACK: "${RF_COMPOSE_RELAY_ITEST_FAIL_FIRST_V3_ACK:-}"
       # T24-A3 itest-only (compiled only under itest-quic-fault): the post-commit QUIC fault seam +
       # non-sensitive request-fingerprint capture for mvp_s62. All default empty so every other
       # realnet test leaves the seam inert. Mounted quic-fault dir lets the test host read the capture
       # + hold marker the relay writes.
-      RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT: "${RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT:-}"
+      RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT: "${RF_COMPOSE_RELAY_ITEST_DROP_AFTER_COMMIT:-}"
       # PERF-D1-R0: the relay is always compiled with itest-quic-fault, whose per-client-QUIC-request
       # capture is fail-closed (CTRL-058). An empty CAPTURE_FILE makes the relay close EVERY client
       # QUIC connection (regressing every object-v3 test that does not set its own path, e.g. s55).
       # Default to a writable, per-project-isolated path inside the relay-redb volume so the seam is
       # exercised harmlessly; an explicit RAMFLUX_RELAY_ITEST_CAPTURE_FILE still overrides. The relay
       # keeps failing closed on a genuinely unwritable/missing path — the default is not best-effort.
-      RAMFLUX_RELAY_ITEST_CAPTURE_FILE: "${RAMFLUX_RELAY_ITEST_CAPTURE_FILE:-/var/lib/ramflux/relay/itest-object-v3-capture.jsonl}"
-      RAMFLUX_RELAY_ITEST_HOLD_MARKER: "${RAMFLUX_RELAY_ITEST_HOLD_MARKER:-}"
+      RAMFLUX_RELAY_ITEST_CAPTURE_FILE: "${RF_COMPOSE_RELAY_ITEST_CAPTURE_FILE:-/var/lib/ramflux/relay/itest-object-v3-capture.jsonl}"
+      RAMFLUX_RELAY_ITEST_HOLD_MARKER: "${RF_COMPOSE_RELAY_ITEST_HOLD_MARKER:-}"
       # CTRL-089 RELAY-MEM-02-A1 DIAGNOSTIC/profiler-only (default empty → inert). Only meaningful when
       # the relay is compiled with the default-off `itest-alloc-prof` feature (via run-realnet.sh
       # RAMFLUX_RELAY_ALLOC_PROF=1). Points the dhat heap-profile json at the HOST BIND MOUNT below (not
       # a named volume) so it survives `compose down -v` teardown. Empty for every normal test → the env
       # is ignored (and the feature is not even compiled), so no other realnet test is affected.
-      RAMFLUX_RELAY_ALLOC_PROF_FILE: "${RAMFLUX_RELAY_ALLOC_PROF_FILE:-}"
+      RAMFLUX_RELAY_ALLOC_PROF_FILE: "${RF_COMPOSE_RELAY_ALLOC_PROF_FILE:-}"
       # RELAY-MEM-03-A0b (CTRL-093) DIAGNOSTIC/probe-only (default empty → inert). Only meaningful when
       # the relay is compiled with the default-off `itest-redb-cache-probe` feature (via run-realnet.sh
       # RAMFLUX_RELAY_REDB_CACHE_PROBE=1). Sets a fixed redb page-cache cap (bytes) for the control-vs-
@@ -61,7 +61,7 @@ services:
       # test → the env is ignored (and the feature is not even compiled), so no other realnet test is
       # affected. This is the container passthrough for the host env; without it the in-container relay
       # never sees the cap and always uses redb's default.
-      RAMFLUX_RELAY_REDB_CACHE_BYTES: "${RAMFLUX_RELAY_REDB_CACHE_BYTES:-}"
+      RAMFLUX_RELAY_REDB_CACHE_BYTES: "${RF_COMPOSE_RELAY_REDB_CACHE_BYTES:-}"
     volumes:
       # The relay reads the offline-root-signed provider keyring from the same federation materials dir.
       - ${RAMFLUX_V3_MATERIALS_DIR:-./.itest-v3-materials}/federation:/etc/ramflux/federation:ro

@@ -13,10 +13,10 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
-      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
       # v3 issuance material is operator-provided; the gateway fails closed when absent.
-      RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RAMFLUX_GATEWAY_V3_ISSUER_SEED:-}"
-      RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "${RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE:-/etc/ramflux/gateway-v3/issuer-cert.json}"
+      RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RF_COMPOSE_GATEWAY_V3_ISSUER_SEED:-}"
+      RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "${RF_COMPOSE_GATEWAY_V3_ISSUER_CERT_FILE:-/etc/ramflux/gateway-v3/issuer-cert.json}"
     volumes:
       - gateway-redb:/var/lib/ramflux/gateway
       - ./config/gateway.toml:/etc/ramflux/config/gateway.toml:ro
@@ -45,9 +45,9 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
-      RAMFLUX_ROUTER_ADMIN_TOKEN: "${RAMFLUX_ROUTER_ADMIN_TOKEN:-}"
+      RAMFLUX_ROUTER_ADMIN_TOKEN: "${RF_COMPOSE_ROUTER_ADMIN_TOKEN:-}"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18082/internal/home-node-migration/forward"
-      RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RAMFLUX_FEDERATION_ADMIN_TOKEN:-ramflux-local-admin-token}"
+      RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:-ramflux-local-admin-token}"
     volumes:
       - router-redb:/var/lib/ramflux/router
       - ./config/router.toml:/etc/ramflux/config/router.toml:ro
@@ -74,7 +74,7 @@ services:
     group_add: ["${RAMFLUX_SECRET_GID:-0}"]
     environment:
       RAMFLUX_NOTIFY_ROUTE_KEY_FILE: "/etc/ramflux/mesh/route.key"
-      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
+      RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:-}"
     volumes:
       - notify-redb:/var/lib/ramflux/notify
       - ./config/notify.toml:/etc/ramflux/config/notify.toml:ro
@@ -100,24 +100,24 @@ services:
     group_add: ["${RAMFLUX_SECRET_GID:-0}"]
     environment:
       RAMFLUX_FEDERATION_ADMIN_ADDR: "0.0.0.0:18082"
-      RAMFLUX_FEDERATION_ADMIN_TOKEN: "${RAMFLUX_FEDERATION_ADMIN_TOKEN:-ramflux-local-admin-token}"
-      RAMFLUX_FEDERATION_NODE_ID: "${RAMFLUX_FEDERATION_NODE_ID:-localhost}"
+      RAMFLUX_FEDERATION_ADMIN_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:-ramflux-local-admin-token}"
+      RAMFLUX_FEDERATION_NODE_ID: "${RF_COMPOSE_FEDERATION_NODE_ID:-localhost}"
       # Advertise externally reachable client endpoints; TLS termination forwards discovery
       # and prekey paths to the federation HTTP listener.
-      RAMFLUX_CLIENT_GATEWAY_QUIC_ADDR: "${RAMFLUX_CLIENT_GATEWAY_QUIC_ADDR:-localhost:443}"
-      RAMFLUX_CLIENT_GATEWAY_TCP_ADDR: "${RAMFLUX_CLIENT_GATEWAY_TCP_ADDR:-localhost:443}"
-      RAMFLUX_CLIENT_GATEWAY_SERVER_NAME: "${RAMFLUX_CLIENT_GATEWAY_SERVER_NAME:-ramflux-gateway}"
-      RAMFLUX_CLIENT_RELAY_QUIC_ADDR: "${RAMFLUX_CLIENT_RELAY_QUIC_ADDR:-localhost:17447}"
-      RAMFLUX_CLIENT_RELAY_SERVER_NAME: "${RAMFLUX_CLIENT_RELAY_SERVER_NAME:-ramflux-relay}"
-      RAMFLUX_CLIENT_PREKEY_HTTP_URL: "${RAMFLUX_CLIENT_PREKEY_HTTP_URL:-http://localhost:18082}"
-      RAMFLUX_CLIENT_SIGNALING_TURN_ADDR: "${RAMFLUX_CLIENT_SIGNALING_TURN_ADDR:-localhost:3478}"
-      RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RAMFLUX_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
+      RAMFLUX_CLIENT_GATEWAY_QUIC_ADDR: "${RF_COMPOSE_CLIENT_GATEWAY_QUIC_ADDR:-localhost:443}"
+      RAMFLUX_CLIENT_GATEWAY_TCP_ADDR: "${RF_COMPOSE_CLIENT_GATEWAY_TCP_ADDR:-localhost:443}"
+      RAMFLUX_CLIENT_GATEWAY_SERVER_NAME: "${RF_COMPOSE_CLIENT_GATEWAY_SERVER_NAME:-ramflux-gateway}"
+      RAMFLUX_CLIENT_RELAY_QUIC_ADDR: "${RF_COMPOSE_CLIENT_RELAY_QUIC_ADDR:-localhost:17447}"
+      RAMFLUX_CLIENT_RELAY_SERVER_NAME: "${RF_COMPOSE_CLIENT_RELAY_SERVER_NAME:-ramflux-relay}"
+      RAMFLUX_CLIENT_PREKEY_HTTP_URL: "${RF_COMPOSE_CLIENT_PREKEY_HTTP_URL:-http://localhost:18082}"
+      RAMFLUX_CLIENT_SIGNALING_TURN_ADDR: "${RF_COMPOSE_CLIENT_SIGNALING_TURN_ADDR:-localhost:3478}"
+      RAMFLUX_FEDERATION_PUBLIC_ENDPOINT: "${RF_COMPOSE_FEDERATION_PUBLIC_ENDPOINT:-ramflux-federation:7443}"
       RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE: "/etc/ramflux/node-identity/node-signing.key"
       # T23-A2b2b: the pre-signed trust-snapshot envelope is served from the read-only federation
       # secrets mount at a fixed container path (operators place the offline-signed file there).
-      RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE: "${RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE:-/etc/ramflux/federation/trust-snapshot.json}"
-      RAMFLUX_FEDERATION_FORCE_TCP_MESH: "${RAMFLUX_FEDERATION_FORCE_TCP_MESH:-0}"
-      RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "${RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK:-0}"
+      RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE: "${RF_COMPOSE_FEDERATION_TRUST_SNAPSHOT_FILE:-/etc/ramflux/federation/trust-snapshot.json}"
+      RAMFLUX_FEDERATION_FORCE_TCP_MESH: "${RF_COMPOSE_FEDERATION_FORCE_TCP_MESH:-0}"
+      RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "${RF_COMPOSE_FEDERATION_DISABLE_TCP_FALLBACK:-0}"
     volumes:
       - federation-redb:/var/lib/ramflux/federation
       - ./config/federation.toml:/etc/ramflux/config/federation.toml:ro
@@ -164,9 +164,9 @@ services:
       RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID: "${RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID:?federation issuer node id is required for the keyring-era relay}"
       # Keyring file (read-only ./secrets/federation mount) and cache file (relay-redb volume) use fixed
       # container paths; the corresponding mount/volume below must exist.
-      RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE: "${RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE:-/etc/ramflux/federation/provider-keyring.json}"
-      RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE: "${RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE:-/var/lib/ramflux/relay/trust-snapshot.json}"
-      RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS: "${RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS:-30}"
+      RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE: "${RF_COMPOSE_FEDERATION_PROVIDER_KEYRING_FILE:-/etc/ramflux/federation/provider-keyring.json}"
+      RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE: "${RF_COMPOSE_RELAY_TRUST_SNAPSHOT_CACHE_FILE:-/var/lib/ramflux/relay/trust-snapshot.json}"
+      RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS: "${RF_COMPOSE_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS:-30}"
     volumes:
       - relay-redb:/var/lib/ramflux/relay
       - ./config/relay.toml:/etc/ramflux/config/relay.toml:ro

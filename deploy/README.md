@@ -8,6 +8,54 @@ Python 3, and sufficient disk space. No test service images
 or relay HMAC key are used. The operator env file is required and is trusted shell
 configuration: keep it outside the repository and restrict it to its owner.
 
+## Compose interpolation inputs
+
+The checked-in Compose files support Docker Compose v2 and podman-compose 1.3.0.
+Service environment names remain `RAMFLUX_*`. Inputs that previously used their own
+service name as an interpolation default now use a separate `RF_COMPOSE_*` name;
+[compose-inputs.json](compose-inputs.json) lists every old service key and its new
+Compose input. For example:
+
+```dotenv
+RF_COMPOSE_FEDERATION_NODE_ID=demo.example.org
+RF_COMPOSE_CLIENT_GATEWAY_QUIC_ADDR=demo.example.org:443
+RF_COMPOSE_NOTIFY_PROVIDER_CREDENTIALS_FILE=/run/secrets/providers.json
+```
+
+Migrate the mapped names in operator Compose env files or exported Compose inputs.
+Names absent from the map, including published-port variables and the required
+federation offline-root pin, retain their existing spelling. Unset and empty
+inputs keep their existing `:-` defaults; nonempty inputs and shared references
+(such as the federation admin token used by the router) retain the same values.
+Production voice still requires a public endpoint, now supplied by
+`RF_COMPOSE_RELAY_VOICE_PUBLIC_ENDPOINT`. Direct service launches continue to use
+the original `RAMFLUX_*` runtime environment names.
+
+The demo wrapper keeps `identity.env` unchanged and appends matching Compose aliases
+to its private generated `runtime.env`. Existing demo data needs no identity,
+certificate or volume migration: the next `up` regenerates that file. The integration
+harness must similarly pass the mapped input aliases, preserving its fixture-over-
+process precedence and original bootstrap inputs; its self-default workaround can
+then be removed while retaining the lint against new self-defaults.
+
+Services reject literal `${…}` values as unconfigured, with a warning that names the
+setting and omits its value. Invalid optional numeric/runtime settings select their
+existing defaults; explicit empty listener settings keep their existing meaning.
+Required secrets, trust material, certificates and explicitly configured credential
+files still undergo their normal validation. A malformed optional input cannot
+turn off required authentication or invent replacement signing material.
+
+The following tests render all Compose variants without contacting a container
+engine. `DEMO_TEST_PODMAN_COMPOSE` selects the installed provider; optionally set
+`COMPOSE_TEST_DOCKER_COMPOSE` to a Docker Compose v2 command or standalone binary.
+The Podman stub refuses every operation except `--version`.
+
+```sh
+DEMO_TEST_PODMAN_COMPOSE=podman-compose \
+COMPOSE_TEST_DOCKER_COMPOSE='docker compose' \
+  python3 -m unittest discover -s deploy/scripts/tests -v
+```
+
 Build the trust/discovery helper from the matching `ramflux-itest` checkout once:
 
 ```sh
@@ -113,7 +161,7 @@ Initialization recovers missing generated trust files using the same saved keys.
 path and mode defaults. Required keyring-provider inputs include
 `RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json`
 and `RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json`.
-Concrete values avoid unresolved self-referential defaults in podman-compose 1.3.0.
+The wrapper also supplies the matching `RF_COMPOSE_*` inputs for these concrete runtime values.
 The actual-provider regression renders the complete generated project and rejects
 unresolved `${...}` expressions anywhere in the result. Run it without a container
 runtime, using an installed `podman-compose` (with its Python dependencies):

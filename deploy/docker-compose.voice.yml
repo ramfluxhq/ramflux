@@ -7,6 +7,6 @@ services:
     environment:
       RAMFLUX_RELAY_VOICE_UDP_ADDR: "0.0.0.0:17449"
       RAMFLUX_RELAY_VOICE_CONTROL_ADDR: "0.0.0.0:17450"
-      RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT: "${RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT:?public voice host:port is required}"
+      RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT: "${RF_COMPOSE_RELAY_VOICE_PUBLIC_ENDPOINT:?public voice host:port is required}"
     ports:
       - "${RAMFLUX_RELAY_VOICE_UDP_PORT:-17449}:17449/udp"

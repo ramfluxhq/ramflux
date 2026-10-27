@@ -294,7 +294,7 @@ PY
       chmod 755 "$state/certs/$service"
     done
     chmod 644 "$state"/config/*.toml "$state"/secrets/gateway-v3/*.json "$state"/secrets/federation/*.json
-    # Concrete outer values avoid podman-compose 1.3.0's self-referential default interpolation.
+    # Preserve daemon/helper inputs and supply the separate Compose interpolation names.
     # The keyring is read-only trust material; the relay owns its durable cache in relay-redb.
     cat "$state/identity.env" > "$state/runtime.env"
     cat >> "$state/runtime.env" <<ENV
@@ -338,6 +338,7 @@ RAMFLUX_RELAY_VOICE_UDP_PORT=$DEMO_BIND_ADDR:$RAMFLUX_DEMO_VOICE_UDP_PORT
 RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450
 ENV
     fi
+    python3 "$script_dir/compose-env.py" "$state/runtime.env"
     sh "$script_dir/build-prod-images.sh"
     compose up -d --build
     wait_for_services
