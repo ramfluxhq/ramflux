@@ -306,6 +306,7 @@ struct RouterWalState {
     #[cfg(test)]
     ack_pause: Arc<Mutex<Option<acknowledgement_test::Pause>>>,
     submissions_by_replay_key: BTreeMap<String, RouterWalSubmissionRecord>,
+    submissions_by_target: BTreeMap<String, BTreeMap<u64, BTreeSet<String>>>,
     local_delivery_by_sender_envelope:
         HashMap<String, HashMap<String, RouterWalLocalDeliveryIndex>>,
     /// Highest sequence ever logged per mailbox, including records that later expired.
@@ -355,7 +356,13 @@ impl RouterWalState {
 
     fn index(&mut self, record: &RouterWalSubmissionRecord) {
         self.replay_due.insert((record.replay_expires_at, record.replay_key.clone()));
-        if record.entry.is_some() {
+        if let Some(entry) = &record.entry {
+            self.submissions_by_target
+                .entry(entry.target_delivery_id.clone())
+                .or_default()
+                .entry(entry.inbox_seq)
+                .or_default()
+                .insert(record.replay_key.clone());
             self.entry_due.insert((record.retain_until(), record.replay_key.clone()));
         }
         if let Some(delivery) = &record.local_delivery {
@@ -375,7 +382,8 @@ impl RouterWalState {
 
     fn unindex(&mut self, record: &RouterWalSubmissionRecord) {
         self.replay_due.remove(&(record.replay_expires_at, record.replay_key.clone()));
-        if record.entry.is_some() {
+        if let Some(entry) = &record.entry {
+            self.unindex_target(entry, &record.replay_key);
             self.entry_due.remove(&(record.retain_until(), record.replay_key.clone()));
         }
         if let Some(delivery) = &record.local_delivery {
@@ -394,6 +402,43 @@ impl RouterWalState {
             };
             if remove_sender {
                 self.local_delivery_by_sender_envelope.remove(&delivery.sender_root_commitment);
+            }
+        }
+    }
+
+    fn unindex_target(&mut self, entry: &InboxEntry, key: &str) {
+        if let Some(sequences) = self.submissions_by_target.get_mut(&entry.target_delivery_id) {
+            if let Some(keys) = sequences.get_mut(&entry.inbox_seq) {
+                keys.remove(key);
+                if keys.is_empty() {
+                    sequences.remove(&entry.inbox_seq);
+                }
+            }
+            if sequences.is_empty() {
+                self.submissions_by_target.remove(&entry.target_delivery_id);
+            }
+        }
+    }
+    fn observe_settlement(&mut self, cursor: &crate::CursorAckState) {
+        let Some(sequences) = self.submissions_by_target.get(&cursor.target_delivery_id) else {
+            return;
+        };
+        let mut keys = sequences
+            .range(..=cursor.settled_inbox_seq)
+            .flat_map(|(_, keys)| keys.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        for seq in cursor.acked_inbox_seqs.iter().chain(&cursor.retired_inbox_seqs) {
+            if let Some(set) = sequences.get(seq) {
+                keys.extend(set.iter().cloned());
+            }
+        }
+        for key in keys {
+            if let Some(record) = self.submissions_by_replay_key.get_mut(&key) {
+                let deadline = record.retain_until();
+                if let Some(entry) = record.entry.take() {
+                    self.entry_due.remove(&(deadline, key.clone()));
+                    self.unindex_target(&entry, &key);
+                }
             }
         }
     }
@@ -417,8 +462,9 @@ impl RouterWalState {
             }
             self.entry_due.pop_first();
             if let Some(record) = self.submissions_by_replay_key.get_mut(&key)
-                && record.entry.take().is_some()
+                && let Some(entry) = record.entry.take()
             {
+                self.unindex_target(&entry, &key);
                 removed += 1;
             }
         }
@@ -550,7 +596,7 @@ impl RouterWalStore {
         replay_expires_at: i64,
         entry: Option<&InboxEntry>,
         local_delivery: Option<RouterWalLocalDelivery>,
-        lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+        lease: Option<crate::SubmissionLease>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
         self.writer
             .append_async(
@@ -578,6 +624,39 @@ impl RouterWalStore {
     #[must_use]
     pub fn issued_watermarks(&self) -> BTreeMap<String, u64> {
         self.state.lock().map_or_else(|_| BTreeMap::new(), |state| state.issued_by_target.clone())
+    }
+
+    /// Apply a durable ACK/NACK cursor to the live projection, retaining replay receipts and issued floors.
+    pub(crate) fn observe_settlement(
+        &self,
+        cursor: &crate::CursorAckState,
+    ) -> Result<(), NodeCoreError> {
+        self.state
+            .lock()
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?
+            .observe_settlement(cursor);
+        Ok(())
+    }
+
+    /// Snapshot one mailbox's WAL view without walking unrelated accounts or swallowing lock errors.
+    pub(crate) fn migration_target_view(
+        &self,
+        target: &str,
+    ) -> Result<(u64, Vec<RouterWalSubmissionRecord>), NodeCoreError> {
+        let state = self.state.lock().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let records =
+            state
+                .submissions_by_target
+                .get(target)
+                .into_iter()
+                .flat_map(|sequences| sequences.values().flatten())
+                .map(|key| {
+                    state.submissions_by_replay_key.get(key).cloned().ok_or_else(|| {
+                        NodeCoreError::Redb("WAL target index lost submission".into())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        Ok((state.issued_by_target.get(target).copied().unwrap_or(0), records))
     }
 
     /// Removes expired recovery records and closed segment files older than the full retention
@@ -683,7 +762,7 @@ enum RouterWalAppendReply {
     Sync(mpsc::SyncSender<Result<RouterWalRecordLocation, NodeCoreError>>),
     Async(
         tokio::sync::oneshot::Sender<Result<RouterWalRecordLocation, NodeCoreError>>,
-        Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+        Option<crate::SubmissionLease>,
     ),
 }
 
@@ -788,7 +867,7 @@ impl RouterWalWriter {
     async fn append_async(
         &self,
         payload: RouterWalPayload,
-        lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+        lease: Option<crate::SubmissionLease>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
         let (reply, response) = tokio::sync::oneshot::channel();
         let shard = self.shard_for_payload(&payload)?;

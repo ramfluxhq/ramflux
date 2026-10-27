@@ -37,6 +37,7 @@ mod migration_barrier;
 mod retention;
 mod submission_barrier;
 pub use identity_registry::IdentityJournalDiscardReport;
+pub use submission_barrier::SubmissionLease;
 
 const ROUTER_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_ROUTER_COMMIT_BATCH_MAX";
 const ROUTER_COMMIT_BATCH_MAX_DEFAULT: usize = 256;
@@ -53,7 +54,9 @@ pub struct RouterRedbStore {
     path: PathBuf,
     commit_writer: Option<RouterCommitWriter>,
     submission_wal: Option<RouterWalStore>,
-    submission_gates: [Arc<tokio::sync::RwLock<()>>; submission_barrier::STRIPES],
+    submission_gates: submission_barrier::TargetGates,
+    pub(crate) inactive_migration_targets:
+        std::sync::RwLock<BTreeMap<String, ramflux_protocol::home_migration::Refusal>>,
     identity_registry_writes: std::sync::atomic::AtomicU64,
     custody_publication_writes: std::sync::atomic::AtomicU64,
     foreign_authority_writes: std::sync::atomic::AtomicU64,
@@ -456,6 +459,7 @@ impl RouterRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         mailbox_keys::upgrade(&write_txn)?;
+        migration_barrier::upgrade_legacy_snapshot(&write_txn)?;
         expiry_index::upgrade(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let mut legacy_registry: IdentityRegistry =
@@ -474,12 +478,16 @@ impl RouterRedbStore {
             None
         };
         let submission_wal = wal_root.map(RouterWalStore::open).transpose()?;
+        migration_barrier::initialize_wal_view(&db, submission_wal.as_ref())?;
         Ok(Self {
-            db,
+            db: Arc::clone(&db),
             path: path.to_path_buf(),
             commit_writer,
             submission_wal,
-            submission_gates: std::array::from_fn(|_| Arc::new(tokio::sync::RwLock::new(()))),
+            submission_gates: submission_barrier::TargetGates::default(),
+            inactive_migration_targets: std::sync::RwLock::new(
+                Self::load_inactive_migration_targets(&db)?,
+            ),
             identity_registry_writes: std::sync::atomic::AtomicU64::new(0),
             custody_publication_writes: std::sync::atomic::AtomicU64::new(0),
             foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),
@@ -676,7 +684,29 @@ impl RouterRedbStore {
         entry: Option<&InboxEntry>,
         sender_root_commitment: Option<&str>,
     ) -> Result<(), NodeCoreError> {
-        let _submission = self.submission_permit(entry)?;
+        let lease = self.submission_permit(entry)?;
+        self.record_leased_submission(
+            replay_key,
+            replay_expires_at,
+            entry,
+            sender_root_commitment,
+            lease,
+        )
+    }
+
+    /// Persist an acceptance made while holding the mailbox admission lease.
+    /// # Errors
+    /// Returns a durability error; the lease prevents cutover from racing acceptance.
+    pub fn record_leased_submission(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+        sender_root_commitment: Option<&str>,
+        lease: Option<SubmissionLease>,
+    ) -> Result<(), NodeCoreError> {
+        self.validate_submission_lease(entry, lease.as_ref())?;
+        let _submission = lease;
         let save_started = Instant::now();
         let replay_started = Instant::now();
         let local_delivery = local_delivery_classification(entry, sender_root_commitment);
@@ -727,7 +757,29 @@ impl RouterRedbStore {
         entry: Option<&InboxEntry>,
         sender_root_commitment: Option<&str>,
     ) -> Result<(), NodeCoreError> {
-        let submission = self.submission_permit_async(entry).await?;
+        let lease = self.submission_permit(entry)?;
+        self.record_leased_submission_async(
+            replay_key,
+            replay_expires_at,
+            entry,
+            sender_root_commitment,
+            lease,
+        )
+        .await
+    }
+
+    /// Persist while transferring the admission lease to the asynchronous WAL worker.
+    /// # Errors
+    /// Returns a durability error; cancellation does not release a queued append's lease.
+    pub async fn record_leased_submission_async(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        entry: Option<&InboxEntry>,
+        sender_root_commitment: Option<&str>,
+        submission: Option<SubmissionLease>,
+    ) -> Result<(), NodeCoreError> {
+        self.validate_submission_lease(entry, submission.as_ref())?;
         let save_started = Instant::now();
         let replay_started = Instant::now();
         let local_delivery = local_delivery_classification(entry, sender_root_commitment);
@@ -832,8 +884,23 @@ impl RouterRedbStore {
     pub fn record_ack_increment(
         &self,
         cursor: &CursorAckState,
-        _envelope_id: &str,
+        envelope_id: &str,
     ) -> Result<(), NodeCoreError> {
+        let lease = self.acquire_acknowledgement(&cursor.target_delivery_id)?;
+        self.record_leased_ack(cursor, envelope_id, lease)
+    }
+
+    /// Persist an ACK whose in-memory update was made under this same target lease.
+    /// # Errors
+    /// Returns a durability error or rejects a lease for another store or mailbox.
+    pub fn record_leased_ack(
+        &self,
+        cursor: &CursorAckState,
+        _envelope_id: &str,
+        lease: SubmissionLease,
+    ) -> Result<(), NodeCoreError> {
+        self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
+        let _lease = lease;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         let write_txn =
@@ -855,6 +922,9 @@ impl RouterRedbStore {
             expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        if let Some(wal) = &self.submission_wal {
+            wal.observe_settlement(cursor)?;
+        }
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
         crate::record_router_save_total_us(elapsed_us(save_started));
         Ok(())
@@ -863,6 +933,19 @@ impl RouterRedbStore {
     /// # Errors
     /// Returns an error when the cursor update cannot be durably recorded.
     pub fn record_nack_increment(&self, cursor: &CursorAckState) -> Result<(), NodeCoreError> {
+        let lease = self.acquire_acknowledgement(&cursor.target_delivery_id)?;
+        self.record_leased_nack(cursor, lease)
+    }
+    /// Persist receiver settlement under its pre-mutation target lease.
+    /// # Errors
+    /// Rejects a mismatched lease or a durability failure.
+    pub fn record_leased_nack(
+        &self,
+        cursor: &CursorAckState,
+        lease: SubmissionLease,
+    ) -> Result<(), NodeCoreError> {
+        self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
+        let _lease = lease;
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         let write_txn =
@@ -881,6 +964,9 @@ impl RouterRedbStore {
             expiry_index::remove_inbox_row(&write_txn, &key)?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        if let Some(wal) = &self.submission_wal {
+            wal.observe_settlement(cursor)?;
+        }
         crate::record_router_save_inbox_us(elapsed_us(inbox_started));
         crate::record_router_save_total_us(elapsed_us(save_started));
         Ok(())
@@ -1048,6 +1134,37 @@ impl RouterRedbStore {
         sender_root_commitment: &str,
         entries: &[InboxEntry],
     ) -> Result<(), NodeCoreError> {
+        let leases = entries
+            .iter()
+            .map(|entry| self.acquire_submission(&entry.target_delivery_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.record_leased_fanout(
+            replay_key,
+            replay_expires_at,
+            sender_root_commitment,
+            entries,
+            leases,
+        )
+    }
+    /// Persist a fanout whose frozen targets were leased before replay acceptance.
+    /// # Errors
+    /// Returns a lease mismatch or durability failure.
+    pub fn record_leased_fanout(
+        &self,
+        replay_key: &str,
+        replay_expires_at: i64,
+        sender_root_commitment: &str,
+        entries: &[InboxEntry],
+        leases: Vec<SubmissionLease>,
+    ) -> Result<(), NodeCoreError> {
+        for entry in entries {
+            let lease =
+                leases.iter().find(|lease| lease.target() == entry.target_delivery_id).ok_or_else(
+                    || NodeCoreError::Redb("fanout target lacks preacceptance lease".into()),
+                )?;
+            self.validate_submission_lease(Some(entry), Some(lease))?;
+        }
+        let _leases = leases;
         let save_started = Instant::now();
         let replay_started = Instant::now();
         self.commit_router_op(RouterCommitOp::Fanout {

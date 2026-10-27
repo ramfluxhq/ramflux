@@ -267,7 +267,7 @@ impl RouterCore {
         *lock_unpoisoned(&self.node_service_signer) = signer;
     }
 
-    fn node_service_signer(&self) -> Option<NodeServiceSigningKey> {
+    pub(crate) fn node_service_signer(&self) -> Option<NodeServiceSigningKey> {
         lock_unpoisoned(&self.node_service_signer).clone()
     }
 
@@ -797,6 +797,31 @@ impl RouterCore {
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
         let targets = self.mvp10_own_device_targets(&request)?;
+        self.accept_fanout_targets(request, targets, now_unix_seconds)
+    }
+
+    /// Acquire every frozen fanout target before accepting replay or assigning any sequence.
+    /// # Errors
+    /// Returns authority, replay or typed migration refusals without mutating delivery state.
+    pub fn accept_leased_fanout(
+        &self,
+        request: ItestMvp10OwnDeviceFanoutRequest,
+        store: &crate::RouterRedbStore,
+        now: i64,
+    ) -> Result<(ReplayAcceptedFanoutPlan, Vec<crate::SubmissionLease>), NodeCoreError> {
+        let targets = self.mvp10_own_device_targets(&request)?;
+        let leases = targets
+            .iter()
+            .map(|(_, target)| store.acquire_submission(target))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((self.accept_fanout_targets(request, targets, now)?, leases))
+    }
+    fn accept_fanout_targets(
+        &self,
+        request: ItestMvp10OwnDeviceFanoutRequest,
+        targets: Vec<(String, String)>,
+        now_unix_seconds: i64,
+    ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
         let source = self.authenticated_envelope_source(&request.envelope)?;
         self.check_envelope_replay_once(&source, &request.envelope, now_unix_seconds)?;
         let deliveries = targets

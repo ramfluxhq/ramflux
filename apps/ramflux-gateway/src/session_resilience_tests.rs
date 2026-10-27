@@ -251,6 +251,7 @@ async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reco
         },
     };
     let response = ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
         outcome: "online".into(),
         target_delivery_id: "peer".into(),
         inbox_seq: Some(1),

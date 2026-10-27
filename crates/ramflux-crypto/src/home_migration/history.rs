@@ -16,7 +16,7 @@ use ramflux_protocol::{
 use std::collections::BTreeMap;
 
 /// Independently pinned starting home. A missing hash is allowed only for genesis bootstrap.
-pub struct HomeTrust<'a> {
+struct HomeTrust<'a> {
     pub account_anchor: &'a str,
     pub node_id: &'a str,
     pub node_key: &'a str,
@@ -180,6 +180,38 @@ fn verify_genesis(
 /// # Errors
 /// Rejects gaps/forks, missing certificates, invalid time/range, wrong A key and oversized pages.
 pub fn verify_home_chain(
+    result: &ResolveResult,
+    stored_base: &RecordEvidence,
+    now: u64,
+) -> Result<VerifiedHome, CryptoError> {
+    // The retained record supplies a single consistent hash, node pin and manager floor.
+    // Callers cannot combine a genuine cached hash with a substituted source signing key.
+    let hash = record_hash(&stored_base.record)?;
+    let manager = &stored_base.authority.record.body.master_certificate;
+    let manager_hash = object_hash(manager)?;
+    let (node, key) = stored_base.record.home();
+    if let HomeRecord::Genesis { genesis } = &stored_base.record {
+        let registered_at = genesis.body.registered_at;
+        crate::custody::verify_node_identity_record(
+            &stored_base.node_record,
+            node,
+            key,
+            registered_at,
+        )?;
+        verify_genesis(stored_base, (node, key), registered_at)?;
+    }
+    let trust = HomeTrust {
+        account_anchor: stored_base.record.account_anchor(),
+        node_id: node,
+        node_key: key,
+        home_epoch: stored_base.record.epoch(),
+        home_hash: Some(&hash),
+        cached_manager_range: manager.body.range_index,
+        cached_manager_certificate_hash: Some(&manager_hash),
+    };
+    verify_retained_chain(result, &trust, now)
+}
+fn verify_retained_chain(
     result: &ResolveResult,
     trust: &HomeTrust<'_>,
     now: u64,

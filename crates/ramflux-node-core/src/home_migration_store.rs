@@ -26,6 +26,7 @@ mod authority_evidence;
 mod fence;
 mod maintenance;
 mod queries;
+mod refusals;
 mod source;
 #[cfg(test)]
 mod tests;

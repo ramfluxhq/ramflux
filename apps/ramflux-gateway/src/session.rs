@@ -1306,6 +1306,7 @@ fn committed_fanout_entry(
     envelope.envelope_id =
         ramflux_node_core::mvp10_fanout_envelope_id(&submitted.envelope_id, &delivery.device_id);
     let committed = ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
         outcome: delivery.outcome.clone(),
         target_delivery_id: delivery.target_delivery_id.clone(),
         inbox_seq: delivery.inbox_seq,

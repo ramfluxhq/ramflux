@@ -19,8 +19,20 @@ impl RouterCore {
         node: &MigrationNode,
         authorization: &Signed<Authorization>,
         now: u64,
-        cancel: bool,
+        cancel: Option<&Signed<ramflux_protocol::home_migration::Control>>,
     ) -> Result<FenceOutcome, NodeCoreError> {
+        if let Some(outcome) = store.terminal_migration_authorization(authorization)? {
+            return Ok(outcome);
+        }
+        let now = store.migration_clock_floor(now)?;
+        if now > crypto::hard_deadline(&authorization.body).map_err(auth_error)? {
+            return fence_authorization(
+                store,
+                node,
+                FenceDecision { authorization, cancel: None, authority: None },
+                now,
+            );
+        }
         self.with_migration_authority(
             &authorization.body.account_anchor,
             now,
@@ -28,7 +40,7 @@ impl RouterCore {
                 fence_authorization(
                     store,
                     node,
-                    FenceDecision { authorization, cancel, authority },
+                    FenceDecision { authorization, cancel, authority: Some(authority) },
                     now,
                 )
             },
@@ -38,8 +50,8 @@ impl RouterCore {
 #[derive(Clone, Copy)]
 pub(super) struct FenceDecision<'a> {
     pub authorization: &'a Signed<Authorization>,
-    pub cancel: bool,
-    pub authority: &'a ramflux_crypto::custody::VerifiedRecord,
+    pub cancel: Option<&'a Signed<ramflux_protocol::home_migration::Control>>,
+    pub authority: Option<&'a ramflux_crypto::custody::VerifiedRecord>,
 }
 pub(super) fn fence_authorization(
     store: &RouterRedbStore,
@@ -66,7 +78,20 @@ pub(super) fn fence_authorization(
     }
     let deadline = crypto::hard_deadline(a).map_err(auth_error)?;
     if now <= deadline {
+        let authority = authority.ok_or_else(|| refusal(Refusal::AuthorityUpdateRequired))?;
         super::authority_evidence::verify(&tx, auth, authority)?;
+        if let Some(cancel) = cancel {
+            crypto::verify_actor(cancel, authority, now).map_err(auth_error)?;
+            let c = &cancel.body;
+            if c.action != ramflux_protocol::home_migration::Action::Abort
+                || c.audience_node != node.node_id()
+                || c.requester.account_anchor != a.account_anchor
+                || c.migration_id != a.migration_id
+                || c.payload_hash != super::message_hash(auth).map_err(storage)?
+            {
+                return Err(refusal(Refusal::AuthorityUpdateRequired));
+            }
+        }
     } else {
         // A permanent proof was checked first. After the signed hard bound, the
         // same trusted clock forbids every first commit, irrespective of whether
@@ -74,7 +99,7 @@ pub(super) fn fence_authorization(
         // grants no account authority and allocates no new durable state.
         crypto::verify_signatures(auth).map_err(auth_error)?;
     }
-    if !cancel && now <= deadline {
+    if cancel.is_none() && now <= deadline {
         return Err(refusal(Refusal::CommitOutcomeUnknown));
     }
     let base: RecordEvidence =
@@ -105,4 +130,56 @@ pub(super) fn fence_authorization(
     }
     commit_transition(store, tx)?;
     Ok(FenceOutcome::Fenced(fence))
+}
+
+impl RouterRedbStore {
+    pub(crate) fn terminal_migration_authorization(
+        &self,
+        auth: &Signed<Authorization>,
+    ) -> Result<Option<FenceOutcome>, NodeCoreError> {
+        use redb::ReadableDatabase;
+        // Neither outcome requires the former home to retain the account's custody registry row.
+        let tx = self.migration_db().begin_read().map_err(storage)?;
+        let key = authorization_key(auth)?;
+        match tx.open_table(PROOFS) {
+            Ok(table) => {
+                if let Some(value) = table.get(key.as_str()).map_err(storage)? {
+                    let hash: String = super::decode(value.value())?;
+                    let records = tx.open_table(RECORDS).map_err(storage)?;
+                    let value = records
+                        .get(hash.as_str())
+                        .map_err(storage)?
+                        .ok_or_else(|| storage("migration permanent proof unavailable"))?;
+                    return Ok(Some(FenceOutcome::Committed(Box::new(super::decode(
+                        value.value(),
+                    )?))));
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(error) => return Err(storage(error)),
+        }
+        match tx.open_table(FENCES) {
+            Ok(table) => table
+                .get(key.as_str())
+                .map_err(storage)?
+                .map(|value| super::decode(value.value()).map(FenceOutcome::Fenced))
+                .transpose(),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(error) => Err(storage(error)),
+        }
+    }
+}
+
+impl RouterRedbStore {
+    pub(crate) fn migration_clock_floor(&self, now: u64) -> Result<u64, NodeCoreError> {
+        use redb::ReadableDatabase;
+        let tx = self.migration_db().begin_read().map_err(storage)?;
+        match tx.open_table(super::CLOCK) {
+            Ok(table) => {
+                Ok(now.max(table.get("floor").map_err(storage)?.map_or(0, |value| value.value())))
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(now),
+            Err(error) => Err(storage(error)),
+        }
+    }
 }

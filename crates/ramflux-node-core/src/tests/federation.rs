@@ -144,6 +144,7 @@ fn inbound_forward_seen_record_survives_only_a_real_router_commit()
     let rejected = store
         .deliver_inbound_forward_once(&source, &forward, now + 1, || {
             Ok(EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "rejected_capacity".into(),
                 target_delivery_id: forward.envelope.target_delivery_id.clone(),
                 inbox_seq: None,
@@ -163,6 +164,7 @@ fn inbound_forward_seen_record_survives_only_a_real_router_commit()
                 i64::try_from(now + 2).unwrap_or(i64::MAX),
             ) {
                 RouterSubmitOutcome::OfflineQueued(queued) => Ok(EnvelopeSubmitResponse {
+                    migration_refusal: None,
                     outcome: "offline_queued".into(),
                     target_delivery_id: queued.entry.target_delivery_id,
                     inbox_seq: Some(queued.entry.inbox_seq),
@@ -209,6 +211,7 @@ fn concurrent_inbound_forward_retry_is_pending_until_the_holder_commits()
                 NodeCoreError::ItestHttp(format!("holder release failed: {error}"))
             })?;
             Ok(EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "offline_queued".into(),
                 target_delivery_id: holder_forward.envelope.target_delivery_id.clone(),
                 inbox_seq: Some(1),
@@ -266,6 +269,7 @@ fn expired_inbound_forward_lease_is_reclaimed_after_lost_holder()
     let reclaimed = store
         .deliver_inbound_forward_once(&source, &forward, now + 20, || {
             Ok(EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "offline_queued".into(),
                 target_delivery_id: forward.envelope.target_delivery_id.clone(),
                 inbox_seq: Some(1),

@@ -519,6 +519,7 @@ pub(crate) mod tests {
             source_node_id: forward.source_node_id,
             target_node_id: forward.target_node_id,
             delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "forward_in_progress".to_owned(),
                 target_delivery_id: forward.envelope.target_delivery_id,
                 inbox_seq: None,
@@ -752,6 +753,7 @@ pub(crate) mod tests {
                 )
                 .map_err(|source| source.to_string())?;
             let delivery = delivered.unwrap_or_else(|| ramflux_node_core::EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "duplicate_federated_forward".to_owned(),
                 target_delivery_id: forward.envelope.target_delivery_id.clone(),
                 inbox_seq: None,
@@ -802,6 +804,7 @@ pub(crate) mod tests {
                 source_node_id: forward.source_node_id.clone(),
                 target_node_id: forward.target_node_id.clone(),
                 delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                    migration_refusal: None,
                     outcome: "federation_spooled_offline_peer".to_owned(),
                     target_delivery_id: forward.envelope.target_delivery_id.clone(),
                     inbox_seq: None,

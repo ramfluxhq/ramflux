@@ -49,6 +49,7 @@ impl TestNode {
         ));
         let store = RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?;
         let core = RouterCore::new();
+        core.set_node_service_signer(Some(crate::NodeServiceSigningKey::from_seed([seed; 32])));
         let pubn = publication()?;
         core.publish_custody_record(&pubn, NOW, &store)?;
         if registered {
@@ -82,6 +83,9 @@ impl TestNode {
         drop(self.store.take());
         let store = RouterRedbStore::open_with_wal(&self.path, self.path.with_extension("wal"))?;
         self.core = store.load_router()?.ok_or("router snapshot")?;
+        self.core.set_node_service_signer(Some(crate::NodeServiceSigningKey::from_seed(
+            self.node.key.to_bytes(),
+        )));
         self.store = Some(store);
         Ok(())
     }
@@ -121,16 +125,8 @@ impl Scenario {
             NOW,
         )?;
         let base = crypto::verify_home_chain(
-            &ResolveResult { home: attested.home, predecessors: vec![] },
-            &crypto::HomeTrust {
-                account_anchor: &anchor,
-                node_id: "A",
-                node_key: &public(8),
-                home_epoch: 0,
-                home_hash: None,
-                cached_manager_range: 0,
-                cached_manager_certificate_hash: None,
-            },
+            &ResolveResult { home: attested.home.clone(), predecessors: vec![] },
+            &attested.home,
             NOW,
         )?;
         let mut prepare: Prepare =
@@ -200,17 +196,7 @@ impl Scenario {
     fn verify(&self, record: RecordEvidence) -> TestResult<VerifiedHome> {
         Ok(crypto::verify_home_chain(
             &ResolveResult { home: record, predecessors: vec![] },
-            &crypto::HomeTrust {
-                account_anchor: &self.anchor,
-                node_id: "A",
-                node_key: &public(8),
-                home_epoch: 0,
-                home_hash: Some(self.base.hash()),
-                cached_manager_range: 1,
-                cached_manager_certificate_hash: Some(&object_hash(
-                    &publication()?.record.body.master_certificate,
-                )?),
-            },
+            self.base.evidence(),
             NOW + 2,
         )?)
     }
@@ -296,7 +282,7 @@ fn source_cancellation_fence_is_relayable_and_permanently_beats_late_commit() ->
             peer: MigrationPeer { node_id: "B", node_key: &public(9) },
         },
         NOW + 2,
-        true,
+        Some(&cancel_request(&s, NOW + 2)?),
     )?;
     let FenceOutcome::Fenced(fence) = result else {
         return Err("unexpected commit".into());
@@ -337,7 +323,7 @@ fn proof_index_survives_transient_operation_compaction_and_refuses_a_false_fence
             peer: MigrationPeer { node_id: "B", node_key: &public(9) },
         },
         NOW + 2,
-        true,
+        Some(&cancel_request(&s, NOW + 2)?),
     )?;
     let FenceOutcome::Committed(existing) = result else {
         return Err("false fence".into());
@@ -430,7 +416,7 @@ fn primary_recovery_cannot_bypass_pending_guard_through_direct_publication() -> 
         &s.a.node,
         &s.authorization,
         NOW + 2,
-        true,
+        Some(&cancel_request(&s, NOW + 2)?),
     )?
     else {
         return Err("existing permanent proof must win".into());
@@ -579,7 +565,7 @@ fn recovery_winning_before_source_commit_invalidates_move_and_fence_releases_des
             peer: MigrationPeer { node_id: "B", node_key: &public(9) },
         },
         NOW + 2,
-        true,
+        Some(&cancel_request(&s, NOW + 2)?),
     )?;
     let FenceOutcome::Fenced(fence) = result else {
         return Err("unexpected commit".into());
@@ -638,3 +624,20 @@ fn attest_request(
 }
 
 mod terminal;
+
+fn cancel_request(
+    s: &Scenario,
+    now: u64,
+) -> TestResult<Signed<ramflux_protocol::home_migration::Control>> {
+    let publication = s.a.core.custody_record(&s.anchor, now)?.ok_or("authority")?;
+    let authority = verify_record(&publication.record, now, None, None)?;
+    let mut control = attest_request(&s.anchor, "B", &hash(77), now)?.control.body;
+    control.action = Action::Abort;
+    control.migration_id = s.authorization.body.migration_id.clone();
+    control.authority_record_hash = object_hash(authority.envelope())?;
+    control.payload_hash = message_hash(&s.authorization)?;
+    let branch = ramflux_crypto::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    Ok(crypto::sign_actor(control, &branch, &authority, now)?)
+}
+
+mod admission_barrier;

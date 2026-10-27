@@ -101,6 +101,8 @@ pub enum Refusal {
     AuthorityUpdateRequired,
     ActorRevoked,
     MigrationInProgress,
+    HomeMigrated,
+    DormantInbox,
     CustodyUserPresenceUnavailable,
     PinMismatch,
     ChannelBindingRequired,

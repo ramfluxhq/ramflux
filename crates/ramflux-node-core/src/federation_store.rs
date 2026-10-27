@@ -660,6 +660,7 @@ fn inbound_forward_in_progress_response(
     request: &crate::FederatedEnvelopeForwardRequest,
 ) -> crate::EnvelopeSubmitResponse {
     crate::EnvelopeSubmitResponse {
+        migration_refusal: None,
         outcome: "forward_in_progress".to_owned(),
         target_delivery_id: request.envelope.target_delivery_id.clone(),
         inbox_seq: None,

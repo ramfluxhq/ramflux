@@ -736,6 +736,7 @@ fn home_node_migration_forwards_within_window_and_nacks_after_window()
                 source_node_id: request.source_node_id,
                 target_node_id: request.target_node_id,
                 delivery: EnvelopeSubmitResponse {
+                    migration_refusal: None,
                     outcome: "offline_queued".to_owned(),
                     target_delivery_id: request.envelope.target_delivery_id,
                     inbox_seq: Some(1),
@@ -963,6 +964,7 @@ fn assert_forwarded_retry_is_idempotent(
                 source_node_id: "node_old.example".into(),
                 target_node_id: plan.route.home_node.clone(),
                 delivery: EnvelopeSubmitResponse {
+                    migration_refusal: None,
                     outcome: "forward_in_progress".into(),
                     target_delivery_id: plan.envelope.target_delivery_id.clone(),
                     inbox_seq: None,
@@ -1020,6 +1022,7 @@ fn real_new_home_response(
     );
     let delivery = match outcome {
         RouterSubmitOutcome::Online(delivery) => EnvelopeSubmitResponse {
+            migration_refusal: None,
             outcome: "online".to_owned(),
             target_delivery_id: delivery.target_delivery_id,
             inbox_seq: Some(delivery.inbox_seq),
@@ -1027,6 +1030,7 @@ fn real_new_home_response(
             nack: None,
         },
         RouterSubmitOutcome::OfflineQueued(delivery) => EnvelopeSubmitResponse {
+            migration_refusal: None,
             outcome: "offline_queued".to_owned(),
             target_delivery_id: delivery.entry.target_delivery_id,
             inbox_seq: Some(delivery.entry.inbox_seq),
@@ -1035,6 +1039,7 @@ fn real_new_home_response(
         },
         RouterSubmitOutcome::DuplicateFederatedForward { target_delivery_id } => {
             EnvelopeSubmitResponse {
+                migration_refusal: None,
                 outcome: "duplicate_federated_forward".to_owned(),
                 target_delivery_id,
                 inbox_seq: None,

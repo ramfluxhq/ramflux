@@ -710,6 +710,7 @@ fn spool_failed_forward(
         source_node_id: signed_request.source_node_id.clone(),
         target_node_id: signed_request.target_node_id.clone(),
         delivery: ramflux_node_core::EnvelopeSubmitResponse {
+            migration_refusal: None,
             outcome: "federation_spooled_offline_peer".to_owned(),
             target_delivery_id: signed_request.envelope.target_delivery_id.clone(),
             inbox_seq: None,

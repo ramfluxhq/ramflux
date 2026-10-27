@@ -72,6 +72,7 @@ pub enum CustodyRefusal {
     UpdateRequired,
     Capacity,
     PersistenceUnavailable,
+    HomeMigration { reason: crate::home_migration::Refusal, nack: Option<Box<crate::Nack>> },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

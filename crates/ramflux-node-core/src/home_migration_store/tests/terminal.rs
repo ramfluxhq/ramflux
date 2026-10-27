@@ -13,7 +13,7 @@ fn missing_seal_reply_can_cancel_by_authorization_and_late_courier_loses() -> Te
         &s.a.node,
         &s.authorization,
         NOW + 2,
-        true,
+        Some(&cancel_request(&s, NOW + 3)?),
     )?;
     let FenceOutcome::Fenced(fence) = result else {
         return Err("commit".into());
@@ -30,7 +30,7 @@ fn missing_seal_reply_can_cancel_by_authorization_and_late_courier_loses() -> Te
         &s.a.node,
         &s.authorization,
         deadline + 1,
-        false,
+        None,
     )?;
     let FenceOutcome::Fenced(expired) = terminal else {
         return Err("commit".into());
@@ -54,22 +54,8 @@ fn activation_rejects_a_proof_verified_under_an_attacker_supplied_source_pin() -
     evidence.node_record =
         ramflux_crypto::custody::sign_node_identity_record(&signing(44), descriptor)?;
     let raw = ResolveResult { home: evidence, predecessors: vec![] };
-    // This was possible with the old public API: a caller chose its own cached-base pin.
-    crypto::verify_home_chain(
-        &raw,
-        &crypto::HomeTrust {
-            account_anchor: &s.anchor,
-            node_id: "A",
-            node_key: &public(44),
-            home_epoch: 0,
-            home_hash: Some(s.base.hash()),
-            cached_manager_range: 1,
-            cached_manager_certificate_hash: Some(&object_hash(
-                &publication()?.record.body.master_certificate,
-            )?),
-        },
-        NOW + 2,
-    )?;
+    // Even the public verifier now derives A's pin from the retained base.
+    assert!(crypto::verify_home_chain(&raw, s.base.evidence(), NOW + 2).is_err());
     assert!(s.b.store()?.activate_home_migration(&s.b.node, &raw, NOW + 2).is_err());
     assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     Ok(())
@@ -263,7 +249,7 @@ fn authorization_only_terminal_query_survives_recovery_before_commit() -> TestRe
         &s.a.node,
         &s.authorization,
         NOW + 3,
-        true,
+        Some(&cancel_request(&s, NOW + 3)?),
     )?
     else {
         return Err("uncommitted move".into());
@@ -277,7 +263,7 @@ fn authorization_only_terminal_query_survives_recovery_before_commit() -> TestRe
             &s.a.node,
             &s.authorization,
             NOW + 3601,
-            false
+            None
         )?,
         FenceOutcome::Fenced(_)
     ));
