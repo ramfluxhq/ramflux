@@ -28,7 +28,15 @@ METHOD = re.compile(r'\.\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behav
 ASSOCIATED = re.compile(r'\b(?:Transaction|Savepoint)\s*::\s*(?:new(?:_unchecked)?|with_name)\b|(?:\bConnection\s*|<[^;{}>]*\bConnection[^;{}>]*>\s*)::\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\b')
 SQL = re.compile(r'(?:^|;)\s*(?:BEGIN|SAVEPOINT|COMMIT|END|ROLLBACK|RELEASE)\b', re.I)
 FUNCTION = re.compile(r'\bfn\s+(\w+)\s*(?:<[^{}]*>)?\s*\(')
-SQL_METHOD = re.compile(r'\.\s*(?:execute|execute_batch|prepare|prepare_cached|query_row)\s*\(')
+SQL_METHOD = re.compile(
+    r'\.\s*(?:execute|execute_batch|prepare|prepare_cached|query_row(?:_and_then)?)\s*\('
+)
+SQL_ASSOCIATED_METHOD = re.compile(
+    r'\bConnection\s*::\s*(?:execute|execute_batch|prepare|prepare_cached|query_row(?:_and_then)?)\s*\('
+)
+SQL_BINDING = re.compile(
+    r'\b(?:const|static|let(?:\s+mut)?)\s+(\w+)(?:\s*:[^=;]+)?\s*='
+)
 
 
 def lex(source):
@@ -104,16 +112,19 @@ def closing_pair(masked, opening, left='(', right=')'):
     return len(masked)
 
 
-def first_argument_end(masked, opening):
-    """Return the first top-level comma or the call's closing parenthesis."""
+def argument_ranges(masked, opening):
+    """Return top-level argument ranges for one call."""
+    ranges = []
+    start = opening + 1
     parens = brackets = braces = 0
-    for i in range(opening + 1, len(masked)):
+    for i in range(start, len(masked)):
         char = masked[i]
         if char == '(':
             parens += 1
         elif char == ')':
             if parens == 0 and brackets == 0 and braces == 0:
-                return i
+                ranges.append((start, i))
+                return ranges
             parens -= 1
         elif char == '[':
             brackets += 1
@@ -124,24 +135,50 @@ def first_argument_end(masked, opening):
         elif char == '}':
             braces -= 1
         elif char == ',' and parens == 0 and brackets == 0 and braces == 0:
-            return i
-    return len(masked)
+            ranges.append((start, i))
+            start = i + 1
+    return ranges
+
+
+def mask_sql_quotes(value):
+    """Mask SQL string literals and quoted identifiers while preserving offsets."""
+    masked = list(value)
+    i = 0
+    while i < len(value):
+        if value[i] not in "'\"":
+            i += 1
+            continue
+        quote = value[i]
+        start = i
+        i += 1
+        while i < len(value):
+            if value[i] == quote:
+                if i + 1 < len(value) and value[i + 1] == quote:
+                    i += 2
+                    continue
+                i += 1
+                break
+            i += 1
+        for offset in range(start, i):
+            masked[offset] = ' '
+    return ''.join(masked)
 
 
 def without_trigger_programs(value):
     # Trigger programs use BEGIN/END as grammar, not transaction boundaries.
     trigger = re.compile(r'\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b', re.I)
     token = re.compile(r'\b(BEGIN|CASE|END)\b', re.I)
+    masked_value = mask_sql_quotes(value)
     result, cursor = [], 0
-    while match := trigger.search(value, cursor):
+    while match := trigger.search(masked_value, cursor):
         result.append(value[cursor:match.start()])
-        begin = re.search(r'\bBEGIN\b', value[match.end():], re.I)
+        begin = re.search(r'\bBEGIN\b', masked_value[match.end():], re.I)
         if begin is None:
             result.append(value[match.start():])
             return ''.join(result)
         body = match.end() + begin.end()
         depth, end = 1, None
-        for marker in token.finditer(value, body):
+        for marker in token.finditer(masked_value, body):
             word = marker[1].upper()
             if word == 'CASE':
                 depth += 1
@@ -194,19 +231,48 @@ def violations(source, path):
     sql_calls = []
     for match in SQL_METHOD.finditer(masked):
         opening = masked.find('(', match.start())
-        sql_calls.append((opening, first_argument_end(masked, opening)))
-    for opening, end in sql_calls:
+        ranges = argument_ranges(masked, opening)
+        if ranges:
+            sql_calls.append((opening, *ranges[0]))
+    for match in SQL_ASSOCIATED_METHOD.finditer(masked):
+        opening = masked.find('(', match.start())
+        ranges = argument_ranges(masked, opening)
+        if len(ranges) > 1:
+            sql_calls.append((opening, *ranges[1]))
+
+    bindings = []
+    for match in SQL_BINDING.finditer(masked):
+        end = masked.find(';', match.end())
+        if end < 0:
+            continue
+        values = [value for offset, value in strings if match.end() < offset < end]
+        if any(contains_transaction_sql(value) for value in values):
+            bindings.append((match.start(), match[1]))
+            continue
+        joined = ''.join(values)
+        if re.search(r'\bconcat\s*!\s*\(', masked[match.end():end]) and contains_transaction_sql(joined):
+            bindings.append((match.start(), match[1]))
+
+    for opening, start, end in sql_calls:
         for offset, value in strings:
-            if opening < offset < end and contains_transaction_sql(value):
+            if start <= offset < end and contains_transaction_sql(value):
                 hits.append((offset, 'raw SQL transaction/savepoint'))
-        for match in re.finditer(r'\bconcat\s*!\s*\(', masked[opening:end]):
-            concat_opening = masked.find('(', opening + match.start())
+        for match in re.finditer(r'\bconcat\s*!\s*\(', masked[start:end]):
+            concat_opening = masked.find('(', start + match.start())
             concat_end = closing_pair(masked, concat_opening)
             joined = ''.join(
                 value for offset, value in strings if concat_opening < offset < concat_end
             )
             if contains_transaction_sql(joined):
-                hits.append((opening + match.start(), 'raw SQL transaction/savepoint'))
+                hits.append((start + match.start(), 'raw SQL transaction/savepoint'))
+        identifier = masked[start:end].strip()
+        if re.fullmatch(r'\w+', identifier):
+            binding = next(
+                (offset for offset, name in reversed(bindings) if offset < opening and name == identifier),
+                None,
+            )
+            if binding is not None:
+                hits.append((binding, 'raw SQL transaction/savepoint'))
     found = []
     for offset, reason in hits:
         if any(start <= offset < end for start, end in tests):

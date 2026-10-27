@@ -76,6 +76,8 @@ both. The source guard scans all production Rust in the storage crate, where the
 managed connection type is crate-private. It rejects raw savepoint/transaction
 APIs, including associated-function and UFCS forms inside `connection.call`, and
 raw SQL transaction starts/terminators, including `concat!`-built statements.
+It also follows simple `const`, `static` and `let` string bindings used as the
+SQL argument, and covers `query_row_and_then` and associated `Connection` calls.
 Exceptions name exact functions: managed entrypoints/acquisition, commit and
 rollback-on-drop in `database.rs`,
 `BackupDatabase::enqueue_restore_events` and

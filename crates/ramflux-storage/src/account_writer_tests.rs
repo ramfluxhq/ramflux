@@ -259,6 +259,20 @@ fn same_process_registry_stress_never_reports_account_busy() -> TestResult {
 }
 
 #[test]
+fn poisoned_registry_drop_releases_ownership_and_removes_the_entry() -> TestResult {
+    let (root, writer) = crate::tests::test_db("poisoned-writer-registry")?;
+    drop(writer);
+    let index = AccountIndex::open(&root)?;
+    let lease = index.acquire_account_writer("acct")?;
+    crate::account_writer::poison_registry();
+    drop(lease);
+    let reopened = index.acquire_account_writer("acct")?;
+    drop(reopened);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn writer_lock_filesystem_error_names_the_real_lock_path() -> TestResult {
     let (root, writer) = crate::tests::test_db("writer-lock-open-error")?;
     drop(writer);

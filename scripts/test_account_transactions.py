@@ -42,10 +42,22 @@ class TransactionGuardTests(unittest.TestCase):
         ):
             self.check(f'fn write() {{ connection.execute_batch({expression})?; }}')
 
+    def test_bound_sql_query_variants_and_associated_calls(self):
+        for source in (
+            'const SQL: &str = "BEGIN IMMEDIATE"; fn write() { db.execute_batch(SQL)?; }',
+            'fn write() { let sql = "COMMIT"; db.execute(sql, [])?; }',
+            'fn write() { let sql = concat!("BEG", "IN"); db.execute_batch(sql)?; }',
+            'fn write() { db.query_row_and_then("SAVEPOINT raw", [], row, map)?; }',
+            'fn write() { Connection::execute_batch(db, "END")?; }',
+        ):
+            self.check(source)
+
     def test_comments_literals_and_triggers_are_not_method_calls(self):
         self.check('fn write() { /* db.savepoint()? */ // db.transaction()?\n let x = "db.savepoint()"; }', False)
         self.check('fn upgrade() { db.execute_batch("CREATE TRIGGER t AFTER INSERT ON x BEGIN SELECT 1; END;")?; }', False)
         self.check('fn upgrade() { db.execute_batch("CREATE TRIGGER t AFTER INSERT ON x BEGIN SELECT CASE WHEN 1 THEN 2 END; END;")?; }', False)
+        self.check("fn upgrade() { db.execute_batch(\"CREATE TRIGGER t AFTER INSERT ON x BEGIN INSERT INTO y VALUES('case'); END;\")?; }", False)
+        self.check('fn upgrade() { db.execute_batch("CREATE TRIGGER t AFTER INSERT ON x BEGIN UPDATE y SET \\\"end\\\" = 1; END;")?; }', False)
         for source in (
             'fn harmless() { let channel = "release"; }',
             'fn harmless() { let message = "End of stream"; }',
