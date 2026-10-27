@@ -109,7 +109,20 @@ pub const CUSTODY_BRANCH_EXPORTER: &str = "EXPERIMENTAL-ramflux.identity.branch_
 pub const CUSTODY_REVOKED_LIST: &str = "ramflux.identity.revoked_devices.list.v1";
 pub const CUSTODY_TIME_PROBE: &str = "ramflux.identity.time_probe.v1";
 
-pub const ALL: [&str; 100] = [
+pub const HOME_PREPARE: &str = "ramflux.identity.home_prepare.v1";
+pub const HOME_ROUTE_OFFER: &str = "ramflux.identity.home_route_offer.v1";
+pub const HOME_AUTHORIZATION: &str = "ramflux.identity.home_authorization.v1";
+pub const HOME_GENESIS: &str = "ramflux.identity.home_genesis.v1";
+pub const HOME_CONTROL: &str = "ramflux.identity.home_control.v1";
+pub const HOME_RECEIPT: &str = "ramflux.identity.home_receipt.v1";
+pub const HOME_COMMIT: &str = "ramflux.identity.home_commit.v1";
+pub const HOME_COMMIT_DELIVERY: &str = "ramflux.identity.home_commit_delivery.v1";
+pub const HOME_ADMISSION_ATTESTATION: &str = "ramflux.identity.home_admission_attestation.v1";
+pub const HOME_NONCOMMIT_FENCE: &str = "ramflux.identity.home_noncommit_fence.v1";
+pub const HOME_RECORD_HASH: &str = "ramflux.identity.home_record_hash.v1";
+pub const HOME_DELIVERY_MAP: &str = "ramflux.identity.home_delivery_map.v1";
+
+pub const ALL: [&str; 112] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -210,6 +223,18 @@ pub const ALL: [&str; 100] = [
     CUSTODY_BRANCH_EXPORTER,
     CUSTODY_REVOKED_LIST,
     CUSTODY_TIME_PROBE,
+    HOME_PREPARE,
+    HOME_ROUTE_OFFER,
+    HOME_AUTHORIZATION,
+    HOME_GENESIS,
+    HOME_CONTROL,
+    HOME_RECEIPT,
+    HOME_COMMIT,
+    HOME_COMMIT_DELIVERY,
+    HOME_ADMISSION_ATTESTATION,
+    HOME_NONCOMMIT_FENCE,
+    HOME_RECORD_HASH,
+    HOME_DELIVERY_MAP,
 ];
 
 #[cfg(test)]
