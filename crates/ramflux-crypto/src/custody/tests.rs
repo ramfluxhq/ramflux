@@ -178,12 +178,20 @@ fn authenticated_capacity_pressure_warns_at_eighty_percent_of_roster() -> Result
         body.devices.push(device);
     }
     let below = primary.sign_record(body.clone())?;
-    assert!(!verify_record(&below, 1_700_000_000, None, None)?.capacity_pressure().roster);
+    assert!(
+        !verify_record(&below, 1_700_000_000, None, None)?
+            .capacity_pressure()
+            .warned(CapacityLimit::Roster)
+    );
     let mut last = body.devices.last().ok_or("device")?.clone();
     last.device_id = "revoked-0818".into();
     body.devices.push(last);
     let at = primary.sign_record(body)?;
-    assert!(verify_record(&at, 1_700_000_000, None, None)?.capacity_pressure().roster);
+    assert!(
+        verify_record(&at, 1_700_000_000, None, None)?
+            .capacity_pressure()
+            .warned(CapacityLimit::Roster)
+    );
     Ok(())
 }
 
@@ -249,5 +257,102 @@ fn full_roster_and_reserved_enrollment_space_do_not_block_in_place_revocation() 
     let revoked = primary.revoke_device(&verified, "primary", now + 1)?;
     assert_eq!(revoked.body.devices.len(), MAX_ROSTER);
     verify_record(&revoked, now + 1, None, None)?;
+    Ok(())
+}
+
+#[test]
+fn external_custody_authorization_rechecks_the_human_lease_at_each_use() -> Result {
+    let (_, _, human) = fixture()?;
+    let original = human.body.issued_at;
+    let now = original + MAX_BRANCH_LEASE_SECONDS - 100;
+    let human = verify_record(&human, now, None, None)?;
+    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[11; 32])?)?;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([12; 32]));
+    let branch = crate::create_device_branch("service.example", "worker", 1, [13; 32]);
+    let agreement = crate::X25519KeyPair::from_seed([14; 32]);
+    let record = create_genesis(
+        &master,
+        &primary,
+        &branch,
+        &agreement,
+        GenesisInput {
+            principal_kind: PrincipalKind::HeadlessAi,
+            display_name: "Example Service".into(),
+            issued_at: now,
+            master_cert_id: encode_base64url([15; 32]),
+            branch_cert_id: encode_base64url([16; 32]),
+            external_human_primary: Some(
+                human.envelope().body.master_certificate.body.primary_device_ref.clone(),
+            ),
+        },
+    )?;
+    let service = verify_record(&record, now, None, Some(&human))?;
+    let reference = DeviceRef {
+        account_anchor: record.body.account_anchor.clone(),
+        device_id: "worker".into(),
+        device_epoch: 1,
+    };
+    service.authorize(&reference, "message", now)?;
+    // The service lease remains valid, but it cannot outlive the human's current authority.
+    assert!(service.authorize(&reference, "message", now + 500).is_err());
+    Ok(())
+}
+
+#[test]
+fn authenticated_certificate_forks_fence_a_range_and_a_higher_range_preserves_denials() -> Result {
+    let (_, primary, genesis) = fixture()?;
+    let now = genesis.body.issued_at;
+    let verified = verify_record(&genesis, now, None, None)?;
+    let mut pins = AuthorityPins::default();
+    pins.observe(&verified)?;
+    let revoked = primary.revoke_device(&verified, "primary", now + 1)?;
+    let revoked_verified = verify_record(&revoked, now + 1, None, None)?;
+    pins.observe(&revoked_verified)?;
+    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[0; 32])?)?;
+    let mut certificate = genesis.body.master_certificate.body.clone();
+    certificate.cert_id = encode_base64url([19; 32]);
+    let mut fork = revoked.body.clone();
+    fork.master_certificate = master.certify(certificate)?;
+    let fork = primary.sign_record(fork)?;
+    assert_eq!(pins.observe(&verify_record(&fork, now + 1, None, None)?)?, PinOutcome::Fenced);
+    assert!(pins.require_current(&revoked_verified).is_err());
+
+    let next_primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([20; 32]));
+    let branch = crate::create_device_branch("vector.example", "replacement", 1, [21; 32]);
+    let agreement = crate::X25519KeyPair::from_seed([22; 32]);
+    let mut replacement = create_genesis(
+        &master,
+        &next_primary,
+        &branch,
+        &agreement,
+        GenesisInput {
+            principal_kind: PrincipalKind::Human,
+            display_name: "Vector Human".into(),
+            issued_at: now + 2,
+            master_cert_id: encode_base64url([23; 32]),
+            branch_cert_id: encode_base64url([24; 32]),
+            external_human_primary: None,
+        },
+    )?
+    .body;
+    let mut cert = replacement.master_certificate.body;
+    cert.range_index = 5;
+    cert.previous_certificate_hash = Some(object_hash(&genesis.body.master_certificate)?);
+    replacement.master_certificate = master.certify(cert)?;
+    let mut cert = replacement.devices[0].branch_certificate.take().ok_or("branch")?.body;
+    cert.master_certificate_hash = object_hash(&replacement.master_certificate)?;
+    replacement.devices[0].branch_certificate = Some(next_primary.certify_branch(cert)?);
+    replacement.device_set_epoch = encode_epoch(5, 1)?;
+    replacement.previous_record_hash = Some(object_hash(&revoked)?);
+    let missing_denial = next_primary.sign_record(replacement.clone())?;
+    assert!(pins.observe(&verify_record(&missing_denial, now + 2, None, None)?).is_err());
+    replacement.devices.push(revoked.body.devices[0].clone());
+    replacement.devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    let replacement = next_primary.sign_record(replacement)?;
+    let replacement = verify_record(&replacement, now + 2, None, None)?;
+    assert_eq!(pins.observe(&replacement)?, PinOutcome::Advanced);
+    pins.require_current(&replacement)?;
+    assert!(!pins.permits_legacy(&genesis.body.account_anchor));
+    assert!(pins.observe(&revoked_verified).is_err());
     Ok(())
 }

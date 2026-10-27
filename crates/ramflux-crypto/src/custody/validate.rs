@@ -4,7 +4,15 @@
 //! Schema, key, lease and complete-record validation before authority is pinned.
 use crate::CryptoError;
 use ed25519_dalek::{Signature, VerifyingKey};
-use ramflux_protocol::{MAX_SAFE_JSON_INTEGER, PrincipalKind, custody::*, domain};
+use ramflux_protocol::{
+    MAX_SAFE_JSON_INTEGER, PrincipalKind,
+    custody::{
+        BranchCertificate, CustodyKind, DeviceRef, DeviceSet, Envelope, MASTER_SCOPES,
+        MAX_BRANCH_LEASE_SECONDS, MAX_RECORD_BYTES, MAX_ROSTER, MasterCertificate, MigrationState,
+        decode_epoch, encode_epoch, object_hash, section_hashes, signing_bytes,
+    },
+    domain,
+};
 use serde::Serialize;
 
 pub(super) fn reject(reason: &'static str) -> CryptoError {
@@ -52,7 +60,7 @@ fn reference(value: &DeviceRef) -> Result<(), CryptoError> {
     id(&value.device_id)?;
     positive(value.device_epoch)
 }
-fn optional_hash(value: &Option<String>) -> Result<(), CryptoError> {
+fn optional_hash(value: Option<&str>) -> Result<(), CryptoError> {
     if let Some(value) = value {
         bytes(value, 32)?;
     }
@@ -90,7 +98,7 @@ pub(super) fn master_body(body: &MasterCertificate) -> Result<(), CryptoError> {
     {
         return Err(reject("born-v3 certificate requires exact scopes and no legacy binding"));
     }
-    optional_hash(&body.previous_certificate_hash)?;
+    optional_hash(body.previous_certificate_hash.as_deref())?;
     match (body.principal_kind, body.custody_kind) {
         (PrincipalKind::Human, CustodyKind::LocalHuman)
             if body.primary_device_ref.account_anchor == body.account_anchor => {}
@@ -166,7 +174,7 @@ pub(super) fn record_structure(body: &DeviceSet) -> Result<(), CryptoError> {
         return Err(reject("custody record differs from certified authority"));
     }
     time(body.issued_at)?;
-    optional_hash(&body.previous_record_hash)?;
+    optional_hash(body.previous_record_hash.as_deref())?;
     if body.profile.kind != body.principal_kind
         || ramflux_protocol::normalize_profile_display_name(&body.profile.display_name)?
             != body.profile.display_name
@@ -182,6 +190,18 @@ pub(super) fn record_structure(body: &DeviceSet) -> Result<(), CryptoError> {
     if body.devices.is_empty() || body.devices.len() > MAX_ROSTER {
         return Err(reject("custody roster capacity exceeded"));
     }
+    roster(body)?;
+    if body.section_hashes != section_hashes(body)? {
+        return Err(reject("custody section hash mismatch"));
+    }
+    if ramflux_protocol::canonical_json_bytes(body)?.len() > MAX_RECORD_BYTES {
+        return Err(reject("custody record byte budget exceeded"));
+    }
+    Ok(())
+}
+
+fn roster(body: &DeviceSet) -> Result<(), CryptoError> {
+    let cert = &body.master_certificate.body;
     let cert_hash = object_hash(&body.master_certificate)?;
     let signer = key(&cert.self_signing_public_key)?;
     let mut previous: Option<&str> = None;
@@ -241,12 +261,6 @@ pub(super) fn record_structure(body: &DeviceSet) -> Result<(), CryptoError> {
         })
     {
         return Err(reject("local primary must remain represented in its roster"));
-    }
-    if body.section_hashes != section_hashes(body)? {
-        return Err(reject("custody section hash mismatch"));
-    }
-    if ramflux_protocol::canonical_json_bytes(body)?.len() > MAX_RECORD_BYTES {
-        return Err(reject("custody record byte budget exceeded"));
     }
     Ok(())
 }
