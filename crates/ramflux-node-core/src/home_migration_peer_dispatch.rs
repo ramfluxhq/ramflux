@@ -28,6 +28,7 @@ impl RouterCore {
         let result = (|| {
             let _verification = node.acquire_migration_verification()?;
             call.verify(peer, node.node_id(), now)?;
+            node.charge_migration_read(&format!("peer/{}", peer.node_id), now)?;
             match call {
                 MigrationPeerCall::Attest { owner, .. } => self
                     .attest_home_migration(store, node, AttestMigration { request: owner }, now)
@@ -68,6 +69,14 @@ impl RouterCore {
                             Ok(MigrationPeerReply::Authorized(Box::new(attestation)))
                         },
                     ),
+                MigrationPeerCall::Resolve { payload, .. } => store
+                    .resolve_migration_home(
+                        &payload.target_anchor,
+                        payload.after_home_hash.as_deref(),
+                        usize::try_from(payload.limit)
+                            .map_err(|_| failure(Refusal::HomeCheckpointRequired))?,
+                    )
+                    .map(|result| MigrationPeerReply::Resolved(Box::new(result))),
                 MigrationPeerCall::Commit { sealed, .. } => self
                     .commit_home_migration(store, node, CommitMigration { sealed, peer }, now)
                     .map(|record| MigrationPeerReply::Committed(Box::new(record))),

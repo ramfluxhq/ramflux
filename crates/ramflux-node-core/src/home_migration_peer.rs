@@ -9,7 +9,7 @@ use ramflux_protocol::{
     home_migration::{
         Action, AttestRequest, Authorization, Control, HomeAttestation, NodeCommitDelivery,
         NoncommitFence, PeerQuery, PeerQueryKind, PeerStatus, RecordEvidence, Refusal,
-        SKEW_SECONDS, Signed, message_hash,
+        ResolvePayload, ResolveResult, SKEW_SECONDS, Signed, message_hash,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ pub enum MigrationPeerCall {
     AuthorizeRead { authentication: Signed<PeerQuery>, owner: Box<Signed<Control>> },
     Commit { authentication: Signed<NodeCommitDelivery>, sealed: Box<SealedMigration> },
     Status { authentication: Signed<PeerStatus>, authorization: Box<Signed<Authorization>> },
+    Resolve { authentication: Signed<PeerQuery>, payload: ResolvePayload },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "outcome", content = "evidence", rename_all = "snake_case", deny_unknown_fields)]
@@ -41,14 +42,15 @@ pub enum MigrationPeerReply {
     Committed(Box<RecordEvidence>),
     Fenced(Box<Signed<NoncommitFence>>),
     Refused(Refusal),
+    Resolved(Box<ResolveResult>),
 }
 impl MigrationPeerCall {
     #[must_use]
     pub fn claimed_peer(&self) -> &str {
         match self {
-            Self::Attest { authentication, .. } | Self::AuthorizeRead { authentication, .. } => {
-                &authentication.body.source_node
-            }
+            Self::Attest { authentication, .. }
+            | Self::AuthorizeRead { authentication, .. }
+            | Self::Resolve { authentication, .. } => &authentication.body.source_node,
             Self::Commit { authentication, .. } => &authentication.body.source_node,
             Self::Status { authentication, .. } => &authentication.body.destination_node,
         }
@@ -56,9 +58,9 @@ impl MigrationPeerCall {
     #[must_use]
     pub fn audience(&self) -> &str {
         match self {
-            Self::Attest { authentication, .. } | Self::AuthorizeRead { authentication, .. } => {
-                &authentication.body.audience_node
-            }
+            Self::Attest { authentication, .. }
+            | Self::AuthorizeRead { authentication, .. }
+            | Self::Resolve { authentication, .. } => &authentication.body.audience_node,
             Self::Commit { authentication, .. } => &authentication.body.audience_node,
             Self::Status { authentication, .. } => &authentication.body.audience_node,
         }
@@ -98,6 +100,18 @@ impl MigrationPeerCall {
                     || q.migration_id != owner.body.migration_id
                     || owner.body.audience_node != peer.node_id
                     || !matches!(owner.body.action, Action::Status | Action::Resolve)
+                {
+                    return Err(refused());
+                }
+            }
+            Self::Resolve { authentication, payload } => {
+                verify_query(authentication, peer, now)?;
+                let q = &authentication.body;
+                if q.kind != PeerQueryKind::Resolve
+                    || q.request_hash != hash(payload)?
+                    || q.account_anchor != payload.target_anchor
+                    || payload.limit == 0
+                    || payload.limit > 64
                 {
                     return Err(refused());
                 }
@@ -162,6 +176,28 @@ fn verify_query(
     fresh(query.body.issued_at, query.body.expires_at, &query.body.nonce, now)
 }
 impl MigrationNode {
+    /// Request only immutable public home evidence over independently admitted mesh transport.
+    /// # Errors
+    /// Returns bounded serialization/randomness/signing errors; the receiver enforces page limits.
+    pub fn peer_resolve_call(
+        &self,
+        audience: &str,
+        payload: ResolvePayload,
+        migration_id: &str,
+        now: u64,
+    ) -> Result<MigrationPeerCall, NodeCoreError> {
+        let authentication = self.peer_query(
+            PeerQueryInput {
+                kind: PeerQueryKind::Resolve,
+                anchor: &payload.target_anchor,
+                id: migration_id,
+                audience,
+                request_hash: hash(&payload)?,
+            },
+            now,
+        )?;
+        Ok(MigrationPeerCall::Resolve { authentication, payload })
+    }
     /// Authenticate a relayed owner preflight without granting a peer cancellation rights.
     /// # Errors
     /// Returns bounded serialization, randomness and signing errors.
