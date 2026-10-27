@@ -80,9 +80,13 @@ pub(crate) fn submit(
         RouterSubmitOutcome::OfflineQueued(queued) => (queued.entry, "offline_queued"),
         _ => return Err(CustodyRefusal::InvalidInput),
     };
-    if let Err(error) =
-        store.record_leased_submission(&replay, expiry, Some(&entry), None, Some(lease))
-    {
+    if let Err(error) = store.record_leased_submission(
+        &replay,
+        expiry,
+        Some(&entry),
+        Some(source.root_commitment()),
+        Some(lease),
+    ) {
         tracing::error!(%error,"custody inbox persistence failed after acceptance; terminating to avoid a state fork");
         std::process::abort();
     }

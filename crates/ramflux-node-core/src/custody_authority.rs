@@ -371,6 +371,7 @@ impl RouterCore {
         }
         crate::home_migration_store::commit_transition(store, tx)?;
         if outcome != PinOutcome::Unchanged {
+            store.observe_custody_publication_commit();
             registry.apply_custody_account(anchor.clone(), state)?;
         }
         Ok(offer)

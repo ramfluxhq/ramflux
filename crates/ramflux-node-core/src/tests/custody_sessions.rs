@@ -531,3 +531,6 @@ fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[path = "custody_migration.rs"]
+mod migration;
