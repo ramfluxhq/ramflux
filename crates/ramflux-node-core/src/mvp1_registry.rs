@@ -226,8 +226,8 @@ pub(crate) struct IdentityDeviceRecord {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IdentityRegistry {
-    #[serde(default, skip_serializing_if = "crate::custody_authority::CustodyRegistry::is_empty")]
-    pub(crate) custody: crate::custody_authority::CustodyRegistry,
+    #[serde(skip)]
+    pub(crate) custody: std::sync::Arc<crate::custody_authority::CustodyRegistry>,
     // A metadata purge is not a root-signed release of a registered principal name.
     #[serde(default)]
     principal_root_bindings: BTreeMap<String, String>,
@@ -629,17 +629,12 @@ impl IdentityRegistry {
             .principal_root_bindings
             .get(principal_id)
             .or_else(|| self.root_public_keys.get(principal_id))
+            .or_else(|| self.custody.principals.get(principal_id))
             .is_some_and(|root| root != root_public_key)
         {
             return Err(NodeCoreError::PrincipalIdTaken);
         }
         Ok(())
-    }
-
-    pub(crate) fn reserve_custody_principal(&mut self, principal_id: &str, master: &str) {
-        self.principal_root_bindings
-            .entry(principal_id.to_owned())
-            .or_insert_with(|| master.to_owned());
     }
 
     fn check_registration_ownership(

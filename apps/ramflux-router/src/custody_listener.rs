@@ -65,11 +65,21 @@ pub(crate) fn start(
                 let acceptor = acceptor.clone();
                 let router = Arc::clone(&router);
                 tokio::spawn(async move {
-                    let _permit = permit;
                     let run = async {
+                        if permit.is_revoked() {
+                            anyhow::bail!("custody admission revoked")
+                        }
                         let tls = accept_tls(&acceptor, socket).await?;
-                        serve(GatewayTcpTlsStream::Server(tls), router, &peer.ip().to_string())
-                            .await
+                        if permit.is_revoked() {
+                            anyhow::bail!("custody admission revoked")
+                        }
+                        serve(
+                            GatewayTcpTlsStream::Server(tls),
+                            router,
+                            &peer.ip().to_string(),
+                            &permit,
+                        )
+                        .await
                     };
                     if let Err(error) = tokio::time::timeout(Duration::from_mins(15), run)
                         .await
@@ -87,6 +97,7 @@ async fn serve(
     mut stream: GatewayTcpTlsStream,
     router: Arc<RouterHandle>,
     peer: &str,
+    permit: &ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
     let auth_deadline = tokio::time::Instant::now() + ramflux_node_core::custody_auth_timeout()?;
     let bytes =
@@ -106,6 +117,9 @@ async fn serve(
     )
     .await??;
     for _ in 0..2048 {
+        if permit.is_revoked() {
+            anyhow::bail!("custody admission revoked")
+        }
         let deadline = if authenticated {
             tokio::time::Instant::now() + Duration::from_secs(330)
         } else {
@@ -133,9 +147,12 @@ async fn serve(
         )
         .await??;
         authenticated |= matches!(
-            response,
+            &response,
             ramflux_protocol::custody::CustodyServerFrame::SessionEstablished { .. }
         );
+        if authenticated {
+            permit.mark_authenticated();
+        }
         tokio::time::timeout_at(
             deadline,
             write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),

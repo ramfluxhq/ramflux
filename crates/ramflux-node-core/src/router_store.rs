@@ -45,6 +45,8 @@ const ROUTER_COMMIT_QUEUE_CAPACITY_DEFAULT: usize = 4_096;
 const ROUTER_GROUP_COMMIT_ENV: &str = "RAMFLUX_ROUTER_GROUP_COMMIT";
 const ROUTER_WAL_ENABLED_ENV: &str = "RAMFLUX_ROUTER_WAL";
 const ROUTER_WAL_DIR_ENV: &str = "RAMFLUX_ROUTER_WAL_DIR";
+const CUSTODY_NEW_PRINCIPALS_PER_DAY_ENV: &str = "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY";
+const CUSTODY_NEW_PRINCIPALS_PER_MINUTE_ENV: &str = "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE";
 
 pub struct RouterRedbStore {
     db: Arc<redb::Database>,
@@ -56,6 +58,8 @@ pub struct RouterRedbStore {
     foreign_authority_writes: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     fail_next_registration_admission: std::sync::atomic::AtomicBool,
+    custody_new_principals_per_day: u64,
+    custody_new_principals_per_minute: u64,
 }
 
 struct RouterCommitWriter {
@@ -465,6 +469,11 @@ impl RouterRedbStore {
             None
         };
         let submission_wal = wal_root.map(RouterWalStore::open).transpose()?;
+        let custody_new_principals_per_day =
+            router_u64_env(CUSTODY_NEW_PRINCIPALS_PER_DAY_ENV, 256).clamp(32, 65_536);
+        let custody_new_principals_per_minute =
+            router_u64_env(CUSTODY_NEW_PRINCIPALS_PER_MINUTE_ENV, 16)
+                .min(custody_new_principals_per_day);
         Ok(Self {
             db,
             path: path.to_path_buf(),
@@ -475,6 +484,8 @@ impl RouterRedbStore {
             foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             fail_next_registration_admission: std::sync::atomic::AtomicBool::new(false),
+            custody_new_principals_per_day,
+            custody_new_principals_per_minute,
         })
     }
 

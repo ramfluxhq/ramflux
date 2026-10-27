@@ -223,10 +223,14 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
         CustodyServerFrame::Refused { code: CustodyRefusal::Replay }
     ));
     let attacker = Driver::new("alice", 20)?;
-    assert!(matches!(
-        attacker.run(&service, &router, &store, attacker.publish())?,
-        CustodyServerFrame::Refused { code: CustodyRefusal::PrincipalIdTaken }
-    ));
+    let attacker_result = attacker.run(&service, &router, &store, attacker.publish())?;
+    assert!(
+        matches!(
+            attacker_result,
+            CustodyServerFrame::Refused { code: CustodyRefusal::PrincipalIdTaken }
+        ),
+        "unexpected conflict result: {attacker_result:?}"
+    );
     assert!(matches!(
         driver.run(
             &service,

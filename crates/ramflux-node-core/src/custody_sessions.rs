@@ -105,9 +105,19 @@ impl CustodyLeases {
             || prefixes.iter().any(|key| {
                 self.by_prefix.get(key).is_some_and(|entries| entries.len() >= SOURCE_LIMIT)
             })
-            || !self.sources.admit(source_ip, tick)
         {
             return Err(CustodyRefusal::Capacity);
+        }
+        let admission = self.sources.admit(source_ip, tick).ok_or(CustodyRefusal::Capacity)?;
+        if let crate::custody_ingress::BudgetAdmission::Evicted(prefix) = admission
+            && let Some(nonce) = self
+                .by_prefix
+                .get(&prefix)
+                .and_then(|entries| entries.first())
+                .map(|(_, nonce)| nonce.clone())
+        {
+            self.untrack(&nonce);
+            self.challenges.remove(&nonce);
         }
         if self.pending_count >= GLOBAL_LIMIT {
             let oldest = self
@@ -403,6 +413,54 @@ mod tests {
         }
         assert!(issued <= SOURCE_LIMIT);
         assert!(pool.issue(intent("203.0.113.1".into(), "honest".into()), 100, tick).is_ok());
+    }
+    #[test]
+    fn full_global_windows_admit_fresh_ipv4_and_ipv6_prefixes_by_fair_share() -> Result {
+        let tick = Instant::now();
+        let mut ipv4 = CustodyLeases::default();
+        let mut sequence = 0_u32;
+        for net in 0..16_u8 {
+            for host in 1..=2_u8 {
+                for _ in 0..32 {
+                    sequence += 1;
+                    ipv4.issue(
+                        intent(format!("203.0.{net}.{host}"), format!("v4-{sequence}")),
+                        100,
+                        tick,
+                    )?;
+                }
+            }
+        }
+        assert_eq!(ipv4.pending_count, 1024);
+        ipv4.issue(intent("198.51.100.7".into(), "honest-v4".into()), 100, tick)?;
+        assert_eq!(ipv4.pending_count, 1024, "one heavy-prefix challenge is evicted");
+
+        let mut ipv6 = CustodyLeases::default();
+        sequence = 0;
+        for site in 0..4_u16 {
+            for subnet in 0..2_u16 {
+                for host in 1..=4_u16 {
+                    for _ in 0..8 {
+                        sequence += 1;
+                        let holder = format!("v6-{sequence}");
+                        for _ in 0..4 {
+                            ipv6.issue(
+                                intent(
+                                    format!("2001:db8:{site:x}:{subnet:x}::{host:x}"),
+                                    holder.clone(),
+                                ),
+                                100,
+                                tick,
+                            )?;
+                        }
+                        ipv6.disconnect(&holder);
+                    }
+                }
+            }
+        }
+        assert_eq!(sequence, 256);
+        ipv6.issue(intent("2001:db8:ffff::1".into(), "honest-v6".into()), 100, tick)?;
+        Ok(())
     }
     #[test]
     fn full_pool_evicts_unconsumed_work_but_retains_replay_markers() -> Result {

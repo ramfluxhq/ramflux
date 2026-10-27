@@ -6,7 +6,7 @@ use crate::{IdentityRegistry, NodeCoreError, RouterCore, RouterRedbStore};
 use ramflux_crypto::custody::{AuthorityPins, PinOutcome, VerifiedRecord, verify_record};
 use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +15,8 @@ pub(crate) struct CustodyRegistry {
     records: BTreeMap<String, CustodyPublication>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     account_pins: BTreeMap<String, AuthorityPins>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) principals: BTreeMap<String, String>,
 }
 impl CustodyRegistry {
     fn pins_for(&self, anchor: &str) -> AuthorityPins {
@@ -26,11 +28,12 @@ impl CustodyRegistry {
             .unwrap_or(&self.pins)
             .require_current(record)
     }
-    pub(crate) fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
     pub(crate) fn permits_legacy(&self, anchor: &str) -> bool {
         !self.account_pins.contains_key(anchor) && self.pins.permits_legacy(anchor)
+    }
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.records.is_empty() && self.principals.is_empty()
     }
 }
 /// Full signed authority plus the bounded cumulative membership evidence, when present.
@@ -107,13 +110,14 @@ impl IdentityRegistry {
         self.check_principal_root_ownership(&body.principal_id, master)?;
         let mut pins = self.custody.pins_for(anchor);
         let outcome = pins.observe(&verified).map_err(|error| crypto(&error))?;
-        self.custody.account_pins.insert(anchor.clone(), pins);
-        self.reserve_custody_principal(&body.principal_id, master);
+        let custody = Arc::make_mut(&mut self.custody);
+        custody.account_pins.insert(anchor.clone(), pins);
+        custody.principals.entry(body.principal_id.clone()).or_insert_with(|| master.clone());
         if outcome == PinOutcome::Advanced {
             if verified.capacity_pressure().any() {
                 tracing::warn!(account_anchor = %anchor, "custody authority reached eighty percent capacity; prioritize revocations");
             }
-            self.custody.records.insert(anchor.clone(), publication.clone());
+            custody.records.insert(anchor.clone(), publication.clone());
         }
         Ok(outcome)
     }
@@ -256,12 +260,13 @@ impl IdentityRegistry {
             &body.principal_id,
             &body.master_certificate.body.master_public_key,
         )?;
-        self.reserve_custody_principal(
-            &body.principal_id,
-            &body.master_certificate.body.master_public_key,
-        );
-        self.custody.account_pins.insert(anchor.clone(), state.pins);
-        self.custody.records.insert(anchor, state.publication);
+        let custody = Arc::make_mut(&mut self.custody);
+        custody
+            .principals
+            .entry(body.principal_id.clone())
+            .or_insert_with(|| body.master_certificate.body.master_public_key.clone());
+        custody.account_pins.insert(anchor.clone(), state.pins);
+        custody.records.insert(anchor, state.publication);
         Ok(())
     }
 }

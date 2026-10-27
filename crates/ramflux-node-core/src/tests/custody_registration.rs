@@ -114,7 +114,7 @@ fn custody_publication_prefix_budget_and_incremental_head_survive_restart() -> T
         for n in 1..8 {
             router.publish_custody_record_from(
                 &native(&format!("budget-{n}"), 10 + n)?,
-                now,
+                now + u64::from(n) * 60,
                 &store,
                 source,
             )?;
@@ -122,7 +122,7 @@ fn custody_publication_prefix_budget_and_incremental_head_survive_restart() -> T
         assert!(matches!(
             router.publish_custody_record_from(
                 &native("over-prefix", 30)?,
-                now,
+                now + 8 * 60,
                 &store,
                 "192.0.2.99".parse()?
             ),
@@ -130,7 +130,7 @@ fn custody_publication_prefix_budget_and_incremental_head_survive_restart() -> T
         ));
         router.publish_custody_record_from(
             &native("another-prefix", 40)?,
-            now,
+            now + 8 * 60,
             &store,
             "198.51.100.1".parse()?,
         )?;
@@ -166,8 +166,17 @@ fn custody_global_principal_rate_is_shared_across_prefixes_and_durable() -> Test
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
         store.save_router(&router)?;
-        for n in 0_u8..16 {
-            let source = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, n, 0, 1));
+        for n in 0_u8..8 {
+            let source = std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                0x2001,
+                0xdb8,
+                u16::from(n),
+                0,
+                0,
+                0,
+                0,
+                1,
+            ));
             router.publish_custody_record_from(
                 &native(&format!("global-{n}"), 100 + n)?,
                 now,
@@ -179,14 +188,63 @@ fn custody_global_principal_rate_is_shared_across_prefixes_and_durable() -> Test
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = store.load_router()?.ok_or("router")?;
-        let record = native("global-over", 130)?;
+        let honest = native("global-honest", 130)?;
+        router.publish_custody_record_from(&honest, now, &store, "203.0.113.1".parse()?)?;
+        for n in 0_u8..7 {
+            router.publish_custody_record_from(
+                &native(&format!("global-fill-{n}"), 140 + n)?,
+                now,
+                &store,
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16 + n, 0, 1)),
+            )?;
+        }
+        let over = native("global-over", 160)?;
         assert!(matches!(
-            router.publish_custody_record_from(&record, now, &store, "203.0.113.1".parse()?),
+            router.publish_custody_record_from(&over, now, &store, "198.51.100.1".parse()?),
             Err(NodeCoreError::Capacity { .. })
         ));
-        assert!(router.custody_record(&record.record.body.account_anchor, now)?.is_none());
-        router.publish_custody_record_from(&record, now + 60, &store, "203.0.113.1".parse()?)?;
+        router.publish_custody_record_from(&over, now + 60, &store, "198.51.100.1".parse()?)?;
     }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn custody_rows_do_not_grow_or_deep_clone_the_legacy_registry_snapshot() -> TestResult {
+    let path = temp_store_path("custody-snapshot-isolation")?;
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let router = RouterCore::new();
+    store.save_router(&router)?;
+    let before = serde_json::to_vec(&router.mvp1_identities_snapshot())?;
+    for n in 0_u8..8 {
+        router.publish_custody_record_from(
+            &native(&format!("snapshot-{n}"), 10 + n)?,
+            1_760_000_000,
+            &store,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, n, 0, 1)),
+        )?;
+    }
+    let snapshot = router.mvp1_identities_snapshot();
+    assert_eq!(serde_json::to_vec(&snapshot)?, before);
+    let candidate = snapshot.clone();
+    assert!(std::sync::Arc::ptr_eq(&snapshot.custody, &candidate.custody));
+
+    let request =
+        registration_request(&router, "legacy-after-custody", "phone", 4101, None, "source")?;
+    let writes = store.identity_registry_write_count();
+    router.register_identity_durable(&request, &store)?;
+    assert_eq!(store.identity_registry_write_count(), writes + 1);
+    let serialized = serde_json::to_vec(&router.mvp1_identities_snapshot())?;
+    assert!(serialized.windows(b"snapshot-".len()).all(|window| window != b"snapshot-"));
+
+    drop(store);
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let restored = store.load_router()?.ok_or("router")?;
+    assert!(
+        restored
+            .custody_record(&native("snapshot-0", 10)?.record.body.account_anchor, 1_760_000_000)?
+            .is_some()
+    );
     std::fs::remove_file(path)?;
     Ok(())
 }

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Harden experimental custody admission with prefix quotas, bounded listener deadlines, durable new-principal budgets and per-account publication writes. Identical publication is a no-op.
+- Keep experimental custody global admission fair across prefixes, isolate custody rows from legacy snapshots, continue native-DM batches after invalid entries, and bound replay receipts per sender.
 - BREAKING (experimental custody): proofs/challenges commit to the operation hash and receiving node id; signed node metadata binds a separate public listener certificate. Reissue experimental profiles for this pre-default wire revision. Memory-vault builds require an explicit integration-test marker. Native DM remains explicit opt-in without forward secrecy and is being retired by ordinary v3 E2EE integration.
 
 - Add experimental born-v3 publication, registration and channel-bound sessions, with durable node pins, one-use challenges and explicit SDK DM operations. Creation remains disabled by default; integration-only memory custody is excluded from production artifacts.

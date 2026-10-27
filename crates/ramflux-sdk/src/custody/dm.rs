@@ -9,9 +9,11 @@ use ramflux_crypto::{
 };
 use ramflux_protocol::custody::{CustodyServerFrame, CustodySessionAction, DeviceRef, decode};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroizing;
 
 const DM_DOMAIN: &str = "ramflux.custody_dm.v1";
+static DM_RECEIVE_DROPS: AtomicU64 = AtomicU64::new(0);
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Packet {
@@ -40,6 +42,7 @@ pub struct CustodyDm {
     pub plaintext: Zeroizing<Vec<u8>>,
     recipient: DeviceRef,
     replay_key: String,
+    receipt_sender: String,
     expires_at: u64,
 }
 fn invalid() -> SdkError {
@@ -70,6 +73,14 @@ fn message_expiry(created_at: i64, ttl: u32, current: u64) -> Result<u64, SdkErr
         return Err(invalid());
     }
     Ok(expires_at)
+}
+fn append_received<T>(messages: &mut Vec<T>, result: Result<Option<T>, SdkError>) -> bool {
+    match result {
+        Ok(Some(message)) => messages.push(message),
+        Ok(None) => {}
+        Err(_) => return false,
+    }
+    true
 }
 impl CustodyConnection {
     /// Send a DM under authenticated root-qualified source/target authority.
@@ -174,88 +185,110 @@ impl CustodyConnection {
         let bundle = self.prekey_bundle()?;
         let own_bundle_hash = bundle_hash(&bundle)?;
         for entry in entries {
-            let entry: InboxDelivery = serde_json::from_value(entry)?;
-            let envelope = entry.envelope;
-            let expected_target = ramflux_protocol::qualified_device_id(
-                &self.device.account_anchor,
-                &self.device.device_id,
-            )?;
-            if envelope.envelope_id.len() > 256
-                || entry.inbox_seq <= after_seq
-                || entry.target_delivery_id != expected_target
-                || envelope.target_delivery_id != expected_target
-            {
-                return Err(invalid());
+            let result = self.receive_one_dm(entry, after_seq, &bundle, &own_bundle_hash).await;
+            if !append_received(&mut messages, result) {
+                let total = DM_RECEIVE_DROPS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                tracing::warn!(
+                    reason = "invalid_or_expired",
+                    total,
+                    "dropped one custody DM while continuing the inbox batch"
+                );
             }
-            let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
-                .map_err(|_| invalid())?;
-            if payload_hash(&bytes) != envelope.payload_hash {
-                return Err(invalid());
-            }
-            let packet: Packet = decode(&bytes, 1024 * 1024)?;
-            if packet.schema != DM_DOMAIN
-                || packet.target != self.device
-                || packet.bundle_hash != own_bundle_hash
-                || packet.source.device_id != envelope.source_device_id
-                || envelope
-                    .ext
-                    .ext
-                    .get("source_root_commitment")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(packet.source.account_anchor.as_str())
-            {
-                return Err(invalid());
-            }
-            let peer = self.lookup(&packet.source).await?;
-            if envelope.source_principal_id != peer.publication.record.body.principal_id {
-                return Err(invalid());
-            }
-            let authority = super::node_pins::verify_authority(
-                &peer.publication,
-                peer.custodian_publication.as_ref(),
-                now()?,
-            )?;
-            let cert = authority.authorize(&packet.source, "message", now()?)?;
-            if ramflux_protocol::encode_base64url(packet.initiator_identity)
-                != cert.agreement_identity_public_key
-            {
-                return Err(invalid());
-            }
-            ramflux_crypto::verify_canonical_signature(
-                &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
-                &envelope.signed.signature,
-                &cert.branch_signing_public_key,
-            )?;
-            let current = now()?;
-            let expires_at = message_expiry(envelope.created_at, envelope.ttl, current)?;
-            let replay_key = ramflux_protocol::hash_base64url(
-                "ramflux.identity.custody_dm_receipt.v1",
-                &ramflux_protocol::canonical_json_bytes(&(
-                    &self.device,
-                    &packet.source,
-                    &envelope.envelope_id,
-                ))?,
-            );
-            let pins = self.pins.clone();
-            let lookup_key = replay_key.clone();
-            if tokio::task::spawn_blocking(move || pins.dm_was_acknowledged(&lookup_key, current))
-                .await
-                .map_err(|_| invalid())??
-            {
-                continue;
-            }
-            let plaintext = self.decrypt_packet(&packet, &bundle, &own_bundle_hash)?;
-            messages.push(CustodyDm {
-                inbox_seq: entry.inbox_seq,
-                envelope_id: envelope.envelope_id,
-                source: packet.source,
-                plaintext,
-                recipient: self.device.clone(),
-                replay_key,
-                expires_at,
-            });
         }
         Ok(messages)
+    }
+
+    async fn receive_one_dm(
+        &mut self,
+        entry: serde_json::Value,
+        after_seq: u64,
+        bundle: &ramflux_crypto::PrekeyBundle,
+        own_bundle_hash: &[u8; 32],
+    ) -> Result<Option<CustodyDm>, SdkError> {
+        let entry: InboxDelivery = serde_json::from_value(entry)?;
+        let envelope = entry.envelope;
+        let expected_target = ramflux_protocol::qualified_device_id(
+            &self.device.account_anchor,
+            &self.device.device_id,
+        )?;
+        if envelope.envelope_id.len() > 256
+            || entry.inbox_seq <= after_seq
+            || entry.target_delivery_id != expected_target
+            || envelope.target_delivery_id != expected_target
+        {
+            return Err(invalid());
+        }
+        let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
+            .map_err(|_| invalid())?;
+        if payload_hash(&bytes) != envelope.payload_hash {
+            return Err(invalid());
+        }
+        let packet: Packet = decode(&bytes, 1024 * 1024)?;
+        if packet.schema != DM_DOMAIN
+            || packet.target != self.device
+            || packet.bundle_hash != *own_bundle_hash
+            || packet.source.device_id != envelope.source_device_id
+            || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
+                != Some(packet.source.account_anchor.as_str())
+        {
+            return Err(invalid());
+        }
+        let peer = self.lookup(&packet.source).await?;
+        if envelope.source_principal_id != peer.publication.record.body.principal_id {
+            return Err(invalid());
+        }
+        let authority = super::node_pins::verify_authority(
+            &peer.publication,
+            peer.custodian_publication.as_ref(),
+            now()?,
+        )?;
+        let cert = authority.authorize(&packet.source, "message", now()?)?;
+        if ramflux_protocol::encode_base64url(packet.initiator_identity)
+            != cert.agreement_identity_public_key
+        {
+            return Err(invalid());
+        }
+        ramflux_crypto::verify_canonical_signature(
+            &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+            &envelope.signed.signature,
+            &cert.branch_signing_public_key,
+        )?;
+        let current = now()?;
+        let expires_at = message_expiry(envelope.created_at, envelope.ttl, current)?;
+        let replay_key = ramflux_protocol::hash_base64url(
+            "ramflux.identity.custody_dm_receipt.v1",
+            &ramflux_protocol::canonical_json_bytes(&(
+                &self.device,
+                &packet.source,
+                &envelope.envelope_id,
+            ))?,
+        );
+        let receipt_sender = ramflux_protocol::qualified_device_id(
+            &packet.source.account_anchor,
+            &packet.source.device_id,
+        )?;
+        let pins = self.pins.clone();
+        let lookup_key = replay_key.clone();
+        let lookup_sender = receipt_sender.clone();
+        if tokio::task::spawn_blocking(move || {
+            pins.dm_was_acknowledged(&lookup_sender, &lookup_key, current)
+        })
+        .await
+        .map_err(|_| invalid())??
+        {
+            return Ok(None);
+        }
+        let plaintext = self.decrypt_packet(&packet, bundle, own_bundle_hash)?;
+        Ok(Some(CustodyDm {
+            inbox_seq: entry.inbox_seq,
+            envelope_id: envelope.envelope_id,
+            source: packet.source,
+            plaintext,
+            recipient: self.device.clone(),
+            replay_key,
+            receipt_sender,
+            expires_at,
+        }))
     }
 }
 impl CustodyConnection {
@@ -309,9 +342,12 @@ impl CustodyConnection {
         let key = message.replay_key.clone();
         let expiry = message.expires_at;
         let current = now()?;
-        tokio::task::spawn_blocking(move || pins.remember_dm_acknowledgement(key, expiry, current))
-            .await
-            .map_err(|_| invalid())??;
+        let sender = message.receipt_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            pins.remember_dm_acknowledgement(&sender, key, expiry, current)
+        })
+        .await
+        .map_err(|_| invalid())??;
         let mut ack = ramflux_protocol::Ack {
             schema: ramflux_protocol::domain::ACK.into(),
             version: 1,
@@ -348,5 +384,12 @@ mod replay_tests {
         assert!(message_expiry(100, 0, 100).is_err());
         assert!(message_expiry(100, 86_401, 100).is_err());
         Ok(())
+    }
+    #[test]
+    fn invalid_message_does_not_discard_a_later_valid_batch_entry() {
+        let mut messages = Vec::new();
+        assert!(!append_received(&mut messages, message_expiry(100, 300, 401).map(|_| Some(1_u8))));
+        assert!(append_received(&mut messages, Ok(Some(2_u8))));
+        assert_eq!(messages, [2]);
     }
 }

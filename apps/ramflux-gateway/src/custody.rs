@@ -236,9 +236,12 @@ async fn tcp_inner(
     context: GatewayQuicContext,
     first: &[u8],
 ) -> anyhow::Result<()> {
-    let _capacity = capacity()
+    let capacity = capacity()
         .acquire(context.remote_addr.ip(), None, std::time::Instant::now())
         .ok_or_else(|| anyhow::anyhow!("custody source budget exhausted"))?;
+    if capacity.is_revoked() {
+        anyhow::bail!("custody admission revoked")
+    }
     let (mut proxy, response) = tokio::time::timeout(
         ramflux_node_core::custody_auth_timeout()?,
         Proxy::open(&context, first),
@@ -250,6 +253,9 @@ async fn tcp_inner(
     )
     .await??;
     for _ in 0..2048 {
+        if capacity.is_revoked() {
+            anyhow::bail!("custody admission revoked")
+        }
         let deadline = proxy.deadline();
         let bytes =
             tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream)).await??;
@@ -263,6 +269,9 @@ async fn tcp_inner(
         let response =
             tokio::time::timeout_at(deadline, proxy.frame(&context, frame, observed.as_deref()))
                 .await??;
+        if matches!(&response, CustodyServerFrame::SessionEstablished { .. }) {
+            capacity.mark_authenticated();
+        }
         tokio::time::timeout_at(
             deadline,
             write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
@@ -278,9 +287,12 @@ async fn quic_inner(
     context: GatewayQuicContext,
     first: &[u8],
 ) -> anyhow::Result<()> {
-    let _capacity = capacity()
+    let capacity = capacity()
         .acquire(context.remote_addr.ip(), Some(connection.stable_id()), std::time::Instant::now())
         .ok_or_else(|| anyhow::anyhow!("custody source or connection budget exhausted"))?;
+    if capacity.is_revoked() {
+        anyhow::bail!("custody admission revoked")
+    }
     let (mut proxy, response) = tokio::time::timeout(
         ramflux_node_core::custody_auth_timeout()?,
         Proxy::open(&context, first),
@@ -292,6 +304,9 @@ async fn quic_inner(
     )
     .await??;
     for _ in 0..2048 {
+        if capacity.is_revoked() {
+            anyhow::bail!("custody admission revoked")
+        }
         let deadline = proxy.deadline();
         let bytes = tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
         let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
@@ -304,6 +319,9 @@ async fn quic_inner(
         let response =
             tokio::time::timeout_at(deadline, proxy.frame(&context, frame, observed.as_deref()))
                 .await??;
+        if matches!(&response, CustodyServerFrame::SessionEstablished { .. }) {
+            capacity.mark_authenticated();
+        }
         tokio::time::timeout_at(
             deadline,
             write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),

@@ -39,11 +39,13 @@ This temporary path addresses devices registered with the same router and polls
 its durable opaque inbox. Current root-qualified authority, branch signatures and
 recipient-side AEAD are verified; it does not install a legacy gateway push
 session or silently use a cross-node directory. Reception enforces the signed
-creation time and TTL (at most one day), and rejects future or expired messages.
+creation time and TTL (at most one day). An invalid, future or expired message is
+dropped and counted without preventing later valid entries in the same inbox page.
 After the caller accepts a decrypted message, `ack_dm` fsyncs its receiver-scoped
-receipt before sending the real inbox ACK. Up to 4096 receipts are retained
-through their signed expiry, across reconnect/restart; full capacity refuses new
-ACKs rather than evicting live replay evidence. An uncertain remote ACK can be
+receipt before sending the real inbox ACK. Up to 4096 receipts per authenticated
+sender are retained through their signed expiry, across reconnect/restart; one
+sender reaching capacity cannot refuse another sender's ACK. Full per-sender
+capacity refuses new ACKs rather than evicting live replay evidence. An uncertain remote ACK can be
 retried. Unacknowledged messages remain redeliverable; this receipt window is not
 an application transaction or a substitute for the ordinary ratchet replay window.
 Plaintext is zeroized on drop. Current branch leases and revocations apply;
@@ -64,6 +66,8 @@ Provision its node-root signature separately from the gateway's proxy credential
 | `RAMFLUX_CUSTODY_TLS_CERT_FILE`, `RAMFLUX_CUSTODY_TLS_KEY_FILE` | router | Public client-facing certificate chain/key, separate from mesh TLS. The signed node record pins the leaf DER SHA-256 hash as canonical base64url in `client_tls_certificate_sha256`. Shared mesh signing keys are refused, including differently encoded certificates using the same key. |
 | `RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS` | gateway, router | Whole unauthenticated exchange deadline, default 10000 ms; accepted range 100–30000. Frame activity never renews it. |
 | `RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING` | participating services | Explicit operator opt-in (`1`); the signed node record must independently advertise this mode. |
+| `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE` | router | Global new-principal burst budget, default 16; capped by the daily value. |
+| `RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY` | router | Global daily new-principal budget, default 256; accepted runtime value is clamped to 32–65536. |
 
 This gateway signer is explicitly software custody. No hardware/nonexportable-key
 claim is made. The node profile must authorize its exact gateway id, key id,
@@ -110,6 +114,9 @@ seconds. A connection may have four outstanding challenges. Sources normalize
 IPv4-mapped addresses and share IPv4 /24, IPv6 /64 and IPv6 /48 budgets; no prefix
 may hold more than 64 outstanding challenges. Issuance windows permit 32/IP,
 128/small-prefix and 256/IPv6-/48 challenges per minute, plus 1024 per node.
+At the node-wide window, a fresh lighter /24 or /48 takes one share from the
+heaviest prefix and its oldest outstanding challenge is invalidated; a group of
+heavy prefixes therefore cannot turn the global bound into fail-closed admission.
 Under global pending-challenge pressure (4096 entries), the oldest unconsumed challenge
 from the heaviest prefix is evicted. Consumed markers are never evicted to admit
 unauthenticated work. Source tracking uses an 8192-entry idle LRU; table occupancy
@@ -127,21 +134,28 @@ Router restart invalidates every grant. No grants are serialized, backed up or
 restored. Durable registration and `Live` survive, but reconnect authenticates again.
 Listener admission permits four live connections/streams per IP, eight per /24 or
 /64, sixteen per /48, and four streams per QUIC connection. Gateway/direct global
-caps remain 32/64, with fifteen-minute authenticated lifetimes. Source open-rate
+caps remain 32/64, with fifteen-minute authenticated lifetimes. At a full cap, a
+lighter prefix evicts the oldest unauthenticated holder from the heaviest /24 or
+/48; revoked holders cannot authenticate or process another frame. Source open-rate
 windows and idle LRU accounting apply before a slot is granted. The direct public
 TLS handshake has a five-second deadline; subsequent unauthenticated reads,
 processing and writes share the short whole-exchange deadline. Slow reading does
 not retain a pre-auth slot indefinitely.
 
-New principal admission is durable and atomic with its per-account publication:
-eight per IPv4 /24 or IPv6 /64 per UTC day, thirty-two per IPv6 /48 per day,
-sixteen per node per minute and 256 per node per day. A node supports at most
+New principal admission is durable and atomic with its per-account publication.
+The defaults are sixteen per node per minute and 256 per node per day. Each /24,
+/64 and /48 receives at most one thirty-second of the configured global daily
+budget (rounded up), additionally capped by the prior eight-per-small-prefix and
+thirty-two-per-/48 daily ceilings. Thus eight /48s cannot consume the node-wide
+budget reserved for fresh prefixes. A node supports at most
 65,536 custody accounts. Clock rollback never resets a budget: correct the clock
 and retry after the retained window. Existing-account updates do not charge a
 new-principal budget; an identical re-publish performs no durable write.
 Publication updates only the affected account's transactional redb row, capped at
-16 MiB including its retained authority/pins, rather than cloning and rewriting
-the whole identity registry. Prefix receipts retain at most the current/previous
+16 MiB including its retained authority/pins. Custody records, pins and custody-only
+principal reservations are omitted from the legacy whole-registry snapshot and
+rebuilt from those rows; legacy candidate clones share the in-memory custody map
+without deep-copying it. Prefix receipts retain at most the current/previous
 day; the global cumulative count remains durable. Principal names remain bound
 to their first authenticated root even after compromise or abandonment; a new
 anchor must choose a different name. Publication is not an administrative release.

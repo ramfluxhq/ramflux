@@ -237,9 +237,28 @@ pub(super) fn log_unbound(root: &Path) -> Result<(), SdkError> {
 }
 
 impl NodePins {
-    pub(super) fn dm_was_acknowledged(&self, key: &str, now: u64) -> Result<bool, SdkError> {
+    fn dm_receipt_path(&self, sender: &str) -> PathBuf {
+        let name = ramflux_crypto::blake3_256_base64url(
+            "ramflux.identity.custody_dm_receipt_sender.v1",
+            sender.as_bytes(),
+        );
+        self.root.join("dm-receipts").join(format!("{name}.json"))
+    }
+    pub(super) fn dm_was_acknowledged(
+        &self,
+        sender: &str,
+        key: &str,
+        now: u64,
+    ) -> Result<bool, SdkError> {
         let _lock = self.lock()?;
-        let path = self.root.join("dm-receipts.json");
+        let legacy = self.root.join("dm-receipts.json");
+        if legacy.try_exists()? {
+            let receipts: std::collections::BTreeMap<String, u64> = read(&legacy, 512 * 1024)?;
+            if receipts.get(key).is_some_and(|expiry| *expiry >= now) {
+                return Ok(true);
+            }
+        }
+        let path = self.dm_receipt_path(sender);
         if !path.try_exists()? {
             return Ok(false);
         }
@@ -248,12 +267,15 @@ impl NodePins {
     }
     pub(super) fn remember_dm_acknowledgement(
         &self,
+        sender: &str,
         key: String,
         expiry: u64,
         now: u64,
     ) -> Result<(), SdkError> {
         let _lock = self.lock()?;
-        let path = self.root.join("dm-receipts.json");
+        let directory = self.root.join("dm-receipts");
+        fs::create_dir_all(&directory)?;
+        let path = self.dm_receipt_path(sender);
         let mut receipts: std::collections::BTreeMap<String, u64> = if path.try_exists()? {
             read(&path, 512 * 1024)?
         } else {
@@ -270,13 +292,13 @@ impl NodePins {
             return Err(invalid());
         }
         receipts.insert(key, expiry);
-        let temporary = self.root.join(format!(
+        let temporary = directory.join(format!(
             ".dm-receipts-{}",
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         ));
         create(&temporary, &serde_json::to_vec(&receipts)?)?;
         fs::rename(temporary, path)?;
-        fs::File::open(&self.root)?.sync_all()?;
+        fs::File::open(directory)?.sync_all()?;
         Ok(())
     }
 }
@@ -289,14 +311,29 @@ mod replay_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::custody::tests::Root::new()?;
         let pins = NodePins::new(&root.0, "node", &ramflux_crypto::fixture_public_key_base64url())?;
-        assert!(!pins.dm_was_acknowledged("message", 100)?);
-        pins.remember_dm_acknowledgement("message".into(), 200, 100)?;
+        assert!(!pins.dm_was_acknowledged("sender", "message", 100)?);
+        pins.remember_dm_acknowledgement("sender", "message".into(), 200, 100)?;
         let restored =
             NodePins::new(&root.0, "node", &ramflux_crypto::fixture_public_key_base64url())?;
-        assert!(restored.dm_was_acknowledged("message", 101)?);
-        pins.remember_dm_acknowledgement("message".into(), 200, 101)?;
-        assert!(!restored.dm_was_acknowledged("message", 201)?);
-        assert!(pins.remember_dm_acknowledgement("expired".into(), 200, 201).is_err());
+        assert!(restored.dm_was_acknowledged("sender", "message", 101)?);
+        pins.remember_dm_acknowledgement("sender", "message".into(), 200, 101)?;
+        assert!(!restored.dm_was_acknowledged("sender", "message", 201)?);
+        assert!(pins.remember_dm_acknowledgement("sender", "expired".into(), 200, 201).is_err());
+        Ok(())
+    }
+    #[test]
+    fn dm_receipt_capacity_isolated_per_authenticated_sender()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        let pins = NodePins::new(&root.0, "node", &ramflux_crypto::fixture_public_key_base64url())?;
+        let path = pins.dm_receipt_path("sender-a");
+        fs::create_dir_all(path.parent().ok_or("receipt parent")?)?;
+        let receipts: std::collections::BTreeMap<_, _> =
+            (0..4096).map(|n| (format!("receipt-{n}"), 200_u64)).collect();
+        create(&path, &serde_json::to_vec(&receipts)?)?;
+        assert!(pins.remember_dm_acknowledgement("sender-a", "overflow".into(), 200, 100).is_err());
+        pins.remember_dm_acknowledgement("sender-b", "available".into(), 200, 100)?;
+        assert!(pins.dm_was_acknowledged("sender-b", "available", 101)?);
         Ok(())
     }
 }

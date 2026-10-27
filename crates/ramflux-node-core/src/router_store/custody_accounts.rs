@@ -28,7 +28,13 @@ struct Budget {
     total: u64,
 }
 impl Budget {
-    fn charge(&mut self, now: u64, limit: u64, global: bool) -> Result<(), NodeCoreError> {
+    fn charge(
+        &mut self,
+        now: u64,
+        daily_limit: u64,
+        minute_limit: u64,
+        global: bool,
+    ) -> Result<(), NodeCoreError> {
         let day = now / 86_400;
         let minute = now / 60;
         // Clock rollback cannot reset the durable window or grant a fresh budget.
@@ -43,7 +49,10 @@ impl Budget {
             self.minute = minute;
             self.burst = 0;
         }
-        if self.daily >= limit || (global && (self.burst >= 16 || self.total >= MAX_ACCOUNTS)) {
+        if self.daily >= daily_limit
+            || self.burst >= minute_limit
+            || (global && self.total >= MAX_ACCOUNTS)
+        {
             return Err(capacity());
         }
         self.daily += 1;
@@ -53,6 +62,23 @@ impl Budget {
     }
 }
 impl RouterRedbStore {
+    fn custody_budget_keys(&self, source: IpAddr) -> Vec<(String, u64, u64, bool)> {
+        const FAIR_PREFIXES: u64 = 32;
+        let fair_daily = self.custody_new_principals_per_day.div_ceil(FAIR_PREFIXES).max(1);
+        let mut keys = vec![(
+            "global".to_owned(),
+            self.custody_new_principals_per_day,
+            self.custody_new_principals_per_minute,
+            true,
+        )];
+        keys.extend(crate::custody_source_prefixes(source).into_iter().skip(1).enumerate().map(
+            |(n, key)| {
+                let prior_daily = if n == 0 { 8 } else { 32 };
+                (key, prior_daily.min(fair_daily), self.custody_new_principals_per_minute, false)
+            },
+        ));
+        keys
+    }
     pub(crate) fn check_custody_new_principal_budget(
         &self,
         source: IpAddr,
@@ -64,22 +90,14 @@ impl RouterRedbStore {
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
             Err(e) => return Err(error(e)),
         };
-        let mut keys = vec![("global".to_owned(), 256)];
-        keys.extend(
-            crate::custody_source_prefixes(source)
-                .into_iter()
-                .skip(1)
-                .enumerate()
-                .map(|(n, key)| (key, if n == 0 { 8 } else { 32 })),
-        );
-        for (key, limit) in keys {
+        for (key, daily_limit, minute_limit, global) in self.custody_budget_keys(source) {
             let mut budget: Budget = table
                 .get(key.as_str())
                 .map_err(error)?
                 .map(|v| serde_json::from_slice(v.value()).map_err(error))
                 .transpose()?
                 .unwrap_or_default();
-            budget.charge(now, limit, key == "global")?;
+            budget.charge(now, daily_limit, minute_limit, global)?;
         }
         Ok(())
     }
@@ -101,26 +119,18 @@ impl RouterRedbStore {
             let mut accounts = tx.open_table(ACCOUNTS).map_err(error)?;
             if is_new {
                 let mut budgets = tx.open_table(BUDGETS).map_err(error)?;
-                let mut keys = vec![("global".to_owned(), 256)];
-                keys.extend(
-                    crate::custody_source_prefixes(source)
-                        .into_iter()
-                        .skip(1)
-                        .enumerate()
-                        .map(|(n, key)| (key, if n == 0 { 8 } else { 32 })),
-                );
-                for (key, limit) in keys {
+                for (key, daily_limit, minute_limit, global) in self.custody_budget_keys(source) {
                     let mut budget: Budget = budgets
                         .get(key.as_str())
                         .map_err(error)?
                         .map(|v| serde_json::from_slice(v.value()).map_err(error))
                         .transpose()?
                         .unwrap_or_default();
-                    budget.charge(now, limit, key == "global")?;
+                    budget.charge(now, daily_limit, minute_limit, global)?;
                     let encoded = serde_json::to_vec(&budget).map_err(error)?;
                     budgets.insert(key.as_str(), encoded.as_slice()).map_err(error)?;
                 }
-                // At most 256 admissions/day times two prefix rows, retained for two days.
+                // Configured admissions create at most two prefix rows each, retained for two days.
                 // No unexpired receipt is evicted to make room for another publisher.
                 let expired: Vec<String> = budgets
                     .iter()
@@ -179,12 +189,12 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut budget = Budget::default();
         for _ in 0..8 {
-            budget.charge(86_400, 8, false)?;
+            budget.charge(86_400, 8, 8, false)?;
         }
         let mut restored: Budget = serde_json::from_slice(&serde_json::to_vec(&budget)?)?;
-        assert!(restored.charge(86_401, 8, false).is_err());
-        assert!(restored.charge(1, 8, false).is_err());
-        restored.charge(172_800, 8, false)?;
+        assert!(restored.charge(86_401, 8, 8, false).is_err());
+        assert!(restored.charge(1, 8, 8, false).is_err());
+        restored.charge(172_800, 8, 8, false)?;
         Ok(())
     }
 }
