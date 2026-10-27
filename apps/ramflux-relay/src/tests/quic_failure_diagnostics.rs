@@ -38,9 +38,9 @@ fn capture_failure_preserves_close_reason_after_successful_tls()
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("{mode}: {stderr}");
         assert!(output.status.success(), "{mode}: {stdout}\n{stderr}");
         assert!(stdout.contains("1 passed"), "child did not run: {stdout}");
-        eprintln!("{mode}: {stderr}");
         if mode == "writable" {
             let record: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(capture)?)?;
@@ -88,9 +88,13 @@ fn exercise_relay(mode: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
         if mode == "wrong-san" {
-            let error = result.err().ok_or("wrong SAN must fail TLS")?.to_string();
+            let refusal = result.err().ok_or("wrong SAN must fail TLS")?;
+            assert!(
+                matches!(&refusal, ramflux_transport::TransportError::Tls(_)),
+                "wrong SAN must be a typed TLS validation refusal: {refusal}"
+            );
+            let error = refusal.to_string();
             eprintln!("{error}");
-            assert!(error.contains("phase=handshake"), "{error}");
             assert!(error.contains("certificate not valid for name"), "{error}");
             assert_eq!(metrics.ingress_total(), 0);
         } else {
@@ -98,8 +102,9 @@ fn exercise_relay(mode: &str) -> Result<(), Box<dyn std::error::Error>> {
             let response = client.request(&client_quic_request("GET", "/healthz")).await;
             assert_eq!(metrics.ingress_total(), 1, "TLS and request dispatch completed");
             if mode == "unresolved" {
-                let error =
-                    response.err().ok_or("capture failure must close connection")?.to_string();
+                let refusal = response.err().ok_or("capture failure must close connection")?;
+                assert!(matches!(&refusal, ramflux_transport::TransportError::Quic(_)));
+                let error = refusal.to_string();
                 eprintln!("{error}");
                 assert!(error.contains("itest-quic-fault: capture write failed"), "{error}");
                 assert!(error.contains("ApplicationClosed"), "{error}");
