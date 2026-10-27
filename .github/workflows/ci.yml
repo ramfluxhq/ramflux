@@ -37,7 +37,7 @@ jobs:
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 7
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -63,8 +63,37 @@ jobs:
         continue-on-error: true
         run: cargo machete
 
-      - name: Test
-        run: cargo test --workspace
-
       - name: Gateway local-mint regression tests
         run: cargo test -p ramflux-gateway --features itest-local-mint
+
+  test-sdk:
+    name: Rust tests (SDK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+
+      - name: Test SDK
+        run: cargo test -p ramflux-sdk
+
+  test-rest:
+    name: Rust tests (workspace except SDK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+
+      - name: Test workspace except SDK
+        run: cargo test --workspace --exclude ramflux-sdk
