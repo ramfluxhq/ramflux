@@ -216,6 +216,14 @@ compose() (
   esac
 )
 
+compose_up() {
+  case "$1" in
+    build) compose up -d --build ;;
+    no-build) compose up -d --no-build ;;
+    *) fail 'internal error: invalid compose build mode' ;;
+  esac
+}
+
 # Do not use compose ps -q SERVICE: podman-compose 1.3.0 does not filter it by service.
 # Return 1 for a service still starting; 2 for a terminal failure or invalid inspection.
 inspect_services() {
@@ -389,10 +397,10 @@ ENV
     python3 "$script_dir/compose-env.py" "$state/runtime.env"
     if [ "$command" = rollback ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
       check_prebuilt_images
-      compose up -d --no-build
+      compose_up no-build
     else
       sh "$script_dir/build-prod-images.sh"
-      compose up -d --build
+      compose_up build
     fi
     wait_for_services
     if [ "$command" = upgrade ] || [ "$command" = rollback ]; then
