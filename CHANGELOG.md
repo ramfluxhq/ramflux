@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Demo node deployments can opt into the voice UDP overlay with an env setting
-  or command-line port, retaining the existing base deployment when unset.
+  or command-line port, retaining the existing base deployment when unset. Voice
+  selection validates the mesh UDP port too; maintenance commands clearly reject
+  unapplied voice settings before invoking Compose.
 
 - Public-name warnings allow Highly Restrictive Latin/CJK script combinations and
   compare NFKC, simple case-folded, whitespace-collapsed skeletons without changing

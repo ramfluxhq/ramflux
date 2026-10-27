@@ -102,4 +102,13 @@ elif args and (args[0] == "inspect" or (len(args) > 1 and args[1] == "inspect"))
         if not control.get("missing_health"):
             field = "Healthcheck" if provider != "docker" else "Health"
             item["State"][field] = {"Status": health}
+        runtime_env = state / "runtime.env"
+        values = dict(line.split("=", 1) for line in runtime_env.read_text().splitlines()
+                      if "=" in line) if runtime_env.exists() else {}
+        item["Config"]["Env"] = [f"{key}={value}" for key, value in values.items()]
+        if args[-1] == "id-ramflux-relay" and "RAMFLUX_RELAY_VOICE_UDP_PORT" in values:
+            bind, port = values["RAMFLUX_RELAY_VOICE_UDP_PORT"].rsplit(":", 1)
+            item["NetworkSettings"] = {"Ports": {
+                "17449/udp": [{"HostIp": bind, "HostPort": port}],
+            }}
         print(json.dumps([item]))

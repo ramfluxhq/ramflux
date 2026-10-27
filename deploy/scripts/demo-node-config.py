@@ -6,7 +6,8 @@ from pathlib import Path
 import secrets
 import sys
 
-repo, state = map(Path, sys.argv[1:])
+repo, state = map(Path, sys.argv[1:3])
+command = sys.argv[3] if len(sys.argv) > 3 else "up"
 project = os.environ["DEMO_PROJECT"]
 settings = {key: os.environ[key] for key in (
     "DEMO_PROJECT", "DEMO_HOST", "DEMO_NODE_ID", "DEMO_GATEWAY_PORT",
@@ -23,6 +24,22 @@ else:
         sys.exit("refusing to adopt a nonempty, unowned data directory")
     owner = {"settings": settings, "directory": str(state), "token": secrets.token_hex(16)}
     marker.write_text(json.dumps(owner, indent=2) + "\n")
+
+# Maintenance commands must use voice settings already written by up, not a new opt-in.
+voice_port = os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", "")
+if command != "up" and voice_port:
+    runtime = state / "runtime.env"
+    values = dict(line.split("=", 1) for line in runtime.read_text().splitlines()
+                  if "=" in line) if runtime.is_file() else {}
+    expected = {
+        "RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT": f"{settings['DEMO_HOST']}:{voice_port}",
+        "RAMFLUX_RELAY_VOICE_UDP_PORT": f"{settings['DEMO_BIND_ADDR']}:{voice_port}",
+    }
+    if not (state / "compose.voice.yml").is_file() or any(
+        values.get(key) != value for key, value in expected.items()
+    ):
+        sys.exit("voice configuration was not applied by the last up; run up first "
+                 "before status, logs, down or down --purge (or restore the last applied selection)")
 
 services = ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
 label = {"org.ramflux.demo.owner": owner["token"]}
@@ -43,5 +60,5 @@ if not compose.exists():
 # Freeze the opt-in overlay alongside the base without changing legacy ownership settings.
 # Selection remains explicit in the operator env/CLI for every invocation.
 voice = state / "compose.voice.yml"
-if os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT") and not voice.exists():
+if command == "up" and voice_port and not voice.exists():
     voice.write_text((repo / "deploy/docker-compose.voice.yml").read_text())

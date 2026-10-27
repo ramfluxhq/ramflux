@@ -267,6 +267,67 @@ else:
         self.run_script("up")
         self.assertIn("http://demo.example.org:58482", (self.state / "runtime.env").read_text())
 
+    def test_voice_port_refuses_the_mesh_udp_port_before_runtime_access(self):
+        result = self.run_script("up", "--voice-udp-port", "59453", success=False)
+        self.assertIn("conflicts with another demo UDP port", result.stderr)
+        self.assertEqual(self.commands(), [])
+        self.assertFalse(self.state.exists())
+
+    def test_general_port_validation_precedes_voice_comparisons(self):
+        original = self.env_file.read_text()
+        for key in ("DEMO_GATEWAY_PORT", "DEMO_RELAY_PORT", "DEMO_HTTP_PORT",
+                    "DEMO_TURN_PORT", "DEMO_MESH_PORT"):
+            with self.subTest(key=key):
+                self.env_file.write_text(original + f"{key}=not-a-number\n")
+                result = self.run_script("up", "--voice-udp-port", "59449", success=False)
+                self.assertIn("ports must be integers", result.stderr)
+                self.assertNotIn("integer expression", result.stderr)
+                self.assertNotIn("conflicts", result.stderr)
+                self.assertEqual(self.commands(), [])
+        self.assertFalse(self.state.exists())
+
+    def test_new_voice_selection_gives_clear_maintenance_error_before_compose(self):
+        self.run_script("up")
+        marker = (self.state / "owner.json").read_bytes()
+        runtime = (self.state / "runtime.env").read_bytes()
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_DEMO_VOICE_UDP_PORT=59449\n")
+        for command, flags in (("status", ()), ("logs", ()), ("down", ()),
+                               ("down", ("--purge",))):
+            with self.subTest(command=command, flags=flags):
+                self.journal.write_text("")
+                result = self.run_script(command, *flags, success=False)
+                self.assertIn("run up first", result.stderr)
+                self.assertNotIn("public voice host:port is required", result.stderr)
+                self.assertEqual(self.commands(), [])
+                self.assertTrue(self.state.exists())
+                self.assertFalse((self.state / "compose.voice.yml").exists())
+                self.assertEqual((self.state / "owner.json").read_bytes(), marker)
+                self.assertEqual((self.state / "runtime.env").read_bytes(), runtime)
+        self.env_file.write_text(self.env_file.read_text().replace(
+            "RAMFLUX_DEMO_VOICE_UDP_PORT=59449\n", ""))
+        self.run_script("logs")
+        self.run_script("down", "--purge")
+        self.assertFalse(self.state.exists())
+
+    def test_applied_voice_selection_allows_maintenance_and_refuses_unapplied_changes(self):
+        voice = ("--voice-udp-port", "59449")
+        self.run_script("up", *voice)
+        marker = (self.state / "owner.json").read_bytes()
+        self.journal.write_text("")
+        result = self.run_script("logs", "--voice-udp-port", "59459", success=False)
+        self.assertIn("run up first", result.stderr)
+        self.assertEqual(self.commands(), [])
+        result = self.run_script("status", *voice)
+        self.assertIn("voice UDP mapping: demo.example.org:59449", result.stdout)
+        self.run_script("logs", *voice)
+        self.run_script("down", *voice)
+        self.assertEqual((self.state / "owner.json").read_bytes(), marker)
+        for args in self.compose_commands():
+            self.assertIn(str(self.state / "compose.voice.yml"), args)
+        self.run_script("down", "--purge", *voice)
+        self.assertFalse(self.state.exists())
+
 
 class PodmanComposeDemoNodeTests(DemoNodeTests):
     PROVIDER = "podman"

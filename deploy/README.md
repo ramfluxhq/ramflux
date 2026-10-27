@@ -72,7 +72,7 @@ sh deploy/scripts/demo-node.sh down /path/to/demo.env --purge
 
 Set `RAMFLUX_DEMO_VOICE_UDP_PORT=59449` in the operator env file, or append
 `--voice-udp-port 59449` to a command; the flag overrides the env value. The port
-must be 1024..65535 and distinct from the gateway, relay-client and TURN UDP ports.
+must be 1024..65535 and distinct from the gateway, relay-client, TURN and loopback mesh UDP ports.
 With this option unset, the existing base Compose invocation is unchanged.
 
 The wrapper freezes `deploy/docker-compose.voice.yml` as `compose.voice.yml` in
@@ -86,8 +86,11 @@ Allow the chosen UDP port through the host/LAN firewall separately.
 Voice is an optional overlay outside the frozen base identity settings: enabling,
 changing or removing it with `up` preserves this project's existing data and keys.
 Use the same selection for every invocation (prefer the operator env file).
-Repeat `up` after changing it, before `status`; clearing it and repeating `up`
-removes the voice mapping. A frozen overlay file left behind is ignored when unset.
+Repeat `up` after changing it, before any other local command; clearing it and
+repeating `up` removes the voice mapping. If the selected voice endpoint/port was
+not applied by the last `up`, `status`, `logs`, `down` and `down --purge` stop
+before Compose with a clear "run up first" message. Restore the last applied
+selection to use those commands without applying the change. A frozen overlay file left behind is ignored when unset.
 Local `status` checks the actual gateway/relay voice env and published UDP mapping
 alongside service health. This checks configuration, not end-to-end audio delivery;
 `status --remote` retains its existing discovery/QUIC checks and does not probe voice.

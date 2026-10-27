@@ -42,17 +42,6 @@ DEMO_BIND_ADDR=${DEMO_BIND_ADDR:-0.0.0.0}
 DEMO_VERSION=${DEMO_VERSION:-$DEMO_PROJECT}
 DEMO_HEALTH_TIMEOUT_SECONDS=${DEMO_HEALTH_TIMEOUT_SECONDS:-180}
 DEMO_HEALTH_POLL_SECONDS=${DEMO_HEALTH_POLL_SECONDS:-2}
-RAMFLUX_DEMO_VOICE_UDP_PORT=${voice_cli:-${RAMFLUX_DEMO_VOICE_UDP_PORT:-}}
-if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
-  case "$RAMFLUX_DEMO_VOICE_UDP_PORT" in
-    0*|*[!0-9]*) fail 'voice UDP port must be an integer between 1024 and 65535' ;;
-  esac
-  [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -ge 1024 ] && [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -le 65535 ] || fail 'voice UDP port must be between 1024 and 65535'
-  for udp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_TURN_PORT"; do
-    [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -ne "$udp_port" ] || fail 'voice UDP port conflicts with another demo UDP port'
-  done
-fi
-export RAMFLUX_DEMO_VOICE_UDP_PORT
 for seconds in "$DEMO_HEALTH_TIMEOUT_SECONDS" "$DEMO_HEALTH_POLL_SECONDS"; do
   case "$seconds" in ''|0*|*[!0-9]*) fail 'health timeout and poll interval must be positive integers' ;; esac
   [ "$seconds" -ge 1 ] && [ "$seconds" -le 3600 ] || fail 'health timeout and poll interval must be 1..3600 seconds'
@@ -69,6 +58,17 @@ for port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_HTTP_PORT" "$DEMO_TUR
   case "$port" in ''|*[!0-9]*) fail 'ports must be integers' ;; esac
   [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || fail 'ports must be between 1024 and 65535'
 done
+RAMFLUX_DEMO_VOICE_UDP_PORT=${voice_cli:-${RAMFLUX_DEMO_VOICE_UDP_PORT:-}}
+if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
+  case "$RAMFLUX_DEMO_VOICE_UDP_PORT" in
+    0*|*[!0-9]*) fail 'voice UDP port must be an integer between 1024 and 65535' ;;
+  esac
+  [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -ge 1024 ] && [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -le 65535 ] || fail 'voice UDP port must be between 1024 and 65535'
+  for udp_port in "$DEMO_GATEWAY_PORT" "$DEMO_RELAY_PORT" "$DEMO_TURN_PORT" "$DEMO_MESH_PORT"; do
+    [ "$RAMFLUX_DEMO_VOICE_UDP_PORT" -ne "$udp_port" ] || fail 'voice UDP port conflicts with another demo UDP port'
+  done
+fi
+export RAMFLUX_DEMO_VOICE_UDP_PORT
 case "$DEMO_DATA_DIR" in /*) ;; *) fail 'DEMO_DATA_DIR must be absolute' ;; esac
 case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
 [ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
@@ -88,10 +88,10 @@ mkdir "$state.lock" 2>/dev/null || fail 'demo operation already running (check a
 trap 'rmdir "$state.lock"' EXIT
 trap 'exit 1' HUP INT TERM
 if [ "$command" = up ]; then
-  python3 "$script_dir/demo-node-config.py" "$repo" "$state"
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" "$command"
 else
   [ -f "$state/owner.json" ] || fail 'data directory is not owned by this demo tooling'
-  python3 "$script_dir/demo-node-config.py" "$repo" "$state"
+  python3 "$script_dir/demo-node-config.py" "$repo" "$state" "$command"
 fi
 owner=$(cat "$state/owner.token")
 # Even a matching project name is insufficient: every existing resource must carry our owner token.
