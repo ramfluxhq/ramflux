@@ -10,6 +10,37 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+/// Retains this process's account writer ownership until the guard is dropped.
+///
+/// Used by quiesced restore and generation cleanup before opening or replacing
+/// account database files. Ownership is process-local and never serialized.
+#[must_use]
+pub struct AccountWriterLease {
+    _owner: Arc<AccountWriter>,
+}
+
+impl crate::AccountIndex {
+    /// Acquires local writer ownership for a live account or a prepared restore.
+    ///
+    /// Creates the account directory if needed. Same-process writer connections
+    /// share ownership; another process is refused without waiting.
+    /// # Errors
+    /// Returns `AccountWriterBusy`, filesystem errors or an invalid account ID.
+    pub fn acquire_account_writer(
+        &self,
+        account: &str,
+    ) -> Result<AccountWriterLease, StorageError> {
+        let id = Path::new(account);
+        if id.components().count() != 1
+            || id.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        std::fs::create_dir_all(self.root().join("accounts").join(account))?;
+        Ok(AccountWriterLease { _owner: AccountWriter::acquire(self.root(), account)? })
+    }
+}
+
 pub(crate) struct AccountWriter {
     // The kernel releases the lease only when the last descriptor closes or the
     // process exits. Never unlink this inode or use file age to break ownership.

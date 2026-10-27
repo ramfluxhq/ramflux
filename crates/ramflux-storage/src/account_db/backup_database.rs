@@ -20,7 +20,8 @@ pub struct BackupDatabase {
     pub(crate) db: rusqlite::Connection,
 }
 impl BackupDatabase {
-    /// Opens a private snapshot; never use this worker handle as the live account writer.
+    /// Opens a private snapshot or a quiesced generation under an account writer lease.
+    /// Never use this worker handle as an active live account writer.
     /// # Errors
     /// Returns authentication, schema or I/O errors.
     pub fn open(path: &Path, key: &AccountDbKey) -> Result<Self, StorageError> {

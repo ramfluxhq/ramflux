@@ -91,6 +91,7 @@ impl BackupJobs {
         mut metadata: format::Metadata,
     ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
         let id = metadata.identity.account_id().to_owned();
+        let _writer = self.index.acquire_account_writer(&id)?;
         let lease =
             self.generations.try_acquire(&id)?.ok_or_else(|| refused("install_in_progress"))?;
         let incoming = staging.directory().join("account.db");

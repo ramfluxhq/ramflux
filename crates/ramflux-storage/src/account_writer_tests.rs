@@ -58,6 +58,36 @@ fn account_writer_process_fixture() -> TestResult {
     };
     let root = Path::new(&root);
     let mode = std::env::var("RAMFLUX_WRITER_LOCK_TEST_MODE")?;
+    if mode == "metadata-busy" {
+        let index = AccountIndex::open(root)?;
+        let before = index.account("acct")?;
+        assert!(matches!(
+            index.create_account("acct", "replacement"),
+            Err(StorageError::AccountWriterBusy(_))
+        ));
+        let wrapped = crate::WrappedAccountDbKey {
+            key_wrapping_provider: "test".into(),
+            key_wrapping_ref: "test:acct".into(),
+            nonce: [1; 12],
+            wrapped_key: vec![2; 48],
+        };
+        let install = crate::BackupIndexInstall {
+            account_id: "acct",
+            principal_commitment: &before.principal_commitment,
+            db_relative_path: "accounts/acct/generation_new/account.db",
+            object_relative_path: "accounts/acct/generation_new",
+            manifest_json: b"test manifest",
+            wrapped_key: &wrapped,
+        };
+        assert!(matches!(
+            index.install_backup_generation(&install),
+            Err(StorageError::AccountWriterBusy(_))
+        ));
+        let after = index.account("acct")?;
+        assert_eq!(after.principal_commitment, before.principal_commitment);
+        assert_eq!(after.db_relative_path, before.db_relative_path);
+        return Ok(());
+    }
     let result = open(root);
     if mode == "busy" {
         assert!(
@@ -84,6 +114,15 @@ fn account_writer_two_process_exclusion_and_lost_holder_recovery() -> TestResult
     let lock_path = root.join("accounts/acct/.writer.lock");
     assert_eq!(std::fs::metadata(&lock_path)?.len(), 0);
     completed(&root, "busy")?;
+    completed(&root, "metadata-busy")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        assert_eq!(std::fs::metadata(&lock_path)?.permissions().mode() & 0o777, 0o600);
+        let alias = root.join("index-alias");
+        symlink(&root, &alias)?;
+        completed(&alias, "busy")?;
+    }
     // Same-owner SQLite connections remain supported and share the process lease.
     let second = open(&root)?;
     drop(writer);
@@ -92,6 +131,12 @@ fn account_writer_two_process_exclusion_and_lost_holder_recovery() -> TestResult
     drop(worker_clone);
     // Query-only readers do not retain the writer lease.
     completed(&root, "open")?;
+    let index = AccountIndex::open(&root)?;
+    let restore_lease = index.acquire_account_writer("acct")?;
+    completed(&root, "busy")?;
+    drop(restore_lease);
+    completed(&root, "open")?;
+    drop(index);
     drop(reader);
 
     let mut holder = child(&root, "hold")?;
