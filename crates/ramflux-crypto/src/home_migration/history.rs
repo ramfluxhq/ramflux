@@ -28,8 +28,13 @@ pub struct HomeTrust<'a> {
 pub struct VerifiedHome {
     evidence: RecordEvidence,
     hash: String,
+    ancestry: BTreeMap<u64, String>,
 }
 impl VerifiedHome {
+    #[must_use]
+    pub fn extends(&self, epoch: u64, hash: &str) -> bool {
+        self.ancestry.get(&epoch).is_some_and(|known| known == hash)
+    }
     #[must_use]
     pub fn evidence(&self) -> &RecordEvidence {
         &self.evidence
@@ -130,6 +135,10 @@ pub fn verify_home_chain(
         return Err(reject("migration chain budget exceeded"));
     }
     let mut hash = trust.home_hash.map(str::to_owned);
+    let mut ancestry = BTreeMap::new();
+    if let Some(hash) = trust.home_hash {
+        ancestry.insert(trust.home_epoch, hash.to_owned());
+    }
     let mut epoch = trust.home_epoch;
     let mut node_id = trust.node_id.to_owned();
     let mut node_key = trust.node_key.to_owned();
@@ -202,13 +211,14 @@ pub fn verify_home_chain(
                 committed_at = c.committed_at;
             }
         }
+        ancestry.insert(e.record.epoch(), next_hash.clone());
         hash = Some(next_hash);
     }
     let hash = hash.ok_or_else(|| reject("migration genesis missing"))?;
     if record_hash(&result.home.record)? != hash {
         return Err(reject("migration result head mismatch"));
     }
-    Ok(VerifiedHome { evidence: result.home.clone(), hash })
+    Ok(VerifiedHome { evidence: result.home.clone(), hash, ancestry })
 }
 /// Binding from B's durable sealed operation, never from unverified request metadata.
 pub struct SealedBinding<'a> {
@@ -246,7 +256,7 @@ pub fn activation_allowed(
         return Err(reject("migration activation sealed binding mismatch"));
     }
     if let Some((epoch, hash)) = sealed.home_floor
-        && (epoch > home.epoch() || (epoch == home.epoch() && hash != home.hash()))
+        && !home.extends(epoch, hash)
     {
         return Err(reject("migration activation stale or forked"));
     }
