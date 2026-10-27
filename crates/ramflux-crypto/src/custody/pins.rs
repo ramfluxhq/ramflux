@@ -67,6 +67,7 @@ impl AuthorityPins {
         let range = decode_epoch(body.device_set_epoch)?.0;
         let certificate = object_hash(&body.master_certificate)?;
         let hash = object_hash(record.envelope())?;
+        let devices = indexed_devices(record)?;
         if let Some(pin) = self.accounts.get_mut(&body.account_anchor) {
             if pin.principal_id != body.principal_id || pin.principal_kind != body.principal_kind {
                 return Err(reject("custody immutable identity changed"));
@@ -97,16 +98,7 @@ impl AuthorityPins {
             pin.epoch = body.device_set_epoch;
             pin.hash = hash;
             pin.revoked_ids.extend(record.revoked_ids().iter().cloned());
-            for device in &body.devices {
-                pin.devices.insert(
-                    device.device_id.clone(),
-                    (
-                        device.device_epoch,
-                        device.signing_key_commitment.clone(),
-                        device.agreement_key_commitment.clone(),
-                    ),
-                );
-            }
+            pin.devices.extend(devices);
         } else {
             self.accounts.insert(
                 body.account_anchor.clone(),
@@ -118,20 +110,7 @@ impl AuthorityPins {
                     epoch: body.device_set_epoch,
                     hash,
                     revoked_ids: record.revoked_ids().clone(),
-                    devices: body
-                        .devices
-                        .iter()
-                        .map(|d| {
-                            (
-                                d.device_id.clone(),
-                                (
-                                    d.device_epoch,
-                                    d.signing_key_commitment.clone(),
-                                    d.agreement_key_commitment.clone(),
-                                ),
-                            )
-                        })
-                        .collect(),
+                    devices,
                 },
             );
         }
@@ -141,19 +120,26 @@ impl AuthorityPins {
 
 fn validate_transition(pin: &AccountPin, record: &VerifiedRecord) -> Result<(), CryptoError> {
     let body = &record.envelope().body;
-    if body.devices.len() > ramflux_protocol::custody::MAX_ENROLLMENT_ROSTER
-        && body.devices.iter().any(|device| {
-            device.status == ramflux_protocol::DeviceSetStatus::Active
-                && !pin.devices.contains_key(&device.device_id)
-        })
-    {
-        return Err(reject("custody enrollment reserve exhausted; prioritize revocation"));
+    if body.devices.len() > ramflux_protocol::custody::MAX_ENROLLMENT_ROSTER {
+        for device in body
+            .devices
+            .iter()
+            .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
+        {
+            let reference =
+                crate::RootQualifiedDeviceRef::from_custody_record(record, &device.device_id)?;
+            if !pin.devices.contains_key(reference.storage_key()) {
+                return Err(reject("custody enrollment reserve exhausted; prioritize revocation"));
+            }
+        }
     }
     if !pin.revoked_ids.is_subset(record.revoked_ids()) {
         return Err(reject("custody revocation rollback"));
     }
     for device in &body.devices {
-        if let Some((epoch, signing, agreement)) = pin.devices.get(&device.device_id)
+        let reference =
+            crate::RootQualifiedDeviceRef::from_custody_record(record, &device.device_id)?;
+        if let Some((epoch, signing, agreement)) = pin.devices.get(reference.storage_key())
             && (device.device_epoch < *epoch
                 || (device.device_epoch == *epoch
                     && (device.signing_key_commitment != *signing
@@ -162,10 +148,39 @@ fn validate_transition(pin: &AccountPin, record: &VerifiedRecord) -> Result<(), 
             return Err(reject("custody branch epoch or key rollback"));
         }
     }
-    for id in pin.devices.keys() {
-        if !body.devices.iter().any(|d| &d.device_id == id) && !record.revoked_ids().contains(id) {
+    for key in pin.devices.keys() {
+        let Some((root, device_id)) = ramflux_protocol::parse_qualified_device_id(key)? else {
+            return Err(reject("custody pin device reference is not root qualified"));
+        };
+        if root != body.account_anchor
+            || (!body.devices.iter().any(|device| device.device_id == device_id)
+                && !record.revoked_ids().iter().any(|revoked| revoked == &device_id))
+        {
             return Err(reject("custody roster entry disappeared without revocation"));
         }
     }
     Ok(())
+}
+
+fn indexed_devices(
+    record: &VerifiedRecord,
+) -> Result<BTreeMap<String, (u64, String, String)>, CryptoError> {
+    record
+        .envelope()
+        .body
+        .devices
+        .iter()
+        .map(|device| {
+            let reference =
+                crate::RootQualifiedDeviceRef::from_custody_record(record, &device.device_id)?;
+            Ok((
+                reference.storage_key().to_owned(),
+                (
+                    device.device_epoch,
+                    device.signing_key_commitment.clone(),
+                    device.agreement_key_commitment.clone(),
+                ),
+            ))
+        })
+        .collect()
 }

@@ -79,6 +79,14 @@ impl RootQualifiedDeviceRef {
         }
         Self::authenticated(body.account_anchor.clone(), device)
     }
+    /// Name a device in the account scope authenticated by a verified custody record.
+    /// This is used for retained revocation indexes where the device may no longer be rostered.
+    pub(crate) fn from_verified_custody_account(
+        record: &crate::custody::VerifiedRecord,
+        device: &str,
+    ) -> Result<Self, CryptoError> {
+        Self::authenticated(record.envelope().body.account_anchor.clone(), device)
+    }
     fn authenticated(root: String, device: &str) -> Result<Self, CryptoError> {
         ramflux_protocol::validate_device_name(device)?;
         let storage_key = ramflux_protocol::qualified_device_id(&root, device)?;

@@ -162,7 +162,35 @@ pub fn verify_record(
         }
         human.authorize(&master.primary_device_ref, "register", now)?;
     }
+    let verified_account = VerifiedRecord {
+        envelope: envelope.clone(),
+        revoked: BTreeSet::new(),
+        encoded_bytes,
+        compacted_bytes: 0,
+        human_custodian: None,
+    };
+    let (revoked, compacted_bytes) =
+        verified_revocations(&verified_account, future, compacted_ids)?;
+    Ok(VerifiedRecord {
+        envelope: envelope.clone(),
+        revoked,
+        encoded_bytes,
+        compacted_bytes,
+        human_custodian: (master.custody_kind == CustodyKind::ExternalHuman)
+            .then(|| human_custodian.cloned().map(Box::new))
+            .flatten(),
+    })
+}
+
+fn verified_revocations(
+    record: &VerifiedRecord,
+    future: u64,
+    compacted_ids: Option<&[String]>,
+) -> Result<(BTreeSet<String>, usize), CryptoError> {
+    let body = &record.envelope().body;
+    let master = &body.master_certificate.body;
     let mut revoked = BTreeSet::new();
+    let mut revoked_references = BTreeSet::new();
     let mut compacted_bytes = 0;
     if let Some(checkpoint) = &body.revoked_device_checkpoint {
         let c = &checkpoint.body;
@@ -208,24 +236,26 @@ pub fn verify_record(
         {
             return Err(reject("revocation membership count, hash or byte budget mismatch"));
         }
-        revoked.extend(ids.iter().cloned());
+        for id in ids {
+            let reference =
+                crate::RootQualifiedDeviceRef::from_verified_custody_account(record, id)?;
+            revoked.insert(reference.device_id().to_owned());
+            revoked_references.insert(reference);
+        }
     } else if compacted_ids.is_some_and(|ids| !ids.is_empty()) {
         return Err(reject("revocation evidence has no signed checkpoint"));
     }
     for device in &body.devices {
+        let reference = crate::RootQualifiedDeviceRef::from_verified_custody_account(
+            record,
+            &device.device_id,
+        )?;
         if device.status == DeviceSetStatus::Revoked {
-            revoked.insert(device.device_id.clone());
-        } else if revoked.contains(&device.device_id) {
+            revoked.insert(reference.device_id().to_owned());
+            revoked_references.insert(reference);
+        } else if revoked_references.contains(&reference) {
             return Err(reject("compacted device cannot reactivate"));
         }
     }
-    Ok(VerifiedRecord {
-        envelope: envelope.clone(),
-        revoked,
-        encoded_bytes,
-        compacted_bytes,
-        human_custodian: (master.custody_kind == CustodyKind::ExternalHuman)
-            .then(|| human_custodian.cloned().map(Box::new))
-            .flatten(),
-    })
+    Ok((revoked, compacted_bytes))
 }
