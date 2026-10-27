@@ -163,7 +163,11 @@ else:
 
     def managed_state(self):
         names = ("compose.yml", "compose.voice.yml", "compose.admin.yml", "runtime.env",
-                 "owner.json", "demo-override.json", "deploy-tree.version")
+                 "owner.json", "owner.token", "demo-override.json", "deploy-tree.version",
+                 "identity.env", ".env")
+        names += tuple(f"config/{service}.toml" for service in (
+            "gateway", "router", "notify", "federation", "relay", "signaling", "retention"
+        ))
         return {name: (self.state / name).read_bytes() if (self.state / name).exists() else None
                 for name in names}
 
@@ -266,13 +270,40 @@ else:
         self.assertEqual(owner["snapshot_history"], [owner["current_snapshot"]])
         snapshot = self.current_snapshot()
         manifest = json.loads((snapshot / "manifest.json").read_text())
-        self.assertEqual(set(manifest["files"]), {
+        self.assertTrue({
             "compose.yml", "runtime.env", "owner.json", "demo-override.json",
-            "deploy-tree.version",
-        })
+            "deploy-tree.version", "identity.env", "owner.token", ".env",
+            *(f"config/{service}.toml" for service in (
+                "gateway", "router", "notify", "federation", "relay", "signaling", "retention"
+            )),
+        }.issubset(manifest["files"]))
         for name in manifest["files"]:
             self.assertEqual((snapshot / name).read_bytes(), (self.state / name).read_bytes())
             self.assertEqual((snapshot / name).stat().st_mode & 0o222, 0)
+
+    def test_rollback_restores_configs_and_target_overlay_selection(self):
+        self.run_script("up")
+        original_snapshot = self.current_snapshot()
+        original_snapshot.chmod(0o700)
+        snapshot_config = original_snapshot / "config/gateway.toml"
+        snapshot_config.chmod(0o600)
+        expected_config = snapshot_config.read_bytes() + b"# version-one-template\n"
+        snapshot_config.write_bytes(expected_config)
+        snapshot_config.chmod(0o400)
+        original_snapshot.chmod(0o500)
+        (self.state / "config/gateway.toml").write_bytes(expected_config)
+
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.run_script("upgrade")
+        self.assertNotEqual((self.state / "config/gateway.toml").read_bytes(), expected_config)
+        self.run_script("up", "--voice-udp-port", "59449")
+        self.assertTrue((self.state / "compose.voice.yml").is_file())
+
+        self.run_script("rollback")
+        self.assertEqual((self.state / "config/gateway.toml").read_bytes(), expected_config)
+        self.assertFalse((self.state / "compose.voice.yml").exists())
+        self.assertNotIn(str(self.state / "compose.voice.yml"), self.compose_commands()[-1])
 
     def test_rollback_restores_pre_split_snapshot_bytes_and_public_probe(self):
         self.run_script("up")
@@ -372,6 +403,55 @@ else:
         self.assertIn("recovered demo version demo-test", recovered.stdout)
         self.assertFalse((self.state / "transaction.pending").exists())
         self.assertEqual(self.managed_state(), initial)
+
+    def test_missing_snapshot_recovery_refuses_manual_path_without_locking_commands(self):
+        self.run_script("up")
+        previous_snapshot = self.current_snapshot()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        old_image = "ghcr.io/ramfluxhq/ramflux-gateway:demo-test"
+        self.control.write_text(json.dumps({
+            "fail_up_versions": ["demo-v2"], "missing_images": [old_image],
+        }))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn("automatic demo recovery failed", failed.stderr)
+        self.assertTrue((self.state / "transaction.pending").is_file())
+        self.assertFalse(Path(str(self.state) + ".lock").exists())
+
+        (previous_snapshot / "manifest.json").unlink()
+        refused = self.run_script("recover", success=False)
+        self.assertIn("manual recovery required: restore the complete demo data directory", refused.stderr)
+        self.assertTrue((self.state / "transaction.pending").is_file())
+        self.assertFalse(Path(str(self.state) + ".lock").exists())
+        refused_down = self.run_script("down", success=False)
+        self.assertIn("run demo-node.sh recover", refused_down.stderr)
+        self.assertFalse(Path(str(self.state) + ".lock").exists())
+
+    def test_recover_restores_config_after_interrupted_rewrite(self):
+        self.run_script("up")
+        config = self.state / "config/gateway.toml"
+        expected = config.read_bytes()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        helper_environment = dict(self.environment, DEMO_PROJECT="demo-test",
+                                  DEMO_HOST="demo.example.org", DEMO_NODE_ID="demo.invalid",
+                                  DEMO_GATEWAY_PORT="59443", DEMO_RELAY_PORT="59447",
+                                  DEMO_HTTP_PORT="59482", DEMO_TURN_PORT="59478",
+                                  DEMO_MESH_PORT="59453", DEMO_BIND_ADDR="0.0.0.0",
+                                  DEMO_VERSION="demo-v2")
+        helper = SCRIPT.parent / "demo-node-config.py"
+        prepared = subprocess.run([
+            sys.executable, str(helper), str(SCRIPT.parents[2]), str(self.state),
+            "prepare", "upgrade",
+        ], env=helper_environment, text=True, capture_output=True, check=False)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        self.assertTrue((self.state / "transaction.pending").is_file())
+
+        config.write_bytes(b"node_id = \"")
+        recovered = self.run_script("recover")
+        self.assertIn("recovered demo version demo-test", recovered.stdout)
+        self.assertEqual(config.read_bytes(), expected)
+        self.assertFalse((self.state / "transaction.pending").exists())
 
     def test_prebuilt_upgrade_requires_all_seven_versioned_images(self):
         self.run_script("up")

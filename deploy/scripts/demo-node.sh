@@ -105,14 +105,16 @@ cleanup() {
   trap - EXIT
   set +e
   if [ "$result" -ne 0 ] && [ -f "$state/transaction.pending" ]; then
-    restored_version=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover 2>&1)
+    recovery_error=$(mktemp "${TMPDIR:-/tmp}/ramflux-demo-recovery.XXXXXX")
+    restored_version=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover 2>"$recovery_error")
     recovery_result=$?
     if [ "$recovery_result" -eq 0 ]; then
       DEMO_VERSION=$restored_version
       export DEMO_VERSION
       if [ "$runtime_mutation_started" -eq 1 ]; then
         owner=$(cat "$state/owner.token")
-        check_prebuilt_images && compose_up no-build && wait_for_services && verify_public_endpoints
+        load_applied_overlays
+        (check_prebuilt_images && compose_up no-build && wait_for_services && verify_public_endpoints)
         recovery_result=$?
       fi
       if [ "$recovery_result" -eq 0 ]; then
@@ -121,16 +123,18 @@ cleanup() {
       fi
     fi
     if [ "$recovery_result" -ne 0 ]; then
-      if [ "$command" = up ]; then
-        python3 "$script_dir/demo-node-config.py" "$repo" "$state" abort-initial
+      recovery_detail=$(cat "$recovery_error")
+      if [ "$command" = up ] \
+          && python3 "$script_dir/demo-node-config.py" "$repo" "$state" abort-initial >/dev/null 2>&1; then
         printf 'initial demo up failed before a snapshot was committed; owned state retained for retry\n' >&2
       else
-        printf 'automatic demo recovery failed; transaction marker retained: %s\n' "$restored_version" >&2
+        printf 'automatic demo recovery failed; transaction marker retained: %s\n' "$recovery_detail" >&2
       fi
     fi
+    rm -f -- "$recovery_error"
   fi
   [ -f "$state/transaction.pending" ] || rm -f -- "$state/owner.json.pending"
-  rmdir "$state.lock"
+  rmdir "$state.lock" || printf 'warning: could not release demo operation lock %s.lock\n' "$state" >&2
   exit "$result"
 }
 trap cleanup EXIT
@@ -200,7 +204,8 @@ check_prebuilt_images() {
   done
   if [ -n "$missing" ]; then
     printf 'missing prebuilt demo images:\n%s\n' "$missing" >&2
-    fail 'load every listed image into the selected container engine before retrying'
+    printf 'load every listed image into the selected container engine before retrying\n' >&2
+    return 1
   fi
 }
 check_resources() {
@@ -350,6 +355,14 @@ verify_public_endpoints() {
   . "$state/identity.env"
   "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
 }
+load_applied_overlays() {
+  RAMFLUX_DEMO_VOICE_UDP_PORT=$(sed -n 's/^RAMFLUX_RELAY_VOICE_UDP_PORT=.*://p' "$state/runtime.env" | tail -n 1)
+  DEMO_ADMIN_LOOPBACK_PORT=$(sed -n 's/^RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
+  export RAMFLUX_DEMO_VOICE_UDP_PORT DEMO_ADMIN_LOOPBACK_PORT
+}
+if [ "$command" = rollback ] || [ "$command" = recover ]; then
+  load_applied_overlays
+fi
 check_resources
 case "$command" in
   up|upgrade|rollback|recover)
@@ -359,12 +372,7 @@ case "$command" in
       RAMFLUX_DEPLOY_DIR="$state" RAMFLUX_NODE_ID="$DEMO_NODE_ID" sh "$script_dir/issue-certs.sh"
       RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/provision-node.sh"
     # Service identities and certificate SPIFFE identities must use the same node id.
-      python3 - "$state" "$DEMO_NODE_ID" <<'PY'
-from pathlib import Path
-import sys
-for config in Path(sys.argv[1], "config").glob("*.toml"):
-    config.write_text(config.read_text().replace('node_id = "localhost"', f'node_id = "{sys.argv[2]}"'))
-PY
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" set-node-id "$DEMO_NODE_ID"
       "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
     # The signing seed has its own mount, shared only by federation and retention.
       legacy_seed="$state/certs/federation/node-signing.key"
@@ -386,8 +394,9 @@ PY
       chmod 644 "$state"/config/*.toml "$state"/secrets/gateway-v3/*.json "$state"/secrets/federation/*.json
     # Preserve daemon/helper inputs and supply the separate Compose interpolation names.
     # The keyring is read-only trust material; the relay owns its durable cache in relay-redb.
-      cat "$state/identity.env" > "$state/runtime.env"
-      cat >> "$state/runtime.env" <<ENV
+      runtime_pending="$state/.runtime.env.pending.$$"
+      cat "$state/identity.env" > "$runtime_pending"
+      cat >> "$runtime_pending" <<ENV
 RAMFLUX_NOTIFY_ROUTE_KEY_FILE=/etc/ramflux/mesh/route.key
 RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE=/etc/ramflux/node-identity/node-signing.key
 RAMFLUX_SECRET_GID=$(id -g)
@@ -428,7 +437,7 @@ RAMFLUX_CLIENT_PREKEY_HTTP_URL=$origin
 RAMFLUX_CLIENT_SIGNALING_TURN_ADDR=$DEMO_HOST:$DEMO_TURN_PORT
 ENV
       if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
-        cat >> "$state/runtime.env" <<ENV
+        cat >> "$runtime_pending" <<ENV
 RAMFLUX_RELAY_VOICE_UDP_ADDR=0.0.0.0:17449
 RAMFLUX_RELAY_VOICE_CONTROL_ADDR=0.0.0.0:17450
 RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT=$DEMO_HOST:$RAMFLUX_DEMO_VOICE_UDP_PORT
@@ -436,6 +445,23 @@ RAMFLUX_RELAY_VOICE_UDP_PORT=$DEMO_BIND_ADDR:$RAMFLUX_DEMO_VOICE_UDP_PORT
 RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450
 ENV
       fi
+      python3 - "$runtime_pending" "$state/runtime.env" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+temporary = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+with temporary.open("rb") as source:
+    os.fsync(source.fileno())
+temporary.chmod(0o600)
+os.replace(temporary, destination)
+directory = os.open(destination.parent, os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
       python3 "$script_dir/compose-env.py" "$state/runtime.env"
     fi
     if [ "$command" = rollback ] || [ "$command" = recover ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then

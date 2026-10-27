@@ -343,11 +343,18 @@ The command builds all seven images, or with `DEMO_PREBUILT_IMAGES=1` first veri
 that all seven versioned images are loaded and uses `--no-build`. The first successful
 `up` starts the version history. Every successful `up` or `upgrade` creates a private,
 read-only snapshot under `version-snapshots/` containing `owner.json`, `runtime.env`,
-`demo-override.json`, the deploy-tree digest and the exact frozen base, voice and admin
-Compose files selected for that version. It retains the node identity, CA, seeds,
-volumes, ports and all other ownership settings, and prints the canonical rollback
-command. A plain `up` still refuses a version change. An upgrade also refuses a missing
-or newly selected voice/admin overlay, reporting only the relevant configuration key.
+`demo-override.json`, the deploy-tree digest, the exact frozen base/voice/admin Compose
+files, and every managed input the operation can rewrite: `config/`, `certs/`,
+`secrets/`, `.env`, `identity.env`, and `owner.token`. These snapshots therefore contain
+private keys, signing seeds, and admin tokens. The state and snapshot directories remain
+mode 0700 and snapshot files mode 0400; back up and grant access to the whole tree as
+secret material. Publication fsyncs every file and containing directory before the
+transaction marker can refer to it. The tool retains the current snapshot plus its
+three predecessors and removes older snapshots and abandoned partial captures. It
+retains the node identity, CA, seeds, volumes, ports and all other ownership settings,
+and prints the canonical rollback command. A plain `up` still refuses a version change.
+An upgrade also refuses a missing or newly selected voice/admin overlay, reporting only
+the relevant configuration key.
 
 Run the printed `demo-node.sh rollback ENV_FILE` command while retaining the current
 env file. Rollback selects the preceding immutable snapshot, restores every managed
@@ -362,7 +369,17 @@ until the upgrade has been accepted. Public discovery/prekeys remain on
 `DEMO_HTTP_PORT` (default 59482); neither admin 18084 nor an unintended default host
 18082 is published.
 
-Before changing any frozen file, an upgrade writes `transaction.pending`. If image
+If the target snapshot used a different voice or private-admin overlay selection,
+first update the operator env to that target selection: set or unset
+`RAMFLUX_DEMO_VOICE_UDP_PORT` and `DEMO_ADMIN_LOOPBACK_PORT` exactly as they were for
+the target version, then run `rollback`. Rollback validates that explicit selection
+against the target snapshot before writing anything and derives its Compose files from
+the restored snapshot. If rollback itself fails, automatic recovery derives the source
+selection from the restored last-good runtime state.
+
+For a state without snapshot metadata, `up` or `upgrade` first captures and fsyncs the
+complete current state and only then publishes `transaction.pending`. For an already
+adopted state, the last-good snapshot already exists before the marker is written. If image
 recreation, container health, or the public probes fail, the wrapper restores the last
 good snapshot, recreates it with `--no-build`, verifies its public endpoints, and leaves
 the version history unchanged. A failed automatic restore retains the marker and emits
@@ -375,9 +392,14 @@ deploy/scripts/demo-node.sh recover /absolute/path/to/demo.env
 
 Recovery again restores the marker's last-good snapshot, uses `--no-build`, verifies
 the public endpoints, and removes the marker only after success. Never delete the
-marker or edit a snapshot to force progress. A failed initial `up` has no prior snapshot;
-inspect and preserve its private state before deciding whether to remove and recreate
-that new, not-yet-owned data directory.
+marker or edit a snapshot to force progress. If the named snapshot is missing or
+partial, recovery refuses with the manual path: restore the complete demo data
+directory from the operator backup, verify `owner.json`, and only then remove
+`transaction.pending`. The adjacent `.lock` is always released on ordinary failures.
+After SIGKILL, first verify that no demo operation remains and remove only that stale
+adjacent lock. A failed initial `up` has no prior snapshot; a kill before `owner.json`
+exists can leave a nonempty unowned directory. Inspect and preserve its private state
+before deciding whether to wipe that brand-new directory and run `up` again.
 
 For temporary administration, set `DEMO_ADMIN_LOOPBACK_PORT=59487` in the operator
 env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
@@ -386,7 +408,17 @@ to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. See
 [listener configuration, bounds and SSH commands](../docs/federation_http.md).
 
-For upgrades from tooling older than this explicit version workflow, first save the
-private state's frozen definitions and `owner.json`, and retain the original checkout
-and images. Never remove identity or volumes. The script validates the public
-connection limit before state or engine changes.
+For upgrades from tooling older than this snapshot workflow, first save the complete
+private state and retain the original checkout and images. Never remove identity or
+volumes. The first new-tooling `up` or `upgrade` takes the old state as its first durable
+snapshot before publishing a transaction marker.
+
+For the sd001 deployment specifically, retain the existing manual-backup directory
+`B`, stage this deploy tree, and run `demo-node.sh up ENV_FILE` with the existing env
+unchanged (`DEMO_VERSION=sd001-9a8961a9` and `DEMO_PREBUILT_IMAGES=1`). Confirm that
+`owner.json` now has `current_snapshot`, then run local `status` and `status --remote`
+with the trusted `qxoGmWD1…` node pin. That adopted snapshot is the rollback target for
+the next upgrade. The tooling cannot roll back to the older `sd001-2da4a6d2` state,
+which predates snapshot metadata; the retained manual backup `B` is the only rollback
+path to that version. The script validates the public connection limit before state or
+engine changes.

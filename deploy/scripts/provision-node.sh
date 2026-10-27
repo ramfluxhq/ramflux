@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-deploy_dir="${RAMFLUX_DEPLOY_DIR:-$(CDPATH= cd -- "${script_dir}/.." && pwd)}"
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+deploy_dir="${RAMFLUX_DEPLOY_DIR:-$(CDPATH='' cd -- "${script_dir}/.." && pwd)}"
 mkdir -p "${deploy_dir}/config"
 
 endpoint_for() {
@@ -19,7 +19,10 @@ endpoint_for() {
 }
 
 for service in gateway router notify federation relay signaling retention; do
-  cat > "${deploy_dir}/config/${service}.toml" <<EOF
+  destination="${deploy_dir}/config/${service}.toml"
+  temporary=$(mktemp "${deploy_dir}/config/.${service}.toml.XXXXXX")
+  trap 'rm -f -- "${temporary}"' EXIT HUP INT TERM
+  cat > "${temporary}" <<EOF
 node_id = "localhost"
 service_id = "ramflux-${service}"
 redb_path = "/var/lib/ramflux/${service}/${service}.redb"
@@ -55,6 +58,24 @@ public_listen_addr = "0.0.0.0:443"
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"
 EOF
+  chmod 644 "${temporary}"
+  python3 - "${temporary}" "${destination}" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+temporary = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+with temporary.open("rb") as source:
+    os.fsync(source.fileno())
+os.replace(temporary, destination)
+directory = os.open(destination.parent, os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+  trap - EXIT HUP INT TERM
 done
 # No [relay] service_key block: v3 (Ed25519 issuer trust) is the only production
 # object data plane; the default/production relay loads no object HMAC key
