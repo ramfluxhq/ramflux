@@ -14,11 +14,7 @@ impl RamfluxClient {
         if local.device_id != raw {
             return Err(invalid("local device context mismatch"));
         }
-        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        Ok(ramflux_protocol::qualified_device_id(
-            &ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key()),
-            raw,
-        )?)
+        Ok(ramflux_protocol::qualified_device_id(&self.own_account_anchor()?, raw)?)
     }
     pub(crate) fn device_reference(&self, device: &str) -> Result<String, SdkError> {
         if ramflux_protocol::parse_qualified_device_id(device)?.is_some() {
@@ -27,11 +23,7 @@ impl RamfluxClient {
         if let Some(local) = &self.device_branch
             && local.device_id == device
         {
-            let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            return Ok(ramflux_protocol::qualified_device_id(
-                &ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key()),
-                device,
-            )?);
+            return Ok(ramflux_protocol::qualified_device_id(&self.own_account_anchor()?, device)?);
         }
         // Bare names never select a directory root. Historical orphan metadata remains
         // addressable solely so lifecycle cleanup can erase it alongside current sessions.
@@ -130,10 +122,7 @@ impl RamfluxClient {
         if let Some(local) = &self.device_branch
             && local.principal_id == principal
         {
-            let own = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            return Ok(
-                ramflux_crypto::identity_root_commitment(&own.signing_key.verifying_key()) == root
-            );
+            return Ok(self.own_account_anchor()? == root);
         }
         if self.friend_link_peer_is_accepted(root)? || self.pending_contact_root(root)? {
             return Ok(true);

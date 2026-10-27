@@ -145,13 +145,10 @@ impl RamfluxClient {
     }
     pub(crate) fn pin_local_group_member(&self, group: &str) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let public =
             ramflux_protocol::encode_base64url(local.signing_key.verifying_key().to_bytes());
-        let root_public =
-            ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
         let db = self.account_db()?;
-        let commitment = crate::prekey::identity_root_public_key_commitment(&root_public)?;
+        let commitment = self.own_account_anchor()?;
         let identity = self.owned_device_identity()?;
         if let Some(binding) = db.group_member_key_binding(group, &identity)?
             && binding.signing_public_key == public
@@ -165,7 +162,7 @@ impl RamfluxClient {
             group,
             &identity,
             &local.principal_id,
-            &crate::prekey::identity_root_public_key_commitment(&root_public)?,
+            &commitment,
             &public,
         )?;
         Ok(())

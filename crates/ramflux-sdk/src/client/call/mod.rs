@@ -59,13 +59,10 @@ impl RamfluxClient {
     }
     pub(crate) fn call_local_endpoint(&self) -> Result<CallEndpoint, SdkError> {
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         Ok(CallEndpoint {
             principal_id: device.principal_id.clone(),
             device_id: device.device_id.clone(),
-            root_public_key: ramflux_protocol::encode_base64url(
-                root.signing_key.verifying_key().to_bytes(),
-            ),
+            root_public_key: self.own_master_public_key()?,
         })
     }
     pub(crate) fn persist_call_row(&self, row: &CallRow) -> Result<(), SdkError> {

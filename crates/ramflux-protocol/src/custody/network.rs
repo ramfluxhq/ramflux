@@ -91,6 +91,21 @@ pub struct CustodyPeer {
     pub target_delivery_id: String,
     pub prekey_bundle: Value,
 }
+/// Complete v3 directory evidence and the currently registered branch prekeys.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustodyManifest {
+    pub publication: Publication,
+    pub custodian_publication: Option<Publication>,
+    pub devices: Vec<CustodyManifestDevice>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustodyManifestDevice {
+    pub device_ref: DeviceRef,
+    pub target_delivery_id: String,
+    pub prekey_bundle: Value,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyServerFrame {
