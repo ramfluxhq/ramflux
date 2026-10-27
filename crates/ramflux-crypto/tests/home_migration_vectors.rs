@@ -280,6 +280,22 @@ fn vectors() -> TestResult<Value> {
             "B",
             &key(9),
         )?)?,
+        row(&sign_node(
+            PeerQuery {
+                version: 1,
+                kind: PeerQueryKind::Attest,
+                account_anchor: authority.envelope().body.account_anchor.clone(),
+                migration_id: hash(19),
+                source_node: "B".into(),
+                audience_node: "A".into(),
+                request_hash: hash(20),
+                nonce: hash(21),
+                issued_at: NOW,
+                expires_at: NOW + 30,
+            },
+            "B",
+            &key(9),
+        )?)?,
     ]);
 
     let genesis = genesis(&authority)?;
@@ -355,6 +371,7 @@ fn every_type_rejects_cross_schema_role_field_and_signature_substitution() -> Te
     reject_substitutions::<HomeAttestation>(&messages[8]["signed"])?;
     reject_substitutions::<NoncommitFence>(&messages[9]["signed"])?;
     reject_substitutions::<PeerStatus>(&messages[10]["signed"])?;
+    reject_substitutions::<PeerQuery>(&messages[11]["signed"])?;
 
     Ok(())
 }

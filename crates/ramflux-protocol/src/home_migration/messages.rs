@@ -378,3 +378,31 @@ impl Message for PeerStatus {
     const DOMAIN: &'static str = domain::HOME_PEER_STATUS;
     const ROLES: &'static [Role] = &[Role::Node];
 }
+
+/// Distinct read/preflight purposes on the authenticated node mesh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerQueryKind {
+    Attest,
+    AuthorizeRead,
+}
+/// A peer signature binds the relayed owner request before any private state is returned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerQuery {
+    pub version: u32,
+    pub kind: PeerQueryKind,
+    pub account_anchor: String,
+    pub migration_id: String,
+    pub source_node: String,
+    pub audience_node: String,
+    pub request_hash: String,
+    pub nonce: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+impl sealed::Sealed for PeerQuery {}
+impl Message for PeerQuery {
+    const DOMAIN: &'static str = domain::HOME_PEER_QUERY;
+    const ROLES: &'static [Role] = &[Role::Node];
+}

@@ -12,6 +12,18 @@ pub trait HomeMigrationMesh: Send + Sync {
     /// # Errors
     /// Rejects unknown, removed or unavailable peers.
     fn peer_key(&self, node: &str) -> Result<String, NodeCoreError>;
+    /// Exchange a typed request over the admitted peer's pinned-CA mesh channel.
+    /// # Errors
+    /// Returns a retryable peer failure without inferring commit or noncommit.
+    fn exchange(
+        &self,
+        _node: &str,
+        _request: &crate::MigrationPeerCall,
+    ) -> Result<crate::MigrationPeerReply, NodeCoreError> {
+        Err(NodeCoreError::HomeMigration(
+            ramflux_protocol::home_migration::Refusal::PeeringUnavailable,
+        ))
+    }
 }
 pub(crate) struct MigrationCaller {
     pub purpose: ramflux_protocol::custody::MigrationPurpose,

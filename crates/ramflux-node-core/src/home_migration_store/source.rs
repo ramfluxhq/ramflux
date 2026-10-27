@@ -21,7 +21,10 @@ pub struct MigrationPeer<'a> {
 pub struct AttestMigration<'a> {
     pub request: &'a ramflux_protocol::home_migration::AttestRequest,
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttestedHome {
+    pub authority: ramflux_protocol::custody::Publication,
     pub home: RecordEvidence,
     pub attestation: Signed<HomeAttestation>,
     pub delivery_map: Vec<DeliveryMapEntry>,
@@ -128,7 +131,15 @@ impl RouterCore {
             )
             .map_err(auth_error)?;
             commit_transition(store, tx)?;
-            Ok(AttestedHome { home: head, attestation, delivery_map: map })
+            Ok(AttestedHome {
+                home: head,
+                attestation,
+                delivery_map: map,
+                authority: ramflux_protocol::custody::Publication {
+                    record: publication.record.clone(),
+                    compacted_ids: publication.compacted_ids.clone(),
+                },
+            })
         })
     }
     /// Serialize one E+1, proof, recovery gate and backlog schedule in the router database.
