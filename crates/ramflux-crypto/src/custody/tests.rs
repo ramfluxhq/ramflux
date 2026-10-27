@@ -5,7 +5,7 @@ use super::*;
 use ramflux_protocol::{PrincipalKind, custody::*, domain, encode_base64url};
 use zeroize::Zeroizing;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-fn fixture() -> Result<(serde_json::Value, SelfSigningKey, Envelope<DeviceSet>)> {
+pub(super) fn fixture() -> Result<(serde_json::Value, SelfSigningKey, Envelope<DeviceSet>)> {
     let v: serde_json::Value =
         serde_json::from_str(include_str!("../../tests/fixtures/custody_v3.json"))?;
     let phrase = RecoveryPhrase::from_entropy(&[0; 32])?;
