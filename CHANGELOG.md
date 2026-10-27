@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Default-off local born-v3 identity setup with a generated recovery phrase,
+  one-use backup confirmation, non-synchronizing primary vault custody and
+  persisted signed v3 authority. These accounts remain `NetworkingPending`;
+  live registration is deferred and legacy-proof fallback is refused.
+- Exact v3 authority codecs, certificate/lease verification, durable mode and
+  revocation floors, independent recovery/record vectors and revocation-priority
+  capacity handling. Existing legacy account and wire formats remain unchanged.
+
 ### Changed
 
 - Public-name warnings allow Highly Restrictive Latin/CJK script combinations and
