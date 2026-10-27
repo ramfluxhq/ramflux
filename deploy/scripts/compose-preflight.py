@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -56,7 +57,7 @@ def expand(value, values, key):
     return result
 
 
-def read_env(path, earlier, process):
+def read_env(path, earlier, process, interpolate=True):
     """Read Compose-style dotenv input for best-effort legacy-name detection."""
     try:
         values = dict(earlier)
@@ -100,7 +101,9 @@ def read_env(path, earlier, process):
                     value = re.sub(r'\\([abfnrtv\\"])', lambda match: escapes[match[1]], value)
             else:
                 value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
-            values[key] = value if single else expand(value, {**values, **process}, key)
+            values[key] = value if single or not interpolate else expand(
+                value, {**values, **process}, key
+            )
         return values
     except (OSError, UnicodeError):
         raise InputError("ENV_FILE") from None
@@ -156,12 +159,19 @@ def default_env_files(files, explicit_project, process, cwd):
     return [primary] if primary.is_file() else []
 
 
-def legacy_env_files(arguments):
+def compose_options(arguments):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--env-file", action="append", type=Path, default=[])
     parser.add_argument("-f", "--file", action="append", type=Path, default=[])
     parser.add_argument("--project-directory", type=Path)
     options, _unknown = parser.parse_known_args(arguments)
+    if any(str(path) == "-" for path in options.file):
+        raise InputError("COMPOSE_FILE")
+    return options
+
+
+def legacy_env_files(arguments):
+    options = compose_options(arguments)
     cwd = Path.cwd()
     if options.env_file:
         return [absolute(path, cwd) for path in options.env_file]
@@ -189,8 +199,69 @@ def provider_command(provider):
     return ["podman-compose"]
 
 
+def compose_files(arguments):
+    options = compose_options(arguments)
+    cwd = Path.cwd()
+    files = options.file
+    if not files and os.environ.get("COMPOSE_FILE") is not None:
+        separator = os.environ.get("COMPOSE_PATH_SEPARATOR", os.pathsep)
+        files = path_list(os.environ["COMPOSE_FILE"], separator, "COMPOSE_FILE")
+    if not files:
+        discovered = first_compose_file([], os.environ, cwd)
+        files = [] if discovered is None else [discovered]
+    resolved = []
+    for path in files:
+        if "://" in str(path) or str(path).startswith("git@"):
+            raise InputError("COMPOSE_FILE")
+        resolved.append(absolute(path, cwd))
+    return resolved
+
+
+def podman_profile_arguments(arguments):
+    profiles = set()
+    for path in compose_files(arguments):
+        try:
+            lines = path.read_text().splitlines()
+        except (OSError, UnicodeError):
+            raise InputError("COMPOSE_FILE") from None
+        profile_indent = None
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip())
+            if profile_indent is not None and (
+                indent < profile_indent
+                or (indent == profile_indent and not stripped.startswith("-"))
+            ):
+                profile_indent = None
+            if profile_indent is not None:
+                listed = re.fullmatch(r"-\s+(.+)", stripped)
+                if not listed:
+                    raise InputError("COMPOSE_PROFILES")
+                profiles.add(yaml_scalar(listed[1]))
+                continue
+            match = re.fullmatch(r"profiles:\s*(.*)", stripped)
+            if not match:
+                continue
+            value = match[1]
+            if not value:
+                profile_indent = indent
+                continue
+            if not (value.startswith("[") and value.endswith("]")):
+                raise InputError("COMPOSE_PROFILES")
+            for item in value[1:-1].split(","):
+                profiles.add(yaml_scalar(item))
+    if any(not profile or not re.fullmatch(r"[A-Za-z0-9_.-]+", profile) for profile in profiles):
+        raise InputError("COMPOSE_PROFILES")
+    return [item for profile in sorted(profiles) for item in ("--profile", profile)]
+
+
 def render_config(provider, arguments):
-    command = [*provider_command(provider), *arguments, "config"]
+    profile_arguments = (
+        ["--profile", "*"] if provider == "docker" else podman_profile_arguments(arguments)
+    )
+    command = [*provider_command(provider), *arguments, *profile_arguments, "config"]
     if provider == "docker":
         command.extend(["--format", "json"])
     try:
@@ -255,13 +326,15 @@ def yaml_scalar(value):
     return value
 
 
-def podman_environments(rendered):
-    """Safely scan only environment mappings/lists from podman-compose YAML."""
+def podman_service_inputs(rendered):
+    """Safely scan environment and env_file nodes from podman-compose YAML."""
     if not any(re.fullmatch(r"services:\s*", line.strip()) for line in rendered.splitlines()):
         raise InputError("CONFIG_RENDER")
     environments = []
+    env_files = []
     current = None
     environment_indent = None
+    env_file_indent = None
     for line in rendered.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -271,12 +344,29 @@ def podman_environments(rendered):
             environments.append(current)
             current = None
             environment_indent = None
+        if env_file_indent is not None and (
+            indent < env_file_indent or (indent == env_file_indent and not stripped.startswith("-"))
+        ):
+            env_file_indent = None
         if re.fullmatch(r"environment:\s*", stripped):
             current = {}
             environment_indent = indent
             continue
         if stripped.startswith("environment:"):
             raise InputError("CONFIG_RENDER")
+        if re.fullmatch(r"env_file:\s*", stripped):
+            env_file_indent = indent
+            continue
+        if stripped.startswith("env_file:"):
+            value = stripped.split(":", 1)[1]
+            env_files.append(yaml_scalar(value))
+            continue
+        if env_file_indent is not None:
+            listed_file = re.fullmatch(r"-\s+(.+)", stripped)
+            if not listed_file:
+                raise InputError("CONFIG_RENDER")
+            env_files.append(yaml_scalar(listed_file[1]))
+            continue
         if current is None:
             continue
         mapping = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*):(?:\s*(.*))?", stripped)
@@ -289,7 +379,43 @@ def podman_environments(rendered):
             raise InputError("CONFIG_RENDER")
     if current is not None:
         environments.append(current)
-    return environments
+    if any(not path for path in env_files):
+        raise InputError("CONFIG_RENDER")
+    return environments, env_files
+
+
+def podman_environments(rendered):
+    return podman_service_inputs(rendered)[0]
+
+
+def podman_env_file_environments(paths, arguments):
+    options = compose_options(arguments)
+    base = project_directory(options.file, options.project_directory, os.environ, Path.cwd())
+    return [read_env(absolute(Path(path), base), {}, {}, interpolate=False) for path in paths]
+
+
+def validate_podman_run_arguments(arguments):
+    for index, argument in enumerate(arguments):
+        match = re.fullmatch(r"(--podman-[a-z0-9-]+-args)(?:=(.*))?", argument)
+        if not match:
+            continue
+        value = match[2]
+        if value is None:
+            if index + 1 >= len(arguments):
+                raise InputError("PODMAN_RUN_ARGS")
+            value = arguments[index + 1]
+        try:
+            nested = shlex.split(value)
+        except ValueError:
+            raise InputError("PODMAN_RUN_ARGS") from None
+        if any(
+            item in {"-e", "--env", "--env-file"}
+            or item.startswith("--env=")
+            or item.startswith("--env-file=")
+            or (item.startswith("-e") and len(item) > 2)
+            for item in nested
+        ):
+            raise InputError("PODMAN_RUN_ARGS")
 
 
 def validate_rendered(environments):
@@ -308,11 +434,17 @@ def main(argv=None):
     parser.add_argument("--provider", choices=("docker", "podman", "podman-compose"), required=True)
     options, compose_arguments = parser.parse_known_args(argv)
     try:
+        compose_options(compose_arguments)
+        if options.provider != "docker":
+            validate_podman_run_arguments(compose_arguments)
         invalid = validate_legacy_inputs(compose_arguments)
         if not invalid:
             rendered = render_config(options.provider, compose_arguments)
-            environments = (docker_environments(rendered) if options.provider == "docker"
-                            else podman_environments(rendered))
+            if options.provider == "docker":
+                environments = docker_environments(rendered)
+            else:
+                environments, env_files = podman_service_inputs(rendered)
+                environments.extend(podman_env_file_environments(env_files, compose_arguments))
             invalid.update(validate_rendered(environments))
     except InputError as error:
         invalid = {str(error)}

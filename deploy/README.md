@@ -305,11 +305,16 @@ Select `docker`, `podman`, or `podman-compose` to match the command that will ru
 Preflight invokes that provider with the same Compose options and a config-only
 operation, then scans the rendered service environments. The provider therefore
 owns `.env`, `COMPOSE_ENV_FILES`, `COMPOSE_DISABLE_ENV_FILE`, project-directory,
-stdin-file, and precedence semantics. A render failure is a refusal. The preflight
-never starts containers and reports setting names rather than values. Explicit env
-files and `./.env` are also inspected for legacy-name migration as a best-effort
-check; that input-level check does not claim to reproduce provider resolution. The
-demo wrapper and itest harness invoke preflight automatically; existing frozen demo
+and precedence semantics. Rendering enables every profile; stdin Compose files are
+refused because a later invocation could consume different input. A render failure
+is a refusal. The preflight never starts containers and reports setting names rather
+than values. Explicit env files and the inferred project `.env` candidate are also
+inspected for legacy-name migration as a best-effort check; that input-level check
+does not claim to reproduce provider resolution. For podman-compose, service
+`env_file` inputs are scanned separately because its config output does not expand
+them; Podman provider run-argument options that inject env or env-file values are
+refused. The demo wrapper and itest harness invoke preflight automatically;
+existing frozen demo
 projects must be regenerated through their normal `up` workflow before maintenance
 commands can pass migration.
 
