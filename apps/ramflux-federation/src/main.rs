@@ -5,11 +5,15 @@ mod admin_http;
 mod discovery;
 mod flow;
 mod helpers;
+mod http_connections;
 mod http_limits;
 #[cfg(test)]
 mod http_listener_tests;
 #[cfg(test)]
 mod http_request_limits_tests;
+mod http_response;
+#[cfg(test)]
+mod http_worker_tests;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod key_migration;

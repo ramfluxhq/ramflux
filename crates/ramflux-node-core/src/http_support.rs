@@ -362,6 +362,71 @@ fn write_itest_response(
     Ok(())
 }
 
+/// Write one close-delimited HTTP response within an absolute deadline.
+/// Each socket write is also limited to five seconds; partial progress cannot renew the deadline.
+/// # Errors
+/// Returns an error on an expired deadline, a stalled peer, or a failed socket write.
+pub fn write_http_response_with_deadline(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    deadline: std::time::Instant,
+) -> Result<(), NodeCoreError> {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut response = Vec::with_capacity(header.len() + body.len());
+    response.extend_from_slice(header.as_bytes());
+    response.extend_from_slice(body);
+    let write_deadline = deadline.min(std::time::Instant::now() + Duration::from_secs(5));
+    let mut remaining = response.as_slice();
+    while !remaining.is_empty() {
+        let timeout = write_deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| NodeCoreError::ItestHttp("response write deadline expired".into()))?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+        match stream.write(remaining) {
+            Ok(0) => return Err(NodeCoreError::ItestHttp("response write returned zero".into())),
+            Ok(count) => remaining = &remaining[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(NodeCoreError::ItestHttp(error.to_string())),
+        }
+    }
+    Ok(())
+}
+
+/// Send FIN after a completed response, then briefly drain unread request bytes.
+/// The drain uses constant memory and ends at the earlier of 100 ms or the supplied deadline.
+/// # Errors
+/// Returns an error if the write half cannot be shut down.
+pub fn finish_http_response(
+    stream: &mut TcpStream,
+    deadline: std::time::Instant,
+) -> Result<(), NodeCoreError> {
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?;
+    let deadline = deadline.min(std::time::Instant::now() + Duration::from_millis(100));
+    let mut chunk = [0u8; 4096];
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
 /// # Errors
 /// Returns an error when the URL is unsupported, the connection fails, or JSON parsing fails.
 pub fn itest_http_post_json<T: Serialize, R: serde::de::DeserializeOwned>(
