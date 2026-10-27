@@ -138,3 +138,14 @@ fn home_migration_export_and_import_cannot_rearm_private_jobs_or_migration_event
     assert_eq!(jobs, 0);
     Ok(())
 }
+
+#[test]
+fn home_migration_never_returns_a_send_plan_inside_an_uncommitted_outer_transaction() -> Result {
+    let (_root, _index, db, _key) = fixture()?;
+    let id = hash(3);
+    let result = db.write_transaction(|| save(&db, &id, 1, "seal_sent"));
+    assert!(matches!(result, Err(StorageError::AuthorizationRejected)));
+    assert!(db.home_migration_job(&id)?.is_none());
+    assert!(db.pending_outbox(256)?.iter().all(|entry| entry.table_name != TAG));
+    Ok(())
+}

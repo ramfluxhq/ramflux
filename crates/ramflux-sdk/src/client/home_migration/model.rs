@@ -64,6 +64,8 @@ pub(super) struct Job {
     pub intent_hash: String,
     pub anchor: String,
     pub authority_hash: String,
+    pub authority: ramflux_protocol::custody::Publication,
+    pub source_home: wire::RecordEvidence,
     pub actor: DeviceRef,
     pub source_key: String,
     pub progress: MigrationProgress,

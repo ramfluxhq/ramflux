@@ -87,7 +87,9 @@ trust from a URL response. The target fingerprint uses
 supplied by the user, and the target client discovery signature is checked.
 
 The migration job and an immutable progress transition commit in the same
-account-writer transaction. Each transition writes the K0 outbox. Projection reads
+account-writer transaction. A migration write refuses an enclosing transaction,
+so returning a send plan cannot mean only an uncommitted savepoint. Each
+transition writes the K0 outbox. Projection reads
 that immutable transition, so later phase changes cannot collapse earlier
 progress. The job carries bounded public signing/admission evidence, never primary
 seeds, recovery phrases, branch seeds, account passwords or provider credentials.
@@ -172,3 +174,19 @@ The intended CLI spelling is `rf account migrate` with `migrate-home` as an
 alias, plus status/cancel operations. Every base64url identifier positional must
 accept a leading `-`. CLI/desktop must consume the same daemon operation; they
 must not create a separate migration engine or a new trust anchor.
+
+## Control transport integration requirement
+
+Migration uses the existing custody connection and node-owned endpoint. It must
+obtain a fresh challenge for each control request, bind the branch proof to that
+control hash and TLS exporter (or the current admitted proxy receipt), and pin
+the node CA, signed server name and node identity. `NoChannelBinding` is refused
+for migration even if an ordinary debug connection permits it. There is no new
+listener, WebPKI/TOFU replacement or ordinary-session fallback.
+
+A former home must still answer bounded migration status, cancellation and resolve
+operations after it refuses an ordinary session. The shared server wire must
+therefore define a migration-scoped, sessionless way to carry the typed business
+request after proof of possession. A control hash by itself does not carry its
+payload. Implementing this client transport requires that shared contract; an
+empty ordinary session identifier or an undocumented token is not a substitute.

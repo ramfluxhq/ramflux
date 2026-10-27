@@ -164,11 +164,15 @@ impl AccountDb {
     }
     /// Persist before external effects. A failed CAS or outbox write rolls back everything.
     /// # Errors
-    /// Rejects changed intent, stale revision, concurrent live jobs and bounded-queue exhaustion.
+    /// Rejects changed intent, stale revision, concurrent live jobs, an enclosing transaction
+    /// and bounded-queue exhaustion. A returned plan must already have its own durable commit.
     pub fn persist_home_migration(
         &self,
         input: HomeMigrationWrite<'_>,
     ) -> Result<(), StorageError> {
+        if !self.connection.is_autocommit()? {
+            return Err(StorageError::AuthorizationRejected);
+        }
         if !digest(input.operation_id)
             || !digest(input.account_anchor)
             || !digest(input.intent_hash)

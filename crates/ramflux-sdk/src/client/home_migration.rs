@@ -116,6 +116,11 @@ impl<'a> HomeMigrationJournal<'a> {
             intent,
             anchor: anchor.clone(),
             authority_hash: object_hash(self.account.record())?,
+            authority: ramflux_protocol::custody::Publication {
+                record: self.account.record().clone(),
+                compacted_ids: None,
+            },
+            source_home: home.evidence().clone(),
             actor,
             source_key: home.home().1.into(),
             progress,
@@ -227,6 +232,11 @@ impl<'a> HomeMigrationJournal<'a> {
             || row.operation_id != job.intent.operation_id
             || row.account_anchor != job.anchor
             || job.anchor != self.account.record().body.account_anchor
+            || job.authority.record.body.account_anchor != job.anchor
+            || object_hash(&job.authority.record)? != job.authority_hash
+            || job.source_home.record.account_anchor() != job.anchor
+            || job.source_home.record.home()
+                != (job.progress.source.as_str(), job.source_key.as_str())
             || row.intent_hash != intent_hash(&job.intent)?
             || job.intent_hash != row.intent_hash
             || row.revision != job.progress.seq
