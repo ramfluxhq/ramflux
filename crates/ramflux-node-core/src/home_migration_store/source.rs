@@ -153,10 +153,13 @@ impl RouterCore {
         now: u64,
     ) -> Result<RecordEvidence, NodeCoreError> {
         let CommitMigration { sealed, peer } = input;
+        let started = std::time::Instant::now();
+        let trusted_now = store.migration_clock_floor(now)?;
+        let observed = || trusted_now.saturating_add(started.elapsed().as_secs());
         let auth = &sealed.authorization;
         let seal = &sealed.seal;
         let a = &auth.body;
-        let now = store.migration_clock_floor(now)?;
+        let now = observed();
         // Permanent outcomes survive custody-record pruning and bypass all mailbox work.
         if let Some(record) = store.committed_migration_authorization(auth)? {
             return Ok(record);
@@ -166,6 +169,7 @@ impl RouterCore {
             validate_commit_request(store, node, sealed, peer, authority, now)
         })?;
         let _submissions = store.migration_submission_barrier(&sealed.delivery_map)?;
+        let now = observed();
         // A competing commit/cancel/recovery may have won while this writer waited.
         if let Some(record) = store.committed_migration_authorization(auth)? {
             return Ok(record);
@@ -182,7 +186,7 @@ impl RouterCore {
         )?;
         self.with_migration_authority(&a.account_anchor, now, |authority, publication| {
             let tx = store.migration_db().begin_write().map_err(storage)?;
-            let now = clock(&tx, now)?;
+            let now = clock(&tx, observed())?;
             let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Source)?;
             let auth_key = super::authorization_key(auth)?;
             if let Some(hash) = read::<String>(&tx, PROOFS, &auth_key)? {

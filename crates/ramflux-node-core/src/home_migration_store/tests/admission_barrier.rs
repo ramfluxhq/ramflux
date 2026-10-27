@@ -257,3 +257,54 @@ fn indexed_barrier_counts_each_delivery_once_and_preserves_settled_replay_receip
     }
     Ok(())
 }
+
+#[test]
+fn source_rechecks_commit_deadline_after_waiting_for_the_database_writer() -> TestResult {
+    let mut s = Scenario::prepared()?;
+    let authority = verify_record(&publication()?.record, NOW + 1, None, None)?;
+    let branch = ramflux_crypto::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    let mut auth = s.authorization.body.clone();
+    auth.max_commit_delay = 1;
+    s.authorization = SelfSigningKey::from_vault_seed(&Zeroizing::new([2; 32]))
+        .sign_home_authorization(auth, &branch, &authority, NOW + 1)?;
+    let sealed = s.seal()?.sealed_evidence()?;
+    let writer = s.a.store()?.migration_db().begin_write()?;
+    std::thread::scope(|scope| -> TestResult {
+        let worker = scope.spawn(|| {
+            s.a.core.commit_home_migration(
+                s.a.store().map_err(storage)?,
+                &s.a.node,
+                CommitMigration {
+                    sealed: &sealed,
+                    peer: MigrationPeer { node_id: "B", node_key: &public(9) },
+                },
+                NOW + 2,
+            )
+        });
+        let limit = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if matches!(
+                s.a.store()?.acquire_acknowledgement(&s.target),
+                Err(NodeCoreError::HomeMigration(Refusal::MigrationInProgress))
+            ) {
+                break;
+            }
+            if std::time::Instant::now() >= limit {
+                return Err("cutover writer did not arrive".into());
+            }
+            std::thread::yield_now();
+        }
+        // The actual production cutover holds the target writer while it waits on redb.
+        // Advancing elapsed trusted time must invalidate the original exact-deadline check.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        drop(writer);
+        assert!(matches!(
+            worker.join().map_err(|_| "commit worker panicked")?,
+            Err(NodeCoreError::HomeMigration(Refusal::CommitExpired))
+        ));
+        Ok(())
+    })?;
+    assert_eq!(s.a.store()?.migration_home(&s.anchor)?.ok_or("head")?.record.epoch(), 0);
+    assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
+    Ok(())
+}
