@@ -21,6 +21,7 @@ pub(crate) fn unavailable() -> SdkError {
 pub(crate) fn proposal_digest(body: &Authorization) -> Result<String, SdkError> {
     Ok(ramflux_protocol::custody::framed_hash("ramflux.sdk.home_migration.proposal.v1", body)?)
 }
+#[cfg(target_os = "macos")]
 pub(crate) fn now() -> Result<u64, SdkError> {
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

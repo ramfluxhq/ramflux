@@ -118,6 +118,31 @@ impl BornAccount {
     pub fn verified(&self) -> &VerifiedRecord {
         &self.verified
     }
+    pub(crate) fn sign_migration_authorization(
+        &self,
+        vault: &dyn PrimaryVault,
+        body: &ramflux_protocol::home_migration::Authorization,
+        digest: &str,
+        now: u64,
+    ) -> Result<
+        ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
+        SdkError,
+    > {
+        vault.home_authorization_preflight()?;
+        let (actor, credentials) = self.credentials(vault, &body.actor.device_id, now)?;
+        if actor != body.actor {
+            return Err(invalid());
+        }
+        let request = super::HomeAuthorizationRequest::new(
+            &self.stored.primary_vault_ref,
+            body,
+            &credentials.signing,
+            self.verified(),
+            digest,
+            now,
+        )?;
+        vault.sign_home_authorization(request)
+    }
     /// V3 is latched at creation; numeric legacy epochs cannot outrank it.
     /// # Errors
     /// Always refuses v1/v2 and unsupported future modes.

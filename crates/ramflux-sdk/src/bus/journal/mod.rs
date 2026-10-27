@@ -201,3 +201,6 @@ mod receipt_topics {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod home_migration_tests;
