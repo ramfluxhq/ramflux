@@ -35,7 +35,7 @@ async fn list_and_read_project_deleted_peer_and_own_rows_without_identity() -> T
                 messages.iter().find(|message| message["is_own"] == is_own).ok_or("ownness")?;
             assert_eq!(
                 message,
-                &json!({"deleted":true,"created_at":message["created_at"],"conversation_id":"thread","is_own":is_own})
+                &json!({"message_id":message["message_id"],"deleted":true,"created_at":message["created_at"],"conversation_id":"thread","is_own":is_own})
             );
         }
         let encoded = serde_json::to_string(messages)?;

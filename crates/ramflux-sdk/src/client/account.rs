@@ -166,10 +166,36 @@ impl RamfluxClient {
             db.set_device_signer(device_branch);
         }
         super::contact_verification::migrate_legacy_contact_verifications(&db)?;
-        let own_devices = db.verified_own_device_ids()?;
-        db.scrub_deleted_messages(&own_devices)?;
+        let scrub_root = account_index.root().to_path_buf();
+        let scrub_pending = db.deleted_message_scrub_pending()?;
         self.born_v3_account = born;
         self.active_account_db = Some(db);
+        if !scrub_pending {
+            return Ok(());
+        }
+        let scrub_account = local_account_id.to_owned();
+        let scrub_key = key.clone();
+        let scrub_device = self.device_branch.clone();
+        std::thread::Builder::new()
+            .name("ramflux-deleted-message-scrub".to_owned())
+            .spawn(move || {
+                let result = (|| -> Result<(), StorageError> {
+                    let index = AccountIndex::open(scrub_root)?;
+                    let mut db = AccountDb::open(&index, &scrub_account, &scrub_key)?;
+                    if let Some(device) = scrub_device {
+                        db.set_device_signer(device);
+                    }
+                    let own_devices = db.verified_own_device_ids()?;
+                    while db.scrub_deleted_messages_batch(&own_devices)? != 0 {
+                        std::thread::yield_now();
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    tracing::warn!(%error, "deleted-message background scrub deferred");
+                }
+            })
+            .map_err(|error| SdkError::LocalBus(format!("cannot start deletion scrub: {error}")))?;
         Ok(())
     }
 
@@ -389,6 +415,71 @@ mod tests {
             Err(SdkError::Storage(StorageError::KeyWrappingFailed(_)))
         ));
 
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn account_unlock_starts_the_bounded_deleted_message_scrub() -> Result<(), SdkError> {
+        let root = temp_root("deleted-message-scrub");
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("acct", "root-commitment")?;
+        client.unlock_account("acct", b"account-secret")?;
+        let key = wrapped_db_key(&root, "acct", b"account-secret")?;
+        let live_path = client.account_db()?.path.clone();
+        drop(client);
+
+        let index = AccountIndex::open(&root)?;
+        let local = AccountDb::open(&index, "acct", &key)?;
+        local.upsert_device_directory_entry(
+            "sibling-device",
+            "root-commitment",
+            "verified-own-device",
+            1,
+        )?;
+        local.send_direct_message("thread", "legacy-deleted", "sibling-device", b"secret")?;
+        let merged_path = root.join("merged.db");
+        let merged_snapshot = local.write_backup_snapshot(&merged_path)?;
+        drop(local);
+        drop(index);
+
+        let source_root = root.join("source");
+        let source_index = AccountIndex::open(&source_root)?;
+        source_index.create_account("acct", "root-commitment")?;
+        let source_key = AccountDbKey::derive("source", b"source-secret");
+        let source = AccountDb::open(&source_index, "acct", &source_key)?;
+        source.send_direct_message("thread", "legacy-deleted", "peer", b"secret")?;
+        source.delete_direct_message("thread", "legacy-deleted", "local", "tombstone")?;
+        let incoming_path = root.join("incoming.db");
+        let incoming_snapshot = source.write_backup_snapshot(&incoming_path)?;
+        drop(source);
+        drop(source_index);
+
+        let mut merged = ramflux_storage::BackupDatabase::open(&merged_path, &merged_snapshot.key)?;
+        merged.merge_backup(&incoming_path, &incoming_snapshot.key, || Ok(()))?;
+        merged.rekey(&key)?;
+        drop(merged);
+        std::fs::copy(&merged_path, &live_path)?;
+
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_device_branch("principal-id", "current-device", 1, [0x63; 32]);
+        let started = std::time::Instant::now();
+        client.unlock_account("acct", b"account-secret")?;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while client.account_db()?.deleted_message_scrub_pending()? {
+            if std::time::Instant::now() >= deadline {
+                return Err(SdkError::LocalBus("deleted-message scrub did not complete".into()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let row = client
+            .account_db()?
+            .direct_message_by_id("legacy-deleted")?
+            .ok_or_else(|| SdkError::LocalBus("legacy deleted row absent".into()))?;
+        assert!(row.deleted && row.is_own && row.sender_id.is_empty());
         let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
