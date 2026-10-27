@@ -125,6 +125,13 @@ impl RouterCore {
         let seal = &sealed.seal;
         let a = &auth.body;
         self.with_migration_authority(&a.account_anchor, now, |authority| {
+            let _submissions = store.migration_submission_barrier(&sealed.delivery_map)?;
+            let cursors = store.migration_backlog_barrier(
+                &a.account_anchor,
+                &a.migration_id,
+                &sealed.delivery_map,
+                now,
+            )?;
             let tx = store.migration_db().begin_write().map_err(storage)?;
             clock(&tx, now)?;
             let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Source)?;
@@ -174,7 +181,7 @@ impl RouterCore {
             }
             maintenance::require_no_live_window(&tx, &a.account_anchor, None)?;
             maintenance::reserve_budget(&tx, &a.account_anchor, false)?;
-            let backlog_hash = schedule_backlog(&tx, a, &sealed.delivery_map, now)?;
+            let backlog_hash = schedule_backlog(&tx, &cursors)?;
             let evidence = committed_evidence(
                 node,
                 sealed,
@@ -185,6 +192,20 @@ impl RouterCore {
                 return Err(storage("migration commit produced genesis"));
             };
             save_head(&tx, &evidence)?;
+            for entry in &sealed.delivery_map {
+                super::write(
+                    &tx,
+                    super::TARGETS,
+                    &entry.target_delivery_id,
+                    &super::InboxRoute {
+                        anchor: a.account_anchor.clone(),
+                        migration_id: a.migration_id.clone(),
+                        epoch: a.next_home_epoch,
+                        active: false,
+                    },
+                )?;
+            }
+
             write(&tx, PROOFS, &key, &record_hash(&evidence.record).map_err(storage)?)?;
             let mut source = sealed.source_operation(current, now)?;
             source.role = MigrationRole::Source;
@@ -427,18 +448,9 @@ fn committed_evidence(
 
 fn schedule_backlog(
     tx: &redb::WriteTransaction,
-    a: &ramflux_protocol::home_migration::Authorization,
-    map: &[DeliveryMapEntry],
-    now: u64,
+    cursors: &[super::MigrationBacklogCursor],
 ) -> Result<String, NodeCoreError> {
-    let cursors = RouterRedbStore::migration_backlog_barrier(
-        tx,
-        &a.account_anchor,
-        &a.migration_id,
-        map,
-        now,
-    )?;
-    for cursor in &cursors {
+    for cursor in cursors {
         write(
             tx,
             BACKLOG,
