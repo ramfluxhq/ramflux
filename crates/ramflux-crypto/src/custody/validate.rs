@@ -36,26 +36,26 @@ pub(super) fn key(value: &str) -> Result<VerifyingKey, CryptoError> {
     }
     Ok(key)
 }
-fn id(value: &str) -> Result<(), CryptoError> {
+pub(super) fn id(value: &str) -> Result<(), CryptoError> {
     if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
         return Err(reject("invalid custody identifier"));
     }
     Ok(())
 }
-fn time(value: u64) -> Result<(), CryptoError> {
+pub(super) fn time(value: u64) -> Result<(), CryptoError> {
     if value > MAX_SAFE_JSON_INTEGER {
         return Err(reject("unsafe custody integer"));
     }
     Ok(())
 }
-fn positive(value: u64) -> Result<(), CryptoError> {
+pub(super) fn positive(value: u64) -> Result<(), CryptoError> {
     time(value)?;
     if value == 0 {
         return Err(reject("zero custody counter"));
     }
     Ok(())
 }
-fn reference(value: &DeviceRef) -> Result<(), CryptoError> {
+pub(super) fn reference(value: &DeviceRef) -> Result<(), CryptoError> {
     bytes(&value.account_anchor, 32)?;
     id(&value.device_id)?;
     positive(value.device_epoch)
