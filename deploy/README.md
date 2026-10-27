@@ -59,7 +59,8 @@ COMPOSE_TEST_DOCKER_COMPOSE='docker compose' \
   python3 -m unittest discover -s deploy/scripts/tests -v
 ```
 
-Build the trust/discovery helper from the matching `ramflux-itest` checkout once:
+For full remote gateway and relay application probes, build the trust/discovery
+helper from the matching `ramflux-itest` checkout once:
 
 ```sh
 cd /path/to/ramflux-itest
@@ -242,8 +243,11 @@ the node using the expected public key over a trusted channel. Discovery and
 prekey HTTP use the same explicit LAN HTTP origin as the s72 fixture; gateway and
 relay use server-authenticated QUIC with the CA from the signed discovery record.
 This wrapper does not provide public HTTPS termination. Use it on a controlled
-demo LAN: HTTP metadata and prekey traffic are visible there. The SDK's TLS-only
-prekey probe currently reports failure for this HTTP origin, as expected in s72.
+demo LAN: HTTP metadata and prekey traffic are visible there. The SDK's prekey
+probe requires HTTPS and therefore reports failure for this plain-HTTP demo
+origin. This is expected and does not mean discovery, gateway or relay health
+failed; terminate public deployments with HTTPS before treating the prekey probe
+as an availability check.
 The public federation HTTP listener exposes only client reads. Administration uses
 a separate unpublished listener on the Compose network (port 18084). The demo HTTP
 port remains the public origin. See [the route inventory](../docs/federation_http.md).
@@ -261,9 +265,8 @@ prints the selected gateway transport results and relay health; it exits nonzero
 on any failure. Health probes do not prove account creation, DM,
 attachments, or TURN behavior; those require the desktop/controller acceptance.
 
-For a LAN check on another machine, build the same helper natively there and use
-a local env file with the settings above, a local `DEMO_TOOL` path and only this
-additional public value copied over a trusted channel from the host's
+For a LAN check on another machine, use a local env file with the settings above
+and this additional public value copied over a trusted channel from the host's
 `identity.env`:
 
 ```sh
@@ -274,9 +277,18 @@ DEMO_EXPECTED_NODE_PUBLIC_KEY=replace_with_public_pin
 sh deploy/scripts/demo-node.sh status /path/to/local-demo.env --remote
 ```
 
-Remote status needs no Docker or host data directory. It verifies the signed
-record and both QUIC application health endpoints over the LAN; it cannot inspect
-container health. Neither status mode confirms or changes desktop trust pins.
+Remote status needs no Docker or host data directory. When `DEMO_TOOL` is unset,
+it verifies the signed record with `curl`, Python 3's standard library and
+OpenSSL, then prints an explicit notice that gateway and relay application probes
+were skipped. Set `DEMO_TOOL` to the matching executable for the existing
+signed-discovery plus gateway and relay application probes. Remote status cannot
+inspect container health. Neither status mode confirms or changes desktop trust
+pins.
+
+All seven service images use an exec-form entrypoint, so the service binary is
+PID 1 and receives SIGTERM directly. Compose allows five seconds for shutdown;
+the configurable `RAMFLUX_SHUTDOWN_GRACE_SECONDS` drain window defaults to one
+second and is capped at four seconds.
 
 Every managed container, volume and network has a random ownership label. The
 wrapper refuses operations when any resource under the requested compose project

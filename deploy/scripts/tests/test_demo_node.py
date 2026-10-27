@@ -324,6 +324,46 @@ else:
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands(), [])
 
+    def test_remote_status_without_demo_tool_verifies_downloaded_record(self):
+        public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        signature = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        record = {
+            "schema": "ramflux.well_known_client.v1",
+            "node_id": "demo.example.org",
+            "node_public_key": public_key,
+            "node_ca_cert_pem": "test CA",
+            "gateway_quic_addr": "demo.example.org:59443",
+            "gateway_tcp_addr": "demo.example.org:59443",
+            "gateway_server_name": "ramflux-gateway",
+            "relay_quic_addr": "demo.example.org:59447",
+            "relay_server_name": "ramflux-relay",
+            "prekey_http_url": "http://demo.example.org:59482",
+            "signaling_turn_addr": "demo.example.org:59478",
+            "protocol_versions": ["v1"],
+            "client_capabilities": ["prekey"],
+            "updated_at": 1,
+            "expires_at": 9999999999,
+            "signature": signature,
+        }
+        record_file = self.root / "remote-record.json"
+        record_file.write_text(json.dumps(record))
+        self.executable("curl", f'''#!/usr/bin/env python3
+from pathlib import Path
+import shutil
+import sys
+output = Path(sys.argv[sys.argv.index("--output") + 1])
+shutil.copyfile({str(record_file)!r}, output)
+''')
+        self.executable("openssl", "#!/bin/sh\nexit 0\n")
+        values = dict(DEMO_HOST="demo.example.org", DEMO_PROJECT="demo-test",
+                      DEMO_DATA_DIR=str(self.state), DEMO_EXPECTED_NODE_PUBLIC_KEY=public_key)
+        self.env_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items()))
+        result = self.run_script("status", "--remote")
+        self.assertIn("discovery signature, freshness and operator pin: healthy", result.stdout)
+        self.assertIn("gateway and relay application probes: skipped", result.stdout)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.commands(), [])
+
     def test_health_wait_retries_starting_services_until_healthy(self):
         self.control.write_text('{"healthy_after": 2}')
         result = self.run_script("up")

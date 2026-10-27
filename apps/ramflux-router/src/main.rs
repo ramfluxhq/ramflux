@@ -85,7 +85,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             router.state().persist_identity_registry(router.store())?;
             return Ok(());
         }
-        wait_for_shutdown_signal()?;
+        ramflux_node_core::wait_for_service_shutdown(service)?;
         operator::checkpoint_for_shutdown(router.state(), router.store())?;
         tracing::info!(service, "router identity registry checkpointed for shutdown");
         return Ok(());
@@ -97,30 +97,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    std::thread::park();
-    Ok(())
-}
-
-fn wait_for_shutdown_signal() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    runtime.block_on(async {
-        #[cfg(unix)]
-        {
-            let mut terminate =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            tokio::select! {
-                result = tokio::signal::ctrl_c() => result?,
-                signal = terminate.recv() => {
-                    if signal.is_none() {
-                        anyhow::bail!("SIGTERM handler closed before receiving a signal");
-                    }
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        tokio::signal::ctrl_c().await?;
-        Ok(())
-    })
+    ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into)
 }
 
 fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {

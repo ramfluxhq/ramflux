@@ -69,8 +69,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    std::thread::park();
-    Ok(())
+    ramflux_node_core::wait_for_service_shutdown(service)
 }
 
 fn retention_async_ingress_enabled() -> bool {

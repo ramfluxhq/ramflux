@@ -65,6 +65,8 @@ pub enum NodeCoreError {
     ItestHttp(String),
     #[error("itest HTTP JSON failed: {0}")]
     ItestJson(String),
+    #[error("service shutdown failed: {0}")]
+    ServiceShutdown(String),
     #[error("unauthorized: {0}")]
     Unauthorized(String),
     /// The caller is verifiably not the device bound as the push routes' owner.

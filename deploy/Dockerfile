@@ -19,8 +19,9 @@ COPY --from=source-build /workspace/target/release/${BIN} /usr/local/bin/${BIN}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl3t64 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && chmod +x "/usr/local/bin/${BIN}"
-ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/${RAMFLUX_BIN} \"$@\"", "--"]
+    && chmod +x "/usr/local/bin/${BIN}" \
+    && ln -s "/usr/local/bin/${BIN}" /usr/local/bin/ramflux-service
+ENTRYPOINT ["/usr/local/bin/ramflux-service"]
 
 FROM debian:trixie-slim AS prebuilt-runtime
 
@@ -31,5 +32,6 @@ COPY target/release/${BIN} /usr/local/bin/${BIN}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl3t64 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && chmod +x "/usr/local/bin/${BIN}"
-ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/${RAMFLUX_BIN} \"$@\"", "--"]
+    && chmod +x "/usr/local/bin/${BIN}" \
+    && ln -s "/usr/local/bin/${BIN}" /usr/local/bin/ramflux-service
+ENTRYPOINT ["/usr/local/bin/ramflux-service"]

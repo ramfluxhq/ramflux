@@ -38,6 +38,7 @@ serde_json = "1.0"
 hmac = { workspace = true }
 postcard = { workspace = true }
 sha2 = { workspace = true }
+signal-hook = { workspace = true }
 thiserror = "2.0"
 tokio = { workspace = true, features = ["rt", "sync"] }
 toml = { workspace = true }

@@ -31,7 +31,7 @@ set +a
 : "${DEMO_HOST:?advertised DNS name or IPv4 address required}"
 : "${DEMO_PROJECT:?dedicated compose project required}"
 : "${DEMO_DATA_DIR:?absolute private data directory required}"
-: "${DEMO_TOOL:?absolute path to demo-node-tool required}"
+DEMO_TOOL=${DEMO_TOOL:-}
 DEMO_NODE_ID=${DEMO_NODE_ID:-demo.invalid}
 DEMO_GATEWAY_PORT=${DEMO_GATEWAY_PORT:-59443}
 DEMO_RELAY_PORT=${DEMO_RELAY_PORT:-59447}
@@ -84,13 +84,28 @@ if [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT" ]; then
 fi
 export RAMFLUX_DEMO_VOICE_UDP_PORT
 case "$DEMO_DATA_DIR" in /*) ;; *) fail 'DEMO_DATA_DIR must be absolute' ;; esac
-case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
-[ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
 origin="http://$DEMO_HOST:$DEMO_HTTP_PORT"
 if [ "$flag" = --remote ]; then
   : "${DEMO_EXPECTED_NODE_PUBLIC_KEY:?copy the public pin from the QA identity.env over a trusted channel}"
-  exec "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+  if [ -n "$DEMO_TOOL" ]; then
+    case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
+    [ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
+    exec "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+  fi
+  command -v curl >/dev/null 2>&1 || fail 'curl is required for tool-free remote status'
+  command -v openssl >/dev/null 2>&1 || fail 'openssl is required for tool-free remote status'
+  remote_record=$(mktemp "${TMPDIR:-/tmp}/ramflux-discovery.XXXXXX") || fail 'cannot create remote status temporary file'
+  trap 'rm -f -- "$remote_record"' EXIT HUP INT TERM
+  curl --fail --silent --show-error --max-time 10 \
+    --output "$remote_record" "$origin/.well-known/ramflux/client"
+  script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+  python3 "$script_dir/verify-remote-discovery.py" "$remote_record" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+  printf '%s\n' 'gateway and relay application probes: skipped (set DEMO_TOOL to a matching demo-node-tool for full probes)'
+  exit 0
 fi
+[ -n "$DEMO_TOOL" ] || fail 'DEMO_TOOL must name an absolute executable demo-node-tool for local operations'
+case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
+[ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 # Canonicalize before checking ownership or allowing recursive deletion.

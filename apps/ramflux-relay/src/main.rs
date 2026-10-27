@@ -286,10 +286,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    // The dhat profiler (itest-alloc-prof) flushes on SIGTERM from its own owner thread, so the main
-    // thread parks as normal here regardless of feature.
-    std::thread::park();
-    Ok(())
+    ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into)
 }
 mod config;
 mod voice;

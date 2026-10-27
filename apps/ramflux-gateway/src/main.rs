@@ -89,15 +89,13 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         if std::env::args().any(|arg| arg == "--once") {
             return Ok(());
         }
-        std::thread::park();
-        return Ok(());
+        return ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into);
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    std::thread::park();
-    Ok(())
+    ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into)
 }
 
 mod device_set_limit;
