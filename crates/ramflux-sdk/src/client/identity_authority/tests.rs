@@ -553,6 +553,7 @@ fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_legacy_
     const TOMBSTONE_PREFIX: &[u8] = b"ramflux.own_contact_tombstone.v1\n";
     let owner = Actor::new("owner", "original", 178, 179, 1)?;
     let restored = Actor::new("owner", "restored", 178, 180, 1)?;
+    let live = Actor::new("owner", "live", 178, 183, 1)?;
     let peer = Actor::new("peer", "peer", 181, 182, 1)?;
     let own = owner.manifest()?;
     let remote = peer.manifest()?;
@@ -593,7 +594,8 @@ fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_legacy_
     legacy.as_object_mut().ok_or("tombstone object")?.remove("decided_at");
     legacy_bytes = TOMBSTONE_PREFIX.to_vec();
     legacy_bytes.extend(serde_json::to_vec(&legacy)?);
-    let legacy = vec![ramflux_protocol::encode_base64url(legacy_bytes)];
+    let legacy_packet = legacy_bytes;
+    let legacy = vec![ramflux_protocol::encode_base64url(&legacy_packet)];
 
     let with_local_decision = owner.client.restore_backup_contacts(&legacy)?;
     assert_eq!(with_local_decision.tombstones_skipped_older, 1);
@@ -604,6 +606,18 @@ fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_legacy_
     assert!(restored.client.account_db()?.friend_link("ordered-link")?.blocked);
     let repeated = restored.client.restore_backup_contacts(&legacy)?;
     assert_eq!(repeated.tombstones_skipped_older, 1);
+
+    observe(&live.client, &remote)?;
+    live.client.establish_friend_link(
+        "ordered-link",
+        &own.principal_commitment,
+        &remote.principal_commitment,
+    )?;
+    assert!(live.client.receive_own_contact(&legacy_packet)?);
+    assert!(
+        live.client.account_db()?.friend_link("ordered-link")?.blocked,
+        "an authenticated legacy sibling restriction remains sticky"
+    );
     Ok(())
 }
 
@@ -675,12 +689,18 @@ fn backup_contact_restore_reports_equivocation_and_link_collision_and_aborts_on_
     let fork = Actor::new("equivocal", "second", 195, 197, 1)?;
     let collision = Actor::new("collision", "collision", 198, 199, 1)?;
     let other = Actor::new("other", "other", 200, 201, 1)?;
+    let higher_local = Actor::new("higher-equivocal", "old", 207, 208, 1)?;
+    let higher_fork = Actor::new("higher-equivocal", "fork", 207, 209, 1)?;
     let own = owner.manifest()?;
     let equivocal_manifest = equivocal.manifest()?;
     let collision_manifest = collision.manifest()?;
-    for (link, manifest) in
-        [("equivocation", &equivocal_manifest), ("link-collision", &collision_manifest)]
-    {
+    let mut higher_fork_manifest = higher_fork.manifest()?;
+    sign_set(&higher_fork, &mut higher_fork_manifest, 2)?;
+    for (link, manifest) in [
+        ("equivocation", &equivocal_manifest),
+        ("higher-equivocation", &higher_fork_manifest),
+        ("link-collision", &collision_manifest),
+    ] {
         observe(&owner.client, manifest)?;
         owner.client.establish_friend_link(
             link,
@@ -690,6 +710,7 @@ fn backup_contact_restore_reports_equivocation_and_link_collision_and_aborts_on_
     }
     let contacts = owner.client.backup_contacts()?;
     observe(&restored.client, &fork.manifest()?)?;
+    observe(&restored.client, &higher_local.manifest()?)?;
     restored.client.establish_friend_link(
         "link-collision",
         &restored.manifest()?.principal_commitment,
@@ -704,10 +725,20 @@ fn backup_contact_restore_reports_equivocation_and_link_collision_and_aborts_on_
                 reason: crate::LocalBusBackupContactSkipReason::Equivocation,
             },
             crate::LocalBusBackupContactSkip {
+                principal_id: "higher-equivocal".into(),
+                reason: crate::LocalBusBackupContactSkipReason::Equivocation,
+            },
+            crate::LocalBusBackupContactSkip {
                 principal_id: "collision".into(),
                 reason: crate::LocalBusBackupContactSkipReason::LinkCollision,
             },
         ]
+    );
+    assert!(
+        restored.client.account_db()?.journal_after(0, 128)?.iter().any(|event| {
+            event.topic == "safety.changed" && event.body["principal_id"] == "higher-equivocal"
+        }),
+        "a signed higher-epoch transition fork is journaled"
     );
 
     let corrupt_owner = Actor::new("corrupt-owner", "original", 202, 203, 1)?;

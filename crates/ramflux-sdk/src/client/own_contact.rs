@@ -41,6 +41,12 @@ pub(super) enum OwnContactReceiveOutcome {
     TombstoneSkippedOlder,
     AlreadyPresent,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OwnContactReceiveMode {
+    Sibling,
+    BackupRestore,
+}
 impl RamfluxClient {
     pub(super) fn backup_contact_skip(
         &self,
@@ -113,7 +119,14 @@ impl RamfluxClient {
                 return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
             }
         }
-        self.check_observed_set(record)?;
+        if let Err(error) = self.check_observed_set(record) {
+            if matches!(error, SdkError::Crypto(_)) {
+                self.record_authority_rejection(record)?;
+                tracing::warn!(principal_id = %record.principal_id, "backup contact authority equivocation skipped");
+                return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
+            }
+            return Err(error);
+        }
         Ok(None)
     }
 
@@ -330,13 +343,15 @@ impl RamfluxClient {
     /// The caller must authenticate the containing owned-root payload first: either an active
     /// sibling packet or the account backup AEAD. This decoder never establishes that authority.
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
-        Ok(self.receive_own_contact_outcome(body)? != OwnContactReceiveOutcome::NotPacket)
+        Ok(self.receive_own_contact_outcome(body, OwnContactReceiveMode::Sibling)?
+            != OwnContactReceiveOutcome::NotPacket)
     }
     pub(super) fn receive_own_contact_outcome(
         &self,
         body: &[u8],
+        mode: OwnContactReceiveMode,
     ) -> Result<OwnContactReceiveOutcome, SdkError> {
-        if let Some(outcome) = self.receive_own_contact_tombstone(body)? {
+        if let Some(outcome) = self.receive_own_contact_tombstone(body, mode)? {
             return Ok(outcome);
         }
         let Some(raw) = body.strip_prefix(PREFIX) else {

@@ -100,6 +100,8 @@ impl AccountDb {
             let (state,changed)=match change {
                 LinkConsentChange::Establish {requester,target,at} => ("lifted",db.execute("INSERT OR REPLACE INTO friend_link_projection(link_id,requester_id,target_id,state,remove_scope,blocked,capability_revoked_at,updated_at) VALUES(?1,?2,?3,'accepted',NULL,0,NULL,?4)",params![id,requester,target,at])?),
                 LinkConsentChange::Block(at) => ("blocked",db.execute("UPDATE friend_link_projection SET state='blocked',blocked=1,capability_revoked_at=coalesce(capability_revoked_at,?2),updated_at=?2 WHERE link_id=?1",params![id,at])?),
+                // The legacy decision vocabulary has no `removed` state, so removal uses the
+                // restrictive `blocked` decision until ID-01-FU-02 adds a dedicated state.
                 LinkConsentChange::Remove {scope,at} => ("blocked",db.execute("UPDATE friend_link_projection SET state='removed',remove_scope=?2,capability_revoked_at=coalesce(capability_revoked_at,?3),updated_at=?3 WHERE link_id=?1",params![id,scope,at])?),
                 LinkConsentChange::Unblock(at) => ("lifted",db.execute("UPDATE friend_link_projection SET state='accepted',blocked=0,capability_revoked_at=NULL,updated_at=?2 WHERE link_id=?1",params![id,at])?),
                 LinkConsentChange::Decline(at) => ("declined",db.execute("UPDATE friend_link_projection SET state='rejected',updated_at=?2 WHERE link_id=?1 AND state='pending'",params![id,at])?),

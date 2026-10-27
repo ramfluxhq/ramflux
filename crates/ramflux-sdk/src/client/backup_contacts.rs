@@ -3,7 +3,7 @@
 
 //! Bounded relationship snapshots inside the authenticated encrypted account backup.
 use crate::bus::protocol::LocalBusBackupContactRestoreReport;
-use crate::client::own_contact::OwnContactReceiveOutcome;
+use crate::client::own_contact::{OwnContactReceiveMode, OwnContactReceiveOutcome};
 use crate::{RamfluxClient, SdkError};
 
 impl RamfluxClient {
@@ -41,7 +41,9 @@ impl RamfluxClient {
                     report.skipped.push(skip);
                     continue;
                 }
-                match self.receive_own_contact_outcome(&body)? {
+                match self
+                    .receive_own_contact_outcome(&body, OwnContactReceiveMode::BackupRestore)?
+                {
                     OwnContactReceiveOutcome::Restored => report.restored += 1,
                     OwnContactReceiveOutcome::TombstoneApplied => {
                         report.tombstones_applied += 1;

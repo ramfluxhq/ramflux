@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Same-root contact restrictions are sticky against delayed sibling acceptance copies.
-use super::{OwnContactReceiveOutcome, RamfluxClient, SdkError, contact_peer};
+use super::{
+    OwnContactReceiveMode, OwnContactReceiveOutcome, RamfluxClient, SdkError, contact_peer,
+};
 use serde::{Deserialize, Serialize};
 const PREFIX: &[u8] = b"ramflux.own_contact_tombstone.v1\n";
 #[derive(Serialize, Deserialize)]
@@ -44,6 +46,7 @@ impl RamfluxClient {
     pub(super) fn receive_own_contact_tombstone(
         &self,
         body: &[u8],
+        mode: OwnContactReceiveMode,
     ) -> Result<Option<OwnContactReceiveOutcome>, SdkError> {
         let Some(raw) = body.strip_prefix(PREFIX) else {
             return Ok(None);
@@ -66,9 +69,10 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("own contact tombstone link collision".into()));
         }
-        if db
-            .contact_link_decision(&link.link_id)?
-            .is_some_and(|local| decided_at.is_none_or(|source| source < local.decided_at))
+        if mode == OwnContactReceiveMode::BackupRestore
+            && db
+                .contact_link_decision(&link.link_id)?
+                .is_some_and(|local| decided_at.is_none_or(|source| source < local.decided_at))
         {
             return Ok(Some(OwnContactReceiveOutcome::TombstoneSkippedOlder));
         }
