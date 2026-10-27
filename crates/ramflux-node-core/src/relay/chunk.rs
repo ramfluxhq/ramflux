@@ -279,8 +279,7 @@ pub fn object_relay_chunk_max_ttl_seconds() -> u64 {
 
 #[must_use]
 pub(super) fn object_relay_chunk_max_ttl_seconds_from_env(value: Option<&str>) -> u64 {
-    value
-        .and_then(|value| value.parse::<u64>().ok())
+    env::parse_value::<u64>(OBJECT_RELAY_CHUNK_MAX_TTL_ENV, value)
         .filter(|ttl| *ttl > 0)
         .unwrap_or(OBJECT_RELAY_CHUNK_MAX_TTL_SECONDS)
         .min(OBJECT_RELAY_CHUNK_HARD_MAX_TTL_SECONDS)

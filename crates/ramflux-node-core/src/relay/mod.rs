@@ -3,6 +3,7 @@
 
 #![allow(unused_imports)]
 
+use crate::environment as env;
 use crate::{
     NodeCoreError, RELAY_CACHE_KEY, RELAY_CACHE_TABLE, RELAY_CHUNK_ENTRY_TABLE,
     RELAY_TOMBSTONE_TABLE,
@@ -11,11 +12,11 @@ use hmac::{Hmac, Mac};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{env, fs};
 mod legacy;
 pub use legacy::*;
 mod chunk;

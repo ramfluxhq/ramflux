@@ -215,17 +215,9 @@ pub(super) fn record_relay_expiry_mutation_in_txn(
 }
 
 pub(super) fn relay_usize_env(name: &str, default: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    env::parsed::<usize>(name).filter(|value| *value > 0).unwrap_or(default)
 }
 
 pub(super) fn relay_u64_env(name: &str, default: u64) -> u64 {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    env::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
 }

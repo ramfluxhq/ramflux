@@ -7,8 +7,8 @@ use super::{NodeCoreError, ObjectRelayTombstone, env};
 
 /// Single env override for the relay resident metadata budget (RELAY-MEM-01-A1). The value is the
 /// maximum number of bytes the in-memory chunk-meta + tombstone index (including in-flight
-/// reservations) may charge. Unset uses [`RELAY_METADATA_MAX_BYTES_DEFAULT`]; `0` or a
-/// non-parseable value is a hard startup failure (never a silent default).
+/// reservations) may charge. Absent or malformed environment input uses the bounded
+/// [`RELAY_METADATA_MAX_BYTES_DEFAULT`]; an explicit `0` remains a startup failure.
 pub const RELAY_METADATA_MAX_BYTES_ENV: &str = "RAMFLUX_RELAY_METADATA_MAX_BYTES";
 /// Default resident metadata budget: 64 MiB. Only the metadata index is resident; chunk ciphertext
 /// lives in redb and is read through on demand, so this bounds RAM independent of stored object size.
@@ -26,19 +26,23 @@ pub(super) fn relay_default_max_bytes() -> u64 {
     RELAY_METADATA_MAX_BYTES_DEFAULT
 }
 
-/// Resolves the resident metadata budget from the environment (fail-closed).
+/// Resolve an optional environment override without accepting an unexpanded expression.
 ///
 /// # Errors
-/// Returns [`NodeCoreError::ItestHttp`] when `RAMFLUX_RELAY_METADATA_MAX_BYTES` is set to `0` or to a
-/// value that does not parse as a positive `u64`. An unset variable is not an error: it yields the
-/// 64 MiB default.
+/// Returns an error for an explicit zero budget. Unparseable overrides warn and use 64 MiB.
 pub fn relay_metadata_max_bytes_from_env() -> Result<u64, NodeCoreError> {
-    match env::var(RELAY_METADATA_MAX_BYTES_ENV) {
-        Err(env::VarError::NotPresent) => parse_relay_metadata_max_bytes(None),
-        Err(env::VarError::NotUnicode(_)) => Err(NodeCoreError::ItestHttp(format!(
-            "{RELAY_METADATA_MAX_BYTES_ENV} is not valid unicode"
-        ))),
-        Ok(raw) => parse_relay_metadata_max_bytes(Some(&raw)),
+    configured_metadata_budget(env::var(RELAY_METADATA_MAX_BYTES_ENV).ok().as_deref())
+}
+
+fn configured_metadata_budget(raw: Option<&str>) -> Result<u64, NodeCoreError> {
+    let raw = env::configured_value(RELAY_METADATA_MAX_BYTES_ENV, raw).map(str::trim);
+    match raw {
+        Some(value) if value.parse::<u64>().is_ok() => parse_relay_metadata_max_bytes(Some(value)),
+        Some(_) => {
+            env::warn_invalid(RELAY_METADATA_MAX_BYTES_ENV);
+            parse_relay_metadata_max_bytes(None)
+        }
+        None => parse_relay_metadata_max_bytes(None),
     }
 }
 
@@ -196,5 +200,30 @@ impl RelayStoreOpError {
             Self::Capacity(_) => 503,
             Self::Persist(_) | Self::PayloadUnavailable(_) | Self::Validation(_) => 500,
         }
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+    #[test]
+    fn malformed_optional_budget_uses_the_bounded_default_but_an_explicit_zero_still_fails()
+    -> Result<(), NodeCoreError> {
+        for value in [
+            None,
+            Some(""),
+            Some("invalid"),
+            Some("18446744073709551616"),
+            Some("${RAMFLUX_RELAY_METADATA_MAX_BYTES:-0}"),
+        ] {
+            assert_eq!(configured_metadata_budget(value)?, RELAY_METADATA_MAX_BYTES_DEFAULT);
+        }
+        assert_eq!(configured_metadata_budget(Some(" 1048576 "))?, 1_048_576);
+        assert!(configured_metadata_budget(Some("0")).is_err());
+        assert!(
+            parse_relay_metadata_max_bytes(Some("invalid")).is_err(),
+            "the strict programmatic validator is unchanged"
+        );
+        Ok(())
     }
 }
