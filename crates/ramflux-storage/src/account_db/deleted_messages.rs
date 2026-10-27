@@ -5,14 +5,29 @@
 
 use super::AccountDb;
 use crate::StorageError;
+use hmac::{Hmac, Mac};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use std::collections::{BTreeMap, BTreeSet};
 
-const SCRUB_VERSION: i64 = 2;
+const SCRUB_VERSION: i64 = 3;
 const SCRUB_BATCH: i64 = 256;
+type HmacSha256 = Hmac<Sha256>;
 
 impl AccountDb {
+    /// Whether bounded post-unlock deletion work remains.
+    ///
+    /// # Errors
+    /// Returns storage errors while consulting the scrub index.
+    pub fn deleted_message_scrub_pending(&self) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE deleted=1 AND scrub_version<?1 LIMIT 1)",
+            params![SCRUB_VERSION],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
+    }
+
     /// Completes bounded deletion upgrades after the SDK has attached its verified identity.
     ///
     /// # Errors
@@ -23,40 +38,54 @@ impl AccountDb {
     ) -> Result<usize, StorageError> {
         let mut total = 0usize;
         loop {
-            let rows = {
-                let mut statement = self.connection.prepare(
-                "SELECT conversation_id,message_id FROM direct_message_projection WHERE deleted=1 AND scrub_version<?1 ORDER BY rowid LIMIT ?2",
-            )?;
-                statement
-                    .query_map(params![SCRUB_VERSION, SCRUB_BATCH], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            if rows.is_empty() {
+            let count = self.scrub_deleted_messages_batch(own_device_ids)?;
+            if count == 0 {
                 break;
             }
-            self.write_transaction(|| {
-                let mut projections = BTreeMap::new();
-                for (conversation, message) in &rows {
-                    let projection = self.scrub_message_for_deletion_inner(
-                        conversation,
-                        message,
-                        None,
-                        own_device_ids,
-                        false,
-                    )?;
-                    if let Some(projection) = projection {
-                        projections.insert(message.clone(), projection);
-                    }
-                }
-                self.scrub_message_journal_batch(&projections)?;
-                Ok::<(), StorageError>(())
-            })?;
-            total = total.saturating_add(rows.len());
+            total = total.saturating_add(count);
         }
         self.checkpoint_retired_secrets_if_committed()?;
         Ok(total)
+    }
+
+    /// Scrubs at most one bounded legacy batch after account unlock.
+    ///
+    /// # Errors
+    /// Returns storage errors without advancing rows whose scrub did not commit.
+    pub fn scrub_deleted_messages_batch(
+        &self,
+        own_device_ids: &BTreeSet<String>,
+    ) -> Result<usize, StorageError> {
+        let rows = {
+            let mut statement = self.connection.prepare(
+                "SELECT conversation_id,message_id FROM direct_message_projection WHERE deleted=1 AND scrub_version<?1 ORDER BY rowid LIMIT ?2",
+            )?;
+            statement
+                .query_map(params![SCRUB_VERSION, SCRUB_BATCH], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        self.write_transaction(|| {
+            let mut projections = BTreeMap::new();
+            for (conversation, message) in &rows {
+                if let Some(projection) = self.scrub_message_for_deletion_inner(
+                    conversation,
+                    message,
+                    None,
+                    own_device_ids,
+                    false,
+                )? {
+                    projections.insert(message.clone(), projection);
+                }
+            }
+            self.scrub_message_journal_batch(&projections)
+        })?;
+        self.checkpoint_retired_secrets_if_committed()?;
+        Ok(rows.len())
     }
 
     pub(super) fn scrub_message_for_deletion(
@@ -70,12 +99,13 @@ impl AccountDb {
             params![conversation, message],
             |row| row.get::<_, i64>(0),
         ).optional()?.is_some_and(|deleted| deleted != 0);
+        let own_device_ids = self.verified_own_device_ids()?;
         let found = self
             .scrub_message_for_deletion_inner(
                 conversation,
                 message,
                 own_override,
-                &BTreeSet::new(),
+                &own_device_ids,
                 true,
             )?
             .is_some();
@@ -154,6 +184,7 @@ impl AccountDb {
         }
         self.persist_deletion_marker(message)?;
         self.scrub_replay_copies(message)?;
+        self.remove_delivery_receipt_work(message)?;
         self.remove_message_origin(conversation, message)?;
         Ok(Some(projection))
     }
@@ -194,60 +225,110 @@ impl AccountDb {
         {
             return Ok(true);
         }
-        self.actor_state_exists(&deletion_marker_key(message))
+        Ok(self.actor_state_exists(&self.deletion_marker_key(message)?)?
+            || self.actor_state_exists(&legacy_deletion_marker_key(message))?)
     }
 
     fn persist_deletion_marker(&self, message: &str) -> Result<(), StorageError> {
-        self.persist_actor_state(&deletion_marker_key(message), &json!({"version":1}))
+        self.persist_actor_state(&self.deletion_marker_key(message)?, &json!({"version":2}))?;
+        self.remove_actor_state(&legacy_deletion_marker_key(message))
     }
 
     fn scrub_replay_copies(&self, message: &str) -> Result<(), StorageError> {
         self.remove_actor_state(&format!("routed/message-owner/{message}"))?;
         let mut envelope_ids = BTreeSet::from([message.to_owned()]);
-        for key in self.actor_state_keys("routed/committed/")? {
-            let Some(mut value) = self.load_actor_state::<Value>(&key)? else { continue };
-            if value.pointer("/routing/message_id").and_then(Value::as_str) != Some(message) {
-                continue;
-            }
-            if let Some(envelope) = value.pointer_mut("/entry/envelope") {
-                if let Some(id) = envelope.get("envelope_id").and_then(Value::as_str) {
-                    envelope_ids.insert(id.to_owned());
-                }
-                for field in [
-                    "source_principal_id",
-                    "source_device_id",
-                    "encrypted_payload",
-                    "signing_key_id",
-                    "signature",
-                ] {
-                    if envelope.get(field).is_some() {
-                        envelope[field] = Value::String(String::new());
-                    }
-                }
-            }
-            self.persist_actor_state(&key, &value)?;
-        }
-        let events = {
+        let keys = {
             let mut statement = self.connection.prepare(
-                "SELECT event_id,event_body FROM local_event_log WHERE event_type='gateway.deliver.opaque' AND signature_status!='scrubbed'",
+                "SELECT state_kind FROM runtime_actor_state
+                 WHERE state_kind >= 'routed/committed/' AND state_kind < 'routed/committed0'
+                   AND CASE WHEN json_valid(CAST(state_json AS TEXT))
+                       THEN json_extract(CAST(state_json AS TEXT),'$.routing.message_id') END=?1",
             )?;
             statement
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?
+                .query_map(params![message], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (event_id, body) in events {
-            let Ok(envelope) = serde_json::from_slice::<Value>(&body) else { continue };
-            if !envelope
-                .get("envelope_id")
+        for key in keys {
+            let Some(value) = self.load_actor_state::<Value>(&key)? else { continue };
+            let payload_hash = value
+                .pointer("/entry/envelope/payload_hash")
                 .and_then(Value::as_str)
-                .is_some_and(|id| envelope_ids.contains(id))
+                .unwrap_or_default()
+                .to_owned();
+            if let Some(envelope) = value.pointer("/entry/envelope")
+                && let Some(id) = envelope.get("envelope_id").and_then(Value::as_str)
             {
-                continue;
+                envelope_ids.insert(id.to_owned());
             }
-            self.connection.execute(
-                "UPDATE local_event_log SET event_body=?2,signature=x'',signature_status='scrubbed' WHERE event_id=?1",
-                params![event_id, serde_json::to_vec(&json!({"deleted_message_hash":deletion_hash(message)}))?],
+            let replay_key = self.account_mac(
+                b"ramflux/replay-key/v1",
+                &ramflux_protocol::canonical_json_bytes(&(message, &payload_hash))?,
             )?;
+            self.persist_actor_state(
+                &format!("routed/deleted/{replay_key}"),
+                &json!({"message_key":self.deletion_hash(message)?,"payload_hash":payload_hash}),
+            )?;
+            self.remove_actor_state(&key)?;
+        }
+        for envelope_id in envelope_ids {
+            self.connection.execute(
+                "UPDATE runtime_journal SET body_json=?2
+                 WHERE topic='message.unrouted'
+                   AND CASE WHEN json_valid(CAST(body_json AS TEXT))
+                       THEN json_extract(CAST(body_json AS TEXT),'$.envelope_id') END=?1",
+                params![
+                    envelope_id,
+                    serde_json::to_vec(&json!({"message_id":message,"deleted":true}))?
+                ],
+            )?;
+            let events = {
+                let mut statement = self.connection.prepare(
+                    "SELECT event_id FROM local_event_log
+                 WHERE event_type='gateway.deliver.opaque' AND signature_status!='scrubbed'
+                   AND CASE WHEN json_valid(CAST(event_body AS TEXT))
+                       THEN json_extract(CAST(event_body AS TEXT),'$.envelope_id') END=?1",
+                )?;
+                statement
+                    .query_map(params![envelope_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for event_id in events {
+                self.connection.execute(
+                    "UPDATE local_event_log SET event_body=?2,signature=x'',signature_status='scrubbed' WHERE event_id=?1",
+                    params![event_id, serde_json::to_vec(&json!({"deleted_message_key":self.deletion_hash(message)?}))?],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_delivery_receipt_work(&self, message: &str) -> Result<(), StorageError> {
+        let status_ids = {
+            let mut statement = self.connection.prepare(
+                "SELECT CASE WHEN json_valid(CAST(state_json AS TEXT))
+                    THEN json_extract(CAST(state_json AS TEXT),'$.status_id') END
+                 FROM runtime_actor_state
+                 WHERE state_kind >= 'delivery-receipt/pending/' AND state_kind < 'delivery-receipt/pending0'
+                   AND CASE WHEN json_valid(CAST(state_json AS TEXT))
+                       THEN json_extract(CAST(state_json AS TEXT),'$.message') END=?1",
+            )?;
+            statement
+                .query_map(params![message], |row| row.get::<_, Option<String>>(0))?
+                .filter_map(Result::transpose)
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        self.connection.execute(
+            "DELETE FROM runtime_actor_state
+             WHERE ((state_kind >= 'delivery-receipt/pending/' AND state_kind < 'delivery-receipt/pending0')
+                 AND CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN json_extract(CAST(state_json AS TEXT),'$.message') END=?1)
+                OR ((state_kind >= 'delivery-receipt/status/' AND state_kind < 'delivery-receipt/status0')
+                 AND CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN json_extract(CAST(state_json AS TEXT),'$.retry_work.message') END=?1)",
+            params![message],
+        )?;
+        for status_id in status_ids {
+            if !status_id.is_empty() {
+                self.remove_actor_state(&format!("delivery-receipt/status/{status_id}"))?;
+            }
         }
         Ok(())
     }
@@ -293,21 +374,6 @@ impl AccountDb {
         &self,
         projections: &BTreeMap<String, Value>,
     ) -> Result<(), StorageError> {
-        let mut envelope_messages = BTreeMap::new();
-        for key in self.actor_state_keys("routed/committed/")? {
-            let Some(value) = self.load_actor_state::<Value>(&key)? else { continue };
-            let Some(message) = value.pointer("/routing/message_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if !projections.contains_key(message) {
-                continue;
-            }
-            if let Some(envelope) =
-                value.pointer("/entry/envelope/envelope_id").and_then(Value::as_str)
-            {
-                envelope_messages.insert(envelope.to_owned(), message.to_owned());
-            }
-        }
         let rows = {
             let mut statement = self.connection.prepare(
                 "SELECT seq,topic,body_json FROM runtime_journal WHERE topic IN ('message.received','group.message.received','message.updated','message.unrouted')",
@@ -318,8 +384,20 @@ impl AccountDb {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let mut quarantined = 0_u64;
         for (seq, topic, bytes) in rows {
-            let mut body: Value = serde_json::from_slice(&bytes)?;
+            let Ok(mut body) = serde_json::from_slice::<Value>(&bytes) else {
+                self.connection.execute(
+                    "UPDATE runtime_journal SET topic='privacy.quarantined',body_json=x'7b7d',source_key=?2,subject=NULL WHERE seq=?1",
+                    params![seq, format!("privacy-quarantined:{seq}")],
+                )?;
+                quarantined = quarantined.saturating_add(1);
+                tracing::warn!(
+                    journal_seq = seq,
+                    "quarantined malformed deleted-message journal row"
+                );
+                continue;
+            };
             let nested = body
                 .pointer("/message/message_id")
                 .or_else(|| body.pointer("/message/id"))
@@ -329,11 +407,7 @@ impl AccountDb {
             if let Some((message, projection)) = projections.iter().find(|(message, _)| {
                 nested == Some(message.as_str())
                     || direct == Some(message.as_str())
-                    || topic == "message.unrouted"
-                        && (envelope == Some(message.as_str())
-                            || envelope.is_some_and(|id| {
-                                envelope_messages.get(id).is_some_and(|mapped| mapped == *message)
-                            }))
+                    || topic == "message.unrouted" && envelope == Some(message.as_str())
             }) {
                 body = if topic == "message.unrouted" {
                     json!({"message_id":message,"deleted":true})
@@ -347,16 +421,44 @@ impl AccountDb {
                 )?;
             }
         }
+        if quarantined != 0 {
+            let previous = self
+                .load_actor_state::<u64>("privacy/deleted-scrub/quarantined-count")?
+                .unwrap_or(0);
+            self.persist_actor_state(
+                "privacy/deleted-scrub/quarantined-count",
+                &previous.saturating_add(quarantined),
+            )?;
+        }
         Ok(())
+    }
+
+    fn account_mac(&self, info: &[u8], value: &[u8]) -> Result<String, StorageError> {
+        let mut derived = [0_u8; 32];
+        hkdf::Hkdf::<Sha256>::new(None, self.current_key.bytes())
+            .expand(info, &mut derived)
+            .map_err(|_| StorageError::AuthorizationRejected)?;
+        let mut mac = HmacSha256::new_from_slice(&derived)
+            .map_err(|_| StorageError::AuthorizationRejected)?;
+        mac.update(value);
+        Ok(ramflux_protocol::encode_base64url(mac.finalize().into_bytes()))
+    }
+
+    fn deletion_hash(&self, message: &str) -> Result<String, StorageError> {
+        self.account_mac(b"ramflux/tombstone-key/v1", message.as_bytes())
+    }
+
+    fn deletion_marker_key(&self, message: &str) -> Result<String, StorageError> {
+        Ok(format!("message/deleted/{}", self.deletion_hash(message)?))
     }
 }
 
-fn deletion_hash(message: &str) -> String {
+fn legacy_deletion_hash(message: &str) -> String {
     ramflux_crypto::blake3_256_base64url("ramflux.deleted-message.v1", message.as_bytes())
 }
 
-fn deletion_marker_key(message: &str) -> String {
-    format!("message/deleted/{}", deletion_hash(message))
+fn legacy_deletion_marker_key(message: &str) -> String {
+    format!("message/deleted/{}", legacy_deletion_hash(message))
 }
 
 fn deleted_projection(conversation: &str, message: &str, created_at: i64, is_own: bool) -> Value {
@@ -485,7 +587,7 @@ mod tests {
     fn post_identity_scrub_recognizes_every_owned_sender_shape() -> Result<(), StorageError> {
         let (root, db) = crate::tests::test_db("deleted-owned-scrub")?;
         let db = db.with_device_signer(ramflux_crypto::create_device_branch(
-            "principal",
+            "principal-id-realistic",
             "current-device",
             1,
             [0x44; 32],
@@ -494,15 +596,15 @@ mod tests {
         for (message, sender) in [
             ("current-message", "current-device"),
             ("sibling-message", "sibling-device"),
-            ("principal-message", "principal"),
+            ("principal-message", "principal-id-realistic"),
         ] {
             db.send_direct_message("thread", message, sender, b"secret")?;
+            db.delete_direct_message("thread", message, "local", &format!("delete-{message}"))?;
         }
-        db.connection.execute("UPDATE direct_message_projection SET deleted=1", [])?;
         let own_devices = db.verified_own_device_ids()?;
         assert!(own_devices.contains("current-device"));
         assert!(own_devices.contains("sibling-device"));
-        assert_eq!(db.scrub_deleted_messages(&own_devices)?, 3);
+        assert!(own_devices.contains("principal-id-realistic"));
         for message in ["current-message", "sibling-message", "principal-message"] {
             assert!(db.direct_message_by_id(message)?.is_some_and(|row| row.is_own));
         }
@@ -558,12 +660,19 @@ mod tests {
         assert!(row.deleted && !row.is_own);
         assert_eq!(db.message_content("message")?, None);
         assert!(!db.actor_state_exists("routed/message-owner/message")?);
+        assert!(!db.actor_state_exists("routed/committed/receipt")?);
+        let replay_key = db
+            .actor_state_key_page("routed/deleted/", 2)?
+            .into_iter()
+            .next()
+            .ok_or(StorageError::AuthorizationRejected)?;
         let replay = db
-            .load_actor_state::<Value>("routed/committed/receipt")?
+            .load_actor_state::<Value>(&replay_key)?
             .ok_or(StorageError::AuthorizationRejected)?;
         let rendered = serde_json::to_string(&replay)?;
         assert!(!rendered.contains("peer-secret"));
         assert!(!rendered.contains("body-secret"));
+        assert!(!rendered.contains("wire-message"));
         assert!(rendered.contains("dedup-hash"));
         let event = db
             .event_body("gateway/delivery/v2/admission")?
@@ -585,10 +694,107 @@ mod tests {
         db.connection.execute_batch(
             "WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<10000)
              INSERT INTO direct_message_projection(conversation_id,message_id,sender_id,encrypted_body,metadata_json,deleted,is_own,scrub_version,created_at)
-             SELECT 'thread','message-'||n,'',x'',x'7b7d',1,0,2,n FROM rows;",
+             SELECT 'thread','message-'||n,'',x'',x'7b7d',1,0,3,n FROM rows;",
         )?;
         assert_eq!(db.scrub_deleted_messages(&BTreeSet::new())?, 0);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_uses_indexed_replay_and_event_lookups_at_scale() -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("deleted-indexed-lookup")?;
+        db.connection.execute_batch(
+            "WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<10000)
+             INSERT INTO runtime_actor_state(state_kind,state_json)
+             SELECT 'routed/committed/unrelated-'||n,
+                    CAST('{\"routing\":{\"message_id\":\"unrelated-'||n||'\"}}' AS BLOB)
+             FROM rows;",
+        )?;
+        db.send_direct_message("thread", "target", "peer", b"secret")?;
+        let plans = [
+            (
+                "SELECT state_kind FROM runtime_actor_state WHERE state_kind >= 'routed/committed/' AND state_kind < 'routed/committed0' AND CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN json_extract(CAST(state_json AS TEXT),'$.routing.message_id') END='target'",
+                "runtime_actor_deleted_message",
+            ),
+            (
+                "SELECT event_id FROM local_event_log WHERE event_type='gateway.deliver.opaque' AND signature_status!='scrubbed' AND CASE WHEN json_valid(CAST(event_body AS TEXT)) THEN json_extract(CAST(event_body AS TEXT),'$.envelope_id') END='target'",
+                "idx_local_event_gateway_envelope",
+            ),
+        ];
+        for (query, index) in plans {
+            let detail: String =
+                db.connection
+                    .query_row(&format!("EXPLAIN QUERY PLAN {query}"), [], |row| row.get(3))?;
+            assert!(detail.contains(index), "unexpected query plan: {detail}");
+        }
+        let started = std::time::Instant::now();
+        db.delete_direct_message("thread", "target", "local", "tombstone")?;
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_journal_row_is_quarantined_without_blocking_upgrade() -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("deleted-journal-quarantine")?;
+        db.send_direct_message("thread", "message", "peer", b"secret")?;
+        db.connection.execute(
+            "UPDATE direct_message_projection SET deleted=1,scrub_version=0 WHERE message_id='message'",
+            [],
+        )?;
+        db.connection.execute(
+            "INSERT INTO runtime_journal(at,topic,body_json,source_key) VALUES(1,'message.received',x'ff','corrupt-source')",
+            [],
+        )?;
+        assert_eq!(db.scrub_deleted_messages_batch(&BTreeSet::new())?, 1);
+        let quarantined: (String, Vec<u8>, String) = db.connection.query_row(
+            "SELECT topic,body_json,source_key FROM runtime_journal LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(quarantined.0, "privacy.quarantined");
+        assert_eq!(quarantined.1, b"{}");
+        assert!(quarantined.2.starts_with("privacy-quarantined:"));
+        assert_eq!(db.load_actor_state::<u64>("privacy/deleted-scrub/quarantined-count")?, Some(1));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_keys_are_account_scoped_and_receipt_retry_work_is_erased()
+    -> Result<(), StorageError> {
+        let first_root = crate::tests::temp_root("deleted-key-first");
+        let second_root = crate::tests::temp_root("deleted-key-second");
+        let mut keys = Vec::new();
+        for (root, secret) in
+            [(&first_root, b"first".as_slice()), (&second_root, b"second".as_slice())]
+        {
+            let index = AccountIndex::open(root)?;
+            index.create_account("acct", "root")?;
+            let db = AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", secret))?;
+            db.send_direct_message("thread", "same-message", "peer", b"secret")?;
+            db.persist_actor_state(
+                "delivery-receipt/pending/status-id",
+                &json!({"status_id":"status-id","conversation":"thread","message":"same-message"}),
+            )?;
+            db.persist_actor_state(
+                "delivery-receipt/status/status-id",
+                &json!({"state":"failed","retry_work":{"message":"same-message","sender":"peer-secret"}}),
+            )?;
+            db.delete_direct_message("thread", "same-message", "local", "tombstone")?;
+            keys.push(
+                db.actor_state_key_page("message/deleted/", 1)?
+                    .into_iter()
+                    .next()
+                    .ok_or(StorageError::AuthorizationRejected)?,
+            );
+            assert!(!db.actor_state_exists("delivery-receipt/pending/status-id")?);
+            assert!(!db.actor_state_exists("delivery-receipt/status/status-id")?);
+        }
+        assert_ne!(keys[0], keys[1]);
+        std::fs::remove_dir_all(first_root)?;
+        std::fs::remove_dir_all(second_root)?;
         Ok(())
     }
 

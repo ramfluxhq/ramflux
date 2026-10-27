@@ -22,6 +22,16 @@ impl AccountDb {
              CREATE TABLE IF NOT EXISTS runtime_ack (envelope_id TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS runtime_scoped_ack (receiver TEXT NOT NULL,target TEXT NOT NULL,inbox_seq INTEGER NOT NULL,PRIMARY KEY(receiver,target,inbox_seq));
              CREATE TABLE IF NOT EXISTS runtime_actor_state (state_kind TEXT PRIMARY KEY, state_json BLOB NOT NULL);
+             CREATE INDEX IF NOT EXISTS runtime_actor_deleted_message ON runtime_actor_state(
+                 CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN json_extract(CAST(state_json AS TEXT),'$.routing.message_id') END
+             ) WHERE state_kind >= 'routed/committed/' AND state_kind < 'routed/committed0';
+             CREATE INDEX IF NOT EXISTS runtime_actor_receipt_message ON runtime_actor_state(
+                 CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN COALESCE(
+                     json_extract(CAST(state_json AS TEXT),'$.message'),
+                     json_extract(CAST(state_json AS TEXT),'$.retry_work.message')
+                 ) END
+             ) WHERE (state_kind >= 'delivery-receipt/pending/' AND state_kind < 'delivery-receipt/pending0')
+                 OR (state_kind >= 'delivery-receipt/status/' AND state_kind < 'delivery-receipt/status0');
              CREATE TABLE IF NOT EXISTS runtime_operation (
                 operation_id TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL,
