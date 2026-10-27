@@ -6,6 +6,27 @@ Current accounts still keep the root seed on each device. Activation requires
 coordinated protocol, verifier, vault, backup and client changes; the guarantees
 below describe that future system, not an implemented or audited feature.
 
+## Ordinary DM security boundary
+
+The ordinary SDK DM stack uses X3DH bootstrap and the existing persistent double
+ratchet. It advances its DH ratchet after the first reply and provides ratchet
+forward secrecy from that point. Bootstrap forward secrecy remains pending
+DM-FS-01: the current signed prekey is a stable derivation of retained branch
+material, with no published/consumed one-time prekey. Later compromise of retained
+bootstrap seeds can reconstruct a captured initial session.
+
+Receiver replay protection rejects consumed ratchet counters. The ordinary routed
+path also retains root-qualified pair/owner bootstrap high-water marks and
+committed receive receipts, preventing an older authenticated bootstrap from
+silently replacing newer state and suppressing duplicate message projections.
+These are the current implementation mechanisms, not a claim of an independent
+cryptographic audit. Born-v3 ordinary-path integration reuses this stack; custody
+registration and its TLS exporter binding do not provide bootstrap forward secrecy.
+
+Identity-record versions are separate from DM envelope, ratchet and generic signed
+request versions. An ordinary encrypted envelope with a v2 schema or generic
+`SignedRequest` with a v1 schema does not accept a legacy v1/v2 identity proof.
+
 ## Authority and recovery model
 
 The user keeps one recovery artifact: a generated 24-word recovery phrase. Nodes

@@ -126,7 +126,7 @@ impl CustodyBusClient {
             body,
             trace_id: None,
         };
-        let bytes = Zeroizing::new(serde_json::to_vec(&request)?);
+        let bytes = super::serialize_secret(&request, 4096)?;
         if bytes.len() > 4096 {
             return Err(SdkError::CustodySetupInvalid);
         }
@@ -148,6 +148,7 @@ impl CustodyBusClient {
         if let Response::Error { code } = &reply.result {
             return Err(match code.as_str() {
                 "CustodyCreationDisabled" => SdkError::CustodyCreationDisabled,
+                "CustodyExpired" => SdkError::CustodyExpired,
                 "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
                 "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
                 "NetworkingPending" => SdkError::NetworkingPending,

@@ -65,19 +65,14 @@ impl RamfluxClient {
         Ok(self.account_index()?.active_account()?)
     }
 
-    pub(crate) fn seal_born_account_data(
+    pub(crate) fn seal_new_account_data(
         &self,
         local_account_id: &str,
+        expected_anchor: &str,
         secret: &[u8],
     ) -> Result<(), SdkError> {
         let index = self.account_index()?;
-        let account = crate::custody::load_account(
-            index.root(),
-            local_account_id,
-            crate::custody::network_now()?,
-        )?;
-        if index.account(local_account_id)?.principal_commitment
-            != account.record().body.account_anchor
+        if index.account(local_account_id)?.principal_commitment != expected_anchor
             || index.load_wrapped_db_key(local_account_id)?.is_some()
         {
             return Err(SdkError::CustodySetupInvalid);
@@ -107,7 +102,13 @@ impl RamfluxClient {
                     self.account_index()?.root(),
                     local_account_id,
                     crate::custody::network_now()?,
-                )?;
+                )
+                .map_err(|error| match error {
+                    SdkError::Io(ref cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+                        SdkError::NetworkingPending
+                    }
+                    error => error,
+                })?;
                 if self.account_index()?.account(local_account_id)?.principal_commitment
                     != account.record().body.account_anchor
                 {

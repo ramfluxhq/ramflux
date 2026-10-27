@@ -186,6 +186,7 @@ pub(super) struct GenesisMaterial<'a> {
     pub primary: &'a ramflux_crypto::custody::SelfSigningKey,
     pub branch: &'a Zeroizing<[u8; 64]>,
     pub now: u64,
+    pub data_secret: Option<&'a [u8]>,
 }
 pub(super) fn persist(
     root: &Path,
@@ -193,7 +194,7 @@ pub(super) fn persist(
     material: GenesisMaterial<'_>,
     vault: &dyn PrimaryVault,
 ) -> Result<BornAccount, SdkError> {
-    let GenesisMaterial { record, primary: key, branch, now } = material;
+    let GenesisMaterial { record, primary: key, branch, now, data_secret } = material;
     let human =
         input.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?;
     let verified = verify_record(&record, now, None, human.as_ref())?;
@@ -226,22 +227,47 @@ pub(super) fn persist(
     let branch_reference = format!("branch:{reference}");
     // On failure retain the reservation; no caller may retry through legacy account.create.
     vault.store_new(&reference, key)?;
-    vault.store_branch(&branch_reference, branch)?;
-    let stored = StoredAuthority {
-        schema: "ramflux.local.custody_account.v1".into(),
-        local_account_id: input.local_account_id.clone(),
-        state: CreationState::NetworkingPending,
-        custody_v3_observed: true,
-        primary_vault_ref: reference,
-        branch_vault_ref: branch_reference,
-        vault_class: "software_os_credential_non_synchronizing".into(),
-        record,
-        pins,
-        custodian_account_id: input.custodian_account_id.clone(),
-    };
-    write_public(&dir.join("authority.json"), &ramflux_protocol::canonical_json_bytes(&stored)?)?;
-    fs::File::open(&dir)?.sync_all()?;
-    Ok(BornAccount { stored, verified })
+    let mut branch_written = false;
+    let result = (|| {
+        vault.store_branch(&branch_reference, branch)?;
+        branch_written = true;
+        if let Some(secret) = data_secret {
+            let mut data = crate::RamfluxClient::new();
+            data.open_account_index(root)?;
+            data.seal_new_account_data(
+                &input.local_account_id,
+                &record.body.account_anchor,
+                secret,
+            )?;
+        }
+        let stored = StoredAuthority {
+            schema: "ramflux.local.custody_account.v1".into(),
+            local_account_id: input.local_account_id.clone(),
+            state: CreationState::NetworkingPending,
+            custody_v3_observed: true,
+            primary_vault_ref: reference.clone(),
+            branch_vault_ref: branch_reference.clone(),
+            vault_class: "software_os_credential_non_synchronizing".into(),
+            record,
+            pins,
+            custodian_account_id: input.custodian_account_id.clone(),
+        };
+        write_public(
+            &dir.join("authority.json"),
+            &ramflux_protocol::canonical_json_bytes(&stored)?,
+        )?;
+        fs::File::open(&dir)?.sync_all()?;
+        Ok(BornAccount { stored, verified })
+    })();
+    if result.is_err() {
+        // Attempt both deletions even if one provider operation fails. The reservation remains
+        // latched, so a partial setup cannot fall back to another identity scheme.
+        let branch_cleanup = if branch_written { vault.delete(&branch_reference) } else { Ok(()) };
+        let primary_cleanup = vault.delete(&reference);
+        branch_cleanup?;
+        primary_cleanup?;
+    }
+    result
 }
 
 impl BornAccount {
