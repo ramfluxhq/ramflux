@@ -356,3 +356,41 @@ fn authenticated_certificate_forks_fence_a_range_and_a_higher_range_preserves_de
     assert!(pins.observe(&revoked_verified).is_err());
     Ok(())
 }
+
+#[test]
+fn custody_pin_rosters_keep_equal_device_names_in_separate_authenticated_accounts() -> Result {
+    let (_, _, alice) = fixture()?;
+    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[9; 32])?)?;
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([10; 32]));
+    let branch = crate::create_device_branch("other.example", "primary", 1, [11; 32]);
+    let bob = create_genesis(
+        &master,
+        &primary,
+        &branch,
+        &crate::X25519KeyPair::from_seed([12; 32]),
+        GenesisInput {
+            principal_kind: PrincipalKind::Human,
+            display_name: "Other Human".into(),
+            issued_at: 1_700_000_000,
+            master_cert_id: encode_base64url([13; 32]),
+            branch_cert_id: encode_base64url([14; 32]),
+            external_human_primary: None,
+        },
+    )?;
+    let alice = verify_record(&alice, 1_700_000_000, None, None)?;
+    let bob = verify_record(&bob, 1_700_000_000, None, None)?;
+    let alice_device = crate::RootQualifiedDeviceRef::from_custody_record(&alice, "primary")?;
+    let bob_device = crate::RootQualifiedDeviceRef::from_custody_record(&bob, "primary")?;
+    assert_ne!(alice_device, bob_device);
+    let mut pins = AuthorityPins::default();
+    assert_eq!(pins.observe(&alice)?, PinOutcome::Advanced);
+    assert_eq!(pins.observe(&bob)?, PinOutcome::Advanced);
+    let encoded = serde_json::to_vec(&pins)?;
+    let mut restored: AuthorityPins = serde_json::from_slice(&encoded)?;
+    restored.require_current(&alice)?;
+    restored.require_current(&bob)?;
+    assert_eq!(restored.observe(&alice)?, PinOutcome::Unchanged);
+    assert_eq!(restored.observe(&bob)?, PinOutcome::Unchanged);
+    assert_eq!(serde_json::to_vec(&restored)?, encoded);
+    Ok(())
+}

@@ -58,6 +58,7 @@ Provision its node-root signature separately from the gateway's proxy credential
 | --- | --- | --- |
 | `RAMFLUX_CUSTODY_NODE_RECORD_FILE` | router | Bounded signed node identity JSON; absent/empty leaves native custody disabled. |
 | `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY` | router, gateway | Independently configured receiving-node identity key; a proxy TLS certificate cannot supply it. |
+| `RAMFLUX_GATEWAY_ID` | gateway | Exact proxy instance identity in the signed node record; defaults to `ramflux-gateway`. Every instance needs its own authorized proxy key. |
 | `RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` | gateway | Dedicated software Ed25519 proxy seed, canonical base64url; required for receipt mode. Keep it separate from node-root and relay receipt keys. |
 | `RAMFLUX_CUSTODY_TCP_ADDR` | router | Optional direct client TLS listener, disabled when unset; requires separate public TLS credentials and a signed certificate pin. |
 | `RAMFLUX_CUSTODY_TLS_CERT_FILE`, `RAMFLUX_CUSTODY_TLS_KEY_FILE` | router | Public client-facing certificate chain/key, separate from mesh TLS. The signed node record pins the leaf DER SHA-256 hash as canonical base64url in `client_tls_certificate_sha256`. Shared mesh signing keys are refused, including differently encoded certificates using the same key. |
@@ -69,7 +70,11 @@ claim is made. The node profile must authorize its exact gateway id, key id,
 public key and router audience. The proxy observes the actual client TLS exporter;
 JSON/header assertions about a different transport hop are not evidence. The
 router checks the signed receipt against independently pinned node metadata and
-current cumulative proxy revocations. Direct mode obtains its exporter at the
+current cumulative proxy revocations. Compose overlays can change gateway identities:
+the cross-gateway integration topology uses `gw-a` and `gw-b`, so its signed
+fixture authorizes both with distinct keys and supplies each instance its own
+credential and receiving-node trust anchor. Authorizing only the base instance
+name does not authorize these instances. Direct mode obtains its exporter at the
 verifying router itself. TLS 1.2 and unavailable exporters fail closed, including
 when no binding was explicitly selected; 0-RTT exporters are never used.
 
