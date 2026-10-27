@@ -114,6 +114,9 @@ class RenderedComposeInputTests(unittest.TestCase):
                 files = [path]
                 if path.name not in {"docker-compose.yml", "docker-compose.itest.yml"}:
                     base = "docker-compose.itest.yml" if ".itest." in path.name else "docker-compose.yml"
+                    if path.name == "docker-compose.itest.admin.yml":
+                        base = "docker-compose.yml"
+                        inputs["RAMFLUX_ITEST_FEDERATION_ADMIN_PORT"] = "58484"
                     files.insert(0, DEPLOY / base)
                 if path.name in {"docker-compose.itest.object-v3.yml", "docker-compose.itest.voice.yml"}:
                     files.insert(1, DEPLOY / "docker-compose.itest.cross-gateway.yml")

@@ -46,7 +46,7 @@ services:
     tmpfs: ["/tmp"]
     environment:
       RAMFLUX_ROUTER_ADMIN_TOKEN: "${RF_COMPOSE_ROUTER_ADMIN_TOKEN:?see deploy/compose-inputs.json migration}"
-      RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18082/internal/home-node-migration/forward"
+      RAMFLUX_ROUTER_FEDERATION_FORWARD_URL: "http://ramflux-federation:18084/internal/home-node-migration/forward"
       RAMFLUX_ROUTER_FEDERATION_FORWARD_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?see deploy/compose-inputs.json migration}"
     volumes:
       - router-redb:/var/lib/ramflux/router
@@ -99,7 +99,8 @@ services:
     tmpfs: ["/tmp"]
     group_add: ["${RAMFLUX_SECRET_GID:-0}"]
     environment:
-      RAMFLUX_FEDERATION_ADMIN_ADDR: "0.0.0.0:18082"
+      RAMFLUX_FEDERATION_PUBLIC_ADDR: "0.0.0.0:18082"
+      RAMFLUX_FEDERATION_ADMIN_ADDR: "0.0.0.0:18084"
       RAMFLUX_FEDERATION_ADMIN_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?see deploy/compose-inputs.json migration}"
       RAMFLUX_FEDERATION_NODE_ID: "${RF_COMPOSE_FEDERATION_NODE_ID:?see deploy/compose-inputs.json migration}"
       # Advertise externally reachable client endpoints; TLS termination forwards discovery
@@ -125,7 +126,7 @@ services:
       - ./certs/node-identity:/etc/ramflux/node-identity:ro
       - ./secrets/federation:/etc/ramflux/federation:ro
     ports:
-      - "${RAMFLUX_FEDERATION_ADMIN_PORT:-18082}:18082"
+      - "${RAMFLUX_FEDERATION_PUBLIC_PORT:-18082}:18082"
       - "${RAMFLUX_FEDERATION_MESH_PORT:-7443}:7443/tcp"
       - "${RAMFLUX_FEDERATION_MESH_PORT:-7443}:7443/udp"
     healthcheck:

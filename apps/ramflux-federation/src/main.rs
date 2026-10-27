@@ -5,11 +5,16 @@ mod admin_http;
 mod discovery;
 mod flow;
 mod helpers;
+#[cfg(test)]
+mod http_listener_tests;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod key_migration;
 mod mesh;
+mod public_http;
 mod state;
+#[cfg(test)]
+mod test_certificates;
 
 use std::sync::Arc;
 
@@ -103,23 +108,29 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             &mesh_observability,
             &discovery,
         )?;
-        if let Ok(admin_addr) = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ADMIN_ADDR")
-        {
-            serve_admin_http(
-                &admin_addr,
-                FederationAdminHttpContext {
-                    store: Arc::clone(&store),
-                    state: Arc::clone(&state),
-                    router: Arc::clone(&router),
-                    discovery: discovery.clone(),
-                    mesh_observability: Arc::clone(&mesh_observability),
-                    admin_token: ramflux_node_core::environment::var(
-                        "RAMFLUX_FEDERATION_ADMIN_TOKEN",
-                    )
+        let public_addr = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:18082".to_owned());
+        public_http::serve_public_http(
+            &public_addr,
+            public_http::FederationPublicHttpContext {
+                router: Arc::clone(&router),
+                discovery: discovery.clone(),
+            },
+        )?;
+        let admin_addr = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ADMIN_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:18084".to_owned());
+        serve_admin_http(
+            &admin_addr,
+            FederationAdminHttpContext {
+                store: Arc::clone(&store),
+                state: Arc::clone(&state),
+                router: Arc::clone(&router),
+                discovery: discovery.clone(),
+                mesh_observability: Arc::clone(&mesh_observability),
+                admin_token: ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ADMIN_TOKEN")
                     .ok(),
-                },
-            )?;
-        }
+            },
+        )?;
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
             return serve_itest_http(&store, &state, &router, &discovery, &mesh_observability);

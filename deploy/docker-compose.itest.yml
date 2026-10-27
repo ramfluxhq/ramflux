@@ -158,7 +158,8 @@ services:
       RAMFLUX_NODE_ID: "${RF_COMPOSE_NODE_ID:-localhost}"
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_PERF: "${RF_COMPOSE_ITEST_PERF:-0}"
-      RAMFLUX_ITEST_FEDERATION_HTTP_ADDR: "0.0.0.0:18082"
+      RAMFLUX_FEDERATION_PUBLIC_ADDR: "0.0.0.0:18082"
+      RAMFLUX_ITEST_FEDERATION_HTTP_ADDR: "0.0.0.0:18086"
       RAMFLUX_FEDERATION_ADMIN_ADDR: "0.0.0.0:18084"
       RAMFLUX_FEDERATION_ADMIN_TOKEN: "${RF_COMPOSE_FEDERATION_ADMIN_TOKEN:?generated fixture token required}"
       RAMFLUX_FEDERATION_NODE_ID: "${RF_COMPOSE_FEDERATION_NODE_ID:-localhost}"
@@ -176,7 +177,7 @@ services:
       - ${RAMFLUX_CERTS_DIR:-./certs}/node-identity:/etc/ramflux/node-identity:ro
       - federation-redb:/var/lib/ramflux/federation
     ports:
-      - "${RAMFLUX_ITEST_FEDERATION_HTTP_PORT:-18082}:18082"
+      - "${RAMFLUX_ITEST_FEDERATION_HTTP_PORT:-18082}:18086"
       - "${RAMFLUX_ITEST_FEDERATION_MESH_PORT:-18482}:7443/tcp"
       - "${RAMFLUX_ITEST_FEDERATION_MESH_PORT:-18482}:7443/udp"
     networks:

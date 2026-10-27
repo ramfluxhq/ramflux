@@ -1,0 +1,5 @@
+# Test-only host access to the internal administration listener.
+services:
+  ramflux-federation:
+    ports:
+      - "127.0.0.1:${RAMFLUX_ITEST_FEDERATION_ADMIN_PORT:?test admin port required}:18084"

@@ -25,7 +25,7 @@ pub(crate) fn serve_itest_http(
     mesh_observability: &SharedMeshObservability,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_FEDERATION_HTTP_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:18082".to_owned());
+        .unwrap_or_else(|_| "127.0.0.1:18086".to_owned());
     let listener = TcpListener::bind(&addr)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     tracing::info!(addr, "federation itest HTTP surface listening");

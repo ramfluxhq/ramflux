@@ -198,8 +198,9 @@ relay use server-authenticated QUIC with the CA from the signed discovery record
 This wrapper does not provide public HTTPS termination. Use it on a controlled
 demo LAN: HTTP metadata and prekey traffic are visible there. The SDK's TLS-only
 prekey probe currently reports failure for this HTTP origin, as expected in s72.
-The federation HTTP listener also exposes token-protected administration routes;
-keep its port limited to the demo LAN and keep the generated admin token private.
+The public federation HTTP listener exposes only client reads. Administration uses
+a separate unpublished listener on the Compose network (port 18084). The demo HTTP
+port remains the public origin. See [the route inventory](../docs/federation_http.md).
 
 `status` checks all seven container health states, then fetches the client record,
 verifies freshness, signature and the saved operator public key, and prints the

@@ -9,8 +9,7 @@ use crate::SharedMeshObservability;
 use crate::{
     FederationAdminDiscoverRequest, FederationAdminPeerRequest, FederationAdminPeerResponse,
     FederationDiscoverySurface, RouterMeshClient, S12DiscoveryResolveRequest,
-    handle_s8_forward_envelope, handle_s12_discovery_resolve, now_unix_seconds, router_get_json,
-    router_post_json,
+    handle_s8_forward_envelope, handle_s12_discovery_resolve, now_unix_seconds,
 };
 
 #[derive(serde::Deserialize)]
@@ -78,7 +77,6 @@ pub(crate) fn handle_admin_request(
     };
     let state = &context.state;
     let store = context.store.as_ref();
-    let router = context.router.as_ref();
     let discovery = &context.discovery;
     let admin_token = context.admin_token.as_deref();
     log_admin_request(&request, discovery);
@@ -92,32 +90,6 @@ pub(crate) fn handle_admin_request(
                     "status": "ok"
                 }),
             )?;
-        }
-        ("GET", "/.well-known/ramflux/client") => {
-            let record = discovery.client_record()?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &record)?;
-        }
-        ("GET", "/.well-known/ramflux/server") => {
-            let record = discovery.well_known_record()?;
-            log_admin_well_known(&record);
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &record)?;
-        }
-        ("GET", path) if path.starts_with("/mvp1/prekey/") => {
-            let response = proxy_router_get_json(router, path)?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
-        }
-        ("GET", path) if path.starts_with("/mvp1/device-manifest/") => {
-            let response = proxy_router_get_json(router, path)?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
-        }
-        ("POST", "/mvp1/prekey/fetch") => {
-            let value: serde_json::Value =
-                serde_json::from_slice(&request.body).map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-                })?;
-            let response: serde_json::Value =
-                router_post_json(router, "/mvp1/prekey/fetch", &value)?;
-            ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/s8/federation/forward") => {
             handle_admin_forward_request(stream, &request, context, admin_token)?;
@@ -155,13 +127,6 @@ pub(crate) fn handle_admin_request(
         }
     }
     Ok(())
-}
-
-fn proxy_router_get_json(
-    router: &RouterMeshClient,
-    path: &str,
-) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
-    router_get_json(router, path)
 }
 
 fn handle_admin_mesh_observability_request(
@@ -237,16 +202,6 @@ fn log_admin_request(
         path = %request.path,
         local_node_id = %discovery.node_id,
         "federation admin HTTP request received"
-    );
-}
-
-fn log_admin_well_known(record: &ramflux_node_core::FederationServerRecord) {
-    tracing::info!(
-        node_id = %record.node_id,
-        endpoint_len = record.node_endpoint.len(),
-        node_public_key_len = record.node_public_key.len(),
-        ca_len = record.node_ca_cert_pem.len(),
-        "federation admin well-known record returned"
     );
 }
 

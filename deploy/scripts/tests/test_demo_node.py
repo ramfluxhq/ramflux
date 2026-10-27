@@ -116,6 +116,8 @@ else:
         self.assertIn("all seven demo services are healthy", result.stdout)
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
         environment = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_FEDERATION_PUBLIC_PORT=0.0.0.0:59482", environment)
+        self.assertNotIn("RAMFLUX_FEDERATION_ADMIN_PORT=", environment)
         for advertised in ("59443", "59447", "59482", "59478", "59453"):
             self.assertIn(advertised, environment)
         calls = [json.loads(line) for line in (self.root / "cli.jsonl").read_text().splitlines()]
