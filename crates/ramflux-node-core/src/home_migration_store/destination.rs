@@ -130,6 +130,16 @@ impl RouterRedbStore {
         if !matches!(op.phase, Phase::Sealed | Phase::CommitPending | Phase::CommitOutcomeUnknown) {
             return Err(refusal(Refusal::BaseMismatch));
         }
+        // The destination must retain the verified prefix, not only its new head:
+        // later contacts can require the original home as their pinned ancestry floor.
+        for predecessor in std::iter::once(&op.base).chain(result.predecessors.iter()) {
+            write(
+                &tx,
+                super::RECORDS,
+                &record_hash(&predecessor.record).map_err(storage)?,
+                predecessor,
+            )?;
+        }
         save_head(&tx, home.evidence())?;
         for entry in &op.delivery_map {
             write(
@@ -141,6 +151,7 @@ impl RouterRedbStore {
                     migration_id: a.migration_id.clone(),
                     epoch: a.next_home_epoch,
                     active: true,
+                    released: false,
                 },
             )?;
         }
@@ -215,6 +226,7 @@ impl RouterRedbStore {
                     migration_id: fence.body.migration_id.clone(),
                     epoch: op.offer.body.next_home_epoch,
                     active: false,
+                    released: true,
                 },
             )?;
         }
@@ -336,7 +348,17 @@ fn verify_preparation(
     let attest = &input.attestation.body;
     let expected_map = map_for(authority)?;
     let map_hash = delivery_map_hash(&expected_map).map_err(storage)?;
-    if p.destination_node != node.node_id()
+    let actor_certificate = authority
+        .envelope()
+        .body
+        .devices
+        .iter()
+        .find(|entry| entry.device_id == p.actor.device_id)
+        .and_then(|entry| entry.branch_certificate.as_ref())
+        .ok_or_else(|| refusal(Refusal::ActorRevoked))?;
+    if p.branch_certificate_hash != object_hash(actor_certificate).map_err(storage)?
+        || p.discovery_hash != node.discovery_hash
+        || p.destination_node != node.node_id()
         || p.destination_key != node.public_key()
         || p.old_node != old
         || input.base.hash() != p.previous_home_hash
@@ -451,7 +473,9 @@ fn seal_in_transaction(
 
     for entry in &op.delivery_map {
         if let Some(old) = read::<InboxRoute>(&tx, TARGETS, &entry.target_delivery_id)?
-            && (old.anchor != a.account_anchor || old.epoch >= a.next_home_epoch)
+            && (old.anchor != a.account_anchor
+                || old.epoch > a.next_home_epoch
+                || (old.epoch == a.next_home_epoch && !old.released))
         {
             return Err(refusal(Refusal::BaseMismatch));
         }
@@ -464,6 +488,7 @@ fn seal_in_transaction(
                 migration_id: a.migration_id.clone(),
                 epoch: a.next_home_epoch,
                 active: false,
+                released: false,
             },
         )?;
     }

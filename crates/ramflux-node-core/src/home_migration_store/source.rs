@@ -300,6 +300,7 @@ fn verify_sealed(
         || p.destination_node != a.destination_node
         || p.destination_key != a.destination_key
         || p.previous_home_hash != a.previous_home_hash
+        || p.discovery_hash != o.discovery_hash
         || o.account_anchor != a.account_anchor
         || o.migration_id != a.migration_id
         || o.authority_record_hash != a.authority_record_hash
@@ -454,6 +455,7 @@ fn persist_source_commit(
                 migration_id: a.migration_id.clone(),
                 epoch: a.next_home_epoch,
                 active: false,
+                released: false,
             },
         )?;
     }
