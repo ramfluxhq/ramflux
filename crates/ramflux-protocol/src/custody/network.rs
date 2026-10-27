@@ -28,12 +28,13 @@ pub enum CustodyProofAction {
     Publish { publication: Box<Publication> },
     Register { prekey_bundle: Value },
     OpenSession,
+    HomeMigration { control_hash: String },
 }
 impl CustodyProofAction {
     #[must_use]
     pub const fn capability(&self) -> &'static str {
         match self {
-            Self::Publish { .. } | Self::Register { .. } => "register",
+            Self::Publish { .. } | Self::Register { .. } | Self::HomeMigration { .. } => "register",
             Self::OpenSession => "message",
         }
     }
@@ -45,6 +46,7 @@ pub enum CustodySessionAction {
     Submit { envelope: Box<crate::Envelope> },
     Inbox { after_seq: u64, limit: u32 },
     Ack { ack: Box<crate::Ack> },
+    HomeMigration { request: Box<crate::home_migration::Request> },
     Close,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +171,9 @@ pub enum CustodyServerFrame {
     },
     Acked {
         inbox_seq: u64,
+    },
+    HomeMigration {
+        response: Box<crate::home_migration::Response>,
     },
     Closed,
     Refused {

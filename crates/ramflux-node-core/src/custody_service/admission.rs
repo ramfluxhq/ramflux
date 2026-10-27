@@ -191,6 +191,7 @@ impl CustodyService {
         let tick = std::time::Instant::now();
         let proof = attempt.proof;
         match attempt.action {
+            CustodyProofAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported),
             CustodyProofAction::Publish { .. } => {
                 router.publish_custody_record_from(publication, now, store, source).map_err(
                     |e| {
@@ -299,6 +300,7 @@ impl CustodyService {
         let Scope { router, store, now, .. } = scope;
         let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
         match action {
+            CustodySessionAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported),
             CustodySessionAction::Lookup { device_ref } => {
                 let p = router
                     .custody_record(&device_ref.account_anchor, now)
