@@ -309,46 +309,15 @@ impl RamfluxClient {
             return Ok(true);
         }
         let db = self.account_db()?;
-        let known = db.load_actor_state::<String>(&alias_key(&own_row_id(source, envelope)?))?;
         let ciphertext_hash = packet.ciphertext_hash.as_deref();
-        let imported = ciphertext_hash
-            .map(|hash| db.load_actor_state::<serde_json::Value>(&imported_ciphertext_key(hash)))
-            .transpose()?
-            .flatten()
-            .filter(|record| record["conversation"] == conversation);
-        let imported_id = imported.as_ref().and_then(|record| record["id"].as_str());
-        let candidate = self
-            .direct_message_by_id(known.as_deref().or(imported_id).unwrap_or(&packet.message_id))?;
-        let history = if let Some(row) = candidate.as_ref() {
-            let origin = self.message_origin(conversation, &row.message_id)?;
-            row.conversation_id == conversation
-                && origin.as_ref().map_or_else(
-                    || {
-                        known.as_deref() == Some(row.message_id.as_str())
-                            || imported_id == Some(row.message_id.as_str())
-                            || (!row.encrypted_body.is_empty()
-                                && ciphertext_hash
-                                    == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str()))
-                    },
-                    |v| {
-                        v["sender_root_commitment"] == source.root_commitment()
-                            && v["sender_device_id"] == source.device_id()
-                            && v["envelope_id"] == envelope
-                    },
-                )
-                && (row.deleted
-                    || db.message_content(&row.message_id)?.as_deref() == Some(body.as_slice()))
-        } else {
-            false
-        };
-        // An authenticated source/envelope gets its own id unless the exact authored row was
-        // already imported by history. Provenance prevents another device's row being merged.
-        let id = if history {
-            candidate.as_ref().ok_or_else(|| invalid("own history row absent"))?.message_id.clone()
+        let history = self.own_sent_history_row(source, &packet, envelope, conversation, &body)?;
+        // Authenticated source/envelope aliases remain authoritative after attribution erasure.
+        let id = if let Some(row) = &history {
+            row.message_id.clone()
         } else {
             own_row_id(source, envelope)?
         };
-        if !history {
+        if history.is_none() {
             db.import_direct_message_projection(DirectMessageWrite {
                 conversation_id: conversation,
                 message_id: &id,
@@ -358,7 +327,7 @@ impl RamfluxClient {
                 created_at: packet.authored_at.unwrap_or(at),
             })?;
         }
-        if history && candidate.as_ref().is_some_and(|row| row.deleted) {
+        if history.as_ref().is_some_and(|row| row.deleted) {
             // Keep authenticated replay aliases without restoring deleted content or attribution.
             self.index_own_sent_projection(source, envelope, &id, ciphertext_hash)?;
             return Ok(true);
@@ -382,6 +351,61 @@ impl RamfluxClient {
             ciphertext_hash,
         )?;
         Ok(true)
+    }
+    fn own_sent_history_row(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        packet: &SentMessage,
+        envelope: &str,
+        conversation: &str,
+        body: &[u8],
+    ) -> Result<Option<DirectMessageRecord>, SdkError> {
+        let db = self.account_db()?;
+        let known = db.load_actor_state::<String>(&alias_key(&own_row_id(source, envelope)?))?;
+        let hash = packet.ciphertext_hash.as_deref();
+        let imported = hash
+            .map(|hash| db.load_actor_state::<serde_json::Value>(&imported_ciphertext_key(hash)))
+            .transpose()?
+            .flatten()
+            .filter(|record| record["conversation"] == conversation);
+        let imported_id = imported.as_ref().and_then(|record| record["id"].as_str());
+        let Some(row) = self
+            .direct_message_by_id(known.as_deref().or(imported_id).unwrap_or(&packet.message_id))?
+        else {
+            return Ok(None);
+        };
+        if row.conversation_id != conversation {
+            return Ok(None);
+        }
+        let source_matches = if let Some(origin) =
+            self.message_origin(conversation, &row.message_id)?
+        {
+            origin["sender_root_commitment"] == source.root_commitment()
+                && origin["sender_device_id"] == source.device_id()
+                && origin["envelope_id"] == envelope
+        } else if known.as_deref() == Some(row.message_id.as_str()) {
+            true
+        } else {
+            let claim = hash
+                .map(|hash| db.load_actor_state::<serde_json::Value>(&ciphertext_index_key(hash)))
+                .transpose()?
+                .flatten();
+            // An imported digest must not override an authenticated source or an ambiguity fence.
+            claim.as_ref().is_none_or(|claim| {
+                claim["id"] == row.message_id
+                    && claim["source"] == source.storage_key()
+                    && claim["envelope_id"] == envelope
+            }) && (imported_id == Some(row.message_id.as_str())
+                || (!row.encrypted_body.is_empty()
+                    && hash == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str())))
+        };
+        if source_matches
+            && (row.deleted || db.message_content(&row.message_id)?.as_deref() == Some(body))
+        {
+            Ok(Some(row))
+        } else {
+            Ok(None)
+        }
     }
 }
 fn invalid(message: &str) -> SdkError {
