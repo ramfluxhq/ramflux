@@ -32,6 +32,10 @@ impl MemoryPrimaryVault {
     }
 }
 impl PrimaryVault for MemoryPrimaryVault {
+    fn delete(&self, reference: &str) -> Result<(), SdkError> {
+        self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
+        Ok(())
+    }
     fn preflight(&self) -> Result<(), SdkError> {
         Ok(())
     }

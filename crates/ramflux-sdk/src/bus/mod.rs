@@ -9,6 +9,7 @@ mod backup_jobs;
 pub mod client;
 mod connection;
 mod control_state;
+mod custody_response;
 mod custody_setup;
 pub mod daemon;
 mod delivery_receipts;

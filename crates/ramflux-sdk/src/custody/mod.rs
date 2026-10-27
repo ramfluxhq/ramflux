@@ -5,6 +5,8 @@
 mod bus;
 mod ceremony;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
+mod secret_buffer;
+pub(crate) use secret_buffer::serialize_secret;
 mod store;
 mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};

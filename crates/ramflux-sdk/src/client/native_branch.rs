@@ -85,6 +85,9 @@ mod tests {
 
     struct BranchOnly(Arc<TestVault>);
     impl PrimaryVault for BranchOnly {
+        fn delete(&self, _: &str) -> Result<(), SdkError> {
+            Err(SdkError::CustodyVaultUnavailable)
+        }
         fn preflight(&self) -> Result<(), SdkError> {
             Err(SdkError::CustodyVaultUnavailable)
         }
@@ -122,7 +125,11 @@ mod tests {
         let (_, expected) = account.credentials(vault.as_ref(), "primary", now)?;
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;
-        client.seal_born_account_data("native", b"data-passphrase")?;
+        client.seal_new_account_data(
+            "native",
+            &account.record().body.account_anchor,
+            b"data-passphrase",
+        )?;
         client.unlock_account("native", b"data-passphrase")?;
         let provider: Arc<dyn PrimaryVault> = Arc::new(BranchOnly(vault));
         client.initialize_born_v3_branch("primary", Arc::clone(&provider)).await?;
@@ -156,10 +163,14 @@ mod tests {
         id: &str,
     ) -> Result<RamfluxClient, Box<dyn std::error::Error>> {
         let vault = Arc::new(TestVault::default());
-        create(&root.0, id, vault.as_ref(), crate::custody::network_now()?)?;
+        let account = create(&root.0, id, vault.as_ref(), crate::custody::network_now()?)?;
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;
-        client.seal_born_account_data(id, b"data-passphrase")?;
+        client.seal_new_account_data(
+            id,
+            &account.record().body.account_anchor,
+            b"data-passphrase",
+        )?;
         client.unlock_account(id, b"data-passphrase")?;
         client.initialize_born_v3_branch("primary", vault).await?;
         Ok(client)

@@ -34,6 +34,8 @@ enum Phase {
 }
 /// Not cloneable or serializable. Drop erases the phrase, including on disconnect/cancel.
 pub struct CreationCeremony {
+    ceremony_id: String,
+    expired: bool,
     root: PathBuf,
     input: CreateInput,
     phrase: Option<RecoveryPhrase>,
@@ -57,14 +59,47 @@ impl CreationCeremony {
         input: CreateInput,
         now: u64,
     ) -> Result<Self, SdkError> {
+        Self::prepare(enabled, root, input, false, now)
+    }
+    pub(crate) fn begin_account(
+        enabled: bool,
+        root: &Path,
+        display_name: String,
+        kind: PrincipalKind,
+        now: u64,
+    ) -> Result<Self, SdkError> {
+        if !enabled {
+            return Err(SdkError::CustodyCreationDisabled);
+        }
+        if kind != PrincipalKind::Human {
+            return Err(invalid());
+        }
+        let input = CreateInput {
+            local_account_id: format!("account-{}", encode_base64url(*random()?)),
+            principal_id: String::new(),
+            device_id: format!("device-{}", encode_base64url(*random()?)),
+            display_name,
+            principal_kind: kind,
+            custodian_account_id: None,
+        };
+        Self::prepare(enabled, root, input, true, now)
+    }
+    fn prepare(
+        enabled: bool,
+        root: &Path,
+        mut input: CreateInput,
+        allocate_principal: bool,
+        now: u64,
+    ) -> Result<Self, SdkError> {
         if !enabled {
             return Err(SdkError::CustodyCreationDisabled);
         }
         valid_id(&input.local_account_id)?;
         ramflux_protocol::validate_device_name(&input.device_id)?;
-        if input.principal_id.is_empty()
-            || input.principal_id.len() > 256
-            || input.principal_id.chars().any(char::is_control)
+        if !allocate_principal
+            && (input.principal_id.is_empty()
+                || input.principal_id.len() > 256
+                || input.principal_id.chars().any(char::is_control))
         {
             return Err(invalid());
         }
@@ -101,7 +136,12 @@ impl CreationCeremony {
         let master = MasterKey::from_phrase(&phrase)?;
         let public = ramflux_crypto::verifying_key_from_base64url(&master.public_key())?;
         let anchor = ramflux_crypto::identity_root_commitment(&public);
+        if allocate_principal {
+            input.principal_id = format!("principal-{anchor}");
+        }
         Ok(Self {
+            ceremony_id: format!("ceremony-{}", encode_base64url(*random()?)),
+            expired: false,
             root: root.into(),
             input,
             phrase: Some(phrase),
@@ -119,9 +159,26 @@ impl CreationCeremony {
     pub const fn deadline(&self) -> Instant {
         self.deadline
     }
+    pub(crate) fn ceremony_id(&self) -> &str {
+        &self.ceremony_id
+    }
+    pub(crate) fn expires_in_ms(&self) -> u64 {
+        u64::try_from(self.deadline.saturating_duration_since(Instant::now()).as_millis())
+            .unwrap_or(u64::MAX)
+    }
+    pub(crate) const fn is_expired(&self) -> bool {
+        self.expired
+    }
+    pub(crate) fn expire(&mut self) {
+        self.phrase = None;
+        self.expired = true;
+    }
     fn live(&mut self) -> Result<(), SdkError> {
-        if Instant::now() >= self.deadline || self.phrase.is_none() {
-            self.phrase = None;
+        if self.expired || Instant::now() >= self.deadline {
+            self.expire();
+            return Err(SdkError::CustodyExpired);
+        }
+        if self.phrase.is_none() {
             return Err(invalid());
         }
         Ok(())
@@ -164,10 +221,28 @@ impl CreationCeremony {
     /// # Errors
     /// Rejects bad confirmation/expiry, unavailable vaults and incomplete durable creation.
     pub fn confirm(
+        self,
+        words: &[Zeroizing<String>; 3],
+        vault: &dyn PrimaryVault,
+        now: u64,
+    ) -> Result<BornAccount, SdkError> {
+        self.complete(words, vault, now, None)
+    }
+    pub(crate) fn confirm_with_passphrase(
+        self,
+        words: &[Zeroizing<String>; 3],
+        vault: &dyn PrimaryVault,
+        now: u64,
+        passphrase: &[u8],
+    ) -> Result<BornAccount, SdkError> {
+        self.complete(words, vault, now, Some(passphrase))
+    }
+    fn complete(
         mut self,
         words: &[Zeroizing<String>; 3],
         vault: &dyn PrimaryVault,
         now: u64,
+        data_secret: Option<&[u8]>,
     ) -> Result<BornAccount, SdkError> {
         self.live()?;
         let phrase = self.phrase.take().ok_or_else(invalid)?;
@@ -222,7 +297,13 @@ impl CreationCeremony {
         super::store::persist(
             &self.root,
             &self.input,
-            super::store::GenesisMaterial { record, primary: &primary, branch: &branch_seeds, now },
+            super::store::GenesisMaterial {
+                record,
+                primary: &primary,
+                branch: &branch_seeds,
+                now,
+                data_secret,
+            },
             vault,
         )
     }
@@ -255,9 +336,83 @@ mod tests {
         let mut ceremony =
             CreationCeremony::begin(true, &root.0, crate::custody::tests::input("expired"), 100)?;
         ceremony.deadline = Instant::now();
-        assert!(ceremony.show_once().is_err());
+        assert!(matches!(ceremony.show_once(), Err(SdkError::CustodyExpired)));
         assert!(ceremony.phrase.is_none());
         assert!(!format!("{ceremony:?}").contains("abandon"));
+        Ok(())
+    }
+    #[test]
+    fn ordinary_creation_allocates_ids_and_seals_passphrase_before_publishing_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        let vault = crate::custody::tests::TestVault::default();
+        let now = crate::custody::network_now()?;
+        let mut pending = CreationCeremony::begin_account(
+            true,
+            &root.0,
+            "Ordinary Human".into(),
+            PrincipalKind::Human,
+            now,
+        )?;
+        let id = pending.input.local_account_id.clone();
+        assert_eq!(pending.input.principal_id, format!("principal-{}", pending.account_anchor()));
+        assert!(pending.input.device_id.starts_with("device-"));
+        assert!(pending.ceremony_id().starts_with("ceremony-"));
+        assert!((1..=300_000).contains(&pending.expires_in_ms()));
+        let phrase = pending.show_once()?;
+        let positions = pending.hidden_challenge()?;
+        let answers = crate::custody::tests::words(&phrase, positions)?;
+        let passphrase = Zeroizing::new("creation data passphrase".to_owned());
+        let account =
+            pending.confirm_with_passphrase(&answers, &vault, now, passphrase.as_bytes())?;
+        assert!(ramflux_storage::AccountIndex::open(&root.0)?.load_wrapped_db_key(&id)?.is_some());
+        vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut client = crate::RamfluxClient::new();
+        client.open_account_index(&root.0)?;
+        client.unlock_account(&id, passphrase.as_bytes())?;
+        assert!(client.device_branch.is_none());
+        assert!(client.identity_root.is_none());
+        assert_eq!(client.own_account_anchor()?, account.record().body.account_anchor);
+        drop(client);
+        let mut restarted = crate::RamfluxClient::new();
+        restarted.open_account_index(&root.0)?;
+        assert!(restarted.unlock_account(&id, b"wrong passphrase").is_err());
+        restarted.unlock_account(&id, passphrase.as_bytes())?;
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_creation_wrong_words_leave_no_account_or_data_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        let vault = crate::custody::tests::TestVault::default();
+        let mut pending = CreationCeremony::begin_account(
+            true,
+            &root.0,
+            "Ordinary Human".into(),
+            PrincipalKind::Human,
+            100,
+        )?;
+        let id = pending.input.local_account_id.clone();
+        drop(pending.show_once()?);
+        pending.hidden_challenge()?;
+        let wrong = std::array::from_fn(|_| Zeroizing::new("wrong".to_owned()));
+        assert!(matches!(
+            pending.confirm_with_passphrase(&wrong, &vault, 100, b"discarded secret"),
+            Err(SdkError::CustodyConfirmationFailed)
+        ));
+        assert!(!root.0.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists());
+        assert!(!root.0.join("custody_accounts").join(id).exists());
+        assert!(matches!(
+            CreationCeremony::begin_account(
+                true,
+                &root.0,
+                "Machine".into(),
+                PrincipalKind::HeadlessAi,
+                100
+            ),
+            Err(SdkError::CustodySetupInvalid)
+        ));
         Ok(())
     }
 }

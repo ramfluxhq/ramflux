@@ -30,6 +30,10 @@ pub trait PrimaryVault: Send + Sync {
     ) -> Result<BranchCredentials, SdkError> {
         Err(SdkError::CustodyVaultUnavailable)
     }
+    /// Remove a credential written by an incomplete creation attempt. Missing entries succeed.
+    /// # Errors
+    /// Returns provider failures; callers retain the fail-closed account reservation.
+    fn delete(&self, reference: &str) -> Result<(), SdkError>;
     /// Store branch credentials separately from primary authority.
     /// # Errors
     /// Fails closed on provider failure or an existing entry.
@@ -44,7 +48,8 @@ pub struct NativePrimaryVault;
 mod native {
     use super::{SdkError, Zeroizing};
     use security_framework::passwords::{
-        PasswordOptions, generic_password, set_generic_password_options,
+        PasswordOptions, delete_generic_password_options, generic_password,
+        set_generic_password_options,
     };
     const SERVICE: &str = "org.ramflux.identity.primary.v1";
     fn options(reference: &str) -> PasswordOptions {
@@ -80,6 +85,13 @@ mod native {
         set_generic_password_options(secret, insertion)
             .map_err(|_| SdkError::CustodyVaultUnavailable)
     }
+    pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
+        match delete_generic_password_options(options(reference)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == -25300 => Ok(()),
+            Err(_) => Err(SdkError::CustodyVaultUnavailable),
+        }
+    }
     pub(super) fn get(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         generic_password(options(reference))
             .map(Zeroizing::new)
@@ -87,6 +99,17 @@ mod native {
     }
 }
 impl PrimaryVault for NativePrimaryVault {
+    fn delete(&self, reference: &str) -> Result<(), SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            native::delete(reference)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = reference;
+            Err(SdkError::CustodyVaultUnavailable)
+        }
+    }
     fn load_branch(
         &self,
         reference: &str,
