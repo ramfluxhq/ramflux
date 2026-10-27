@@ -59,6 +59,11 @@ if normalized and normalized[0] == "compose":
     if normalized[normalized.index("-p") + 1] != "demo-test":
         sys.exit("unexpected compose project")
     if "up" in normalized:
+        runtime = state / "runtime.env"
+        values = dict(line.split("=", 1) for line in runtime.read_text().splitlines()
+                      if "=" in line) if runtime.exists() else {}
+        if values.get("RAMFLUX_VERSION") in control.get("fail_up_versions", []):
+            sys.exit("controlled version-specific compose failure")
         if control.get("up_exit"):
             sys.exit(control["up_exit"])
         deployed.touch()

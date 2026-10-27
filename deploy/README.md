@@ -340,21 +340,44 @@ deploy/scripts/demo-node.sh upgrade /absolute/path/to/demo.env
 ```
 
 The command builds all seven images, or with `DEMO_PREBUILT_IMAGES=1` first verifies
-that all seven versioned images are loaded and uses `--no-build`. It records the old
-version in private `owner.json`, refreshes changed frozen Compose definitions, retains
-the node identity, CA, seeds, volumes, ports and all other ownership settings, and
-prints the exact rollback command. A plain `up` still refuses a version change, and
-`upgrade` refuses every setting change other than `DEMO_VERSION`.
+that all seven versioned images are loaded and uses `--no-build`. The first successful
+`up` starts the version history. Every successful `up` or `upgrade` creates a private,
+read-only snapshot under `version-snapshots/` containing `owner.json`, `runtime.env`,
+`demo-override.json`, the deploy-tree digest and the exact frozen base, voice and admin
+Compose files selected for that version. It retains the node identity, CA, seeds,
+volumes, ports and all other ownership settings, and prints the canonical rollback
+command. A plain `up` still refuses a version change. An upgrade also refuses a missing
+or newly selected voice/admin overlay, reporting only the relevant configuration key.
 
 Run the printed `demo-node.sh rollback ENV_FILE` command while retaining the current
-env file. Rollback selects the last version from `owner.json`, verifies that all seven
-old images remain available, recreates the services with `--no-build`, and leaves all
-identity and data material intact. After it succeeds, restore `DEMO_VERSION` in the
-operator env to the version printed by rollback; later maintenance commands fail
-closed while the env and recorded version differ. Keep previously deployed images
-until the upgrade has been accepted. Maintenance commands use the saved Compose
-copies and do not refresh them. Public discovery/prekeys remain on `DEMO_HTTP_PORT`
-(default 59482); neither admin 18084 nor an unintended default host 18082 is published.
+env file. Rollback selects the preceding immutable snapshot, restores every managed
+file byte-for-byte without consulting the current checkout, verifies that all seven
+old images remain available, and recreates the services with `--no-build`. Container
+health alone is insufficient: `up`, `upgrade`, `rollback`, and recovery also run the
+signed public discovery and application probes through the published origin before
+committing their state. After rollback succeeds, restore `DEMO_VERSION` in the operator
+env to the printed version; later maintenance commands fail closed while the env and
+recorded version differ. Keep previously deployed images and the private snapshot tree
+until the upgrade has been accepted. Public discovery/prekeys remain on
+`DEMO_HTTP_PORT` (default 59482); neither admin 18084 nor an unintended default host
+18082 is published.
+
+Before changing any frozen file, an upgrade writes `transaction.pending`. If image
+recreation, container health, or the public probes fail, the wrapper restores the last
+good snapshot, recreates it with `--no-build`, verifies its public endpoints, and leaves
+the version history unchanged. A failed automatic restore retains the marker and emits
+a loud error. Correct the engine or restore the retained old images, keep the same
+operator settings (the failed target `DEMO_VERSION` may remain), then run:
+
+```sh
+deploy/scripts/demo-node.sh recover /absolute/path/to/demo.env
+```
+
+Recovery again restores the marker's last-good snapshot, uses `--no-build`, verifies
+the public endpoints, and removes the marker only after success. Never delete the
+marker or edit a snapshot to force progress. A failed initial `up` has no prior snapshot;
+inspect and preserve its private state before deciding whether to remove and recreate
+that new, not-yet-owned data directory.
 
 For temporary administration, set `DEMO_ADMIN_LOOPBACK_PORT=59487` in the operator
 env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
