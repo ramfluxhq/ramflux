@@ -98,6 +98,8 @@ struct InboxRoute {
     migration_id: String,
     epoch: u64,
     active: bool,
+    #[serde(default)]
+    released: bool,
 }
 
 /// Immutable admission evidence on the mesh; never import a peer's live scheduler state.
