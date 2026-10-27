@@ -78,7 +78,14 @@ if normalized and normalized[0] == "compose":
                     sys.exit(f"compose requires an existing absolute {flag} path")
     if normalized[normalized.index("-p") + 1] != "demo-test":
         sys.exit("unexpected compose project")
-    if "up" in normalized:
+    if "config" in normalized:
+        environment = {"RAMFLUX_ROUTER_ADMIN_TOKEN": "test-admin-token"}
+        if provider == "docker":
+            print(json.dumps({"services": {"probe": {"environment": environment}}}))
+        else:
+            print("services:\n  probe:\n    environment:\n"
+                  "      RAMFLUX_ROUTER_ADMIN_TOKEN: test-admin-token")
+    elif "up" in normalized:
         runtime = state / "runtime.env"
         values = dict(line.split("=", 1) for line in runtime.read_text().splitlines()
                       if "=" in line) if runtime.exists() else {}
