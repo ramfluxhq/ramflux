@@ -63,6 +63,7 @@ pub fn genesis(a: &VerifiedRecord) -> TestResult<RecordEvidence> {
         )?),
     };
     Ok(RecordEvidence {
+        authority: Publication { record: a.envelope().clone(), compacted_ids: None },
         record,
         management_certificate_chain: vec![],
         actor_certificate: None,
@@ -146,6 +147,7 @@ pub fn transition(
         &key(old_seed),
     )?;
     Ok(RecordEvidence {
+        authority: Publication { record: authority.envelope().clone(), compacted_ids: None },
         record: HomeRecord::Committed {
             authorization: Box::new(authorization),
             commit_proof: Box::new(proof),
@@ -155,3 +157,6 @@ pub fn transition(
         node_record: node(base.home().0, old_seed)?,
     })
 }
+
+#[cfg(test)]
+mod schema_substitution;

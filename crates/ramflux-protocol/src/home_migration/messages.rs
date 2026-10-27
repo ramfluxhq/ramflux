@@ -68,6 +68,7 @@ pub trait Message: sealed::Sealed + Serialize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    Attest,
     Prepare,
     Seal,
     Commit,
@@ -347,11 +348,31 @@ pub struct NoncommitFence {
     pub version: u32,
     pub migration_id: String,
     pub authorization_hash: String,
-    pub seal_hash: String,
+    pub seal_hash: Option<String>,
     pub fenced_at: u64,
 }
 impl sealed::Sealed for NoncommitFence {}
 impl Message for NoncommitFence {
     const DOMAIN: &'static str = domain::HOME_NONCOMMIT_FENCE;
+    const ROLES: &'static [Role] = &[Role::Node];
+}
+
+/// Destination's authenticated terminal query; neither expiry nor abort grants routing authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerStatus {
+    pub version: u32,
+    pub account_anchor: String,
+    pub migration_id: String,
+    pub authorization_hash: String,
+    pub audience_node: String,
+    pub destination_node: String,
+    pub nonce: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+impl sealed::Sealed for PeerStatus {}
+impl Message for PeerStatus {
+    const DOMAIN: &'static str = domain::HOME_PEER_STATUS;
     const ROLES: &'static [Role] = &[Role::Node];
 }

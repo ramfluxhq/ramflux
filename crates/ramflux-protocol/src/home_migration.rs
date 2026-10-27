@@ -47,7 +47,18 @@ fn safe_numbers(value: &Value) -> Result<(), ProtocolError> {
             }
         }
         Value::Object(values) => {
-            for value in values.values() {
+            for (name, value) in values {
+                if let Value::String(text) = value {
+                    let max = if matches!(name.as_str(), "gateway_tcp_addr" | "federation_endpoint")
+                    {
+                        2048
+                    } else {
+                        256
+                    };
+                    if text.len() > max {
+                        return Err(invalid("migration identifier exceeds budget"));
+                    }
+                }
                 safe_numbers(value)?;
             }
         }
@@ -101,3 +112,6 @@ pub fn record_hash(record: &HomeRecord) -> Result<String, ProtocolError> {
 pub fn delivery_map_hash(map: &[DeliveryMapEntry]) -> Result<String, ProtocolError> {
     custody::framed_hash(domain::HOME_DELIVERY_MAP, &map)
 }
+
+#[cfg(test)]
+mod tests;

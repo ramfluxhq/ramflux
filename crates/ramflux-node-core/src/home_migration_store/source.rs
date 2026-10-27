@@ -19,9 +19,7 @@ pub struct MigrationPeer<'a> {
 }
 #[derive(Clone, Copy)]
 pub struct AttestMigration<'a> {
-    pub account_anchor: &'a str,
-    pub destination: &'a str,
-    pub nonce: &'a str,
+    pub request: &'a ramflux_protocol::home_migration::AttestRequest,
 }
 pub struct AttestedHome {
     pub home: RecordEvidence,
@@ -48,8 +46,26 @@ impl RouterCore {
         input: AttestMigration<'_>,
         now: u64,
     ) -> Result<AttestedHome, NodeCoreError> {
-        let AttestMigration { account_anchor: anchor, destination, nonce } = input;
-        self.with_migration_authority(anchor, now, |authority| {
+        let request = input.request;
+        let anchor = request.payload.account_anchor.as_str();
+        let destination = request.payload.destination_node.as_str();
+        let nonce = request.payload.nonce.as_str();
+        self.with_migration_authority(anchor, now, |authority, publication| {
+            crypto::verify_actor(&request.control, authority, now).map_err(auth_error)?;
+            let control = &request.control.body;
+            if control.action != Action::Attest
+                || control.audience_node != node.node_id()
+                || control.requester.account_anchor != anchor
+                || control.nonce != nonce
+                || control.payload_hash
+                    != ramflux_protocol::custody::framed_hash(
+                        ramflux_protocol::domain::HOME_ATTEST_REQUEST,
+                        &request.payload,
+                    )
+                    .map_err(storage)?
+            {
+                return Err(refusal(Refusal::AuthorityUpdateRequired));
+            }
             let map = map_for(authority)?;
             let mut registered = false;
             for entry in &map {
@@ -59,7 +75,8 @@ impl RouterCore {
                 return Err(refusal(Refusal::HomeGenesisRequired));
             }
             let tx = store.migration_db().begin_write().map_err(storage)?;
-            clock(&tx, now)?;
+            let now = clock(&tx, now)?;
+            super::authority_evidence::remember(&tx, publication, now)?;
             let head = if let Some(head) = read::<RecordEvidence>(&tx, HEADS, anchor)? {
                 head
             } else {
@@ -78,6 +95,10 @@ impl RouterCore {
                 )
                 .map_err(auth_error)?;
                 let head = RecordEvidence {
+                    authority: ramflux_protocol::custody::Publication {
+                        record: publication.record.clone(),
+                        compacted_ids: publication.compacted_ids.clone(),
+                    },
                     record: HomeRecord::Genesis { genesis: Box::new(genesis) },
                     management_certificate_chain: vec![],
                     actor_certificate: None,
@@ -124,7 +145,7 @@ impl RouterCore {
         let auth = &sealed.authorization;
         let seal = &sealed.seal;
         let a = &auth.body;
-        self.with_migration_authority(&a.account_anchor, now, |authority| {
+        self.with_migration_authority(&a.account_anchor, now, |authority, publication| {
             let _submissions = store.migration_submission_barrier(&sealed.delivery_map)?;
             let cursors = store.migration_backlog_barrier(
                 &a.account_anchor,
@@ -133,9 +154,10 @@ impl RouterCore {
                 now,
             )?;
             let tx = store.migration_db().begin_write().map_err(storage)?;
-            clock(&tx, now)?;
+            let now = clock(&tx, now)?;
             let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Source)?;
-            if let Some(hash) = read::<String>(&tx, PROOFS, &key)? {
+            let auth_key = super::authorization_key(auth)?;
+            if let Some(hash) = read::<String>(&tx, PROOFS, &auth_key)? {
                 let record: RecordEvidence = read(&tx, RECORDS, &hash)?
                     .ok_or_else(|| storage("migration permanent proof lost its record"))?;
                 let HomeRecord::Committed { authorization, .. } = &record.record else {
@@ -147,6 +169,9 @@ impl RouterCore {
                     return Err(refusal(Refusal::IdempotencyConflict));
                 }
                 return Ok(record);
+            }
+            if read::<Signed<NoncommitFence>>(&tx, super::FENCES, &auth_key)?.is_some() {
+                return Err(refusal(Refusal::CommitExpired));
             }
             if let Some(old) = read::<MigrationOperation>(&tx, OPS, &key)? {
                 if old.authorization.as_ref().map(message_hash).transpose().map_err(storage)?
@@ -175,9 +200,11 @@ impl RouterCore {
             if record_hash(&current.record).map_err(storage)? != a.previous_home_hash
                 || current.record.epoch().checked_add(1) != Some(a.next_home_epoch)
                 || current.record.home() != (node.node_id(), node.public_key())
-                || a.next_home_epoch >= MAX_CHAIN_RECORDS as u64
             {
                 return Err(refusal(Refusal::BaseMismatch));
+            }
+            if a.next_home_epoch >= MAX_CHAIN_RECORDS as u64 {
+                return Err(refusal(Refusal::HomeCheckpointRequired));
             }
             maintenance::require_no_live_window(&tx, &a.account_anchor, None)?;
             maintenance::reserve_budget(&tx, &a.account_anchor, false)?;
@@ -186,55 +213,20 @@ impl RouterCore {
                 node,
                 sealed,
                 authority,
+                publication,
                 CommitMoment { now, deadline, backlog_hash },
             )?;
-            let HomeRecord::Committed { commit_proof, .. } = &evidence.record else {
-                return Err(storage("migration commit produced genesis"));
-            };
-            save_head(&tx, &evidence)?;
-            for entry in &sealed.delivery_map {
-                super::write(
-                    &tx,
-                    super::TARGETS,
-                    &entry.target_delivery_id,
-                    &super::InboxRoute {
-                        anchor: a.account_anchor.clone(),
-                        migration_id: a.migration_id.clone(),
-                        epoch: a.next_home_epoch,
-                        active: false,
-                    },
-                )?;
-            }
-
-            write(&tx, PROOFS, &key, &record_hash(&evidence.record).map_err(storage)?)?;
-            let mut source = sealed.source_operation(current, now)?;
-            source.role = MigrationRole::Source;
-            source.phase = Phase::Committed;
-            source.proof = Some((**commit_proof).clone());
-            source.state_version = 1;
-            source.recovery_guard = true;
-            write(&tx, OPS, &key, &source)?;
-            tx.open_table(GUARDS)
-                .map_err(storage)?
-                .insert(a.account_anchor.as_str(), key.as_str())
-                .map_err(storage)?;
-            write(
+            persist_source_commit(
                 &tx,
-                BUSINESS,
-                &business_key(&a.account_anchor, &a.migration_id, Action::Commit)?,
-                &BusinessOutcome {
-                    payload_hash: message_hash(auth).map_err(storage)?,
-                    operation_key: key,
-                    expires_at: source.expires_at,
-                },
+                SourceCommit { sealed, base: current, evidence: &evidence, cursors: &cursors, now },
             )?;
             commit_transition(store, tx)?;
             Ok(evidence)
         })
     }
-    /// Cancellation/expiry and first commit use the same durable source operation CAS.
+    /// Relay a seal-bound terminal query; cancellation also works without a seal.
     /// # Errors
-    /// Rejects wrong seals/authority and returns the existing proof instead of rolling it back.
+    /// Rejects invalid sealed evidence or a conflicting permanent commit.
     pub fn fence_home_migration(
         &self,
         store: &RouterRedbStore,
@@ -243,83 +235,26 @@ impl RouterCore {
         now: u64,
         cancel: bool,
     ) -> Result<FenceOutcome, NodeCoreError> {
-        let CommitMigration { sealed, peer } = input;
-        let a = &sealed.authorization;
-        let s = &sealed.seal;
-        self.with_migration_authority(&a.body.account_anchor, now, |authority| {
-            let tx = store.migration_db().begin_write().map_err(storage)?;
-            clock(&tx, now)?;
-            let key = op_key(&a.body.account_anchor, &a.body.migration_id, MigrationRole::Source)?;
-            if let Some(hash) = read::<String>(&tx, PROOFS, &key)? {
-                let record: RecordEvidence = read(&tx, RECORDS, &hash)?
-                    .ok_or_else(|| storage("migration permanent proof lost its record"))?;
-                let HomeRecord::Committed { authorization, .. } = &record.record else {
-                    return Err(storage("migration proof index points to genesis"));
-                };
-                if message_hash(authorization).map_err(storage)?
-                    != message_hash(a).map_err(storage)?
-                {
-                    return Err(refusal(Refusal::IdempotencyConflict));
-                }
-                return Ok(FenceOutcome::Committed(Box::new(record)));
-            }
-            if let Some(old) = read::<MigrationOperation>(&tx, OPS, &key)? {
-                if old.authorization.as_ref().map(message_hash).transpose().map_err(storage)?
-                    != Some(message_hash(a).map_err(storage)?)
-                {
-                    return Err(refusal(Refusal::IdempotencyConflict));
-                }
-                if let Some(proof) = old.proof {
-                    let record = HomeRecord::Committed {
-                        authorization: Box::new(a.clone()),
-                        commit_proof: Box::new(proof),
-                    };
-                    return Ok(FenceOutcome::Committed(Box::new(
-                        read(&tx, RECORDS, &record_hash(&record).map_err(storage)?)?
-                            .ok_or_else(|| storage("migration commit record unavailable"))?,
-                    )));
-                }
-                if let Some(fence) = old.fence {
-                    return Ok(FenceOutcome::Fenced(fence));
-                }
-            }
-            verify_sealed(node, sealed, peer, authority, false)?;
-            if !cancel
-                && now
-                    <= s.body.commit_deadline.ok_or_else(|| refusal(Refusal::EvidenceRequired))?
-                && now <= crypto::hard_deadline(&a.body).map_err(auth_error)?
-            {
-                return Err(refusal(Refusal::CommitOutcomeUnknown));
-            }
-            // The caller's fresh custody action authenticates cancellation; a courier may only expire.
-            let fence = crypto::sign_node(
-                NoncommitFence {
-                    version: 1,
-                    migration_id: a.body.migration_id.clone(),
-                    authorization_hash: message_hash(a).map_err(storage)?,
-                    seal_hash: message_hash(s).map_err(storage)?,
-                    fenced_at: now,
-                },
-                node.node_id(),
-                &node.key,
-            )
-            .map_err(auth_error)?;
-            if now <= crypto::hard_deadline(&a.body).map_err(auth_error)? {
-                let base: RecordEvidence = read(&tx, RECORDS, &a.body.previous_home_hash)?
-                    .ok_or_else(|| refusal(Refusal::BaseMismatch))?;
-                let mut old = sealed.source_operation(base, now)?;
-                old.role = MigrationRole::Source;
-                old.phase = Phase::Expired;
-                old.fence = Some(fence.clone());
-                old.recovery_guard = false;
-                write(&tx, OPS, &key, &old)?;
-                maintenance::index_expiry(&tx, &key, old.expires_at)?;
-            }
-            commit_transition(store, tx)?;
-            Ok(FenceOutcome::Fenced(fence))
-        })
+        self.with_migration_authority(
+            &input.sealed.authorization.body.account_anchor,
+            now,
+            |authority, _publication| {
+                verify_sealed(node, input.sealed, input.peer, authority, false)?;
+                super::fence::fence_authorization(
+                    store,
+                    node,
+                    super::fence::FenceDecision {
+                        authorization: &input.sealed.authorization,
+                        cancel,
+                        authority,
+                    },
+                    now,
+                )
+            },
+        )
     }
 }
+
 fn verify_sealed(
     node: &MigrationNode,
     sealed: &super::SealedMigration,
@@ -395,6 +330,7 @@ fn committed_evidence(
     node: &MigrationNode,
     sealed: &super::SealedMigration,
     authority: &VerifiedRecord,
+    publication: &crate::CustodyPublication,
     moment: CommitMoment,
 ) -> Result<RecordEvidence, NodeCoreError> {
     let auth = &sealed.authorization;
@@ -435,6 +371,10 @@ fn committed_evidence(
         .and_then(|d| d.branch_certificate.clone())
         .ok_or_else(|| refusal(Refusal::ActorRevoked))?;
     let evidence = RecordEvidence {
+        authority: ramflux_protocol::custody::Publication {
+            record: publication.record.clone(),
+            compacted_ids: publication.compacted_ids.clone(),
+        },
         record: HomeRecord::Committed {
             authorization: Box::new(auth.clone()),
             commit_proof: Box::new(proof.clone()),
@@ -464,9 +404,71 @@ fn schedule_backlog(
         )?;
     }
     let backlog_hash = ramflux_protocol::custody::framed_hash(
-        ramflux_protocol::domain::HOME_DELIVERY_MAP,
+        ramflux_protocol::domain::HOME_BACKLOG_MANIFEST,
         &cursors,
     )
     .map_err(storage)?;
     Ok(backlog_hash)
+}
+
+struct SourceCommit<'a> {
+    sealed: &'a super::SealedMigration,
+    base: RecordEvidence,
+    evidence: &'a RecordEvidence,
+    cursors: &'a [super::MigrationBacklogCursor],
+    now: u64,
+}
+fn persist_source_commit(
+    tx: &redb::WriteTransaction,
+    facts: SourceCommit<'_>,
+) -> Result<(), NodeCoreError> {
+    let SourceCommit { sealed, base, evidence, cursors, now } = facts;
+    let auth = &sealed.authorization;
+    let a = &auth.body;
+    let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Source)?;
+    let auth_key = super::authorization_key(auth)?;
+    let HomeRecord::Committed { commit_proof, .. } = &evidence.record else {
+        return Err(storage("migration commit produced genesis"));
+    };
+    save_head(tx, evidence)?;
+    for entry in &sealed.delivery_map {
+        super::write(
+            tx,
+            super::TARGETS,
+            &entry.target_delivery_id,
+            &super::InboxRoute {
+                anchor: a.account_anchor.clone(),
+                migration_id: a.migration_id.clone(),
+                epoch: a.next_home_epoch,
+                active: false,
+            },
+        )?;
+    }
+
+    write(tx, PROOFS, &auth_key, &record_hash(&evidence.record).map_err(storage)?)?;
+    let mut source = sealed.source_operation(base, now)?;
+    source.role = MigrationRole::Source;
+    source.phase = Phase::Committed;
+    source.proof = Some((**commit_proof).clone());
+    source.state_version = 1;
+    source.recovery_guard = false;
+    source.expires_at = commit_proof.body.forward_until;
+    source.live_budget = cursors.iter().any(|cursor| cursor.progress.remaining != 0);
+    if !source.live_budget {
+        maintenance::release_budget(tx, &a.account_anchor, false)?;
+    }
+    maintenance::index_expiry(tx, &key, source.expires_at)?;
+    write(tx, OPS, &key, &source)?;
+    tx.open_table(GUARDS).map_err(storage)?.remove(a.account_anchor.as_str()).map_err(storage)?;
+    write(
+        tx,
+        BUSINESS,
+        &business_key(&a.account_anchor, &a.migration_id, Action::Commit)?,
+        &BusinessOutcome {
+            payload_hash: message_hash(auth).map_err(storage)?,
+            operation_key: key,
+            expires_at: source.expires_at,
+        },
+    )?;
+    Ok(())
 }

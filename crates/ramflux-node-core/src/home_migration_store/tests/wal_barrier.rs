@@ -4,7 +4,7 @@
 //! Cutover covers acknowledged WAL submissions and excludes subsequent old-home writes.
 use super::*;
 use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
-fn entry(target: &str) -> crate::InboxEntry {
+pub(super) fn entry(target: &str) -> crate::InboxEntry {
     crate::InboxEntry {
         inbox_seq: 7,
         target_delivery_id: target.into(),
@@ -26,7 +26,7 @@ fn entry(target: &str) -> crate::InboxEntry {
             delivery_class: DeliveryClass::OpaqueEvent,
             priority: Priority::Normal,
             ttl: 3600,
-            created_at: NOW as i64,
+            created_at: 1_700_000_100,
             encrypted_payload: "opaque".into(),
             payload_hash: hash(43),
         },
@@ -54,7 +54,7 @@ fn acknowledged_wal_only_submission_is_in_signed_cutover_manifest() -> TestResul
     assert_eq!(
         commit_proof.body.backlog_manifest_hash,
         ramflux_protocol::custody::framed_hash(
-            ramflux_protocol::domain::HOME_DELIVERY_MAP,
+            ramflux_protocol::domain::HOME_BACKLOG_MANIFEST,
             &cursors
         )?
     );
@@ -83,5 +83,43 @@ fn in_flight_submission_serializes_before_commit_and_late_append_is_refused() ->
         NOW + 2,
     )?;
     assert_eq!(cursors.iter().map(|c| c.high_water).max(), Some(7));
+    Ok(())
+}
+#[test]
+fn actual_wal_append_racing_cutover_is_included_or_refused_before_ack() -> TestResult {
+    for _ in 0..4 {
+        let s = Scenario::prepared()?;
+        let sealed = s.seal()?;
+        let queued = entry(&s.target);
+        let store = s.a.store()?;
+        let start = std::sync::Barrier::new(2);
+        let (submitted, committed) = std::thread::scope(|scope| {
+            let append = scope.spawn(|| {
+                start.wait();
+                store.record_submission_increment("race", i64::MAX / 2, Some(&queued))
+            });
+            start.wait();
+            let committed = s.commit(&sealed);
+            (append.join(), committed)
+        });
+        let submitted = submitted.map_err(|_| "submission worker panicked")?;
+        if committed.is_err() {
+            assert!(submitted.is_ok(), "a durable submission must own the retry barrier");
+            s.commit(&sealed)?;
+        }
+        let cursors = store.migration_backlog_barrier(
+            &s.anchor,
+            &s.authorization.body.migration_id,
+            &sealed.delivery_map,
+            NOW + 2,
+        )?;
+        if submitted.is_ok() {
+            assert_eq!(cursors.iter().map(|c| c.high_water).max(), Some(7));
+            assert_eq!(cursors.iter().map(|c| c.progress.remaining).sum::<u64>(), 1);
+        } else {
+            assert!(committed.is_ok(), "a refused append requires a successful cutover");
+            assert_eq!(cursors.iter().map(|c| c.high_water).max(), Some(0));
+        }
+    }
     Ok(())
 }

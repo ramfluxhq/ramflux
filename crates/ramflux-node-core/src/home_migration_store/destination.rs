@@ -33,10 +33,10 @@ impl RouterCore {
         now: u64,
     ) -> Result<Signed<Offer>, NodeCoreError> {
         let p = &input.prepare.body;
-        self.with_migration_authority(&p.account_anchor, now, |authority| {
+        self.with_migration_authority(&p.account_anchor, now, |authority, _publication| {
             let (expected_map, map_hash) = verify_preparation(node, input, authority, now)?;
             let tx = store.migration_db().begin_write().map_err(storage)?;
-            clock(&tx, now)?;
+            let now = clock(&tx, now)?;
             let key = op_key(&p.account_anchor, &p.migration_id, MigrationRole::Destination)?;
             if let Some(existing) = read::<MigrationOperation>(&tx, OPS, &key)? {
                 if message_hash(&existing.prepare).map_err(storage)?
@@ -106,6 +106,7 @@ impl RouterCore {
                 next_due: now,
                 expires_at: offer.body.accept_until + SKEW_SECONDS,
                 recovery_guard: false,
+                live_budget: true,
             };
             write(&tx, OPS, &key, &op)?;
             maintenance::index_expiry(&tx, &key, op.expires_at)?;
@@ -134,8 +135,8 @@ impl RouterCore {
         now: u64,
     ) -> Result<Signed<Receipt>, NodeCoreError> {
         let a = &authorization.body;
-        self.with_migration_authority(&a.account_anchor,now,|authority|{
-            let tx=store.migration_db().begin_write().map_err(storage)?;clock(&tx,now)?;
+        self.with_migration_authority(&a.account_anchor,now,|authority, _publication|{
+            let tx=store.migration_db().begin_write().map_err(storage)?;let now=clock(&tx,now)?;
             let key=op_key(&a.account_anchor,&a.migration_id,MigrationRole::Destination)?;
             let mut op:MigrationOperation=read(&tx,OPS,&key)?.ok_or_else(||refusal(Refusal::EvidenceRequired))?;
             let auth_hash=message_hash(authorization).map_err(storage)?;
@@ -162,10 +163,10 @@ impl RouterCore {
                 issued_at:now,expires_at:now+300,reason_code:None},node.node_id(),&node.key).map_err(auth_error)?;
             op.authorization=Some(authorization.clone());op.seal=Some(seal.clone());op.phase=Phase::Sealed;op.state_version=2;op.next_due=now;
             op.expires_at=crypto::hard_deadline(a).map_err(auth_error)?;op.recovery_guard=true;
-            maintenance::unsealed_budget(&tx,false)?;
+            maintenance::unsealed_budget(&tx,&a.account_anchor,false)?;
             for entry in &op.delivery_map {
                 if let Some(old)=read::<InboxRoute>(&tx,TARGETS,&entry.target_delivery_id)?
-                    && (old.anchor!=a.account_anchor || (old.migration_id!=a.migration_id && !old.active)) {return Err(refusal(Refusal::BaseMismatch));}
+                    && (old.anchor!=a.account_anchor || old.epoch>=a.next_home_epoch) {return Err(refusal(Refusal::BaseMismatch));}
                 write(&tx,TARGETS,&entry.target_delivery_id,&InboxRoute{anchor:a.account_anchor.clone(),migration_id:a.migration_id.clone(),epoch:a.next_home_epoch,active:false})?;
             }
             tx.open_table(GUARDS).map_err(storage)?.insert(a.account_anchor.as_str(),key.as_str()).map_err(storage)?;
@@ -183,18 +184,26 @@ impl RouterRedbStore {
     pub fn activate_home_migration(
         &self,
         node: &MigrationNode,
-        home: &VerifiedHome,
+        result: &ramflux_protocol::home_migration::ResolveResult,
         now: u64,
     ) -> Result<(), NodeCoreError> {
-        let HomeRecord::Committed { authorization, commit_proof } = &home.evidence().record else {
+        let HomeRecord::Committed { authorization, commit_proof } = &result.home.record else {
             return Err(refusal(Refusal::EvidenceRequired));
         };
         let a = &authorization.body;
         let tx = self.migration_db().begin_write().map_err(storage)?;
-        clock(&tx, now)?;
+        let now = clock(&tx, now)?;
         let key = op_key(&a.account_anchor, &a.migration_id, MigrationRole::Destination)?;
+        if let Some(head) = read::<RecordEvidence>(&tx, HEADS, &a.account_anchor)?
+            && head.record.home() == (node.node_id(), node.public_key())
+            && record_hash(&head.record).map_err(storage)?
+                == record_hash(&result.home.record).map_err(storage)?
+        {
+            return Ok(());
+        }
         let mut op: MigrationOperation =
             read(&tx, OPS, &key)?.ok_or_else(|| refusal(Refusal::EvidenceRequired))?;
+        let home = verify_activation_base(result, &op, now)?;
         if op.fence.is_some() {
             return Err(refusal(Refusal::HomeFork));
         }
@@ -205,7 +214,7 @@ impl RouterRedbStore {
         let floor_hash =
             floor.as_ref().map(|e| record_hash(&e.record)).transpose().map_err(storage)?;
         crypto::activation_allowed(
-            home,
+            &home,
             &crypto::SealedBinding {
                 destination_node: node.node_id(),
                 destination_key: node.public_key(),
@@ -241,6 +250,10 @@ impl RouterRedbStore {
                 },
             )?;
         }
+        maintenance::release_budget(&tx, &a.account_anchor, false)?;
+        op.live_budget = false;
+        maintenance::remove_courier(&tx, &op)?;
+        maintenance::index_expiry(&tx, &key, op.expires_at)?;
         op.phase = Phase::Active;
         op.proof = Some((**commit_proof).clone());
         op.state_version += 1;
@@ -277,24 +290,33 @@ impl RouterRedbStore {
                 op.authorization.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?,
             )
             .map_err(storage)?
-            || fence.body.seal_hash
-                != message_hash(op.seal.as_ref().ok_or_else(|| refusal(Refusal::EvidenceRequired))?)
-                    .map_err(storage)?
+            || fence.body.seal_hash.as_ref().is_some_and(|hash| {
+                op.seal.as_ref().and_then(|seal| message_hash(seal).ok()).as_ref() != Some(hash)
+            })
         {
             return Err(refusal(Refusal::BaseMismatch));
         }
         if op.fence.is_some() {
             return Ok(());
         }
+        maintenance::remove_courier(&tx, &op)?;
+        op.live_budget = false;
         op.fence = Some(fence.clone());
         op.phase = Phase::Expired;
         op.state_version += 1;
         op.recovery_guard = false;
         for entry in &op.delivery_map {
-            tx.open_table(TARGETS)
-                .map_err(storage)?
-                .remove(entry.target_delivery_id.as_str())
-                .map_err(storage)?;
+            write(
+                &tx,
+                TARGETS,
+                &entry.target_delivery_id,
+                &InboxRoute {
+                    anchor: anchor.into(),
+                    migration_id: fence.body.migration_id.clone(),
+                    epoch: op.offer.body.next_home_epoch,
+                    active: false,
+                },
+            )?;
         }
         tx.open_table(GUARDS).map_err(storage)?.remove(anchor).map_err(storage)?;
         write(&tx, OPS, &key, &op)?;
@@ -341,4 +363,30 @@ fn verify_preparation(
         return Err(refusal(Refusal::AuthorityUpdateRequired));
     }
     Ok((expected_map, map_hash))
+}
+
+fn verify_activation_base(
+    result: &ramflux_protocol::home_migration::ResolveResult,
+    op: &MigrationOperation,
+    now: u64,
+) -> Result<VerifiedHome, NodeCoreError> {
+    let base_hash = record_hash(&op.base.record).map_err(storage)?;
+    let (source, source_key) = op.base.record.home();
+    let home = crypto::verify_home_chain(
+        result,
+        &crypto::HomeTrust {
+            account_anchor: op.base.record.account_anchor(),
+            node_id: source,
+            node_key: source_key,
+            home_epoch: op.base.record.epoch(),
+            home_hash: Some(&base_hash),
+            cached_manager_range: op.base.authority.record.body.master_certificate.body.range_index,
+            cached_manager_certificate_hash: Some(
+                &object_hash(&op.base.authority.record.body.master_certificate).map_err(storage)?,
+            ),
+        },
+        now,
+    )
+    .map_err(auth_error)?;
+    Ok(home)
 }

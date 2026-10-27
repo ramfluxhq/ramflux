@@ -1,4 +1,5 @@
 {
+  "backlog_manifest_hash": "gAwKMWOqJaGTYmHxb4LD-2zXkcmABYqaSZe_-SN4YF0",
   "committed_home": {
     "actor_certificate": {
       "body": {
@@ -23,6 +24,107 @@
         "version": 1
       },
       "signature": "9A4XF_K6xhelAI85DvRY9rrcce4RU8GA9VXNe8cTzspYrYeIj3rgzAzxG4t_Geb6E7hgvyKm6lE5JNH34Ro8Cg"
+    },
+    "authority": {
+      "compacted_ids": null,
+      "record": {
+        "body": {
+          "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+          "custody_mode": "v3",
+          "delegations": [],
+          "device_set_epoch": 4294967297,
+          "devices": [
+            {
+              "agreement_key_commitment": "382HGatpHL9OdpNnzIqKvSxZHGZ7Voq29ZModogZ0EI",
+              "branch_certificate": {
+                "body": {
+                  "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+                  "agreement_identity_public_key": "rAGyIJ6GNU-4UyN7XeD0-rE8f8v0M6YcAZNpYX_s8Qs",
+                  "branch_signing_public_key": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+                  "capabilities": [
+                    "call",
+                    "group",
+                    "message",
+                    "register",
+                    "sync"
+                  ],
+                  "cert_id": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY",
+                  "device_epoch": 1,
+                  "device_id": "primary",
+                  "expires_at": 1702592000,
+                  "master_certificate_hash": "MObK_MiUX6AkEOVT6kYbxYkkCARnCuezi6hCJgV43nc",
+                  "not_before": 1700000000,
+                  "principal_kind": "human",
+                  "schema": "ramflux.identity.branch_certificate.v1",
+                  "version": 1
+                },
+                "signature": "9A4XF_K6xhelAI85DvRY9rrcce4RU8GA9VXNe8cTzspYrYeIj3rgzAzxG4t_Geb6E7hgvyKm6lE5JNH34Ro8Cg"
+              },
+              "device_epoch": 1,
+              "device_id": "primary",
+              "migration_state": "native",
+              "revoked_at": null,
+              "signing_key_commitment": "l3CMwbcPKdTN2e_lqRjc5C3QRWiLRsdxZLRwmKR-B7s",
+              "status": "active"
+            }
+          ],
+          "issued_at": 1700000000,
+          "legacy_binding": null,
+          "master_certificate": {
+            "body": {
+              "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+              "cert_id": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "custody_kind": "local_human",
+              "issued_at": 1700000000,
+              "legacy_binding_hash": null,
+              "master_public_key": "dpo72yjw_usfOz1CMtsiramWwlb9rLj72PwxphjlnJc",
+              "previous_certificate_hash": null,
+              "primary_device_ref": {
+                "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+                "device_epoch": 1,
+                "device_id": "primary"
+              },
+              "principal_id": "vector.example",
+              "principal_kind": "human",
+              "range_index": 1,
+              "schema": "ramflux.identity.master_certificate.v1",
+              "scopes": [
+                "branch_certify",
+                "contact_consent",
+                "delegate",
+                "device_set",
+                "profile"
+              ],
+              "self_signing_public_key": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+              "version": 1
+            },
+            "signature": "wtf7znG-O4p0Pa8H9ODiKN4BPp7zw8WopP1mDwl-vCW0ii8gUaHGBNxTcC5s0wwuNM-LSs7p9dVi8SmWadO9AQ"
+          },
+          "migration": null,
+          "origin": "new",
+          "previous_record_hash": null,
+          "principal_id": "vector.example",
+          "principal_kind": "human",
+          "profile": {
+            "custodian": null,
+            "display_name": "Vector Human",
+            "kind": "human"
+          },
+          "revoked_delegation_ids": [],
+          "revoked_device_checkpoint": null,
+          "schema": "ramflux.identity.signed_device_set.v3",
+          "section_hashes": {
+            "delegations": "u2vjvaKeUTCA8Z_WqY5vv_9W38HfsDvQ0zS0-Jvf9HQ",
+            "devices": "T-vWMOdpqLouE4OWnpxsuJdx8HvVC82FGDosPDa4r6w",
+            "migration": "PuZvvT45m-DToF2lJO4xh2soc6EgMYJjqNW7fudQkoc",
+            "profile": "_oWW3q60uDX4Ae1wFPclh3lHnucDsbk4yDCa6ND7wt4",
+            "revoked_delegation_ids": "4XeIV73t7KnC-EfggK9imLwWHQvXic1x10d5D10Z57A",
+            "revoked_device_checkpoint": "2w04tcJKbxewLsd4S1mNc4vVm7tHI96cikB7yxH6vv8"
+          },
+          "version": 3
+        },
+        "signature": "fJbyJ2N2yKMh5sokO1JkIE7mSaudy2RdlSnF9_UhzKu2RAP75LRctKpgvSpciNCPvzRQwYMc85V9xkJaT2TFDg"
+      }
     },
     "management_certificate_chain": [
       {
@@ -177,6 +279,107 @@
   "delivery_map_hash": "WIthSvpjCBrr1k8aG5wg_VLJ5899Egh5xL6IeNJpNTA",
   "genesis": {
     "actor_certificate": null,
+    "authority": {
+      "compacted_ids": null,
+      "record": {
+        "body": {
+          "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+          "custody_mode": "v3",
+          "delegations": [],
+          "device_set_epoch": 4294967297,
+          "devices": [
+            {
+              "agreement_key_commitment": "382HGatpHL9OdpNnzIqKvSxZHGZ7Voq29ZModogZ0EI",
+              "branch_certificate": {
+                "body": {
+                  "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+                  "agreement_identity_public_key": "rAGyIJ6GNU-4UyN7XeD0-rE8f8v0M6YcAZNpYX_s8Qs",
+                  "branch_signing_public_key": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+                  "capabilities": [
+                    "call",
+                    "group",
+                    "message",
+                    "register",
+                    "sync"
+                  ],
+                  "cert_id": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY",
+                  "device_epoch": 1,
+                  "device_id": "primary",
+                  "expires_at": 1702592000,
+                  "master_certificate_hash": "MObK_MiUX6AkEOVT6kYbxYkkCARnCuezi6hCJgV43nc",
+                  "not_before": 1700000000,
+                  "principal_kind": "human",
+                  "schema": "ramflux.identity.branch_certificate.v1",
+                  "version": 1
+                },
+                "signature": "9A4XF_K6xhelAI85DvRY9rrcce4RU8GA9VXNe8cTzspYrYeIj3rgzAzxG4t_Geb6E7hgvyKm6lE5JNH34Ro8Cg"
+              },
+              "device_epoch": 1,
+              "device_id": "primary",
+              "migration_state": "native",
+              "revoked_at": null,
+              "signing_key_commitment": "l3CMwbcPKdTN2e_lqRjc5C3QRWiLRsdxZLRwmKR-B7s",
+              "status": "active"
+            }
+          ],
+          "issued_at": 1700000000,
+          "legacy_binding": null,
+          "master_certificate": {
+            "body": {
+              "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+              "cert_id": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+              "custody_kind": "local_human",
+              "issued_at": 1700000000,
+              "legacy_binding_hash": null,
+              "master_public_key": "dpo72yjw_usfOz1CMtsiramWwlb9rLj72PwxphjlnJc",
+              "previous_certificate_hash": null,
+              "primary_device_ref": {
+                "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+                "device_epoch": 1,
+                "device_id": "primary"
+              },
+              "principal_id": "vector.example",
+              "principal_kind": "human",
+              "range_index": 1,
+              "schema": "ramflux.identity.master_certificate.v1",
+              "scopes": [
+                "branch_certify",
+                "contact_consent",
+                "delegate",
+                "device_set",
+                "profile"
+              ],
+              "self_signing_public_key": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+              "version": 1
+            },
+            "signature": "wtf7znG-O4p0Pa8H9ODiKN4BPp7zw8WopP1mDwl-vCW0ii8gUaHGBNxTcC5s0wwuNM-LSs7p9dVi8SmWadO9AQ"
+          },
+          "migration": null,
+          "origin": "new",
+          "previous_record_hash": null,
+          "principal_id": "vector.example",
+          "principal_kind": "human",
+          "profile": {
+            "custodian": null,
+            "display_name": "Vector Human",
+            "kind": "human"
+          },
+          "revoked_delegation_ids": [],
+          "revoked_device_checkpoint": null,
+          "schema": "ramflux.identity.signed_device_set.v3",
+          "section_hashes": {
+            "delegations": "u2vjvaKeUTCA8Z_WqY5vv_9W38HfsDvQ0zS0-Jvf9HQ",
+            "devices": "T-vWMOdpqLouE4OWnpxsuJdx8HvVC82FGDosPDa4r6w",
+            "migration": "PuZvvT45m-DToF2lJO4xh2soc6EgMYJjqNW7fudQkoc",
+            "profile": "_oWW3q60uDX4Ae1wFPclh3lHnucDsbk4yDCa6ND7wt4",
+            "revoked_delegation_ids": "4XeIV73t7KnC-EfggK9imLwWHQvXic1x10d5D10Z57A",
+            "revoked_device_checkpoint": "2w04tcJKbxewLsd4S1mNc4vVm7tHI96cikB7yxH6vv8"
+          },
+          "version": 3
+        },
+        "signature": "fJbyJ2N2yKMh5sokO1JkIE7mSaudy2RdlSnF9_UhzKu2RAP75LRctKpgvSpciNCPvzRQwYMc85V9xkJaT2TFDg"
+      }
+    },
     "management_certificate_chain": [],
     "node_record": {
       "body": {
@@ -616,19 +819,19 @@
     },
     {
       "domain": "ramflux.identity.home_noncommit_fence.v1",
-      "hash": "nYwucsyTm_5jo62FUAnhTYUBWeGyRD7GK6igFZxxE6g",
+      "hash": "s2Dvhi4BKaLMc2OxcSFP-TeKmxqE7SEehhHwRQSNris",
       "signed": {
         "body": {
           "authorization_hash": "ExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM",
           "fenced_at": 1700000100,
           "migration_id": "ExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM",
-          "seal_hash": "ExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM",
+          "seal_hash": null,
           "version": 1
         },
         "domain": "ramflux.identity.home_noncommit_fence.v1",
         "schema": "ramflux.identity.home_noncommit_fence.v1",
         "signatures": [
-          "vvvJh0GSTwQqkcXVJjo_vW3VsGjCLVr0UEe8XMEZdHTgaT5xxHYZ7qnEafWEjUnMK98FvvKbWIdJfurWX0fLCw"
+          "qriZsdhMB6Pbnk9mR1hcVHTfdwy8uzyjhycyDMSwdeSRYqYesf12lzs8ruXmcvcjNx2mzTgYQ2M9JM0sR1NgCw"
         ],
         "signers": [
           {
@@ -641,7 +844,40 @@
           }
         ]
       },
-      "signing_hex": "7b22626f6479223a7b22617574686f72697a6174696f6e5f68617368223a2245784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d222c2266656e6365645f6174223a313730303030303130302c226d6967726174696f6e5f6964223a2245784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d222c227365616c5f68617368223a2245784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d222c2276657273696f6e223a317d2c22646f6d61696e223a2272616d666c75782e6964656e746974792e686f6d655f6e6f6e636f6d6d69745f66656e63652e7631222c22736368656d61223a2272616d666c75782e6964656e746974792e686f6d655f6e6f6e636f6d6d69745f66656e63652e7631222c227369676e657273223a5b7b226b6579223a7b226b696e64223a226e6f6465222c226e6f64655f6964223a2241222c227075626c69635f6b6579223a2245356a324c47306152587852756d704c587a32394c326e3871544957495933496d583542613946396b386f227d2c22726f6c65223a226e6f6465227d5d7d"
+      "signing_hex": "7b22626f6479223a7b22617574686f72697a6174696f6e5f68617368223a2245784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d222c2266656e6365645f6174223a313730303030303130302c226d6967726174696f6e5f6964223a2245784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d222c227365616c5f68617368223a6e756c6c2c2276657273696f6e223a317d2c22646f6d61696e223a2272616d666c75782e6964656e746974792e686f6d655f6e6f6e636f6d6d69745f66656e63652e7631222c22736368656d61223a2272616d666c75782e6964656e746974792e686f6d655f6e6f6e636f6d6d69745f66656e63652e7631222c227369676e657273223a5b7b226b6579223a7b226b696e64223a226e6f6465222c226e6f64655f6964223a2241222c227075626c69635f6b6579223a2245356a324c47306152587852756d704c587a32394c326e3871544957495933496d583542613946396b386f227d2c22726f6c65223a226e6f6465227d5d7d"
+    },
+    {
+      "domain": "ramflux.identity.home_peer_status.v1",
+      "hash": "5WrIKCzj1wJsO2XDO9C_EDL97YcP3YyirO66qpZsbw0",
+      "signed": {
+        "body": {
+          "account_anchor": "CFeUxoWMBsa9yAAoCz0GXjxP6R7ZQr3-SUty7OxO4EI",
+          "audience_node": "A",
+          "authorization_hash": "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQ",
+          "destination_node": "B",
+          "expires_at": 1700000160,
+          "issued_at": 1700000100,
+          "migration_id": "ExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM",
+          "nonce": "FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU",
+          "version": 1
+        },
+        "domain": "ramflux.identity.home_peer_status.v1",
+        "schema": "ramflux.identity.home_peer_status.v1",
+        "signatures": [
+          "3GxKcdkPuYcOEznuhDt3SFXKvjEH4qXYYG3migzOqRZBKBEncqMaf9Pn3GxmLgsbiJAi27zgz7IM6oEY8hbiBA"
+        ],
+        "signers": [
+          {
+            "key": {
+              "kind": "node",
+              "node_id": "B",
+              "public_key": "_RckOFqgx1tk-3jNYC-h2ZH96_drE8WO1wLqyDXp9hg"
+            },
+            "role": "node"
+          }
+        ]
+      },
+      "signing_hex": "7b22626f6479223a7b226163636f756e745f616e63686f72223a2243466555786f574d427361397941416f437a3047586a78503652375a5172332d53557479374f784f344549222c2261756469656e63655f6e6f6465223a2241222c22617574686f72697a6174696f6e5f68617368223a2246425155464251554642515546425155464251554642515546425155464251554642515546425155464251222c2264657374696e6174696f6e5f6e6f6465223a2242222c22657870697265735f6174223a313730303030303136302c226973737565645f6174223a313730303030303130302c226d6967726174696f6e5f6964223a2245784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d5445784d222c226e6f6e6365223a2246525556465255564652555646525556465255564652555646525556465255564652555646525556465255222c2276657273696f6e223a317d2c22646f6d61696e223a2272616d666c75782e6964656e746974792e686f6d655f706565725f7374617475732e7631222c22736368656d61223a2272616d666c75782e6964656e746974792e686f6d655f706565725f7374617475732e7631222c227369676e657273223a5b7b226b6579223a7b226b696e64223a226e6f6465222c226e6f64655f6964223a2242222c227075626c69635f6b6579223a225f52636b4f4671677831746b2d336a4e59432d68325a4839365f64724538574f31774c7179445870396867227d2c22726f6c65223a226e6f6465227d5d7d"
     }
   ]
 }

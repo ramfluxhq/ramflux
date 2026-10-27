@@ -122,7 +122,11 @@ pub const HOME_NONCOMMIT_FENCE: &str = "ramflux.identity.home_noncommit_fence.v1
 pub const HOME_RECORD_HASH: &str = "ramflux.identity.home_record_hash.v1";
 pub const HOME_DELIVERY_MAP: &str = "ramflux.identity.home_delivery_map.v1";
 
-pub const ALL: [&str; 112] = [
+pub const HOME_BACKLOG_MANIFEST: &str = "ramflux.identity.home_backlog_manifest.v1";
+pub const HOME_ATTEST_REQUEST: &str = "ramflux.identity.home_attest_request.v1";
+pub const HOME_PEER_STATUS: &str = "ramflux.identity.home_peer_status.v1";
+
+pub const ALL: [&str; 115] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -235,6 +239,9 @@ pub const ALL: [&str; 112] = [
     HOME_NONCOMMIT_FENCE,
     HOME_RECORD_HASH,
     HOME_DELIVERY_MAP,
+    HOME_BACKLOG_MANIFEST,
+    HOME_ATTEST_REQUEST,
+    HOME_PEER_STATUS,
 ];
 
 #[cfg(test)]

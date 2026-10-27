@@ -3,12 +3,13 @@
 
 //! Typed action payloads and bounded evidence on the custody connection.
 use super::{
-    Authorization, BacklogProgress, CommitProof, Control, DeliveryMapEntry, HomeAttestation,
-    HomeRecord, NoncommitFence, Offer, Prepare, Receipt, RecordEvidence, ResolveResult, Signed,
+    Action, Authorization, BacklogProgress, CommitProof, Control, DeliveryMapEntry,
+    HomeAttestation, HomeRecord, NoncommitFence, Offer, Prepare, Receipt, RecordEvidence,
+    ResolveResult, Signed,
 };
 use crate::custody::{BranchProofV3, Envelope, NodeIdentityRecord, Publication, RelayAcceptance};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SealPayload {
@@ -48,10 +49,10 @@ pub struct FencePayload {
     pub noncommit_fence_hash: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawRequest")]
 pub struct Request {
     pub control: Signed<Control>,
-    pub payload: Value,
+    pub payload: ActionPayload,
     pub evidence: Evidence,
 }
 
@@ -61,7 +62,7 @@ pub struct Evidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_record: Option<crate::WellKnownClientRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_record: Option<Value>,
+    pub server_record: Option<Envelope<NodeIdentityRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepare: Option<Signed<Prepare>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,4 +102,57 @@ pub struct Response {
     pub resolve_result: Option<ResolveResult>,
     pub backlog_progress: Option<BacklogProgress>,
     pub attestation: Option<Signed<HomeAttestation>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestPayload {
+    pub account_anchor: String,
+    pub destination_node: String,
+    pub nonce: String,
+}
+/// Owner consent survives the admitted destination relaying this request to A.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestRequest {
+    pub control: Signed<Control>,
+    pub payload: AttestPayload,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActionPayload {
+    Attest(AttestPayload),
+    Prepare(Box<Signed<Prepare>>),
+    Seal(SealPayload),
+    Commit(CommitPayload),
+    Activate(ActivatePayload),
+    Operation(OperationPayload),
+    Resolve(ResolvePayload),
+    Fence(FencePayload),
+}
+// JSON exists only at the strict action-selected decoding boundary, never as an admitted payload.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRequest {
+    control: Signed<Control>,
+    payload: serde_json::Value,
+    evidence: Evidence,
+}
+impl TryFrom<RawRequest> for Request {
+    type Error = serde_json::Error;
+    fn try_from(raw: RawRequest) -> Result<Self, Self::Error> {
+        let payload = match raw.control.body.action {
+            Action::Attest => ActionPayload::Attest(serde_json::from_value(raw.payload)?),
+            Action::Prepare => ActionPayload::Prepare(serde_json::from_value(raw.payload)?),
+            Action::Seal => ActionPayload::Seal(serde_json::from_value(raw.payload)?),
+            Action::Commit => ActionPayload::Commit(serde_json::from_value(raw.payload)?),
+            Action::Activate => ActionPayload::Activate(serde_json::from_value(raw.payload)?),
+            Action::Status | Action::Abort => {
+                ActionPayload::Operation(serde_json::from_value(raw.payload)?)
+            }
+            Action::Resolve => ActionPayload::Resolve(serde_json::from_value(raw.payload)?),
+            Action::Fence => ActionPayload::Fence(serde_json::from_value(raw.payload)?),
+        };
+        Ok(Self { control: raw.control, payload, evidence: raw.evidence })
+    }
 }
