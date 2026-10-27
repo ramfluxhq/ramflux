@@ -1,756 +1,920 @@
 # Account-authorized home-node migration
 
-Design proposal, revision 1. Review is required before implementation. This
-file defines proposed behavior; it does not claim that the production flow
-exists or that live migration has passed acceptance tests.
+Design revision 2; review before implementation. Revision 2 replaces the earlier
+v2-account, TOFU, automatic-fallback and conditional-custody-record proposals.
+This document specifies a cooperative **born-v3-only** operation, not implemented
+production behavior. There are no legacy accounts to support after the v3-only
+client rollout. Do not implement a v2 authorization mode or create synthetic
+legacy roots for this feature.
 
-## Current implementation and scope
+## Source baseline and implementation dependencies
 
-The inspected product base is `9a8961a9566cf241bd5111c07cfc6167b6347a06`.
+The fetched product main is `9a8961a9566cf241bd5111c07cfc6167b6347a06`; the docs
+branch is based on that main. The inspected custody networking r2 interfaces are
+`feat/id-02-impl-2` at `aa2165487d4308081de724c65c5993399f1becdf`. The inspected
+local forwarding train is `train/2026-10-27` at
+`15ffa9f4827bbc2f4722aea723334f713d63b449`; its approved predecessor
+`626aa37bef0b6085e91080c89fa4809ed88577af` contains the forward-signature fix.
+These are source-reading dependencies, not implementation commits in this branch.
 
-- [The SDK migration method](../crates/ramflux-sdk/src/client/federation.rs)
-  delegates to an in-memory
-  [federation model](../crates/ramflux-sync/src/federation.rs). It does not
-  move a daemon account, register it at another gateway, or install forwarding.
-- [Router lifecycle handlers](../apps/ramflux-router/src/lifecycle.rs) apply
-  migration and route proofs using an operator admin token. They are reachable
-  through privileged router mesh handlers and an additional test listener.
-- [Existing migration proofs](../crates/ramflux-protocol/src/home_node_migration.rs)
-  have a device signature and previous-binding hash. Their
-  [crypto verifier](../crates/ramflux-crypto/src/home_node_migration.rs) explicitly
-  leaves lineage/fork enforcement to its caller. A primitive signature check is
-  not sufficient authorization for this flow.
-- [Router migration state](../crates/ramflux-node-core/src/home_node_migration.rs)
-  defines a 24-hour forwarding window. A new-node route proof is separate from
-  the account migration proof. The existing destination route commitment does
-  not bind an account, admission reservation or migration nonce.
-- [Client node discovery](../crates/ramflux-protocol/src/client_discovery.rs)
-  and [node pins](../crates/ramflux-sdk/src/node/store.rs) already provide signed
-  endpoints, expiry checks, key-change detection and explicit pin confirmation.
-  They do not provide destination admission or migration publication.
+Relevant current code and interfaces:
 
-The approved forwarding work at `626aa37bef0b6085e91080c89fa4809ed88577af`
-(FU-BATCH-03 and its prerequisite train) is an implementation dependency, not
-part of this documentation change. It includes bounded forwarding reservations,
-recovery/retry behavior and correct sender-signature treatment of the appended
-hop marker. Integration must retain all of those semantics.
+- [SDK migration](../crates/ramflux-sdk/src/client/federation.rs) changes only the
+  in-memory federation model. It cannot establish production migration success.
+- [Router lifecycle](../apps/ramflux-router/src/lifecycle.rs) currently exposes
+  admin-token apply routes. Their request-supplied `now`, timestamp ordering and
+  legacy migration proof are not the new user operation.
+- [Existing migration state](../crates/ramflux-node-core/src/home_node_migration.rs)
+  and [router forwarding](../crates/ramflux-node-core/src/router.rs) need the
+  explicit deltas below; retaining the train does not supply them automatically.
+- [Custody wire](root_key_custody_wire.md) and
+  [custody model](root_key_custody.md) define master-certified management authority,
+  current records, branch leases, exporter proofs and mode/fork floors. Their
+  historical legacy-transition text does not authorize migration compatibility.
+- At the inspected custody r2 revision, `Envelope<DeviceSet>`, `DeviceRef`,
+  `BranchProofV3`, `Publication`, `NodeIdentityRecord`, `AuthorityPins`,
+  `RouterCore::custody_record`, `CustodyConnection`, `CustodyNetworkConfig` and
+  `PrimaryVault` exist. The ordinary SDK/bus session integration and removal of
+  legacy creation/registration are separate v3-only rollout dependencies.
 
-The user outcome is one unchanged account identity moving from A to B, with
-messages addressed to A forwarded during the cooperative window. Account roots,
-contacts, conversation ids, message ids, device ids, delivery ids and ciphertext
-are preserved. Local history and ratchet state stay in the existing account DB;
-no new identity or account secret is generated. Moving a home does not migrate
-historical relay object ownership, transfer server backups, or promise delivery
-of traffic already lost at an unavailable A. Attachments already hosted at A
-continue using their recorded owner/relay; moving those objects is separate work.
+The demo gate is the ordinary bus/CLI E2EE stack with v3 accounts, not the
+custody-native provisional single-message DM API. Both nodes must support v3,
+share admitted federation, and advertise the completed migration capability.
 
-## Actors, authority and invariants
+## Actors, trust and management authorization
 
-| Actor | Authority and responsibility |
+The account keeps its anchor, principal id, immutable kind, device identities,
+delivery ids, conversations, history and ratchets. Migration changes its home,
+not its identity. No node admin credential, internal mesh key or node signing
+seed enters a client operation. Migration does not copy or recover a master seed.
+
+| Actor | Responsibility |
 | --- | --- |
-| Account and initiating device | Authorize the exact next home binding, retain a durable operation journal, and authenticate requests without node admin credentials. |
-| Old home A | Verify account authority and B's admission, atomically install forwarding and a durable commit receipt; A does not authorize the account's choice of home. |
-| Destination B | Verify account ownership, current device authority, capacity and federation policy; reserve admission, sign its route, durably seal authorization, then activate the same identity. |
-| Other own devices | Verify the new binding through account authority, update their per-account endpoints and reconnect independently. They do not automatically move other accounts using A. |
-| Contacts and peer nodes | Resolve the account-signed home record, maintain rollback/fork floors and retry unchanged envelopes using the verified route. A forwarding hint alone is not authority. |
+| Account custody authority | Approve the exact move with the v3 master or a currently master-certified custody signer; a branch possession proof alone is insufficient. |
+| Initiating device | Authenticate with its current v3 branch, persist the job and submit an exactly authorized intent; it cannot mint management permission. |
+| Old home A | Check its own stored custody head, sequence exactly one E+1 against E, durably commit the move and backlog forwarding, and retain discovery for offline devices. |
+| Destination B | Check its own authority floors plus A's fresh registration attestation; reserve capacity, create inboxes at seal, courier the commit to A and activate only on A's proof. |
+| Senders, contacts and own siblings | Verify the committed home chain, retain monotonic floors, re-resolve signed migrated rejections and retry the original ciphertext. |
 
-No client receives an admin token, node private key, mesh client key or signing
-seed from either node. Internal service authentication remains server-side.
-Normal migration does not change federation peer admission: A and B must already
-be mutually permitted by their operators' federation policy. A missing link is a
-typed preflight failure, not an automatic client-authorized peer admission.
+The ordinary account passphrase unlocks local account data. **That does not
+reconstruct the master or grant custody authority.** A migration confirmation
+also requires a management-signing operation using the separate primary/custody
+credential. The recommended demo path is the master-certified primary
+self-signing key, authorized by the current master certificate's `delegate`
+scope for this narrowly defined, one-operation migration authorization. It is
+not an implicit generic branch delegation or a new privilege inferred from
+`register`/`message` capability. The master-certified path avoids requesting the
+recovery phrase for a routine move. An explicit direct-master ceremony can sign
+the same authorization, but is not required for the demo and never persists the
+master in runtime state.
 
-This proposal deliberately requires two signatures for account-changing
-messages: the active initiating branch and account-management authority. With
-current root-bound v2 accounts, management authority is the pinned identity root
-key, alongside a fresh root-signed device set and valid v2 branch proof. Every
-lookup, replay key and authority cache uses the root-qualified device reference,
-never a bare device id. Check immutable principal kind, branch key/epoch binding,
-device-set floor, revocation tombstones and identity lineage before authorization.
-An included public key is evidence to verify against that chain, not a new pin.
+The SDK must expose a purpose-bound signing interface: explicit user unlock and
+confirmation bind the account, destination fingerprint, predecessor hash, next
+home epoch and authorization digest. Passphrases go through the protected
+existing unlock channel/TTY, never argv, logs or progress events. The inspected
+`PrimaryVault::load_primary` is a credential-loading API, not evidence of such
+confirmation; the SDK work list must add the gated operation. Nodes verify the
+resulting signature and certificate chain, not a client boolean saying that a
+passphrase was entered. A stolen secondary containing branch credentials cannot
+migrate. Compromise of the unlocked primary/custody signer remains management
+compromise; this design does not claim to contain it cryptographically.
 
-Under [root key custody](root_key_custody.md), management authority becomes the
-primary self-signing key within its master-certified range. A secondary can
-prepare an exact intent, but needs primary approval of its hash before sealing;
-no new migration delegation scope is granted by this proposal. The offline
-master/recovery phrase is not requested for normal migration. v3 branch proof,
-lease and current public-record verification replace v2 checks only through
-explicit version negotiation. No v3 record may fall back to v2 root material.
-A headless participant cannot make itself primary or bypass this approval.
-The extra management signature is a proposed migration permission, to review
-alongside the custody operations table; it is not present in today's verifier.
+Every request is anchored to v3 `DeviceRef {account_anchor, device_id,
+device_epoch}`. Both nodes verify master-certificate range, principal ownership,
+current record hash/epoch, branch key/certificate/lease, revocation checkpoint,
+kind and fork/mode latches against **their own durable registry**. A client copy
+is evidence, never the authoritative floor. A newer client record must first
+pass normal verified custody publication; an older or fenced record is refused.
+B refreshes through A over admitted mesh before reservation/seal; A rechecks its
+own current head atomically at commit. A primary/actor superseded in A's stored current record cannot commit through
+a stale B. This is node-local freshness enforcement, not proof that no withheld
+newer custody record exists anywhere. After commit, revoking an
+actor prevents its later sessions but does not undo the already committed home.
 
-Current devices still hold legacy root copies. This design cannot make a stolen
-legacy root harmless or prove global freshness from signatures alone. Once v3
-is enabled, the public record's single authority epoch and custody latch apply;
-its home section is new and distinct from custody-erasure migration metadata.
-The primary-signed record names the old active binding plus a conditional
-pending binding hash and seal/activation condition. A verified activation receipt
-selects that already-approved pending binding without inventing a second
-public-record epoch or requiring the primary to sign again while offline.
-Clearing/superseding that conditional authorization requires a later primary-
-signed authority record. The exact v3 section is a custody integration work
-item; v2 migration must not be advertised as v3-compatible before it is reviewed.
-Do not introduce another competing v3 authority head.
+The first demo supports human accounts with a locally available management
+signer. External-human-custodian/headless migration is refused with
+`custody_approval_required` until the exact remote-approval UI and signer routing
+in **MIGRATE-CUSTODIAN-01** are implemented. A headless branch never becomes its
+own management authority. This is a declared capability limit, not a v2 fallback.
 
-## Discovery and transport
+## Node discovery, pins and TLS
 
-Reuse node lookup to fetch and verify B's signed client record, its freshness,
-node id, pinned node-key fingerprint and signed CA/endpoints. An expected
-fingerprint must match the exact discovered node key, using existing node lookup's
-`hash_hex(CLIENT_DISCOVERY_DOMAIN, node_public_key.as_bytes())` fingerprint of
-the encoded public-key string. First-use trust requires
-an explicit user confirmation of that fingerprint; absent confirmation is
-`trust_confirmation_required`. A changed stored pin is a security error, not a
-new TOFU opportunity. Record pin provenance and the exact discovery-record hash
-in the journal. Refresh expired discovery before preparing or resuming.
+B's node key must be established by either:
 
-Obtain B's signed server/mesh record for its federation endpoint. Its node id and
-signing key must match the client-discovery pin. Deployments with separate
-signing keys need an explicit signed key-binding certificate in a later reviewed
-version; this initial version rejects that configuration. HTTPS authentication
-uses the verified node CA/pinned deployment trust. An HTTP discovery origin may
-be fetched to display an untrusted candidate, but migration control and authority
-publication require verified TLS; the demo must provide an HTTPS client origin.
+1. a user-supplied expected node-key fingerprint obtained out of band; or
+2. A's fresh, node-signed peer-admission attestation naming B's admitted key.
 
-Proposed client endpoints use the public client origin. They are authenticated
-account operations, deliberately extending the currently read-only public route
-inventory; they do not expose federation administration. The public gateway
-handler enforces limits and proxies to router/gateway services using existing
-internal authenticated transport. Clients never choose an internal mesh address
-or supply an admin token. Responses must return 404 for old admin paths on this
-listener, including when a client supplies an admin token.
+There is **no TOFU or `--confirm-tofu` migration path**. An unverified candidate
+can be displayed, but cannot authorize a move. A changed pin is a security
+failure. The existing display fingerprint remains
+`hash_hex(CLIENT_DISCOVERY_DOMAIN, node_public_key.as_bytes())` over the encoded
+key string; changing the discovery schema must not silently change that display
+algorithm. A's commit independently compares B's key to A's own admitted peer
+record; a user pin does not override A's federation policy.
 
-| Method and path | Serving node | Caller / reader |
-| --- | --- | --- |
-| POST `/v1/account/home-migration/prepare` | B public origin | Initiating device; returns B's signed route/admission commitment. |
-| POST `/v1/account/home-migration/seal` | B public origin | Account-approved intent; returns durable sealed receipt. |
-| POST `/v1/account/home-migration/commit` | A public origin | Client presents the sealed intent; installs the forwarding window. |
-| POST `/v1/account/home-migration/activate` | B public origin | Client presents A's receipt, or completes the bounded fallback after its deadline. |
-| POST `/v1/account/home-migration/status` | A or B public origin | Account/device-authenticated, nonce-bound recovery query. |
-| POST `/v1/account/home-migration/abort` | B public origin | Account-authorized cancellation of an unsealed reservation only. |
-| POST `/v1/account/home-binding/publish` | B or permitted directory replica | Account-authorized publication; replica verifies the complete activation bundle. |
-| POST `/v1/account/home-binding/resolve` | Known home or directory replica | Authenticated account/device or admitted peer holding the target's opaque identifier; returns the signed current bundle, not a bare URL. |
+Version the signed client record as `ramflux.well_known_client.v2`, with a new
+signature domain `ramflux.client_discovery.v2`. Retain all v1 fields and add exactly
+`control_https_origin`, `control_server_name` and `custody_node_record_hash`.
+The full closed v2 type and its signature bytes include these fields. Do not
+append fields to the current `deny_unknown_fields` v1 type or accept v1 as
+migration-capable. Ordinary discovery may explicitly decode either schema;
+migration requires v2. A signed capability alone without these fields is not
+sufficient. The referenced v3 node identity record must verify under the same
+pinned node key and its retained node-record floor.
 
-All paths above are proposed. Router commit/route application and federation
-admission checks use private service calls with mTLS service identities. A and B
-exchange bounded status/seal evidence over their admitted mesh; those internal
-paths must not become public aliases. A public origin does not accept arbitrary
-proxy URLs, redirects to another origin, or user-supplied mesh endpoints.
+The client connects to the address in `control_https_origin`, but TLS validates
+the explicit `control_server_name`, using **only `node_ca_cert_pem` from the
+pinned, signed record**. Require TLS 1.3; built-in WebPKI roots are off. A valid
+public-CA certificate that does not chain to this node CA is refused. Node-CA
+expiry, hostname mismatch and changed CA evidence fail closed.
 
-## Canonical wire rules
+For an IP-only deployment, the origin may contain the dial IP and port while
+the certificate's DNS SAN is the signed control server name. Use the existing
+`GatewayTcpTlsStream` pattern: resolve/dial the origin separately and pass the
+signed server name explicitly to rustls for SNI/verification. HTTP Host remains
+the signed origin authority. Do not let an HTTP client's default IP-derived SNI
+or default root store replace this rule. Fetching a signed discovery record over
+HTTP is permitted only before control, with its signature/key checked against
+one of the pin sources above before accepting its CA.
 
-Use [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) over the
-[RFC 7493 I-JSON](https://www.rfc-editor.org/rfc/rfc7493) subset. Reject duplicate
-keys, invalid UTF-8, lone surrogates, unknown fields, trailing data and non-finite
-or out-of-range numbers before deserializing to a generic map. Do not normalize
-Unicode. Integers are exact nonnegative JSON integers at most `9007199254740991`;
-timestamps are UTC Unix seconds. Nonces and operation ids contain 32 random bytes,
-base64url without padding (43 characters). Keys and digests are exactly 32 bytes;
-Ed25519 signatures exactly 64 bytes, using the same encoding. No implicit nulls,
-defaults or optional fields: a nullable field must be present with JSON `null`.
+Serve control on a public **client TLS listener**, separate from the plaintext
+federation read origin and all federation administration. Keep the existing
+public read port's contract; add a separately configured demo control TLS port.
+The v2 record advertises that actual dial origin. No admin route is exposed by
+this listener. Forwarding, commit delivery and node-local authority lookup stay
+on authenticated internal/peer service channels.
 
-These closed-field/null rules apply to the new envelopes and bodies. Embedded
-existing authority, branch and discovery documents retain their own versioned
-wire rules, including any signed optional-field omission; do not rewrite them
-by inserting nulls or stripping nested signatures.
+Reuse custody r2's one-use challenge, operation hash, `BranchProofV3`, and
+`direct_exporter` binding on the actual client TLS connection. Extend its typed
+action vocabulary with migration actions; do not disguise a mutation as
+`OpenSession` or `Register`. The audience is the specific receiving node id.
+Where TLS terminates before the router, use the existing node-authorized proxy
+receipt with the client exporter, exact action/challenge and device reference.
+Its key must appear in the signed node identity record and match the deployed
+proxy; in-process test wiring is insufficient. `no_channel_binding` is refused
+for migration, including when another feature separately opts into it.
 
-Use existing `ramflux_protocol::canonical_json_bytes` and
-`hash_base64url(domain, bytes)` semantics: BLAKE3 of UTF-8 domain bytes followed
-by canonical bytes, encoded base64url without padding. No SHA-256 substitute or
-implicit delimiter is introduced. Each message's complete signed envelope hash
-uses its own domain. Nodes compare canonical object hashes, not transport JSON
-formatting. These new schemas require typed canonical builders; do not recursively
-strip signatures from nested evidence using a generic signing helper.
+B's mesh courier never replays B's client TLS proof as if it belonged to A. A
+verifies the account authorization/actor signatures, its own current authority,
+B's seal and the admitted B mesh identity. Fresh client requests to A use fresh
+A-audience proofs; the internal courier authenticates as B, not as the account.
 
-Define the following closed signed envelope `Signed<T>`:
+Before a control POST, on the **same TLS connection**, request
+`POST /v3/home-migration/challenge` with exactly `{device_ref:Ref,
+http_method:"POST", http_path:Id, control_hash:H}`. The response is exactly
+`{challenge:BranchChallenge, action_hash:H, node_identity_record_hash:H}`.
+Extend `CustodyProofAction` with a typed migration action covering that method,
+canonical path and full signed Control hash. Client and verifier compare its
+`custody_action_hash`; the server's one-use lease stores the same action. This is
+an explicit r2-interface extension, not a claim that the existing Challenge
+response already exposes action_hash. The subsequent POST's evidence contains
+`Envelope<BranchProofV3>` and any required node proxy receipt, verified against
+the actual exporter and lease. A public-status proof cannot authorize the
+private-status route. No HTTP pooling may move the proof to another connection.
+
+For a root new to B, preliminary signature/anchor checks do not establish current
+membership. B obtains A's attestation and publication over admitted mesh and
+validates them with the custody verifier against its own existing pins. Final
+branch/management admission uses that accepted head. For a new root, commit its
+registry entry and reservation together only after possession,
+attestation and capacity checks pass; a rejected prepare must not allocate an
+unbounded new authority cache. Existing-root revocation/equivocation floors still
+persist through the normal custody safety path even when admission is refused.
+Never charge a victim's root budget before possession and membership checks.
+
+### Route and reader inventory
+
+All client control POST routes below are on the node-CA TLS listener, with
+operation-bound v3 authentication. Public record reads return only the public
+projection and grant no account/session privilege.
+
+| Method / route | Node and reader |
+| --- | --- |
+| POST `/v3/home-migration/challenge` | A or B; bounded pre-auth one-use operation challenge, no account/reservation allocation. |
+| POST `/v3/home-migration/prepare` | B; authenticated initiating device. |
+| POST `/v3/home-migration/seal` | B; same account, with exact custody authorization. |
+| POST `/v3/home-migration/commit` | A; optional client recovery path using the same sealed authorization. |
+| POST `/v3/home-migration/activate` | B; current own device presents A's proof; B's worker can do the same without client presence. |
+| POST `/v3/home-migration/status` | A or B; public outcome view for an authorized query. |
+| POST `/v3/home-migration/private-status` | A or B; own current device only; admitted A/B mesh callers have an equivalent private service method. |
+| POST `/v3/home-migration/abort` | B; original preparer before seal, or explicit current management approval. |
+| POST `/v3/home-record/resolve` | A or B; authenticated query of public chain/route evidence. |
+| GET `/v3/home-record/{anchor}` | A or B; bounded public chain read for senders and offline siblings, without first registering at the migrated-away node. Query selectors are `after_hash` and `limit` (at most 64). |
+| POST `/v3/internal/home-migration/commit` | Admitted peer mesh only; B's commit courier to A. Never an alias on either public HTTP listener. |
+| POST `/v3/internal/home-migration/attest` | Admitted peer mesh only; B asks A for nonce-bound registered-home/current-head evidence. |
+
+Sessionless v3 resolve/status authentication remains available at A even after
+normal registration is refused. The public GET is deliberately only a signed
+record read: no branch proof, roster, delivery map, mutable status or secret is
+returned. Apply source/global read caps before serving it, and verify its hash
+chain against cached floors/the signed migrated rejection. Expired sibling
+credentials do not prevent fetching that public locator; normal custody renewal
+is still required before opening a B session. Read-only discovery is not a
+`no_channel_binding` mutation mode. A contact's first-use authority limitations
+remain those of existing custody lookup, not a claim of globally freshest state.
+
+## Wire formats and hash chain
+
+Use strict UTF-8 I-JSON and [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785),
+following [RFC 7493](https://www.rfc-editor.org/rfc/rfc7493). Reject duplicates,
+unknown fields/versions, lone surrogates, non-finite/fractional/unsafe counters,
+trailing input and noncanonical base64url before verification. New fields are
+mandatory; nullable fields use explicit null. Existing embedded custody objects
+retain their exact versioned encoding and nested signatures. No normalization of
+signed strings or recursive signature stripping is permitted.
+
+Notation: `H` is a canonical unpadded base64url 32-byte digest; `N` is 32 random
+bytes encoded likewise; `K` is a validated Ed25519 public key; `U` is an integer
+in `[0, 9007199254740991]`; `Time` is U in UTC Unix seconds; `Ref` is the existing
+v3 DeviceRef; `Id` is a bounded validated identifier; `T?` is T or null.
+
+Migration messages use a closed role-bound envelope:
 
 ```json
-{
-  "schema": "DOMAIN",
-  "domain": "DOMAIN",
-  "body": {},
-  "signers": [],
-  "signatures": []
-}
+{"schema":"DOMAIN","domain":"DOMAIN","body":{},"signers":[],"signatures":[]}
 ```
 
-`DOMAIN` and `{}` here are metasyntax; body fields are defined below. The signature
-preimage is JCS of exactly `schema`, `domain`, `body`, `signers`. Each signer signs
-the same bytes. `signatures[i]` corresponds to `signers[i]`; array length and order
-must match the required role list, with no duplicate/extra roles. Signer metadata
-is therefore authenticated. The object hash is
-`hash_base64url(DOMAIN, JCS(complete Signed<T>))`, including signature bytes.
-Embedded documents are referenced by this hash; re-signing an operation is not
-an idempotent retry. Persist and resend the original signed bytes.
+This is schema metasyntax, not a valid empty message. Sign exactly JCS of
+`{schema,domain,body,signers}` with strict Ed25519; enforce `schema == domain ==`
+the expected type domain. Signers are exactly `{role,key}`, in the order below;
+`signatures[i]` corresponds to `signers[i]`. Reject missing/extra/reordered roles.
+The signed metadata fixes key identity and role. Key forms:
 
-A signer is exactly `{role, key}`. Node key: `{kind:"node", node_id, public_key}`.
-Account v2 key: `{kind:"root_v2", root_commitment, public_key}`. Future v3 key:
-`{kind:"self_signing_v3", root_commitment, public_key, authority_record_hash}`.
-Actor key: `{kind:"branch_v2", root_commitment, device_id, device_epoch,
-public_key}`; replace `branch_v2` with `branch_v3` only when v3 is negotiated.
-All signatures are Ed25519; other algorithms are rejected. Account and actor
-signer roots must match the body's `root_commitment` and authenticated
-`identity_commitment`. Derive/check the commitment using the existing root
-commitment function; do not equate a display principal name with its root.
+- management: `{kind:"master_certified_custody", account_anchor,
+  master_certificate_hash, authority_record_hash, public_key}`, or explicit
+  `{kind:"master", account_anchor, public_key}` in the reviewed master ceremony;
+- actor: `{kind:"branch_v3", device_ref:Ref, branch_certificate_hash, public_key}`;
+- node: `{kind:"node", node_id, public_key}` matching the pinned node signer.
 
-### Reserved domains and exact bodies
+There is no `root_v2`, `branch_v2` or legacy branch-proof alternative. The custody
+certificate/public record is still its existing `Envelope<T>` type; the new
+role-bound message type must not reinterpret that preimage.
 
-The existing domain `ramflux.home_node_migration_proof.v1` and its preimage remain
-unchanged. The following are **new reservations**, to add to the protocol domain
-registry during implementation. Route/proof v2 extend the existing migration
-family; v1 handlers cannot reinterpret them or drop new fields.
+Use custody's NUL-framed BLAKE3 convention for new object hashes:
+`H(tag,x) = base64url(BLAKE3(UTF8(tag) || 0x00 || JCS(x)))`.
+Signed message references use existing `CUSTODY_OBJECT_HASH` through
+`custody::framed_hash` with the **complete**
+message, including signatures. Existing custody envelopes use `custody::object_hash`
+unchanged. A home-record hash uses new
+`ramflux.identity.home_record_hash.v1`; delivery-map and discovery-object hashes
+use new `ramflux.identity.home_delivery_map.v1` and
+`ramflux.identity.home_discovery_hash.v1`. Discovery hashes cover
+`{kind:"client"|"server", record:object}`. No old v1 hash or signature bytes change.
+These new labels are reservations to add to `domain.rs`/`ALL` during implementation.
 
-Notation: `H` = 32-byte digest; `N` = nonce/id; `U` = integer; `S` = bounded UTF-8
-string; `K` = 32-byte key; `E` = signed envelope; `T?` = type T or null. Each row
-lists all required body fields. Identity/node strings are nonempty and at most
-256 bytes; URLs at most 2048 bytes. The root/account/device binding is verified
-from the evidence, not inferred from the labels.
+### Closed message bodies
 
-| Type / reserved domain | Required body fields | Signer roles in order |
+Each row lists all body fields after common required `{version:1}`. All new
+schema/domain strings are the full reserved spelling below. Generic `Receipt`
+is not the commit proof: its body may report outcomes but cannot activate a home.
+
+| Type / reserved domain | Remaining required body fields | Roles |
 | --- | --- | --- |
-| Prepare / `ramflux.home_node_migration.prepare.v1` | `migration_id:N, identity_commitment:S, root_commitment:H, actor_device_id:S, actor_device_epoch:U, authority_hash:H, branch_proof_hash:H, base_binding_hash:H, base_home_epoch:U, delivery_map_hash:H, old_home_node:S, destination_node:S, destination_node_key:K, discovery_record_hash:H, nonce:N, issued_at:U, expires_at:U` | `actor` |
-| Route commitment / `ramflux.home_node_route_record.v2` | `migration_id:N, identity_commitment:S, root_commitment:H, prepare_hash:H, delivery_map_hash:H, base_binding_hash:H, next_home_epoch:U, old_home_node:S, destination_node:S, destination_node_key:K, discovery_record_hash:H, mesh_record_hash:H, federation_endpoint:S, client_origin:S, admission_id:N, nonce:N, issued_at:U, accept_until:U, max_forward_seconds:U` | `node` (B) |
-| Migration statement / `ramflux.home_node_migration_proof.v2` | `migration_id:N, identity_commitment:S, root_commitment:H, actor_device_id:S, actor_device_epoch:U, authority_hash:H, branch_proof_hash:H, base_binding_hash:H, next_home_epoch:U, old_home_node:S, destination_node:S, destination_node_key:K, route_commitment_hash:H, delivery_map_hash:H, nonce:N, issued_at:U, expires_at:U, fallback_after:U, forward_seconds:U` | `account`, `actor` |
-| Home binding / `ramflux.identity.home_binding.v1` | `identity_commitment:S, root_commitment:H, home_epoch:U, previous_binding_hash:H?, home_node:S, home_node_key:K, client_origin:S, migration_id:N?, migration_statement_hash:H?, route_commitment_hash:H?, authority_hash:H, issued_at:U` | `account`, `actor` |
-| Control / `ramflux.home_node_migration.control.v1` | `action:S, audience_node:S, migration_id:N, identity_commitment:S, root_commitment:H, statement_hash:H?, home_binding_hash:H?, admission_id:N?, authority_hash:H, branch_proof_hash:H, target_identity_commitment:S?, target_root_commitment:H?, nonce:N, issued_at:U, expires_at:U` | `actor` for status/resolve; `account`, `actor` for seal, commit, activate, abort, publish |
-| Node receipt / `ramflux.home_node_migration.receipt.v1` | `action:S, migration_id:N, identity_commitment:S, root_commitment:H, node_id:S, request_hash:H, request_nonce:N, statement_hash:H?, home_binding_hash:H?, admission_id:N?, state:S, state_version:U, accepted_at:U?, effective_at:U?, forward_until:U?, fallback_after:U?, observed_home_epoch:U, observed_binding_hash:H?, issued_at:U, expires_at:U, reason_code:S?` | `node` (the answering node) |
+| Prepare / `ramflux.identity.home_prepare.v1` | `migration_id:N, account_anchor:H, actor:Ref, authority_record_hash:H, branch_certificate_hash:H, previous_home_hash:H, previous_home_epoch:U, old_node:Id, destination_node:Id, destination_key:K, discovery_hash:H, delivery_map_hash:H, nonce:N, issued_at:Time, expires_at:Time` | actor |
+| Offer / `ramflux.identity.home_route_offer.v1` | `migration_id:N, account_anchor:H, prepare_hash:H, authority_record_hash:H, previous_home_hash:H, next_home_epoch:U, old_node:Id, destination_node:Id, destination_key:K, discovery_hash:H, server_record_hash:H, control_https_origin:Id, federation_endpoint:Id, delivery_map_hash:H, admission_id:N, nonce:N, issued_at:Time, accept_until:Time, max_commit_delay:U, forward_seconds:U` | node B |
+| Authorization / `ramflux.identity.home_authorization.v1` | `migration_id:N, account_anchor:H, actor:Ref, authority_record_hash:H, management_certificate_hash:H?, previous_home_hash:H, next_home_epoch:U, old_node:Id, destination_node:Id, destination_key:K, control_https_origin:Id, offer_hash:H, delivery_map_hash:H, nonce:N, issued_at:Time, seal_until:Time, max_commit_delay:U, forward_seconds:U` | management, actor |
+| Genesis / `ramflux.identity.home_genesis.v1` | `account_anchor:H, actor:Ref, authority_record_hash:H, management_certificate_hash:H?, home_epoch:0, home_node:Id, home_node_key:K, control_https_origin:Id, issued_at:Time` | management, actor |
+| Control / `ramflux.identity.home_control.v1` | `action:Id, audience_node:Id, migration_id:N, requester:Ref, authority_record_hash:H, payload_hash:H, nonce:N, issued_at:Time, expires_at:Time` | actor |
+| Receipt / `ramflux.identity.home_receipt.v1` | `action:Id, migration_id:N, account_anchor:H, node_id:Id, request_hash:H, request_nonce:N, authorization_hash:H?, seal_hash:H?, home_record_hash:H?, phase:Id, state_version:U, sealed_at:Time?, commit_deadline:Time?, commit_proof_hash:H?, response_payload_hash:H, issued_at:Time, expires_at:Time, reason_code:Id?` | answering node |
+| Commit proof / `ramflux.identity.home_commit.v1` | `migration_id:N, account_anchor:H, old_node:Id, destination_node:Id, previous_home_hash:H, next_home_epoch:U, authority_record_hash:H, authorization_hash:H, offer_hash:H, seal_hash:H, commit_deadline:Time, committed_at:Time, forward_until:Time, backlog_manifest_hash:H` | node A |
+| Node commit delivery / `ramflux.identity.home_commit_delivery.v1` | `migration_id:N, account_anchor:H, source_node:Id, audience_node:Id, authorization_hash:H, offer_hash:H, seal_hash:H, admission_evidence_hash:H, nonce:N, issued_at:Time, expires_at:Time` | node B |
+| Home attestation / `ramflux.identity.home_admission_attestation.v1` | `account_anchor:H, audience_node:Id, previous_home_hash:H, authority_record_hash:H, device_set_epoch:U, nonce:N, issued_at:Time, expires_at:Time` | node A |
 
-`Control.action` is exactly `seal|commit|activate|status|abort|publish|resolve` and
-must match the endpoint. Resolve uses `identity_commitment` for the requesting
-account and includes the target in its signed body as described below; it does not
-pretend that the requester owns the target. For `status`, `abort` and `resolve`,
-`statement_hash`/`home_binding_hash` may be null; mutation operations otherwise
-require their exact hashes. `admission_id` may be null only for status/resolve
-or the genesis-publication exception below.
-For `resolve`, `target_identity_commitment` and `target_root_commitment` are
-required non-null and identify the target; the message's identity/root identify
-the authenticated requester. Other actions require these two target fields to
-be null. A resolve operation uses a fresh random `migration_id` solely as its
-correlation id, and its binding/statement/admission fields are null. Its receipt
-binds the requester and request hash; observed epoch/hash and returned bundle
-refer to the signed query's target. Resolver access never implies authority to
-mutate that target.
+Identifiers are at most 256 UTF-8 bytes; origins/endpoints are at most 2048 and
+are parsed by their explicit URL/address type, not the Id grammar. Actor refs and
+key metadata must match verified certificates. Offer echoes prepare's nonce;
+controls use fresh per-request nonces. Check equality of anchor, operation id,
+predecessor, next epoch, destination, map and all referenced hashes across the
+bundle. `next_home_epoch = previous_home_epoch + 1`, checked for overflow.
 
-The HTTP request wrapper is exactly `{message:E, evidence:object}`. Evidence
-keys are selected by endpoint from: `authority`, `branch_proof`, `base_binding`,
-`prepare`, `route_commitment`, `statement`, `home_binding`, `seal_receipt`,
-`commit_receipt`, `activation_receipt`, `discovery_record`, `mesh_record`, `delivery_map`.
-No other keys are accepted. Required evidence is the full set of referenced
-objects not already present under the same hash in the authenticated server's
-store. The server returns `evidence_required` with a bounded list of missing
-hashes rather than treating omission as approval. `branch_proof_hash` uses the existing
-`ramflux_crypto::branch_proof_document_hash` for v2. `authority` in this version
-is exactly `{mode:"root_v2", root_public_key:K, device_set:SignedDeviceSetRecord}`,
-using the existing signed-set/profile schema and complete revoked roster.
-`authority_hash = hash_base64url("ramflux.home_node_migration.authority.v1",
-JCS(authority))`. This hash is not the safety-number device-list hash.
-`discovery_record_hash` and `mesh_record_hash` are respectively
-`hash_base64url("ramflux.home_node_migration.discovery.v1", JCS({kind:"client",
-record:WellKnownClientRecord}))` and the same expression with `kind:"server"`
-and `FederationServerRecord`. These two tags are additional hash-only domain
-reservations. Verify each record's existing signature with its own verifier;
-this hashing rule does not change its signature preimage. All other signed
-references use the envelope hash above; delivery-map hashing is defined below.
-The v3 adapter is reserved future work and must be rejected until its exact
-custody evidence grammar and conditional home section are reviewed. The response is exactly `{receipt:E,
-route_commitment:E|null, home_bundle:object|null}`. Only prepare supplies a route
-commitment; only resolve supplies a home bundle. Receipts bind the full
-request message hash and nonce. Prepare receipts have null statement/binding
-hashes; seal binds both and every subsequent mutation of that admission must preserve them.
+Control actions are `prepare|seal|commit|activate|status|abort|resolve` and must
+match the endpoint/audience. Prepare's signed payload is its Prepare message;
+other exact payloads are: seal `{authorization_hash,offer_hash}`; commit
+`{authorization_hash,offer_hash,seal_hash}`; activate `{home_record_hash,
+commit_proof_hash}`; status/abort `{account_anchor,migration_id}`; private-status uses the same status
+payload at its separately authorized route; resolve
+`{target_anchor,after_home_hash:H?,limit:U}`. `payload_hash` is H with the control
+domain over that object. The requester signs as itself for resolve, never as the
+target. The response wire wrapper is exactly `{receipt:Signed<Receipt>,
+offer:Signed<Offer>?,commit_proof:Signed<CommitProof>?,
+resolve_result:ResolveResult?,private_status:PrivateStatus?}`. Only prepare returns
+an offer; commit/recovery may return the immutable commit proof; resolve returns
+the public result; the separately authorized private-status route is the sole
+client route returning PrivateStatus. Other entries must be null. PrivateStatus
+is `{delivery_map:array,backlog_progress:object,authority:Publication,
+admission_evidence:object}` with the exact nested fields defined below, not an
+arbitrary recursive account dump. Pre-seal abort requires the original preparer or explicit management
+approval; a branch cannot cancel another device's operation by guessing its id.
 
-Admission expiry and route validity are separate: `accept_until` closes new
-acceptance of an offer, not an already activated home. Never copy it into a
-legacy route-expiry field and thereby cut off a 24-hour forwarding window.
-The new versioned router record retains the active binding and forwarding
-anchor independently; fresh signed B status renews readiness, not admission.
+A control request is exactly `{control:Signed<Control>,payload:object,evidence:object}`,
+authenticated through the operation-bound v3 TLS exchange. Evidence is a closed
+map selected from `prepare`, `offer`, `authorization`, `seal_receipt`,
+`commit_proof`, `home_record`, `authority`, `branch_proof`, `delivery_map`,
+`client_record`, `server_record`, `attestation`, `node_identity_record`,
+`proxy_receipt` and `predecessors`. Missing referenced evidence is `evidence_required`; a node's
+stored matching object may satisfy it. The node courier uses the same evidence
+with its signed NodeCommitDelivery and authenticated mesh instead of a client's
+Control/branch TLS proof. Authority is the existing `Publication`/
+`CustodyPublication` (complete v3 record and compacted-id evidence), never a v2
+set or a client-asserted epoch. Reissue channel proofs on a new TLS connection;
+retry the identical immutable migration messages without re-signing them.
 
-A home bundle is exactly `{binding:E, prepare:E|null, statement:E|null,
-route_commitment:E|null, seal_receipt:E|null, activation_receipt:E|null,
-authority:object, branch_proof:object, discovery_record:object,
-mesh_record:object|null, delivery_map:array|null}`. Non-genesis bundles require
-all entries non-null; genesis has only binding, authority, branch proof and
-client discovery non-null. Referenced historical discovery/proof documents
-remain intact; refresh current node/authority status separately. Peers anchor B's
-key in the account-signed binding, rather than implicitly accepting a new node
-pin supplied by a directory. Changing B's key or the bound client origin requires
-another account-authorized binding; a readiness refresh cannot change them.
-The immutable home binding has no TTL: it is account authority history, not a
-permission to reopen admission. Its separate signed activation/status evidence
-supplies route readiness and freshness. Fresh directory responses never extend
-an expired operation or erase a higher home/authority floor.
+PrivateStatus's exact nested `backlog_progress` fields are
+`{scheduled:U,durably_forwarded:U,receiver_acked:U,expired:U,rejected:U,
+remaining:U,phase:Id}`. These are disjoint current-outcome counts, not cumulative event totals:
+receiver_acked excludes durably_forwarded, and remaining is scheduled minus
+those accounted outcomes. Rejection/expiry is not delivery success.
+`admission_evidence` has exactly the operation's `prepare`, `offer`,
+`authorization`, `seal_receipt`, `attestation`, `client_record`, `server_record`
+and `node_identity_record`, using the types already defined. Authorization and
+seal_receipt are null while prepared; the remaining entries must be present. The authority and
+delivery map are the separately named fields, not duplicated recursively. The
+Receipt's `response_payload_hash` is H with the Receipt domain over exactly
+`{offer,commit_proof,resolve_result,private_status}`; the receipt itself is
+excluded to avoid a signature/hash cycle. The seal receipt's own `seal_hash`,
+`home_record_hash` and `commit_proof_hash` are null; later status receipts may
+reference its derived hash. Private-status responses obey the 5 MiB aggregate
+custody ceiling, not the 64 KiB ordinary control-message size.
 
-### Cross-document validation
+### Idempotence and expiry context
 
-For a migration id, identity/root, predecessor, epochs and target key must
-agree wherever present across prepare, commitment, statement, binding and
-receipts. The original actor and migration nonce match prepare and statement;
-B's commitment echoes that nonce. Each later control has its own fresh request
-nonce, which its response echoes. A different currently authorized own device
-may recover a sealed job; it authenticates with its own current authority/proof,
-not the original actor's expired proof. `next_home_epoch = base_home_epoch + 1`; arithmetic overflow is a hard
-error. The binding's predecessor is that exact base; its home/route/statement
-references must match the sealed documents. Client origin and federation endpoint
-come exclusively from the pinned discovery/server records referenced by the
-commitment. The statement's requested window cannot exceed B's offer. A receipt
-from an unrelated node or naming another action/request nonce is unusable.
+The durable business key is `(account_anchor,migration_id,action)` and its value
+binds the immutable payload/authorization hash, not a replaceable transport
+nonce. Same business key/hash returns the original outcome; a changed payload
+is `idempotency_conflict`. A recovery request may use a new Control nonce, TLS
+challenge or B-courier signature after restart; it does not create another
+admission or commit. Responses bind that fresh request hash/nonce while returning
+the same stored commit proof. One-use transport proofs remain bounded by the
+existing custody challenge/session store and are not replayed on new connections.
 
-`delivery_map` is an array of exactly `{device_id, device_epoch,
-target_delivery_id}` entries, sorted by device-id UTF-8 byte order, without duplicates and with
-at most 256 entries. Its hash is
-`hash_base64url("ramflux.home_node_migration.delivery_map.v1", JCS(delivery_map))`.
-This is an additional hash-only domain reservation, not a signed-envelope type. It names only current,
-non-revoked members of the exact authority hash. The account's management
-signature binds this map through the statement/commitment, so B can create
-bounded offline inbox routes for already-authorized siblings without receiving
-their private keys. Target-id collisions with another root, missing initiating
-device, malformed ids or epoch mismatch refuse admission. A later sibling
-registration must prove the same root-qualified branch and its target binding;
-a mapping alone cannot open a session or publish that sibling's prekeys.
+Control and node-courier requests live at most 300 seconds with the existing
+300-second custody skew checks; freshness is not a home-ordering rule. A signed
+Offer can be sealed only until its B-issued accept_until. Authorization.seal_until
+limits **sealing**, and its signed max_commit_delay separately authorizes commit
+within the B-seal deadline. A checks sealed_at <= seal_until and the exact
+seal-derived deadline, not whether a previously accepted offer is still open.
+Generic receipt expiry limits fresh status assertions; a preserved seal receipt
+is historical commitment evidence until its commit deadline. Commit proofs and
+home records have no expiry that could reopen admission or delete a home floor.
+After commit, recovery rechecks current node/custody state, not a retired client
+nonce. A late receipt contradicting a known terminal noncommit fence is source
+equivocation evidence; it never silently reopens B's released admission.
 
-Genesis publication is the sole mutation exception: `action:publish`, a fresh
-correlation `migration_id`, `statement_hash:null`, the epoch-0 binding hash and
-`admission_id:null`. The binding has null predecessor/migration/route fields and
-must name the authenticated account's existing home. An old home verifies its
-registered account when serving this request; permitted independent replicas
-can verify the account's management signature against existing root trust.
-Publishing genesis never allocates an admitted account on another node, replaces
-a known home head, or requires old-node approval for B's fallback admission.
+### Committed home records, bundles and floors
 
-Control requests bind fresh authority/proof hashes independently of the older
-sealed statement. The request wrapper supplies those documents. Status is not
-an unauthenticated oracle, and an actor revoked after seal cannot keep issuing
-controls using the historical proof. Historical accepted account signatures are
-verified in their preserved authority context; a valid later authority head,
-revocation floor, identity tombstone or resolved fork always overlays that history.
-A newly presented expired intent cannot bootstrap admission from its own claim
-of an old accept time. Late recovery requires matching durable node status and
-the current account-authorized home/authority head, not a bare expired receipt.
-Nodes may be Byzantine: a fresh B status is not proof that no newer account head
-exists elsewhere. Peers retain floors and require existing account trust or an
-independently verified account authority checkpoint; first-contact/bootstrap
-under withheld history retains the same freshness limitation as device lookup.
+Define a closed tagged HomeRecord:
 
-### Time, replay and admission bounds
+```json
+{"kind":"genesis","genesis":"Signed<Genesis>"}
+```
 
-Prepare/control request lifetime is at most 300 seconds, with at most 30 seconds
-future clock skew. A route commitment can be accepted for at most 600 seconds
-from its node issue time; the account statement must expire no later than that
-`accept_until`. `fallback_after` is exactly statement `issued_at + 300` and must
-be strictly before its `expires_at`; re-prepare if the remaining admission window
-cannot accommodate this. `forward_seconds` is 86400 in the initial version and
-cannot exceed the commitment's cap. Nodes use their own clock, never a request's
-claimed `now`. Receipts are fresh for at most 300 seconds; an expired receipt is
-historical proof, and a nonce-bound status query supplies current state.
+```json
+{"kind":"committed","authorization":"Signed<Authorization>","commit_proof":"Signed<CommitProof>"}
+```
 
-Replay keys include root, migration id, action, audience and request nonce.
-Same key and same canonical request returns the stored outcome; a different hash
-is `idempotency_conflict`. Keep original accept times and never extend a lease or
-forwarding window on retries. Fresh authenticated status with a new nonce can
-retrieve an expired request's outcome. Admission/commit ids and the per-root
-home-epoch floor survive restart, retention and backup merge. Expired prepare
-requests cannot recreate a reservation or replay an older home binding.
+Strings here denote typed nested objects. A non-genesis record **carries A's
+commit proof**, not a mutable side-channel status hint. The account signature
+in Authorization authenticates the complete next-home choice and predecessor;
+A's proof signs that authorization hash, predecessor and E+1. The whole composite
+record is hashed. A's proof intentionally does not contain that resulting hash:
+this avoids a circular hash dependency. A computes/persists the full record hash
+after signing the proof, in the same atomic commit. Activation receipts reference
+that derived hash. No extra primary signature after commit is needed, so B can
+complete a cooperative move while the initiating client is asleep.
 
-One unsealed reservation and one sealed/active migration per account root are
-allowed at a node. Every transition is a durable compare-and-set on the expected
-phase, base-binding hash and home epoch. Unsealed reservations expire and release
-capacity at `accept_until`. A sealed migration is an irrevocable admitted account
-allocation, not an indefinitely held anonymous reservation; its bounded pending
-phase automatically activates by the fallback deadline, or reports a durable
-service/storage failure. A node cannot promise admission without reserving the
-capacity needed to fulfill this transition.
+The public ResolveResult is exactly `{home_record:HomeRecord,
+predecessors:[HomeRecord], commit_receipt:Signed<CommitProof>?,
+offer:Signed<Offer>?, seal_receipt:Signed<Receipt>?,
+activation_receipt:Signed<Receipt>?, management_certificate_chain:[object],
+actor_certificate:object, node_records:[object]}`. The included custody/branch
+certificates and node records use the existing closed versioned types above. Genesis has null
+migration-related entries; all non-genesis entries are required and commit_receipt
+must equal the record's embedded proof. Predecessors are ordered oldest-to-newest,
+start at the caller's known hash (or genesis), and link without gaps to the head.
+The previous record supplies A's node key; verify the commit signer against that
+key, not a directory-supplied replacement. Management/actor certificates verify
+under the account's master and known custody floors. Missing current authority
+is fetched through the ordinary custody lookup path, never trusted from a hint.
 
-## Cooperative flow and old-node failure
+Contacts receive this public binding/route evidence only: **no full device-set
+publication, delivery map, delivery ids or admission-private evidence**. Only
+current own devices and the two admitted homes may request PrivateStatus, which
+adds `{delivery_map, backlog_progress, authority, admission_evidence}`. Server-side
+authorization is required, not a client `include_private:true` flag. An unknown
+root cannot enumerate private operation state. Store public and private views
+separately so a generic serializer cannot accidentally expose the private map.
 
-1. **Resolve and persist intent.** The client validates both node records and
-   pins, refreshes current account authority, and resolves the latest signed home
-   binding. A legacy account first creates an account/branch-signed epoch-0
-   binding for its existing home, with null predecessor/migration fields. A
-   verifies it against the existing registered identity before accepting a move;
-   B and peers verify its root against their existing account trust. Genesis
-   creation cannot replace a binding already known at epoch 0 or higher.
-2. **Prepare at B.** Persist the random migration id, exact prepare message and
-   expected predecessor before sending. B verifies current authority, principal
-   kind, revocation/lease state, target pin and client/server record consistency.
-   B enforces storage/capacity/peering policy, reserves the same account identity
-   and returns its signed commitment. Existing principal/device/delivery ids are
-   carried forward; an old-home component in an opaque id is not rewritten.
-3. **Authorize locally.** Verify the commitment against the pinned B key and
-   exact request. Construct account-and-branch-signed statement and epoch E+1
-   home binding, referencing the commitment and statement hashes respectively.
-   There is no hash cycle: commitment -> statement -> home binding. Persist the
-   signed bytes before any external authorization is sent. Future custody users
-   wait for the primary to approve these exact bytes, not a generic permission.
-4. **Seal at B.** Submit control plus statement, binding and evidence. B
-   atomically consumes its reservation, seals the exact hashes and records the
-   automatic fallback deadline. A sealed receipt proves durable admission, not
-   old-home forwarding. This seal/abort CAS prevents a reservation being released
-   while A is committing it. No subsequent abort is permitted.
-5. **Commit at A.** Present B's sealed receipt and the complete signed bundle.
-   A verifies B's pin/route signature, both account signatures, current authority,
-   exact old-home/base binding, E+1 and unexpired initial admission. Atomically
-   install the migration record, route proof, epoch floor, forwarding plan and
-   commit receipt before returning success or changing routing. `effective_at`
-   is A's first commit time; `forward_until = effective_at + 86400`. Retry returns
-   those original values. Do not ACK installation with only volatile state.
-6. **Activate B and reconnect.** B accepts A's valid commit receipt and activates
-   immediately, or activates at/after the signed fallback deadline if A cannot
-   supply one. Both paths use the same sealed account/binding. Persist that B is
-   ready, register the existing root-qualified devices at B, publish current
-   authority and prekeys, verify a live gateway session and inbox access, then
-   change the per-account manifest and live endpoints. B automatically exposes the
-   already account-signed active bundle through resolve once activation commits; client publication retries that same bundle
-   and propagates it to replicas. B queues authenticated
-   forwarded traffic already admitted after sealing until inbox activation; it
-   must not reject such traffic simply because the first client reconnect lags.
-7. **Publish and converge.** Publish the home bundle at B and bounded permitted
-   directory replicas; deliver an encrypted own-device notice and contact/peer
-   home-update notice referencing its hash. Recipients validate the bundle and
-   fetch authority as needed. They update routing, prekey and gateway hints for
-   the account, retain decryption/ratchet state, and retry with original message
-   and envelope ids. Neither A's unsigned hint nor a node's directory entry can
-   replace the account-signed home record. The client does not mark delivery
-   ready until B is connected and at least B's signed resolve result confirms
-   the new bundle. Replica/contact notification progress is reported separately.
-8. **Close the window.** A stops forwarding at the persisted deadline. It keeps
-   the authenticated migrated Nack/new-home hint and epoch floor, so peers
-   re-resolve; expiry never restores A as the account's home. A closing timer and
-   a delayed retry cannot reopen the window. B's periodic live route evidence
-   can refresh readiness without changing the immutable home binding.
+Historical verification is a distinct, typed home-record verifier: check
+certificates/signatures at A's committed_at, including the management range and
+actor lease then, while retaining every locally known later authority/home floor.
+It never relaxes `verify_branch_proof_v3` for current sessions or mutations.
+Before **first activation**, B also checks the management certificate against its
+own current custody range; a superseded manager cannot first activate a stale
+move through B. If primary recovery raced a committed-but-not-yet-activated move,
+retain the committed home and return `custody_reconfirmation_required`; do not
+roll back to A or use an old range. Exact current-custody reconfirmation/recovery
+is **MIGRATE-RECOVERY-01**, outside the demo. Already active homes survive ordinary
+branch revocation/lease renewal, with fresh session authorization still enforced.
 
-If A is unreachable, withholding status or refusing to commit, the account and B
-can finish after five minutes without A's signature. Peers that receive the
-account-signed active bundle route directly to B. This is a bounded escape from
-A's control, **not a guarantee that an offline/malicious A forwards messages**.
-Messages sent only to an unreachable A remain sender-pending; senders must retry
-resolution through a known independent replica, a received signed home update,
-or a contact-provided B origin with its pin. No global discoverability is
-assumed: if every locator is withheld and no independent path is available,
-show `publication_unreachable`; do not claim the move reaches all contacts.
+The home chain has its own durable `(account_anchor, home_epoch, home_record_hash)`
+floor. The v3 device-set record still has exactly one epoch/state and **no
+conditional home section**. Its optional future `home_binding_floor {epoch,hash}`
+would be an unconditional checkpoint only, in a separately reviewed version;
+ordinary lease renewal cannot authorize/revive a pending home. The initial demo
+uses the separate signed chain without changing the v3 DeviceSet schema.
 
-A delayed A commit after fallback may install a *remaining* cooperative window
-only if its signed account operation was durably sealed before admission expiry,
-its current binding is still the exact base, B reports that exact binding active,
-and no later home epoch is known. Use the sealed receipt's `accepted_at` as the
-forward-window anchor in this late path; there is no new 24-hour extension.
-An expired prepare/statement alone is insufficient. Once the corresponding
-24-hour window is over, return migrated status without reopening forwarding.
+Reject lower home epochs, a gap, a changed hash at the same epoch, or an invalid
+commit proof. Identical epoch/hash is idempotent. A serializes one successor per
+base by CAS. Concurrent B/C moves from the same honest A cannot both commit;
+the loser receives A's signed base-mismatch/noncommit outcome. Two conflicting
+A-signed commit proofs are retained as equivocation evidence and yield
+`home_fork`; never choose by timestamp. Recovery/forced move is a later explicit
+custody operation, not an implicit largest-epoch rule.
 
-The forwarder retains FU-BATCH-03 bounded leases, retryable uncertain outcomes,
-durable receipts and isolation between targets. The original sender envelope
-and root claim remain authenticated. Only the existing appended forwarding-count
-metadata is excluded by the specific sender-signing helper and authenticated by
-the federation request; do not strip arbitrary extensions or change the signed
-sender principal. Enforce one forwarding hop. A second move during an active
-window must first synchronize peers and reject/resolve a required multi-hop
-path; the initial release returns `previous_window_active` rather than silently
-creating A -> B -> C chains.
+For the demo retain all home records, commit proofs and terminal replay fences;
+no pruning or `outcome_pruned` behavior is implemented. A resolve page contains
+at most 64 linked records within 1 MiB. First-version admission stops before a
+chain exceeds that verifiable 64-record limit (`home_checkpoint_required`). A
+reviewed checkpoint/pagination extension is **MIGRATE-CHECKPOINT-01**; do not drop
+history or reset the epoch to make room. Cached peers may request a suffix.
 
-## Durable client state and user contract
+## Cooperative protocol, deadlines and recovery
 
-One encrypted account-DB journal row owns the operation. Commit each transition
-and its typed event outbox in one storage transaction **before** the next external
-step. Never serialize this job only in process memory or in the global nodes
-store. Account actor serialization applies; network work has request deadlines
-and must not hold a daemon-wide lock or block another account's socket reads.
+### Prepare and seal at B
 
-| Durable phase | External action / restart rule | User-visible state |
+1. Verify A and B discovery, pins, capabilities, existing peer admission and the
+   current v3 account. Initialize/persist an epoch-0 home genesis at A if absent,
+   using management approval and A's existing registration; never overwrite an
+   existing head. A migrated account is not bootstrapped again at epoch zero.
+2. B obtains A's fresh nonce-bound HomeAttestation over admitted mesh **before
+   creating a reservation**, proving current registration, home base and stored
+   custody head. This is mandatory for new-to-B roots and refreshed for existing
+   roots as well. The attestation is nonce-bound to this B request, valid for
+   at most 60 seconds, and cannot be reused for another prepare. Self-generated
+   roots cannot fill reservations merely by
+   supplying self-signed authority. Registration PoW can be an additional policy;
+   it is not a substitute for this attestation in the demo flow.
+3. B compares that attested v3 head with its own persisted floors, validates its
+   current publication and denies stale/forked/revoked claims. It reserves one
+   bounded admission against the exact base and returns Offer. Offer acceptance
+   expires 600 seconds after B's issue time; delayed user approval requires a new
+   offer, not an extension through client timestamps.
+4. The user explicitly unlocks/confirms custody authorization. Persist the
+   management+actor signed Authorization before sending seal. Its `seal_until`
+   is no later than Offer.accept_until and it explicitly permits at most a
+   600-second commit delay from B's actual seal time. Client `issued_at` is for
+   request freshness, not a cutover/window clock.
+5. B atomically CASes prepared -> sealed, saves the exact authorization/map and
+   creates **normal router inbox routes for every eligible delivery-map device**,
+   including offline siblings. A seal receipt states `sealed_at = B.now` and
+   `commit_deadline = sealed_at + 600`. Persist a B-side `commit_pending_at_A`
+   courier item in that same transaction. Send an own-device seal notice via A's
+   existing own-device/inbox control path, not solely through a B inbox that an
+   offline sibling cannot find. The notice is node-signed metadata with the
+   authorization hash and destination fingerprint; it does not impersonate an
+   encrypted branch message or replace account consent.
+
+The delivery map is the complete authorized recipient routing map, sorted by
+DeviceRef, with no duplicates; each entry is exactly `{device_ref:Ref,
+target_delivery_id:Id}` and matches the node-verified roster/current target
+bindings. Its hash is H with `home_delivery_map.v1`. Cross-root target collision,
+missing initiating device, revoked entries or roster mismatch refuse seal.
+Routing-map installation does not authenticate an absent sibling session or
+publish its prekeys on its behalf. The returning sibling proves its own v3 branch. Include non-revoked offline
+members even when their current branch lease needs renewal; creating an inbox
+does not extend that lease. They renew through the normal custody path before
+access. Recheck roster/map against A's current record at commit, and apply normal
+revocation/TTL policy explicitly to any excluded old queue.
+
+Abort and seal use one reservation CAS. Client cancellation is possible only
+before seal. After seal, B can release a **proved uncommitted** admission after
+the commit deadline as below; there is no client cancellation of an in-flight
+commit. One sealed/active operation per root means one **in-progress window**,
+not a lifetime exclusion: after completion B can later admit a B -> C -> B move.
+
+### Commit at A; B drives completion
+
+B delivers the sealed request to A over admitted mesh, retries idempotently and
+queries signed status. Client liveness is not required. A verifies the Offer,
+B's seal, management/actor signatures and **A's own stored current v3 head**.
+Verify the exact predecessor and custody range, admission deadline, actor lease
+and revocations, destination pin/admission, map, 600-second maximum and allowed
+24-hour forwarding duration. Do not accept a caller-supplied `now`. An A status
+query for an unknown id must include the verified seal/authorization evidence
+before A can assert deadline expiry; an arbitrary guessed id does not acquire a
+terminal fence. The terminal noncommit CAS and commit CAS share the same lock/
+durable state, so a delayed request cannot win after A has proved noncommit.
+
+A refuses first commits after `commit_deadline` on A's clock. The commit must be
+one durable transaction/atomic batch that:
+
+- CASes home base E/hash to this unique E+1;
+- records the versioned migration, full HomeRecord, commit proof and epoch floor;
+- sets `committed_at = A.now` and `forward_until = committed_at + 86400`;
+- captures a stable per-device inbox high-water mark and backlog-manifest hash;
+- installs forwarding for new inbound submissions and enqueues a durable,
+  bounded-cursor backlog drain covering all mapped devices through those marks;
+- persists the receipt and idempotence result before returning success.
+
+The high-water barrier covers accepted but not receiver-ACKed online/in-flight
+entries as well as offline queues. Audit the retained WAL/inbox source bytes;
+where an online path lacks a recoverable entry, retain it until ACK before
+advertising migration support. An online sender ACK is not a receiver ACK.
+
+Backlog *scheduling* is atomic with commit; do not copy an unbounded inbox while
+holding the commit transaction. The due-work drain pages entries and uses the
+same forwarding reservations/leases as new traffic. Submissions racing commit
+are serialized into either the captured backlog range or the new forwarding
+path; there must be no unowned gap. B creates the routes at seal and processes
+forwarded backlog/new messages through its **ordinary router local delivery and
+WAL**, never an unrelated provisional buffer.
+
+Forward work includes A's commit proof in node-authenticated routing evidence;
+B may verify/persist it and activate before acknowledging that delivery. No
+forwarded submission is an alternate activation authority. Until a valid commit
+proof is available, there is no successful delivery ACK from an invented buffer.
+B also fetches the proof through its commit courier and activates when it arrives,
+including when the original client lost its reply. A peer can independently
+check that A sequenced the same exact successor from the previous home key.
+
+### Backlog, deduplication and outbound traffic
+
+Already ACKed offline inbox entries at A cannot be stranded by switching the
+client manifest. Transfer every mapped device's unacknowledged pre-commit range,
+including offline siblings. Preserve envelope bytes, sender authority and target
+ids. A releases an entry only after B's durable normal-inbox commit/duplicate
+ACK, a real receiver ACK already recorded at A, or its original TTL expires with
+an explicit expired outcome accounted for; any further window-plus-retention
+deletion requires a reviewed policy.
+It never treats scheduling an attempt or a lost reply as success.
+
+Sealed inbox routes are dormant for ordinary delivery until A's proof is
+verified. An A forward carrying that proof can atomically advance B's home state
+and then use the normal inbox path; an unrelated direct submission cannot gain
+an early delivery ACK merely because its guessed target id already exists.
+
+For an older queued v3 message, preserve A's **original durable receiver-home
+acceptance evidence**, its authorized receipt-key/node record and source branch
+certificate. The existing custody queued-message exception requires purpose
+`message`, exact signed-object/source/target binding, original accepted_at inside
+the branch/key issuance intervals, and current revocation/mode floors. It is
+not an expired-branch registration or fresh-send exception. Add the missing
+production adapter for this path: custody r2's native DM does not implement it.
+The forwarder's new timestamp or A's migration commit is not an intake receipt.
+Capture/sign and persist this evidence at original message acceptance with the
+inbox/WAL entry; never fabricate/backdate it when migration begins. Existing
+queues lacking required evidence must drain normally or cause a typed
+`backlog_evidence_required` refusal before seal, not silent loss.
+
+For this routing-envelope receipt, reserve
+`ramflux.identity.home_accepted_envelope.v1` and compute H over exactly
+`{sender_bytes:base64url(envelope_sender_signed_bytes(envelope)),
+sender_signature:Sig}`. These bytes preserve all sender-authenticated content
+and the original signature while ignoring only the already approved appended
+node metadata. Bind that digest as RelayAcceptance.message_hash. Carry the
+receipt/node-record evidence in the **node-signed outer federation forward
+request**, not in a newly unsigned sender extension or changed ciphertext.
+Keep the one-hop marker and approved sender projection unchanged. B uses the
+typed historical-message verifier, never a global bypass of v3 proof/lease checks.
+If normal policy now rejects an entry (for example a revoked sender), retain an
+explicit rejected/expired outcome in backlog progress; do not count it as B
+delivery. Pending missing evidence/authority is retryable, not such an outcome.
+
+Deduplicate across backlog replay, A-forwarded new traffic and a sender's direct
+retry. The server tuple is `(verified sender anchor, envelope_id,
+target_delivery_id)`; **envelope_id is the transport message id** in the owner's
+(sender, message id, delivery id) rule. It is visible/authenticated without
+opening ciphertext. Keep normal receiver-side E2EE message-id/replay checks for
+the encrypted application message id as well; a node cannot deduplicate by a
+plaintext field it cannot read. Do not regenerate ids or ciphertext on reroute.
+Use the train's persistent local-delivery index, independent of the forwarding
+peer's source_node_id, rather than only federation Pending/Committed seen keys.
+A duplicate must not consume a second local inbox entry after restart.
+
+Persist each backlog cursor/ACK so a crash after B commits but before A records
+the ACK only replays the same entry. Preserve original TTL/retention timestamps;
+migration does not extend message TTL. The initial release does not silently
+prune undelivered backlog at window close: retain it and report
+`backlog_incomplete` for operator/client attention until a later retention policy
+is reviewed. Forwarding retries stop at the window; expiry is not a delivery
+receipt. End-to-end receiver receipts, not node ACKs, prove recipient delivery.
+
+A continues delivering already-accepted **outbound federation spools** for this
+account after commit. They are not recipient inbox backlog, are not deleted by
+migration and do not acquire another forward hop. The client stops creating new
+submissions through A as soon as commit is confirmed, before manifest switch;
+if commit outcome is uncertain after seal, pause submissions and query status.
+Queued local sends retain ids and resume through B after reconnection. Do not
+resubmit uncertain old outbound sends under fresh ids. Existing online sessions
+at A may receive already accepted work/receipts, but must not submit new account
+traffic after the home commit. Registration refusal alone is insufficient.
+
+### Deadline outcomes and finality
+
+There is **no automatic fallback, unilateral activation or late-commit path**.
+B activates only from A's valid commit proof. A fixes its first commit time and
+window once; duplicate requests return that original result after their request
+nonce/transport proof expires. Initial commit deadlines are not extended by
+retries. Fresh channel proofs and status nonces authenticate a recovery query.
+
+At `commit_deadline + 300 seconds` (custody clock-skew allowance), B queries A.
+If A committed in time, recover that proof and activate. Otherwise A atomically
+records a terminal `not_committed`/expired fence once its own clock is past the
+deadline; B verifies this signed nonce-bound result, releases its unused sealed
+allocation and removes empty staged routes. A can never later commit that id.
+
+**Absence of a received receipt is not proof of absence of a commit.** If A is
+unreachable or the reply is lost, B records `commit_outcome_unknown`, does not
+activate, does not silently delete potentially committed inboxes/capacity, and
+backs off status recovery. Such in-doubt allocations are separately capped per
+peer/root and consume reserved capacity; exhaustion refuses new seals, not old
+promises. Once a signed terminal result proves no receipt exists, release it.
+This is the honest two-phase uncertainty limit. A may maliciously block progress;
+resolve it through node recovery or the future explicit **MIGRATE-FORCE-01**
+protocol, never by assuming that a local timer authorizes a new home. This
+interpretation of timed release is essential when A committed before the deadline
+but its receipt was lost. The demo fault tests cover this case.
+
+A's signed commit makes the home final. A later actor revocation does not roll
+it back; B still imports/enforces current authority before allowing sessions,
+including source revocations arriving after seal. A newer committed home or
+identity tombstone wins over a delayed activation. A return move is a fresh
+higher-epoch operation after the previous one-hop window closes. On a return to an earlier node, that
+node verifies the new committed chain, installs the higher home floor and derives
+registration eligibility from the **current** head naming itself. Historical
+migration records/proofs remain immutable; their mere existence must not keep
+rejecting registration forever. v1 refuses
+chained A -> B -> C forwarding (`previous_window_active`).
+
+### Permanent bootstrap and closing the window
+
+A permanently serves public home resolve/status for a migrated anchor. The
+signed registration/session refusal carries the current home-record hash and a
+resolve hint, so an offline sibling returning only to A can obtain the verified
+bundle and find B. It need not first read a notice trapped in B's inbox.
+
+After `forward_until`, stop new forwards, retain the home head/floor and return
+a **signed** migrated rejection. The sender verifies A from its previous binding,
+resolves/verifies the full successor chain, updates target_node_id/prekey origin,
+and retries the unchanged envelope. Unsigned hints never change a route. A must
+refuse migration-capability startup without the matching node signer; an empty
+signature is not a degraded working mode. A malicious/offline A can withhold the
+bundle; independent replicas/user-supplied verified locators and forced moves
+are later availability work, not guarantees of this first version.
+
+## Required deltas against the forwarding train
+
+| Current train behavior | Required first-version change |
+| --- | --- |
+| Migration effective/window uses account `proof.effective_at`. | Version the durable migration record. Effective away-home state follows the committed home head, independent of clock/window expiry. Forward only while `committed_at <= node_now < forward_until`. Window closure or clock rollback must never re-enable old-home registration/session submits. |
+| Route-proof `expires_at > now` can truncate forwarding. | Admission/offer expiry limits accepting the offer, not an active route. Remove that gate for the committed route or derive active-route validity from the persisted forward_until. |
+| Apply accepts request `now` and rejects by issued_at timestamp ordering. | Delete client now; node clocks only. Order by expected predecessor/home epoch CAS and idempotent hashes, never client timestamps. |
+| A may send a terminal migrated Nack after a forward failure. | B inboxes exist at seal; only normal durable delivery can be ACKed. Preserve lease/backoff/uncertain-outcome semantics. Retryable failures must not be treated as success; a migrated Nack is signed and carries a verifiable resolve path. Sender retries may reach the same normal B inbox. |
+| A migration affects new submissions only. | Atomically schedule the pre-commit high-water backlog for every mapped device, with durable drain cursors and safe ACK deletion. |
+| Federation seen keys include the forwarding source node. | Preserve normal local-delivery dedup across differing forwarders using sender anchor/transport-message id/delivery id. Cover backlog + direct retry in the same WAL path. |
+| B would otherwise need a provisional buffer until activation. | Install delivery-map routes at seal and store through the normal router/WAL dedup path, with A commit proof verified before successful forwarding ACK. |
+| Migrated Nack signer can be absent. | Matching node signer is mandatory for capability/startup and every migrated refusal, including offline sibling registration. |
+| Sender-signing helper excludes the appended hop marker. | Retain the exact approved exclusion for `home_node_migration_forward_count`; the federation signature authenticates it. Preserve source root/device claims and every other signed extension. Never mutate ciphertext or weaken v3 sender verification. |
+| Forward work has bounded reservation leases, Pending/Committed inbound seen records and recovery. | Preserve them for backlog and new work; lease expiry is not an ACK, and an expired lease must not duplicate B's local delivery. Keep per-target isolation and original replay/TTL fences. |
+| Historical migrated-away state can refuse registration after a return move. | Derive that gate from the current committed home head; a higher-epoch return permits registration without erasing old proofs/floors. |
+
+## Durable SDK, bus, CLI and UI
+
+Use the ordinary per-account actor/DB and its transactional event outbox. Keep
+one immutable migration journal with exact signed bytes, authority/node pins,
+predecessor/head hashes, remote state versions, deadlines, backlog counters,
+manifest revisions and retry schedule. Commit before every external step. No
+primary/master secret or passphrase is journaled. No daemon-wide lock spans
+network work. A different current own device may query/finish a committed job;
+it cannot use a revoked actor's pre-commit authorization to evade A's checks.
+
+| Durable client phase | Action and restart recovery | User state |
 | --- | --- | --- |
-| `intent` | Persist node pins, discovery hashes, id and base binding; refresh stale evidence before prepare. | Checking destination and trust. |
-| `prepare_sent` | Retry identical prepare or query B by id; persist commitment before proceeding. | Requesting admission. |
-| `awaiting_approval` | Obtain exact management/branch signatures; no remote seal yet. | Confirm destination fingerprint / approve on primary. |
-| `seal_sent` | Query B; if prepared, retry identical seal; if aborted/expired, stop. Never guess from a lost reply. | Authorizing move. |
-| `sealed` | Persist B receipt and fallback deadline; journal exact A commit request before sending. | Destination reserved; completing move. |
-| `commit_sent` | Query A and B with fresh nonces; same committed hashes resume, absent A result retries before deadline; at fallback activate B. | Waiting for old home / bounded fallback countdown. |
-| `destination_active` | Query B, establish authenticated gateway/inbox and prekeys; recover the same account if a reply was lost. | Connecting to new home. |
-| `manifest_switch_pending` | Store new desired per-account config and operation hash before atomically replacing/fsyncing the manifest. Startup reconciles manifest with journal, not vice versa. | Saving new home. |
-| `publishing` | Persist local binding floor; retry publication/own-device notices idempotently. Never reconnect to A because notification failed. | Connected; notifying devices and contacts. |
-| `forwarding` | B connection and B publication verified; show A deadline only when its signed receipt confirms installation. | Moved; old-home forwarding until deadline, or moved without confirmed forwarding. |
-| `complete` | Persist window closed/receipt status and retain current binding/floor. | Move complete. |
-| `aborted` / `rejected` | Only pre-seal terminal outcomes; retain bounded replay fence. | Not moved, reason and safe retry action. |
-| `needs_attention` | Uncertain/forked/security/storage outcome; query before any mutation, retain last safe phase. | Action required; no false success or automatic rollback. |
+| `intent` | Verify pins, local v3 mode and known home; persist id/base. | Checking destination. |
+| `prepare_sent` | Retry same request or query B; persist signed offer. | Requesting admission. |
+| `awaiting_custody_unlock` | Confirm exact target/base, load separate custody authority and sign authorization. | Unlock/confirm migration. |
+| `seal_sent` | Query B before retry; aborted/expired is terminal; sealed recovers its deadline. | Authorizing move. |
+| `sealed` | Persist B receipt; B's durable `commit_pending_at_A` courier runs independently. | Waiting for old home commit; no cancellation. |
+| `commit_pending` | Query A/B; pause uncertain outgoing submissions; never activate from a timer. | Waiting / needs attention if A unavailable. |
+| `activate_sent` | Submit/recover A proof at B or observe B's autonomous receipt-based activation. Query B after a lost reply. | Activating destination. |
+| `backlog_transferring` | B activation and inboxes are ready; track durable A drain counters without requiring offline devices online. | Moving queued messages. |
+| `reconnecting` | Register existing v3 refs at B, republish authorized prekeys and connect ordinary QUIC/TCP-TLS/inbox stack. | Connecting at new home. |
+| `manifest_switch_pending` | Persist desired config then atomic replace/fsync; reconcile against verified journal/head after crash. | Saving new home. |
+| `forwarding` | B connected, signed home resolution published; retain drain/forward progress. | Moved; backlog/forwarding progress shown separately. |
+| `complete` | Window closed and backlog accounted for; preserve floors/proofs. | Move complete. |
+| `expired` / `aborted` / `refused` | Only proved noncommit/pre-seal outcomes; retain operation fence. | Not moved; safe retry available. |
+| `needs_attention` | Unknown commit, fork, incomplete backlog, trust/storage error; preserve last confirmed state and query. | Action required; no false success. |
 
-Persist the exact request/response hashes, signed bytes, authority evidence,
-phase/event sequence, last confirmed remote states, fallback/window deadlines,
-manifest old/new revisions and retry schedule. Do not store node secrets or
-recovery phrases. Events contain only ids, phase, timestamps, reason codes and
-public fingerprints. Ordinary backup may include diagnostic job history but
-must restore it inert: do not resurrect expired/sealed work as a live job, lower
-binding floors, or send an old commit without querying current node status.
+The destination journal has explicit prepared, sealed/commit_pending_at_A,
+commit_known, active, terminal_noncommit and commit_outcome_unknown phases.
+Every source/destination crash boundary is tested, including after durable A
+commit but before any reply, and after B activation before client observation.
+The per-account manifest switches gateway addresses, CA/server names, prekey and
+signaling endpoints and new-object defaults together, preserving identity/DB
+location/ratchets and existing objects' recorded relay ownership. Migration does
+not transfer old attachments or backups; those are **MIGRATE-OBJECTS-01** work.
 
-A disk failure before intent persistence sends no request. Failure after a
-remote mutation keeps the job uncertain and queries status on restart. The
-manifest's account identity/secret/DB location stay unchanged. If it points to B
-but the journal lacks a verified active receipt, reconcile against B before
-networking; do not manufacture a new account or fall back to A automatically.
-Endpoint switching updates gateway QUIC and TCP-TLS, signed CA/server names,
-prekey origin, signaling and defaults for newly created relay objects together.
-Other accounts' node preferences and existing object owner paths are untouched.
+Proposed ordinary bus methods are `account.home_node.migrate`,
+`account.home_node.migration.status` and `account.home_node.migration.abort`.
+Start input is `{operation_id,target_discovery_url,expected_node_fingerprint?}`;
+a null fingerprint requires verified A-admission pin evidence, never TOFU.
+Status/abort take the operation id. A separate protected custody-confirmation
+step signs the exact proposal digest after passphrase/data unlock plus the
+separate custody credential approval; no secret is an ordinary bus JSON field.
+Typed progress/result bodies include operation id, phase/sequence, source/target,
+confirmed home epoch/hash, commit deadline, forwarding deadline, backlog progress
+and reason/retry code. Outbox subscription replay and status survive restart.
 
-Abort is allowed only while B is prepared. It is an account-authorized control
-message, CAS against that admission id. Abort racing seal has exactly one durable
-winner; `already_sealed` is not a successful cancellation. After sealing, rollback
-means a new reviewed migration to a previous node with a higher binding epoch,
-not deletion of records or decrementing a floor. A blocked/disabled destination,
-revoked actor before seal, changed pin, authority fork or admission expiry stops
-before seal. A later branch revocation does not undo an already root/primary-
-authorized sealed move; the revoked branch loses status/mutation access and a
-remaining authorized device can recover it. A newer account-authorized move or
-identity tombstone supersedes it and must be checked before delayed activation.
+`rf account migrate-home --account ID --to DISCOVERY_URL
+--expected-node-fingerprint FINGERPRINT` drives that job and confirmation. An
+explicit `--pin-from-home` alternative uses A's verified admission. No automatic
+TOFU switch exists. Status/abort subcommands use the durable id. Success means
+B's live ordinary session and verified committed home record, with backlog and
+forwarding completion reported separately. A node ACK is not an E2EE receipt.
 
-### Proposed local bus and CLI
+Desktop/TUI follow the same bus state: show pin provenance and source/target,
+explicit custody confirmation, commit deadline, no-cancel-after-seal boundary,
+queued-message progress, B connectivity and remaining forward window. Lost A
+shows needs-attention, not a countdown to automatic success. The CLI is sufficient
+for the demo; polished screens are **MIGRATE-UI-01**. Own-device seal notice and
+safe signed sibling bootstrap are not deferred with those screens.
 
-- `account.home_node.migrate {operation_id, target_discovery_url,
-  expected_node_fingerprint, confirm_tofu}` starts or resumes the account-scoped
-  durable job. `expected_node_fingerprint` may be null only with explicit
-  `confirm_tofu:true`; it cannot override an existing mismatched pin.
-- `account.home_node.migration.status {operation_id}` reads durable progress;
-  `account.home_node.migration.abort {operation_id}` attempts pre-seal abort.
-- Response/progress/result events carry typed `operation_id`, `home_epoch`,
-  `old_node_id`, `new_node_id`, `phase`, monotonic `sequence`, `reason_code`,
-  `retry_after`, `fallback_after`, `forward_until` (nullable when unconfirmed),
-  and `forwarding_confirmed`. Events are committed through the existing durable
-  outbox/journal; subscription replay and status survive daemon restart.
-- `rf account migrate-home --account ID --to HTTPS_ORIGIN
-  --expected-node-fingerprint FINGERPRINT` prints typed JSON progress/results.
-  Explicit first-use `--confirm-tofu` prints the discovered fingerprint for
-  confirmation; noninteractive callers must pass that fingerprint back in a
-  second invocation, not approve an unseen candidate with a boolean alone.
-  Add status/abort subcommands selecting the durable operation id.
-- Exit 0 means B is connected and its resolve result confirms publication; it
-  does not mean all contacts updated or the 24-hour window elapsed. A detached
-  accepted job returns its id with a distinct pending result; the CLI must not
-  label a queued request “migrated”. Restart/resume does not require the phrase.
+Exclude migration journals/active timers from v1 backup export/import entirely.
+The signed public home floor still survives account restoration through current
+node resolution; stale backup state cannot lower a locally retained floor or
+restart a job. **MIGRATE-BACKUP-01** will add inert diagnostic job history later.
+Before networking, a restored v3 device refreshes custody and the home chain.
 
-Desktop/TUI show source/destination names plus fingerprints, approval state,
-cutover/fallback countdown, forwarding confirmation and a recoverable progress
-screen. Confirmation includes whether the node pin is established or first-use.
-Disable cancellation after sealing with a concrete explanation. Keep the screen
-recoverable after app exit; use bus state, not a UI-only timer. Never ask for an
-admin token, destination node seed, or routine recovery phrase. A secondary
-shows the exact primary-approval request and can stay pending without losing
-its old connection before the irreversible seal.
+## Bounds, errors and minimal work packages
 
-## Peer convergence, replay floors and failure limits
+Require 8 KiB headers, 64 KiB ordinary control messages, 8 KiB individual signed
+migration objects and a 10-second whole-request deadline (not reset by trickle
+reads). Admission evidence uses the existing 5 MiB custody frame ceiling with
+streamed caps before allocation, retaining existing 512 KiB v3 record and 4 MiB
+revocation-list bounds. Both individual and aggregate limits apply; no roster
+or revocation truncation. Resolve pages are bounded as above. Heavy verification
+is off the sole socket-reader worker; at most 16 migration crypto jobs/node.
 
-Home binding forms a root-authorized hash chain: E+1 references the exact E hash.
-Peers persist `(root_commitment, highest_home_epoch, binding_hash)` and authority
-floors before changing routing. Reject lower epochs; identical epoch/hash is
-idempotent. Same epoch/different hash is `home_binding_fork`, never “higher time
-wins”. Require a bounded predecessor proof from the cached head or a verified
-current account authority record. A self-declared high epoch from a node cannot
-skip account signatures or a fork. This is not a globally consistent directory:
-partitions can temporarily hide conflicting signatures from legitimate legacy
-root copies. Stop automatic moves and routing changes on discovered conflict.
+After verifying identity and A's attestation, allow prepare burst 2, 6/hour/root,
+one unsealed and one in-progress sealed/window operation/root, at most 1024
+unsealed reservations/node and a configured admitted-peer share. In-doubt seals
+have a small explicit per-peer cap (initially 16) and consume account capacity.
+Authenticated status/resolve: burst 10, 60/minute/requesting root, no durable
+allocation for an unknown query. Public record GET: burst 10, 60/minute/source
+subject to the configured CGNAT/global read ceiling; it performs bounded cached
+record reads and never allocates an account/reservation or returns private state. Retrying the same id/hash consumes no new reservation. Cheap
+source/connection limits apply before crypto; authenticated root quotas are
+charged only after verification. Preserve configurable per-source CGNAT ceilings
+and independent global/root caps. A signed registration attestation prevents
+anonymous-root reservation exhaustion; an admitted peer can still deny service,
+so capacity and per-peer caps remain necessary.
 
-Recovery from such a fork is an explicit account-management operation, not
-silent last-writer choice: the primary/root selects a known valid branch,
-publishes a signed current authority checkpoint naming *both* conflicting home
-hashes and the chosen binding, and increments the account authority epoch. This
-uses the custody public record/checkpoint machinery when v3 is enabled. For v2,
-a new root-signed checkpoint schema and vectors are a required protocol work item
-before enabling concurrent-device migration; until implemented, migration is
-limited to one initiating device and a detected fork needs operator-visible
-manual account recovery. Do not claim that local actor serialization supplies a
-global lock across devices or nodes.
+Keep typed refusal codes: `v3_required`, `custody_approval_required`,
+`authority_update_required`, `actor_revoked`, `custody_reconfirmation_required`, `pin_mismatch`, `channel_binding_required`,
+`base_mismatch`, `home_fork`, `idempotency_conflict`, `admission_expired`,
+`commit_expired`, `commit_outcome_unknown`, `previous_window_active`,
+`home_genesis_required`, `home_checkpoint_required`, `backlog_incomplete`,
+`backlog_evidence_required`,
+`capacity_refused`, `peering_unavailable`, `evidence_required`, `rate_limited` and
+`storage_unavailable`. Unauthenticated control errors are generic; no private
+map or private-operation oracle is exposed. The public GET intentionally reveals
+a published locator for a known opaque anchor, not private admission status. Log bounded ids/codes, not secrets/full evidence.
+Transport replay keys are anchor-qualified and action/audience/nonce-bound;
+durable business keys are the separately defined idempotence tuple. Store at
+most 256 retained operations/root and 16384/node in the first version, refusing
+new prepares before those budgets are exhausted rather than pruning a floor.
+Drain work uses pages of at most 64 inbox entries and 128 transitions/tick,
+with at most four concurrent forwards/peer and the train's per-target leases.
+A fresh status proof never reissues authorization, extends a deadline or rewinds
+a home/custody floor. No pruning of proof/fence state is in the initial release.
 
-B and directory replicas retain current binding, epoch floor and signed closure
-or tombstone; A retains the corresponding floor and final outcome after window
-expiry. Retention can prune bulky receipts, but not those security fences.
-After receipt pruning, status returns `outcome_pruned` plus current signed head,
-never `not_found` that could restart an old migration. Do not import old replay
-rows, migration reservations or job timers from backups as live operations.
+### MIGRATE-SRV-01: required for the first two-node CLI demo
 
-If a peer's cached A route Nacks, it first verifies the signed home bundle or
-performs authenticated resolution, then updates its routing cache and prekey
-origin. Contacts without the feature cannot be promised transparent migration;
-announce required capabilities before seal. Signed home-binding/notice support
-and a working independently reachable B locator are demo prerequisites.
+Implement in ordered reviewable commits, on the merged forwarding/custody base:
 
-## Abuse, privacy and resource controls
+1. **Protocol and crypto:** all closed v3 migration messages, home record and
+   public/private bundle types, management-authority verification against the
+   node-owned current record, canonical/hash vectors and strict domain registry.
+   Keep current custody Envelope/branch-exporter semantics. Add v2 client
+   discovery with control TLS fields and the exact no-TOFU pin contract.
+2. **B admission/seal:** A registration attestation, capacity/one-root CAS,
+   normal mapped-device inbox installation at seal, durable B->A commit courier,
+   own-device seal notice, signed status/abort and deadline/noncommit recovery.
+3. **A commit/backlog:** one durable base CAS with commit proof, route/window and
+   high-water drain jobs for all devices; A-timestamped window, no client now or
+   issued_at ordering; preserve outbound spools and close existing submit paths.
+4. **Activation/forwarding:** B proof-only activation and normal WAL delivery;
+   persistent cross-forwarder dedup; backlog leases/cursors/ACK deletion and
+   uncertain-outcome recovery; adapt source-authority import to v3 Publication/
+   BranchCertificate/DeviceRef (no synthetic legacy IdentityRoot), implement
+   original receiver-home message acceptance/history verification for queued
+   v3 data, and retain approved sender-signing exclusions/authority checks;
+   all forwarding deltas above, permanent A
+   resolve and signed migrated registration/session/send refusals.
+5. **Deploy and acceptance:** node-CA control TLS listener, matching mandatory
+   node signer and deployed proxy-key publication, signed v2 discovery and
+   already-admitted peering on two IP-reachable nodes. No WebPKI or test-memory
+   vault escape in the actual demo. Run node/crypto/custody tests and the new
+   server fault scenarios before enabling `home_migration_v1` capability.
+6. **Remove legacy migration surface:** after rewritten s51 passes, remove admin
+   migration/route apply from both router mesh and itest listeners, DTOs containing
+   client now, and seed-forging fixtures. Retain pure validators only if needed;
+   no combined mode or admin-token CLI escape hatch.
 
-These are proposed initial limits, not claims about current configuration.
-Bounds may be lowered by node policy; responses identify a policy refusal before
-seal. Raising wire maxima requires a negotiated protocol version.
+### MIGRATE-SDK-01: follows the server contract, same demo
 
-| Resource | Initial bound / enforcement |
-| --- | --- |
-| Request header/body | 8 KiB / 256 KiB; count streamed bytes, never allocate from declared length; reject malformed lengths and oversize before signature work. |
-| Whole request / internal call | 10 seconds / 5 seconds, including trickle reads; no per-read timeout reset. Replies and evidence fetches are also size/deadline bounded. |
-| Concurrency | Existing public listener cap plus at most 16 migration signature jobs per node; 1 active mutation per root; no synchronous expensive crypto on the sole socket-reader worker. |
-| Prepare attempts | After authentication, burst 2 and 6/hour per root, one outstanding reservation per root; repeats with the same id/hash cost no new admission allocation. |
-| Status/resolve | After authentication, burst 10 and 60/minute per requesting root; mutations share a 20/minute/root budget. Authenticated missing queries allocate no durable row. |
-| Anonymous/source pressure | Cheap connection/byte limits and configurable per-source ceilings before crypto; use the node's existing source classification/CGNAT controls. Never substitute an IP for an authenticated root. |
-| Pending state | At most 1024 unsealed reservations per node, with a node-capacity cap on sealed/active accounts. A full node refuses before seal. |
-| Evidence | At most 128 KiB of authority evidence, 64 predecessor links and 16 additional documents per request; verify exact referenced hashes. Larger accounts/chains require a bounded checkpoint path or `evidence_too_large`, never truncation. |
-| Retention | Delete unsealed payloads within 1 hour after expiry/abort; retain small operation replay tombstones 48 hours. Keep only current/last sealed payloads per root and the permanent highest epoch/current-hash/closure floor. Bulk historical receipts follow a documented retention budget. |
-| Work and notifications | At most 128 due transitions per worker tick; per-item errors are logged by code/id and do not abort unrelated accounts. Contact fanout is paginated, retryable and bounded, not a synchronous commit prerequisite. |
+1. Reuse the ordinary v3 session/bus integration from the v3-only rollout. Add
+   purpose-bound custody signing/confirmation to the existing independent vault
+   boundary; do not recreate the legacy root or require the phrase routinely.
+   Verify that the supported demo platform has the real custody provider; a
+   branch/data unlock alone must fail migration authorization.
+2. Implement the durable client phases, restart queries and exact manifest switch;
+   no automatic fallback; pause source sends at confirmed/uncertain commit;
+   reconnect the same device/ratchets and preserve queued outgoing ids.
+3. Implement sender-side signed `HomeNodeMigrated` handling in the SDK **and**
+   federation target lookup: verify A/chain/commit proof, update target_node_id
+   and prekey origin, and retry the unchanged envelope. It is not enough to
+   update only the migrated account's own endpoints.
+4. Ordinary bus migrate/status/abort plus protected custody approval, durable
+   typed events, CLI flags/exit states and own-sibling bootstrap/notice handling.
+5. Rewrite s51 through the real CLI and daemon socket using v3 identities and
+   real node-issued offers/proofs. Feed the test agents exact flags and artifact
+   SHAs; no client migration request contains an admin token or a node seed.
 
-Pre-auth source throttles protect CPU but must not charge an arbitrary supplied
-account's admission budget. Authenticate and verify all bindings before charging
-per-root limits. Capacity checks and reservation creation are atomic. A fresh
-self-generated key is not proof that an account is already admitted: new-to-B
-roots still pass its registration/admission policy, including the existing PoW
-challenge where configured. Source limits must be configurable for shared CGNAT
-populations; retain independent per-root and global ceilings so loosening a
-source cap cannot remove abuse protection.
+The minimal demo is two already-admitted IP-reachable nodes, a v3 human account
+with management authority available, its offline sibling, and a third sender
+retaining A's route. Forced move, general replicas/contact fanout
+(**MIGRATE-REPLICA-01**), custody-external signer routing, attachment moves,
+polished UI, backup job history, checkpoint/pruning and node-root-key rotation
+(**MIGRATE-NODE-ROTATE-01**) are named later work. General proof/operation
+retention and compaction require **MIGRATE-RETENTION-01**; until then budgets
+refuse new work rather than erase a safety fence. Normal proxy/receipt-key
+rotation in the existing v3 node record remains enforced; no weakened verifier
+or indefinite ambiguity is used to defer these features.
 
-Check destination routes against the pinned signed server record and operator
-federation policy before dialing. DNS rebinding, redirects, private-address
-routing and cross-origin fetches use the existing node transport policy, with
-explicit operator permission for LAN deployments. Do not let a signed account
-statement turn a node into an arbitrary URL fetcher. A malicious destination can
-refuse service or observe normal routing metadata; it cannot manufacture the
-account/root signature or change the committed destination. A malicious old
-home can withhold data and lie about progress, so status is signed, nonce-bound
-and checked against B's evidence; it cannot forge a higher account binding.
+### Demo implementation boundary and order
 
-Logs exclude admin credentials, seeds, raw authority documents, full signatures,
-message bodies and contact lists. Public errors are typed and generic; detailed
-operator diagnostics use bounded operation ids and reason codes. A home change
-reveals the new home to contacts and serving nodes; it is not an anonymity or
-unlinkability feature. Prefer authenticated lookup and contact notices over an
-index enumerating all migrated identities. Resolve authentication bounds abuse;
-it does not require the node to learn or reconstruct encrypted contact graphs.
-Knowing an opaque target id can reveal its public home record, but never grants
-contact consent, identity-management authority or access to its inbox.
+The target is a small cooperative CLI demonstration, not all deferred recovery
+or UI features. Review the protocol/types first; server admission, commit and
+forwarding form one acceptance unit. SDK journal/CLI work may proceed against
+those reviewed types, but capability enablement waits for the real v3 rollout,
+node TLS/proxy setup and the production historical-message acceptance adapter.
+The final unit is rewritten s51 plus a manual two-node run with an offline
+sibling and a third sender. These dependencies are critical-path gates, not a
+claim that the inspected custody r2 branch already supplies them. Use an actual
+supported primary-vault provider on the initiating client; node OS and client
+vault OS need not be the same.
 
-### Result and error vocabulary
+## Acceptance matrix
 
-HTTP status is transport classification; the node-signed receipt carries the
-semantic result once a request is authenticated. Valid result states are
-`prepared|sealed|committed|active|published|aborted|expired|superseded|unknown`.
-A receipt state version increments monotonically for that node's operation.
-Before authentication, return a generic bounded error without disclosing whether
-an identity or operation exists; no fabricated signed account outcome is needed.
+- **Cryptography and schema:** every signature/hash golden; role order and
+  schema==domain; reject old r1 root/branch-v2 payloads, custom/null/default
+  ambiguity, I-JSON violations, mismatched anchor/ref/certificate/offer/predecessor,
+  map, node pin, TLS audience and expired authorizations. Cross-schema vectors
+  enumerate existing root/branch/node preimages and prove none can substitute
+  for the top-level `{body,domain,schema,signers}` migration transcript.
+- **Authority and network attacks:** stale-but-valid client publication, primary
+  replacement and actor revocation against each node's stored head; wrong node
+  CA/SNI, WebPKI-only trust, attacker first-use discovery, wrong/deployed-missing
+  proxy key, wrong exporter/operation or no-channel-binding downgrade; all fail.
+- **Concurrent migration:** B and C seal the same base; A commits exactly one,
+  signs the losing refusal; no destination activates without the winning proof.
+  Retain conflicting A-signed proofs and fence on simulated A equivocation.
+- **Crash boundaries:** before/after prepare/seal, B commit-courier persistence,
+  A's atomic commit/drain scheduling, B activation, each backlog ACK/cursor,
+  manifest replace and journal event ACK. Lost A receipt before deadline then
+  A unreachable after deadline remains uncertain, not expired/active by a timer.
+  Once A recovers, recover the original proof/deadline or a terminal noncommit
+  fence; never extend the window or destroy potentially committed storage.
+- **Backlog/dedup:** ACK messages into A before commit for initiating and offline
+  devices, race more submits at commit, replay backlog and direct retries after
+  B restart, lose destination ACKs. One normal B inbox entry per authenticated
+  sender/transport-message/delivery tuple, successful E2EE decryption and stable
+  receiver replay protection. Do not acknowledge mere scheduling as delivery.
+- **Outbound and siblings:** A completes accepted outbound spools; new source
+  submits stop at commit. Offline sibling starts with A only, verifies signed
+  migrated refusal, resolves B from A and reconnects without a new identity.
+- **Privacy and abuse:** contact resolve lacks delivery map/full roster; own-device
+  and admitted-home private views are separately authorized. New roots without
+  A attestation cannot reserve; CGNAT peers share source limits without spending
+  a victim root's budget. Oversized/trickle clients cannot allocate unboundedly.
+- **Return and expiry:** after the first window, B->A works without a permanent
+  active-root exclusion. Advance test-only clocks/durations to close the window;
+  A still serves signed resolve/rejection, sender retries directly to B. Pending
+  backlog is explicit attention, never silently deleted. Restarts and stale
+  backups cannot reopen forwarding or resurrect an old migration.
 
-| Class | Reason codes and client action |
-| --- | --- |
-| Trust / authority (403) | `pin_mismatch`, `trust_confirmation_required`, `authority_stale`, `actor_revoked`, `authority_fork`, `custody_approval_required`; refresh or require user/primary action, never downgrade. |
-| Conflict (409) | `base_mismatch`, `home_binding_fork`, `idempotency_conflict`, `already_sealed`, `previous_window_active`, `superseded`; fetch signed status/current head before deciding. |
-| Expiry (410) | `admission_expired`, `request_expired`, `outcome_pruned`; a fresh query can recover a previously accepted result; an expired request is not retried as a new authorization. |
-| Policy / size (413/422/429) | `evidence_too_large`, `evidence_required`, `capacity_refused`, `peering_unavailable`, `rate_limited`, `unsupported_capability`; bounded backoff or a new user-approved prepare, never skip admission. |
-| Retryable / uncertain (503 or transport failure) | `storage_unavailable`, `service_unavailable`, `publication_unreachable`, `outcome_unknown`; retain the last confirmed phase and query status before repeating a mutation. |
+**Rewritten s51 live boundary:** create/contact the v3 account at A through the
+ordinary CLI/bus, establish normal E2EE sessions, leave a sibling offline and
+queue DMs at A, invoke `rf account migrate-home` with a real pin, and observe
+B-issued admission/seal plus A-issued commit proof. Restart both nodes and the
+daemon at lost-response boundaries. Receive/decrypt both the pre-commit backlog
+and DMs submitted via the cached A route during the window, exactly once. Verify
+sender re-resolution/direct B delivery and sibling bootstrap. Blackhole A during
+commit in a separate negative case: no B activation, honest needs-attention.
+After the window test signed migrated rejection and direct retry. The fixture
+never constructs a destination proof from its seed or calls an admin apply route.
 
-Signed receipts must not echo requester-controlled error messages or URLs.
-`Retry-After` and `retry_after` hints are capped at 300 seconds; they are scheduling
-advice and never extend admission, authority, seal or forwarding deadlines.
-Terminal rejections before a durable mutation may use a generic error instead
-of a receipt. A timeout/500/503 after sending a mutation is always uncertain to
-the caller; it must not be interpreted as proof that the mutation did not occur.
-
-## Implementation work packages and readers
-
-| Layer | Required work; producer and readers |
-| --- | --- |
-| Protocol/crypto | Version the existing route commitment and migration-proof family; add typed envelope builders, reserved domains, binding/receipt/control types and strict ingress. Devices produce account/actor signatures; nodes produce route/receipt signatures; clients, old/destination routers and peers verify them. Add current-head/fork checkpoint handling before multi-device enablement. |
-| Router | Account-authorized prepare/seal/commit/activation/status state; current-authority and epoch checks; one transaction for migration, route, forwarding anchor and receipt; bounded due-work worker. Add v2 bundle validation rather than coercing a commitment/seal into a v1 node signature. Existing forwarding runtime reads only committed records and retains the approved train's leases/replay behavior. |
-| Federation public origin | Add only the client routes listed above with auth, body/deadline/cap controls; proxy through authenticated internal services. Signed client/server records advertise `home_migration_v1` and `home_binding_v1` capability strings once complete. Keep admin handlers unreachable here. Update the route inventory and demo HTTPS origin configuration. |
-| Federation mesh/directory | Admission-policy query, sealed/active status and signed home-bundle replication among admitted peers; no client admin credential. Destination produces route/activation evidence; contact and own-device resolution consume it. Validate immutable node pin and endpoint binding before forwarding. |
-| Gateway/identity | Admit migration registration for the same root/branch/delivery ids using the sealed bundle; preserve identity kind, signed revocation floors and fresh session proof checks. Do not let generic foreign-home registration bypass migration admission. Publish current device authority/prekeys and make offline sibling inboxes available before claiming readiness. |
-| Storage/retention | Incremental per-root operation rows, immutable exact-byte blobs, CAS phase updates and transactional outbox; persistent binding/authority/replay floors. Manifest reconciliation is crash-safe. Backup restore imports jobs inert and cannot lower floors or replay old timers. Avoid whole-registry snapshot rewrites for each status query. |
-| SDK | Replace the in-memory method as the user operation's authority with an async durable migration coordinator; retain/model-test the existing method as appropriate but do not call it to claim network success. Reuse node lookup, pin verification, TLS, account authority, registration and gateway reconnection. Bind retry work to the exact account actor and journal id. |
-| Bus and `rf` | Account-scoped migrate/status/abort, durable typed progress/result/errors, journal replay and nonblocking subscriptions. CLI flags and fingerprint confirmation above; real bus/CLI tests verify actual transitions and restart recovery. |
-| Desktop/TUI | Trust review, exact primary approval where required, persisted progress/recovery view, cancellation boundary and truthful distinction between destination connectivity, publication and confirmed old-home forwarding. |
-| Deploy/itest | Configure two genuinely client-reachable HTTPS origins and already-admitted peers; update production/itest capability and route inputs. Rewrite s51 to drive CLI/bus with production service paths and real node-generated proofs. No node seed or admin token enters the client or the test's migration requests. |
-
-The public directory home bundle becomes the authoritative home reader for
-contact routing, gateway recipient resolution, principal lookups, prekey URL
-selection, own-device activation/restore and account status. Audit all of these;
-merely changing the initiating daemon's gateway leaves cached senders behind.
-Account backup, exported contact cards and stale node profiles are hints, not
-permission to lower that reader's persistent binding floor. Existing contacts'
-trust in the account root is retained; this operation does not make them
-re-accept a contact or device invitation.
-
-### Development-stage removal of the old control path
-
-Remove the admin-token migration/apply and route/update/apply request schemas and
-production/test routes after s51 uses the account-authorized path. There is no
-combined mode, public admin alias or CLI `--admin-token` escape hatch. Operator
-health/status tooling can inspect signed outcomes through its separate private
-administration surface, but cannot impersonate account authorization. Keep pure
-core signature/route validation helpers if still used, behind the new durable
-transaction boundary. Old v1 fixtures may remain protocol-history vectors, but
-must not be accepted as v2 migration authorization. Update operator docs and
-remove fixture code that forges B's route proof from a known B seed.
-
-Existing stored account data and current identities remain readable. An account
-without a binding bootstraps epoch 0 once from its pinned existing node and
-account authority; the first server/peer observation persists that floor.
-An existing migrated admin fixture must be recreated through the real flow in
-development, rather than silently upgraded from an admin token to account
-consent. No change to root derivation, principal kind or device ids is allowed.
-Capability negotiation fails closed until both nodes and the relevant clients
-implement and advertise the flow. Landing the forwarding prerequisite alone
-does not enable the migration UI.
-
-## Acceptance tests and release ordering
-
-Protocol vectors must cover each exact preimage/domain, JCS property order and
-number edge cases, UTF-16 sort behavior, I-JSON duplicate/surrogate/numeric
-rejects, strict unknown-field handling, base64 lengths, signature role order,
-and nested-evidence substitution. Mutate every identity/root/device/epoch,
-destination pin, predecessor hash, nonce, audience, deadline and route endpoint
-individually; no signature accepted in another message domain or role.
-
-Server tests use the actual public listener and private service path. Check
-public admin paths stay 404, clients cannot pass admin credentials as authority,
-invalid/revoked/forked devices cannot charge another root's budget, and
-root-correct but account-unrelated documents cannot satisfy an evidence hash.
-Adversarial requests include private-URL/redirect/DNS rebinding attempts, huge or
-malformed Content-Length, trickle clients, oversized authority chains, duplicate
-ids with changed payloads, expired admission and shared-source CGNAT load.
-
-Crash injection is required immediately before and after each store commit and
-response: B prepare/seal/activation, A migration+route+receipt, manifest replace,
-publication and outbox acknowledgment. Verify exact replay returns original
-windows/outcomes; lost replies recover through nonce-bound status; cleanup of an
-unsealed reservation cannot cancel a sealed move. Abort/seal races have one
-winner. Delayed old-node commit, changed/newer bindings, revoked actors,
-backup import, multi-device epoch conflicts and pruning all fail closed without
-resurrecting a route or extending the forwarding period.
-
-SDK bus tests run through a real Unix socket and persisted account DB, with
-local stub *services* implementing the reviewed protocol rather than stubbing
-the migration coordinator's success. Restart the daemon in every phase. Check
-journal event sequence/replay, exact endpoint/manifest switch, sibling
-convergence, safe inert restore, timeout recovery, other-account responsiveness
-and CLI JSON/exit behavior. Primary approval tests bind exact destination and
-statement hashes; a secondary or headless caller cannot widen that approval.
-
-Rewrite realnet s51 as follows:
-
-1. Start two production-path nodes with verified HTTPS discovery and admitted
-   peering, plus a sender. Provision server keys only through normal node setup.
-   Create and contact the migrating account through the real client path at A.
-2. Establish a ratchet and receive an encrypted DM before migration. Invoke
-   `rf account migrate-home` through its real daemon socket using B's discovered
-   fingerprint; assert signed admission/seal/commit/active/publication evidence.
-   The fixture must not construct B's proof, call admin migration routes, or
-   supply an admin token to the account/CLI operation.
-3. Keep the sender intentionally using its cached A route; send new encrypted
-   DMs during the confirmed window. Assert forwarding to B, unchanged sender
-   signature/root and ciphertext identity, exactly one delivery and successful
-   decryption. Confirm the sender later resolves the signed binding and sends
-   directly to B. Verify the offline sibling can reconnect without new identity.
-4. Lose a commit reply and restart the client daemon; also restart A and B after
-   durable transitions. Assert the same migration id, base/head, window anchor
-   and operation outcome, with no second identity, duplicate ACK or lost DM.
-5. Blackhole A's control path while keeping the independent B locator available;
-   after the bounded fallback verify B activation and peer rerouting. Do not
-   assert forwarding from a deliberately unreachable A. Separately test no
-   independent publication path and require an honest pending/attention result.
-6. Close the window using an injected server clock in focused tests and a bounded
-   configurable *test-only* duration in realnet. A emits migrated Nack/hint,
-   sender verifies/re-resolves and delivers directly to B. Restart/restore must
-   not reopen A forwarding. Exercise original-forward retry and revocation
-   regressions from the forwarding train alongside s51.
-
-Release order: review this design and the authority/expiry choices; land the
-forwarding dependency train; implement protocol/crypto and vectors; implement
-server transactions and genuine client routes; implement signed home discovery
-and all routing readers; implement SDK durable job/bus/CLI; wire UI and deploy
-inputs; run rewritten s51 plus identity, sibling restore, receipts, DM, backup
-and forwarding regressions. Enable the capability/UI only after live acceptance.
-Implementation reports must distinguish unit/bus evidence from realnet results.
+Implementation remains gated on design approval, the merged forwarding train,
+completed v3-only ordinary clients and realnet evidence. Native unit/bus evidence
+must not be described as this live acceptance boundary.
