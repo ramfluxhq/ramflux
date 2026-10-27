@@ -54,6 +54,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         println!("{service}:healthy");
         return Ok(());
     }
+    let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
     tracing_subscriber::fmt().with_target(false).init();
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
@@ -84,18 +85,30 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         )?;
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
-            return serve_itest_http(&router, &store, &state);
+            let itest_router = router.clone();
+            let itest_store = Arc::clone(&store);
+            let itest_state = Arc::clone(&state);
+            ramflux_node_core::spawn_service_worker("ramflux-gateway-itest-http", move |_| {
+                if let Err(error) = serve_itest_http(&itest_router, &itest_store, &itest_state) {
+                    tracing::error!(%error, "gateway itest HTTP listener stopped");
+                }
+            })?;
         }
         if std::env::args().any(|arg| arg == "--once") {
             return Ok(());
         }
-        return ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into);
+        return shutdown
+            .wait_and_finalize(move || {
+                drop((router, notify, state, store));
+                Ok(())
+            })
+            .map_err(Into::into);
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into)
+    shutdown.wait_and_finalize(|| Ok(())).map_err(Into::into)
 }
 
 mod device_set_limit;

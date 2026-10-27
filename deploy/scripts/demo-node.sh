@@ -95,7 +95,8 @@ if [ "$flag" = --remote ]; then
   command -v curl >/dev/null 2>&1 || fail 'curl is required for tool-free remote status'
   command -v openssl >/dev/null 2>&1 || fail 'openssl is required for tool-free remote status'
   remote_record=$(mktemp "${TMPDIR:-/tmp}/ramflux-discovery.XXXXXX") || fail 'cannot create remote status temporary file'
-  trap 'rm -f -- "$remote_record"' EXIT HUP INT TERM
+  trap 'rm -f -- "$remote_record"' EXIT
+  trap 'exit 1' HUP INT TERM
   curl --fail --silent --show-error --max-time 10 \
     --output "$remote_record" "$origin/.well-known/ramflux/client"
   script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -355,6 +356,7 @@ RAMFLUX_FEDERATION_TRUST_ENDPOINT=ramflux-federation:7443
 RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json
 RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json
 RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS=30
+RAMFLUX_SHUTDOWN_GRACE_SECONDS=${RAMFLUX_SHUTDOWN_GRACE_SECONDS:-1}
 RAMFLUX_FEDERATION_TRUST_ISSUER_NODE_ID=$DEMO_NODE_ID
 RAMFLUX_FEDERATION_NODE_ID=$DEMO_NODE_ID
 RAMFLUX_FEDERATION_PUBLIC_ENDPOINT=ramflux-federation:7443

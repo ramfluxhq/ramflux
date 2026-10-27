@@ -58,6 +58,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             };
             return operator::run(command, &path);
         }
+        let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
         let store = ramflux_node_core::RouterRedbStore::open(redb_path)?;
         let router = match store.load_router()? {
             Some(router) => router,
@@ -77,18 +78,25 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         serve_router_mesh_from_env(&config, &router)?;
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
-            let result = serve_itest_http(&router);
-            router.state().persist_identity_registry(router.store())?;
-            return result;
+            let itest_router = Arc::clone(&router);
+            ramflux_node_core::spawn_service_worker("ramflux-router-itest-http", move |_| {
+                if let Err(error) = serve_itest_http(&itest_router) {
+                    tracing::error!(%error, "router itest HTTP listener stopped");
+                }
+            })?;
         }
         if std::env::args().any(|arg| arg == "--once") {
             router.state().persist_identity_registry(router.store())?;
             return Ok(());
         }
-        ramflux_node_core::wait_for_service_shutdown(service)?;
-        operator::checkpoint_for_shutdown(router.state(), router.store())?;
-        tracing::info!(service, "router identity registry checkpointed for shutdown");
-        return Ok(());
+        return shutdown
+            .wait_and_finalize(move || {
+                operator::checkpoint_for_shutdown(router.state(), router.store())?;
+                tracing::info!(service, "router identity registry checkpoint completed");
+                drop(router);
+                Ok(())
+            })
+            .map_err(Into::into);
     }
     if checkpoint_only || discard_stale {
         anyhow::bail!("identity registry maintenance commands require --config");
@@ -97,7 +105,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::wait_for_service_shutdown(service).map_err(Into::into)
+    ramflux_node_core::ServiceShutdown::install(service)?.wait_and_finalize(|| Ok(())).map_err(Into::into)
 }
 
 fn run_mesh_health_smoke(service: &'static str) -> anyhow::Result<()> {

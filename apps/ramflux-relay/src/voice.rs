@@ -8,6 +8,13 @@ use std::sync::{Arc, Mutex};
 
 /// Disabled unless all three explicit operator endpoints are configured.
 pub(crate) fn start(config: &NodeServiceConfig) -> anyhow::Result<()> {
+    let Some((udp, control, public)) = voice_endpoints()? else {
+        return Ok(());
+    };
+    start_voice_surfaces(config, &udp, &control, &public)
+}
+
+fn voice_endpoints() -> anyhow::Result<Option<(String, String, String)>> {
     let variables = [
         "RAMFLUX_RELAY_VOICE_UDP_ADDR",
         "RAMFLUX_RELAY_VOICE_CONTROL_ADDR",
@@ -17,21 +24,31 @@ pub(crate) fn start(config: &NodeServiceConfig) -> anyhow::Result<()> {
         ramflux_node_core::environment::var(name).ok().filter(|v| !v.trim().is_empty())
     });
     if values.iter().all(Option::is_none) {
-        return Ok(());
+        return Ok(None);
     }
     let [Some(udp), Some(control), Some(public)] = values else {
         anyhow::bail!("all relay voice endpoints must be configured together");
     };
+    Ok(Some((udp, control, public)))
+}
+
+fn start_voice_surfaces(
+    config: &NodeServiceConfig,
+    udp: &str,
+    control: &str,
+    public: &str,
+) -> anyhow::Result<()> {
     let socket = std::net::UdpSocket::bind(udp)?;
     socket.set_nonblocking(true)?;
     let server =
-        ramflux_transport::MeshTlsServer::bind(&control, &crate::config::mesh_tls_config(config))?;
+        ramflux_transport::MeshTlsServer::bind(control, &crate::config::mesh_tls_config(config))?;
+    server.set_nonblocking(true)?;
     let state = Arc::new(Mutex::new(VoiceRelayState::default()));
     let udp_state = Arc::clone(&state);
     let allow_private = ramflux_node_core::environment::var("RAMFLUX_RELAY_ALLOW_PRIVATE_TARGETS")
         .as_deref()
         == Ok("1");
-    std::thread::Builder::new().name("voice-udp".into()).spawn(move || {
+    ramflux_node_core::spawn_service_worker("voice-udp", move |_| {
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
@@ -49,11 +66,20 @@ pub(crate) fn start(config: &NodeServiceConfig) -> anyhow::Result<()> {
         let server = Arc::clone(&server);
         let state = Arc::clone(&state);
         let node = node.clone();
-        let public = public.clone();
-        std::thread::Builder::new().name("voice-control".into()).spawn(move || {
-            loop {
+        let public = public.to_owned();
+        ramflux_node_core::spawn_service_worker("voice-control", move |shutdown| {
+            while !shutdown.is_cancelled() {
                 let result = (|| -> anyhow::Result<()> {
-                    let accepted = server.accept_authenticated()?;
+                    let accepted = match server.accept_authenticated() {
+                        Ok(accepted) => accepted,
+                        Err(ramflux_transport::TransportError::Io(error))
+                            if error.kind() == std::io::ErrorKind::WouldBlock =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
                     let identity = ramflux_node_core::parse_mesh_spiffe_uri(
                         accepted.peer_spiffe_uri.as_deref().unwrap_or_default(),
                     )?;
@@ -100,6 +126,7 @@ pub(crate) fn start(config: &NodeServiceConfig) -> anyhow::Result<()> {
             }
         })?;
     }
+    tracing::info!(udp, control, public, "relay voice surfaces listening");
     Ok(())
 }
 fn mutate(
@@ -135,8 +162,10 @@ pub(crate) async fn run_udp(
     // Receive an entire datagram so truncation can never turn an oversized packet into a valid one.
     let mut buffer = vec![0_u8; 65536];
     let mut sweep = tokio::time::interval(std::time::Duration::from_secs(10));
+    let shutdown = ramflux_node_core::service_shutdown_token();
     loop {
         tokio::select! {
+            () = shutdown.cancelled() => return Ok(()),
             result=socket.recv_from(&mut buffer) => {
                 let (len,source)=result?;
                 let route={

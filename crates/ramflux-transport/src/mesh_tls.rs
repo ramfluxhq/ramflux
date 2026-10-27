@@ -39,6 +39,14 @@ impl MeshTlsServer {
         Ok(self.listener.local_addr()?)
     }
 
+    /// Configure whether listener acceptance is nonblocking.
+    ///
+    /// # Errors
+    /// Returns an error when the socket option cannot be changed.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), TransportError> {
+        Ok(self.listener.set_nonblocking(nonblocking)?)
+    }
+
     /// # Errors
     /// Returns an error when TCP accept or the TLS handshake fails.
     pub fn accept(&self) -> Result<MeshTlsServerStream, TransportError> {

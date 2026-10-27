@@ -138,4 +138,19 @@ mod tests {
         assert_eq!(discovery_cache_ttl(2000, 2001, 100), 0);
         Ok(())
     }
+
+    #[test]
+    fn python_discovery_fixture_is_signed_by_rust_canonicalizer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture =
+            include_str!("../../../deploy/scripts/tests/fixtures/rust-signed-discovery.json");
+        let record: WellKnownClientRecord = serde_json::from_str(fixture)?;
+        let key = SigningKey::from_bytes(&[42; 32]);
+        assert_eq!(record.node_public_key, crate::encode_base64url(key.verifying_key().to_bytes()));
+        assert_eq!(
+            record.signature,
+            crate::encode_base64url(key.sign(&client_discovery_signing_bytes(&record)?).to_bytes())
+        );
+        Ok(())
+    }
 }

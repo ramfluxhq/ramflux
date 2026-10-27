@@ -73,6 +73,7 @@ pub(crate) fn serve_federation_mesh_mtls(
     let mesh_server =
         ramflux_transport::MeshTlsServer::bind(&config.mesh.listen_addr, &mesh_tls_config(config))
             .map_err(|error| mesh_transport_error(&error))?;
+    mesh_server.set_nonblocking(true).map_err(|error| mesh_transport_error(&error))?;
     let context = MeshServerContext {
         state: Arc::clone(state),
         store: Arc::clone(store),
@@ -82,11 +83,9 @@ pub(crate) fn serve_federation_mesh_mtls(
     };
     let mesh_context = context.clone();
     let tls = mesh_tls_config(config);
-    thread::spawn(move || {
-        if let Err(error) = serve_mesh_mtls(&mesh_server, &mesh_context, &tls) {
-            tracing::error!(%error, "federation mesh mTLS listener stopped");
-        }
-    });
+    ramflux_node_core::spawn_service_worker("ramflux-federation-mesh-tls", move |_| {
+        serve_mesh_mtls(&mesh_server, &mesh_context, &tls);
+    })?;
     #[cfg(feature = "itest-http")]
     if ramflux_node_core::environment::var("RAMFLUX_FEDERATION_DISABLE_QUIC_LISTENER").as_deref()
         == Ok("1")
@@ -124,12 +123,17 @@ pub(crate) fn serve_federation_mesh_mtls(
             }
         }
         _ => {
-            thread::spawn(move || {
-                if let Err(error) = serve_mesh_quic(&quic_addr, &quic_context, &quic_tls) {
-                    quic_context.observability.mark_quic_listener_error(&error.to_string());
-                    tracing::error!(%error, "federation mesh QUIC listener stopped");
-                }
-            });
+            ramflux_node_core::spawn_service_worker(
+                "ramflux-federation-mesh-quic",
+                move |shutdown| {
+                    if let Err(error) =
+                        serve_mesh_quic(&quic_addr, &quic_context, &quic_tls, shutdown)
+                    {
+                        quic_context.observability.mark_quic_listener_error(&error.to_string());
+                        tracing::error!(%error, "federation mesh QUIC listener stopped");
+                    }
+                },
+            )?;
         }
     }
     Ok(())
@@ -139,6 +143,7 @@ pub(crate) fn serve_mesh_quic(
     listen_addr: &str,
     context: &MeshServerContext,
     tls: &ramflux_transport::MeshTlsConfig,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let roots_state = Arc::clone(&context.state);
     let root_pems_provider = std::sync::Arc::new(move || {
@@ -162,7 +167,10 @@ pub(crate) fn serve_mesh_quic(
         context.observability.mark_quic_listener_ready(local_addr.to_string());
         tracing::info!(addr = %local_addr, "federation mesh QUIC surface listening");
         loop {
-            let connection = match server.accept_connection().await {
+            let connection = match tokio::select! {
+                () = shutdown.cancelled() => break,
+                connection = server.accept_connection() => connection,
+            } {
                 Ok(connection) => connection,
                 Err(error) => {
                     context.observability.mark_quic_listener_error(&error.to_string());
@@ -177,6 +185,7 @@ pub(crate) fn serve_mesh_quic(
                 }
             });
         }
+        Ok::<(), ramflux_node_core::NodeCoreError>(())
     })
 }
 
@@ -230,9 +239,9 @@ pub(crate) fn serve_mesh_mtls(
     server: &ramflux_transport::MeshTlsServer,
     context: &MeshServerContext,
     tls: &ramflux_transport::MeshTlsConfig,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
+) {
     tracing::info!("federation mesh mTLS surface listening");
-    loop {
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let accepted = match server.accept_authenticated_with_pem_roots_provider(tls, || {
             let state = context
                 .state
@@ -241,6 +250,12 @@ pub(crate) fn serve_mesh_mtls(
             Ok(state.pinned_peer_ca_cert_pems())
         }) {
             Ok(accepted) => accepted,
+            Err(ramflux_transport::TransportError::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
             Err(error) => {
                 tracing::warn!(%error, "federation mesh mTLS handshake rejected");
                 continue;
@@ -254,6 +269,9 @@ pub(crate) fn serve_mesh_mtls(
             .map(|peer| peer.service_id);
         let context = context.clone();
         thread::spawn(move || {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             loop {
                 match handle_mesh_request(&mut stream, &context, peer_service_id.as_deref()) {
                     Ok(true) => {}

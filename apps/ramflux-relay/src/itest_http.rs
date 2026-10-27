@@ -41,6 +41,7 @@ pub(crate) fn serve_itest_http(
     let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_RELAY_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18084".to_owned());
     let listener = TcpListener::bind(&addr)?;
+    listener.set_nonblocking(true)?;
     let worker_count = relay_ingress_worker_count();
     let queue_capacity = worker_count.saturating_mul(4).max(1);
     let (sender, receiver) = std::sync::mpsc::sync_channel(queue_capacity);
@@ -57,13 +58,21 @@ pub(crate) fn serve_itest_http(
     for worker_id in 0..worker_count {
         let worker_receiver = Arc::clone(&receiver);
         let worker_ingress = Arc::clone(&ingress);
-        thread::Builder::new()
-            .name(format!("ramflux-relay-http-ingress-{worker_id}"))
-            .spawn(move || relay_ingress_worker_loop(&worker_receiver, &worker_ingress))?;
+        ramflux_node_core::spawn_service_worker(
+            format!("ramflux-relay-http-ingress-{worker_id}"),
+            move |_| relay_ingress_worker_loop(&worker_receiver, &worker_ingress),
+        )?;
     }
     tracing::info!(addr, worker_count, queue_capacity, "relay itest HTTP surface listening");
-    for stream in listener.incoming() {
-        let stream = stream?;
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        let stream = match listener.accept().map(|(stream, _)| stream) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if let Err(error) = stream.set_nodelay(true) {
             tracing::warn!(%error, "failed to enable TCP_NODELAY on relay ingress connection");
         }
@@ -98,6 +107,9 @@ pub(crate) fn relay_ingress_worker_loop(
             receiver.recv()
         };
         let Ok(mut stream) = stream else {
+            return;
+        };
+        let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
             return;
         };
         if let Err(error) = handle_itest_request(&mut stream, ingress) {

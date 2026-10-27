@@ -28,10 +28,17 @@ pub(crate) fn serve_itest_http(
         .unwrap_or_else(|_| "127.0.0.1:18086".to_owned());
     let listener = TcpListener::bind(&addr)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     tracing::info!(addr, "federation itest HTTP surface listening");
-    for stream in listener.incoming() {
-        let stream = match stream {
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        let stream = match listener.accept().map(|(stream, _)| stream) {
             Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
             Err(error) => {
                 tracing::warn!(%error, "federation itest accept failed");
                 continue;
@@ -43,6 +50,9 @@ pub(crate) fn serve_itest_http(
         let discovery = discovery.clone();
         let mesh_observability = Arc::clone(mesh_observability);
         thread::spawn(move || {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             handle_itest_connection(
                 stream,
                 &state,

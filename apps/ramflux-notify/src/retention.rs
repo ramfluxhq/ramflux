@@ -7,27 +7,21 @@ pub(crate) fn start(
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     store.sweep_retention(ramflux_node_core::now_unix_seconds())?;
     let revocations = std::sync::Arc::clone(&store);
-    std::thread::Builder::new()
-        .name("notify-route-revocation".into())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(30));
-                if let Err(error) = revocations.sweep_push_route_revocations() {
-                    tracing::warn!(%error, "push route revocation sweep deferred");
-                }
+    ramflux_node_core::spawn_service_worker("notify-route-revocation", move |_| {
+        while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(30)) {
+            if let Err(error) = revocations.sweep_push_route_revocations() {
+                tracing::warn!(%error, "push route revocation sweep deferred");
             }
-        })
-        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
-    std::thread::Builder::new()
-        .name("notify-retention".into())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(30));
-                if let Err(error) = store.sweep_retention(ramflux_node_core::now_unix_seconds()) {
-                    tracing::warn!(%error,"notify retention deferred");
-                }
+        }
+    })
+    .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+    ramflux_node_core::spawn_service_worker("notify-retention", move |_| {
+        while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(30)) {
+            if let Err(error) = store.sweep_retention(ramflux_node_core::now_unix_seconds()) {
+                tracing::warn!(%error,"notify retention deferred");
             }
-        })
-        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+        }
+    })
+    .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
     Ok(())
 }

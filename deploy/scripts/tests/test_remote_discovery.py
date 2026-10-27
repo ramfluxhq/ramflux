@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "verify-remote-discovery.py"
 SPEC = importlib.util.spec_from_file_location("verify_remote_discovery", SCRIPT)
@@ -21,6 +22,26 @@ SPEC.loader.exec_module(VERIFY)
 
 
 class RemoteDiscoveryTests(unittest.TestCase):
+    def test_libressl_reports_ed25519_tooling_gap(self):
+        version = subprocess.CompletedProcess(
+            ["openssl", "version"], 0, stdout="LibreSSL 3.3.6\n", stderr=""
+        )
+        with mock.patch.object(VERIFY.subprocess, "run", return_value=version):
+            with self.assertRaisesRegex(
+                SystemExit,
+                "openssl lacks Ed25519 — install OpenSSL 3 or use demo-node-tool",
+            ):
+                VERIFY.verify(Path("unused"), "unused")
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl is required")
+    def test_verifies_rust_signed_golden_record(self):
+        fixture = Path(__file__).parent / "fixtures" / "rust-signed-discovery.json"
+        record = json.loads(fixture.read_text())
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            VERIFY.verify(fixture, record["node_public_key"], now=1500)
+        self.assertIn("signature, freshness and operator pin: healthy", output.getvalue())
+
     @unittest.skipUnless(shutil.which("openssl"), "openssl is required")
     def test_accepts_valid_ed25519_record_and_rejects_tampering(self):
         with tempfile.TemporaryDirectory(prefix="ramflux-discovery-test-") as directory:

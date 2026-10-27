@@ -279,7 +279,7 @@ sh deploy/scripts/demo-node.sh status /path/to/local-demo.env --remote
 
 Remote status needs no Docker or host data directory. When `DEMO_TOOL` is unset,
 it verifies the signed record with `curl`, Python 3's standard library and
-OpenSSL, then prints an explicit notice that gateway and relay application probes
+OpenSSL 3 (LibreSSL lacks the required Ed25519 CLI support), then prints an explicit notice that gateway and relay application probes
 were skipped. Set `DEMO_TOOL` to the matching executable for the existing
 signed-discovery plus gateway and relay application probes. Remote status cannot
 inspect container health. Neither status mode confirms or changes desktop trust
@@ -288,7 +288,10 @@ pins.
 All seven service images use an exec-form entrypoint, so the service binary is
 PID 1 and receives SIGTERM directly. Compose allows five seconds for shutdown;
 the configurable `RAMFLUX_SHUTDOWN_GRACE_SECONDS` drain window defaults to one
-second and is capped at four seconds.
+second and is capped at four seconds. The signal closes listener admission,
+cancels background workers, drains tracked requests, joins service roots, runs
+the router identity-registry checkpoint, and drops the final store handles before
+logging completion. An empty compose override uses the one-second default.
 
 Every managed container, volume and network has a random ownership label. The
 wrapper refuses operations when any resource under the requested compose project

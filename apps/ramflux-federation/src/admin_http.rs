@@ -44,11 +44,18 @@ pub(crate) fn serve_admin_http(
             "federation admin HTTP bind failed at {addr}: {source}"
         ))
     })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     tracing::info!(addr, "federation production admin HTTP surface listening");
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = match stream {
+    ramflux_node_core::spawn_service_worker("ramflux-federation-admin-http", move |shutdown| {
+        while !shutdown.is_cancelled() {
+            let mut stream = match listener.accept().map(|(stream, _)| stream) {
                 Ok(stream) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!(%error, "federation admin accept failed");
                     continue;
@@ -57,6 +64,9 @@ pub(crate) fn serve_admin_http(
             let accepted_at = std::time::Instant::now();
             let context = context.clone();
             thread::spawn(move || {
+                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                    return;
+                };
                 if let Err(error) =
                     handle_admin_request_with_limits(&mut stream, &context, limits, accepted_at)
                 {
@@ -72,7 +82,7 @@ pub(crate) fn serve_admin_http(
                 }
             });
         }
-    });
+    })?;
     Ok(())
 }
 

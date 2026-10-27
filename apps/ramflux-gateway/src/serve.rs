@@ -103,7 +103,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
     tcp_server_config: rustls::ServerConfig,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    std::thread::Builder::new().name("ramflux-gateway-quic".to_owned()).spawn(move || {
+    ramflux_node_core::spawn_service_worker("ramflux-gateway-quic", move |shutdown| {
         let worker_threads = gateway_quic_worker_threads();
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(worker_threads)
@@ -121,6 +121,7 @@ fn spawn_gateway_quic_and_tcp_tls_thread(
             let quic_task = tokio::spawn(run_gateway_quic(addr, server_config, context.clone()));
             let tcp_task = tokio::spawn(run_gateway_tcp_tls(tcp_addr, tcp_server_config, context));
             tokio::select! {
+                () = shutdown.cancelled() => {}
                 result = quic_task => match result {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => tracing::error!(%error, "gateway QUIC listener stopped"),
@@ -159,7 +160,7 @@ fn spawn_gateway_tcp_tls_thread(
     tcp_server_config: rustls::ServerConfig,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    std::thread::Builder::new().name("ramflux-gateway-tcp-tls".to_owned()).spawn(move || {
+    ramflux_node_core::spawn_service_worker("ramflux-gateway-tcp-tls", move |shutdown| {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -172,8 +173,13 @@ fn spawn_gateway_tcp_tls_thread(
             }
         };
         runtime.block_on(async move {
-            if let Err(error) = run_gateway_tcp_tls(tcp_addr, tcp_server_config, context).await {
-                tracing::error!(%error, "gateway TCP-TLS listener stopped");
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                result = run_gateway_tcp_tls(tcp_addr, tcp_server_config, context) => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "gateway TCP-TLS listener stopped");
+                    }
+                }
             }
         });
     })?;
@@ -218,6 +224,9 @@ async fn run_gateway_quic(
     while let Some(connecting) = endpoint.accept().await {
         let context = context.clone();
         tokio::spawn(async move {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             match connecting.await {
                 Ok(connection) => {
                     handle_gateway_quic_connection(connection, context).await;
@@ -242,6 +251,9 @@ async fn run_gateway_tcp_tls(
         let acceptor = acceptor.clone();
         let context = context.clone();
         tokio::spawn(async move {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             let tls_stream = match acceptor.accept(stream).await {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -328,13 +340,12 @@ fn spawn_gateway_forward_mesh_thread(
     tls: ramflux_transport::MeshTlsConfig,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    std::thread::Builder::new().name("ramflux-gateway-forward-mesh".to_owned()).spawn(
-        move || {
-            if let Err(error) = run_gateway_forward_mesh_listener(&listen_addr, &tls, context) {
-                tracing::error!(%error, "gateway forward mesh listener stopped");
-            }
-        },
-    )?;
+    ramflux_node_core::spawn_service_worker("ramflux-gateway-forward-mesh", move |shutdown| {
+        if let Err(error) = run_gateway_forward_mesh_listener(&listen_addr, &tls, context, shutdown)
+        {
+            tracing::error!(%error, "gateway forward mesh listener stopped");
+        }
+    })?;
     Ok(())
 }
 
@@ -342,6 +353,7 @@ fn run_gateway_forward_mesh_listener(
     listen_addr: &str,
     tls: &ramflux_transport::MeshTlsConfig,
     context: GatewayListenerContext,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async move {
@@ -354,7 +366,10 @@ fn run_gateway_forward_mesh_listener(
         let local_addr = server.local_addr()?;
         tracing::info!(addr = %local_addr, "gateway forward mesh surface listening");
         loop {
-            let connection = match server.accept_connection().await {
+            let connection = match tokio::select! {
+                () = shutdown.cancelled() => break,
+                connection = server.accept_connection() => connection,
+            } {
                 Ok(connection) => connection,
                 Err(error) => {
                     tracing::warn!(%error, "gateway forward mesh connection rejected");
@@ -363,6 +378,9 @@ fn run_gateway_forward_mesh_listener(
             };
             let connection_context = context.clone();
             tokio::spawn(async move {
+                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                    return;
+                };
                 if let Err(error) =
                     gateway_forward_mesh_connection_loop(connection, connection_context).await
                 {
@@ -370,6 +388,7 @@ fn run_gateway_forward_mesh_listener(
                 }
             });
         }
+        Ok::<(), anyhow::Error>(())
     })
 }
 
@@ -391,6 +410,9 @@ async fn gateway_forward_mesh_connection_loop(
         };
         let request_context = context.clone();
         tokio::spawn(async move {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             if let Err(error) = handle_gateway_forward_mesh_request(accepted, request_context).await
             {
                 tracing::warn!(%error, "gateway forward mesh request failed");

@@ -9,7 +9,6 @@ use crate::config::{now_unix_seconds, relay_client_quic_addr, validate_relay_cli
 use crate::itest_quic_fault;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 /// Ingress metrics for the client-facing object relay QUIC surface, shared (via `Arc`) across all
 /// connections handled by one listener.
@@ -113,7 +112,7 @@ pub(crate) fn serve_relay_client_quic(
         state,
         config: Arc::new(config.clone()),
     };
-    thread::Builder::new().name("ramflux-relay-client-quic".to_owned()).spawn(move || {
+    ramflux_node_core::spawn_service_worker("ramflux-relay-client-quic", move |shutdown| {
         let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -121,9 +120,16 @@ pub(crate) fn serve_relay_client_quic(
                 return;
             }
         };
-        if let Err(error) = runtime.block_on(run_relay_client_quic(addr, server_config, context)) {
-            tracing::error!(%error, "relay client QUIC listener stopped");
-        }
+        runtime.block_on(async move {
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                result = run_relay_client_quic(addr, server_config, context) => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "relay client QUIC listener stopped");
+                    }
+                }
+            }
+        });
     })?;
     Ok(())
 }
@@ -138,6 +144,9 @@ pub(crate) async fn run_relay_client_quic(
     while let Some(connecting) = endpoint.accept().await {
         let context = context.clone();
         tokio::spawn(async move {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             match connecting.await {
                 Ok(connection) => handle_relay_client_quic_connection(connection, context).await,
                 Err(error) => {

@@ -28,11 +28,14 @@ pub(crate) fn serve_public_http(
             "federation public HTTP bind failed at {addr}: {error}"
         ))
     })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     tracing::info!(addr, limit, "federation public client HTTP surface listening");
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
+    ramflux_node_core::spawn_service_worker("ramflux-federation-public-http", move |shutdown| {
+        while !shutdown.is_cancelled() {
+            match listener.accept().map(|(stream, _)| stream) {
                 Ok(stream) => {
                     let _worker = spawn_public_connection(
                         stream,
@@ -42,10 +45,13 @@ pub(crate) fn serve_public_http(
                         limits,
                     );
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
                 Err(error) => tracing::warn!(%error, "federation public accept failed"),
             }
         }
-    });
+    })?;
     Ok(())
 }
 
@@ -91,6 +97,9 @@ pub(crate) fn spawn_public_connection(
     }
     let permit = ConnectionPermit(active);
     match std::thread::Builder::new().spawn(move || {
+        let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+            return;
+        };
         let _permit = permit;
         handle_public_connection_with_limits(&mut stream, &context, limits, accepted_at);
     }) {

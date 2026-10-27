@@ -61,6 +61,11 @@ def canonical_signing_bytes(record):
 
 
 def verify(record_path, expected_key, now=None):
+    version = subprocess.run(
+        ["openssl", "version"], capture_output=True, text=True, check=False
+    )
+    if version.returncode != 0 or not version.stdout.startswith("OpenSSL 3."):
+        fail("openssl lacks Ed25519 — install OpenSSL 3 or use demo-node-tool")
     try:
         record = json.loads(
             Path(record_path).read_text(encoding="utf-8"), object_pairs_hook=unique_object

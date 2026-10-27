@@ -19,13 +19,24 @@ pub(crate) fn serve_itest_http(
     let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18081".to_owned());
     let listener = TcpListener::bind(&addr)?;
+    listener.set_nonblocking(true)?;
     tracing::info!(addr, "gateway itest HTTP surface listening");
-    for stream in listener.incoming() {
-        let mut stream = stream?;
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        let mut stream = match listener.accept().map(|(stream, _)| stream) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         let router = router.clone();
         let state = Arc::clone(state);
         let store = Arc::clone(store);
         std::thread::spawn(move || {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             if let Err(error) = handle_itest_request(&mut stream, &router, &state, &store) {
                 let body = format!("{error}");
                 if let Err(write_error) = ramflux_node_core::write_itest_text_response(

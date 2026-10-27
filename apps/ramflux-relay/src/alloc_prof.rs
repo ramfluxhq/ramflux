@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static FLUSHED: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 // Default output lands on the host bind mount (survives `compose down -v`) so the profile persists.
 const DEFAULT_FILE: &str = "/var/lib/ramflux/alloc-prof/dhat-heap.json";
 const FILE_ENV: &str = "RAMFLUX_RELAY_ALLOC_PROF_FILE";
@@ -31,8 +33,8 @@ fn install_signal_handlers() {
 /// otherwise OVERWRITE the serving process's dump at the same path with a near-empty profile.
 ///
 /// The Profiler lives on a dedicated owner thread that polls the SIGTERM flag and, on shutdown,
-/// drops the Profiler (writing the heap json) and exits the process — so the dump lands regardless
-/// of where the main thread is blocked. Returns after a short delay so the global profiler is armed
+/// drops the Profiler (writing the heap json), then notifies the shared shutdown coordinator.
+/// Returns after a short delay so the global profiler is armed
 /// before the workload begins.
 pub fn maybe_start() {
     let serving = !std::env::args().any(|arg| arg == "--health-check" || arg == "--once");
@@ -59,8 +61,20 @@ pub fn maybe_start() {
             "ramflux-relay: itest-alloc-prof shutdown signal received; flushing dhat heap profile -> {file}"
         );
         drop(profiler); // writes the heap json
-        std::process::exit(0);
+        let mut flushed = FLUSHED.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *flushed = true;
+        FLUSHED.1.notify_all();
     });
     // Give the owner thread a moment to arm the global profiler before the workload starts.
     std::thread::sleep(std::time::Duration::from_millis(100));
+}
+
+/// Request a profile flush and wait for the profiler owner to finish writing it.
+pub fn flush_and_wait() {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+    let flushed = FLUSHED.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = FLUSHED
+        .1
+        .wait_timeout_while(flushed, std::time::Duration::from_secs(4), |done| !*done)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 }

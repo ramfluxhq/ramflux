@@ -36,6 +36,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         println!("{service}:healthy");
         return Ok(());
     }
+    let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
     tracing_subscriber::fmt().with_target(false).init();
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
@@ -62,14 +63,28 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         tracing::info!(service, node_id = config.node_id, "retention store initialized");
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
-            return serve_itest_http(&store, &config);
+            let itest_store = Arc::clone(&store);
+            let itest_config = config.clone();
+            ramflux_node_core::spawn_service_worker("ramflux-retention-itest-http", move |_| {
+                if let Err(error) = serve_itest_http(&itest_store, &itest_config) {
+                    tracing::error!(%error, "retention itest HTTP listener stopped");
+                }
+            })?;
         }
+        tracing::info!(service, "service initialized");
+        if std::env::args().any(|arg| arg == "--once") {
+            return Ok(());
+        }
+        return shutdown.wait_and_finalize(move || {
+            drop(store);
+            Ok(())
+        });
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::wait_for_service_shutdown(service)
+    shutdown.wait_and_finalize(|| Ok(()))
 }
 
 fn retention_async_ingress_enabled() -> bool {
@@ -125,16 +140,17 @@ fn spawn_retention_async_mesh_quic_listener(
             "unsupported retention async ingress runtime; using tokio"
         );
     }
-    thread::Builder::new()
-        .name("ramflux-retention-async-quic-ingress".to_owned())
-        .spawn(move || {
+    ramflux_node_core::spawn_service_worker(
+        "ramflux-retention-async-quic-ingress",
+        move |shutdown| {
             if let Err(error) =
-                run_retention_async_mesh_quic_listener(&listen_addr, &tls, store, config)
+                run_retention_async_mesh_quic_listener(&listen_addr, &tls, store, config, shutdown)
             {
                 tracing::error!(%error, "retention async QUIC ingress stopped");
             }
-        })
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+        },
+    )
+    .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     Ok(())
 }
 
@@ -143,6 +159,7 @@ fn run_retention_async_mesh_quic_listener(
     tls: &ramflux_transport::MeshTlsConfig,
     store: Arc<ramflux_node_core::RetentionRedbStore>,
     config: Arc<ramflux_node_core::NodeServiceConfig>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -159,7 +176,10 @@ fn run_retention_async_mesh_quic_listener(
         let local_addr = server.local_addr().map_err(|error| retention_transport_error(&error))?;
         tracing::info!(addr = %local_addr, "retention async QUIC ingress listening");
         loop {
-            let connection = match server.accept_connection().await {
+            let connection = match tokio::select! {
+                () = shutdown.cancelled() => break,
+                connection = server.accept_connection() => connection,
+            } {
                 Ok(connection) => connection,
                 Err(error) => {
                     tracing::warn!(%error, "retention async QUIC connection rejected");
@@ -169,6 +189,9 @@ fn run_retention_async_mesh_quic_listener(
             let store = Arc::clone(&store);
             let config = Arc::clone(&config);
             tokio::spawn(async move {
+                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                    return;
+                };
                 if let Err(error) =
                     retention_async_quic_connection_loop(connection, store, config).await
                 {
@@ -176,6 +199,7 @@ fn run_retention_async_mesh_quic_listener(
                 }
             });
         }
+        Ok::<(), ramflux_node_core::NodeCoreError>(())
     })
 }
 
@@ -205,6 +229,9 @@ async fn retention_async_quic_connection_loop(
         let store = Arc::clone(&store);
         let peer_service_id = Arc::clone(&peer_service_id);
         tokio::spawn(async move {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
             if let Err(error) =
                 handle_retention_async_quic_request(accepted, store, &peer_service_id).await
             {
@@ -289,10 +316,24 @@ fn serve_itest_http(
         .unwrap_or_else(|_| "0.0.0.0:18087".to_owned());
     let listener = TcpListener::bind(&addr)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     tracing::info!(addr, "retention itest HTTP surface listening");
-    for stream in listener.incoming() {
-        let mut stream = stream
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        let mut stream = match listener.accept().map(|(stream, _)| stream) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(source) => {
+                return Err(ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()));
+            }
+        };
+        let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+            break;
+        };
         if let Err(error) = handle_itest_request(&mut stream, store, config) {
             let body = format!("{error}");
             ramflux_node_core::write_itest_text_response(
@@ -372,15 +413,19 @@ fn start_gc_scheduler(
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(86_400)
             .max(86_400);
-    thread::spawn(move || {
+    if let Err(error) = ramflux_node_core::spawn_service_worker("retention-gc", move |_| {
         let mesh_client = ramflux_transport::MeshHttpClient::new();
-        loop {
+        while !ramflux_node_core::service_shutdown_token().is_cancelled() {
             if let Err(error) = run_gc_sweep_once(&store, &config, &mesh_client) {
                 tracing::warn!(%error, "retention background GC sweep failed");
             }
-            thread::sleep(Duration::from_secs(interval));
+            if !ramflux_node_core::service_shutdown_sleep(Duration::from_secs(interval)) {
+                break;
+            }
         }
-    });
+    }) {
+        tracing::error!(%error, "retention GC worker unavailable");
+    }
 }
 
 fn run_gc_sweep_once(
@@ -655,13 +700,22 @@ fn serve_retention_mesh_mtls(
     let server =
         ramflux_transport::MeshTlsServer::bind(&config.mesh.listen_addr, &mesh_tls_config(config))
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
+    server
+        .set_nonblocking(true)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     let local_service_id = config.service_id.clone();
     let allowed_service_ids = config.mesh.allowed_service_ids.clone();
-    thread::spawn(move || {
+    ramflux_node_core::spawn_service_worker("ramflux-retention-mesh", move |shutdown| {
         tracing::info!("retention mesh mTLS surface listening");
-        loop {
+        while !shutdown.is_cancelled() {
             let accepted = match server.accept_authenticated() {
                 Ok(accepted) => accepted,
+                Err(ramflux_transport::TransportError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!(%error, "retention mesh mTLS handshake rejected");
                     continue;
@@ -681,6 +735,9 @@ fn serve_retention_mesh_mtls(
             let mut stream = accepted.stream;
             let store = Arc::clone(&store);
             thread::spawn(move || {
+                let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                    return;
+                };
                 loop {
                     match handle_mesh_request(&mut stream, &store, peer.service_id.as_str()) {
                         Ok(true) => {}
@@ -703,7 +760,7 @@ fn serve_retention_mesh_mtls(
                 }
             });
         }
-    });
+    })?;
     Ok(())
 }
 

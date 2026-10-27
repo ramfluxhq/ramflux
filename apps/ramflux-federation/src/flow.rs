@@ -251,14 +251,17 @@ pub(crate) fn start_outbound_spool_retry_loop(
     router: Arc<RouterMeshClient>,
 ) {
     let interval = Duration::from_secs(outbound_spool_retry_interval_seconds().max(1));
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(interval);
-            if let Err(error) = retry_outbound_spool_once(&store, &state, &router) {
-                tracing::warn!(%error, "federation outbound spool retry pass failed");
+    if let Err(error) =
+        ramflux_node_core::spawn_service_worker("federation-spool-retry", move |_| {
+            while ramflux_node_core::service_shutdown_sleep(interval) {
+                if let Err(error) = retry_outbound_spool_once(&store, &state, &router) {
+                    tracing::warn!(%error, "federation outbound spool retry pass failed");
+                }
             }
-        }
-    });
+        })
+    {
+        tracing::error!(%error, "federation spool retry worker unavailable");
+    }
 }
 
 pub(crate) fn retry_outbound_spool_once(

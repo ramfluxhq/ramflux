@@ -3,7 +3,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::thread;
 
 #[cfg(feature = "itest-http")]
 use crate::handlers::handle_itest_request;
@@ -29,6 +28,7 @@ pub(crate) fn serve_itest_http(
     let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_ROUTER_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18080".to_owned());
     let listener = TcpListener::bind(&addr)?;
+    listener.set_nonblocking(true)?;
     let worker_count = router_ingress_worker_count();
     let queue_capacity = worker_count.saturating_mul(4).max(1);
     let (sender, receiver) = std::sync::mpsc::sync_channel(queue_capacity);
@@ -36,13 +36,21 @@ pub(crate) fn serve_itest_http(
     for worker_id in 0..worker_count {
         let worker_receiver = Arc::clone(&receiver);
         let worker_router = Arc::clone(router);
-        thread::Builder::new()
-            .name(format!("ramflux-router-http-ingress-{worker_id}"))
-            .spawn(move || router_ingress_worker_loop(&worker_receiver, &worker_router))?;
+        ramflux_node_core::spawn_service_worker(
+            format!("ramflux-router-http-ingress-{worker_id}"),
+            move |_| router_ingress_worker_loop(&worker_receiver, &worker_router),
+        )?;
     }
     tracing::info!(addr, worker_count, queue_capacity, "router itest HTTP surface listening");
-    for stream in listener.incoming() {
-        let stream = stream?;
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        let stream = match listener.accept().map(|(stream, _)| stream) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if let Err(error) = stream.set_nodelay(true) {
             tracing::warn!(%error, "failed to enable TCP_NODELAY on router ingress connection");
         }
@@ -79,6 +87,9 @@ fn router_ingress_worker_loop(
         let Ok(mut stream) = stream else {
             return;
         };
+        let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+            return;
+        };
         if let Err(error) = handle_itest_request(&mut stream, router) {
             let body = format!("{error}");
             if let Err(write_error) = ramflux_node_core::write_itest_text_response(
@@ -101,13 +112,14 @@ pub(crate) fn serve_router_mesh_mtls(
     let mesh_router = Arc::clone(router);
     let local_service_id = config.service_id.clone();
     let allowed_service_ids = config.mesh.allowed_service_ids.clone();
-    thread::spawn(move || {
+    mesh_server.set_nonblocking(true)?;
+    ramflux_node_core::spawn_service_worker("ramflux-router-mesh", move |_| {
         if let Err(error) =
             serve_mesh_mtls(&mesh_server, &mesh_router, &local_service_id, &allowed_service_ids)
         {
             tracing::error!(%error, "router mesh mTLS listener stopped");
         }
-    });
+    })?;
     if router_async_ingress_enabled()
         && let Some(listen_addr) = router_async_listen_addr(config)
     {
@@ -248,10 +260,11 @@ fn spawn_router_async_tokio_mesh_quic_thread(
     peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     let router = Arc::clone(router);
-    thread::Builder::new().name("ramflux-router-async-quic-ingress".to_owned()).spawn(
-        move || {
+    ramflux_node_core::spawn_service_worker(
+        "ramflux-router-async-quic-ingress",
+        move |shutdown| {
             if let Err(error) =
-                run_router_async_mesh_quic_listener(&listen_addr, &tls, router, peer_auth)
+                run_router_async_mesh_quic_listener(&listen_addr, &tls, router, peer_auth, shutdown)
             {
                 tracing::error!(%error, "router async QUIC ingress stopped");
             }
@@ -268,7 +281,7 @@ fn spawn_router_async_compio_mesh_quic_thread(
     peer_auth: RouterAsyncMeshPeerAuth,
 ) -> anyhow::Result<()> {
     let router = Arc::clone(router);
-    thread::Builder::new().name("ramflux-router-async-compio-quic-ingress".to_owned()).spawn(
+    std::thread::Builder::new().name("ramflux-router-async-compio-quic-ingress".to_owned()).spawn(
         move || {
             if let Err(error) =
                 run_router_async_compio_mesh_quic_listener(&listen_addr, &tls, router, &peer_auth)
@@ -297,6 +310,7 @@ fn run_router_async_mesh_quic_listener(
     tls: &ramflux_transport::MeshTlsConfig,
     router: Arc<crate::router_runtime::RouterHandle>,
     peer_auth: RouterAsyncMeshPeerAuth,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let worker_threads = router_async_worker_threads();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -325,8 +339,7 @@ fn run_router_async_mesh_quic_listener(
                 .await;
             });
         }
-        std::future::pending::<()>().await;
-        #[allow(unreachable_code)]
+        shutdown.cancelled().await;
         Ok::<(), anyhow::Error>(())
     })
 }
@@ -358,7 +371,7 @@ fn run_router_async_compio_mesh_quic_listener(
         let tls = tls.clone();
         let endpoint_bridge = bridge.clone();
         let endpoint_peer_auth = peer_auth.clone();
-        let handle = thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name(format!("ramflux-router-async-compio-quic-ingress-{endpoint_index}"))
             .spawn(move || {
                 if let Err(error) = run_router_async_compio_mesh_quic_reactor(
@@ -989,9 +1002,15 @@ fn serve_mesh_mtls(
     allowed_service_ids: &std::collections::BTreeSet<String>,
 ) -> anyhow::Result<()> {
     tracing::info!("router mesh mTLS surface listening");
-    loop {
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let accepted = match server.accept_authenticated() {
             Ok(accepted) => accepted,
+            Err(ramflux_transport::TransportError::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
             Err(error) => {
                 tracing::warn!(%error, "router mesh mTLS handshake rejected");
                 continue;
@@ -1012,8 +1031,11 @@ fn serve_mesh_mtls(
         let mut stream = accepted.stream;
         let router = Arc::clone(router);
         let peer_service_id = peer.service_id;
-        thread::spawn(move || {
-            loop {
+        ramflux_node_core::spawn_service_worker("ramflux-router-mesh-request", move |shutdown| {
+            let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
+                return;
+            };
+            while !shutdown.is_cancelled() {
                 match handle_mesh_request(&mut stream, &router, &peer_service_id) {
                     Ok(true) => {}
                     Ok(false) => break,
@@ -1033,8 +1055,9 @@ fn serve_mesh_mtls(
             if let Err(error) = ramflux_transport::close_mesh_server_stream(&mut stream) {
                 tracing::debug!(%error, "router mesh close_notify failed");
             }
-        });
+        })?;
     }
+    Ok(())
 }
 
 pub(crate) fn mesh_tls_config(

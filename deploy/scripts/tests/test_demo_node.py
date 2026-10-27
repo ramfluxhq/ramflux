@@ -354,7 +354,10 @@ import sys
 output = Path(sys.argv[sys.argv.index("--output") + 1])
 shutil.copyfile({str(record_file)!r}, output)
 ''')
-        self.executable("openssl", "#!/bin/sh\nexit 0\n")
+        self.executable(
+            "openssl",
+            "#!/bin/sh\n[ \"$1\" != version ] || printf '%s\\n' 'OpenSSL 3.0.0'\nexit 0\n",
+        )
         values = dict(DEMO_HOST="demo.example.org", DEMO_PROJECT="demo-test",
                       DEMO_DATA_DIR=str(self.state), DEMO_EXPECTED_NODE_PUBLIC_KEY=public_key)
         self.env_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items()))

@@ -57,6 +57,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         println!("{service}:healthy");
         return Ok(());
     }
+    let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
     let _tracing_guard = init_tracing();
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
@@ -138,18 +139,52 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         )?;
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
-            return serve_itest_http(&store, &state, &router, &discovery, &mesh_observability);
+            start_itest_http(&store, &state, &router, &discovery, &mesh_observability)?;
         }
         if std::env::args().any(|arg| arg == "--once") {
             return Ok(());
         }
-        return ramflux_node_core::wait_for_service_shutdown(service);
+        return finish_shutdown(shutdown, store, state, router, mesh_observability, discovery);
     }
     tracing::info!(service, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
-    ramflux_node_core::wait_for_service_shutdown(service)
+    shutdown.wait_and_finalize(|| Ok(()))
+}
+
+fn finish_shutdown(
+    shutdown: ramflux_node_core::ServiceShutdown,
+    store: Arc<ramflux_node_core::FederationRedbStore>,
+    state: Arc<SharedFederationTrustState>,
+    router: Arc<RouterMeshClient>,
+    observability: SharedMeshObservability,
+    discovery: FederationDiscoverySurface,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    shutdown.wait_and_finalize(move || {
+        drop((store, state, router, observability, discovery));
+        Ok(())
+    })
+}
+
+#[cfg(feature = "itest-http")]
+fn start_itest_http(
+    store: &Arc<ramflux_node_core::FederationRedbStore>,
+    state: &Arc<SharedFederationTrustState>,
+    router: &Arc<RouterMeshClient>,
+    discovery: &FederationDiscoverySurface,
+    mesh_observability: &SharedMeshObservability,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let store = Arc::clone(store);
+    let state = Arc::clone(state);
+    let router = Arc::clone(router);
+    let discovery = discovery.clone();
+    let observability = Arc::clone(mesh_observability);
+    ramflux_node_core::spawn_service_worker("ramflux-federation-itest-http", move |_| {
+        if let Err(error) = serve_itest_http(&store, &state, &router, &discovery, &observability) {
+            tracing::error!(%error, "federation itest HTTP listener stopped");
+        }
+    })
 }
 
 fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {

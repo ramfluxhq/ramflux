@@ -36,6 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -43,6 +44,7 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
+redb = { workspace = true }
 
 [lints]
 workspace = true
