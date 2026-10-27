@@ -325,7 +325,8 @@ impl RamfluxClient {
             row.conversation_id == conversation
                 && origin.as_ref().map_or_else(
                     || {
-                        imported_id == Some(row.message_id.as_str())
+                        known.as_deref() == Some(row.message_id.as_str())
+                            || imported_id == Some(row.message_id.as_str())
                             || (!row.encrypted_body.is_empty()
                                 && packet.ciphertext_hash.as_deref()
                                     == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str()))
@@ -358,9 +359,17 @@ impl RamfluxClient {
                 created_at: packet.authored_at.unwrap_or(at),
             })?;
         }
-        if !history || candidate.as_ref().is_none_or(|row| !row.deleted) {
-            db.store_message_content(conversation, &id, &body)?;
+        if history && candidate.as_ref().is_some_and(|row| row.deleted) {
+            // Keep authenticated replay aliases without restoring deleted content or attribution.
+            self.index_own_sent_projection(
+                source,
+                envelope,
+                &id,
+                packet.ciphertext_hash.as_deref(),
+            )?;
+            return Ok(true);
         }
+        db.store_message_content(conversation, &id, &body)?;
         self.record_own_sent_projection(
             source,
             OwnSentInput {
