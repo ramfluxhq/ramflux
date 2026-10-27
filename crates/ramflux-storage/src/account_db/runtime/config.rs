@@ -84,7 +84,13 @@ impl AccountDb {
     /// Returns encrypted reader or transaction errors.
     pub fn open_backup_reader(&self) -> Result<Self, StorageError> {
         let reader = self.open_reader()?;
-        reader.connection.execute_batch("BEGIN; SELECT key_fingerprint FROM account_key_check;")?;
+        let transaction = reader.connection.deferred_transaction()?;
+        let _: String = reader.connection.query_row(
+            "SELECT key_fingerprint FROM account_key_check",
+            [],
+            |row| row.get(0),
+        )?;
+        transaction.pin_read_snapshot()?;
         Ok(reader)
     }
 

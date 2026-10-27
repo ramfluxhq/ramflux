@@ -81,7 +81,8 @@ impl AccountDb {
     ) -> Result<Self, StorageError> {
         let account = index.account(local_account_id)?;
         let path = index.root().join(account.db_relative_path);
-        let connection = Connection::open(&path)?;
+        let writer = crate::account_writer::AccountWriter::acquire(index.root(), local_account_id)?;
+        let connection = Connection::open_account_writer(&path, writer)?;
         apply_key(&connection, key)?;
         connection.execute_batch("PRAGMA synchronous=FULL;")?;
         let mode = current_encryption_mode(&connection);

@@ -70,3 +70,24 @@ fn contact_consent_waits_for_a_competing_writer_before_reading() -> Result<(), S
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn backup_reader_nested_snapshot_keeps_outer_snapshot_pinned() -> Result<(), StorageError> {
+    let (root, writer) = crate::tests::test_db("backup-reader-nesting")?;
+    let reader = writer.open_backup_reader()?;
+    assert!(reader.is_query_only()?);
+    assert!(!reader.connection.is_autocommit()?);
+    reader.read_snapshot(|| {
+        let _: i64 =
+            reader
+                .connection
+                .query_row("SELECT count(*) FROM runtime_actor_state", [], |row| row.get(0))?;
+        Ok::<(), StorageError>(())
+    })?;
+    assert!(!reader.connection.is_autocommit()?);
+    assert!(reader.write_transaction(|| Ok::<(), StorageError>(())).is_err());
+    drop(reader);
+    drop(writer);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

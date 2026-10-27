@@ -21,7 +21,8 @@ pub(crate) struct Connection {
 struct Worker {
     id: u64,
     path: PathBuf,
-    transaction_mode: Mutex<Option<TransactionMode>>,
+    transaction_mode: Mutex<Option<TrackedTransaction>>,
+    _account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
     sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -30,6 +31,12 @@ struct Worker {
 enum TransactionMode {
     Deferred,
     Immediate,
+}
+
+#[derive(Clone, Copy)]
+struct TrackedTransaction {
+    mode: TransactionMode,
+    id: u64,
 }
 
 static NEXT_CONNECTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -51,7 +58,22 @@ impl Connection {
     }
 
     pub(crate) fn open_with_flags(path: impl AsRef<Path>, flags: OpenFlags) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_owned(path.as_ref(), flags, None)
+    }
+
+    pub(crate) fn open_account_writer(
+        path: &Path,
+        writer: std::sync::Arc<crate::account_writer::AccountWriter>,
+    ) -> Result<Self> {
+        Self::open_owned(path, OpenFlags::default(), Some(writer))
+    }
+
+    fn open_owned(
+        path: &Path,
+        flags: OpenFlags,
+        writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
+    ) -> Result<Self> {
+        let path = path.to_path_buf();
         let connection_id = NEXT_CONNECTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel::<Job>(64);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -84,6 +106,7 @@ impl Connection {
                 id: connection_id,
                 path,
                 transaction_mode: Mutex::new(None),
+                _account_writer: writer,
                 sender: Some(sender),
                 handle: Some(worker),
             }),
@@ -172,12 +195,17 @@ impl Connection {
             std::sync::atomic::AtomicU64::new(1);
         let nested = !self.call(|db| Ok(db.is_autocommit()))?;
         let outer_mode = *self.inner.transaction_mode.lock().map_err(|_| Error::InvalidQuery)?;
-        debug_assert_eq!(
-            nested,
-            outer_mode.is_some(),
-            "transactions on a managed connection must use the transaction wrapper"
-        );
-        if nested && immediate && outer_mode != Some(TransactionMode::Immediate) {
+        if !nested && outer_mode.is_some() {
+            // SQLite may roll back a transaction itself (FULL, IOERR, or ON CONFLICT
+            // ROLLBACK). Invalidate its guard and fail this phase closed.
+            *self.inner.transaction_mode.lock().map_err(|_| Error::InvalidQuery)? = None;
+            return Err(Error::InvalidQuery);
+        }
+        // An untracked raw BEGIN has unknown mode: reads may nest, writes may not.
+        if nested
+            && immediate
+            && outer_mode.map(|tracked| tracked.mode) != Some(TransactionMode::Immediate)
+        {
             return Err(Error::InvalidQuery);
         }
         let savepoint = nested.then(|| {
@@ -212,8 +240,7 @@ impl Connection {
             }
             let mut transaction_mode =
                 self.inner.transaction_mode.lock().map_err(|_| Error::InvalidQuery)?;
-            debug_assert!(transaction_mode.is_none());
-            *transaction_mode = Some(mode);
+            *transaction_mode = Some(TrackedTransaction { mode, id: transaction_id });
             drop(transaction_mode);
             let writer = immediate.then(|| {
                 if let Ok(mut writers) = active_writers().lock() {
@@ -238,7 +265,11 @@ impl Connection {
                 committed: false,
                 savepoint,
                 _writer: writer,
-                _mode: Some(TransactionModeRegistration { connection: self }),
+                _mode: Some(TransactionModeRegistration {
+                    connection: self,
+                    id: transaction_id,
+                    armed: true,
+                }),
             });
         }
         Ok(Transaction {
@@ -348,7 +379,34 @@ pub(crate) struct Transaction<'a> {
     _mode: Option<TransactionModeRegistration<'a>>,
 }
 impl Transaction<'_> {
+    fn is_current(&self) -> bool {
+        self._mode.as_ref().is_none_or(|registration| {
+            self.connection
+                .inner
+                .transaction_mode
+                .lock()
+                .is_ok_and(|mode| mode.is_some_and(|tracked| tracked.id == registration.id))
+        })
+    }
+
+    /// Leave a query-only outer snapshot pinned until its reader connection closes.
+    pub(crate) fn pin_read_snapshot(mut self) -> Result<()> {
+        let query_only: bool =
+            self.connection.query_row("PRAGMA query_only", [], |row| row.get(0))?;
+        if !query_only || self.savepoint.is_some() || self._writer.is_some() || !self.is_current() {
+            return Err(Error::InvalidQuery);
+        }
+        self.committed = true;
+        if let Some(mode) = &mut self._mode {
+            mode.armed = false;
+        }
+        Ok(())
+    }
+
     pub(crate) fn commit(mut self) -> Result<()> {
+        if !self.is_current() {
+            return Err(Error::InvalidQuery);
+        }
         if let Some(name) = &self.savepoint {
             self.connection.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
         } else {
@@ -367,11 +425,16 @@ struct WriterRegistration {
 
 struct TransactionModeRegistration<'a> {
     connection: &'a Connection,
+    id: u64,
+    armed: bool,
 }
 
 impl Drop for TransactionModeRegistration<'_> {
     fn drop(&mut self) {
-        if let Ok(mut mode) = self.connection.inner.transaction_mode.lock() {
+        if self.armed
+            && let Ok(mut mode) = self.connection.inner.transaction_mode.lock()
+            && mode.is_some_and(|tracked| tracked.id == self.id)
+        {
             *mode = None;
         }
     }
@@ -408,7 +471,7 @@ impl Drop for WriterRegistration {
 }
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.committed && self.is_current() {
             if let Some(name) = &self.savepoint {
                 let _ = self.connection.execute_batch(&format!(
                     "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
@@ -461,6 +524,60 @@ mod tests {
         let db = Connection::open(":memory:")?;
         let _outer = db.deferred_transaction()?;
         assert!(matches!(db.immediate_transaction(), Err(rusqlite::Error::InvalidQuery)));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::Connection;
+
+    #[test]
+    fn raw_begin_allows_nested_reads_but_never_an_immediate_upgrade() -> rusqlite::Result<()> {
+        let db = Connection::open(":memory:")?;
+        db.execute_batch("BEGIN")?;
+        db.deferred_transaction()?.commit()?;
+        assert!(!db.is_autocommit()?);
+        assert!(matches!(db.immediate_transaction(), Err(rusqlite::Error::InvalidQuery)));
+        db.execute_batch("ROLLBACK")?;
+        db.immediate_transaction()?.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_auto_rollback_invalidates_old_guard_without_rolling_back_new_writer()
+    -> rusqlite::Result<()> {
+        let db = Connection::open(":memory:")?;
+        db.execute_batch("CREATE TABLE values_test(value INTEGER UNIQUE)")?;
+        let old = db.immediate_transaction()?;
+        db.execute_batch("INSERT INTO values_test VALUES(1)")?;
+        // The ROLLBACK conflict action causes the same auto-commit transition as
+        // SQLite's automatic rollback after FULL/IOERR/NOMEM.
+        assert!(db.execute_batch("INSERT OR ROLLBACK INTO values_test VALUES(1)").is_err());
+        assert!(db.is_autocommit()?);
+        assert!(matches!(db.immediate_transaction(), Err(rusqlite::Error::InvalidQuery)));
+        let fresh = db.immediate_transaction()?;
+        db.execute_batch("INSERT INTO values_test VALUES(2)")?;
+        drop(old);
+        assert!(!db.is_autocommit()?);
+        // An old mode guard must not erase the new writer's immediate mode.
+        db.immediate_transaction()?.commit()?;
+        fresh.commit()?;
+        let value: i64 = db.query_row("SELECT value FROM values_test", [], |row| row.get(0))?;
+        assert_eq!(value, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn stale_guard_cannot_commit_a_replacement_transaction() -> rusqlite::Result<()> {
+        let db = Connection::open(":memory:")?;
+        let old = db.immediate_transaction()?;
+        db.execute_batch("ROLLBACK")?;
+        assert!(db.deferred_transaction().is_err());
+        let fresh = db.immediate_transaction()?;
+        assert!(old.commit().is_err());
+        assert!(!db.is_autocommit()?);
+        fresh.commit()?;
         Ok(())
     }
 }
