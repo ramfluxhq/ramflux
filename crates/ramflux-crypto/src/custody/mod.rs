@@ -50,3 +50,31 @@ pub use safety::{safety_fingerprint, safety_number};
 
 mod contact;
 pub use contact::verify_contact_consent;
+
+pub(crate) fn verify_home_management_certificate(
+    cert: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::MasterCertificate>,
+    anchor: &str,
+) -> Result<(), crate::CryptoError> {
+    validate::master_body(&cert.body)?;
+    if cert.body.account_anchor != anchor
+        || cert.body.custody_kind != ramflux_protocol::custody::CustodyKind::LocalHuman
+    {
+        return Err(validate::reject("migration historical manager anchor/kind mismatch"));
+    }
+    validate::signature(
+        &validate::key(&cert.body.master_public_key)?,
+        ramflux_protocol::domain::CUSTODY_MASTER_CERTIFICATE,
+        cert,
+    )
+}
+pub(crate) fn verify_home_branch_certificate(
+    cert: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::BranchCertificate>,
+    manager_key: &str,
+) -> Result<(), crate::CryptoError> {
+    validate::branch_body(&cert.body)?;
+    validate::signature(
+        &validate::key(manager_key)?,
+        ramflux_protocol::domain::CUSTODY_BRANCH_CERTIFICATE,
+        cert,
+    )
+}

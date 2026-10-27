@@ -100,6 +100,30 @@ impl SelfSigningKey {
         let bytes = custody::signing_bytes(domain::CUSTODY_BRANCH_CERTIFICATE, &body)?;
         Ok(custody::Envelope { body, signature: encode_base64url(self.0.sign(&bytes).to_bytes()) })
     }
+    /// Sign one exact home move with current primary and branch authority.
+    /// The vault/provider must enforce user presence before handing out this key.
+    /// # Errors
+    /// Rejects a stale/wrong manager, actor mismatch and invalid authorization bounds.
+    pub fn sign_home_authorization(
+        &self,
+        body: ramflux_protocol::home_migration::Authorization,
+        actor: &crate::DeviceBranch,
+        authority: &super::VerifiedRecord,
+        now: u64,
+    ) -> Result<
+        ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
+        CryptoError,
+    > {
+        let signers = crate::home_migration::authorization_signers(&body, authority, now)?;
+        if actor.device_id != body.actor.device_id
+            || actor.device_epoch != body.actor.device_epoch
+            || actor.principal_id != authority.envelope().body.principal_id
+        {
+            return Err(super::validate::reject("migration actor ownership mismatch"));
+        }
+        crate::home_migration::sign_with_keys(body, signers, &[&self.0, &actor.signing_key])
+    }
+
     /// Publish a complete typed device set; never invoke a generic root-signing path.
     /// # Errors
     /// Rejects an unrelated signer, invalid sections, or canonical serialization failures.
