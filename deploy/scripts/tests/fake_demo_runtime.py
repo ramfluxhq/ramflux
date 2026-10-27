@@ -103,6 +103,9 @@ if normalized and normalized[0] == "compose":
             }
         resources["id-demo-network"] = {"kind": "network", "project": "demo-test", "owner": token}
         save_resources()
+        if control.get("corrupt_env_after_up"):
+            with (state / "runtime.env").open("a") as output:
+                output.write("RF_COMPOSE_FEDERATION_ADMIN_TOKEN=DO_NOT_LOG\n")
     elif "restart" in normalized:
         if normalized[normalized.index("restart"):] != ["restart", "ramflux-router"]:
             sys.exit("unexpected restart scope")

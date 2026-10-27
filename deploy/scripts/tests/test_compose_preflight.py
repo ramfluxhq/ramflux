@@ -60,6 +60,102 @@ class PreflightTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('private-name', result.stderr)
 
+    def test_implicit_dotenv_comes_from_compose_project_directory(self):
+        project = self.root / 'project'
+        project.mkdir()
+        compose = project / 'compose.yaml'
+        compose.write_text('services: {}\n')
+        (project / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), '-f', str(compose)],
+            cwd=self.root, env={'PATH': os.environ['PATH']}, text=True,
+            capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
+        self.assertNotIn('DO_NOT_LOG', result.stderr)
+
+    def test_project_directory_overrides_first_compose_file_for_dotenv(self):
+        compose_dir = self.root / 'compose'
+        project = self.root / 'project'
+        compose_dir.mkdir()
+        project.mkdir()
+        compose = compose_dir / 'compose.yaml'
+        compose.write_text('services: {}\n')
+        (compose_dir / '.env').write_text('SAFE=value\n')
+        (project / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), '-f', str(compose),
+             '--project-directory', str(project)],
+            cwd=self.root, env={'PATH': os.environ['PATH']}, text=True,
+            capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
+        self.assertNotIn('DO_NOT_LOG', result.stderr)
+
+    def test_compose_env_files_are_checked_in_order_and_missing_files_fail_closed(self):
+        first = self.root / 'first.env'
+        second = self.root / 'second.env'
+        first.write_text('RAMFLUX_NODE_ID=first\nRF_COMPOSE_NODE_ID=first\n')
+        second.write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
+        environment = {
+            'PATH': os.environ['PATH'],
+            'COMPOSE_ENV_FILES': 'first.env,second.env',
+        }
+        result = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.root,
+                                env=environment, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
+        self.assertNotIn('DO_NOT_LOG', result.stderr)
+        environment['COMPOSE_ENV_FILES'] = 'missing.env'
+        result = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.root,
+                                env=environment, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ENV_FILE', result.stderr)
+
+    def test_explicit_env_file_takes_precedence_over_compose_env_files(self):
+        explicit = self.root / 'explicit.env'
+        explicit.write_text('SAFE=value\n')
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), '--env-file', str(explicit)], cwd=self.root,
+            env={'PATH': os.environ['PATH'], 'COMPOSE_ENV_FILES': 'missing.env'},
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_compose_file_from_environment_selects_project_dotenv(self):
+        project = self.root / 'project'
+        project.mkdir()
+        (project / 'compose.yaml').write_text('services: {}\n')
+        (project / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)], cwd=self.root,
+            env={'PATH': os.environ['PATH'], 'COMPOSE_FILE': 'project/compose.yaml'},
+            text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
+        self.assertNotIn('DO_NOT_LOG', result.stderr)
+
+    def test_dotenv_compose_file_loads_new_project_dotenv_at_lower_precedence(self):
+        project = self.root / 'project'
+        project.mkdir()
+        (self.root / 'compose.yaml').write_text('services: {}\n')
+        (self.root / '.env').write_text(
+            'COMPOSE_FILE=project/compose.yaml\nRAMFLUX_NODE_ID=primary\n')
+        (project / '.env').write_text(
+            'RAMFLUX_NODE_ID=secondary\nRF_COMPOSE_NODE_ID=secondary\n')
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)], cwd=self.root,
+            env={'PATH': os.environ['PATH']}, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('RAMFLUX_NODE_ID', result.stderr)
+
+    def test_disable_default_env_file_uses_only_process_environment(self):
+        (self.root / '.env').write_text('RAMFLUX_NODE_ID=DO_NOT_LOG\n')
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)], cwd=self.root,
+            env={'PATH': os.environ['PATH'], 'COMPOSE_DISABLE_ENV_FILE': 'true'},
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_public_default_secret_is_refused_even_with_new_or_equal_names(self):
         for text in ['RF_COMPOSE_FEDERATION_ADMIN_TOKEN=ramflux-local-admin-token',
                      "RF_COMPOSE_FEDERATION_ADMIN_TOKEN=' ramflux-local-admin-token '",

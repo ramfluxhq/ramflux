@@ -100,12 +100,89 @@ def validate(values):
     return sorted(invalid)
 
 
+def absolute(path, base):
+    """Resolve a Compose CLI path relative to the invocation directory."""
+    return path if path.is_absolute() else base / path
+
+
+def path_list(value, separator, key):
+    paths = value.split(separator)
+    if not value or not separator or any(not path for path in paths):
+        raise InputError(key)
+    return [Path(path) for path in paths]
+
+
+def first_compose_file(files, process, cwd):
+    if files:
+        return files[0]
+    value = process.get('COMPOSE_FILE')
+    if value is not None:
+        separator = process.get('COMPOSE_PATH_SEPARATOR', os.pathsep)
+        return path_list(value, separator, 'COMPOSE_FILE')[0]
+    for directory in (cwd, *cwd.parents):
+        for name in ('compose.yaml', 'compose.yml', 'docker-compose.yaml',
+                     'docker-compose.yml'):
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def project_directory(files, explicit, process, cwd):
+    if explicit is not None:
+        return absolute(explicit, cwd)
+    first = first_compose_file(files, process, cwd)
+    if first is None or str(first) == '-':
+        return cwd
+    if '://' in str(first) or str(first).startswith('git@'):
+        raise InputError('COMPOSE_FILE')
+    return absolute(first, cwd).parent
+
+
+def default_env_files(files, explicit_project, process, cwd):
+    configured = process.get('COMPOSE_ENV_FILES')
+    if configured is not None:
+        return [absolute(path, cwd)
+                for path in path_list(configured, ',', 'COMPOSE_ENV_FILES')]
+    disabled = process.get('COMPOSE_DISABLE_ENV_FILE', '0').lower()
+    if disabled in ('1', 'true'):
+        return []
+    if disabled not in ('0', 'false'):
+        raise InputError('COMPOSE_DISABLE_ENV_FILE')
+
+    primary_dir = project_directory(files, explicit_project, process, cwd)
+    primary = primary_dir / '.env'
+    if not primary.is_file():
+        return []
+
+    # With no CLI/project override, a COMPOSE_FILE from the primary .env can
+    # move the project and cause Compose to load a second, lower-precedence .env.
+    if files or explicit_project is not None or 'COMPOSE_FILE' in process:
+        return [primary]
+    primary_values = read_env(primary, {}, process)
+    compose_file = primary_values.get('COMPOSE_FILE')
+    if compose_file is None:
+        return [primary]
+    separator = primary_values.get('COMPOSE_PATH_SEPARATOR', os.pathsep)
+    first = path_list(compose_file, separator, 'COMPOSE_FILE')[0]
+    if str(first) == '-' or '://' in str(first) or str(first).startswith('git@'):
+        raise InputError('COMPOSE_FILE')
+    secondary = absolute(first, primary_dir).parent / '.env'
+    if secondary != primary and secondary.is_file():
+        return [secondary, primary]
+    return [primary]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--env-file', action='append', type=Path, default=[])
+    parser.add_argument('-f', '--file', action='append', type=Path, default=[])
+    parser.add_argument('--project-directory', type=Path)
     args = parser.parse_args(argv)
-    files = args.env_file or ([Path('.env')] if Path('.env').is_file() else [])
     try:
+        cwd = Path.cwd()
+        files = ([absolute(path, cwd) for path in args.env_file] if args.env_file else
+                 default_env_files(args.file, args.project_directory, os.environ, cwd))
         values = {}
         for path in files:
             values = read_env(path, values, os.environ)

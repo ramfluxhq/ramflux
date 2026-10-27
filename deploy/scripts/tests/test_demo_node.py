@@ -1039,6 +1039,15 @@ else:
         self.assertFalse(any("down" in args for args in self.compose_commands()))
         self.assertNotIn("demo URL:", result.stdout)
 
+    def test_health_diagnostics_do_not_run_compose_after_preflight_refusal(self):
+        self.control.write_text('{"health": "starting", "corrupt_env_after_up": true}')
+        result = self.run_script("up", success=False)
+        self.assertIn("RF_COMPOSE_FEDERATION_ADMIN_TOKEN", result.stderr)
+        self.assertNotIn("DO_NOT_LOG", result.stderr)
+        diagnostics = [args for args in self.compose_commands()
+                       if "ps" in args or "logs" in args]
+        self.assertEqual(diagnostics, [])
+
     def test_health_wait_fails_immediately_on_stopped_unhealthy_or_unchecked_services(self):
         for scenario in ({"container_state": "exited"}, {"health": "unhealthy"}, {"missing_health": True}, {"duplicate": True}):
             with self.subTest(scenario=scenario):
