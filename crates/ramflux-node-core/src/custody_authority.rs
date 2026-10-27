@@ -45,7 +45,7 @@ impl CustodyPublication {
 fn reject(message: &str) -> NodeCoreError {
     NodeCoreError::ItestHttp(message.into())
 }
-fn crypto(error: ramflux_crypto::CryptoError) -> NodeCoreError {
+fn crypto(error: &ramflux_crypto::CryptoError) -> NodeCoreError {
     reject(&error.to_string())
 }
 impl IdentityRegistry {
@@ -64,8 +64,8 @@ impl IdentityRegistry {
                     .ok_or_else(|| reject("current human custodian authority unavailable"))?;
                 let verified =
                     verify_record(&custodian.record, now, custodian.compacted_ids.as_deref(), None)
-                        .map_err(crypto)?;
-                self.custody.pins.require_current(&verified).map_err(crypto)?;
+                        .map_err(|error| crypto(&error))?;
+                self.custody.pins.require_current(&verified).map_err(|error| crypto(&error))?;
                 Some(verified)
             } else {
                 None
@@ -76,7 +76,7 @@ impl IdentityRegistry {
             publication.compacted_ids.as_deref(),
             human.as_ref(),
         )
-        .map_err(crypto)
+        .map_err(|error| crypto(&error))
     }
     pub(crate) fn observe_custody(
         &mut self,
@@ -90,7 +90,7 @@ impl IdentityRegistry {
             return Err(reject("legacy-to-custody migration is not enabled"));
         }
         let verified = self.verify_custody(publication, now)?;
-        let outcome = self.custody.pins.observe(&verified).map_err(crypto)?;
+        let outcome = self.custody.pins.observe(&verified).map_err(|error| crypto(&error))?;
         if outcome == PinOutcome::Advanced {
             if verified.capacity_pressure().any() {
                 tracing::warn!(account_anchor = %anchor, "custody authority reached eighty percent capacity; prioritize revocations");
@@ -135,7 +135,7 @@ impl RouterCore {
             return Ok(None);
         };
         let verified = registry.verify_custody(publication, now)?;
-        registry.custody.pins.require_current(&verified).map_err(crypto)?;
+        registry.custody.pins.require_current(&verified).map_err(|error| crypto(&error))?;
         Ok(Some(publication.clone()))
     }
 }
