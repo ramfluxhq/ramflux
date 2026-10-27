@@ -238,6 +238,201 @@ async fn r9_cycle_budget_defers_but_item_timeout_charges_stored_decision_jobs() 
     Ok(())
 }
 
+fn store_courier_ack(
+    account: &LocalBusAccountState,
+    key: &str,
+    carrier: &crate::client::task::carrier::Carrier,
+) -> Case {
+    let local = account.client.device_branch.as_ref().ok_or("local device")?;
+    account.client.account_db()?.persist_actor_state(
+        key,
+        &crate::client::task::control::AckJob {
+            ack: crate::client::task::control::Ack {
+                carrier_base64: ramflux_protocol::encode_base64url(carrier.bytes()?),
+                certificate: crate::client::task::certificate::Certificate {
+                    conversation_id: carrier.conversation_id.clone(),
+                    resolution: ramflux_protocol::TaskResolve {
+                        task_id: carrier.event()?.event().task_id().into(),
+                        base_revision: 1,
+                        step_id: "courier-step".into(),
+                        target: NeedsMe::Approval { grant_id: "courier-grant".into() },
+                        decision_id: "courier-decision".into(),
+                        decision: ramflux_protocol::TaskDecision::Resume,
+                    },
+                    assignee: local.principal_id.clone(),
+                    issuer_device: local.device_id.clone(),
+                    issued_at: now_unix_timestamp(),
+                    phase: crate::client::task::certificate::Phase::Committed,
+                    committed_version: Some(2),
+                    carrier_hash: None,
+                    decision_key: "courier-decision".into(),
+                    evidence_hash: "courier-evidence".into(),
+                    signature: String::new(),
+                },
+                manifests: Vec::new(),
+                signer_principal: local.principal_id.clone(),
+                signer_device: local.device_id.clone(),
+                signature: String::new(),
+            },
+            attempts: 0,
+            next_at: 0,
+            created_at: now_unix_timestamp(),
+        },
+    )?;
+    Ok(())
+}
+
+struct CourierStarvationFixture {
+    root: PathBuf,
+    agent: LocalBusAccountState,
+    human: LocalBusAccountState,
+    healthy_forward: String,
+}
+
+fn courier_starvation_fixture() -> Case<CourierStarvationFixture> {
+    let (root, mut agent, human) = pair("courier-round-robin-r10")?;
+    open_for(&human, &agent, "slow-a", "grant-a", "slow-thread")?;
+    open_for(&human, &agent, "slow-b", "grant-b", "slow-thread")?;
+    open_for(&human, &agent, "healthy", "grant-healthy", "healthy-thread")?;
+    let human_id = human.client.device_branch.as_ref().ok_or("human device")?.principal_id.clone();
+    let agent_id = agent.client.device_branch.as_ref().ok_or("agent device")?.principal_id.clone();
+    human.client.establish_friend_link("courier-peer", &human_id, &agent_id)?;
+    pending(&mut agent, "approval-a", "grant-a")?;
+    pending(&mut agent, "approval-b", "grant-b")?;
+    decide(&human, &request_job(&agent, "slow-a")?.packet, true)?;
+    decide(&human, &request_job(&agent, "slow-b")?.packet, true)?;
+    let mut slow_thread = human
+        .client
+        .account_db()?
+        .client_record("conversation", "slow-thread")?
+        .ok_or("slow conversation")?;
+    slow_thread["test_preparation_delay_ms"] = json!(6_000);
+    human.client.account_db()?.persist_client_record(
+        "conversation",
+        "slow-thread",
+        &slow_thread,
+    )?;
+    let mut healthy_thread = human
+        .client
+        .account_db()?
+        .client_record("conversation", "healthy-thread")?
+        .ok_or("healthy conversation")?;
+    healthy_thread["test_preparation_ready"] = json!(true);
+    human.client.account_db()?.persist_client_record(
+        "conversation",
+        "healthy-thread",
+        &healthy_thread,
+    )?;
+    let slow = human
+        .client
+        .task_history("slow-thread", "slow-a")?
+        .events
+        .last()
+        .ok_or("slow carrier")?
+        .carrier
+        .clone();
+    let healthy = human
+        .client
+        .task_history("healthy-thread", "healthy")?
+        .events
+        .last()
+        .ok_or("healthy carrier")?
+        .carrier
+        .clone();
+    store_courier_ack(&human, "task/ack/000-stalled", &slow)?;
+    store_courier_ack(&human, "task/ack/100-healthy", &healthy)?;
+    let healthy_forward = crate::client::task::scoped("forward", "healthy-thread", "healthy")?;
+    human.client.account_db()?.persist_actor_state(
+        &healthy_forward,
+        &crate::client::task::control::ForwardJob {
+            conversation_id: "healthy-thread".into(),
+            task_id: "healthy".into(),
+            attempts: 0,
+            next_at: 0,
+            created_at: now_unix_timestamp(),
+        },
+    )?;
+    Ok(CourierStarvationFixture { root, agent, human, healthy_forward })
+}
+
+async fn exercise_courier_starvation(
+    human: &mut LocalBusAccountState,
+    healthy_forward: &str,
+) -> Case {
+    const STALLED_ACK: &str = "task/ack/000-stalled";
+    const HEALTHY_ACK: &str = "task/ack/100-healthy";
+    for _ in 0..4 {
+        let budget = crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
+        assert_eq!(drive_with_budget(human, &budget).await?, 0);
+        crate::bus::dispatch::task_transport::drain_confirmations(human, &budget).await?;
+    }
+    let remaining = human
+        .client
+        .account_db()?
+        .load_actor_state::<crate::client::task::control::AckJob>(HEALTHY_ACK)?;
+    assert!(
+        remaining.is_none(),
+        "healthy ack remained with attempts {}, ack cursor {}, approval cursor {}",
+        remaining.as_ref().map_or(0, |job| job.attempts),
+        human.task_ack_cursor,
+        human.task_approval_cursor
+    );
+    assert!(!human.client.account_db()?.actor_state_exists(healthy_forward)?);
+    let first = human
+        .client
+        .account_db()?
+        .load_actor_state::<crate::client::task::control::AckJob>(STALLED_ACK)?
+        .ok_or("stalled acknowledgement")?
+        .attempts;
+    assert!(first > 0, "stalled acknowledgement must receive a real attempt");
+    for expected in (first + 1)..=8 {
+        let mut job = human
+            .client
+            .account_db()?
+            .load_actor_state::<crate::client::task::control::AckJob>(STALLED_ACK)?
+            .ok_or("stalled acknowledgement")?;
+        job.next_at = 0;
+        human.client.account_db()?.persist_actor_state(STALLED_ACK, &job)?;
+        let budget = crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
+        crate::bus::dispatch::task_transport::drain_confirmations(human, &budget).await?;
+        let charged = human
+            .client
+            .account_db()?
+            .load_actor_state::<crate::client::task::control::AckJob>(STALLED_ACK)?
+            .ok_or("charged acknowledgement")?;
+        assert_eq!(charged.attempts, expected);
+    }
+    let mut exhausted = human
+        .client
+        .account_db()?
+        .load_actor_state::<crate::client::task::control::AckJob>(STALLED_ACK)?
+        .ok_or("exhausted acknowledgement")?;
+    exhausted.next_at = 0;
+    human.client.account_db()?.persist_actor_state(STALLED_ACK, &exhausted)?;
+    let budget = crate::bus::dispatch::task_transport::PreparationBudget::for_sync_cycle();
+    crate::bus::dispatch::task_transport::drain_confirmations(human, &budget).await?;
+    assert!(!human.client.account_db()?.actor_state_exists(STALLED_ACK)?);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn r10_stalled_couriers_rotate_while_healthy_confirmations_finish() -> Case {
+    tokio::time::timeout(
+        Duration::from_secs(180),
+        Box::pin(async {
+            let mut fixture = courier_starvation_fixture()?;
+            exercise_courier_starvation(&mut fixture.human, &fixture.healthy_forward).await?;
+            drop(fixture.human);
+            drop(fixture.agent);
+            std::fs::remove_dir_all(fixture.root)?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        }),
+    )
+    .await
+    .map_err(|_| "courier starvation regression exceeded its outer timeout")??;
+    Ok(())
+}
+
 #[test]
 fn r5_canonically_identical_decisions_apply_the_executors_original_request_and_do_not_wedge_other_grants()
 -> Case {

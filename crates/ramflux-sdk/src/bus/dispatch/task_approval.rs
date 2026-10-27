@@ -74,17 +74,11 @@ pub(crate) async fn drive_with_budget(
         "task/approval_out/",
         65,
     )?);
-    rows.sort_by(|left, right| {
-        let order = |row: &Value| {
-            (
-                row["next_at"].as_i64().unwrap_or(i64::MAX),
-                row["attempts"].as_u64().unwrap_or(u64::MAX),
-            )
-        };
-        order(&left.1).cmp(&order(&right.1)).then_with(|| left.0.cmp(&right.0))
-    });
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    super::task_transport::rotate_to_cursor(&mut rows, account.task_approval_cursor);
+    let approval_budget = budget.approval_share();
     let mut sent = 0;
-    let mut attempted = 0;
+    let mut charged = 0;
     for (storage, row) in rows {
         let Some(mut job) = crate::error_policy::task_scan(
             &storage,
@@ -99,22 +93,28 @@ pub(crate) async fn drive_with_budget(
         let Some(bytes) = crate::error_policy::task_scan(&storage, job.packet.bytes())? else {
             continue;
         };
+        if !approval_budget.can_start_item() {
+            break;
+        }
         let request = job.packet.request();
         let result = super::task_approval_transport::send(
             account,
             &request.binding.conversation_id,
             job.packet.recipient(),
             &bytes,
-            budget,
+            &approval_budget,
         )
         .await;
+        account.task_approval_cursor = account.task_approval_cursor.wrapping_add(1);
         if matches!(&result, Ok(super::task_transport::Preparation::Deferred)) {
-            if budget.exhausted() {
+            if !approval_budget.can_start_item() {
                 break;
             }
             continue;
         }
-        attempted += 1;
+        if result.is_err() {
+            charged += 1;
+        }
         if let Err(error) = &result {
             tracing::debug!(%error, job = %storage, "task approval transport attempt deferred");
         }
@@ -131,10 +131,10 @@ pub(crate) async fn drive_with_budget(
         if matches!(&result, Ok(super::task_transport::Preparation::Ready(()))) {
             sent += 1;
         }
-        // Leave the remainder of the shared cycle budget available to acknowledgement and
-        // own-device forwarding. A stalled approval is charged and backed off, but cannot spend
-        // both preparation slots ahead of unrelated confirmation work.
-        if attempted >= 1 {
+        // Healthy decisions retain the established two-per-cycle throughput. Only a charged
+        // preparation failure consumes the failure share; the five-second approval sub-budget
+        // still reserves more than one full preparation ceiling for confirmations.
+        if charged >= 1 || sent >= 2 {
             break;
         }
     }

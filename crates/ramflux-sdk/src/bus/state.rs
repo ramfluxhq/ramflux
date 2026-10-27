@@ -93,6 +93,10 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) mcp_standing_approvals: BTreeMap<String, LocalMcpStandingApprovalRecord>,
     pub(crate) mcp_pending_approvals: BTreeMap<String, LocalMcpApprovalRecord>,
     pub(crate) mcp_audit_log: Vec<LocalMcpAuditRecord>,
+    pub(crate) task_approval_cursor: usize,
+    pub(crate) task_ack_cursor: usize,
+    pub(crate) task_forward_cursor: usize,
+    pub(crate) task_forward_first: bool,
     /// T25-A3 (OBJ-IPC-01): in-flight bounded UPLOAD spools, keyed by `operation_id`.
     pub(crate) object_put_spools: BTreeMap<String, ObjectPutSpoolSession>,
     /// T25-A4 (OBJ-IPC-01): in-flight bounded DOWNLOAD spools, keyed by `operation_id`.
@@ -136,6 +140,10 @@ impl LocalBusAccountState {
             mcp_standing_approvals: BTreeMap::new(),
             mcp_pending_approvals: BTreeMap::new(),
             mcp_audit_log: Vec::new(),
+            task_approval_cursor: 0,
+            task_ack_cursor: 0,
+            task_forward_cursor: 0,
+            task_forward_first: false,
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
         }
@@ -167,6 +175,10 @@ impl LocalBusAccountState {
             mcp_standing_approvals: BTreeMap::new(),
             mcp_pending_approvals: BTreeMap::new(),
             mcp_audit_log: Vec::new(),
+            task_approval_cursor: 0,
+            task_ack_cursor: 0,
+            task_forward_cursor: 0,
+            task_forward_first: false,
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
         }

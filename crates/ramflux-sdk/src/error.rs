@@ -55,6 +55,8 @@ pub enum SdkError {
     ContactRequestCapacity(String),
     #[error("voice call control receipt capacity exhausted at {limit} receipts")]
     CallControlReceiptCapacity { limit: u64 },
+    #[error("task manifest worker capacity is full")]
+    TaskManifestWorkerCapacity,
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
     #[error("storage error: {0}")]

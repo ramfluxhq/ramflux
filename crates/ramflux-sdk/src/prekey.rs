@@ -287,23 +287,22 @@ pub(crate) fn sdk_http_get_json_with_deadline<R>(
 where
     R: serde::de::DeserializeOwned,
 {
+    let deadline = std::time::Instant::now() + total_timeout;
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
         sdk_http_host_port(base_url)?
     );
-    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), total_timeout)
+    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), deadline)
 }
 
 fn sdk_http_json_request_with_deadline<R>(
     base_url: &str,
     request_head: &[u8],
-    total_timeout: Duration,
+    deadline: std::time::Instant,
 ) -> Result<R, SdkError>
 where
     R: serde::de::DeserializeOwned,
 {
-    let started = std::time::Instant::now();
-    let deadline = started + total_timeout;
     let host_port = sdk_http_host_port(base_url)?;
     let addresses = host_port.to_socket_addrs()?.collect::<Vec<_>>();
     let mut last_error = None;

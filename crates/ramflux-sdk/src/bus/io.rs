@@ -165,6 +165,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         }
         SdkError::Transport(error) => crate::error_policy::transport_code(error),
         SdkError::ContactRequestCapacity(_)
+        | SdkError::TaskManifestWorkerCapacity
         | SdkError::ContactUnavailable(_)
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => "Unavailable",
         SdkError::CallControlReceiptCapacity { .. } => "CallControlReceiptCapacity",
