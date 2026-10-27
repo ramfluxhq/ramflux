@@ -3,7 +3,7 @@
 
 //! Private pair controls for task approvals, independent of compacted signed event histories.
 use super::task_transport::{
-    Preparation, PreparationBudget, Target, await_preparation, direct_targets, own_targets, seal,
+    Preparation, PreparationBudget, Target, await_preparation, own_targets, seal,
 };
 use crate::bus::task_delivery::Delivery;
 use crate::client::task::invalid;
@@ -49,6 +49,10 @@ async fn prepare(
         .account_db()?
         .client_record("conversation", conversation)?
         .ok_or_else(|| invalid("task approval conversation missing"))?;
+    #[cfg(test)]
+    if let Some(delay) = thread["test_preparation_delay_ms"].as_u64() {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
     let group = thread["group_id"].as_str();
     diagnostic(account, "own_targets begin");
     let mut targets = own_targets(account, &engine.config).await?;
@@ -65,7 +69,7 @@ async fn prepare(
         .await?
         .targets
     } else {
-        direct_targets(account, &engine.config, &thread).await?
+        super::task_transport::task_direct_targets(account, &engine.config, &thread).await?
     };
     diagnostic(account, "peer_targets complete");
     let peers = endpoint_targets(client, candidates, recipient)?;
