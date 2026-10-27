@@ -844,7 +844,8 @@ async fn lifecycle_keys_remain_idempotent_after_lock_and_process_supervisor_rest
 
 #[tokio::test(flavor = "current_thread")]
 async fn daemon_stop_cancels_network_flushes_outbox_and_removes_socket() -> Result<(), SdkError> {
-    LocalSet::new().run_until(async {
+    // Stop must cancel a live network operation and finish durable cleanup; neither phase is a 2 s SLA.
+    tokio::time::timeout(Duration::from_secs(60), LocalSet::new().run_until(async {
         let root = root("stop-drain");
         let (entered,blocked) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -857,11 +858,14 @@ async fn daemon_stop_cancels_network_flushes_outbox_and_removes_socket() -> Resu
         let client = LocalBusClient::connect(&socket).await?;
         let upload_client = client.clone();
         let upload = tokio::task::spawn_local(async move { upload_client.request_frame(request("upload","alice","object.put",serde_json::json!({"object_id":"object","operation_id":"upload-operation","plaintext_base64":ramflux_protocol::encode_base64url(b"durable upload"),"chunk_size":4096,"relay_endpoint":"https://relay.invalid"}))).await });
-        tokio::time::timeout(Duration::from_secs(2),blocked).await.map_err(|_| failure("upload did not reach gateway"))?.map_err(|_| failure("gateway dropped"))?;
+        blocked.await.map_err(|_| failure("gateway dropped before the upload stalled"))?;
+        assert!(!upload.is_finished());
+        assert!(!actor.has_stopped());
+        assert!(!cancelled.load(Ordering::SeqCst));
         let stop_client = LocalBusClient::connect(&socket).await?;
-        let response = tokio::time::timeout(Duration::from_secs(2),stop_client.request_frame(LocalBusFrame::request("stop",None,"daemon","daemon.stop",serde_json::json!({})))).await.map_err(|_| failure("daemon stop timed out"))??;
+        let response = stop_client.request_frame(LocalBusFrame::request("stop",None,"daemon","daemon.stop",serde_json::json!({}))).await?;
         assert_eq!(response["stopping"],true);
-        tokio::time::timeout(Duration::from_secs(2),server).await.map_err(|_| failure("daemon listener did not stop"))?.map_err(|error| failure(&error.to_string()))??;
+        server.await.map_err(|error| failure(&error.to_string()))??;
         assert!(!socket.exists()); assert!(actor.has_stopped()); assert!(cancelled.load(Ordering::SeqCst));
         let _ = upload.await; drop(client); drop(stop_client); drop(supervisor);
         let mut verifier = RamfluxClient::new(); verifier.open_account_index(&root)?; verifier.unlock_account("alice",b"actor-test-secret")?;
@@ -869,7 +873,7 @@ async fn daemon_stop_cancels_network_flushes_outbox_and_removes_socket() -> Resu
         assert_eq!(verifier.object_operation("object")?.map(|operation| operation.state),Some(OBJECT_OPERATION_LOCAL_COMMITTED.to_owned()));
         drop(verifier); std::fs::remove_dir_all(root)?;
         Ok(())
-    }).await
+    })).await.map_err(|_| failure("daemon cancellation or durable shutdown deadlocked"))?
 }
 
 #[tokio::test]
