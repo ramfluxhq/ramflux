@@ -65,6 +65,20 @@ impl RootQualifiedDeviceRef {
         }
         Self::authenticated(record.principal_commitment.clone(), device)
     }
+    /// Name a branch only from fully verified born-v3 authority.
+    /// The caller must enforce durable head pins before granting operations.
+    /// # Errors
+    /// Rejects a device absent from the authenticated roster.
+    pub fn from_custody_record(
+        record: &crate::custody::VerifiedRecord,
+        device: &str,
+    ) -> Result<Self, CryptoError> {
+        let body = &record.envelope().body;
+        if !body.devices.iter().any(|entry| entry.device_id == device) {
+            return Err(CryptoError::IdentityAuthority("device absent from custody set"));
+        }
+        Self::authenticated(body.account_anchor.clone(), device)
+    }
     fn authenticated(root: String, device: &str) -> Result<Self, CryptoError> {
         ramflux_protocol::validate_device_name(device)?;
         let storage_key = ramflux_protocol::qualified_device_id(&root, device)?;
